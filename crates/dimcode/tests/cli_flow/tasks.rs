@@ -3241,6 +3241,7 @@ fn tui_resume_restores_settled_delegations_outside_the_window_in_dispatch_order(
         terminal.until_anywhere("agent result · Task alpha · reviewer");
         terminal.write(b"/tasks\r");
         terminal.until("Task beta");
+        terminal.until("Task gamma");
         let start = terminal.transcript.rfind("Background tasks").unwrap();
         let list = &terminal.transcript[start..];
         let alpha = list.rfind("Task alpha").expect("alpha restored");

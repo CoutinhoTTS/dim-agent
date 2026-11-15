@@ -511,18 +511,21 @@ async fn web_entry_admits_token_holders_to_sessions_and_safe_management() {
     let client = reqwest::Client::new();
     let upload_url = format!("http://{address}/api/sessions/{session_id}/files");
     let content = "x".repeat(16 * 1024 * 1024);
-    let multipart = format!(
-        "--dim-upload\r\nContent-Disposition: form-data; name=\"file\"; filename=\"notes.txt\"\r\nContent-Type: text/plain\r\n\r\n{content}\r\n--dim-upload--\r\n"
-    );
-    let upload = || {
+    let upload = |content: &str| {
         client
             .post(&upload_url)
             .header("Origin", &origin)
             .header("Content-Type", "multipart/form-data; boundary=dim-upload")
-            .body(multipart.clone())
+            .body(format!(
+                "--dim-upload\r\nContent-Disposition: form-data; name=\"file\"; filename=\"notes.txt\"\r\nContent-Type: text/plain\r\n\r\n{content}\r\n--dim-upload--\r\n"
+            ))
     };
-    assert_eq!(upload().send().await.unwrap().status(), 401);
-    let response = upload().header("Cookie", &cookie).send().await.unwrap();
+    assert_eq!(upload("private").send().await.unwrap().status(), 401);
+    let response = upload(&content)
+        .header("Cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
     let status = response.status();
     let body = response.text().await.unwrap();
     assert_eq!(status, 200, "{body}");
