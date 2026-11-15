@@ -118,10 +118,34 @@ preference, workspace selection, account lease or secret file is created.
 
 | Method | Request | Reply | mutating | interruption |
 | --- | --- | --- | --- | --- |
-| `provider.management` | `{providerId?}` | `{drivers: ManagementDriver[], providers: ManagementProvider[], errors: ProviderRecordError[]}`; each connection adds `gluedPrefix`, the prefix its record states, and each model adds `alias`, the catalog id the listed id stands for; each is omitted when unset | false | `Drain` |
+| `provider.management` | `{providerId?}` | `{drivers: ManagementDriver[], providers: ManagementProvider[], errors: ProviderRecordError[]}`; each connection adds `gluedPrefix`, the prefix its record states, and each model adds `alias`, the catalog id the listed id stands for, and `catalogName`, the name `provider.catalog` publishes for the row; each is omitted when unset | false | `Drain` |
 | `provider.list` | `{}` | Existing `{providers, errors}` summary; each provider adds `remoteModelList`, whether `provider.refresh` can list its models, which clients use to offer or withhold that command in a row naming an empty catalog, and `gluedPrefix`, the prefix its record states, omitted when unset | false | `Drain` |
 | `provider.selection` | `{cwd?}` | Existing `{selection}` and its separate scope/version. A `cwd` reads only that scope's row and answers `null` when the folder has none; the workspace-over-global precedence is a `configuration` rule, not this read's | false | `Drain` |
-| `provider.catalog` | `{providerId}` | Existing `{catalog}` with `ProviderModel`; **unchanged** | false | `Drain` |
+| `provider.catalog` | `{providerId}` | Existing `{catalog}` with `ProviderModel`; each model's `name` is unique within its provider (§3.1 below) | false | `Drain` |
+
+`provider.catalog` publishes a `name` unique within its provider. Duplicates are
+found among all of that catalog's rows, a disabled or an unavailable one included,
+so switching a row on or off renames no other and every client reads the same
+names. Names compare after trimming. A row whose name is unique keeps it as
+stated. A row that shares its name publishes its label candidate, `<its own name>
+· <the origin its listing states for it>` — the text after the last ` · ` of the
+label it carries, `routing group` for a group row among them — while no other row
+reaches the same candidate and no row states that name itself. Every other row of
+the group appends its id instead, so a label two rows carry apart names neither of
+them; a row whose listing states no origin has no candidate and appends its id.
+Every computed name is built from trimmed parts, the appended id included, so two
+ids that differ only in space reach one name. An appended id whose name no other
+row reaches and no row states is kept as it stands, and every name so kept —
+label or id — is reserved before any counter is assigned, so a counter never takes
+a name another row publishes itself. A name still taken after that gains a
+counter, the rows left taking theirs in one canonical order: by their id name,
+then their id, then their stated name. That counter is the only part a listing
+order can decide, and with that order only rows sharing an id and a stated name
+reach it, so reordering the same rows names each of them the same. The name is
+computed when the reply is built and never stored: every descriptor and every
+persisted field keeps the name the provider or the user stated, so saving an edit
+never writes a suffix back and a suffix disappears with its duplicate. This holds
+for every provider, a custom one whose two rows state one name included.
 
 Without an ID, management returns all known entries, including signed-out accounts.
 With an ID, it returns that entry or a typed error. It is the sole edit-view read:
@@ -140,7 +164,7 @@ catalog. Aggregation does not promise an atomic snapshot across account owners.
 | `account` | Optional `{namespace, loginMethods, state}`; namespace is `account`, `account.codex` or `account.grok`, login methods are `browser`/`device`, and state is that namespace's existing public status reply; absent for static authority |
 | `actions` | Available operation names: `update`, `delete`, `refresh`, `models.create`, `models.edit`, `models.reset`, `models.delete`, `models.set_enabled`, `preferences.update`, `login`, `logout`, `usage`; no per-action reason codes |
 | `connection` | Safe static-record connection below; `null` when connection configuration exists only in the optional account package |
-| `models` | `{model: ModelEntry, source: "default" \| "override" \| "user", enabled: boolean, endpoint: ModelProtocol \| null, unavailableReason: string \| null, missingLimits: ("contextWindow" \| "maxOutputTokens")[], actions: string[], endpointOverride?: NewApiEndpoint}[]`; endpoint overrides use the executable subset in §6. `null` only for an account entry with no local catalog record. Bad catalog data is an error. `missingLimits` names the limits no source declared (§3.5) and is empty otherwise. Model actions are `set_enabled`, `edit`, `reset`, `delete`, restricted by origin/authority, and `set_enabled` only on an entry without an `unavailableReason`, because the set keeps an unavailable entry's enablement |
+| `models` | `{model: ModelEntry, source: "default" \| "override" \| "user", enabled: boolean, endpoint: ModelProtocol \| null, unavailableReason: string \| null, missingLimits: ("contextWindow" \| "maxOutputTokens")[], actions: string[], endpointOverride?: NewApiEndpoint}[]`; endpoint overrides use the executable subset in §6. `null` only for an account entry with no local catalog record. Bad catalog data is an error. `missingLimits` names the limits no source declared (§3.5) and is empty otherwise. `catalogName` is the name `provider.catalog` publishes for that row, present only when it differs from `model.displayName`; an absent field means the display name is already the one to show. It is computed, so `model.displayName` stays the name the provider or the user stated and an edit never writes the computed name back. Model actions are `set_enabled`, `edit`, `reset`, `delete`, restricted by origin/authority, and `set_enabled` only on an entry without an `unavailableReason`, because the set keeps an unavailable entry's enablement |
 | `preferences` | Map from model ID to the existing `ModelPreferences` shape |
 | `modelsListed` | Absent from the reads and from an update that did not change `baseUrl`, `credential` or `headers`; on the other updates it says what the write did with the record's models: `listed`, `bundled`, `unsupported` or `disabled` |
 

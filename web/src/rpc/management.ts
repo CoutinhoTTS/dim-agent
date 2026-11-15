@@ -14,7 +14,7 @@ export type ModelEntry = {
   capabilities: { modalities: string[]; toolCalling: boolean; streaming: boolean; structuredOutput: boolean; vision: boolean; audio: boolean; reasoning: boolean; contextWindow?: number; maxOutputTokens?: number }
   metadata?: { reasoning?: { supported: boolean; effortOptions?: string[] }; serviceTier?: { supported: boolean; options: string[] }; identification?: ModelIdentification; matchedProviderId?: string; matchedModelId?: string }
 }
-export type ManagementModel = { model: ModelEntry; source: string; enabled: boolean; endpoint: string | null; endpointOverride?: string; alias?: string; unavailableReason: string | null; missingLimits: string[]; actions: string[] }
+export type ManagementModel = { model: ModelEntry; source: string; enabled: boolean; endpoint: string | null; endpointOverride?: string; alias?: string; catalogName?: string; unavailableReason: string | null; missingLimits: string[]; actions: string[] }
 export type ManagementProvider = {
   providerId: string; displayName: string; source: string; credentialAuthority: string; version: number | null; enabled: boolean | null; actions: string[]
   account?: { namespace: string; loginMethods: string[]; state: AccountState }
@@ -106,7 +106,7 @@ export function readManagementProvider(value: unknown): ManagementProvider {
       const c = object(v.connection), auth = object(c.auth)
       return { driverKind: string(c.driverKind), auth: { type: string(auth.type), headerName: optional(auth.headerName, string), prefix: optional(auth.prefix, string) }, baseUrl: string(c.baseUrl), credentialConfigured: boolean(c.credentialConfigured), headerNames: list(c.headerNames, string), proxyUrl: c.proxyUrl === null ? null : string(c.proxyUrl), proxyAuthConfigured: boolean(c.proxyAuthConfigured), timeoutMs: c.timeoutMs === null ? null : number(c.timeoutMs), gluedPrefix: optional(c.gluedPrefix, string) }
     })(),
-    models: v.models === null ? null : list(v.models, (item) => { const m = object(item); return { model: readModelEntry(m.model), source: string(m.source), enabled: boolean(m.enabled), endpoint: m.endpoint === null ? null : string(m.endpoint), endpointOverride: optional(m.endpointOverride, string), alias: optional(m.alias, string), unavailableReason: m.unavailableReason === null ? null : string(m.unavailableReason), missingLimits: m.missingLimits === undefined ? [] : list(m.missingLimits, string), actions: list(m.actions, string) } }),
+    models: v.models === null ? null : list(v.models, (item) => { const m = object(item); return { model: readModelEntry(m.model), source: string(m.source), enabled: boolean(m.enabled), endpoint: m.endpoint === null ? null : string(m.endpoint), endpointOverride: optional(m.endpointOverride, string), alias: optional(m.alias, string), catalogName: optional(m.catalogName, string), unavailableReason: m.unavailableReason === null ? null : string(m.unavailableReason), missingLimits: m.missingLimits === undefined ? [] : list(m.missingLimits, string), actions: list(m.actions, string) } }),
     preferences: Object.fromEntries(Object.entries(preferences).map(([id, value]) => { const p = object(value); return [id, { reasoningEffort: optional(p.reasoningEffort, string), serviceTier: optional(p.serviceTier, string) }] })),
   }
 }

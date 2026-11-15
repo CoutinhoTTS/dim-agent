@@ -948,6 +948,33 @@ mod tests {
         assert!(!row.contains('—'), "{screen}");
     }
 
+    /// The filter matches the row's own text, which carries the id beside the
+    /// name: two models a gateway names alike stay reachable by the part that
+    /// tells them apart.
+    #[test]
+    fn the_filter_matches_a_models_id() {
+        let mut panel = ModelsPanel::new();
+        let mut models = item("siliconflow/glm-5.3", &[], None, None);
+        models.display_name = "GLM-5.3 · SiliconFlow".into();
+        let mut other = item("volcengine/glm-5.3", &[], None, None);
+        other.display_name = "GLM-5.3 · Volcengine Ark".into();
+        panel.set_models(Ok(ModelList {
+            manage: false,
+            models: vec![models, other],
+            current: None,
+            empty: Vec::new(),
+            limits: Vec::new(),
+        }));
+        panel.paste("volcengine");
+        let screen = drawn(&panel);
+        assert!(screen.contains("volcengine/glm-5.3"), "{screen}");
+        assert!(!screen.contains("siliconflow"), "{screen}");
+        assert!(matches!(
+            panel.handle_key(key_of(KeyCode::Enter)),
+            Effect::SelectModel { ref model_id, .. } if model_id == "volcengine/glm-5.3"
+        ));
+    }
+
     #[test]
     fn arrows_cycle_the_highlighted_models_effort_and_enter_adopts_it() {
         let mut panel = panel();
