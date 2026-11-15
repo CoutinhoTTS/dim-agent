@@ -1197,8 +1197,9 @@ async fn an_undeclared_model_limit_is_refused_until_a_source_declares_it() {
     std::fs::remove_dir_all(home).unwrap();
 }
 
-/// The efforts a served model offers, as a picker reads them.
-fn served_efforts(
+/// The effort list a model's metadata declares, as stated: `None` when it
+/// states no list, `Some([])` when it declares an empty one.
+fn declared_efforts(
     metadata: Option<&dim_app_server::model_catalog::ModelMetadata>,
 ) -> Option<Vec<String>> {
     metadata
@@ -1213,7 +1214,7 @@ fn bundled_efforts(catalog: &BundledCatalog, provider_id: &str, id: &str) -> Vec
         .unwrap()
         .iter()
         .find(|model| model.model_id == id)
-        .and_then(|model| served_efforts(model.metadata.as_ref()))
+        .and_then(|model| declared_efforts(model.metadata.as_ref()))
         .unwrap()
 }
 
@@ -1315,7 +1316,7 @@ impl ServedListing {
 
     /// The efforts `id` offers, as the refresh reply reports them.
     fn served(&self, id: &str) -> Option<Vec<String>> {
-        served_efforts(
+        declared_efforts(
             self.catalog
                 .models
                 .iter()
@@ -1334,7 +1335,7 @@ impl ServedListing {
             .await
             .unwrap();
         let models = management.providers[0].models.as_ref().unwrap();
-        served_efforts(
+        declared_efforts(
             models
                 .iter()
                 .find(|model| model.model.model_id == id)
