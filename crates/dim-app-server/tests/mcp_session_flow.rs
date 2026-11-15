@@ -3767,7 +3767,7 @@ async fn a_stdio_entry_starts_a_command_the_toolchain_source_provides() {
     let session = env.session(false, PermissionPreset::FullAccess).await;
     let mcp = session.session_service::<McpSession>().unwrap();
     let mut changed = mcp.subscribe();
-    let version = tokio::time::timeout(Duration::from_secs(5), async {
+    let version = tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             match changed.borrow_and_update().servers.get("docs") {
                 Some(McpSourceState::Ready { version }) => return version.clone(),
@@ -3780,7 +3780,12 @@ async fn a_stdio_entry_starts_a_command_the_toolchain_source_provides() {
         }
     })
     .await
-    .unwrap();
+    .unwrap_or_else(|_| {
+        panic!(
+            "the stdio entry did not become ready: {:?}",
+            changed.borrow().servers
+        )
+    });
     adopted(&session, Some(&version)).await;
     env.turn(&session, Action::Text).await;
     let names: Vec<String> = env

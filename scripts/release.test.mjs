@@ -109,6 +109,65 @@ test('workflow actions use immutable commits',()=>{
   }
 });
 
+/** A checkout carrying `version` in every product field the release PR writes. */
+function versionCheckout(temporary,version) {
+  const checkout=path.join(temporary,'checkout');
+  mkdirSync(path.join(checkout,'npm'),{recursive:true});
+  mkdirSync(path.join(checkout,'runtime'),{recursive:true});
+  writeFileSync(path.join(checkout,'Cargo.toml'),`[workspace.package]\nversion = "${version}"\n`);
+  const platforms=['dimcode-web','dimcode-darwin-arm64','dimcode-darwin-x64','dimcode-linux-arm64',
+    'dimcode-linux-x64','dimcode-windows-arm64','dimcode-windows-x64'];
+  writeFileSync(path.join(checkout,'npm/package.json'),`${JSON.stringify({name:'dimcode',version,
+    bin:{dim:'bin/dim.js',dimcode:'bin/dim.js'},
+    optionalDependencies:Object.fromEntries(platforms.map(name=>[name,version]))},null,2)}\n`);
+  writeFileSync(path.join(checkout,'runtime/package.json'),`${JSON.stringify({name:'dimcode-runtime',version},null,2)}\n`);
+  writeFileSync(path.join(checkout,'runtime/package-lock.json'),`${JSON.stringify({name:'dimcode-runtime',version,
+    lockfileVersion:3,packages:{'':{name:'dimcode-runtime',version}}},null,2)}\n`);
+  return checkout;
+}
+
+const guard=async()=>(await import(pathToFileURL(path.join(root,'scripts/alpha-version.mjs')).href));
+
+test('the dispatch guard accepts a checkout that records the allocated version',async(t)=>{
+  const checkout=versionCheckout(fixture(t),version);
+  const {versionMismatches}=await guard();
+  assert.deepEqual(versionMismatches(checkout,version),[]);
+});
+
+const stale='0.1.0-alpha.1';
+for (const [field,file,edit] of [
+  ['Cargo.toml [workspace.package] version','Cargo.toml',(text)=>text.replace(`version = "${version}"`,`version = "${stale}"`)],
+  ['npm/package.json version','npm/package.json',(text)=>text.replace(`"version": "${version}"`,`"version": "${stale}"`)],
+  ['npm/package.json optionalDependencies dimcode-linux-x64','npm/package.json',(text)=>text.replace(`"dimcode-linux-x64": "${version}"`,`"dimcode-linux-x64": "${stale}"`)],
+  ['runtime/package.json version','runtime/package.json',(text)=>text.replace(`"version": "${version}"`,`"version": "${stale}"`)],
+  ['runtime/package-lock.json version','runtime/package-lock.json',(text)=>text.replace(`"version": "${version}"`,`"version": "${stale}"`)],
+]) {
+  test(`the dispatch guard names ${field} when it disagrees`,async(t)=>{
+    const checkout=versionCheckout(fixture(t),version);
+    const target=path.join(checkout,file);
+    const text=readFileSync(target,'utf8');
+    const edited=edit(text);
+    assert.notEqual(edited,text,`this case must change ${field}`);
+    writeFileSync(target,edited);
+    const {versionMismatches}=await guard();
+    assert.deepEqual(versionMismatches(checkout,version),[`${field} says ${stale}`]);
+  });
+}
+
+test('the dispatch refusal names both remedies, including an already published version',async(t)=>{
+  const checkout=versionCheckout(fixture(t),version);
+  const {assertReleaseVersion}=await guard();
+  assert.equal(assertReleaseVersion(checkout,version),version,'a checkout that records the version passes');
+  assert.throws(()=>assertReleaseVersion(checkout,'0.1.0-alpha.19'),(error)=>{
+    assert.match(error.message,/This main commit does not record 0\.1\.0-alpha\.19/);
+    assert.match(error.message,/Cargo\.toml \[workspace\.package\] version says/);
+    assert.match(error.message,/Merge the release PR that commits 0\.1\.0-alpha\.19/);
+    assert.match(error.message,/-f tag=v0\.1\.0-alpha\.19/);
+    assert.match(error.message,/already tagged or published is rebuilt from its tag/);
+    return true;
+  });
+});
+
 test('the default list stages its content and optional plugins and runs no npm ci', {skip:process.platform==='win32'}, (t)=>{
   const temporary=fixture(t);
   const bin=path.join(temporary,'bin');

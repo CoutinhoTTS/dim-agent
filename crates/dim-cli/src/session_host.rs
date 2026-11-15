@@ -5430,10 +5430,11 @@ fn runtime_calls(action: &RuntimeAction) -> Vec<(&'static str, serde_json::Value
 /// The methods every test worker's daemon advertises: enough for `hello`, and
 /// a bounded window read.
 #[cfg(all(test, unix))]
-const TEST_FEATURES: [&str; 3] = [
+const TEST_FEATURES: [&str; 4] = [
     "session.create",
     "session.history",
     "session.history.latestTurn",
+    "session.input.pending.blockPresence",
 ];
 
 /// A worker on a daemon that advertises `features` and answers nothing: the

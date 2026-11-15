@@ -6,7 +6,8 @@ The InputQueue plugin registers InputMethods in every Session and InputQueue in 
 
 Owner: [input_queue.rs](../../../../crates/dim-agent-capabilities/src/input_queue.rs).
 Registers the namespace `session.input` with the Session's `sessionMethods`:
-`session.input.pending` ([contract](../../../design/input-state-read.md)) and
+`session.input.pending` ([contract](../../../design/input-state-read.md), including
+the opt-in [block-presence read](../../../design/input-state-read.md#block-presence-extension)) and
 `session.input.withdraw` for every branch of its Session, served through that
 branch's InputQueue. It also provides the Session table `submitChecks`
 ([`SubmitChecks`](../../../../crates/dim-agent-capabilities/src/input_queue.rs)):
