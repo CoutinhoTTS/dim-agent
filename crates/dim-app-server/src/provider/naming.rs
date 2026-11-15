@@ -41,11 +41,12 @@ fn label_candidate(entry: &ModelEntry) -> Option<String> {
 /// — `<its own name> · <the origin its gateway states for it>` — but only while
 /// no other row reaches the same candidate and no row states that name itself;
 /// every other row of the group appends its id instead, so a label two rows
-/// carry apart names neither of them. A name that is still taken gains a
-/// counter: that is the one step a listing order can decide, and only rows
-/// sharing an id reach it. Everything else is read off the whole set before any
-/// name is assigned, so listing the same rows in another order names each row
-/// the same.
+/// carry apart names neither of them. Every computed name is built from trimmed
+/// parts, the appended id included, so two ids that differ only in space reach
+/// one name. A name that is still taken gains a counter: that is the one step a
+/// listing order can decide, and only rows sharing an id reach it. Everything
+/// else is read off the whole set before any name is assigned, so listing the
+/// same rows in another order names each row the same.
 pub(crate) fn unique<'a>(entries: impl IntoIterator<Item = &'a ModelEntry>) -> Vec<String> {
     let entries: Vec<&ModelEntry> = entries.into_iter().collect();
     let mut stated: HashMap<&str, usize> = HashMap::new();
@@ -102,7 +103,7 @@ pub(crate) fn unique<'a>(entries: impl IntoIterator<Item = &'a ModelEntry>) -> V
                 .clone()
                 .expect("a kept candidate is present"),
             false => {
-                let base = format!("{own}{SEPARATOR}{}", entry.model_id);
+                let base = id_fallback(entry);
                 let name = free(&base, &claimed);
                 claimed.insert(name.clone());
                 name
@@ -111,6 +112,17 @@ pub(crate) fn unique<'a>(entries: impl IntoIterator<Item = &'a ModelEntry>) -> V
         names.push(name);
     }
     names
+}
+
+/// The name a shared row publishes when its label names no other row: its own
+/// name, trimmed, then its id, trimmed. Only the id as published is trimmed; the
+/// stored id is untouched.
+fn id_fallback(entry: &ModelEntry) -> String {
+    format!(
+        "{}{SEPARATOR}{}",
+        entry.display_name.trim(),
+        entry.model_id.trim()
+    )
 }
 
 /// `base`, or the first `<base> <n>` no row publishes yet.
@@ -255,6 +267,26 @@ mod tests {
             unique(&entries),
             ["GLM-5.3 · siliconflow/glm-5.3", "GLM-5.3 · proxy/glm-5.3",],
             "both rows carry the label, so it names neither and both take ids"
+        );
+    }
+
+    #[test]
+    fn ids_that_agree_after_trimming_take_one_name() {
+        let entries = vec![entry("a", "GLM-5.3", None), entry("a ", "GLM-5.3", None)];
+        let names = unique(&entries);
+        assert_eq!(
+            names.iter().map(|name| name.trim()).collect::<HashSet<_>>(),
+            HashSet::from(["GLM-5.3 · a", "GLM-5.3 · a 2"]),
+            "the ids differ only in space, so one of them takes the counter"
+        );
+        let mut reversed = vec![&entries[1], &entries[0]];
+        assert_eq!(
+            unique(reversed.drain(..))
+                .iter()
+                .map(|name| name.trim())
+                .collect::<HashSet<_>>(),
+            names.iter().map(|name| name.trim()).collect::<HashSet<_>>(),
+            "the same rows reversed publish the same two names"
         );
     }
 

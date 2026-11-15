@@ -133,9 +133,11 @@ label it carries, `routing group` for a group row among them — while no other 
 reaches the same candidate and no row states that name itself. Every other row of
 the group appends its id instead, so a label two rows carry apart names neither of
 them; a row whose listing states no origin has no candidate and appends its id.
-A name still taken after that gains a counter. That counter is the only part a
-listing order can decide, and only rows sharing an id reach it, so reordering the
-same rows names each of them the same. The name is computed when the reply is
+Every computed name is built from trimmed parts, the appended id included, so two
+ids that differ only in space reach one name. A name still taken after that gains
+a counter. That counter is the only part a listing order can decide, and only
+rows sharing an id reach it, so reordering the same rows names each of them the
+same. The name is computed when the reply is
 built and never stored: every descriptor and every persisted field keeps the name
 the provider or the user stated, so saving an edit never writes a suffix back and
 a suffix disappears with its duplicate. This holds for every provider, a custom
