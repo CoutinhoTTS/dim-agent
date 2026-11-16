@@ -509,3 +509,11 @@ export interface SessionFiles {
   owned_paths(request: { sessionId: string }): Promise<{ paths: string[] }>;
 }
 export interface StoredSessionFile { fileId: string; path: string; bytes: number }
+
+/** Process data face owned by the managed provider; credentials remain with the owner. */
+export interface ManagedSearch {
+  /** Rejects with unavailable or search_failed; abandoning the call cancels the request. */
+  search(request: { query: string; count: number }): Promise<{
+    results: { title: string; url: string; snippet: string; publishedAt?: string }[]
+  }>
+}
