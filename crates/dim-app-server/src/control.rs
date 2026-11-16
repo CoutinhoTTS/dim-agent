@@ -29,19 +29,13 @@ struct ActivityState {
 }
 
 impl Default for ProcessActivity {
+    /// Creates a standalone admission owner whose publication is already complete.
     fn default() -> Self {
-        Self::standalone()
+        Self::observing(watch::channel(true).1, CancellationToken::new())
     }
 }
 
 impl ProcessActivity {
-    /// An admission-only owner with no host publication to observe: an
-    /// embedding host that does not run the App Server lifecycle has already
-    /// published everything it serves.
-    pub fn standalone() -> Self {
-        Self::observing(watch::channel(true).1, CancellationToken::new())
-    }
-
     fn observing(ready: watch::Receiver<bool>, shutdown: CancellationToken) -> Self {
         Self {
             count: Default::default(),
