@@ -535,3 +535,10 @@ export interface Store {
   worktreeUsages(request: WorktreeDirectory): Promise<{ usages: { sessionId: string; subtree: string }[] }>;
   removeWorktree(request: WorktreeDirectory, remove: (path: string) => Promise<void>): Promise<{ removed: boolean }>;
 }
+
+/** One enabled Skill in the current Session view. */
+export type SkillSummary = { id: string; name: string; description: string; userInvocable: boolean };
+/** Branch service backed by its Session Skills owner. */
+export interface SkillsBranch {
+  list(request: Record<string, never>): SkillSummary[];
+}

@@ -244,14 +244,31 @@ The `skills` check is covered by `crates/dim-app-server/tests/transport_flow/ski
 ## SkillsBranch
 
 Owner: [skills/session.rs](../../../../crates/dim-agent-capabilities/src/skills/session.rs).
-Exposes the Session skill view from a branch and requests adoption of a changed
-skill list through `ConfigureControl`; initial adoption belongs to Prompt.
+Provides `skillsBranch`, the read-only Session skill list reached through a branch, and
+requests adoption of a changed list through `ConfigureControl`; initial adoption belongs to Prompt.
+
+### Data face
+
+`skillsBranch.list({})` is synchronous and returns the existing ordered list of enabled Skills:
+`[{id, name, description, userInvocable}]`. A Skill with `userInvocable: false` remains in the
+reply; input palettes use that field to omit it. The request must be one empty object; malformed
+requests fail with `invalid_request`. Owner failures retain the existing Skills error code and
+message; the management client boundary still maps owner `closed` to its reload error.
+
+Rust `SkillsBranch::list` and the dispatcher read the same Session-owned view once. The call
+performs no scan, reload, subscription or asynchronous work, so it has no retained wait to cancel.
+The branch's service is withdrawn with the branch. Session view updates and prompt adoption keep
+their existing lifetimes below.
+
+`SessionSkills` is private Skills owner state. The Session part and branch parts share its typed
+key in the Session instance; it has no public catalog name. Its content, prompt loader and change
+watch remain with Skills. The public face returns data without exposing that owner object.
 
 ### Dependencies
 
 | Service | Purpose |
 | --- | --- |
-| `S:SessionSkills` | Current skill view and change watch. |
+| `S:SessionSkills` | Private typed key for the current view and change watch within the Skills owner. |
 | `B:BranchLifecycle` | Wait for activation; stop on closing. |
 | `B:dyn ConfigureControl` | Adopt the changed list as prompt configuration. |
 
@@ -274,7 +291,7 @@ Failed adoption is logged; a later view change can retry.
 | --- | --- |
 | 作用域 | 分支 |
 | 注入 | `B:BranchLifecycle`、`B:dyn ConfigureControl`、`S:SessionSkills` |
-| 提供 | `B:SkillsBranch` |
+| 提供 | `B:SkillsBranch`、`B:dyn HostDispatch#skillsBranch` |
 | 被注入于 | — |
 <!-- /generated -->
 

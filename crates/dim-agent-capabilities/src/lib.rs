@@ -86,7 +86,6 @@ fn register_names_in(catalog: &mut dim_agent_runtime::names::ServiceCatalog) {
         dim_agent_runtime::names::name_of::<prompt_sources::SessionLanguage>(),
         SESSION_GROUP,
     );
-    register::<skills::SessionSkills>(catalog, session);
     register::<host::PrepareModelHost>(catalog, session);
     register::<host::PrepareContextHost>(catalog, session);
     register::<host::ContextModelHost>(catalog, session);
@@ -115,7 +114,7 @@ fn register_names_in(catalog: &mut dim_agent_runtime::names::ServiceCatalog) {
     register::<tool_binding::ToolBinding>(catalog, branch);
     register::<permission::Permission>(catalog, branch);
     register::<approval::Approval>(catalog, branch);
-    register::<skills::SkillsBranch>(catalog, branch);
+    catalog.register_shared_instance("skillsBranch", BRANCH_GROUP);
     register::<prompt_sources::PromptSourcesBranch>(catalog, branch);
     register::<workspace_tools::background::BackgroundExec>(catalog, branch);
     register::<shell_session::ShellSession>(catalog, branch);

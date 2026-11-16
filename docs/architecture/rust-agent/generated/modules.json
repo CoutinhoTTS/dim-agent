@@ -9530,7 +9530,6 @@
       "from": "dim_agent_capabilities",
       "to": "dim_agent_capabilities::skills::session",
       "references": [
-        "path skills::SessionSkills",
         "path skills::SkillsBranch"
       ]
     },
@@ -16628,7 +16627,6 @@
         "mod session",
         "path SkillsBranchPlugin::new",
         "path SkillsPlugin::new",
-        "use session::SessionSkills",
         "use session::SkillsBranch",
         "use session::SkillsBranchPlugin",
         "use session::SkillsPlugin"
@@ -16896,6 +16894,15 @@
     },
     {
       "from": "dim_agent_capabilities::skills::session",
+      "to": "dim_agent_capabilities::port_faces",
+      "references": [
+        "path crate::port_faces::Empty",
+        "path crate::port_faces::request",
+        "path crate::port_faces::unknown_method"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::skills::session",
       "to": "dim_agent_capabilities::prompt_registry",
       "references": [
         "path PromptRegistry",
@@ -16967,7 +16974,9 @@
       "from": "dim_agent_capabilities::skills::session",
       "to": "dim_agent_runtime::assembly",
       "references": [
+        "path BRANCH_GROUP",
         "path SESSION_GROUP",
+        "use dim_agent_runtime::BRANCH_GROUP",
         "use dim_agent_runtime::SESSION_GROUP"
       ]
     },
@@ -32523,21 +32532,7 @@
         "path SkillStatus::Active",
         "path SkillStatus::Shadowed",
         "path SkillsError",
-        "path SkillsError::Closed",
-        "path SkillsError::InstallConflict",
-        "path SkillsError::InstallIo",
-        "path SkillsError::InstallationExists",
-        "path SkillsError::RemoveFailed",
-        "path SkillsError::RootUnreadable",
-        "path SkillsError::SelectionInvalid",
-        "path SkillsError::SettingsConflict",
-        "path SkillsError::SettingsRead",
-        "path SkillsError::SettingsSync",
-        "path SkillsError::SettingsWrite",
-        "path SkillsError::StalePreview",
         "path SkillsError::UnknownInstallation",
-        "path SkillsError::UnknownSkill",
-        "path SkillsError::UnmanagedDirectory",
         "path dim_agent_capabilities::skills::SkillIssue",
         "path dim_agent_capabilities::skills::register_parts",
         "path selection_path",

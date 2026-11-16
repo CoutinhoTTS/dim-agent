@@ -93,7 +93,6 @@ Each catalog name a part of the assembly provides or injects. `data` means share
 | `sessionLifecycle` | session | SessionScope | data | `activated` async, `closing` async, `hold` async, `release` async |
 | `sessionLoader` | session | SessionScope | internal(control) | — |
 | `sessionMethods` | session | SessionMethods | data | `register` async |
-| `sessionSkills` | session | Skills | internal(host-resource) | — |
 | `skillsConfig` | session | SessionScope | data | `get` async |
 | `submitChecks` | session | InputMethods | internal(hot-path) | — |
 | `timelineFactory` | session | SessionScope | internal(control) | — |
@@ -123,7 +122,7 @@ Each catalog name a part of the assembly provides or injects. `data` means share
 | `permission` | branch | Permission | data | `check` async |
 | `prompt` | branch | Prompt | internal(hot-path) | — |
 | `promptSourcesBranch` | branch | PromptSourcesBranch | internal(hot-path) | — |
-| `skillsBranch` | branch | SkillsBranch | internal(host-resource) | — |
+| `skillsBranch` | branch | SkillsBranch | data | `list` sync |
 | `timeline` | branch | BranchScope | data | `ancestors` async, `append` async, `branchId` async, `committed` async, `hasPending` async, `query` async, `sequence` async |
 | `timelineIdentity` | branch | BranchScope | data | `get` async |
 | `toolBinding` | branch | ToolBinding | internal(hot-path) | — |
