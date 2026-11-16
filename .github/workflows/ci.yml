@@ -87,11 +87,34 @@ jobs:
           persist-credentials: false
       - name: Verify native Windows CLI boundaries
         run: cargo test --locked -p dim-cli --lib
+  web:
+    needs: changes
+    if: needs.changes.outputs.web == 'true'
+    concurrency:
+      group: ci-main-web-${{ github.ref == 'refs/heads/main' && needs.changes.outputs.rust == 'true' && 'shared' || github.run_id }}
+      cancel-in-progress: true
+    runs-on: [self-hosted, windows, x64]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+      - name: Build and test the Web workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/stage-web.mjs staging/release-web "$(node -p "require('./npm/package.json').version")" "$GITHUB_SHA"
+          git diff --exit-code -- web/src/auto-imports.d.ts web/src/components.d.ts
+          npm test --prefix web
   verify:
     needs: changes
     if: >-
       needs.changes.outputs.rust == 'true' || needs.changes.outputs.xtask == 'true' ||
-      needs.changes.outputs.web == 'true' || needs.changes.outputs.scripts == 'true'
+      needs.changes.outputs.scripts == 'true'
     concurrency:
       group: ci-main-verify-${{ github.ref == 'refs/heads/main' && needs.changes.outputs.rust == 'true' && 'shared' || github.run_id }}
       cancel-in-progress: true
@@ -145,15 +168,6 @@ jobs:
         run: |
           node --check scripts/check-acp-registry.mjs
           node --test scripts/*.test.mjs
-      - name: Build the Web workspace
-        if: needs.changes.outputs.web == 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          # The frontend is a separate artifact; building it here type-checks web/.
-          node scripts/stage-web.mjs staging/release-web "$(node -p "require('./npm/package.json').version")" "$GITHUB_SHA"
-          git diff --exit-code -- web/src/auto-imports.d.ts web/src/components.d.ts
-          npm test --prefix web
       - name: Verify actual CLI profiles and terminal launcher
         if: needs.changes.outputs.rust == 'true'
         shell: bash
@@ -279,7 +293,7 @@ jobs:
           retention-days: 1
   ci-ok:
     # The one check to require: it passes when every selected job passed and skipped jobs were not needed.
-    needs: [changes, dependencies, windows-cli, verify, acp-registry]
+    needs: [changes, dependencies, windows-cli, web, verify, acp-registry]
     if: always()
     runs-on: self-hosted
     timeout-minutes: 5
