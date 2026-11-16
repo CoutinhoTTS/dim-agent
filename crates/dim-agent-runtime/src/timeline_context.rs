@@ -691,7 +691,12 @@ impl TimelineContext {
         loop {
             match self.loop_state() {
                 Ok(state) => return Ok(state.watch()),
-                Err(_) if self.close.started() => return Err(AgentError::Closed(self.id().into())),
+                Err(_) if self.close.started() => {
+                    return Err(self
+                        .dispatcher
+                        .failure()
+                        .unwrap_or_else(|| AgentError::Closed(self.id().into())));
+                }
                 Err(AgentError::Reloading(_)) => {}
                 Err(error) => return Err(error),
             }
