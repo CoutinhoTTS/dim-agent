@@ -116,16 +116,19 @@ impl FileStorage {
     async fn close_reader(&self, read_id: String) -> Result<()> {
         let id = Uuid::parse_str(&read_id)
             .map_err(|_| FileStorageError::InvalidPath("unknown read id"))?;
-        let entry = self
-            .state
-            .lock()
-            .unwrap()
-            .readers
-            .remove(&id)
-            .ok_or(FileStorageError::InvalidPath("unknown read id"))?;
-        let release = entry
-            .release
-            .ok_or(FileStorageError::InvalidPath("unknown read id"))?;
+        let release = {
+            let mut state = self.state.lock().unwrap();
+            let entry = state
+                .readers
+                .get_mut(&id)
+                .ok_or(FileStorageError::InvalidPath("unknown read id"))?;
+            let release = entry
+                .release
+                .take()
+                .ok_or(FileStorageError::InvalidPath("unknown read id"))?;
+            state.readers.remove(&id);
+            release
+        };
         release
             .dispose()
             .await

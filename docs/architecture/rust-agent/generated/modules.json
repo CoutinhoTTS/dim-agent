@@ -672,6 +672,13 @@
       ]
     },
     {
+      "id": "dim_agent_capabilities::file_storage::testing",
+      "crate": "dim_agent_capabilities",
+      "parent": "dim_agent_capabilities::file_storage",
+      "file": "crates/dim-agent-capabilities/src/file_storage.rs",
+      "unexpandedMacros": []
+    },
+    {
       "id": "dim_agent_capabilities::file_storage::unsupported",
       "crate": "dim_agent_capabilities",
       "parent": "dim_agent_capabilities::file_storage",
@@ -9326,13 +9333,6 @@
     },
     {
       "from": "dim_agent_capabilities",
-      "to": "dim_agent_capabilities::file_storage::face",
-      "references": [
-        "path file_storage::FsHost"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities",
       "to": "dim_agent_capabilities::history",
       "references": [
         "mod history",
@@ -12344,6 +12344,13 @@
     },
     {
       "from": "dim_agent_capabilities::file_storage",
+      "to": "dim_agent_capabilities::file_storage::testing",
+      "references": [
+        "mod testing"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::file_storage",
       "to": "dim_agent_capabilities::file_storage::unsupported",
       "references": [
         "mod unsupported",
@@ -12456,6 +12463,16 @@
         "path Tree::Business",
         "path Tree::Leftover",
         "path account_lock"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::file_storage::testing",
+      "to": "dim_agent_capabilities::file_storage",
+      "references": [
+        "path FileReader",
+        "path FileStorage",
+        "use super::FileReader",
+        "use super::FileStorage"
       ]
     },
     {

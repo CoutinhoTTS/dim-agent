@@ -98,7 +98,50 @@ async fn streaming_reads_pin_files_and_end_with_storage() {
     let face = root
         .get::<dim_agent_capabilities::file_storage::FsHost>()
         .unwrap();
+    use dim_agent_capabilities::file_storage::testing;
+    let native_id = testing::reader_id(&reader);
+    assert!(matches!(
+        face.close_read(native_id.clone()).await,
+        Err(FileStorageError::InvalidPath(_))
+    ));
+    assert_eq!(
+        face.read_at(native_id.clone(), 0, 10, &cancel)
+            .await
+            .unwrap(),
+        bytes[..10]
+    );
     let caller = Ctx::root().unwrap();
+    let dropped = face
+        .open_read(&caller, source.to_string_lossy().into_owned(), &cancel)
+        .await
+        .unwrap();
+    let released = testing::reader_released(&storage, &dropped.read_id);
+    drop(face.close_read(dropped.read_id.clone()));
+    assert_eq!(
+        face.read_at(dropped.read_id.clone(), 0, 10, &cancel)
+            .await
+            .unwrap(),
+        bytes[..10]
+    );
+    let mut close = Box::pin(face.close_read(dropped.read_id.clone()));
+    assert!(
+        close
+            .as_mut()
+            .poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
+            .is_pending()
+    );
+    drop(close);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !released() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(matches!(
+        face.read_at(dropped.read_id, 0, 1, &cancel).await,
+        Err(FileStorageError::InvalidPath(_))
+    ));
     let opened = face
         .open_read(&caller, source.to_string_lossy().into_owned(), &cancel)
         .await
@@ -212,6 +255,10 @@ async fn streaming_reads_pin_files_and_end_with_storage() {
         Err(FileStorageError::Closed)
     ));
     surviving_caller.shutdown().await.unwrap();
+    assert!(matches!(
+        face.read_at(native_id, 0, 1, &cancel).await,
+        Err(FileStorageError::Closed)
+    ));
     assert!(matches!(
         reader.read_at(0, 1, &cancel).await,
         Err(FileStorageError::Closed)

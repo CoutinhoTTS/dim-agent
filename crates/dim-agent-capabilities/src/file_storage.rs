@@ -33,6 +33,22 @@ use uuid::Uuid;
 mod face;
 pub use face::{FsHost, OpenRead};
 
+/// Read-only reader lifetime observations for filesystem flow tests.
+#[cfg(feature = "testing")]
+pub mod testing {
+    use super::{FileReader, FileStorage};
+
+    pub fn reader_id(reader: &FileReader) -> String {
+        reader.0.id.to_string()
+    }
+
+    pub fn reader_released(storage: &FileStorage, id: &str) -> impl Fn() -> bool + use<> {
+        let id = uuid::Uuid::parse_str(id).unwrap();
+        let reader = storage.state.lock().unwrap().readers[&id].reader.clone();
+        move || reader.strong_count() == 0
+    }
+}
+
 const RESOURCE_PREFIX: &str = ".dim-file-storage-";
 const LOCK_DIRECTORY: &str = ".dim-file-storage-locks";
 const TEMPORARY_DIRECTORY: &str = ".dim-file-storage-temps";

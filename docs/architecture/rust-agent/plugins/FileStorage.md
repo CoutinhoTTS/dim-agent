@@ -38,6 +38,13 @@ same FileStorage generation and reader registry. `openRead` resolves the supplie
 absolute path through the existing authorized-root traversal and pins that exact
 file. Replacing the path afterwards does not change the reader's bytes.
 
+The wire `openRead` operation requires a calling row to own retention; `readAt`
+and `closeRead` require only the reader id. These are trusted-plugin operations:
+an id identifies a reader, not caller authorization, and a plugin that receives
+another row's id can read or close it. Readers opened through native
+`FileStorage::open_read` have no caller retention to release through this face; attempting to close such an id returns `invalid`
+without unregistering it.
+
 `readAt` keeps the existing maximum of 64 KiB and independent offsets. Zero limit
 or an offset at/past the pinned length returns empty bytes. The wire encodes bytes
 as base64; the native binding reads the same reader id directly. Unknown, closed
@@ -48,7 +55,9 @@ I/O failures are `io`. No extra read or normalization follows the owner's result
 The calling row retains an opened reader until `closeRead` or that row's unload;
 registration finishes before `openRead` returns. Close removes the id before
 releasing retention, while reads already accepted finish under the owner's
-existing operation tracking. FileStorage close drains those operations and
+existing operation tracking. Dropping close before it is polled does nothing;
+once close removes the id, the existing context cleanup continues even if its
+wait is dropped. FileStorage close drains those operations and
 releases the same pinned handles, including readers retained by a caller. There
 is one reader registry and no separate connection table or read queue.
 

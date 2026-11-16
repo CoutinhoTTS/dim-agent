@@ -125,7 +125,6 @@ fn register_names_in(catalog: &mut dim_agent_runtime::names::ServiceCatalog) {
     register::<timeline_tree::BranchLine>(catalog, branch);
     register::<host_platform::HostPlatform>(catalog, None);
     register::<file_storage::FileStorage>(catalog, None);
-    register::<file_storage::FsHost>(catalog, None);
     catalog.register_shared("fsHost");
     register::<host::ModelHost>(catalog, None);
     register::<host::ProviderConnectionResolver>(catalog, None);
