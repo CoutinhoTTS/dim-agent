@@ -1957,13 +1957,7 @@ async fn clear_worktree_record(
     rpc: &RpcService,
     worktree: Option<&crate::worktrees::CreatedWorktree>,
 ) {
-    let (Some(created), Some(store)) = (
-        worktree,
-        rpc.ctx
-            .get_at(&rutis::host::Key::<crate::storage::SessionStore>::named(
-                "store",
-            )),
-    ) else {
+    let (Some(created), Some(store)) = (worktree, rpc.ctx.get::<crate::storage::Store>()) else {
         return;
     };
     let _ = store

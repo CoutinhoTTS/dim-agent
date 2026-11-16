@@ -97,10 +97,10 @@ CLI 的 line 模式与 `exec` 只打印这一行。TUI 与 Web 把细节放在�
 
 续接请求延续它之前失败的那个请求。它的 `context/prepare` 与 `model/call` 携带 `failure_chain {from_request_id, attempts, waited_ms}`：被续接的失败请求、该请求已用的尝试次数和已睡眠的退避时间。ModelProvider 用它们初始化续接请求的重试状态，因此它的第一次调用就是这条链的下一次尝试，整条链共用 8 次调用与 300 秒睡眠的预算。没有尝试或等待预算时，请求不发起调用而直接结算为失败。携带失败链的请求在结算为失败时，其终态 `failure` 报告链的总计，因此失败行的 `Tried N times over M s` 覆盖整条链；这适用于提供方失败、经 `invoke` 的 `map_err` 结算的未声明工具启动拒绝、调用之前或之外的失败，以及重载。`context/prepare` 失败的续接不会到达 ModelProvider：它的 `step/model-output-end` 没有 `failure`，turn 以 Failed 结束。共享的只有尝试次数与等待预算：退避曲线与那一次 `malformed_response` 重试是请求本地的，在续接中重新开始。没有该字段的请求获得全新预算；工具步骤之后的普通请求不属于任何链。
 
-8 次与 300 秒是 ModelProvider 的公开上限：处置方读取它们，就能在不读 ModelProvider 状态的情况下拒绝已耗尽的链。ModelProvider 在失败策略禁止重试结束该请求的失败时写入 `failure.retryForbidden`；该字段仅在为 true 时写入，续接会拒绝它。
+ModelProvider 在调用携带失败链的请求时执行共享的尝试次数和等待上限，不需要独立处置方。ModelProvider 在失败策略禁止重试结束该请求的失败时写入 `failure.retryForbidden`；该字段仅在为 true 时写入，续接会拒绝它。
 
 ## 5. 兼容性
 
 字段是增量的。没有 `failure` 的二进制无法解码带它的事件，因为 `ModelOutputOutcome` 拒绝未知字段。这与 `presentation` 的前向兼容限制相同，因此跨此变更的降级不受支持，正如它此前对 `presentation` 也不受支持。
 
-同一决定覆盖续接字段、重试禁止与新 kind。`ContextPrepareData` 与 `ModelCallData` 上可选的 `failure_chain`、`InputMessageData` 上可选的 `handover`，以及 `ModelFailure` 上可选的 `retryForbidden` 都是增量的；没有它们的二进制无法读取携带它们的事件，因此跨此变更的降级不受支持。新的 `step/disposition` kind 对原生存储是增量的，且在 v1 中不存在：出站边界像过滤 `input/consumed` 一样过滤它，因此冻结的 v1 通知集不变。每个新增都在契约测试中登记该决定及其兼容用例；冻结样本保持不变。
+同一决定覆盖续接字段、重试禁止与 handover 输入。`ContextPrepareData` 与 `ModelCallData` 上可选的 `failure_chain`、`InputMessageData` 上可选的 `handover`，以及 `ModelFailure` 上可选的 `retryForbidden` 都是增量的；没有它们的二进制无法读取携带它们的事件，因此跨此变更的降级不受支持。每个新增都在契约测试中登记该决定及其兼容用例；冻结样本保持不变。
