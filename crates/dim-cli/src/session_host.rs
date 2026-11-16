@@ -54,8 +54,9 @@ use workflow::WorkflowReads;
 const PUBLISH_INTERVAL: Duration = Duration::from_millis(16);
 const OUTPUT_INTERVAL: Duration = Duration::from_secs(1);
 /// The complete Provider editing interface, without legacy write fallbacks.
-const PROVIDER_METHODS: [&str; 4] = [
+const PROVIDER_METHODS: [&str; 5] = [
     "provider.management",
+    "provider.management.list",
     "provider.create",
     "provider.update",
     "provider.probe",
@@ -76,7 +77,7 @@ struct ProviderSummary {
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct ManagementEntry {
+struct ManagementInfo {
     provider_id: String,
     source: String,
     display_name: String,
@@ -84,6 +85,12 @@ struct ManagementEntry {
     version: Option<u32>,
     connection: Option<ManagementConnection>,
     account: Option<ManagementAccount>,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ManagementEntry {
+    #[serde(flatten)]
+    info: ManagementInfo,
     preferences: std::collections::BTreeMap<String, serde_json::Value>,
     /// What the update did with the record's models; absent from the reads.
     #[serde(default)]
@@ -119,7 +126,12 @@ struct ManagementConnection {
 #[derive(Deserialize)]
 struct ProviderManagement {
     providers: Vec<ManagementEntry>,
+}
+#[derive(Deserialize)]
+struct ProviderManagementPage {
+    providers: Vec<ManagementInfo>,
     errors: Vec<ManagementError>,
+    next: Option<String>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -863,12 +875,12 @@ impl Worker {
                     }
                     let snapshot: ProviderManagement = self
                         .client
-                        .typed("provider.management", json!({}))
+                        .typed("provider.management", json!({"providerId": provider}))
                         .await?;
                     snapshot
                         .providers
                         .into_iter()
-                        .find(|entry| entry.provider_id == provider)
+                        .find(|entry| entry.info.provider_id == provider)
                         .ok_or_else(|| format!("{cannot_copy}, or select a configured Provider model before starting a new Session"))?;
                 }
                 target = Some((provider, model));
@@ -3340,16 +3352,30 @@ impl Worker {
         if !self.client.supports(&PROVIDER_METHODS) {
             return Err("This daemon cannot manage providers".into());
         }
-        let listed: ProviderManagement =
-            self.client.typed("provider.management", json!({})).await?;
-        for error in listed.errors {
-            self.send(Update::Notice(format!(
-                "{}: {}",
-                error.provider_id, error.message
-            )));
+        let mut providers = Vec::new();
+        let mut after: Option<String> = None;
+        loop {
+            let mut params = json!({});
+            if let Some(id) = after {
+                params["after"] = json!(id);
+            }
+            let page: ProviderManagementPage = self
+                .client
+                .typed("provider.management.list", params)
+                .await?;
+            for error in page.errors {
+                self.send(Update::Notice(format!(
+                    "{}: {}",
+                    error.provider_id, error.message
+                )));
+            }
+            providers.extend(page.providers);
+            after = page.next;
+            if after.is_none() {
+                break;
+            }
         }
-        listed
-            .providers
+        providers
             .into_iter()
             .filter_map(|entry| {
                 entry.connection.map(|connection| {
@@ -3473,7 +3499,7 @@ impl Worker {
                 listing_unsupported = true;
             }
             let updated: ManagementEntry = self.client.typed("provider.update", json!({"providerId":provider_id,"expectedVersion":expected_version,"patch":patch})).await?;
-            let mut message = format!("{notice} {}", updated.display_name);
+            let mut message = format!("{notice} {}", updated.info.display_name);
             match updated.models_listed {
                 Some(ModelsListed::Listed) => message.push_str("; listed its models"),
                 Some(ModelsListed::Unsupported) => listing_unsupported = true,
@@ -3842,7 +3868,10 @@ impl Worker {
         }
         let snapshot: ProviderManagement = self
             .client
-            .typed("provider.management", json!({"providerId": provider_id}))
+            .typed(
+                "provider.management",
+                json!({"providerId": provider_id, "modelId": model_id}),
+            )
             .await?;
         let provider = snapshot
             .providers
@@ -3858,6 +3887,7 @@ impl Worker {
             return Ok(());
         }
         let version = provider
+            .info
             .version
             .ok_or("Provider catalog must be refreshed before editing preferences")?;
         self.client
@@ -5144,13 +5174,17 @@ pub(crate) async fn clear_saved_model_preferences(
     model_id: &str,
 ) -> crate::Result<()> {
     let snapshot: ProviderManagement = client
-        .typed("provider.management", json!({"providerId": provider_id}))
+        .typed(
+            "provider.management",
+            json!({"providerId": provider_id, "modelId": model_id}),
+        )
         .await?;
     let version = snapshot
         .providers
         .into_iter()
         .next()
         .ok_or("Provider management entry is missing")?
+        .info
         .version
         .ok_or("Provider catalog must be refreshed before editing preferences")?;
     clear_model_preferences(client, provider_id, model_id, version).await

@@ -59,7 +59,7 @@ Capability、通知流、目录副本、凭据服务或注册表。继续遵守
 
 | 方法 | 请求 | 回复 | mutating | interruption |
 | --- | --- | --- | --- | --- |
-| `provider.management` | `{providerId?}` | `{drivers: ManagementDriver[], providers: ManagementProvider[], errors: ProviderRecordError[]}`；每个连接新增 `gluedPrefix`，即其记录声明的前缀，每个模型新增 `alias`，即所列 id 所指的 catalog id，以及 `catalogName`，即 `provider.catalog` 为该行发布的名字；未设置时省略 | false | `Drain` |
+| `provider.management` | `{providerId, modelId?}` | `{drivers: ManagementDriver[], providers: ManagementProvider[], errors: ProviderRecordError[]}`；每个连接新增 `gluedPrefix`，即其记录声明的前缀，每个模型新增 `alias`，即所列 id 所指的 catalog id，以及 `catalogName`，即 `provider.catalog` 为该行发布的名字；未设置时省略 | false | `Drain` |
 | `provider.list` | `{}` | 原 `{providers,errors}` 摘要；每项新增 `remoteModelList`，表示 `provider.refresh` 能否列举该 Provider 的模型，客户端据此在空 catalog 的提示行给出或省略该命令，以及 `gluedPrefix`，即其记录声明的前缀，未设置时省略 | false | `Drain` |
 | `provider.selection` | `{cwd?}` | 既有 `{selection}`，其 scope/version 独立。带 `cwd` 时只读该作用域的行，该文件夹没有行时返回 `null`；工作区优先于全局是一条 `configuration` 规则，不属于此读取 | false | `Drain` |
 | `provider.catalog` | `{providerId}` | 既有 `{catalog}` 和 `ProviderModel`；每个模型的 `name` 在其 Provider 内唯一（见下方 §3.1） | false | `Drain` |
@@ -80,7 +80,7 @@ Capability、通知流、目录副本、凭据服务或注册表。继续遵守
 的名字，因此保存编辑不会写回后缀，后缀也随其重复行一起消失。此规则适用于所有 Provider，
 包括两行同名的自定义 Provider。
 
-省略 ID 返回全部已知条目，包含未登录账号；指定 ID 返回该项或明确错误。
+详情必须指定 Provider ID，返回该项或明确错误；可再指定 modelId，只返回该模型和它的偏好。模型不存在时返回明确的未找到错误。
 管理读取独自提供编辑视图：version、模型 descriptor、管理说明来自同一 Provider 记录快照，
 不能把另一次 `provider.catalog` 的目录与该 version 拼接后写入。选择和只读 web 客户端
 继续使用原 catalog。不承诺账号 owner 之间的原子快照。
@@ -122,6 +122,22 @@ actions 只说明当前可用性，
 不能变成用户新增。
 账号退出或切换后，已有目录仍保留版本和描述，但模型标为不可用；刷新到当前账号前不提供模型写操作。
 `source:"override"` 表示有 descriptor 覆盖的默认模型；编辑用户模型后仍为 `source:"user"`。
+
+### 按需读取管理数据
+
+`provider.management.list` 提供分页概要，请求为
+`{providerId?, after?, limit?, accountsOnly?, query?}`。每页默认 32 条，范围 1–128。
+`providerId` 与 `after` 互斥；游标是上一页最后访问的 Provider ID。`query` 按 ID
+或显示名搜索，`accountsOnly` 只列账户提供商。回复为 `{drivers,providers,errors,next}`；
+末页的 `next` 为 null，损坏记录占用页位置并进入 errors，翻页可以越过它。
+
+概要只包含身份、来源、凭据归属、版本、启用状态、账户、操作和安全连接信息，
+不包含 models 和 preferences 字段。Web 按需翻页，打开 Provider 后读取详情；
+CLI 列表逐页读取概要，指定账户或模型的操作携带相应 ID。
+
+Provider 按 ID 点查或按页读取，每次请求结束释放结果，不保留目录结果、seed 记录
+映射或模型投影缓存。一个模型的详情以所属 Provider 的持久记录为读取和版本检查单位，
+保留目录命名所需的同记录信息。接口、所有权和流程见[英文对应章节](../../../design/appserver/provider-management.md#on-demand-management-reads)。
 
 ### 3.2 写入与字段操作
 

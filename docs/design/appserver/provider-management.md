@@ -118,7 +118,7 @@ preference, workspace selection, account lease or secret file is created.
 
 | Method | Request | Reply | mutating | interruption |
 | --- | --- | --- | --- | --- |
-| `provider.management` | `{providerId?}` | `{drivers: ManagementDriver[], providers: ManagementProvider[], errors: ProviderRecordError[]}`; each connection adds `gluedPrefix`, the prefix its record states, and each model adds `alias`, the catalog id the listed id stands for, and `catalogName`, the name `provider.catalog` publishes for the row; each is omitted when unset | false | `Drain` |
+| `provider.management` | `{providerId, modelId?}` | `{drivers: ManagementDriver[], providers: ManagementProvider[], errors: ProviderRecordError[]}`; each connection adds `gluedPrefix`, the prefix its record states, and each model adds `alias`, the catalog id the listed id stands for, and `catalogName`, the name `provider.catalog` publishes for the row; each is omitted when unset | false | `Drain` |
 | `provider.list` | `{}` | Existing `{providers, errors}` summary; each provider adds `remoteModelList`, whether `provider.refresh` can list its models, which clients use to offer or withhold that command in a row naming an empty catalog, and `gluedPrefix`, the prefix its record states, omitted when unset | false | `Drain` |
 | `provider.selection` | `{cwd?}` | Existing `{selection}` and its separate scope/version. A `cwd` reads only that scope's row and answers `null` when the folder has none; the workspace-over-global precedence is a `configuration` rule, not this read's | false | `Drain` |
 | `provider.catalog` | `{providerId}` | Existing `{catalog}` with `ProviderModel`; each model's `name` is unique within its provider (§3.1 below) | false | `Drain` |
@@ -147,8 +147,9 @@ persisted field keeps the name the provider or the user stated, so saving an edi
 never writes a suffix back and a suffix disappears with its duplicate. This holds
 for every provider, a custom one whose two rows state one name included.
 
-Without an ID, management returns all known entries, including signed-out accounts.
-With an ID, it returns that entry or a typed error. It is the sole edit-view read:
+Management requires a Provider ID and returns that entry or a typed error.
+An optional model ID restricts the reply to that model and its saved preferences;
+an absent model is a typed not-found error. It is the sole edit-view read:
 its record version, model descriptors and annotations come from the same Provider record
 snapshot. Clients do not combine `provider.catalog` from another version with its
 `expectedVersion`. Selection and read-only web clients keep using the unchanged
@@ -197,6 +198,51 @@ or changed; its models are unavailable and model writes wait for a current refre
 A disappeared default's override cannot become a user-added model.
 `source:"override"` means a default model with a stored descriptor override;
 an edited user model remains `source:"user"`.
+
+### On-demand management reads
+
+`provider.management.list` is the process `managementMethods` namespace's read-only
+management overview. Its request is `{providerId?, after?, limit?, accountsOnly?, query?}`.
+`limit` defaults to 32 and admits 1–128. `providerId` and `after` are mutually exclusive.
+`after` is an exclusive Provider ID cursor. `query` matches the ID or display name,
+case-insensitively. `accountsOnly` restricts enumeration to account authorities.
+The reply is `{drivers, providers, errors, next}`. `next` is the last visited ID
+when more entries remain, otherwise null. Failed records consume a page position
+and appear in `errors`, so paging progresses past them. Pages are independent reads;
+a write between pages can change subsequent results.
+
+Each overview entry contains the identity, source, authority, version, enablement,
+account, actions and safe connection fields defined above. It has no model or
+preference fields. Model absence in a detail still means an account has no stored
+catalog; it is never used to mean that a list omitted its models.
+
+Provider reads only the requested record or page, projects each detail once and
+releases the result after the call. A scoped read uses an indexed equality lookup.
+Bundled reseed diagnostics inspect only the requested builtin definition. Reads do
+not retain snapshots, seed-record maps or computed model results between calls.
+The persisted Provider record is the storage read and CAS unit: one model's detail
+uses its owning record, including the names needed to preserve the catalog's
+unique-name contract.
+
+Web requests a page when its provider list opens, follows `next` on Load more and
+queries again when search changes. It reads an edit snapshot only when a Provider
+opens. Account discovery uses the account-only overview. CLI list commands consume
+successive overview pages for the list the user requested; named account operations
+read that Provider directly. Model-specific operations pass the model ID.
+
+```text
+Providers                     Provider detail
+[Search providers]            [Connection] [Models]
+  Provider A                  read Provider A only
+  Provider B                  model edit -> Provider A + model ID
+[Load more]
+```
+
+The Provider owner requests shared, cancellable catalog work from the managed
+account owner; its contract is in the [App Server managed-provider contract](../../../crates/dim-app-server/README.md#managed-provider-contract).
+The [Dim OAuth owner](../../../crates/dim-oauth/docs/runtime-contract.md) defines
+in-flight sharing and result lifetime. The local and wire consumers use the same
+owner methods through `managementMethods`.
 
 ### 3.2 Writes and field operations
 

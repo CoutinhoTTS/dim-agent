@@ -199,7 +199,9 @@ async fn model_preview_resolves_startup_without_creating_sessions_or_saving_choi
             )
             .await,
     );
-    let before = client.rpc("provider.management", json!({})).await;
+    let before = client
+        .rpc("provider.management", json!({"providerId":provider}))
+        .await;
     assert_ok(&before);
     for (params, expected) in [
         (json!({"cwd":home}), "alpha"),
@@ -233,7 +235,9 @@ async fn model_preview_resolves_startup_without_creating_sessions_or_saving_choi
         .await;
     assert!(invalid.get("error").is_some(), "{invalid}");
     assert!(server.agent().unwrap().sessions().is_empty());
-    let after = client.rpc("provider.management", json!({})).await;
+    let after = client
+        .rpc("provider.management", json!({"providerId":provider}))
+        .await;
     assert_eq!(before["result"], after["result"]);
     let created = client.rpc("session.create", json!({"cwd":home})).await;
     assert_ok(&created);

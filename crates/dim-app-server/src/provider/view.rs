@@ -19,7 +19,7 @@ pub struct ManagementDriver {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ManagementProvider {
+pub struct ManagementInfo {
     pub provider_id: String,
     pub display_name: String,
     pub source: &'static str,
@@ -30,6 +30,13 @@ pub struct ManagementProvider {
     pub account: Option<ManagementAccount>,
     pub actions: Vec<&'static str>,
     pub connection: Option<ManagementConnection>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagementProvider {
+    #[serde(flatten)]
+    pub info: ManagementInfo,
     pub models: Option<Vec<ManagementModel>>,
     pub preferences: BTreeMap<String, ModelPreferences>,
     /// What an update did with the record's models; absent from the reads and
@@ -119,12 +126,12 @@ impl ProviderService {
         super::can_list_models(&self.bundled, provider_id, record)
     }
 
-    pub(super) async fn static_management(
+    pub(super) async fn static_management_info(
         &self,
         provider_id: String,
-        record: StaticProviderRecord,
+        record: &StaticProviderRecord,
         cancel: &CancellationToken,
-    ) -> Result<ManagementProvider, ProviderError> {
+    ) -> Result<ManagementInfo, ProviderError> {
         let (authority, account, available) = match record.credential_authority {
             CredentialAuthority::Static => ("static", None, true),
             authority => {
@@ -163,7 +170,7 @@ impl ProviderService {
         ];
         if authority == "static" {
             actions.extend(["models.create", "models.delete"]);
-            if self.remote_model_list(&provider_id, &record)
+            if self.remote_model_list(&provider_id, record)
                 && (record.auth == StaticAuth::Anonymous || record.credential.is_some())
             {
                 actions.push("refresh");
@@ -174,8 +181,66 @@ impl ProviderService {
                 actions.push("logout");
             }
         }
-        let catalog = static_models(&self.bundled, &provider_id, &record, available);
-        let models = static_entries(&self.bundled, &provider_id, &record)
+        let (proxy_url, proxy_auth_configured) = match &record.network.proxy {
+            Some(proxy) => {
+                let mut url = reqwest::Url::parse(proxy).map_err(|_| ProviderError::Failed)?;
+                let authenticated = !url.username().is_empty() || url.password().is_some();
+                url.set_username("").map_err(|_| ProviderError::Failed)?;
+                url.set_password(None).map_err(|_| ProviderError::Failed)?;
+                (Some(url.to_string()), authenticated)
+            }
+            None => (None, false),
+        };
+        let mut header_names: Vec<_> = record.headers.keys().cloned().collect();
+        header_names.sort();
+        Ok(ManagementInfo {
+            provider_id,
+            display_name: record.display_name.clone(),
+            source: if record.kind == StaticRecordKind::Builtin {
+                "builtin"
+            } else {
+                "custom"
+            },
+            credential_authority: authority,
+            version: Some(record.version),
+            enabled: Some(record.enabled),
+            account,
+            actions,
+            connection: Some(ManagementConnection {
+                driver_kind: record.driver_kind.clone(),
+                auth: record.auth.clone(),
+                base_url: record.base_url.clone(),
+                credential_configured: if authority == "static" {
+                    record.credential.is_some()
+                } else {
+                    available
+                },
+                header_names,
+                proxy_url,
+                proxy_auth_configured,
+                timeout_ms: record.network.timeout_ms,
+                glued_prefix: record.glued_prefix.clone(),
+            }),
+        })
+    }
+
+    pub(super) async fn static_management(
+        &self,
+        provider_id: String,
+        record: StaticProviderRecord,
+        cancel: &CancellationToken,
+    ) -> Result<ManagementProvider, ProviderError> {
+        let info = self
+            .static_management_info(provider_id.clone(), &record, cancel)
+            .await?;
+        let available = info
+            .connection
+            .as_ref()
+            .is_some_and(|c| c.credential_configured)
+            || record.credential_authority == CredentialAuthority::Static;
+        let entries = static_entries(&self.bundled, &provider_id, &record);
+        let catalog = static_models_from_entries(&record, available, entries.clone());
+        let models = entries
             .into_iter()
             .zip(catalog)
             .map(|(model, effective)| {
@@ -221,58 +286,19 @@ impl ProviderService {
                 }
             })
             .collect();
-        let (proxy_url, proxy_auth_configured) = match &record.network.proxy {
-            Some(proxy) => {
-                let mut url = reqwest::Url::parse(proxy).map_err(|_| ProviderError::Failed)?;
-                let authenticated = !url.username().is_empty() || url.password().is_some();
-                url.set_username("").map_err(|_| ProviderError::Failed)?;
-                url.set_password(None).map_err(|_| ProviderError::Failed)?;
-                (Some(url.to_string()), authenticated)
-            }
-            None => (None, false),
-        };
-        let mut header_names: Vec<_> = record.headers.into_keys().collect();
-        header_names.sort();
         Ok(ManagementProvider {
-            provider_id,
-            display_name: record.display_name,
-            source: if record.kind == StaticRecordKind::Builtin {
-                "builtin"
-            } else {
-                "custom"
-            },
-            credential_authority: authority,
-            version: Some(record.version),
-            enabled: Some(record.enabled),
-            account,
-            actions,
+            info,
             models: Some(models),
             preferences: record.model_preferences,
-            connection: Some(ManagementConnection {
-                driver_kind: record.driver_kind,
-                auth: record.auth,
-                base_url: record.base_url,
-                credential_configured: if authority == "static" {
-                    record.credential.is_some()
-                } else {
-                    available
-                },
-                header_names,
-                proxy_url,
-                proxy_auth_configured,
-                timeout_ms: record.network.timeout_ms,
-                glued_prefix: record.glued_prefix,
-            }),
             models_listed: None,
         })
     }
 
-    pub(super) fn managed_management(
+    pub(super) fn managed_management_info(
         descriptor: crate::managed_provider::ProviderDescriptor,
         account: AccountSnapshot,
-        record: Option<ProviderRecord>,
-        bundled: &BundledCatalog,
-    ) -> ManagementProvider {
+        record: Option<&ProviderRecord>,
+    ) -> ManagementInfo {
         let unavailable = if account.account.is_none() {
             Some("account_required")
         } else if record
@@ -296,6 +322,40 @@ impl ProviderService {
             ]);
         }
         let version = record.as_ref().map(|record| record.version);
+        ManagementInfo {
+            provider_id: descriptor.provider_id,
+            display_name: descriptor.display_name,
+            source: "managed",
+            credential_authority: "account",
+            version,
+            enabled: None,
+            account: Some(ManagementAccount {
+                namespace: "account",
+                login_methods: descriptor.login_methods,
+                state: AccountState::Package(account),
+            }),
+            actions,
+            connection: None,
+        }
+    }
+
+    pub(super) fn managed_management(
+        descriptor: crate::managed_provider::ProviderDescriptor,
+        account: AccountSnapshot,
+        record: Option<ProviderRecord>,
+        bundled: &BundledCatalog,
+    ) -> ManagementProvider {
+        let info = Self::managed_management_info(descriptor, account.clone(), record.as_ref());
+        let unavailable = if account.account.is_none() {
+            Some("account_required")
+        } else if record
+            .as_ref()
+            .is_some_and(|record| !same_account(&record.account, &account))
+        {
+            Some("account_changed")
+        } else {
+            None
+        };
         let (models, preferences) = match record {
             Some(record) => {
                 let effective = record.effective_models(bundled);
@@ -351,19 +411,7 @@ impl ProviderService {
             None => (None, BTreeMap::new()),
         };
         ManagementProvider {
-            provider_id: descriptor.provider_id,
-            display_name: descriptor.display_name,
-            source: "managed",
-            credential_authority: "account",
-            version,
-            enabled: None,
-            account: Some(ManagementAccount {
-                namespace: "account",
-                login_methods: descriptor.login_methods,
-                state: AccountState::Package(account),
-            }),
-            actions,
-            connection: None,
+            info,
             models,
             preferences,
             models_listed: None,
@@ -372,130 +420,276 @@ impl ProviderService {
 
     pub async fn management(
         self: &Arc<Self>,
-        provider_id: Option<String>,
+        provider_id: String,
+        model_id: Option<String>,
         cancel: &CancellationToken,
     ) -> Result<ManagementView, ProviderError> {
         let db = self.db.clone();
-        let target = provider_id.clone();
-        let records = self.owned(cancel, move |_| Box::pin(async move {
+        let id = provider_id.clone();
+        let record = self
+            .owned(cancel, move |_| {
+                Box::pin(async move {
+                    db.run_read(move |connection| {
+                        let row: Option<(u32, String)> = connection
+                            .query_row(
+                                "SELECT version,record FROM providers WHERE provider_id=?1",
+                                [&id],
+                                |row| Ok((row.get(0)?, row.get(1)?)),
+                            )
+                            .optional()
+                            .map_err(storage)?;
+                        row.map(|(version, body)| {
+                            parse_provider_row(&id, version, &body)
+                                .map_err(|error| storage(error.to_string()))
+                        })
+                        .transpose()
+                    })
+                    .await
+                    .map_err(ProviderError::from)
+                })
+            })
+            .await?;
+        let mut errors = Vec::new();
+        let mut provider = match record {
+            Some(PersistedProviderRecord::Static(record)) => {
+                if record.kind == StaticRecordKind::Builtin
+                    && let Some(definition) = bundled_seed_for(&self.bundled, &provider_id)?
+                    && record.definition_fingerprint != definition.definition_fingerprint
+                {
+                    let candidate = reseed_candidate(&record, definition);
+                    let collisions: Vec<_> = candidate
+                        .user_models
+                        .iter()
+                        .filter(|user| {
+                            candidate
+                                .models
+                                .iter()
+                                .any(|model| model.model_id == user.model_id)
+                        })
+                        .map(|entry| entry.model_id.as_str())
+                        .collect();
+                    errors.push(ProviderRecordError { provider_id: provider_id.clone(), message: if collisions.is_empty() {
+                        "Bundled definition changed; restart to apply it".into()
+                    } else { format!("Bundled definition conflicts with user models: {}; delete them and restart", collisions.join(", ")) } });
+                }
+                self.static_management(provider_id, *record, cancel).await?
+            }
+            record => {
+                let descriptor = self
+                    .oauth
+                    .providers(cancel)
+                    .await?
+                    .into_iter()
+                    .find(|descriptor| descriptor.provider_id == provider_id)
+                    .ok_or(if record.is_some() {
+                        ProviderError::Unsupported("Managed account package is unavailable".into())
+                    } else {
+                        ProviderError::NotFound
+                    })?;
+                let account = self.oauth.status(&provider_id, cancel).await?;
+                let record = record.map(|record| match record {
+                    PersistedProviderRecord::Managed(record) => *record,
+                    PersistedProviderRecord::Static(_) => unreachable!(),
+                });
+                Self::managed_management(descriptor, account, record, &self.bundled)
+            }
+        };
+        if let Some(model_id) = model_id {
+            let models = provider.models.as_mut().ok_or(ProviderError::NotFound)?;
+            models.retain(|model| model.model.model_id == model_id);
+            if models.is_empty() {
+                return Err(ProviderError::NotFound);
+            }
+            provider.preferences.retain(|id, _| id == &model_id);
+        }
+        self.check(cancel)?;
+        Ok(ManagementView {
+            drivers: management_drivers(),
+            providers: vec![provider],
+            errors,
+        })
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementPageRequest {
+    pub provider_id: Option<String>,
+    pub after: Option<String>,
+    pub limit: Option<u32>,
+    #[serde(default)]
+    pub accounts_only: bool,
+    pub query: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagementPage {
+    pub drivers: Vec<ManagementDriver>,
+    pub providers: Vec<ManagementInfo>,
+    pub errors: Vec<ProviderRecordError>,
+    pub next: Option<String>,
+}
+
+impl ProviderService {
+    pub async fn management_page(
+        self: &Arc<Self>,
+        request: ManagementPageRequest,
+        cancel: &CancellationToken,
+    ) -> Result<ManagementPage, ProviderError> {
+        let limit = request.limit.unwrap_or(32);
+        if !(1..=128).contains(&limit) || (request.provider_id.is_some() && request.after.is_some())
+        {
+            return Err(ProviderError::InvalidConfig(
+                "Use a page size of 1..128 and either providerId or after".into(),
+            ));
+        }
+        let mut descriptors = self.oauth.providers(cancel).await?;
+        let db = self.db.clone();
+        let target = request.provider_id.clone();
+        let after = request.after.clone();
+        let accounts_only = request.accounts_only;
+        let query_text = request.query.clone().unwrap_or_default();
+        let mut records = self.owned(cancel, move |_| Box::pin(async move {
             db.run_read(move |connection| {
-                let mut query = connection.prepare("SELECT provider_id,version,record FROM providers WHERE ?1 IS NULL OR provider_id=?1 ORDER BY provider_id").map_err(storage)?;
-                let rows = query.query_map([target], |row| Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?, row.get::<_, String>(2)?))).map_err(storage)?;
-                rows.map(|row| {
-                    let (id, version, body) = row.map_err(storage)?;
-                    let record = parse_provider_row(&id, version, &body).map_err(ProviderError::from);
-                    Ok((id, record))
-                }).collect::<dim_agent_runtime::Result<Vec<_>>>()
+                let sql = if target.is_some() {
+                    "SELECT provider_id FROM providers WHERE provider_id=?1"
+                } else {
+                    "SELECT provider_id FROM providers WHERE provider_id>coalesce(?1,'') AND CASE WHEN json_valid(record) THEN (instr(lower(provider_id),lower(?3))>0 OR instr(lower(json_extract(record,'$.displayName')),lower(?3))>0) AND (?4=0 OR json_extract(record,'$.credentialAuthority') IN ('openai_codex','grok') OR json_extract(record,'$.kind')='managed') ELSE 1 END ORDER BY provider_id LIMIT ?2"
+                };
+                let mut query = connection.prepare(sql).map_err(storage)?;
+                let mut rows = if let Some(target) = target {
+                    query.query(params![target]).map_err(storage)?
+                } else {
+                    query.query(params![after, limit+1, query_text, accounts_only]).map_err(storage)?
+                };
+                let mut records = Vec::new();
+                while let Some(row) = rows.next().map_err(storage)? {
+                    let id: String = row.get(0).map_err(storage)?;
+                    records.push(id);
+                }
+                Ok(records)
             }).await.map_err(ProviderError::from)
         })).await?;
-        let mut descriptors = self.oauth.providers(cancel).await?;
-        let seeds = bundled_seeds(&self.bundled)?;
-        let mut view = ManagementView {
-            drivers: drivers::custom_drivers()
-                .map(|driver| ManagementDriver {
-                    driver_kind: driver,
-                    auth_types: if driver == "amazon-bedrock" {
-                        vec!["aws_bedrock"]
-                    } else {
-                        vec!["api_key", "bearer", "custom_header", "anonymous"]
-                    },
-                    remote_model_list: drivers::remote_model_list(driver),
+        for descriptor in &descriptors {
+            if request.query.as_ref().is_none_or(|query| {
+                format!("{} {}", descriptor.provider_id, descriptor.display_name)
+                    .to_lowercase()
+                    .contains(&query.to_lowercase())
+            }) && request
+                .provider_id
+                .as_ref()
+                .is_none_or(|id| id == &descriptor.provider_id)
+                && request
+                    .after
+                    .as_ref()
+                    .is_none_or(|id| id < &descriptor.provider_id)
+                && !records.iter().any(|id| id == &descriptor.provider_id)
+            {
+                records.push(descriptor.provider_id.clone());
+            }
+        }
+        records.sort();
+        let next = (records.len() > limit as usize).then(|| records[limit as usize - 1].clone());
+        records.truncate(limit as usize);
+        let db = self.db.clone();
+        let records = self
+            .owned(cancel, move |_| {
+                Box::pin(async move {
+                    db.run_read(move |connection| {
+                        let mut query = connection
+                            .prepare("SELECT version,record FROM providers WHERE provider_id=?1")
+                            .map_err(storage)?;
+                        records
+                            .into_iter()
+                            .map(|id| {
+                                let row: Option<(u32, String)> = query
+                                    .query_row([&id], |row| Ok((row.get(0)?, row.get(1)?)))
+                                    .optional()
+                                    .map_err(storage)?;
+                                let record = row.map(|(version, body)| {
+                                    parse_provider_row(&id, version, &body)
+                                        .map_err(ProviderError::from)
+                                });
+                                Ok((id, record))
+                            })
+                            .collect::<dim_agent_runtime::Result<Vec<_>>>()
+                    })
+                    .await
+                    .map_err(ProviderError::from)
                 })
-                .collect(),
+            })
+            .await?;
+        let mut page = ManagementPage {
+            drivers: management_drivers(),
             providers: Vec::new(),
             errors: Vec::new(),
+            next,
         };
         for (id, record) in records {
-            let result = match record {
-                Ok(PersistedProviderRecord::Static(record)) => {
-                    if let Some(definition) = seeds.get(&id)
-                        && record.kind == StaticRecordKind::Builtin
-                        && record.definition_fingerprint != definition.definition_fingerprint
-                    {
-                        let candidate = reseed_candidate(&record, definition.clone());
-                        let collisions: Vec<_> = candidate
-                            .user_models
-                            .iter()
-                            .filter(|user| {
-                                candidate
-                                    .models
-                                    .iter()
-                                    .any(|model| model.model_id == user.model_id)
-                            })
-                            .map(|entry| entry.model_id.as_str())
-                            .collect();
-                        view.errors.push(ProviderRecordError { provider_id: id.clone(), message: if collisions.is_empty() {
-                            "Bundled definition changed; restart to apply it".into()
-                        } else { format!("Bundled definition conflicts with user models: {}; delete them and restart", collisions.join(", ")) } });
-                    }
-                    self.static_management(id.clone(), *record, cancel).await
+            let result = match record.transpose() {
+                Ok(Some(PersistedProviderRecord::Static(record))) => {
+                    self.static_management_info(id.clone(), &record, cancel)
+                        .await
                 }
-                Ok(PersistedProviderRecord::Managed(record)) => {
-                    match descriptors
+                Ok(record) => {
+                    if let Some(index) = descriptors
                         .iter()
                         .position(|descriptor| descriptor.provider_id == id)
                     {
-                        Some(index) => {
-                            let descriptor = descriptors.remove(index);
-                            match self.oauth.status(&id, cancel).await {
-                                Ok(account) => Ok(Self::managed_management(
-                                    descriptor,
-                                    account,
-                                    Some(*record),
-                                    &self.bundled,
-                                )),
-                                Err(error) => Err(error.into()),
-                            }
+                        let descriptor = descriptors.remove(index);
+                        match self.oauth.status(&id, cancel).await {
+                            Ok(account) => Ok(Self::managed_management_info(
+                                descriptor,
+                                account,
+                                record.as_ref().and_then(|record| match record {
+                                    PersistedProviderRecord::Managed(record) => {
+                                        Some(record.as_ref())
+                                    }
+                                    _ => None,
+                                }),
+                            )),
+                            Err(error) => Err(error.into()),
                         }
-                        None => Err(ProviderError::Unsupported(
-                            "Managed account package is unavailable".into(),
-                        )),
+                    } else {
+                        Err(if record.is_some() {
+                            ProviderError::Unsupported(
+                                "Managed account package is unavailable".into(),
+                            )
+                        } else {
+                            ProviderError::NotFound
+                        })
                     }
                 }
                 Err(error) => Err(error),
             };
             match result {
-                Ok(provider) => view.providers.push(provider),
-                Err(error) if provider_id.is_some() => return Err(error),
-                Err(error) => {
-                    descriptors.retain(|descriptor| descriptor.provider_id != id);
-                    view.errors.push(ProviderRecordError {
-                        provider_id: id,
-                        message: error.to_string(),
-                    });
-                }
-            }
-        }
-        for descriptor in descriptors.into_iter().filter(|descriptor| {
-            provider_id
-                .as_ref()
-                .is_none_or(|id| id == &descriptor.provider_id)
-        }) {
-            let id = descriptor.provider_id.clone();
-            let result = match self.oauth.status(&id, cancel).await {
-                Ok(account) => Ok(Self::managed_management(
-                    descriptor,
-                    account,
-                    None,
-                    &self.bundled,
-                )),
-                Err(error) => Err(error.into()),
-            };
-            match result {
-                Ok(provider) => view.providers.push(provider),
-                Err(error) if provider_id.is_some() => return Err(error),
-                Err(error) => view.errors.push(ProviderRecordError {
+                Ok(info) => page.providers.push(info),
+                Err(error) if request.provider_id.is_some() => return Err(error),
+                Err(error) => page.errors.push(ProviderRecordError {
                     provider_id: id,
                     message: error.to_string(),
                 }),
             }
         }
-        if provider_id.is_some() && view.providers.is_empty() {
+        if request.provider_id.is_some() && page.providers.is_empty() {
             return Err(ProviderError::NotFound);
         }
-        view.providers
-            .sort_by(|a, b| a.provider_id.cmp(&b.provider_id));
         self.check(cancel)?;
-        Ok(view)
+        Ok(page)
     }
+}
+
+fn management_drivers() -> Vec<ManagementDriver> {
+    drivers::custom_drivers()
+        .map(|driver| ManagementDriver {
+            driver_kind: driver,
+            auth_types: if driver == "amazon-bedrock" {
+                vec!["aws_bedrock"]
+            } else {
+                vec!["api_key", "bearer", "custom_header", "anonymous"]
+            },
+            remote_model_list: drivers::remote_model_list(driver),
+        })
+        .collect()
 }

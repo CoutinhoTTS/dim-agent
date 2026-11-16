@@ -24,7 +24,10 @@ pub use models::PreferencesPatch;
 use secrets::StaticCredential;
 pub use secrets::{ProviderSecret, ProviderSecretHost, ResolveProviderSecret};
 pub use startup::{StartupInput, StartupSelection};
-pub use view::{ManagementProvider, ManagementView, ModelsListed};
+pub use view::{
+    ManagementInfo, ManagementPage, ManagementPageRequest, ManagementProvider, ManagementView,
+    ModelsListed,
+};
 
 use crate::{
     codex_oauth::OpenAICodexOAuthService,
@@ -155,6 +158,7 @@ impl From<crate::managed_provider::ManagedProviderError> for ProviderError {
         match error.code {
             "account_required" | "account_recovery_required" => Self::AuthRequired,
             "account_changed" => Self::AccountChanged,
+            "account_cancelled" | "service_reloading" => Self::Cancelled,
             "account_identity_rejected" => Self::AuthFailed,
             _ => Self::Failed,
         }
@@ -1099,6 +1103,14 @@ fn static_models(
     account_available: bool,
 ) -> Vec<ProviderModel> {
     let entries = static_entries(bundled, provider_id, record);
+    static_models_from_entries(record, account_available, entries)
+}
+
+fn static_models_from_entries(
+    record: &StaticProviderRecord,
+    account_available: bool,
+    entries: Vec<ModelEntry>,
+) -> Vec<ProviderModel> {
     let names = naming::unique(&entries);
     entries
         .into_iter()

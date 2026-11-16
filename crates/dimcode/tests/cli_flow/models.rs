@@ -33,6 +33,7 @@ fn models_reports_account_discovery_failure_instead_of_an_empty_list() {
 fn hello(wire: &mut Wire) {
     wire.hello(&[
         "provider.management",
+        "provider.management.list",
         "provider.models.set_enabled",
         "provider.models.edit",
         "provider.models.create",
@@ -49,6 +50,7 @@ fn tui_connect_disabled_provider_refreshes_its_model_management_panel() {
         let daemon = home.daemon(|wire| {
             wire.hello(&[
                 "provider.management",
+                "provider.management.list",
                 "provider.create",
                 "provider.update",
                 "provider.probe",
@@ -71,7 +73,7 @@ fn tui_connect_disabled_provider_refreshes_its_model_management_panel() {
                     "baseUrl":"https://fixture.invalid/v1", "credentialConfigured":true},
                 "models":[]
             });
-            let listed = wire.read("provider.management");
+            let listed = wire.read("provider.management.list");
             assert_eq!(listed["params"], json!({}));
             wire.reply(&listed, json!({"providers":[record],"errors":[]}));
             for _ in 0..2 {

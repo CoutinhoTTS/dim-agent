@@ -82,7 +82,7 @@ impl ManagedProvider for SearchProvider {
             })
         })
     }
-    fn catalog(&self, _: &str) -> ManagedFuture<ManagedCatalog> {
+    fn catalog(&self, _: &str, _: CancellationToken) -> ManagedFuture<ManagedCatalog> {
         unused()
     }
     fn credential(&self, _: &str, _: &str) -> ManagedFuture<CredentialLease> {

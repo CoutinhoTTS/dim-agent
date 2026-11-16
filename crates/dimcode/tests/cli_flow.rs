@@ -5298,7 +5298,7 @@ fn explicit_model_selection_uses_protocol_field_names_from_tui_and_line_client()
             let home = Home::new();
             let daemon = home.daemon(move |wire| {
             let hello = wire.read("hello");
-            let mut features = vec!["session.create", "session.history", "provider.list", "provider.management"];
+            let mut features = vec!["session.create", "session.history", "provider.list", "provider.management","provider.management.list"];
             if leaf {
                 features.push("ui.leaf.2");
             }
@@ -5537,7 +5537,7 @@ fn a_new_session_shows_the_effort_its_creation_adopted() {
                         "features":["session.create","session.history","session.history.latestTurn","session.input.pending.blockPresence","session.methods","provider.list",
                             "provider.catalog","provider.management"]}),
                     "provider.list" => json!({"providers":[{"providerId":"test","displayName":"Test","enabled":true}]}),
-                    "provider.management" => json!({"providers":[{"providerId":"test","source":"custom",
+                    "provider.management" | "provider.management.list" => json!({"providers":[{"providerId":"test","source":"custom",
                         "displayName":"Test","enabled":true,"version":1,"connection":null,
                         "preferences":{"model":{"reasoningEffort":"high"}}}],"errors":[]}),
                     "provider.catalog" => json!({"catalog":{"version":1,"disabledModelIds":[],"models":[{"id":"model","name":"Model",
@@ -5658,6 +5658,7 @@ fn home_after_new_drops_the_previous_sessions_effort() {
     let daemon = home.daemon(|wire| {
         wire.hello(&[
             "provider.management",
+            "provider.management.list",
             "ui.open",
             "ui.close",
             "ui.attach",
@@ -5705,7 +5706,7 @@ fn home_after_new_drops_the_previous_sessions_effort() {
         // `/new` and its first message create the next Session, which has
         // adopted no preference yet.
         let providers = wire.read("provider.management");
-        assert_eq!(providers["params"], json!({}));
+        assert_eq!(providers["params"], json!({"providerId":"test"}));
         wire.reply(
             &providers,
             json!({"providers":[{"providerId":"test","source":"user",
@@ -5912,7 +5913,7 @@ fn repicking_the_current_model_keeps_the_effort() {
                         "provider.catalog","provider.management","provider.selection","provider.select"]}),
                 "provider.list" => json!({"providers":[{"providerId":"test","displayName":"Test","enabled":true}]}),
                 "provider.catalog" => catalog.clone(),
-                "provider.management" => json!({"providers":[{"providerId":"test","source":"custom",
+                "provider.management" | "provider.management.list" => json!({"providers":[{"providerId":"test","source":"custom",
                     "displayName":"Test","enabled":true,"version":1,"connection":null,
                     "preferences":{"model":{"reasoningEffort":"high"}}}],"errors":[]}),
                 "session.create" => panic!("resuming must not create a Session"),
@@ -7003,8 +7004,8 @@ fn browser_login_hides_callback_and_refreshes_the_managed_catalog() {
     let daemon = home.daemon(|wire| {
         wire.2 = true;
         let hello = wire.read("hello");
-        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods","provider.list","provider.management","account.login.browser.begin","account.login.browser.complete","provider.refresh"]}));
-        let listed = wire.read("provider.management");
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods","provider.list","provider.management","provider.management.list","account.login.browser.begin","account.login.browser.complete","provider.refresh"]}));
+        let listed = wire.read("provider.management.list");
         wire.reply(&listed,json!({"providers":[{"providerId":"fixture","displayName":"Fixture","account":{"namespace":"account","loginMethods":["browser"]}}]}));
         let begin = wire.read("account.login.browser.begin");
         assert_eq!(begin["params"]["directory"],"https://fixture.invalid");
@@ -7054,8 +7055,8 @@ fn device_login_polls_and_cancels_the_attempt_on_ctrl_c() {
     let daemon = home.daemon(|wire| {
         wire.2 = true;
         let hello = wire.read("hello");
-        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods","provider.list","provider.management","account.login.begin","account.login.status","account.login.cancel"]}));
-        let listed = wire.read("provider.management");
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods","provider.list","provider.management","provider.management.list","account.login.begin","account.login.status","account.login.cancel"]}));
+        let listed = wire.read("provider.management.list");
         wire.reply(&listed,json!({"providers":[{"providerId":"fixture","displayName":"Fixture","account":{"namespace":"account","loginMethods":["device"]}}]}));
         let begin = wire.read("account.login.begin");
         wire.reply(&begin,json!({"attemptId":"device","verificationUri":"https://fixture.invalid/device","userCode":"TEST-CODE","expiresAt":999999}));
@@ -9216,7 +9217,13 @@ fn tui_provider_management_uses_the_production_daemon_and_survives_restart() {
     terminal.until("Disconnect");
     terminal.until("Added Provider flow");
     let mut wire = connect(&home);
-    let snapshot = rpc(&mut wire, "provider.management", json!({}));
+    let overview = rpc(
+        &mut wire,
+        "provider.management.list",
+        json!({"query":"Provider flow"}),
+    );
+    let id = overview["result"]["providers"][0]["providerId"].clone();
+    let snapshot = rpc(&mut wire, "provider.management", json!({"providerId":id}));
     let provider = snapshot["result"]["providers"]
         .as_array()
         .unwrap()
@@ -12014,7 +12021,7 @@ fn tui_provider_create_recovery_preserves_changed_draft_until_confirmation() {
     let daemon = home.daemon(move |wire| {
         wire.2 = true;
         let hello = wire.read("hello");
-        wire.reply(&hello, json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.input.pending.blockPresence","session.methods","provider.management","provider.create","provider.update","provider.probe"]}));
+        wire.reply(&hello, json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.input.pending.blockPresence","session.methods","provider.management","provider.management.list","provider.create","provider.update","provider.probe"]}));
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -12023,7 +12030,7 @@ fn tui_provider_create_recovery_preserves_changed_draft_until_confirmation() {
         let accounts = wire.read("account.providers");
         wire.reply(&accounts, json!([]));
         for _ in 0..2 {
-            let listed = wire.read("provider.management");
+            let listed = wire.read("provider.management.list");
             wire.reply(&listed, json!({"providers":[],"errors":[]}));
         }
         let probe = wire.read("provider.probe");
@@ -12032,10 +12039,10 @@ fn tui_provider_create_recovery_preserves_changed_draft_until_confirmation() {
         let id = create["params"]["providerId"].clone();
         let mut entry = json!({"providerId":id,"source":"custom","displayName":"Recovered provider","enabled":true,"version":1,"preferences":{},"connection":{"driverKind":"openai-compatible","auth":{"type":"bearer"},"baseUrl":"https://first.example/v1","credentialConfigured":true}});
         wire.send(json!({"jsonrpc":"2.0","id":create["id"],"error":{"code":-32000,"message":"Create reply lost"}}));
-        let listed = wire.read("provider.management");
+        let listed = wire.read("provider.management.list");
         wire.send(json!({"jsonrpc":"2.0","id":listed["id"],"error":{"code":-32000,"message":"Snapshot unavailable"}}));
         for _ in 0..2 {
-            let listed = wire.read("provider.management");
+            let listed = wire.read("provider.management.list");
             wire.reply(&listed, json!({"providers":[entry],"errors":[]}));
         }
         let probe = wire.read("provider.probe");
@@ -12051,7 +12058,7 @@ fn tui_provider_create_recovery_preserves_changed_draft_until_confirmation() {
         entry["modelsListed"] = json!("listed");
         wire.reply(&update, entry.clone());
         // The update stored the listing itself; the CLI never asks again.
-        let listed = wire.read("provider.management");
+        let listed = wire.read("provider.management.list");
         wire.reply(&listed, json!({"providers":[entry],"errors":[]}));
         wait_release.recv_timeout(PATIENCE).unwrap();
     });
@@ -12268,7 +12275,7 @@ fn tui_models_picker_cycles_reasoning_effort() {
                 "provider.list" => json!({"providers":[{"providerId":"test","displayName":"Test","enabled":true}]}),
                 "provider.catalog" => catalog.clone(),
                 "account.providers" => json!([]),
-                "provider.management" => json!({"providers":[{"providerId":"test","source":"custom","displayName":"Test","enabled":true,"version":version,"connection":null,"preferences":{"model":preferences.clone()}}],"errors":[]}),
+                "provider.management" | "provider.management.list" => json!({"providers":[{"providerId":"test","source":"custom","displayName":"Test","enabled":true,"version":version,"connection":null,"preferences":{"model":preferences.clone()}}],"errors":[]}),
                 "provider.preferences.update" => {
                     version += 1;
                     preferences = json!({"reasoningEffort":request["params"]["patch"]["reasoningEffort"]["value"],"serviceTier":"priority"});

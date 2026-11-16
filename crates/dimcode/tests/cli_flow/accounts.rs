@@ -41,12 +41,12 @@ fn a_described_browser_provider_signs_in_from_the_cli() {
         hello(
             wire,
             &[
-                "provider.management",
+                "provider.management.list",
                 "account.codex.login.browser.begin",
                 "account.codex.login.browser.complete",
             ],
         );
-        let listed = wire.read("provider.management");
+        let listed = wire.read("provider.management.list");
         wire.reply(
             &listed,
             management(json!([
@@ -90,13 +90,13 @@ fn a_described_device_provider_signs_in_and_cancels_from_the_cli() {
         hello(
             wire,
             &[
-                "provider.management",
+                "provider.management.list",
                 "account.grok.login.begin",
                 "account.grok.login.status",
                 "account.grok.login.cancel",
             ],
         );
-        let listed = wire.read("provider.management");
+        let listed = wire.read("provider.management.list");
         wire.reply(
             &listed,
             management(json!([described(
@@ -134,12 +134,12 @@ fn dim_device_login_refreshes_the_model_catalog_before_exiting() {
         let home = Home::new();
         let daemon = home.daemon(move |wire| {
             wire.hello(&[
-                "provider.management",
+                "provider.management.list",
                 "account.login.begin",
                 "account.login.status",
                 "provider.refresh",
             ]);
-            let listed = wire.read("provider.management");
+            let listed = wire.read("provider.management.list");
             wire.reply(&listed, management(json!([described(
                 "dim-fixture", "DimAgent", "account", &["device"], false
             )])));
@@ -255,8 +255,8 @@ fn dim_device_login_can_retry_the_model_refresh_from_the_account_panel() {
 fn login_without_a_provider_lists_the_described_accounts() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
-        hello(wire, &["provider.management"]);
-        let listed = wire.read("provider.management");
+        hello(wire, &["provider.management.list"]);
+        let listed = wire.read("provider.management.list");
         wire.reply(
             &listed,
             management(json!([
@@ -296,8 +296,8 @@ fn login_without_a_provider_lists_the_described_accounts() {
 fn a_provider_without_a_descriptor_offers_no_sign_in() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
-        hello(wire, &["provider.management"]);
-        let listed = wire.read("provider.management");
+        hello(wire, &["provider.management.list"]);
+        let listed = wire.read("provider.management.list");
         wire.reply(
             &listed,
             management(json!([
@@ -339,8 +339,8 @@ fn a_provider_without_a_descriptor_offers_no_sign_in() {
 fn an_unsupported_daemon_reports_the_missing_sign_in_method() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
-        hello(wire, &["provider.management"]);
-        let listed = wire.read("provider.management");
+        hello(wire, &["provider.management.list"]);
+        let listed = wire.read("provider.management.list");
         wire.reply(
             &listed,
             management(json!([described(
@@ -371,8 +371,8 @@ fn an_unsupported_daemon_reports_the_missing_sign_in_method() {
 fn account_and_logout_follow_the_described_namespace() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
-        hello(wire, &["provider.management", "account.codex.status"]);
-        let listed = wire.read("provider.management");
+        hello(wire, &["provider.management.list", "account.codex.status"]);
+        let listed = wire.read("provider.management.list");
         wire.reply(
             &listed,
             management(json!([described(
@@ -405,8 +405,8 @@ fn account_and_logout_follow_the_described_namespace() {
 
     let home = Home::new();
     let daemon = home.daemon(|wire| {
-        hello(wire, &["provider.management", "account.codex.logout"]);
-        let listed = wire.read("provider.management");
+        hello(wire, &["provider.management.list", "account.codex.logout"]);
+        let listed = wire.read("provider.management.list");
         wire.reply(
             &listed,
             management(json!([described(
@@ -443,8 +443,8 @@ fn account_commands_name_the_missing_account_provider() {
     for command in ["account", "login", "logout"] {
         let home = Home::new();
         let daemon = home.daemon(|wire| {
-            hello(wire, &["provider.management"]);
-            let listed = wire.read("provider.management");
+            hello(wire, &["provider.management.list"]);
+            let listed = wire.read("provider.management.list");
             wire.reply(
                 &listed,
                 management(json!([
@@ -506,6 +506,7 @@ fn the_provider_panel_signs_in_through_each_described_namespace() {
                 wire,
                 &[
                     "provider.management",
+                    "provider.management.list",
                     "provider.create",
                     "provider.update",
                     "provider.probe",
@@ -525,7 +526,7 @@ fn the_provider_panel_signs_in_through_each_described_namespace() {
             wire.no_context();
             let providers = wire.read("account.providers");
             wire.reply(&providers, json!([]));
-            let listed = wire.read("provider.management");
+            let listed = wire.read("provider.management.list");
             wire.reply(
                 &listed,
                 management(json!([
@@ -587,6 +588,7 @@ fn a_panel_without_the_sign_in_method_shows_the_unsupported_daemon_error() {
             wire,
             &[
                 "provider.management",
+                "provider.management.list",
                 "provider.create",
                 "provider.update",
                 "provider.probe",
@@ -602,7 +604,7 @@ fn a_panel_without_the_sign_in_method_shows_the_unsupported_daemon_error() {
         wire.no_context();
         let providers = wire.read("account.providers");
         wire.reply(&providers, json!([]));
-        let listed = wire.read("provider.management");
+        let listed = wire.read("provider.management.list");
         wire.reply(
             &listed,
             management(json!([described(

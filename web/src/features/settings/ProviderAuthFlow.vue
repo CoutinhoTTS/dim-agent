@@ -3,13 +3,13 @@ import { computed, onBeforeUnmount, onMounted, ref } from "vue"
 import { useI18n } from "vue-i18n"
 import { copyText } from "../../clipboard"
 import { settingsMessages } from "../../i18n/settings"
-import { readAccountDescriptors, readLoginAttempt, readLoginStatus, type LoginAttempt, type ManagementProvider } from "../../rpc/management"
+import { readAccountDescriptors, readLoginAttempt, readLoginStatus, type LoginAttempt, type ManagementInfo } from "../../rpc/management"
 import { readAck } from "../../rpc/read"
 import { useConnectionStore } from "../../stores/connection"
 import { useModelsStore } from "../../stores/models"
 import { messageFrom, reloadSettingsOnReconnect } from "./context"
 
-const props = defineProps<{ provider: ManagementProvider }>()
+const props = defineProps<{ provider: ManagementInfo }>()
 const emit = defineEmits<{ finished: [modelRefreshError?: string] }>()
 const { t } = useI18n({ messages: settingsMessages })
 const connection = useConnectionStore()

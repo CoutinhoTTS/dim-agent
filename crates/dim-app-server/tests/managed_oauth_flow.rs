@@ -1370,7 +1370,7 @@ async fn managed_provider_selection_http_recovery_and_restart_flow() {
         )
         .await
         .unwrap();
-    assert!(updated.connection.unwrap().credential_configured);
+    assert!(updated.info.connection.unwrap().credential_configured);
     let old_request = {
         let selection = provider
             .configuration(

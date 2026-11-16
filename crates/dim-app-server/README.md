@@ -111,7 +111,7 @@ loader configuration and package installation remain separate work. See
 
 ### Provider management
 
-Local protocol-v3 clients read `provider.management {providerId?}` for one safe
+Local protocol-v3 clients read `provider.management {providerId, modelId?}` for one safe
 editing snapshot containing the record version, connection fields, full model
 descriptors, available actions and saved preferences. Credentials, secret
 references, header values and proxy authentication are never returned.
@@ -611,6 +611,12 @@ whole-buffer bound, listings, removal under a held lease, work directories and
 unchanged transaction/backup/lifecycle behavior.
 
 ## Managed provider contract
+
+Catalog reads accept caller cancellation. Concurrent reads may share the account
+owner's in-flight request; cancellation removes that caller, while remaining
+callers retain their request. `account_cancelled` reports a cancelled catalog wait.
+The owner removes a completed flight and retains no directory-result cache.
+
 
 `ManagedProvider` ([`src/managed_provider.rs`](src/managed_provider.rs)) is the typed service a managed provider plugin publishes. `ManagedProviderBinding` hands it to the process-owned `ManagedProviders`, which the account RPC, the provider service and `webSearch` (exported via `#[rutis::service]` for the `Web` plugin) use. `ManagedProviders` is assembled on every server; `ManagedProviderMethods`, also a process row, registers the `account` namespace with `managementMethods` and is assembled with a product home. Without a binding the process lists no managed providers and `webSearch` fails with `unavailable`.
 

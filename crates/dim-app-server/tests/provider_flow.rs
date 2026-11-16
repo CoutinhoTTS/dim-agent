@@ -394,8 +394,11 @@ async fn provider_network_is_request_local_and_covers_catalogs_and_stream_bodies
                 timeout_ms: Some(3000),
             });
             let saved = provider.create(config.clone(), &cancel).await.unwrap();
-            assert!(saved.connection.as_ref().unwrap().proxy_url.is_some());
-            assert_eq!(saved.connection.as_ref().unwrap().timeout_ms, Some(3000));
+            assert!(saved.info.connection.as_ref().unwrap().proxy_url.is_some());
+            assert_eq!(
+                saved.info.connection.as_ref().unwrap().timeout_ms,
+                Some(3000)
+            );
             let mut other = config.clone();
             other.provider_id = DIRECT.into();
             other.connection.network = None;
@@ -403,13 +406,13 @@ async fn provider_network_is_request_local_and_covers_catalogs_and_stream_bodies
             let kept = provider
                 .update(
                     config.provider_id.clone(),
-                    saved.version.unwrap(),
+                    saved.info.version.unwrap(),
                     serde_json::from_value(json!({"displayName":config.display_name})).unwrap(),
                     &cancel,
                 )
                 .await
                 .unwrap();
-            assert!(kept.connection.as_ref().unwrap().proxy_url.is_some());
+            assert!(kept.info.connection.as_ref().unwrap().proxy_url.is_some());
             for network in [
                 json!({"proxy":{"action":"set","value":"socks5://localhost:1080"}}),
                 json!({"proxy":{"action":"set","value":"https://host/path"}}),
@@ -420,7 +423,7 @@ async fn provider_network_is_request_local_and_covers_catalogs_and_stream_bodies
                 if let Ok(patch) = serde_json::from_value(json!({"network":network})) {
                     assert!(
                         provider
-                            .update(PROXY.into(), kept.version.unwrap(), patch, &cancel)
+                            .update(PROXY.into(), kept.info.version.unwrap(), patch, &cancel)
                             .await
                             .is_err()
                     );
@@ -504,7 +507,7 @@ async fn provider_network_is_request_local_and_covers_catalogs_and_stream_bodies
                 2,
                 "a network-only update lists nothing"
             );
-            version = saved.version.unwrap();
+            version = saved.info.version.unwrap();
             let saved = provider
                 .update(PROXY.into(), version, serde_json::from_value(json!({"network":{"proxy":{"action":"clear"},"timeoutMs":{"action":"clear"}}})).unwrap(), &cancel)
                 .await
@@ -514,7 +517,7 @@ async fn provider_network_is_request_local_and_covers_catalogs_and_stream_bodies
                 2,
                 "a network-only update lists nothing"
             );
-            assert_eq!(saved.version, Some(version + 1));
+            assert_eq!(saved.info.version, Some(version + 1));
             version = provider
                 .refresh_for(PROXY.into(), &cancel)
                 .await
@@ -534,7 +537,7 @@ async fn provider_network_is_request_local_and_covers_catalogs_and_stream_bodies
                 .update(PROXY.into(), version, serde_json::from_value(json!({"baseUrl":format!("http://{}/slow/v1", addresses[0]),"network":{"timeoutMs":{"action":"set","value":500}},"enabled":false})).unwrap(), &cancel)
                 .await
                 .unwrap()
-                .version.unwrap();
+                .info.version.unwrap();
             version = provider
                 .update(
                     PROXY.into(),
@@ -544,6 +547,7 @@ async fn provider_network_is_request_local_and_covers_catalogs_and_stream_bodies
                 )
                 .await
                 .unwrap()
+                .info
                 .version
                 .unwrap();
             // The re-point dropped the old endpoint's models, so the model
@@ -621,7 +625,7 @@ async fn provider_network_is_request_local_and_covers_catalogs_and_stream_bodies
                 )
                 .await
                 .unwrap()
-                .version
+                .info.version
                 .unwrap();
             provider
                 .update(
@@ -767,7 +771,14 @@ async fn external_secrets_are_request_local_and_follow_plugin_lifetime() {
     };
     assert!(provider.create(invalid, &cancel).await.is_err());
     let summary = provider.create(config.clone(), &cancel).await.unwrap();
-    assert!(summary.connection.as_ref().unwrap().credential_configured);
+    assert!(
+        summary
+            .info
+            .connection
+            .as_ref()
+            .unwrap()
+            .credential_configured
+    );
     assert!(
         !serde_json::to_string(&summary)
             .unwrap()
@@ -1346,7 +1357,7 @@ impl ServedListing {
     async fn read_back(&self, id: &str) -> Option<Vec<String>> {
         let management = self
             .provider
-            .management(Some(LISTED.into()), &self.cancel)
+            .management(LISTED.into(), None, &self.cancel)
             .await
             .unwrap();
         let models = management.providers[0].models.as_ref().unwrap();
@@ -1551,7 +1562,7 @@ async fn a_saved_effort_is_validated_against_the_listings_levels() {
         .provider
         .update_preferences(
             LISTED.into(),
-            saved.version.unwrap(),
+            saved.info.version.unwrap(),
             "gpt-5.5".into(),
             serde_json::from_value(json!({"reasoningEffort":{"action":"set","value":"none"}}))
                 .unwrap(),
@@ -1613,7 +1624,7 @@ async fn a_declared_output_limit_at_or_above_the_window_adopts_a_derived_allowan
     let above = provider
         .update_model_config(
             PROVIDER.into(),
-            created.version.unwrap(),
+            created.info.version.unwrap(),
             "same".into(),
             serde_json::from_value(json!({"maxOutputTokens":40_000})).unwrap(),
             &cancel,
@@ -1732,7 +1743,7 @@ async fn selectable_models_match_execution_and_hide_unavailable_models() {
     let updated = provider
         .set_enabled_models(
             MINE.into(),
-            created.version.unwrap(),
+            created.info.version.unwrap(),
             vec![
                 "served".into(),
                 "unavailable".into(),
@@ -1940,7 +1951,7 @@ async fn selectable_models_match_execution_and_hide_unavailable_models() {
     );
     // The view offers a toggle only where the set governs the entry.
     let view = provider
-        .management(Some(MINE.into()), &cancel)
+        .management(MINE.into(), None, &cancel)
         .await
         .unwrap();
     let actions = |id: &str| {
@@ -2235,7 +2246,7 @@ async fn selectable_modality_models_carry_declared_operations_without_chat_rules
     provider
         .set_enabled_models(
             MINE.into(),
-            created.version.unwrap(),
+            created.info.version.unwrap(),
             vec!["modality-text".into()],
             &cancel,
         )
@@ -2385,7 +2396,7 @@ async fn modality_connection_resolution_reaches_the_stub_and_refuses_unselectabl
     let enabled = provider
         .set_enabled_models(
             MINE.into(),
-            created.version.unwrap(),
+            created.info.version.unwrap(),
             vec![
                 "media".into(),
                 "unavailable".into(),
@@ -2658,7 +2669,7 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
     provider.create(config.clone(), &cancel).await.unwrap();
     let admitted = serde_json::to_value(
         provider
-            .management(Some(REMOTE.into()), &cancel)
+            .management(REMOTE.into(), None, &cancel)
             .await
             .unwrap(),
     )
@@ -2680,7 +2691,7 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
     assert_eq!(
         serde_json::to_value(
             provider
-                .management(Some(REMOTE.into()), &cancel)
+                .management(REMOTE.into(), None, &cancel)
                 .await
                 .unwrap()
         )
@@ -2853,7 +2864,7 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
             .unwrap()
             .unwrap()
             .version,
-        saved.version.unwrap()
+        saved.info.version.unwrap()
     );
 
     let refresh = spawn(REMOTE, cancel.clone());
@@ -3488,7 +3499,7 @@ async fn connection_updates_list_the_new_endpoint_and_keep_bundled_models() {
         json!("listed")
     );
     assert_eq!(
-        updated.version,
+        updated.info.version,
         Some(2),
         "the connection and its listing are one write"
     );
@@ -3526,14 +3537,14 @@ async fn connection_updates_list_the_new_endpoint_and_keep_bundled_models() {
         .unwrap();
     assert!(refused.await.unwrap().is_err());
     let unchanged = provider
-        .management(Some(REMOTE.into()), &cancel)
+        .management(REMOTE.into(), None, &cancel)
         .await
         .unwrap()
         .providers
         .remove(0);
-    assert_eq!(unchanged.version, Some(2));
+    assert_eq!(unchanged.info.version, Some(2));
     assert_eq!(
-        unchanged.connection.as_ref().unwrap().base_url,
+        unchanged.info.connection.as_ref().unwrap().base_url,
         format!("{base}/new/v1")
     );
     assert_eq!(
@@ -3562,8 +3573,11 @@ async fn connection_updates_list_the_new_endpoint_and_keep_bundled_models() {
         .expect("a network-only patch saves without a listing")
         .unwrap()
         .unwrap();
-    assert_eq!(timed.version, Some(3));
-    assert_eq!(timed.connection.as_ref().unwrap().timeout_ms, Some(4000));
+    assert_eq!(timed.info.version, Some(3));
+    assert_eq!(
+        timed.info.connection.as_ref().unwrap().timeout_ms,
+        Some(4000)
+    );
     assert_eq!(
         serde_json::to_value(&timed).unwrap().get("modelsListed"),
         None
@@ -3590,9 +3604,9 @@ async fn connection_updates_list_the_new_endpoint_and_keep_bundled_models() {
         .expect("a kept credential saves without a listing")
         .unwrap()
         .unwrap();
-    assert_eq!(renamed.display_name, "Renamed remote");
+    assert_eq!(renamed.info.display_name, "Renamed remote");
     assert_eq!(
-        renamed.version,
+        renamed.info.version,
         Some(4),
         "a name change with a kept credential saves alone"
     );
@@ -3601,7 +3615,7 @@ async fn connection_updates_list_the_new_endpoint_and_keep_bundled_models() {
         None
     );
     assert_eq!(
-        renamed.connection.as_ref().unwrap().base_url,
+        renamed.info.connection.as_ref().unwrap().base_url,
         format!("{base}/new/v1")
     );
     assert!(
@@ -3658,20 +3672,20 @@ async fn connection_updates_list_the_new_endpoint_and_keep_bundled_models() {
         "{invalid:?}"
     );
     let untouched = provider
-        .management(Some(REMOTE.into()), &cancel)
+        .management(REMOTE.into(), None, &cancel)
         .await
         .unwrap()
         .providers
         .remove(0);
-    assert_eq!(untouched.version, Some(4));
-    assert_eq!(untouched.display_name, "Renamed remote");
+    assert_eq!(untouched.info.version, Some(4));
+    assert_eq!(untouched.info.display_name, "Renamed remote");
     assert_eq!(
-        untouched.connection.as_ref().unwrap().base_url,
+        untouched.info.connection.as_ref().unwrap().base_url,
         format!("{base}/new/v1")
     );
 
     let seeded = provider
-        .management(Some("deepseek".into()), &cancel)
+        .management("deepseek".into(), None, &cancel)
         .await
         .unwrap()
         .providers
@@ -3687,7 +3701,7 @@ async fn connection_updates_list_the_new_endpoint_and_keep_bundled_models() {
     let keyed = provider
         .update(
             "deepseek".into(),
-            seeded.version.unwrap(),
+            seeded.info.version.unwrap(),
             serde_json::from_value(json!({
                 "baseUrl":format!("{base}/bundled"),
                 "credential":{"action":"set","value":"builtin-key"},
@@ -3716,7 +3730,7 @@ async fn connection_updates_list_the_new_endpoint_and_keep_bundled_models() {
     let repointed = provider
         .update(
             "deepseek".into(),
-            keyed.version.unwrap(),
+            keyed.info.version.unwrap(),
             serde_json::from_value(json!({"baseUrl":format!("{base}/bundled-2")})).unwrap(),
             &cancel,
         )
@@ -3761,7 +3775,14 @@ async fn connection_updates_list_the_new_endpoint_and_keep_bundled_models() {
         serde_json::to_value(&saved).unwrap()["modelsListed"],
         json!("unsupported")
     );
-    assert!(saved.connection.as_ref().unwrap().credential_configured);
+    assert!(
+        saved
+            .info
+            .connection
+            .as_ref()
+            .unwrap()
+            .credential_configured
+    );
     assert!(requests.try_recv().is_err());
 
     root.shutdown().await.unwrap();
@@ -3842,7 +3863,7 @@ async fn a_listing_that_collides_with_a_user_model_names_it_and_writes_nothing()
             .version;
     }
     let before: Vec<String> = provider
-        .management(Some(REMOTE.into()), &cancel)
+        .management(REMOTE.into(), None, &cancel)
         .await
         .unwrap()
         .providers
@@ -3881,14 +3902,14 @@ async fn a_listing_that_collides_with_a_user_model_names_it_and_writes_nothing()
         "Discovered models conflict with user-added models: m, n. Delete them through provider.models.delete, then retry."
     );
     let unchanged = provider
-        .management(Some(REMOTE.into()), &cancel)
+        .management(REMOTE.into(), None, &cancel)
         .await
         .unwrap()
         .providers
         .remove(0);
-    assert_eq!(unchanged.version, Some(version));
+    assert_eq!(unchanged.info.version, Some(version));
     assert_eq!(
-        unchanged.connection.as_ref().unwrap().base_url,
+        unchanged.info.connection.as_ref().unwrap().base_url,
         format!("{base}/old/v1")
     );
     assert_eq!(
@@ -4107,9 +4128,9 @@ async fn a_disabled_provider_can_refresh_its_catalog_after_a_connection_change()
         serde_json::to_value(&disabled).unwrap()["modelsListed"],
         json!("disabled")
     );
-    assert_eq!(disabled.version, Some(2));
+    assert_eq!(disabled.info.version, Some(2));
     assert_eq!(
-        disabled.connection.as_ref().unwrap().base_url,
+        disabled.info.connection.as_ref().unwrap().base_url,
         format!("{base}/new/v1")
     );
     assert!(
@@ -4121,11 +4142,11 @@ async fn a_disabled_provider_can_refresh_its_catalog_after_a_connection_change()
         "a disabled re-point sends no listing request"
     );
     assert_eq!(
-        disabled.enabled,
+        disabled.info.enabled,
         Some(false),
         "editing the connection keeps the provider disabled"
     );
-    assert!(disabled.actions.contains(&"refresh"));
+    assert!(disabled.info.actions.contains(&"refresh"));
 
     let refresh = {
         let provider = provider.clone();
@@ -4174,7 +4195,7 @@ async fn a_disabled_provider_can_refresh_its_catalog_after_a_connection_change()
     );
 
     let seeded = provider
-        .management(Some("kimi-for-coding".into()), &cancel)
+        .management("kimi-for-coding".into(), None, &cancel)
         .await
         .unwrap()
         .providers
@@ -4189,7 +4210,7 @@ async fn a_disabled_provider_can_refresh_its_catalog_after_a_connection_change()
     let kept = provider
         .update(
             "kimi-for-coding".into(),
-            seeded.version.unwrap(),
+            seeded.info.version.unwrap(),
             serde_json::from_value(json!({
                 "enabled":false,
                 "baseUrl":format!("{base}/coding"),
@@ -5257,7 +5278,7 @@ async fn new_api_metadata_routes_and_builtin_routes_survive_restart() {
                 .update(builtin.provider_id, builtin.version, serde_json::from_value(json!({"baseUrl":format!("http://{address}/go/v1"),"headers":[{"name":"X-OpenCode-Session","action":"set","value":"stale"}],"credential":{"action":"set","value":"builtin-key"},"enabled":true})).unwrap(), &cancel)
                 .await
                 .unwrap()
-                .version.unwrap();
+                .info.version.unwrap();
         } else {
             assert_eq!(
                 builtin.version, saved_version,
@@ -5384,7 +5405,7 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
         .create(serde_json::from_value(creation.clone()).unwrap(), &cancel)
         .await
         .unwrap();
-    assert_eq!(created.version, Some(1));
+    assert_eq!(created.info.version, Some(1));
     assert_eq!(
         created.models.as_ref().unwrap()[0].model.model_id,
         "editable"
@@ -5443,10 +5464,11 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
         ));
         assert_eq!(
             provider
-                .management(Some(managed_id.into()), &cancel)
+                .management(managed_id.into(), None, &cancel)
                 .await
                 .unwrap()
                 .providers[0]
+                .info
                 .version,
             Some(1)
         );
@@ -5464,12 +5486,12 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
         )
         .await
         .unwrap();
-    assert_eq!(disabled.version, Some(2));
+    assert_eq!(disabled.info.version, Some(2));
     let edited = provider.update(managed_id.into(), 2, serde_json::from_value(json!({
         "displayName":"Renamed", "headers":[{"name":"x-private","action":"remove"},{"name":"X-Preserved","action":"set","value":"preserved"}],
         "network":{"timeoutMs":{"action":"clear"}}
     })).unwrap(), &cancel).await.unwrap();
-    assert_eq!(edited.version, Some(3));
+    assert_eq!(edited.info.version, Some(3));
     assert_eq!(
         serde_json::to_value(&edited).unwrap()["modelsListed"],
         json!("disabled")
@@ -5484,8 +5506,8 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
         )
         .await
         .unwrap();
-    assert_eq!(edited.version, Some(4));
-    let connection = edited.connection.unwrap();
+    assert_eq!(edited.info.version, Some(4));
+    let connection = edited.info.connection.unwrap();
     assert!(connection.credential_configured && connection.proxy_auth_configured);
     assert_eq!(connection.header_names, ["X-Preserved"]);
     assert_eq!(connection.timeout_ms, None);
@@ -5500,7 +5522,7 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
     let preferred = provider.update_preferences(managed_id.into(), 5, "editable".into(), serde_json::from_value(json!({
         "reasoningEffort":{"action":"set","value":"high"},"serviceTier":{"action":"set","value":"priority"}
     })).unwrap(), &cancel).await.unwrap();
-    assert_eq!(preferred.version, Some(6));
+    assert_eq!(preferred.info.version, Some(6));
     let preference_target = ModelId {
         provider_id: managed_id.into(),
         model_id: "editable".into(),
@@ -5583,9 +5605,10 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
         )
         .await
         .unwrap();
-    assert_eq!(disconnected.version, Some(8));
+    assert_eq!(disconnected.info.version, Some(8));
     assert!(
         !disconnected
+            .info
             .connection
             .as_ref()
             .unwrap()
@@ -5604,7 +5627,7 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
     ));
     let management_snapshot = serde_json::to_value(
         provider
-            .management(Some(managed_id.into()), &cancel)
+            .management(managed_id.into(), None, &cancel)
             .await
             .unwrap(),
     )
@@ -5645,7 +5668,7 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
         .await
         .unwrap();
     let stale = provider
-        .management(Some(stale_id.into()), &cancel)
+        .management(stale_id.into(), None, &cancel)
         .await
         .unwrap();
     assert_eq!(
@@ -5729,7 +5752,14 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
         .update(bedrock.provider_id.clone(), bedrock.version, serde_json::from_value(json!({"baseUrl":"https://bedrock-runtime.us-west-2.amazonaws.com","headers":[{"name":"x-marker","action":"set","value":"safe"}],"credential":{"action":"set_aws","value":{"accessKeyId":"fixture-access","secretAccessKey":"fixture-secret","sessionToken":"fixture-session"}},"enabled":true})).unwrap(), &cancel)
         .await
         .unwrap();
-    assert!(bedrock.connection.as_ref().unwrap().credential_configured);
+    assert!(
+        bedrock
+            .info
+            .connection
+            .as_ref()
+            .unwrap()
+            .credential_configured
+    );
     let catalog = provider
         .catalog_for("aws-bedrock".into(), &cancel)
         .await
@@ -5785,8 +5815,8 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
         assert!(
             provider
                 .update(
-                    bedrock.provider_id.clone(),
-                    bedrock.version.unwrap(),
+                    bedrock.info.provider_id.clone(),
+                    bedrock.info.version.unwrap(),
                     patch,
                     &cancel
                 )
@@ -5809,8 +5839,8 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
         assert!(
             provider
                 .update(
-                    bedrock.provider_id.clone(),
-                    bedrock.version.unwrap(),
+                    bedrock.info.provider_id.clone(),
+                    bedrock.info.version.unwrap(),
                     patch,
                     &cancel
                 )
@@ -5834,8 +5864,8 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
         assert!(
             provider
                 .update(
-                    bedrock.provider_id.clone(),
-                    bedrock.version.unwrap(),
+                    bedrock.info.provider_id.clone(),
+                    bedrock.info.version.unwrap(),
                     patch,
                     &cancel
                 )
@@ -5866,8 +5896,8 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
     assert!(
         provider
             .update(
-                bedrock.provider_id.clone(),
-                bedrock.version.unwrap() - 1,
+                bedrock.info.provider_id.clone(),
+                bedrock.info.version.unwrap() - 1,
                 serde_json::from_value(json!({"enabled":true})).unwrap(),
                 &cancel
             )
@@ -5877,15 +5907,16 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
     assert_eq!(
         provider
             .update(
-                bedrock.provider_id.clone(),
-                bedrock.version.unwrap(),
+                bedrock.info.provider_id.clone(),
+                bedrock.info.version.unwrap(),
                 serde_json::from_value(json!({"enabled":true})).unwrap(),
                 &cancel
             )
             .await
             .unwrap()
+            .info
             .version,
-        Some(bedrock.version.unwrap() + 1)
+        Some(bedrock.info.version.unwrap() + 1)
     );
 
     let a = provider
@@ -5917,8 +5948,8 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
         .await
         .unwrap();
     assert!(
-        a.connection.as_ref().unwrap().credential_configured
-            && !b.connection.as_ref().unwrap().credential_configured
+        a.info.connection.as_ref().unwrap().credential_configured
+            && !b.info.connection.as_ref().unwrap().credential_configured
     );
     let public = serde_json::to_string(&provider.list(&cancel).await.unwrap()).unwrap();
     assert!(
@@ -5961,7 +5992,7 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
         (PROVIDER_A, Some(1234.0))
     );
     let catalog = provider
-        .set_enabled_models(PROVIDER_A.into(), a.version.unwrap(), vec![], &cancel)
+        .set_enabled_models(PROVIDER_A.into(), a.info.version.unwrap(), vec![], &cancel)
         .await
         .unwrap();
     let fallback = provider
@@ -6033,10 +6064,10 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
     }
 
     let builtin = provider
-        .management(Some("deepseek".into()), &cancel)
+        .management("deepseek".into(), None, &cancel)
         .await
         .unwrap();
-    let builtin = provider.update("deepseek".into(), builtin.providers[0].version.unwrap(), serde_json::from_value(json!({"baseUrl":format!("{base}/builtin"),"credential":{"action":"set","value":"user-model-key"},"enabled":true})).unwrap(), &cancel).await.unwrap();
+    let builtin = provider.update("deepseek".into(), builtin.providers[0].info.version.unwrap(), serde_json::from_value(json!({"baseUrl":format!("{base}/builtin"),"credential":{"action":"set","value":"user-model-key"},"enabled":true})).unwrap(), &cancel).await.unwrap();
     let custom = provider
         .catalog_for(PROVIDER_A.into(), &cancel)
         .await
@@ -6044,7 +6075,7 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
         .unwrap();
     for (id, version) in [
         (PROVIDER_A, custom.version),
-        ("deepseek", builtin.version.unwrap()),
+        ("deepseek", builtin.info.version.unwrap()),
     ] {
         let catalog = provider
             .create_model(id.into(), version, model("user-added", 321), &cancel)
@@ -6086,7 +6117,7 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
         while let Some(chunk) = output.next().await {
             chunk.unwrap();
         }
-        let snapshot = provider.management(Some(id.into()), &cancel).await.unwrap();
+        let snapshot = provider.management(id.into(), None, &cancel).await.unwrap();
         assert_eq!(
             snapshot.providers[0]
                 .models
@@ -6245,12 +6276,12 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
         .await
         .unwrap();
     let builtin_models = provider
-        .catalog_for(builtin.provider_id.clone(), &cancel)
+        .catalog_for(builtin.info.provider_id.clone(), &cancel)
         .await
         .unwrap()
         .unwrap();
     let builtin_target = ModelId {
-        provider_id: builtin.provider_id.clone(),
+        provider_id: builtin.info.provider_id.clone(),
         model_id: builtin_models
             .models
             .iter()
@@ -6265,8 +6296,8 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
         .unwrap();
     provider
         .delete_static(
-            builtin.provider_id.clone(),
-            builtin.version.unwrap(),
+            builtin.info.provider_id.clone(),
+            builtin.info.version.unwrap(),
             &cancel,
         )
         .await
@@ -6351,7 +6382,7 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
     assert_eq!(
         serde_json::to_value(
             reloaded
-                .management(Some(managed_id.into()), &cancel)
+                .management(managed_id.into(), None, &cancel)
                 .await
                 .unwrap()
         )
@@ -6549,13 +6580,13 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
             .is_err()
     );
     let view = usable
-        .management(Some("deepseek".into()), &cancel)
+        .management("deepseek".into(), None, &cancel)
         .await
         .unwrap();
     assert_eq!(view.errors.len(), 1);
     assert!(view.errors[0].message.contains(&collision.0));
     assert_eq!(
-        view.providers[0].version,
+        view.providers[0].info.version,
         collision.1["version"]
             .as_u64()
             .map(|version| version as u32)
@@ -6578,7 +6609,7 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
     let deleted = usable
         .delete_model(
             "deepseek".into(),
-            view.providers[0].version.unwrap(),
+            view.providers[0].info.version.unwrap(),
             collision.0.clone(),
             &cancel,
         )
@@ -6586,7 +6617,7 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
         .unwrap();
     assert!(!deleted.disabled_model_ids.contains(&collision.0));
     let waiting = usable
-        .management(Some("deepseek".into()), &cancel)
+        .management("deepseek".into(), None, &cancel)
         .await
         .unwrap();
     assert_eq!(waiting.errors.len(), 1);
@@ -6597,7 +6628,7 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
     let replaced = isolated
         .get::<ProviderService>()
         .unwrap()
-        .management(Some("deepseek".into()), &cancel)
+        .management("deepseek".into(), None, &cancel)
         .await
         .unwrap();
     assert!(replaced.errors.is_empty());
@@ -6770,7 +6801,7 @@ async fn legacy_import_preserves_sources_model_origins_and_scoped_choices() {
     assert!(!result.to_string().contains("must-not-be-echoed"));
     assert_eq!(std::fs::read(&source).unwrap(), original);
     let defaults = provider
-        .management(Some("legacy-defaults".into()), &cancel)
+        .management("legacy-defaults".into(), None, &cancel)
         .await
         .unwrap();
     let entry = &defaults.providers[0];
@@ -6783,7 +6814,7 @@ async fn legacy_import_preserves_sources_model_origins_and_scoped_choices() {
         Some("high")
     );
     let users = provider
-        .management(Some("legacy-users".into()), &cancel)
+        .management("legacy-users".into(), None, &cancel)
         .await
         .unwrap();
     let models = users.providers[0].models.as_ref().unwrap();
@@ -6819,14 +6850,21 @@ async fn legacy_import_preserves_sources_model_origins_and_scoped_choices() {
     let edited = provider
         .update(
             "legacy-defaults".into(),
-            entry.version.unwrap(),
+            entry.info.version.unwrap(),
             serde_json::from_value(json!({"displayName":"Edited legacy Provider"})).unwrap(),
             &cancel,
         )
         .await
         .unwrap();
-    assert_eq!(edited.display_name, "Edited legacy Provider");
-    assert!(edited.connection.as_ref().unwrap().credential_configured);
+    assert_eq!(edited.info.display_name, "Edited legacy Provider");
+    assert!(
+        edited
+            .info
+            .connection
+            .as_ref()
+            .unwrap()
+            .credential_configured
+    );
     assert_eq!(
         edited.models.as_ref().unwrap()[0]
             .model
@@ -6838,7 +6876,7 @@ async fn legacy_import_preserves_sources_model_origins_and_scoped_choices() {
         provider
             .update(
                 "legacy-defaults".into(),
-                entry.version.unwrap(),
+                entry.info.version.unwrap(),
                 serde_json::from_value(json!({"enabled":false})).unwrap(),
                 &cancel
             )
@@ -6846,7 +6884,11 @@ async fn legacy_import_preserves_sources_model_origins_and_scoped_choices() {
         Err(ProviderError::Conflict(_))
     ));
     provider
-        .delete_static("legacy-defaults".into(), edited.version.unwrap(), &cancel)
+        .delete_static(
+            "legacy-defaults".into(),
+            edited.info.version.unwrap(),
+            &cancel,
+        )
         .await
         .unwrap();
     provider
@@ -6855,7 +6897,7 @@ async fn legacy_import_preserves_sources_model_origins_and_scoped_choices() {
         .unwrap();
     assert!(matches!(
         provider
-            .management(Some("legacy-defaults".into()), &cancel)
+            .management("legacy-defaults".into(), None, &cancel)
             .await,
         Err(ProviderError::NotFound)
     ));
@@ -7004,7 +7046,7 @@ async fn legacy_import_declares_only_the_limits_the_source_does() {
         json!(["contextWindow", "maxOutputTokens"])
     );
     let imported = provider
-        .management(Some("legacy-limits".into()), &cancel)
+        .management("legacy-limits".into(), None, &cancel)
         .await
         .unwrap();
     let models = imported.providers[0].models.as_ref().unwrap();
@@ -7035,7 +7077,7 @@ async fn legacy_import_declares_only_the_limits_the_source_does() {
     assert_eq!(declared.model.capabilities.max_output_tokens, Some(8_000));
     assert_eq!(marks("declared"), ["contextWindow", "maxOutputTokens"]);
     for id in ["legacy-remote", "legacy-bundled"] {
-        let imported = provider.management(Some(id.into()), &cancel).await.unwrap();
+        let imported = provider.management(id.into(), None, &cancel).await.unwrap();
         let models = imported.providers[0].models.as_ref().unwrap();
         let entry = |model_id: &str| {
             models
@@ -7833,7 +7875,7 @@ async fn auxiliary_model_calls_the_given_model_once_without_tools_or_fallback() 
     );
 
     let disabled = provider
-        .set_enabled_models(AUX.into(), saved.version.unwrap(), vec![], &cancel)
+        .set_enabled_models(AUX.into(), saved.info.version.unwrap(), vec![], &cancel)
         .await
         .unwrap();
     let error = auxiliary
@@ -8213,13 +8255,13 @@ async fn a_bundled_entry_without_limits_takes_the_identified_numbers_or_reports_
     let provider = root.get::<ProviderService>().unwrap();
     let cancel = CancellationToken::new();
     let view = provider
-        .management(Some("siliconflow".into()), &cancel)
+        .management("siliconflow".into(), None, &cancel)
         .await
         .unwrap();
     provider
         .update(
             "siliconflow".into(),
-            view.providers[0].version.unwrap(),
+            view.providers[0].info.version.unwrap(),
             serde_json::from_value(json!({
                 "credential":{"action":"set","value":"fixture-key"},"enabled":true
             }))
@@ -8533,6 +8575,7 @@ async fn a_provider_states_the_prefix_its_ids_carry_and_that_statement_resolves_
         .unwrap();
     assert_eq!(
         stated
+            .info
             .connection
             .as_ref()
             .expect("the record is static")
@@ -8585,6 +8628,7 @@ async fn a_provider_states_the_prefix_its_ids_carry_and_that_statement_resolves_
         .unwrap();
     assert_eq!(
         cleared
+            .info
             .connection
             .as_ref()
             .expect("the record is static")
@@ -8647,6 +8691,7 @@ async fn a_created_provider_states_the_prefix_its_ids_carry() {
     let created = provider.create(relay, &cancel).await.unwrap();
     assert_eq!(
         created
+            .info
             .connection
             .as_ref()
             .expect("the record is static")
@@ -8666,13 +8711,14 @@ async fn a_created_provider_states_the_prefix_its_ids_carry() {
         .expect("the created provider is in the list");
     assert_eq!(listed.glued_prefix.as_deref(), Some("auto"));
     let managed = provider
-        .management(Some(CREATED.into()), &cancel)
+        .management(CREATED.into(), None, &cancel)
         .await
         .unwrap()
         .providers
         .remove(0);
     assert_eq!(
         managed
+            .info
             .connection
             .as_ref()
             .expect("the record is static")
@@ -8710,6 +8756,7 @@ async fn a_created_provider_states_the_prefix_its_ids_carry() {
     let blank = provider.create(blank, &cancel).await.unwrap();
     assert_eq!(
         blank
+            .info
             .connection
             .as_ref()
             .expect("the record is static")
@@ -8731,6 +8778,7 @@ async fn a_created_provider_states_the_prefix_its_ids_carry() {
     let padded = provider.create(padded, &cancel).await.unwrap();
     assert_eq!(
         padded
+            .info
             .connection
             .as_ref()
             .expect("the record is static")
@@ -8826,7 +8874,7 @@ async fn a_model_edit_sets_an_alias_on_the_record_and_creates_no_override() {
         "the statement is on the record"
     );
     let managed = provider
-        .management(Some(ALIASED.into()), &cancel)
+        .management(ALIASED.into(), None, &cancel)
         .await
         .unwrap()
         .providers
@@ -9346,13 +9394,13 @@ async fn listed_provider(
     cancel: &CancellationToken,
 ) {
     let view = provider
-        .management(Some(LISTED_PROVIDER.into()), cancel)
+        .management(LISTED_PROVIDER.into(), None, cancel)
         .await
         .unwrap();
     let updated = provider
         .update(
             LISTED_PROVIDER.into(),
-            view.providers[0].version.expect("the seeded record"),
+            view.providers[0].info.version.expect("the seeded record"),
             serde_json::from_value(json!({
                 "baseUrl":endpoint,
                 "enabled":true,
@@ -9578,7 +9626,7 @@ async fn a_listed_id_is_identified_against_the_catalog_on_a_refresh_and_a_read()
 
     // The picker reads provider.management, which answers the same.
     let managed = provider
-        .management(Some(LISTED_PROVIDER.into()), &cancel)
+        .management(LISTED_PROVIDER.into(), None, &cancel)
         .await
         .unwrap()
         .providers
@@ -9613,13 +9661,13 @@ async fn a_builtin_bundle_and_a_user_model_still_answer_for_themselves() {
     let (root, provider) = provider_root(&home).await;
     let cancel = CancellationToken::new();
     let view = provider
-        .management(Some("openai".into()), &cancel)
+        .management("openai".into(), None, &cancel)
         .await
         .unwrap();
     provider
         .create_model(
             "openai".into(),
-            view.providers[0].version.expect("the seeded record"),
+            view.providers[0].info.version.expect("the seeded record"),
             model(ADDED, 4_096),
             &cancel,
         )
@@ -9696,7 +9744,7 @@ async fn a_custom_providers_ids_are_identified_through_the_later_steps() {
     let catalog = provider
         .create_model(
             CUSTOM.into(),
-            created.version.expect("the created record"),
+            created.info.version.expect("the created record"),
             model(ADDED, 4_096),
             &cancel,
         )
@@ -9945,7 +9993,7 @@ async fn a_management_row_carries_the_name_the_catalog_publishes() {
     let catalog = gateway.refreshed().await;
     let view = gateway
         .provider
-        .management(Some(GATEWAY.into()), &gateway.cancel)
+        .management(GATEWAY.into(), None, &gateway.cancel)
         .await
         .unwrap();
     let view = serde_json::to_value(&view).unwrap();
@@ -9988,7 +10036,7 @@ async fn a_management_row_without_a_duplicate_carries_no_catalog_name() {
     gateway.refreshed().await;
     let view = gateway
         .provider
-        .management(Some(GATEWAY.into()), &gateway.cancel)
+        .management(GATEWAY.into(), None, &gateway.cancel)
         .await
         .unwrap();
     let view = serde_json::to_value(&view).unwrap();
@@ -10059,4 +10107,195 @@ async fn a_rename_through_management_stores_no_suffix() {
         "a rename does not reach the other rows"
     );
     gateway.close().await;
+}
+
+#[tokio::test]
+async fn management_pages_read_overviews_and_reread_a_changed_provider() {
+    use dim_app_server::provider::ManagementPageRequest;
+    let home = temp_home("provider-management-pages");
+    let (root, provider) = provider_root(&home).await;
+    let cancel = CancellationToken::new();
+    let target = "00000000-0000-4000-8000-000000001351";
+    provider
+        .create(
+            input(
+                target,
+                "http://127.0.0.1:1/v1",
+                StaticAuth::Bearer,
+                Some("fixture-key"),
+                "page-flow",
+                43,
+            ),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let mut after = None;
+    let mut ids = Vec::new();
+    loop {
+        let page = provider
+            .management_page(
+                ManagementPageRequest {
+                    after: after.clone(),
+                    limit: Some(7),
+                    ..Default::default()
+                },
+                &cancel,
+            )
+            .await
+            .unwrap();
+        assert!(page.providers.len() + page.errors.len() <= 7);
+        assert!(page.errors.is_empty(), "fresh bundled records are readable");
+        for item in page.providers {
+            assert!(after.as_ref().is_none_or(|after| after < &item.provider_id));
+            ids.push(item.provider_id.clone());
+            let value = serde_json::to_value(item).unwrap();
+            assert!(
+                value.get("models").is_none(),
+                "an overview does not transfer model descriptors"
+            );
+            assert!(
+                value.get("preferences").is_none(),
+                "preferences belong to the edit snapshot"
+            );
+        }
+        after = page.next;
+        if after.is_none() {
+            break;
+        }
+    }
+    assert!(ids.len() > 100);
+    let mut ordered = ids.clone();
+    ordered.sort();
+    ordered.dedup();
+    assert_eq!(ids, ordered, "pages cover each provider once");
+    let detail = provider
+        .management(target.into(), None, &cancel)
+        .await
+        .unwrap();
+    provider
+        .update(
+            target.into(),
+            detail.providers[0].info.version.unwrap(),
+            serde_json::from_value(json!({"displayName":"Changed without a cache"})).unwrap(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let page = provider
+        .management_page(
+            ManagementPageRequest {
+                provider_id: Some(target.into()),
+                ..Default::default()
+            },
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert_eq!(page.providers[0].display_name, "Changed without a cache");
+    assert!(page.next.is_none());
+    let found = provider
+        .management_page(
+            ManagementPageRequest {
+                query: Some("without a cache".into()),
+                ..Default::default()
+            },
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert_eq!(found.providers.len(), 1);
+    let accounts = provider
+        .management_page(
+            ManagementPageRequest {
+                accounts_only: true,
+                ..Default::default()
+            },
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert!(
+        accounts
+            .providers
+            .iter()
+            .all(|entry| entry.account.is_some())
+    );
+    assert!(!accounts.providers.is_empty());
+    assert!(
+        provider
+            .management_page(
+                ManagementPageRequest {
+                    limit: Some(0),
+                    ..Default::default()
+                },
+                &cancel
+            )
+            .await
+            .is_err()
+    );
+    root.shutdown().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test]
+#[ignore = "records warm provider-read measurements against a disposable store"]
+async fn measure_on_demand_provider_reads() {
+    use dim_app_server::provider::ManagementPageRequest;
+    let home = temp_home("provider-read-measurement");
+    let (root, provider) = provider_root(&home).await;
+    let cancel = CancellationToken::new();
+    let mut db = rusqlite::Connection::open(home.join("native.sqlite")).unwrap();
+    let records: Vec<(String, u32, String)> = db.prepare("SELECT provider_id,version,record FROM providers ORDER BY provider_id='deepseek' DESC,provider_id").unwrap().query_map([], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap().collect::<Result<_,_>>().unwrap();
+    for count in [1, 32, 128] {
+        let tx = db.transaction().unwrap();
+        tx.execute("DELETE FROM providers", []).unwrap();
+        for index in 0..count {
+            let (id, version, body) = &records[index % records.len()];
+            let id = if index >= records.len() {
+                format!("measurement-{index}")
+            } else {
+                id.clone()
+            };
+            tx.execute(
+                "INSERT INTO providers(provider_id,version,record) VALUES (?1,?2,?3)",
+                rusqlite::params![id, version, body],
+            )
+            .unwrap();
+        }
+        tx.commit().unwrap();
+        for mode in ["detail", "page"] {
+            let mut samples = Vec::new();
+            for _ in 0..6 {
+                let started = std::time::Instant::now();
+                let bytes = if mode == "detail" {
+                    serde_json::to_vec(
+                        &provider
+                            .management("deepseek".into(), None, &cancel)
+                            .await
+                            .unwrap(),
+                    )
+                    .unwrap()
+                } else {
+                    serde_json::to_vec(
+                        &provider
+                            .management_page(ManagementPageRequest::default(), &cancel)
+                            .await
+                            .unwrap(),
+                    )
+                    .unwrap()
+                };
+                assert!(!bytes.is_empty());
+                samples.push(started.elapsed().as_secs_f64() * 1000.0);
+            }
+            println!(
+                "providers={count} read={mode} coldMs={:.2} warmMs={:?}",
+                samples[0],
+                &samples[1..]
+            );
+        }
+    }
+    drop(db);
+    root.shutdown().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
 }

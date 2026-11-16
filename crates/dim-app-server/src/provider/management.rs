@@ -20,8 +20,9 @@ pub struct ImportLegacyProviders {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ManagementScope {
+    pub provider_id: String,
     #[serde(default, deserialize_with = "optional_non_null")]
-    pub provider_id: Option<String>,
+    pub model_id: Option<String>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -107,6 +108,7 @@ pub(super) fn provide(
         "provider",
         [
             "provider.management",
+            "provider.management.list",
             "provider.create",
             "provider.update",
             "provider.probe",
@@ -134,6 +136,7 @@ pub(super) fn provide(
                         | "provider.selection"
                         | "provider.list"
                         | "provider.management"
+                        | "provider.management.list"
                         | "provider.probe"
                 ),
                 Interruption::Drain,
@@ -150,11 +153,15 @@ pub(super) fn provide(
             Box::pin(async move {
                 let cancel = &stopping;
                 match method.as_str() {
+                    "provider.management.list" => {
+                        let p: super::ManagementPageRequest = params(value)?;
+                        reply(provider.management_page(p, cancel).await.map_err(error)?)
+                    }
                     "provider.management" => {
                         let p: ManagementScope = params(value)?;
                         reply(
                             provider
-                                .management(p.provider_id, cancel)
+                                .management(p.provider_id, p.model_id, cancel)
                                 .await
                                 .map_err(error)?,
                         )

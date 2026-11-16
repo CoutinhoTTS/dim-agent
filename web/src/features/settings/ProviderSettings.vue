@@ -4,7 +4,7 @@ import { useRoute, useRouter } from "vue-router"
 import { useI18n } from "vue-i18n"
 import ConfirmDialog from "../../components/ConfirmDialog.vue"
 import { settingsMessages } from "../../i18n/settings"
-import { readManagement, type ManagementProvider, type ManagementView } from "../../rpc/management"
+import { readManagement, readManagementPage, type ManagementProvider, type ManagementInfo, type ManagementPage } from "../../rpc/management"
 import { readAck } from "../../rpc/read"
 import { useConnectionStore } from "../../stores/connection"
 import { useModelsStore } from "../../stores/models"
@@ -18,7 +18,7 @@ const route = useRoute()
 const router = useRouter()
 const connection = useConnectionStore()
 const models = useModelsStore()
-const view = ref<ManagementView>()
+const view = ref<ManagementPage>()
 const detail = ref<ManagementProvider>()
 const loading = ref(true)
 const busy = ref(false)
@@ -43,25 +43,29 @@ const tabItems = computed(() => [
   { label: t("connection"), value: "connection" },
   { label: `${t("models")} (${detail.value?.models?.length ?? 0})`, value: "models" },
 ])
-function configured(provider: ManagementProvider): boolean {
+function configured(provider: ManagementInfo): boolean {
   return provider.source === "custom" || provider.account?.state.authenticated === true
     || provider.connection?.credentialConfigured === true || (!provider.account && provider.enabled === true)
 }
 const configuredProviders = computed(() => (view.value?.providers ?? []).filter(configured).filter((p) => `${p.displayName} ${p.providerId}`.toLowerCase().includes(search.value.toLowerCase())))
 const availableProviders = computed(() => (view.value?.providers ?? []).filter((p) => !configured(p)).filter((p) => `${p.displayName} ${p.providerId}`.toLowerCase().includes(pickerSearch.value.toLowerCase())))
-async function load(): Promise<void> {
+async function load(more = false): Promise<void> {
   loading.value = true
   error.value = ""
   try {
-    view.value = await connection.client.call("provider.management", {}, readManagement)
-    if (!dirty.value && providerId.value) await loadDetail()
+    const query = isNew.value ? pickerSearch.value : search.value
+    const page = await connection.client.call("provider.management.list", { ...(more && view.value?.next ? { after: view.value.next } : {}), query }, readManagementPage)
+    if (query !== (isNew.value ? pickerSearch.value : search.value)) return
+    if (more && view.value) view.value = { ...page, providers: [...view.value.providers, ...page.providers], errors: [...view.value.errors, ...page.errors] }
+    else view.value = page
+    if (!more && !dirty.value && providerId.value) await loadDetail()
   } catch (cause) { error.value = messageFrom(cause) }
   finally { loading.value = false }
 }
 async function loadDetail(): Promise<void> {
   const id = providerId.value
   detailError.value = ""
-  detail.value = view.value?.providers.find((p) => p.providerId === id)
+  detail.value = undefined
   if (!id) return
   try {
     const result = await connection.client.call("provider.management", { providerId: id }, readManagement)
@@ -154,6 +158,7 @@ watch([providerId, isNew], async () => {
   ++formKey.value
   await loadDetail()
 })
+watch([search, pickerSearch, isNew], () => { void load() })
 watch(() => connection.phase, (phase, before) => { if (phase === "connected" && before !== "connected" && !dirty.value) void load() })
 void load()
 </script>
@@ -165,7 +170,7 @@ void load()
     <UAlert v-if="savedProvider" color="success" variant="subtle" icon="i-lucide-check-circle" :description="t('providerSaved', { name: savedProvider })" role="status" class="settings-banner" />
     <UAlert v-if="error" color="error" variant="subtle" icon="i-lucide-alert-circle" :description="error" role="alert" class="settings-banner">
       <template #actions>
-        <UButton size="xs" color="neutral" variant="ghost" :disabled="loading || connection.phase !== 'connected'" @click="load">{{ t("retry") }}</UButton>
+        <UButton size="xs" color="neutral" variant="ghost" :disabled="loading || connection.phase !== 'connected'" @click="load()">{{ t("retry") }}</UButton>
       </template>
     </UAlert>
     <UAlert v-for="failure in view?.errors" :key="failure.providerId" color="warning" variant="subtle" icon="i-lucide-alert-triangle" :description="`${failure.providerId}: ${failure.message}`" class="settings-banner" />
@@ -181,11 +186,12 @@ void load()
           <strong>{{ provider.displayName }} <UBadge v-if="provider.account" color="neutral" variant="subtle" size="sm" label="OAuth" /></strong>
           <small v-if="provider.connection?.baseUrl">{{ provider.connection.baseUrl }}</small>
         </span>
-        <span class="settings-meta">{{ t(provider.enabled === false ? "disabled" : provider.account ? "signedIn" : "enabled") }} · {{ t("providerModelCount", { count: provider.models?.length ?? 0 }) }}</span>
+        <span class="settings-meta">{{ t(provider.enabled === false ? "disabled" : provider.account ? "signedIn" : "enabled") }}</span>
         <UIcon name="i-lucide-chevron-right" class="size-4 shrink-0 text-muted" aria-hidden="true" />
       </UButton>
       <p v-if="view && !configuredProviders.length" class="settings-empty">{{ t(search ? 'noResults' : 'noProviders') }}</p>
     </div>
+    <UButton v-if="view?.next" :loading="loading" @click="load(true)">{{ t("loadMore") }}</UButton>
     <UModal
       :open="opened"
       :title="isNew ? t(custom ? 'custom' : 'add') : detail?.displayName ?? providerId"
@@ -198,7 +204,7 @@ void load()
         <UAlert v-if="loading || busy" color="neutral" variant="subtle" :description="t(busy ? 'working' : 'loading')" role="status" class="settings-banner" />
         <UAlert v-if="error" color="error" variant="subtle" icon="i-lucide-alert-circle" :description="error" role="alert" class="settings-banner">
           <template #actions>
-            <UButton size="xs" color="neutral" variant="ghost" :disabled="loading || connection.phase !== 'connected'" @click="load">{{ t("retry") }}</UButton>
+            <UButton size="xs" color="neutral" variant="ghost" :disabled="loading || connection.phase !== 'connected'" @click="load()">{{ t("retry") }}</UButton>
           </template>
         </UAlert>
         <UAlert v-if="detailError" color="error" variant="subtle" icon="i-lucide-alert-circle" :description="detailError" role="alert" class="settings-banner">
@@ -228,6 +234,7 @@ void load()
                 <span class="settings-row-main"><strong>{{ provider.displayName }} <UBadge v-if="provider.account" color="neutral" variant="subtle" size="sm" label="OAuth" /></strong></span>
                 <UIcon name="i-lucide-chevron-right" class="size-4 shrink-0 text-muted" aria-hidden="true" />
               </UButton>
+              <UButton v-if="view.next" :loading="loading" @click="load(true)">{{ t("loadMore") }}</UButton>
               <p v-if="!availableProviders.length" class="settings-empty">{{ t("noResults") }}</p>
             </div>
           </template>

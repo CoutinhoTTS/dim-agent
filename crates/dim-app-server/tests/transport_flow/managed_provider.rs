@@ -156,7 +156,7 @@ impl ManagedProvider for Provider {
     ) -> ManagedFuture<WebSearchResponse> {
         ready(Err(ManagedError::TokenMissing))
     }
-    fn catalog(&self, _: &str) -> ManagedFuture<ManagedCatalog> {
+    fn catalog(&self, _: &str, _: CancellationToken) -> ManagedFuture<ManagedCatalog> {
         let entry: ModelEntry = serde_json::from_value(json!({"modelId":"fixture-model",
             "displayName":"Fixture model","status":"active",
             "metadata":{"reasoning":{"supported":true,"effortOptions":["low","high"]}},
