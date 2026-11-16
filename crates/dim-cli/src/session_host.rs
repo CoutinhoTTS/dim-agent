@@ -92,8 +92,12 @@ struct ManagementEntry {
     #[serde(flatten)]
     info: ManagementInfo,
     preferences: std::collections::BTreeMap<String, serde_json::Value>,
-    /// What the update did with the record's models; absent from the reads.
-    #[serde(default)]
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ManagementUpdateSummary {
+    #[serde(flatten)]
+    info: ManagementInfo,
     models_listed: Option<ModelsListed>,
 }
 /// `provider.management`'s safe account descriptor.
@@ -3504,7 +3508,7 @@ impl Worker {
                 }
                 listing_unsupported = true;
             }
-            let updated: ManagementEntry = self.client.typed("provider.update", json!({"providerId":provider_id,"expectedVersion":expected_version,"patch":patch})).await?;
+            let updated: ManagementUpdateSummary = self.client.typed("provider.update", json!({"providerId":provider_id,"expectedVersion":expected_version,"patch":patch,"reply":"summary"})).await?;
             let mut message = format!("{notice} {}", updated.info.display_name);
             match updated.models_listed {
                 Some(ModelsListed::Listed) => message.push_str("; listed its models"),

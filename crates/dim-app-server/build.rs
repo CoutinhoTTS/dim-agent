@@ -21,6 +21,8 @@ const STORED: &[&str] = &[
 mod catalog;
 #[path = "src/model_catalog/tokens.rs"]
 mod catalog_tokens;
+#[path = "src/model_catalog/name_inputs.rs"]
+mod name_inputs;
 
 fn main() {
     let out = PathBuf::from(std::env::var_os("OUT_DIR").unwrap());

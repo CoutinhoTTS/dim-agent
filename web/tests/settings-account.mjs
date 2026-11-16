@@ -200,7 +200,7 @@ test("Dim device sign-in fetches models and the signed-in account can retry a fa
   } finally { app.unmount(); delete globalThis.settingsConnection }
 })
 
-test("disabled third-party Provider refresh retries the remote listing and updates the model count", async () => {
+test("disabled third-party Provider refresh retries and loads model detail only on its tab", async () => {
   const providerId = "relay"
   let refreshes = 0
   const provider = { providerId, displayName: "Relay", source: "custom", credentialAuthority: "static", version: 1, enabled: false, actions: ["refresh"], preferences: {},
@@ -236,6 +236,9 @@ test("disabled third-party Provider refresh retries the remote listing and updat
     await flush()
     assert.equal(refreshes, 2)
     assert.doesNotMatch(text(root), /Relay timeout/)
+    assert.doesNotMatch(text(root), /models \(1\)/)
+    const modelsTab = all(root).find((element) => element.props.role === "tab" && text(element) === "models")
+    await modelsTab.props.onClick(); await flush()
     assert.match(text(root), /models \(1\)/)
   } finally { app.unmount(); delete globalThis.settingsConnection; delete globalThis.settingsRoute }
 })
@@ -346,7 +349,7 @@ test("provider overview follows pages on demand and opens only the selected deta
   globalThis.settingsRouter = { push: async (route) => { Object.assign(globalThis.settingsRoute, { ...route, params: route.params ?? {} }) } }
   globalThis.settingsConnection = { phase: "connected", client: { call: async (method, params, read) => {
     requests.push({ method, params })
-    if (method === "provider.management.list") return read({ drivers: [], errors: [], providers: [info(params.after ? "second" : "first")], next: params.after ? null : "first" })
+    if (method === "provider.management.list") return read({ drivers: [], errors: [], providers: [info(params.providerId ?? (params.after ? "second" : "first"))], next: params.providerId || params.after ? null : "first" })
     assert.equal(method, "provider.management")
     assert.deepEqual(params, { providerId: "second" })
     return read({ drivers: [], errors: [], providers: [{ ...info("second"), models: [], preferences: {} }] })
@@ -363,6 +366,10 @@ test("provider overview follows pages on demand and opens only the selected deta
     assert.equal(requests[1].params.after, "first")
     const second = all(root).find((element) => element.type === "button" && text(element).includes("second"))
     await second.props.onClick(); await flush()
+    assert.equal(requests.filter(({ method }) => method === "provider.management").length, 0)
+    assert.deepEqual(requests.at(-1), { method: "provider.management.list", params: { providerId: "second" } })
+    const modelsTab = all(root).find((element) => element.props.role === "tab" && text(element) === "models")
+    await modelsTab.props.onClick(); await flush()
     assert.equal(requests.filter(({ method }) => method === "provider.management").length, 1)
   } finally {
     app.unmount()
@@ -370,4 +377,35 @@ test("provider overview follows pages on demand and opens only the selected deta
     delete globalThis.settingsRouter
     delete globalThis.settingsConnection
   }
+})
+
+test("connection configuration reads and writes summaries without requesting model payloads", async () => {
+  const requests = []
+  const route = reactive({ name: "settings-provider-detail", params: { providerId: "fixture" } })
+  const provider = { providerId: "fixture", displayName: "Fixture", source: "builtin", credentialAuthority: "static", enabled: false, version: 2, actions: ["update"],
+    connection: { driverKind: "openai-compatible", auth: { type: "bearer" }, baseUrl: "https://example.test/v1", credentialConfigured: true, headerNames: [], proxyUrl: null, proxyAuthConfigured: false, timeoutMs: null } }
+  globalThis.settingsRoute = route
+  globalThis.settingsRouter = { replace: async ({ name }) => { route.name = name; route.params = {} } }
+  globalThis.settingsConnection = { phase: "connected", client: { call: async (method, params, read) => {
+    requests.push({ method, params })
+    if (method === "provider.management.list") return read({ drivers: [], providers: [provider], errors: [], next: null })
+    assert.equal(method, "provider.update")
+    assert.equal(params.reply, "summary")
+    assert.equal(params.expectedVersion, 2)
+    assert.deepEqual(params.patch, { enabled: true })
+    return read({ ...provider, version: 3, enabled: true })
+  } } }
+  const root = node("root")
+  const app = renderer.createApp(ProviderSettings).use(createPinia()).use(nuxtUiTestPlugin).provide(settingsDirtyKey, ref(false))
+  app.mount(root)
+  try {
+    await flush()
+    const label = all(root).find((element) => element.type === "label" && text(element) === "enableProvider")
+    label.children.find((element) => element.type === "input").props["onUpdate:modelValue"](true)
+    await flush()
+    await all(root).find((element) => element.type === "form").props.onSubmit({ preventDefault() {} })
+    await flush()
+    assert.equal(requests.filter(({ method }) => method === "provider.update").length, 1)
+    assert.equal(route.name, "settings-providers")
+  } finally { app.unmount(); delete globalThis.settingsRoute; delete globalThis.settingsRouter; delete globalThis.settingsConnection }
 })

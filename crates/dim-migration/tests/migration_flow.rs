@@ -968,6 +968,14 @@ async fn offline_import_reopens_with_unchanged_native_consumers_and_preserves_co
         .unwrap()
         .execute_batch(
             "PRAGMA foreign_keys=OFF;
+             DROP TABLE provider_name_keys;
+             DROP TABLE provider_names;
+             DROP TABLE provider_model_state;
+             DROP TABLE provider_bases;
+             DROP TABLE provider_sources;
+             DROP TABLE provider_models;
+             DROP TABLE provider_catalog_revision;
+             DROP TABLE provider_bundle;
              CREATE TEMP TABLE agents_rows AS SELECT * FROM agents;
              DROP TABLE agents;
              CREATE TABLE agents(agent_id TEXT PRIMARY KEY, profile TEXT NOT NULL, is_default INTEGER NOT NULL CHECK(is_default IN (0, 1)));
@@ -1007,12 +1015,6 @@ async fn offline_import_reopens_with_unchanged_native_consumers_and_preserves_co
              DROP TABLE timeline_member_origins;
              DROP TABLE timeline_member_terminals;
              DROP TABLE timeline_member_nodes;
-             DROP TRIGGER provider_models_insert;
-                DROP TRIGGER provider_models_update;
-                DROP TABLE provider_models;
-                DROP TABLE provider_query_records;
-                DROP TABLE provider_bundle;
-                DROP TABLE provider_catalog_revision;
              DROP TABLE agent_store_format;
              CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 23));
              INSERT INTO agent_store_format VALUES (23);",
@@ -1951,16 +1953,7 @@ async fn migration_declares_only_the_limits_the_source_does() {
     plugin.dispose().await.unwrap();
     root.shutdown().await.unwrap();
     let native = Connection::open(target.join("rust/dimcode.sqlite")).unwrap();
-    let record: Value = serde_json::from_str(
-        &native
-            .query_row(
-                "SELECT record FROM providers WHERE provider_id='legacy-limits'",
-                [],
-                |row| row.get::<_, String>(0),
-            )
-            .unwrap(),
-    )
-    .unwrap();
+    let record: Value = serde_json::from_str(&provider_record(&native, "legacy-limits")).unwrap();
     let models = record["userModels"].as_array().unwrap();
     let entry = |id: &str| models.iter().find(|model| model["modelId"] == id).unwrap();
     let assumed = entry("assumed");
@@ -1981,16 +1974,7 @@ async fn migration_declares_only_the_limits_the_source_does() {
         json!(["contextWindow", "maxOutputTokens"])
     );
     for id in ["legacy-remote", "legacy-bundled"] {
-        let record: Value = serde_json::from_str(
-            &native
-                .query_row(
-                    "SELECT record FROM providers WHERE provider_id=?1",
-                    [id],
-                    |row| row.get::<_, String>(0),
-                )
-                .unwrap(),
-        )
-        .unwrap();
+        let record: Value = serde_json::from_str(&provider_record(&native, id)).unwrap();
         let models = record["models"].as_array().unwrap();
         let entry = |model_id: &str| {
             models
@@ -2336,18 +2320,8 @@ async fn migration_converts_providers_and_selections_through_the_provider_mappin
         Some("Workspace directory is unavailable")
     );
     let native = Connection::open(&native_path).unwrap();
-    let record = |id: &str| -> Value {
-        serde_json::from_str(
-            &native
-                .query_row(
-                    "SELECT record FROM providers WHERE provider_id=?1",
-                    [id],
-                    |row| row.get::<_, String>(0),
-                )
-                .unwrap(),
-        )
-        .unwrap()
-    };
+    let record =
+        |id: &str| -> Value { serde_json::from_str(&provider_record(&native, id)).unwrap() };
     let clean = record("legacy-clean");
     assert_eq!(clean["kind"], "custom");
     assert_eq!(clean["version"], 1);
@@ -2426,18 +2400,8 @@ async fn migration_converts_providers_and_selections_through_the_provider_mappin
     server.shutdown();
     server.join().await.unwrap();
     let native = Connection::open(&native_path).unwrap();
-    let record = |id: &str| -> Value {
-        serde_json::from_str(
-            &native
-                .query_row(
-                    "SELECT record FROM providers WHERE provider_id=?1",
-                    [id],
-                    |row| row.get::<_, String>(0),
-                )
-                .unwrap(),
-        )
-        .unwrap()
-    };
+    let record =
+        |id: &str| -> Value { serde_json::from_str(&provider_record(&native, id)).unwrap() };
     assert_eq!(record("deepseek"), imported_builtin);
 }
 
@@ -3086,4 +3050,13 @@ async fn migration_configuration_is_consumed_by_unchanged_web_and_the_native_sch
     drop(client);
     server.shutdown();
     server.join().await.unwrap();
+}
+
+fn provider_record(connection: &Connection, id: &str) -> String {
+    serde_json::to_string(
+        &dim_app_server::provider::read_stored_static(connection, id)
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap()
 }

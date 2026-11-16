@@ -30,6 +30,8 @@ pub struct UpdateProvider {
     pub provider_id: String,
     pub expected_version: u32,
     pub patch: super::ProviderPatch,
+    #[serde(default)]
+    pub reply: super::UpdateReplyKind,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -186,7 +188,13 @@ pub(super) fn provide(
                         let p: UpdateProvider = params(value)?;
                         reply(
                             provider
-                                .update(p.provider_id, p.expected_version, p.patch, cancel)
+                                .update_reply(
+                                    p.provider_id,
+                                    p.expected_version,
+                                    p.patch,
+                                    p.reply,
+                                    cancel,
+                                )
                                 .await
                                 .map_err(error)?,
                         )
@@ -228,19 +236,9 @@ pub(super) fn provide(
                         let p: ManagementScope = params(value)?;
                         let catalog = match p.model_id {
                             Some(model_id) => {
-                                let mut catalog = provider
-                                    .catalog_target(p.provider_id.clone(), model_id.clone(), cancel)
+                                provider
+                                    .catalog_target(p.provider_id, model_id, cancel)
                                     .await
-                                    .map_err(error)?;
-                                if let Some(model) = catalog.as_mut().and_then(|catalog| {
-                                    catalog.models.iter_mut().find(|model| model.id == model_id)
-                                }) {
-                                    model.name = provider
-                                        .model_name(p.provider_id, model_id, cancel)
-                                        .await
-                                        .map_err(error)?;
-                                }
-                                Ok(catalog)
                             }
                             None => provider.catalog_for(p.provider_id, cancel).await,
                         }

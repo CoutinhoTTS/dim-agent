@@ -588,12 +588,12 @@ async fn timeline_export_reads_a_live_product_home_and_its_copies() {
             } else { "" };
             changed(&database, &older, &format!("{catalog} {grants} {output} {dropped} {end_index} {worktrees} {worktree_time} {submission} {members} {text}
                 {identities}
-                DROP TRIGGER provider_models_insert;
-                DROP TRIGGER provider_models_update;
+                DROP TABLE provider_name_keys; DROP TABLE provider_names; DROP TABLE provider_model_state;
+                DROP TABLE provider_bases; DROP TABLE provider_sources;
                 DROP TABLE provider_models;
-                DROP TABLE provider_query_records;
-                DROP TABLE provider_bundle;
+
                 DROP TABLE provider_catalog_revision;
+                DROP TABLE provider_bundle;
                 DROP INDEX timeline_events_branch_interrupts;
                 DROP TABLE agent_store_format;
                 CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = {version}));

@@ -12071,6 +12071,8 @@ fn tui_provider_create_recovery_preserves_changed_draft_until_confirmation() {
         assert_eq!(update["params"]["providerId"], id);
         assert_eq!(update["params"]["expectedVersion"], 1);
         assert_eq!(update["params"]["patch"], probe["params"]["connection"]);
+        assert_eq!(update["params"]["reply"], "summary");
+        entry.as_object_mut().unwrap().remove("preferences");
         entry["version"] = json!(2);
         entry["connection"]["baseUrl"] = json!("https://second.example/v1");
         entry["modelsListed"] = json!("listed");

@@ -18,7 +18,7 @@ use std::{
 };
 
 /// The native store format this daemon creates and opens.
-pub const FORMAT: u32 = 51;
+pub const FORMAT: u32 = 52;
 /// The oldest schema the startup transaction upgrades: the first step of
 /// `UPGRADES`, which is ordered oldest first.
 const MIN_FORMAT: u32 = UPGRADES[0].0;
@@ -54,23 +54,7 @@ const LEGACY_INDEXES: &[(&str, &str, u32, u32)] = &[
         31,
     ),
 ];
-pub(super) const SCHEMA: &[(&str, &str)] = &[
-    (
-        "agent_store_format",
-        "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 51))",
-    ),
-    (
-        "settings_documents",
-        "CREATE TABLE settings_documents (source TEXT NOT NULL PRIMARY KEY, version INTEGER NOT NULL CHECK(version > 0), document TEXT NOT NULL, imported_revision TEXT NOT NULL)",
-    ),
-    (
-        "provider_imports",
-        "CREATE TABLE provider_imports (kind TEXT NOT NULL, id TEXT NOT NULL, source_schema TEXT NOT NULL, source_version INTEGER NOT NULL, source_digest TEXT NOT NULL, PRIMARY KEY (kind, id))",
-    ),
-    (
-        "providers",
-        "CREATE TABLE providers (provider_id TEXT NOT NULL PRIMARY KEY, version INTEGER NOT NULL CHECK(version > 0), record TEXT NOT NULL)",
-    ),
+const PROVIDER_V51: &[(&str, &str)] = &[
     (
         "provider_bundle",
         "CREATE TABLE provider_bundle (provider_id TEXT PRIMARY KEY, fingerprint TEXT, definition_fingerprint TEXT, pending INTEGER NOT NULL CHECK(pending IN (0,1)))",
@@ -106,6 +90,64 @@ pub(super) const SCHEMA: &[(&str, &str)] = &[
     (
         "provider_models_update",
         "CREATE TRIGGER provider_models_update AFTER UPDATE ON providers BEGIN DELETE FROM provider_query_records WHERE provider_id=NEW.provider_id; INSERT INTO provider_query_records SELECT NEW.provider_id,coalesce(json_extract(record,'$.enabled'),0),json_extract(record,'$.kind'),coalesce(json_extract(record,'$.credential') IS NOT NULL OR json_extract(record,'$.auth.type')='anonymous' OR coalesce(json_extract(record,'$.credentialAuthority'),'static')!='static',0),json_remove(record,'$.models','$.userModels','$.modelConfigOverrides') FROM (SELECT CASE WHEN json_valid(NEW.record) THEN NEW.record ELSE '{}' END AS record); DELETE FROM provider_models WHERE provider_id=NEW.provider_id; INSERT OR IGNORE INTO provider_models SELECT NEW.provider_id,coalesce(json_extract(CASE WHEN type='object' THEN value ELSE '{}' END,'$.modelId'),json_extract(CASE WHEN type='object' THEN value ELSE '{}' END,'$.entry.modelId')),'default',value FROM json_each(CASE WHEN json_valid(NEW.record) THEN NEW.record ELSE '{}' END,'$.models') WHERE coalesce(json_extract(CASE WHEN type='object' THEN value ELSE '{}' END,'$.modelId'),json_extract(CASE WHEN type='object' THEN value ELSE '{}' END,'$.entry.modelId')) IS NOT NULL; INSERT OR IGNORE INTO provider_models SELECT NEW.provider_id,json_extract(CASE WHEN type='object' THEN value ELSE '{}' END,'$.modelId'),'user',value FROM json_each(CASE WHEN json_valid(NEW.record) THEN NEW.record ELSE '{}' END,'$.userModels') WHERE json_extract(CASE WHEN type='object' THEN value ELSE '{}' END,'$.modelId') IS NOT NULL; INSERT OR IGNORE INTO provider_models SELECT NEW.provider_id,json_extract(CASE WHEN type='object' THEN value ELSE '{}' END,'$.modelId'),'override',value FROM json_each(CASE WHEN json_valid(NEW.record) THEN NEW.record ELSE '{}' END,'$.modelConfigOverrides') WHERE json_extract(CASE WHEN type='object' THEN value ELSE '{}' END,'$.modelId') IS NOT NULL; END",
+    ),
+];
+pub(super) const SCHEMA: &[(&str, &str)] = &[
+    (
+        "agent_store_format",
+        "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 52))",
+    ),
+    (
+        "settings_documents",
+        "CREATE TABLE settings_documents (source TEXT NOT NULL PRIMARY KEY, version INTEGER NOT NULL CHECK(version > 0), document TEXT NOT NULL, imported_revision TEXT NOT NULL)",
+    ),
+    (
+        "provider_imports",
+        "CREATE TABLE provider_imports (kind TEXT NOT NULL, id TEXT NOT NULL, source_schema TEXT NOT NULL, source_version INTEGER NOT NULL, source_digest TEXT NOT NULL, PRIMARY KEY (kind, id))",
+    ),
+    (
+        "providers",
+        "CREATE TABLE providers (provider_id TEXT NOT NULL PRIMARY KEY, version INTEGER NOT NULL CHECK(version > 0), record TEXT NOT NULL)",
+    ),
+    (
+        "provider_bundle",
+        "CREATE TABLE provider_bundle (provider_id TEXT PRIMARY KEY, fingerprint TEXT, definition_fingerprint TEXT, pending INTEGER NOT NULL CHECK(pending IN (0,1)), attempted INTEGER NOT NULL, naming_revision TEXT NOT NULL)",
+    ),
+    (
+        "provider_catalog_revision",
+        "CREATE TABLE provider_catalog_revision (id INTEGER PRIMARY KEY CHECK(id=1), revision TEXT NOT NULL, activation INTEGER NOT NULL)",
+    ),
+    (
+        "provider_sources",
+        "CREATE TABLE provider_sources (revision TEXT NOT NULL UNIQUE, image BLOB NOT NULL)",
+    ),
+    (
+        "provider_bases",
+        "CREATE TABLE provider_bases (provider_id TEXT PRIMARY KEY REFERENCES providers(provider_id) ON DELETE CASCADE, revision TEXT NOT NULL REFERENCES provider_sources(revision))",
+    ),
+    (
+        "provider_models",
+        "CREATE TABLE provider_models (provider_id TEXT NOT NULL REFERENCES providers(provider_id) ON DELETE CASCADE, model_id TEXT NOT NULL, source TEXT NOT NULL, position INTEGER NOT NULL, entry TEXT NOT NULL, PRIMARY KEY(provider_id,model_id,source))",
+    ),
+    (
+        "provider_models_by_model",
+        "CREATE INDEX provider_models_by_model ON provider_models(model_id,provider_id)",
+    ),
+    (
+        "provider_models_by_position",
+        "CREATE INDEX provider_models_by_position ON provider_models(provider_id,source,position)",
+    ),
+    (
+        "provider_names",
+        "CREATE TABLE provider_names (provider_id TEXT NOT NULL REFERENCES providers(provider_id) ON DELETE CASCADE, model_id TEXT NOT NULL, display_name TEXT NOT NULL, label TEXT, zdr INTEGER NOT NULL, PRIMARY KEY(provider_id,model_id))",
+    ),
+    (
+        "provider_model_state",
+        "CREATE TABLE provider_model_state (provider_id TEXT NOT NULL REFERENCES providers(provider_id) ON DELETE CASCADE, model_id TEXT NOT NULL, field TEXT NOT NULL, position INTEGER NOT NULL, value TEXT NOT NULL, PRIMARY KEY(provider_id,model_id,field))",
+    ),
+    (
+        "provider_name_keys",
+        "CREATE TABLE provider_name_keys (provider_id TEXT NOT NULL, key TEXT NOT NULL, model_id TEXT NOT NULL, PRIMARY KEY(provider_id,key,model_id), FOREIGN KEY(provider_id,model_id) REFERENCES provider_names(provider_id,model_id) ON DELETE CASCADE)",
     ),
     (
         "provider_selections",
@@ -312,7 +354,7 @@ const V45_COLUMNS: &str = "ALTER TABLE worktree_directories ADD COLUMN last_used
 /// The one-way upgrade steps, oldest first: the format a step starts from
 /// and the `SCHEMA` entries it adds, which are created in `SCHEMA` order,
 /// tables before their indexes. An upgrade also replaces the marker table.
-const UPGRADES: [(u32, &[&str]); 37] = [
+const UPGRADES: [(u32, &[&str]); 38] = [
     (
         13,
         &[
@@ -453,8 +495,17 @@ const UPGRADES: [(u32, &[&str]); 37] = [
             "provider_catalog_revision",
             "provider_models",
             "provider_models_by_model",
-            "provider_models_insert",
-            "provider_models_update",
+        ],
+    ),
+    (
+        51,
+        &[
+            "provider_model_state",
+            "provider_sources",
+            "provider_bases",
+            "provider_names",
+            "provider_name_keys",
+            "provider_models_by_position",
         ],
     ),
 ];
@@ -469,6 +520,9 @@ fn format_table(version: u32) -> String {
 fn schema_of(version: u32) -> Vec<(&'static str, String)> {
     SCHEMA
         .iter()
+        .chain(PROVIDER_V51.iter().filter(|(name, _)| {
+            version == 51 && !SCHEMA.iter().any(|(current, _)| current == name)
+        }))
         .chain(super::text::SCHEMA)
         .chain(super::members::SCHEMA)
         .chain(super::arrays::SCHEMA)
@@ -505,6 +559,11 @@ fn schema_of(version: u32) -> Vec<(&'static str, String)> {
                         .expect("index definition")
                         .to_owned()
                 }
+                _ if version == 51 && name.starts_with("provider_") => PROVIDER_V51
+                    .iter()
+                    .find(|(n, _)| *n == name)
+                    .map_or(sql, |(_, sql)| *sql)
+                    .to_owned(),
                 _ => sql.to_owned(),
             };
             (name, sql)
@@ -1316,6 +1375,9 @@ impl SqliteStorage {
                         .chain(super::identities::SCHEMA)
                         .filter(|(name, _)| added.contains(name))
                         .filter(|(name, _)| {
+                            !(*from == 51 && *name == "provider_models_by_position")
+                        })
+                        .filter(|(name, _)| {
                             !(resume && *name == "timeline_events_branch_interrupts")
                         })
                     {
@@ -1366,10 +1428,38 @@ impl SqliteStorage {
                         }
                         super::members::backfill_v42(&connection)?;
                     }
-                    if *from == 50 {
+                    if *from == 51 {
+                        if upgrade_from == 51 {
+                            connection.execute_batch("DROP TRIGGER provider_models_insert; DROP TRIGGER provider_models_update; DROP TABLE provider_query_records; DROP TABLE provider_models; ALTER TABLE provider_bundle ADD COLUMN attempted INTEGER NOT NULL DEFAULT 0; ALTER TABLE provider_bundle ADD COLUMN naming_revision TEXT NOT NULL DEFAULT '';  ALTER TABLE provider_catalog_revision ADD COLUMN activation INTEGER NOT NULL DEFAULT 0;").map_err(storage)?;
+                            for (_, sql) in SCHEMA.iter().filter(|(name, _)| {
+                                matches!(*name, "provider_models" | "provider_models_by_model")
+                            }) {
+                                connection.execute_batch(sql).map_err(storage)?;
+                            }
+                            for table in ["provider_bundle", "provider_catalog_revision"] {
+                                connection
+                                    .execute_batch(&format!(
+                                        "ALTER TABLE {table} RENAME TO {table}_old"
+                                    ))
+                                    .map_err(storage)?;
+                                connection
+                                    .execute_batch(
+                                        SCHEMA.iter().find(|(name, _)| *name == table).unwrap().1,
+                                    )
+                                    .map_err(storage)?;
+                                connection.execute_batch(&format!("INSERT INTO {table} SELECT * FROM {table}_old; DROP TABLE {table}_old")).map_err(storage)?;
+                            }
+                        }
                         connection
-                            .execute_batch("UPDATE providers SET record=record")
+                            .execute_batch(
+                                SCHEMA
+                                    .iter()
+                                    .find(|(name, _)| *name == "provider_models_by_position")
+                                    .unwrap()
+                                    .1,
+                            )
                             .map_err(storage)?;
+                        crate::provider::persistence::migrate(&connection)?;
                     }
                     if *from == 38 {
                         super::arrays::backfill(&connection)?;

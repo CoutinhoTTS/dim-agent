@@ -424,64 +424,44 @@ impl ProviderService {
         model_id: Option<String>,
         cancel: &CancellationToken,
     ) -> Result<ManagementView, ProviderError> {
+        self.adopt_provider(&provider_id, cancel).await?;
         let db = self.db.clone();
         let id = provider_id.clone();
         let target = model_id.clone();
-        let record = self
+        let bundled = self.bundled.clone();
+        let (record,target_name,pending) = self
             .owned(cancel, move |_| {
                 Box::pin(async move {
                     db.run_read(move |connection| {
-                        if let Some(target) = target {
-                            return read_model_record(connection, &id, &target);
+                        let tx=connection.transaction().map_err(storage)?;
+                        let pending=tx.query_row("SELECT pending FROM provider_bundle WHERE provider_id=?1",[&id],|r|r.get::<_,bool>(0)).optional().map_err(storage)?.unwrap_or(false);
+                        let mut collisions=Vec::new();
+                        if pending {
+                            let mut statement=tx.prepare("SELECT model_id FROM provider_models WHERE provider_id=?1 AND source='user' ORDER BY position").map_err(storage)?;
+                            for model in statement.query_map([&id],|r|r.get::<_,String>(0)).map_err(storage)? {
+                                let model=model.map_err(storage)?;
+                                if bundled.source().matching(&format!("t\0{id}\0{model}")).next().is_some() {collisions.push(model);}
+                            }
                         }
-                        let row: Option<(u32, String)> = connection
-                            .query_row(
-                                "SELECT version,record FROM providers WHERE provider_id=?1",
-                                [&id],
-                                |row| Ok((row.get(0)?, row.get(1)?)),
-                            )
-                            .optional()
-                            .map_err(storage)?;
-                        row.map(|(version, body)| {
-                            parse_provider_row(&id, version, &body)
-                                .map_err(|error| storage(error.to_string()))
-                        })
-                        .transpose()
+                        let pending=pending.then_some(collisions);
+                        if let Some(target)=target {
+                            let record=read_model_record(&tx,&id,&target)?;
+                            let name=persistence::names(&tx,&bundled,&id,std::slice::from_ref(&target))?.remove(&target);
+                            return Ok((record,name,pending));
+                        }
+                        Ok((persistence::read(&tx,&id,persistence::Models::All)?,None,pending))
                     })
                     .await
                     .map_err(ProviderError::from)
                 })
             })
             .await?;
-        let db = self.db.clone();
-        let id = provider_id.clone();
-        let expected=self.owned(cancel,move |_| Box::pin(async move {
-            db.run_read(move |c| c.query_row("SELECT definition_fingerprint FROM provider_bundle WHERE provider_id=?1",[id],|row| row.get::<_,Option<String>>(0)).optional().map(Option::flatten).map_err(storage)).await.map_err(ProviderError::from)
-        })).await?;
         let mut errors = Vec::new();
+        if let Some(collisions) = pending {
+            errors.push(ProviderRecordError {provider_id:provider_id.clone(),message:if collisions.is_empty() {"Bundled definition changed; restart to apply it".into()} else {format!("Bundled definition conflicts with user models: {}; delete them and restart",collisions.join(", "))}});
+        }
         let mut provider = match record {
             Some(PersistedProviderRecord::Static(record)) => {
-                if record.kind == StaticRecordKind::Builtin
-                    && record.definition_fingerprint != expected
-                    && let Some(definition) = bundled_seed_for(&self.bundled, &provider_id)?
-                    && record.definition_fingerprint != definition.definition_fingerprint
-                {
-                    let candidate = reseed_candidate(&record, definition);
-                    let collisions: Vec<_> = candidate
-                        .user_models
-                        .iter()
-                        .filter(|user| {
-                            candidate
-                                .models
-                                .iter()
-                                .any(|model| model.model_id == user.model_id)
-                        })
-                        .map(|entry| entry.model_id.as_str())
-                        .collect();
-                    errors.push(ProviderRecordError { provider_id: provider_id.clone(), message: if collisions.is_empty() {
-                        "Bundled definition changed; restart to apply it".into()
-                    } else { format!("Bundled definition conflicts with user models: {}; delete them and restart", collisions.join(", ")) } });
-                }
                 self.static_management(provider_id, *record, cancel).await?
             }
             record => {
@@ -510,9 +490,7 @@ impl ProviderService {
             if models.is_empty() {
                 return Err(ProviderError::NotFound);
             }
-            let name = self
-                .model_name(provider.info.provider_id.clone(), model_id.clone(), cancel)
-                .await?;
+            let name = target_name.ok_or(ProviderError::NotFound)?;
             for model in models {
                 model.catalog_name = (model.model.display_name != name).then(|| name.clone());
             }
@@ -561,75 +539,87 @@ impl ProviderService {
             ));
         }
         let mut descriptors = self.oauth.providers(cancel).await?;
+        if let Some(id) = &request.provider_id {
+            self.adopt_provider(id, cancel).await?;
+        }
         let db = self.db.clone();
+        let bundled = self.bundled.clone();
         let target = request.provider_id.clone();
         let after = request.after.clone();
         let accounts_only = request.accounts_only;
-        let query_text = request.query.clone().unwrap_or_default();
-        let mut records = self.owned(cancel, move |_| Box::pin(async move {
-            db.run_read(move |connection| {
-                let sql = if target.is_some() {
-                    "SELECT provider_id FROM providers WHERE provider_id=?1"
-                } else {
-                    "SELECT provider_id FROM providers WHERE provider_id>coalesce(?1,'') AND CASE WHEN json_valid(record) THEN (instr(lower(provider_id),lower(?3))>0 OR instr(lower(json_extract(record,'$.displayName')),lower(?3))>0) AND (?4=0 OR json_extract(record,'$.credentialAuthority') IN ('openai_codex','grok') OR json_extract(record,'$.kind')='managed') ELSE 1 END ORDER BY provider_id LIMIT ?2"
-                };
-                let mut query = connection.prepare(sql).map_err(storage)?;
-                let mut rows = if let Some(target) = target {
-                    query.query(params![target]).map_err(storage)?
-                } else {
-                    query.query(params![after, limit+1, query_text, accounts_only]).map_err(storage)?
-                };
-                let mut records = Vec::new();
-                while let Some(row) = rows.next().map_err(storage)? {
-                    let id: String = row.get(0).map_err(storage)?;
-                    records.push(id);
-                }
-                Ok(records)
-            }).await.map_err(ProviderError::from)
-        })).await?;
-        for descriptor in &descriptors {
-            if request.query.as_ref().is_none_or(|query| {
-                let query = query.to_lowercase();
-                descriptor.provider_id.to_lowercase().contains(&query)
-                    || descriptor.display_name.to_lowercase().contains(&query)
-            }) && request
-                .provider_id
-                .as_ref()
-                .is_none_or(|id| id == &descriptor.provider_id)
-                && request
-                    .after
-                    .as_ref()
-                    .is_none_or(|id| id < &descriptor.provider_id)
-                && !records.iter().any(|id| id == &descriptor.provider_id)
-            {
-                records.push(descriptor.provider_id.clone());
-            }
-        }
-        records.sort();
-        let next = (records.len() > limit as usize).then(|| records[limit as usize - 1].clone());
-        records.truncate(limit as usize);
-        let db = self.db.clone();
-        let records = self
-            .owned(cancel, move |_| {
+        let query_text = request.query.clone().unwrap_or_default().to_lowercase();
+        let account_ids: BTreeMap<_, _> = descriptors
+            .iter()
+            .map(|d| (d.provider_id.clone(), d.display_name.clone()))
+            .collect();
+        let (records, next) = self
+            .owned(cancel, move |cancel| {
                 Box::pin(async move {
-                    db.run_read(move |connection| {
-                        let mut query = connection
-                            .prepare("SELECT p.version,json_set(q.record,'$.models',json('[]'),'$.userModels',json('[]'),'$.modelConfigOverrides',json('[]')) FROM providers p JOIN provider_query_records q ON q.provider_id=p.provider_id WHERE p.provider_id=?1")
-                            .map_err(storage)?;
-                        records
-                            .into_iter()
-                            .map(|id| {
-                                let row: Option<(u32, String)> = query
-                                    .query_row([&id], |row| Ok((row.get(0)?, row.get(1)?)))
-                                    .optional()
-                                    .map_err(storage)?;
-                                let record = row.map(|(version, body)| {
-                                    parse_provider_row(&id, version, &body)
+                    db.run(move |connection| {
+                        let tx = connection.transaction().map_err(storage)?;
+                        let mut ids = if let Some(target) = &target {
+                            BTreeSet::from([target.clone()])
+                        } else {
+                            persistence::ids(&tx, &bundled)?
+                        };
+                        if target.is_none() {
+                            ids.extend(account_ids.keys().cloned());
+                        }
+                        let mut records = Vec::new();
+                        for id in ids {
+                            if after.as_ref().is_some_and(|after| &id <= after) {
+                                continue;
+                            }
+                            let header = persistence::header(&tx, &id)?;
+                            if target.is_none() {
+                                if let Some((_, body)) = &header {
+                                    if let Ok(body) = serde_json::from_str::<Value>(body) {
+                                        let account = account_ids.contains_key(&id)
+                                            || body["kind"] == "managed"
+                                            || matches!(
+                                                body["credentialAuthority"].as_str(),
+                                                Some("openai_codex" | "grok")
+                                            );
+                                        let display = account_ids
+                                            .get(&id)
+                                            .map(String::as_str)
+                                            .or_else(|| body["displayName"].as_str())
+                                            .unwrap_or_default();
+                                        if (accounts_only && !account)
+                                            || (!id.to_lowercase().contains(&query_text)
+                                                && !display.to_lowercase().contains(&query_text))
+                                        {
+                                            continue;
+                                        }
+                                    }
+                                } else if !id.to_lowercase().contains(&query_text)
+                                    && !account_ids.get(&id).is_some_and(|name| {
+                                        name.to_lowercase().contains(&query_text)
+                                    })
+                                {
+                                    continue;
+                                }
+                            }
+                            persistence::adopt(&tx, &id, &bundled, &cancel)?;
+                            let record = if header.is_some() {
+                                Some(
+                                    persistence::read(&tx, &id, persistence::Models::Header)
                                         .map_err(ProviderError::from)
-                                });
-                                Ok((id, record))
-                            })
-                            .collect::<dim_agent_runtime::Result<Vec<_>>>()
+                                        .and_then(|record| record.ok_or(ProviderError::NotFound)),
+                                )
+                            } else {
+                                None
+                            };
+                            records.push((id, record));
+                            if records.len() > limit as usize {
+                                break;
+                            }
+                        }
+                        let next = (records.len() > limit as usize)
+                            .then(|| records[limit as usize - 1].0.clone());
+                        records.truncate(limit as usize);
+                        tx.commit().map_err(storage)?;
+                        Ok((records, next))
                     })
                     .await
                     .map_err(ProviderError::from)

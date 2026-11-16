@@ -3,31 +3,22 @@
 use crate::model_catalog::ModelEntry;
 use std::collections::{HashMap, HashSet};
 
-pub(crate) struct Name {
-    pub model_id: String,
-    pub display_name: String,
-    pub label: Option<String>,
-}
+pub(crate) use crate::model_catalog::name_inputs::{Name, keys};
+use crate::model_catalog::name_inputs::{id_fallback, label_candidate};
 
-/// What a renamed row puts between its own name and its qualifier.
-const SEPARATOR: &str = " · ";
-
-/// The fields a listing states its per-row label in, in the order the lookup
-/// reads them. Another gateway's label is added here.
-const LABELS: &[&str] = &["magpie_label"];
-
-/// The name a row publishes when it keeps the origin its listing states for it:
-/// its own name, trimmed, followed by that origin.
-fn label_candidate(entry: &Name) -> Option<String> {
-    let (_, qualifier) = entry.label.as_deref()?.rsplit_once(SEPARATOR)?;
-    let qualifier = qualifier.trim();
-    if qualifier.is_empty() {
-        return None;
+impl From<&ModelEntry> for Name {
+    fn from(entry: &ModelEntry) -> Self {
+        Self {
+            model_id: entry.model_id.clone(),
+            display_name: entry.display_name.clone(),
+            label: entry
+                .metadata
+                .as_ref()
+                .and_then(|m| m.raw.get("magpie_label"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned),
+        }
     }
-    Some(format!(
-        "{}{SEPARATOR}{qualifier}",
-        entry.display_name.trim()
-    ))
 }
 
 /// The name each of one provider's complete rows publishes, in their order,
@@ -50,18 +41,7 @@ fn label_candidate(entry: &Name) -> Option<String> {
 /// stated name. Everything else is read off the whole set before any name is
 /// assigned, so listing the same rows in another order names each row the same.
 pub(crate) fn unique<'a>(entries: impl IntoIterator<Item = &'a ModelEntry>) -> Vec<String> {
-    let entries: Vec<_> = entries
-        .into_iter()
-        .map(|entry| Name {
-            model_id: entry.model_id.clone(),
-            display_name: entry.display_name.clone(),
-            label: entry
-                .metadata
-                .as_ref()
-                .and_then(|m| LABELS.iter().find_map(|label| m.raw.get(*label)?.as_str()))
-                .map(str::to_owned),
-        })
-        .collect();
+    let entries: Vec<_> = entries.into_iter().map(Name::from).collect();
     unique_names(&entries)
 }
 
@@ -156,16 +136,6 @@ pub(crate) fn unique_names(entries: &[Name]) -> Vec<String> {
         .into_iter()
         .map(|name| name.expect("every row is named"))
         .collect()
-}
-
-/// The name a shared row publishes when its label names no other row: its own
-/// name, trimmed, then its id, trimmed.
-fn id_fallback(entry: &Name) -> String {
-    format!(
-        "{}{SEPARATOR}{}",
-        entry.display_name.trim(),
-        entry.model_id.trim()
-    )
 }
 
 /// How many rows reach each of the names they computed, none counted for a row

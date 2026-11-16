@@ -188,10 +188,11 @@ List errors use existing `ProviderRecordError {providerId, message}`; healthy
 entries remain available. A builtin without `remoteModels` whose stored fingerprint
 differs from its bundled definition gets a derived reseed diagnostic (§6), while
 its admitted entry and deletion action remain usable. Name any colliding model
-IDs; after their deletion, keep a restart-required diagnostic until startup applies
-the definition. Seeding and this read share one Provider-owned candidate builder,
-including remote-model substitution, so they cannot disagree about the candidate.
-Do not persist another status or disable the entry.
+IDs; after their deletion, keep a restart-required diagnostic until the next
+activation permits adoption on access. Adoption and this read share one
+Provider-owned candidate builder, including remote-model substitution, so they
+cannot disagree about the candidate. The pending attempt belongs to source
+adoption (§3.1 below); it does not disable the entry.
 Actions describe current availability, not authorization or a promise that a later
 write succeeds. Model origin is derived from the distinct persisted lists in §6.
 An account's existing catalog retains its version and descriptors while signed out
@@ -219,14 +220,9 @@ catalogs, identification results or query results. Model identification reads on
 matching descriptors and preserves namespace, alias, canonical-name and ambiguity
 rules. Building the shipped lookup data happens before distribution.
 
-Provider synchronizes bundled definitions by catalog revision. An unchanged
-revision reads only the revision and pending provider IDs. An initial installation or changed
-revision reconciles definitions individually, preserving connection settings,
-credentials, user models, overrides and enablement. Conflicting updates remain
-pending and are retried on the next activation even when the catalog revision is
-unchanged. Revision and successful record changes commit atomically. Synchronization
-releases its temporary SQLite page-cache allocation after commit; an unchanged
-revision without pending work performs no write. Removal retires the builtin; a user-disabled provider is never re-enabled by an upgrade.
+Source activation publishes the available generation without expanding providers.
+Per-provider adoption, retirement and pending conflicts follow
+[Indexed source and sparse adoption](#indexed-source-and-sparse-adoption).
 
 Display lists use bounded pages and server-side search. Opening a conversation
 reads its adopted model; it does not enumerate candidate catalogs. Web and CLI
@@ -292,21 +288,22 @@ Provider reads only the requested record or page, projects each detail once and
 releases the result after the call. A scoped read uses an indexed equality lookup.
 Bundled reseed diagnostics inspect only the requested builtin definition. Reads do
 not retain snapshots, seed-record maps or computed model results between calls.
-The persisted Provider record is the storage read and CAS unit: one model's detail
-uses its owning record, including the names needed to preserve the catalog's
-unique-name contract.
+The Provider version remains the CAS unit. A model detail reads its header, target
+state and descriptor plus indexed naming dependencies in one local snapshot; it
+does not expand the owning provider's other model payloads.
 
 Web requests a page when its provider list opens, follows `next` on Load more and
-queries again when search changes. It reads an edit snapshot only when a Provider
-opens. Account discovery uses the account-only overview. CLI list commands consume
+queries again when search changes. Connection configuration uses that summary;
+opening Models reads the full edit snapshot. Account discovery uses the account-only overview. CLI list commands consume
 successive overview pages for the list the user requested; named account operations
 read that Provider directly. Model-specific operations pass the model ID.
 
 ```text
 Providers                     Provider detail
 [Search providers]            [Connection] [Models]
-  Provider A                  read Provider A only
-  Provider B                  model edit -> Provider A + model ID
+  Provider A                  Connection -> summary
+  Provider B                  Models -> full edit snapshot
+                              model edit -> Provider A + model ID
 [Load more]
 ```
 
@@ -316,16 +313,73 @@ The [Dim OAuth owner](../../../crates/dim-oauth/docs/runtime-contract.md) define
 in-flight sharing and result lifetime. The local and wire consumers use the same
 owner methods through `managementMethods`.
 
+### Indexed source and sparse adoption
+
+The bundled source is an immutable build-time index: provider summaries and
+fingerprints of each serialized provider declaration, original model order,
+sorted target keys, matching keys, effective naming inputs and individually readable descriptors. Offsets address data; opening
+Provider does not decode model payloads, build a runtime catalog index or insert
+builtin model rows. Mutable storage contains admitted user/source state. Full edit
+snapshots remain output-proportional.
+
+An available source generation is distinct from a provider's adopted base. An
+untouched builtin reads the current source at version 1 without a mutable row.
+First configuration admits its source identity and commits version 2 by CAS.
+Targeted management, catalog, configuration and model-page reads reconcile a
+changed source atomically when admitting that provider; successful
+adoption advances its version once before applying a caller's expected version.
+The legacy all-provider `provider.list` returns admitted summaries without
+forcing adoption of every provider. An unchanged provider declaration does not
+advance a version, including when only the catalog index representation changes.
+When the catalog generation changes, source-dependent naming inputs of persisted
+mutable rows are reconciled on provider access; this derived-only update leaves the version and
+model payloads unchanged. Its work can scale with that provider's mutable input,
+including only the base targets needed by those overrides or aliases; unrelated
+immutable defaults stay indexed and are not expanded for this step.
+A retired admitted builtin becomes disabled. Remote listings remain authoritative
+when `remoteModels` is true.
+
+A collision retains the complete admitted base, version and user state. Its pending
+attempt records the activation that attempted it. Deleting the conflicting user
+model does not adopt immediately: adoption may retry on access after the next
+activation. No background sweep expands unused providers. Source generations needed
+by admitted bases remain readable without the old executable and travel with native
+backup/restore. Migration cannot infer user intent from today's bundle: an old base
+that cannot be proved identical is pinned as authoritative admitted history.
+
+Exact, scoped and unscoped reads locate keys before loading descriptors. Each page
+uses one local read snapshot, bounded candidate batches and the same identification
+and naming rule as a full read. Naming compares the effective descriptor, including
+ID-name enrichment and overrides, using Unicode trim. An index locates the target's
+collision dependency component, including reserved labels, ID fallbacks and counters;
+no published name is stored. Adversarial components may include a whole provider.
+Substring search can examine necessary index candidates beyond the returned limit;
+it does not parse unrelated model payloads. Overview filtering reads summaries only.
+
 ### 3.2 Writes and field operations
 
-`ManagementProvider` below means the same edit snapshot as §3.1. Existing method
-request/reply shapes remain except the explicit `ModelEdit.endpoint` addition and
+`ManagementProvider` below means the same edit snapshot as §3.1. Ordinary CLI/Web
+configuration reads `provider.management.list` and requests `reply:"summary"` on update.
+The connection flow loads model details only when requested:
+
+```text
+Provider overview -> Connection -> Save (summary + committed version)
+                         |
+                         +-> Models -> Full editable model snapshot
+```
+
+This selection changes only the reply, not CAS, secret preservation, cancellation
+or discovery. Enablement, credential and network-only configuration of unchanged
+bundled defaults reads and writes no model payload. A full reply still constructs
+the requested complete edit snapshot. Existing method
+request/reply shapes remain except the additive `provider.update.reply` selection,
+the explicit `ModelEdit.endpoint` addition and
 typed errors in §3.4. Existing writes retain `mutating:true`, `interruption:Drain`.
 
 | Method | Request | Reply / behavior | mutating | interruption |
 | --- | --- | --- | --- | --- |
 | `provider.create`  | `{providerId, displayName, connection, models: ModelEntry[], enabled, gluedPrefix?}` | `ManagementProvider`; create-only, caller-generated fresh UUID, existing ID conflicts; `gluedPrefix` takes the patch's rule: trimmed, and an empty one states none | true | `Drain` |
-| `provider.update`  | `{providerId, expectedVersion, patch}` | `ManagementProvider`; validate and commit one partial update transaction; a patch that changes `baseUrl`, `credential` or `headers` also replaces the record's own models with the new endpoint's listing in that same compare-and-set write, and `modelsListed` says what it did; a `network`-only change saves alone | true | `Drain` |
+| `provider.update`  | `{providerId, expectedVersion, patch, reply?: "full" \| "summary"}` | `ManagementProvider` by default; `reply:"summary"` returns the committed safe `ManagementInfo` plus optional `modelsListed`; validate and commit one partial update transaction; a patch that changes `baseUrl`, `credential` or `headers` also replaces the record's own models with the new endpoint's listing in that same compare-and-set write, and `modelsListed` says what it did; a `network`-only change saves alone | true | `Drain` |
 | `provider.probe`  | `{providerId, connection}` | `{models: ModelEntry[]}`; §3.3, no record writes or version check | false | `Drain` |
 | `provider.models.create`  | `{providerId, expectedVersion, model: ModelEntry}` | Existing catalog; separate user-added list; duplicate default or user ID rejected; add enabled and remove any stale `modelConfigOverrides`, `disabledModelIds`, `modelPreferences` and `endpointOverrides` entries for that ID in the same transaction | true | `Drain` |
 | `provider.models.delete`  | `{providerId, expectedVersion, modelId}` | Existing catalog; only user-added items; remove that ID from `disabledModelIds` and clean owned preferences/routes/selections in the same transaction | true | `Drain` |
@@ -562,6 +616,10 @@ the reply; it never rolls back committed writes. Reread uncertain writes rather
 than replaying them. Provider updates do not reload the loader row.
 
 The native service and RPC share the same create, partial update and model operations.
+Offline native migration uses Provider's `read_stored_static` / `write_stored_static`
+boundary in its caller-owned SQLite transaction. That boundary assembles or splits
+the native state and admitted source; migration does not interpret sparse rows.
+These are storage-owner functions, not additional runtime services.
 New custom Providers use canonical UUIDs. Existing bundled and explicitly imported
 non-UUID identities remain editable through their accepted partial-write paths.
 
@@ -1331,8 +1389,9 @@ separate decision covering Settings too, not a prerequisite here.
 
 ## 6. Persistence, existing Sessions and migration
 
-**Format decision: v19, unchanged SQL schema.** These optional top-level fields
-carry user configuration; missing maps/lists mean no corresponding user data:
+The logical record fields introduced by the [v19 decision](native-storage-format.md#329-格式决定)
+carry user configuration; missing maps/lists mean no corresponding user data.
+Their native representation now follows [v52](native-storage-format.md#v52-sparse-provider-state):
 
 | Struct / JSON field | Stored value and use |
 | --- | --- |
@@ -1367,24 +1426,15 @@ and an update that lists the new endpoint follows the same rule: it fails, names
 the colliding user models, and writes nothing. Delete the colliding user model
 through `provider.models.delete`, then retry the refresh or the update.
 
-Bundled reseeding must not fail seeding or Provider activation on that collision.
-When a changed fingerprint's candidate would collide with a user model, leave
-that record's admitted definition, fingerprint and version untouched, and continue
-seeding the other records in the existing transaction. This applies to the actual
-replacement candidate: a record with `remoteModels` retains its remote defaults.
-Expose the collision through §3.1's existing per-entry error list, keeping the
-Provider and `provider.models.delete` usable. After explicit deletion, the next
-startup can apply the bundled definition. Other validation failures retain their
-existing failure behavior. A replacement user model needs an ID distinct from
-the incoming bundled defaults; no
-automatic rename, overwrite, persistent warning or new migration service.
+Source adoption follows §3.1's indexed-source contract. Collisions appear in the
+existing per-entry errors and preserve the admitted base. The explicit
+[native v52 format](native-storage-format.md#v52-sparse-provider-state) supersedes
+v51's eager projection storage; it does not redefine earlier committed formats.
 
-Old v19 binaries can read these records but drop new top-level fields on rewrite,
-including automatic `seed_bundled` rewrites when fingerprints change. That downgrade
-loss is accepted explicitly, not limited to user edits. Disposable-database
-acceptance must run an old v19 reader and its rewrite path on a new record.
-No storage-owner gate, deletion history or format bump is added. Unknown database
-formats retain their existing rejection and byte-preservation rules.
+The v19 decision accepted loss of its then-new top-level fields when an old v19
+binary rewrote a record, including automatic `seed_bundled` rewrites. That historical
+compatibility decision does not permit opening a v52 store with an older daemon.
+Unknown database formats retain their existing rejection and byte-preservation rules.
 
 | Edit | Effect on already-adopted Sessions |
 | --- | --- |
@@ -1482,7 +1532,7 @@ not reported. Source bytes remain unchanged.
 | Stored selection | For one admitted static record and bundled catalog, `stored_selection` accepts exactly the model IDs `select`/`configuration` accept and returns the same protocol and adopted capabilities; fixed drivers and New API explicit, inferred, unsupported and ambiguous routes; missing, disabled, unavailable, non-text, disabled-Provider, missing-credential and undeclared-limit models are refused; an account-owned record is refused; a mock endpoint receives no request; the Migration provider/selection flow and `provider.import_legacy` report the same outcomes through the shared contract |
 | Accounts | Existing login/logout/usage; managed same-account refresh preserves preferences, descriptor overrides and disables, while a different-account refresh clears all three; actual advertised-method versus missing-package-method behavior, unchanged Usage DTO, no static usage config |
 | Concurrency/recovery | Two-client typed CAS conflicts on new and retained writes; lost create reply recovered by canonical UUID; noncanonical create IDs fail while existing non-UUID IDs still work with other methods; repeated create conflicts; read errors preserve healthy entries/drafts |
-| Storage/import | New record read and rewritten by old v19 code including reseed; bundled upgrade collides with a user-added builtin model: Provider activates, that record/definition/fingerprint/version remain unchanged, other records update and management reports the collision; explicit deletion keeps a restart-required diagnostic until startup applies the new definition; deleting a disabled user model clears its stale disable so the new bundled model is enabled; a user model created with a disappeared default's ID starts enabled without that default's descriptor override, preferences or endpoint override; valid/invalid/repeated imports and source preservation in disposable databases |
+| Storage/import | New record read and rewritten by old v19 code including reseed; bundled upgrade collides with a user-added builtin model: Provider activates, that record/definition/fingerprint/version remain unchanged, independently admitted records update and management reports the collision; explicit deletion keeps a restart-required diagnostic until access after the next activation adopts the new definition; deleting a disabled user model clears its stale disable so the new bundled model is enabled; a user model created with a disappeared default's ID starts enabled without that default's descriptor override, preferences or endpoint override; valid/invalid/repeated imports and source preservation in disposable databases |
 | Client flow | Actual source-built App Server and Desktop/CLI: draft → probe → create → model/select → call → edit → call → restart → disconnect/delete; no fake-daemon-only evidence |
 
 Provider, transport, managed-account and source-built native CLI flows exercise
@@ -1552,3 +1602,11 @@ catalog construction is added, so the selection conversion calls this contract
 instead of a legacy-only private judgment. No notification, version-history
 service, template entity, credential abstraction or second client configuration
 store is needed.
+
+The sparse representation needs no duplicate header projection, model-rewrite
+trigger, retained decoded catalog or second resolver. Source archives keep an
+admitted base usable without the old executable; keyed mutable rows preserve user
+state independently of it. Naming dependency indexes contain the inputs required
+by the existing collision rule, rather than another published-name store. Summary
+replies reuse the existing management face and version contract. These structures
+serve the required persistence and read boundaries; no further layer is needed.

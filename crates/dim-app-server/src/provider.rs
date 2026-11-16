@@ -8,15 +8,21 @@ pub(crate) mod management;
 mod models;
 pub(crate) mod naming;
 mod new_api;
+pub(crate) mod persistence;
 mod preferences;
 mod query;
+#[cfg(feature = "testing")]
+pub mod read_work;
 mod remote;
 pub use query::{ModelPage, ModelQuery};
 mod secrets;
 mod startup;
 mod view;
 pub use dim_agent_types::ModelPreferences;
-pub use editing::{ConnectionInput, CreateProvider, ProbeProvider, ProbeResult, ProviderPatch};
+pub use editing::{
+    ConnectionInput, CreateProvider, ManagementUpdateSummary, ProbeProvider, ProbeResult,
+    ProviderPatch, UpdateReply, UpdateReplyKind,
+};
 pub use legacy::{
     ImportResult, LEGACY_METADATA_FIELDS, LEGACY_PROVIDER_FIELDS, LegacyConversion, LegacyRow,
     LegacySelection, LegacySnapshot, convert_legacy_provider, convert_legacy_selection,
@@ -297,7 +303,7 @@ struct ProviderRecord {
 enum ManagedRecordKind {
     Managed,
 }
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 #[serde(untagged)]
 enum PersistedProviderRecord {
     Managed(Box<ProviderRecord>),
@@ -323,16 +329,6 @@ fn parse_provider_row(
             Ok(PersistedProviderRecord::Static(record))
         }
     }
-}
-fn parse_static_row(
-    id: &str,
-    version: u32,
-    body: &str,
-) -> Result<Option<StaticProviderRecord>, HostError> {
-    Ok(match parse_provider_row(id, version, body)? {
-        PersistedProviderRecord::Static(record) => Some(*record),
-        PersistedProviderRecord::Managed(_) => None,
-    })
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -801,21 +797,28 @@ pub struct ProviderSelection {
     pub version: u32,
 }
 
-fn read_static(
+/// Reads a complete native Provider record, including its admitted source base.
+/// The caller owns the SQLite read snapshot. Invalid records return an error.
+pub fn read_stored_static(
     connection: &rusqlite::Connection,
     provider_id: &str,
 ) -> dim_agent_runtime::Result<Option<StaticProviderRecord>> {
-    let row: Option<(u32, String)> = connection
-        .query_row(
-            "SELECT version,record FROM providers WHERE provider_id=?1",
-            [provider_id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()
-        .map_err(storage)?;
-    row.map(|(version, body)| parse_static(provider_id, version, &body))
-        .transpose()
-        .map_err(storage)
+    persistence::static_read(connection, provider_id, persistence::Models::All)
+}
+
+/// Writes an admitted native Provider record and its indexes in the caller's transaction.
+pub fn write_stored_static(
+    connection: &rusqlite::Connection,
+    provider_id: &str,
+    record: &StaticProviderRecord,
+) -> dim_agent_runtime::Result<()> {
+    persistence::write(
+        connection,
+        provider_id,
+        record.version,
+        &serde_json::to_string(record).map_err(storage)?,
+    )?;
+    Ok(())
 }
 
 pub fn parse_static(
@@ -1077,7 +1080,12 @@ fn static_entries(
                 } else {
                     ModelSource::Custom
                 }),
-                models: record.user_models.clone(),
+                models: if record.remote_models {
+                    record.user_models.clone()
+                } else {
+                    models.clone()
+                },
+                admitted_defaults: !record.remote_models,
                 glued_prefix: record.glued_prefix.clone(),
                 model_aliases: record.model_aliases.clone(),
                 ..Default::default()
@@ -1306,19 +1314,6 @@ fn seeded(provider: &CatalogProvider) -> bool {
         || managed_authority(&provider.provider_id) != CredentialAuthority::Static
 }
 
-struct DefinitionDigest(Sha256);
-
-impl std::io::Write for DefinitionDigest {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.0.update(bytes);
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
 fn bundled_seed(provider: CatalogProvider) -> Result<StaticProviderRecord, HostError> {
     let authority = managed_authority(&provider.provider_id);
     let endpoint_types = provider
@@ -1327,19 +1322,6 @@ fn bundled_seed(provider: CatalogProvider) -> Result<StaticProviderRecord, HostE
         .and_then(|metadata| metadata.raw.as_ref())
         .map(|raw| raw.endpoint_type_by_model.clone())
         .unwrap_or_default();
-    let mut fingerprint = DefinitionDigest(Sha256::new());
-    serde_json::to_writer(
-        &mut fingerprint,
-        &(
-            &provider.display_name,
-            &provider.driver_kind,
-            &provider.auth,
-            &provider.default_base_url,
-            &provider.models,
-            &endpoint_types,
-        ),
-    )
-    .map_err(failure)?;
     Ok(StaticProviderRecord {
         kind: StaticRecordKind::Builtin,
         display_name: provider.display_name.clone(),
@@ -1378,7 +1360,7 @@ fn bundled_seed(provider: CatalogProvider) -> Result<StaticProviderRecord, HostE
         enabled: authority != CredentialAuthority::Static,
         glued_prefix: None,
         model_aliases: BTreeMap::new(),
-        definition_fingerprint: Some(format!("{:x}", fingerprint.0.finalize())),
+        definition_fingerprint: None,
         version: 1,
     })
 }
@@ -1393,7 +1375,9 @@ fn bundled_seed_for(
     provider.models = bundled
         .bundled_models(provider_id)
         .expect("a bundled provider's models");
-    bundled_seed(provider).map(Some)
+    let mut record = bundled_seed(provider)?;
+    record.definition_fingerprint = bundled.fingerprint(provider_id).map(str::to_owned);
+    Ok(Some(record))
 }
 
 fn reseed_candidate(
@@ -1412,6 +1396,8 @@ fn reseed_candidate(
     definition.user_models = previous.user_models.clone();
     definition.model_preferences = previous.model_preferences.clone();
     definition.endpoint_overrides = previous.endpoint_overrides.clone();
+    definition.model_aliases = previous.model_aliases.clone();
+    definition.glued_prefix = previous.glued_prefix.clone();
     definition.disabled_model_ids = previous.disabled_model_ids.clone();
     definition.enabled = previous.enabled && drivers::supported(&definition.driver_kind);
     definition
@@ -1444,33 +1430,18 @@ fn read_model_record(
     provider_id: &str,
     model_id: &str,
 ) -> dim_agent_runtime::Result<Option<PersistedProviderRecord>> {
-    let row: Option<(u32,String)> = connection.query_row(
-        "SELECT version,json_set(q.record,'$.models',json((SELECT json_group_array(json(entry)) FROM provider_models WHERE provider_id=p.provider_id AND model_id=?2 AND source='default')),'$.userModels',json((SELECT json_group_array(json(entry)) FROM provider_models WHERE provider_id=p.provider_id AND model_id=?2 AND source='user')),'$.modelConfigOverrides',json((SELECT json_group_array(json(entry)) FROM provider_models WHERE provider_id=p.provider_id AND model_id=?2 AND source='override'))) FROM providers p JOIN provider_query_records q ON q.provider_id=p.provider_id WHERE p.provider_id=?1",
-        params![provider_id,model_id], |r| Ok((r.get(0)?,r.get(1)?)),
-    ).optional().map_err(storage)?;
-    row.map(|(version, body)| parse_provider_row(provider_id, version, &body).map_err(storage))
-        .transpose()
+    persistence::read(connection, provider_id, persistence::Models::One(model_id))
 }
 
 fn read_catalog(
     connection: &rusqlite::Connection,
     provider_id: &str,
 ) -> dim_agent_runtime::Result<Option<ProviderRecord>> {
-    let row: Option<(u32, String)> = connection
-        .query_row(
-            "SELECT version, record FROM providers WHERE provider_id = ?1",
-            [provider_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .optional()
-        .map_err(storage)?;
-    row.map(|(version, body)| parse_catalog(version, &body))
-        .transpose()
-}
-fn parse_catalog(version: u32, body: &str) -> dim_agent_runtime::Result<ProviderRecord> {
-    let catalog: ProviderRecord = serde_json::from_str(body).map_err(storage)?;
-    validate_catalog(version, &catalog)?;
-    Ok(catalog)
+    match persistence::read(connection, provider_id, persistence::Models::All)? {
+        Some(PersistedProviderRecord::Managed(record)) => Ok(Some(*record)),
+        Some(_) => Err(storage("Invalid managed catalog")),
+        None => Ok(None),
+    }
 }
 fn validate_catalog(version: u32, catalog: &ProviderRecord) -> dim_agent_runtime::Result<()> {
     if catalog.version != version {
@@ -1603,8 +1574,13 @@ fn save_catalog(
     provider_id: &str,
     catalog: &ProviderRecord,
 ) -> dim_agent_runtime::Result<()> {
-    connection.execute("INSERT INTO providers(provider_id,version,record) VALUES (?1,?2,?3) ON CONFLICT(provider_id) DO UPDATE SET version=excluded.version,record=excluded.record",
-        params![provider_id, catalog.version, serde_json::to_string(catalog).map_err(storage)?]).map_err(storage)?;
+    persistence::write(
+        connection,
+        provider_id,
+        catalog.version,
+        &serde_json::to_string(catalog).map_err(storage)?,
+    )
+    .map_err(storage)?;
     Ok(())
 }
 fn selection_scope(cwd: Option<&Path>) -> Result<String, HostError> {
@@ -1635,8 +1611,7 @@ impl ProviderService {
     /// The preferences saved for one model, `{providerId, modelId}`: the
     /// per-model record `/models` writes, and nothing else.
     ///
-    /// A static record keeps its own map; a managed one keeps it beside its
-    /// account. A Provider or model this build does not know answers empty, so
+    /// Static and managed records both own model-scoped preferences. A Provider or model this build does not know answers empty, so
     /// a disappeared record reads as no saved value rather than an error.
     async fn saved_preferences(
         self: &Arc<Self>,
@@ -1648,7 +1623,7 @@ impl ProviderService {
         let (provider_id, model_id) = (provider_id.to_owned(), model_id.to_owned());
         self.owned(cancel, move |_| Box::pin(async move {
             db.run_read(move |connection| {
-                let value: Option<String> = connection.query_row("SELECT value FROM provider_query_records p,json_each(p.record,'$.modelPreferences') WHERE p.provider_id=?1 AND key=?2", params![provider_id,model_id], |row| row.get(0)).optional().map_err(storage)?;
+                let value: Option<String> = connection.query_row("SELECT value FROM provider_model_state WHERE provider_id=?1 AND model_id=?2 AND field='modelPreferences'", params![provider_id,model_id], |row| row.get(0)).optional().map_err(storage)?;
                 value.map(|value| serde_json::from_str(&value).map_err(storage)).transpose().map(Option::unwrap_or_default)
             }).await.map_err(failure)
         })).await
@@ -1709,6 +1684,7 @@ impl ProviderService {
         provider_id: String,
         cancel: &CancellationToken,
     ) -> Result<Option<ProviderCatalog>, HostError> {
+        self.adopt_provider(&provider_id, cancel).await?;
         if self
             .oauth
             .contains(&provider_id, cancel)
@@ -1723,7 +1699,7 @@ impl ProviderService {
         self.owned(cancel, move |_| {
             Box::pin(async move {
                 db.run_read(move |connection| {
-                    Ok(read_static(connection, &provider_id)?
+                    Ok(read_stored_static(connection, &provider_id)?
                         .map(|record| static_catalog(&bundled, &provider_id, &record, available)))
                 })
                 .await
@@ -1738,6 +1714,7 @@ impl ProviderService {
         model_id: String,
         cancel: &CancellationToken,
     ) -> Result<Option<ProviderCatalog>, HostError> {
+        self.adopt_provider(&provider_id, cancel).await?;
         let account = if self
             .oauth
             .contains(&provider_id, cancel)
@@ -1759,23 +1736,32 @@ impl ProviderService {
         self.owned(cancel, move |_| {
             Box::pin(async move {
                 db.run_read(move |connection| {
-                    let Some(record) = read_model_record(connection, &provider_id, &model_id)?
-                    else {
+                    let tx = connection.transaction().map_err(storage)?;
+                    let Some(record) = read_model_record(&tx, &provider_id, &model_id)? else {
                         return Ok(None);
                     };
-                    match record {
-                        PersistedProviderRecord::Static(record) => Ok(Some(static_catalog(
+                    let mut catalog = match record {
+                        PersistedProviderRecord::Static(record) => {
+                            Some(static_catalog(&bundled, &provider_id, &record, available))
+                        }
+                        PersistedProviderRecord::Managed(record) => account
+                            .filter(|a| a.account.is_some() && same_account(&record.account, a))
+                            .map(|_| record.catalog(&bundled)),
+                    };
+                    if let Some(model) = catalog
+                        .as_mut()
+                        .and_then(|c| c.models.iter_mut().find(|m| m.id == model_id))
+                    {
+                        model.name = persistence::names(
+                            &tx,
                             &bundled,
                             &provider_id,
-                            &record,
-                            available,
-                        ))),
-                        PersistedProviderRecord::Managed(record) => Ok(account
-                            .filter(|account| {
-                                account.account.is_some() && same_account(&record.account, account)
-                            })
-                            .map(|_| record.catalog(&bundled))),
+                            std::slice::from_ref(&model_id),
+                        )?
+                        .remove(&model_id)
+                        .ok_or_else(|| storage("Selected model disappeared"))?;
                     }
+                    Ok(catalog)
                 })
                 .await
                 .map_err(failure)
@@ -1784,74 +1770,42 @@ impl ProviderService {
         .await
     }
 
-    async fn seed_bundled(self: &Arc<Self>) -> Result<(), HostError> {
+    async fn activate_source(self: &Arc<Self>) -> Result<(), HostError> {
         let bundled = self.bundled.clone();
         let db = self.db.clone();
         self.owned(&CancellationToken::new(), move |_| Box::pin(async move {
             db.run(move |connection| {
                 let tx = connection.transaction().map_err(storage)?;
-                let revision: Option<String> = tx.query_row("SELECT revision FROM provider_catalog_revision WHERE id=1", [], |row| row.get(0)).optional().map_err(storage)?;
-                let changed = revision.as_deref() != Some(bundled.revision());
-                let mut ids: BTreeSet<String> = if changed {
-                    bundled.provider_ids().map(str::to_owned).collect()
-                } else { BTreeSet::new() };
-                {
-                    let mut query = tx.prepare("SELECT provider_id FROM provider_bundle WHERE ?1 OR pending=1").map_err(storage)?;
-                    for id in query.query_map([changed], |row| row.get::<_, String>(0)).map_err(storage)? {
-                        ids.insert(id.map_err(storage)?);
-                    }
+                if !tx.query_row("SELECT EXISTS(SELECT 1 FROM provider_sources WHERE revision=?1)", [bundled.revision()], |r| r.get::<_,bool>(0)).map_err(storage)? {
+                    tx.execute("INSERT INTO provider_sources VALUES (?1,?2)", params![bundled.revision(),bundled.image()]).map_err(storage)?;
                 }
-                if revision.is_none() {
-                    let mut query = tx.prepare("SELECT provider_id FROM providers WHERE CASE WHEN json_valid(record) THEN json_extract(record,'$.kind')='builtin' ELSE 0 END").map_err(storage)?;
-                    for id in query.query_map([], |row| row.get::<_, String>(0)).map_err(storage)? { ids.insert(id.map_err(storage)?); }
-                }
-                let synchronizing = !ids.is_empty();
-                for id in ids {
-                    let fingerprint = bundled.fingerprint(&id);
-                    let installed: Option<(Option<String>, bool)> = tx.query_row("SELECT fingerprint,pending FROM provider_bundle WHERE provider_id=?1", [&id], |r| Ok((r.get(0)?,r.get(1)?))).optional().map_err(storage)?;
-                    if installed.as_ref().is_some_and(|(old,pending)| old.as_deref()==fingerprint && !pending) { continue; }
-                    let definition = bundled_seed_for(&bundled, &id).map_err(storage)?;
-                    let definition_fingerprint=definition.as_ref().and_then(|record|record.definition_fingerprint.clone());
-                    let row: Option<(u32,String)> = tx.query_row("SELECT version,record FROM providers WHERE provider_id=?1",[&id],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(storage)?;
-                    let previous=match row {
-                        Some((version,body)) => match parse_static_row(&id,version,&body) { Ok(record)=>record,Err(_)=>continue },
-                        None=>None,
-                    };
-                    let mut pending = false;
-                    let candidate = match (previous, definition) {
-                        (Some(previous), definition) if previous.kind == StaticRecordKind::Builtin => {
-                            let mut record = match definition {
-                                Some(definition) if previous.definition_fingerprint != definition.definition_fingerprint => reseed_candidate(&previous, definition),
-                                None if previous.enabled => { let mut record=previous.clone(); record.enabled=false; record },
-                                _ => { tx.execute("INSERT OR REPLACE INTO provider_bundle VALUES (?1,?2,?3,0)", params![id,fingerprint,definition_fingerprint]).map_err(storage)?; continue; }
-                            };
-                            if record.user_models.iter().any(|user| record.models.iter().any(|model| model.model_id==user.model_id)) {
-                                pending=true;
-                                None
-                            } else {
-                                record.version = previous.version.checked_add(1).ok_or_else(|| storage("Provider version overflow"))?;
-                                Some(record)
-                            }
-                        }
-                        (None, definition) => definition,
-                        _ => None,
-                    };
-                    if let Some(mut record) = candidate {
-                        validate_static_record(&id, &mut record).map_err(storage)?;
-                        tx.execute("INSERT INTO providers VALUES (?1,?2,?3) ON CONFLICT(provider_id) DO UPDATE SET version=excluded.version,record=excluded.record", params![id,record.version,serde_json::to_string(&record).map_err(storage)?]).map_err(storage)?;
-                    }
-                    tx.execute("INSERT OR REPLACE INTO provider_bundle VALUES (?1,?2,?3,?4)", params![id,fingerprint,definition_fingerprint,pending]).map_err(storage)?;
-                }
-                if changed {
-                    tx.execute("INSERT OR REPLACE INTO provider_catalog_revision VALUES (1,?1)",[bundled.revision()]).map_err(storage)?;
-                }
-                tx.commit().map_err(storage)?;
-                if synchronizing {
-                    connection.execute_batch("PRAGMA shrink_memory").map_err(storage)?;
-                }
-                Ok(())
+                tx.execute("INSERT INTO provider_catalog_revision VALUES (1,?1,1) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,activation=activation+1", [bundled.revision()]).map_err(storage)?;
+                tx.execute("DELETE FROM provider_sources WHERE revision!=?1 AND NOT EXISTS (SELECT 1 FROM provider_bases WHERE provider_bases.revision=provider_sources.revision)",[bundled.revision()]).map_err(storage)?;
+                tx.commit().map_err(storage)
             }).await.map_err(failure)
         })).await
+    }
+
+    async fn adopt_provider(
+        self: &Arc<Self>,
+        provider_id: &str,
+        cancel: &CancellationToken,
+    ) -> Result<(), HostError> {
+        let id = provider_id.to_owned();
+        let db = self.db.clone();
+        let bundled = self.bundled.clone();
+        self.owned(cancel, move |cancel| {
+            Box::pin(async move {
+                db.run(move |connection| {
+                    let tx = connection.transaction().map_err(storage)?;
+                    persistence::adopt(&tx, &id, &bundled, &cancel)?;
+                    tx.commit().map_err(storage)
+                })
+                .await
+                .map_err(failure)
+            })
+        })
+        .await
     }
 
     pub async fn list(
@@ -1860,20 +1814,34 @@ impl ProviderService {
     ) -> Result<ProviderList, HostError> {
         let db = self.db.clone();
         let bundled = self.bundled.clone();
-        let mut list = self.owned(cancel, move |_| Box::pin(async move { db.run_read(move |connection| {
-            let mut query = connection.prepare("SELECT p.provider_id,p.version,json_set(q.record,'$.models',json('[]'),'$.userModels',json('[]'),'$.modelConfigOverrides',json('[]')) FROM providers p JOIN provider_query_records q ON q.provider_id=p.provider_id ORDER BY p.provider_id").map_err(storage)?;
-            let rows = query.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?, row.get::<_, String>(2)?))).map_err(storage)?;
-            let mut result = ProviderList { providers: Vec::new(), errors: Vec::new() };
-            for row in rows {
-                let (id, version, body) = row.map_err(storage)?;
-                match parse_static_row(&id, version, &body) {
-                    Ok(None)=>{},
-                    Ok(Some(record)) => result.providers.push(static_summary(&bundled, id, record)),
-                    Err(error) => result.errors.push(ProviderRecordError { provider_id: id, message: error.to_string() }),
-                }
-            }
-            Ok(result)
-        }).await.map_err(failure) })).await?;
+        let mut list = self
+            .owned(cancel, move |_| {
+                Box::pin(async move {
+                    db.run_read(move |connection| {
+                        let tx = connection.transaction().map_err(storage)?;
+                        let mut result = ProviderList {
+                            providers: Vec::new(),
+                            errors: Vec::new(),
+                        };
+                        for id in persistence::ids(&tx, &bundled)? {
+                            match persistence::read(&tx, &id, persistence::Models::Header) {
+                                Ok(Some(PersistedProviderRecord::Static(record))) => {
+                                    result.providers.push(static_summary(&bundled, id, *record))
+                                }
+                                Ok(_) => {}
+                                Err(error) => result.errors.push(ProviderRecordError {
+                                    provider_id: id,
+                                    message: error.to_string(),
+                                }),
+                            }
+                        }
+                        Ok(result)
+                    })
+                    .await
+                    .map_err(failure)
+                })
+            })
+            .await?;
         for provider in &mut list.providers {
             if provider.credential_authority != CredentialAuthority::Static {
                 match self.account_available(&provider.provider_id, cancel).await {
@@ -1983,13 +1951,18 @@ impl ProviderService {
             ));
         }
         let db = self.db.clone();
+        let bundled = self.bundled.clone();
         self.owned(cancel, move |_| {
             Box::pin(async move {
                 db.run(move |connection| {
                     Ok((|| -> Result<_, ProviderError> {
                         let tx = connection.transaction()?;
-                        let mut record =
-                            read_static(&tx, &provider_id)?.ok_or(ProviderError::NotFound)?;
+                        let mut record = persistence::static_read(
+                            &tx,
+                            &provider_id,
+                            persistence::Models::Header,
+                        )?
+                        .ok_or(ProviderError::NotFound)?;
                         if record.version != expected_version {
                             return Err(ProviderError::Conflict("Provider version changed".into()));
                         }
@@ -1997,17 +1970,20 @@ impl ProviderService {
                             record.enabled = false;
                             record.version =
                                 record.version.checked_add(1).ok_or(ProviderError::Failed)?;
-                            tx.execute(
-                                "UPDATE providers SET version=?2,record=?3 WHERE provider_id=?1",
-                                params![
-                                    provider_id,
-                                    record.version,
-                                    serde_json::to_string(&record)?
-                                ],
+                            persistence::write_header(
+                                &tx,
+                                &provider_id,
+                                record.version,
+                                &serde_json::to_string(&record)?,
                             )?;
+                            persistence::admit_base(&tx, &provider_id, &record, &bundled)?;
                         } else {
                             tx.execute(
                                 "DELETE FROM provider_selections WHERE provider_id=?1",
+                                [&provider_id],
+                            )?;
+                            tx.execute(
+                                "DELETE FROM provider_bundle WHERE provider_id=?1",
                                 [&provider_id],
                             )?;
                             tx.execute(
@@ -2109,7 +2085,7 @@ impl ProviderService {
             .owned(cancel, move |_| {
                 Box::pin(async move {
                     db.run_read(move |connection| {
-                        Ok(read_catalog(connection, &id)?.map(|record| record.version))
+                        Ok(persistence::header(connection, &id)?.map(|(version, _)| version))
                     })
                     .await
                     .map_err(ProviderError::from)
@@ -2323,18 +2299,40 @@ impl ProviderService {
         cancel: &CancellationToken,
     ) -> Result<Vec<String>, HostError> {
         let db = self.db.clone();
-        self.owned(cancel, move |_| Box::pin(async move {
-            db.run_read(move |connection| {
-                let predicate = "(p.kind='managed' OR (p.enabled=1 AND p.credential_configured=1))";
-                let sql = if model_id.is_some() {
-                    format!("SELECT DISTINCT p.provider_id FROM provider_models m JOIN provider_query_records p ON p.provider_id=m.provider_id WHERE m.model_id=?1 AND m.source!='override' AND {predicate} ORDER BY CASE WHEN p.kind='managed' THEN 0 ELSE 1 END,p.provider_id")
-                } else {
-                    format!("SELECT p.provider_id FROM provider_query_records p WHERE {predicate} ORDER BY CASE WHEN p.kind='managed' THEN 0 ELSE 1 END,p.provider_id")
-                };
-                let mut query=connection.prepare(&sql).map_err(storage)?;
-                query.query_map(rusqlite::params_from_iter(model_id), |row| row.get(0)).map_err(storage)?.collect::<rusqlite::Result<Vec<_>>>().map_err(storage)
-            }).await.map_err(failure)
-        })).await
+        let bundled = self.bundled.clone();
+        self.owned(cancel, move |_| {
+            Box::pin(async move {
+                db.run_read(move |connection| {
+                    let tx = connection.transaction().map_err(storage)?;
+                    let mut selected = Vec::new();
+                    let ids = if let Some(model) = &model_id {
+                        persistence::providers_for_model(&tx, &bundled, model)?
+                    } else {
+                        persistence::ids(&tx, &bundled)?
+                    };
+                    for id in ids {
+                        match persistence::read(&tx, &id, persistence::Models::Header) {
+                            Ok(Some(PersistedProviderRecord::Managed(_))) => selected.push((0, id)),
+                            Ok(Some(PersistedProviderRecord::Static(r)))
+                                if r.enabled
+                                    && (r.auth == StaticAuth::Anonymous
+                                        || r.credential.is_some()
+                                        || r.credential_authority
+                                            != CredentialAuthority::Static) =>
+                            {
+                                selected.push((1, id))
+                            }
+                            _ => {}
+                        }
+                    }
+                    selected.sort();
+                    Ok(selected.into_iter().map(|(_, id)| id).collect())
+                })
+                .await
+                .map_err(failure)
+            })
+        })
+        .await
     }
 
     async fn candidate_models(
@@ -2343,18 +2341,33 @@ impl ProviderService {
     ) -> Result<Vec<ModelId>, HostError> {
         let providers = self.candidate_provider_ids(None, cancel).await?;
         let db = self.db.clone();
-        self.owned(cancel, move |_| Box::pin(async move {
-            db.run_read(move |connection| {
-                let mut query = connection.prepare("SELECT model_id FROM provider_models WHERE provider_id=?1 AND source!='override' AND coalesce(json_extract(entry,'$.status'),json_extract(entry,'$.entry.status'))!='unavailable' ORDER BY source, rowid").map_err(storage)?;
-                let mut result=Vec::new();
-                for provider_id in providers {
-                    for model in query.query_map([&provider_id], |row| row.get::<_,String>(0)).map_err(storage)? {
-                        result.push(ModelId { provider_id: provider_id.clone(), model_id: model.map_err(storage)? });
+        let bundled = self.bundled.clone();
+        self.owned(cancel, move |_| {
+            Box::pin(async move {
+                db.run_read(move |connection| {
+                    let tx = connection.transaction().map_err(storage)?;
+                    let mut result = Vec::new();
+                    for provider_id in providers {
+                        for model in persistence::ordered_models(
+                            &tx,
+                            &bundled,
+                            &provider_id,
+                            None,
+                            usize::MAX,
+                        )? {
+                            result.push(ModelId {
+                                provider_id: provider_id.clone(),
+                                model_id: model.model_id,
+                            });
+                        }
                     }
-                }
-                Ok(result)
-            }).await.map_err(failure)
-        })).await
+                    Ok(result)
+                })
+                .await
+                .map_err(failure)
+            })
+        })
+        .await
     }
 
     async fn configuration_with_limits(
@@ -2368,9 +2381,11 @@ impl ProviderService {
     ) -> Result<ModelSelection, HostError> {
         self.check(cancel)?;
         let explicit_target = explicit.is_some();
-        let mut candidates = vec![];
+        let mut candidates = std::collections::VecDeque::new();
+        let mut providers = std::collections::VecDeque::new();
+        let mut after = None;
         if let Some(id) = explicit {
-            candidates.push(id);
+            candidates.push_back(id);
         } else {
             for scope in [cwd, None] {
                 if let Some(selection) = self.selection(scope, cancel).await? {
@@ -2395,9 +2410,51 @@ impl ProviderService {
                     }
                 }
             }
-            candidates = self.candidate_models(cancel).await?;
+            providers = self.candidate_provider_ids(None, cancel).await?.into();
         }
-        for target in candidates {
+        loop {
+            let target = if let Some(target) = candidates.pop_front() {
+                target
+            } else {
+                let Some(id) = providers.front().cloned() else {
+                    break;
+                };
+                self.adopt_provider(&id, cancel).await?;
+                let db = self.db.clone();
+                let bundled = self.bundled.clone();
+                let provider = id.clone();
+                let rows = self
+                    .owned(cancel, move |_| {
+                        Box::pin(async move {
+                            db.run_read(move |connection| {
+                                let tx = connection.transaction().map_err(storage)?;
+                                persistence::ordered_models(
+                                    &tx,
+                                    &bundled,
+                                    &provider,
+                                    after.as_ref(),
+                                    32,
+                                )
+                            })
+                            .await
+                            .map_err(failure)
+                        })
+                    })
+                    .await?;
+                after = None;
+                if rows.is_empty() {
+                    providers.pop_front();
+                    continue;
+                }
+                for row in rows {
+                    candidates.push_back(ModelId {
+                        provider_id: id.clone(),
+                        model_id: row.model_id.clone(),
+                    });
+                    after = Some(row);
+                }
+                continue;
+            };
             let id = target.provider_id;
             let model_id = target.model_id;
             let read = self
@@ -3264,7 +3321,7 @@ impl DynPlugin for ProviderPlugin {
                 deleted.forget_startup(&event.session_id);
                 async { Ok(None) }
             })?;
-            service.seed_bundled().await.map_err(|error| {
+            service.activate_source().await.map_err(|error| {
                 rutis::Error::from(ErrorKind::PluginFailed(error.to_string().into()))
             })?;
             let resolver = Arc::new(ProductResolver(service.clone()));
@@ -3317,4 +3374,31 @@ pub(crate) fn adopted_selection_preferences(
     metadata: Option<&dim_agent_types::RequestMetadata>,
 ) -> Option<ModelPreferences> {
     dim_agent_capabilities::host::adopted_preferences(config?, provider_protocol(metadata)?)
+}
+
+#[cfg(feature = "testing")]
+pub mod testing {
+    use super::*;
+
+    pub fn stored_provider(
+        connection: &rusqlite::Connection,
+        id: &str,
+    ) -> dim_agent_runtime::Result<Option<Value>> {
+        persistence::read(connection, id, persistence::Models::All)?
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(storage)
+    }
+
+    pub fn replace_provider(
+        connection: &rusqlite::Connection,
+        id: &str,
+        version: u32,
+        body: &str,
+    ) -> dim_agent_runtime::Result<()> {
+        connection
+            .execute("DELETE FROM provider_bases WHERE provider_id=?1", [id])
+            .map_err(storage)?;
+        persistence::write_pinned(connection, id, version, body)
+    }
 }

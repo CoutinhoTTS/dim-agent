@@ -41,7 +41,14 @@ Evaluation-tool tests are opt-in: `cargo test --locked -p xtask --features eval-
 
 ## Bundled provider catalog
 
-The App Server build compiles the checked-in `crates/dim-app-server/resources/default-catalog.json` into independently compressed provider/model records and static lookup keys. Runtime reads decode individual matching records.
+The App Server build compiles `crates/dim-app-server/resources/default-catalog.json`
+into one embedded offset image: provider headers/fingerprints, original model order,
+sorted matching/target/naming keys and independently compressed model payloads.
+Integer offsets avoid a pointer relocation per record. No runtime catalog index or
+decoded catalog is retained. Packaging remains a single executable on every target;
+no new release sidecar or linker section policy is required. Native source archives
+use the [v52 image contract](../design/appserver/native-storage-format.md#v52-sparse-provider-state).
+Runtime reads decode only selected payloads and necessary match candidates.
 It also serves as the starting catalog for maintenance. Use the Node version in `.node-version`.
 
 ```sh

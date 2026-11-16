@@ -26,7 +26,7 @@ use dim_app_server::protocol::SessionOrigin;
 use dim_app_server::storage::{
     NodeLoads, STORE_FORMAT, SqliteStorage, SqliteTimelineStore, vacuum_store,
 };
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use rutis::host::CtxHost;
 use std::{
     path::PathBuf,
@@ -462,12 +462,46 @@ const V51_ADDITIONS: &[&str] = &[
     "CREATE TRIGGER provider_models_update AFTER UPDATE ON providers BEGIN DELETE FROM provider_query_records WHERE provider_id=NEW.provider_id; INSERT INTO provider_query_records SELECT NEW.provider_id,coalesce(json_extract(record,'$.enabled'),0),json_extract(record,'$.kind'),coalesce(json_extract(record,'$.credential') IS NOT NULL OR json_extract(record,'$.auth.type')='anonymous' OR coalesce(json_extract(record,'$.credentialAuthority'),'static')!='static',0),json_remove(record,'$.models','$.userModels','$.modelConfigOverrides') FROM (SELECT CASE WHEN json_valid(NEW.record) THEN NEW.record ELSE '{}' END AS record); DELETE FROM provider_models WHERE provider_id=NEW.provider_id; INSERT OR IGNORE INTO provider_models SELECT NEW.provider_id,coalesce(json_extract(CASE WHEN type='object' THEN value ELSE '{}' END,'$.modelId'),json_extract(CASE WHEN type='object' THEN value ELSE '{}' END,'$.entry.modelId')),'default',value FROM json_each(CASE WHEN json_valid(NEW.record) THEN NEW.record ELSE '{}' END,'$.models') WHERE coalesce(json_extract(CASE WHEN type='object' THEN value ELSE '{}' END,'$.modelId'),json_extract(CASE WHEN type='object' THEN value ELSE '{}' END,'$.entry.modelId')) IS NOT NULL; INSERT OR IGNORE INTO provider_models SELECT NEW.provider_id,json_extract(CASE WHEN type='object' THEN value ELSE '{}' END,'$.modelId'),'user',value FROM json_each(CASE WHEN json_valid(NEW.record) THEN NEW.record ELSE '{}' END,'$.userModels') WHERE json_extract(CASE WHEN type='object' THEN value ELSE '{}' END,'$.modelId') IS NOT NULL; INSERT OR IGNORE INTO provider_models SELECT NEW.provider_id,json_extract(CASE WHEN type='object' THEN value ELSE '{}' END,'$.modelId'),'override',value FROM json_each(CASE WHEN json_valid(NEW.record) THEN NEW.record ELSE '{}' END,'$.modelConfigOverrides') WHERE json_extract(CASE WHEN type='object' THEN value ELSE '{}' END,'$.modelId') IS NOT NULL; END",
 ];
 
+const V52_ADDITIONS: &[&str] = &[
+    "CREATE TABLE provider_model_state (provider_id TEXT NOT NULL REFERENCES providers(provider_id) ON DELETE CASCADE, model_id TEXT NOT NULL, field TEXT NOT NULL, position INTEGER NOT NULL, value TEXT NOT NULL, PRIMARY KEY(provider_id,model_id,field))",
+    "CREATE TABLE provider_bundle (provider_id TEXT PRIMARY KEY, fingerprint TEXT, definition_fingerprint TEXT, pending INTEGER NOT NULL CHECK(pending IN (0,1)), attempted INTEGER NOT NULL, naming_revision TEXT NOT NULL)",
+    "CREATE TABLE provider_catalog_revision (id INTEGER PRIMARY KEY CHECK(id=1), revision TEXT NOT NULL, activation INTEGER NOT NULL)",
+    "CREATE TABLE provider_sources (revision TEXT NOT NULL UNIQUE, image BLOB NOT NULL)",
+    "CREATE TABLE provider_bases (provider_id TEXT PRIMARY KEY REFERENCES providers(provider_id) ON DELETE CASCADE, revision TEXT NOT NULL REFERENCES provider_sources(revision))",
+    "CREATE TABLE provider_models (provider_id TEXT NOT NULL REFERENCES providers(provider_id) ON DELETE CASCADE, model_id TEXT NOT NULL, source TEXT NOT NULL, position INTEGER NOT NULL, entry TEXT NOT NULL, PRIMARY KEY(provider_id,model_id,source))",
+    "CREATE INDEX provider_models_by_model ON provider_models(model_id,provider_id)",
+    "CREATE INDEX provider_models_by_position ON provider_models(provider_id,source,position)",
+    "CREATE TABLE provider_names (provider_id TEXT NOT NULL REFERENCES providers(provider_id) ON DELETE CASCADE, model_id TEXT NOT NULL, display_name TEXT NOT NULL, label TEXT, zdr INTEGER NOT NULL, PRIMARY KEY(provider_id,model_id))",
+    "CREATE TABLE provider_name_keys (provider_id TEXT NOT NULL, key TEXT NOT NULL, model_id TEXT NOT NULL, PRIMARY KEY(provider_id,key,model_id), FOREIGN KEY(provider_id,model_id) REFERENCES provider_names(provider_id,model_id) ON DELETE CASCADE)",
+];
+
 fn drop_v51(connection: &Connection) {
+    for table in [
+        "provider_model_state",
+        "provider_name_keys",
+        "provider_names",
+        "provider_bases",
+        "provider_sources",
+    ] {
+        connection
+            .execute_batch(&format!("DROP TABLE IF EXISTS {table}"))
+            .unwrap();
+    }
     for sql in V51_ADDITIONS.iter().rev() {
         let words: Vec<_> = sql.split_whitespace().collect();
-        connection
-            .execute_batch(&format!("DROP {} IF EXISTS {}", words[1], words[2]))
+        let kind: Option<String> = connection
+            .query_row(
+                "SELECT type FROM sqlite_master WHERE name=?1",
+                [words[2]],
+                |r| r.get(0),
+            )
+            .optional()
             .unwrap();
+        if let Some(kind) = kind {
+            connection
+                .execute_batch(&format!("DROP {kind} {}", words[2]))
+                .unwrap();
+        }
     }
 }
 
@@ -533,7 +567,8 @@ fn schema_of(version: u32) -> Vec<String> {
         .chain(V37_ADDITIONS.iter().filter(|_| version >= 37))
         .chain(V39_ADDITIONS.iter().filter(|_| version >= 39))
         .chain(V40_ADDITIONS.iter().filter(|_| version >= 40))
-        .chain(V51_ADDITIONS.iter().filter(|_| version >= 51))
+        .chain(V51_ADDITIONS.iter().filter(|_| version == 51))
+        .chain(V52_ADDITIONS.iter().filter(|_| version >= 52))
         .chain(["CREATE INDEX timeline_events_branch_interrupts ON timeline_events(session_id, branch_id, sequence) WHERE kind = 'stop/interrupt' AND json_extract(body, '$.record.event.data.scope') = 'branch'"].iter().filter(|_| version >= 47))
         .filter(|sql| version <= 24 || !sql.starts_with("CREATE INDEX timeline_events_by_end "))
         .map(|sql| sql.replace("(version = 13)", &format!("(version = {version})")))
@@ -7530,14 +7565,17 @@ async fn a_v25_provider_record_keeps_supplied_limits_and_drops_assumed_ones() {
     db.close().await.unwrap();
 
     let read = |id: &str| -> String {
-        Connection::open(&database.0)
-            .unwrap()
-            .query_row(
-                "SELECT record FROM providers WHERE provider_id=?1",
-                [id],
-                |row| row.get(0),
-            )
-            .unwrap()
+        let connection = Connection::open(&database.0).unwrap();
+        match dim_app_server::provider::testing::stored_provider(&connection, id) {
+            Ok(Some(value)) => value.to_string(),
+            _ => connection
+                .query_row(
+                    "SELECT record FROM providers WHERE provider_id=?1",
+                    [id],
+                    |r| r.get(0),
+                )
+                .unwrap(),
+        }
     };
     let connection = Connection::open(&database.0).unwrap();
     assert_eq!(schema(&connection), schema_of(STORE_FORMAT));
@@ -9079,7 +9117,8 @@ async fn v50_provider_projection_upgrade_preserves_records_and_tracks_atomic_wri
     let mut connection = Connection::open(&database.0).unwrap();
     drop_v51(&connection);
     connection.execute_batch("DROP TABLE agent_store_format; CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 50)); INSERT INTO agent_store_format VALUES (50)").unwrap();
-    let body = serde_json::json!({"kind":"custom","enabled":true,"credential":"fixture","models":[{"modelId":"base"}],"userModels":[{"modelId":"user"}],"modelConfigOverrides":[{"modelId":"base"}]}).to_string();
+    let model = |id| serde_json::json!({"modelId":id,"displayName":id,"status":"active","capabilities":{"modalities":["text"],"toolCalling":true,"streaming":true,"structuredOutput":false,"vision":false,"audio":false,"reasoning":false}});
+    let body = serde_json::json!({"kind":"custom","displayName":"Fixture","driverKind":"openai-compatible","baseUrl":"http://127.0.0.1:1/v1","auth":{"type":"anonymous"},"credential":null,"version":7,"enabled":true,"models":[model("base")],"userModels":[model("user")],"modelConfigOverrides":[model("base")],"disabledModelIds":[]}).to_string();
     connection
         .execute("INSERT INTO providers VALUES ('fixture',7,?1)", [&body])
         .unwrap();
@@ -9091,16 +9130,13 @@ async fn v50_provider_projection_upgrade_preserves_records_and_tracks_atomic_wri
     assert_eq!(storage.upgraded_from(), Some(50));
     storage.close().await.unwrap();
     connection = Connection::open(&database.0).unwrap();
-    assert_eq!(
-        connection
-            .query_row(
-                "SELECT record FROM providers WHERE provider_id='fixture'",
-                [],
-                |row| row.get::<_, String>(0)
-            )
-            .unwrap(),
-        body
-    );
+    let original: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let reconstructed = dim_app_server::provider::testing::stored_provider(&connection, "fixture")
+        .unwrap()
+        .unwrap();
+    for (key, value) in original.as_object().unwrap() {
+        assert_eq!(&reconstructed[key], value, "preserved {key}");
+    }
     assert_eq!(
         connection
             .query_row(
@@ -9111,7 +9147,16 @@ async fn v50_provider_projection_upgrade_preserves_records_and_tracks_atomic_wri
             .unwrap(),
         3
     );
-    assert_eq!(connection.query_row("SELECT json_type(record,'$.models') FROM provider_query_records WHERE provider_id='fixture'",[],|row| row.get::<_,Option<String>>(0)).unwrap(),None);
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT json_type(record,'$.models') FROM providers WHERE provider_id='fixture'",
+                [],
+                |row| row.get::<_, Option<String>>(0)
+            )
+            .unwrap(),
+        None
+    );
     let tx = connection.transaction().unwrap();
     tx.execute("UPDATE providers SET record=json_set(record,'$.models',json('[]')) WHERE provider_id='fixture'",[]).unwrap();
     tx.rollback().unwrap();
@@ -9138,7 +9183,7 @@ async fn v50_provider_projection_upgrade_preserves_records_and_tracks_atomic_wri
     assert_eq!(
         connection
             .query_row(
-                "SELECT count(*) FROM provider_query_records WHERE provider_id='fixture'",
+                "SELECT count(*) FROM providers WHERE provider_id='fixture'",
                 [],
                 |row| row.get::<_, u32>(0)
             )
@@ -9154,5 +9199,89 @@ async fn v50_provider_projection_upgrade_preserves_records_and_tracks_atomic_wri
             )
             .unwrap(),
         "{broken"
+    );
+}
+
+#[tokio::test]
+async fn v51_provider_history_migrates_atomically_without_guessing_the_bundle() {
+    let database = Database::new();
+    let connection = Connection::open(&database.0).unwrap();
+    let mut statements = schema_of(51);
+    statements.sort_by_key(|sql| !sql.starts_with("CREATE TABLE"));
+    for sql in statements {
+        connection.execute_batch(&sql).unwrap();
+    }
+    connection
+        .execute("INSERT INTO agent_store_format VALUES (51)", [])
+        .unwrap();
+    let model = |id| serde_json::json!({"modelId":id,"displayName":id,"status":"active","capabilities":{"modalities":["text"],"toolCalling":true,"streaming":true,"structuredOutput":false,"vision":false,"audio":false,"reasoning":false}});
+    let original = serde_json::json!({"kind":"builtin","displayName":"Admitted history","driverKind":"new-api-router","baseUrl":"http://127.0.0.1:1/v1","auth":{"type":"bearer"},"credential":{"secretRef":"fixture-reference"},"version":7,"enabled":false,"remoteModels":true,"models":[model("z"),model("a")],"userModels":[model("user")],"modelConfigOverrides":[model("a")],"disabledModelIds":["user","z"],"modelPreferences":{"a":{"reasoningEffort":"high"}},"modelAliases":{"a":"gpt-4o"},"gluedPrefix":"prefix","definitionFingerprint":"unrecoverable-old-base","headers":{"x-fixture":"fixture-header"},"endpointTypes":{"z":"openai"},"endpointOverrides":{"a":"openai-response"}});
+    connection
+        .execute(
+            "INSERT INTO providers VALUES ('history',7,?1)",
+            [original.to_string()],
+        )
+        .unwrap();
+    connection.execute("INSERT INTO provider_bundle VALUES ('history','available-source','proposed-definition',1)",[]).unwrap();
+    connection
+        .execute(
+            "INSERT INTO provider_catalog_revision VALUES (1,'available-source')",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO providers VALUES ('zz-invalid','not-a-version','{}')",
+            [],
+        )
+        .unwrap();
+    let before = schema(&connection);
+    let records = rows(&connection, "providers");
+    drop(connection);
+    assert!(SqliteStorage::open(database.0.clone()).is_err());
+    let connection = Connection::open(&database.0).unwrap();
+    assert_eq!(schema(&connection), before);
+    assert_eq!(rows(&connection, "providers"), records);
+    connection
+        .execute("DELETE FROM providers WHERE provider_id='zz-invalid'", [])
+        .unwrap();
+    drop(connection);
+    let storage = SqliteStorage::open(database.0.clone()).unwrap();
+    assert_eq!(storage.upgraded_from(), Some(51));
+    storage.close().await.unwrap();
+    let connection = Connection::open(&database.0).unwrap();
+    assert_eq!(schema(&connection), schema_of(STORE_FORMAT));
+    let reconstructed = dim_app_server::provider::testing::stored_provider(&connection, "history")
+        .unwrap()
+        .unwrap();
+    for (key, value) in original.as_object().unwrap() {
+        assert_eq!(&reconstructed[key], value, "preserved {key}");
+    }
+    assert_eq!(
+        connection
+            .query_row("SELECT count(*) FROM provider_bases", [], |r| r
+                .get::<_, u32>(0))
+            .unwrap(),
+        0,
+        "unknown history stays admitted rather than borrowing today's bundle"
+    );
+    assert!(
+        connection
+            .query_row(
+                "SELECT pending FROM provider_bundle WHERE provider_id='history'",
+                [],
+                |r| r.get::<_, bool>(0)
+            )
+            .unwrap()
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT json_type(record,'$.models') FROM providers WHERE provider_id='history'",
+                [],
+                |r| r.get::<_, Option<String>>(0)
+            )
+            .unwrap(),
+        None
     );
 }

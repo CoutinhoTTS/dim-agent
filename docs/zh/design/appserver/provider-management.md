@@ -114,8 +114,8 @@ Capability、通知流、目录副本、凭据服务或注册表。继续遵守
 列表错误沿用 `ProviderRecordError {providerId,message}`，健康项仍可使用。内置记录没有
 remoteModels 且存储 fingerprint 不同于 bundled 定义时，推导 reseed 诊断（§6），
 已准入条目和删除操作仍可用。有冲突时指出模型 ID；删除冲突项后，仍提示需重启，
-直到启动采用新定义。seed 和管理读取共用一个 Provider 自有候选构建函数，包含远程模型
-替换规则，避免候选不一致。不持久化另一份状态，也不禁用条目。
+直到下次激活允许访问时采用新定义。接纳和管理读取共用一个 Provider 自有候选构建函数，
+包含远程模型替换规则，避免候选不一致。pending 尝试归源接纳所有，不禁用条目。
 actions 只说明当前可用性，
 不是授权或后续写成功的承诺。模型来源由 §6 的独立持久列表推导；默认项消失后，其覆盖
 不能变成用户新增。
@@ -124,53 +124,37 @@ actions 只说明当前可用性，
 
 ### 启动、选择与内存
 
-Provider 根据持久状态查询。显式选择按 Provider ID 和模型 ID 点查；默认选择依次尝试
-工作区选择、全局选择，找到可用目标即返回。两者均不可用时，才查询已启用且已配置的
-候选项，按账号优先、Provider ID 排序。账号是否可用由账号拥有方判断，持久凭据和标志
-不能代表当前已登录。路由、能力和限额仍由执行条件决定。
-业务选择不使用分页游标。仅指定模型的启动按模型 ID 查询，优先采用有效 Provider；
-多个 Provider 均可用时拒绝歧义。输入优先级见[模型启动](../../../design/model-startup.md)。
+显式选择读取指定 Provider 和模型。默认选择先尝试工作区，再尝试全局保存的选择；
+第一个可用目标直接返回。只有两者均不可用时才查询启用且已配置的候选，继续遵守
+账号优先、Provider ID 排序和 owner 的实时账号可用性判断。仅给模型 ID 的启动
+按精确模型 ID 查询，优先有效 Provider，多个可用 Provider 时拒绝歧义。
 
-随程序发布的目录在构建时编译为独立可读的记录和查找键。激活时不展开完整目录，
-也不保留解析后的目录、识别结果或查询结果。模型识别只读取匹配的描述，遵守命名空间、
-别名、规范名称和歧义规则；目录查找数据在发布前构建。
+内置目录在构建时生成可独立读取的记录和识别键，运行时不展开或保留全量目录。
+激活只公布可用源代次，不展开 Provider。逐 Provider 接纳、退役和 pending 冲突
+遵循下文“索引源与稀疏接纳”合同。
 
-内置定义按目录修订号同步。修订号未变时，只读取修订号和待处理的 Provider ID。
-首次安装或修订号变化时逐项协调定义，保留连接设置、凭据、用户模型、覆盖字段和启用状态。
-更新冲突保留为待处理项，下次激活重试，即使目录修订号未变。修订号与成功的记录更新
-原子提交，提交后释放同步产生的 SQLite 临时页缓存。修订号未变且无待处理项时不写入。
-目录移除的内置项退出内置定义；升级不会重新启用用户已停用的 Provider。
+Web 与 CLI 模型选择器打开时查询、关闭时释放结果。已采用模型的能力读取携带
+Provider 和模型 ID，不枚举候选目录。具体选择、同步、保留量和峰值验证合同见
+[英文对应章节](../../../design/appserver/provider-management.md#startup-selection-and-memory)。
 
-展示列表使用有界分页和服务端搜索。打开会话只读取已采用的模型。Web 和 CLI 模型选择器
-打开时查询、关闭时释放结果，写入后只重读受影响的查询。Agent 和模态选择通过现有服务
-数据接口使用 Provider 拥有的可用性条件。
+### 模型显示查询
 
-空闲时只保留必要的 I/O 句柄和生命周期状态。验证分别报告常驻分配、临时峰值和随程序
-发布的只读目录字节数，不能用进程总 RSS 替代，也不能漏计保留的目录索引。展示和更新流程
-同样报告峰值，并限制单次请求接收的数据量。测量使用临时 home，覆盖重复激活和读取，
-确认结果释放后没有累计缓存。
+`provider.models.query` 是进程 `managementMethods` 的只读操作，请求为
+`{providerId?, modelId?, query?, after?, limit?}`。limit 默认 32，范围 1–128。
+query 匹配模型 ID、显示名和 Provider 名；`zdr` 也匹配账号 owner 声明的 ZDR 标志。
+after 和 next 是按序、排他的 `{providerId, modelId}` 游标，空模型 ID 表示没有模型行的
+启用 Provider；客户端原样传回游标，不把游标当作可选模型。
 
-### 模型展示查询
+回复为 `{models, empty, next}`。模型行含 providerId、providerName、model、version、
+preferences 和 disabled；停用或不可用模型仍可见，以供诊断。empty 项含 providerId、
+providerName 和 reason：`{kind:"no_models", listable}` 或 `{kind:"unreadable"}`。
+每页最多准入 limit 个模型或空 Provider 候选；错误页可能少于 limit 个模型。
+next 为 null 表示结束。非法 limit 返回 `provider_invalid_config`；取消和存储错误
+沿用 Provider 操作合同。查询不刷新远端目录，刷新是显式管理操作。
 
-`provider.models.query` 是进程 `managementMethods` 数据接口的只读操作，请求为
-`{providerId?, modelId?, query?, after?, limit?}`。`limit` 默认 32，范围 1–128。
-搜索匹配模型 ID、显示名或 Provider 名称；`zdr` 还匹配账号拥有方提供的 ZDR 标志。
-`after` 与回复中的 `next` 都是按 `{providerId, modelId}` 排序的排他游标：下一页从该位置
-之后开始。游标表示遍历位置，空模型 ID 表示已启用但没有模型行的 Provider。
-客户端原样传回游标。
-
-回复为 `{models, empty, next}`。每个模型行包含 `providerId`、`providerName`、
-`model`（发布的 `ProviderModel`）、`version`、`preferences` 和 `disabled`。
-停用及不可用的模型仍用于展示诊断。`empty` 项包含 `providerId`、`providerName` 和
-带标签的 `reason`：`{kind:"no_models", listable}` 或 `{kind:"unreadable"}`。
-每页最多访问 `limit` 个模型或空 Provider 候选项，因此有错误时实际模型数可以更少。
-`next:null` 表示遍历结束。点查前已删除的候选跳过，之后不可读的行在 `empty` 中报告；
-没有账号描述的空托管 Provider 也报告为不可读。无效的 limit 返回 `provider_invalid_config`；取消与存储错误
-遵循 Provider 操作合同。远程目录刷新由显式管理操作发起。
-
-已知目标的 `provider.catalog` 请求携带 `modelId`，回复保留原 catalog 外层结构，
-只包含该模型，并保留根据所属 Provider 命名字段计算的名字。CLI 打开会话、更换模型和
-采用失败诊断均使用此形式。
+`provider.catalog` 的可选 modelId 用于已知目标的能力读取；回复仍是同一个 catalog
+封装，但只含指定模型，并保留所属 Provider 的命名规则。完整字段和游标合同见
+[英文对应章节](../../../design/appserver/provider-management.md#model-display-queries)。
 
 ### 按需读取管理数据
 
@@ -181,12 +165,38 @@ Provider 根据持久状态查询。显式选择按 Provider ID 和模型 ID 点
 末页的 `next` 为 null，损坏记录占用页位置并进入 errors，翻页可以越过它。
 
 概要只包含身份、来源、凭据归属、版本、启用状态、账户、操作和安全连接信息，
-不包含 models 和 preferences 字段。Web 按需翻页，打开 Provider 后读取详情；
+不包含 models 和 preferences 字段。Web 按需翻页，连接配置使用摘要，打开 Models 后读取详情；
 CLI 列表逐页读取概要，指定账户或模型的操作携带相应 ID。
 
 Provider 按 ID 点查或按页读取，每次请求结束释放结果，不保留目录结果、seed 记录
-映射或模型投影缓存。一个模型的详情以所属 Provider 的持久记录为读取和版本检查单位，
-保留目录命名所需的同记录信息。接口、所有权和流程见[英文对应章节](../../../design/appserver/provider-management.md#on-demand-management-reads)。
+映射或模型投影缓存。版本检查仍以 Provider 为单位；模型详情在同一本地快照内
+读取头部、目标载荷和状态以及索引定位的命名依赖，不展开其他模型载荷。接口、所有权和流程见[英文对应章节](../../../design/appserver/provider-management.md#on-demand-management-reads)。
+
+### 索引源与稀疏接纳
+
+使用构建期不可变偏移目录，包含 Provider 声明指纹、有序目标键、命名/匹配输入和
+可单独读取的模型载荷。名称复用同一业务规则，包含有效名称补全、Unicode 空白、
+覆盖与冲突依赖分量；不缓存发布名称。冲突分量可能覆盖整个 Provider，任意子串
+查询也可能需要检查较多索引候选，不能宣称所有查找均为常数工作量。
+
+连接配置通过现有 `provider.management.list` 读取摘要，通过 `provider.update` 的
+`reply:"summary"` 接收已提交版本与安全摘要；未指定 `reply` 时仍返回完整快照。
+CLI/Web 的普通连接配置不展开模型，Web 在打开 Models 标签时才读取完整编辑快照。
+
+```text
+Provider 列表 -> 连接配置 -> 保存（摘要与提交版本）
+                   |
+                   +-> Models -> 完整模型编辑快照
+```
+
+原生 v52 将模型级禁用、偏好、别名和路由按模型键保存，保留原有顺序及凭据引用。
+可用目录代次与每个 Provider 已接纳的基线分开：启动不解码或插入内置模型；
+访问时按 Provider 原子接纳变化，冲突保留旧基线，在下次启动后访问时重试。
+源代次变化时，只重建持久化可变行的有效命名输入，并读取其覆盖或别名所需的基线目标；
+不展开无关默认项，派生更新不改变版本或模型载荷。
+迁移逐 Provider 保留不可重建的历史，归档源随备份恢复。协议细节由
+[英文所有者契约](../../../design/appserver/provider-management.md#indexed-source-and-sparse-adoption)与
+[原生格式契约](../../../design/appserver/native-storage-format.md#v52-sparse-provider-state)定义。
 
 ### 3.2 写入与字段操作
 
@@ -870,7 +880,9 @@ Settings 一起另行决定，不作为本方案前置。
 
 ## 6. 持久化、已运行 Session 与迁移
 
-**格式决定：保持 v19 和现有 SQL schema。** 只增加以下可选顶层字段，缺失表示无对应用户数据：
+[v19 决定](../../../design/appserver/native-storage-format.md#329-格式决定)引入的以下逻辑字段
+承载用户配置，缺失表示无对应用户数据；原生表示现遵循
+[v52](../../../design/appserver/native-storage-format.md#v52-sparse-provider-state)。
 
 | 结构 / JSON 字段 | 值与用途 |
 | --- | --- |
@@ -891,22 +903,18 @@ Settings 一起另行决定，不作为本方案前置。
 列举新端点的 update 遵循同一规则：失败，点名冲突的用户模型，不写入任何内容。
 解决时通过 `provider.models.delete` 显式删除冲突的用户模型，再重试 refresh 或该 update。
 
-bundled reseed 遇到这种冲突不能导致 seed 或 Provider 激活失败。fingerprint 改变后的实际
-替换候选若与用户模型冲突，保留该记录已准入的定义、fingerprint 和 version，继续在既有
-事务中处理其他记录；remoteModels 为真的记录继续保留其远程默认列表。§3.1 沿既有逐项
-错误列表提示冲突，Provider 和 models.delete 保持可用。显式删除冲突用户模型后，下次
-启动采用新 bundled 定义。其他校验错误沿用原失败行为。替代用户模型的 ID 须与新 bundled
-默认列表中的 ID 不同；不自动
-改名/覆盖、不持久化警告，也不新增迁移服务。
+源接纳遵循 §3.1 的索引源合同。冲突沿既有逐项错误提示，保留已准入基线。
+[v52 原生格式](../../../design/appserver/native-storage-format.md#v52-sparse-provider-state)
+替代 v51 的全量投影存储，不重新解释已提交的旧格式。
 
 两项模型上限另有自己的格式决定：[#522 格式决定](../../../design/appserver/native-storage-format.md#522-v26-格式决定)
 把未声明的上限变为缺省键（上一格式的读取器两种取值都解不了），并在启动事务内原地升级既有记录，
 而不是沿用版本号。该决定写明本次改动引入的格式版本、启动事务执行的改写，以及旧二进制的启动拒绝；
 §3.5 说明有效目录随后如何按来源补齐声明值。
 
-旧 v19 能读取新记录，但重写会丢新增顶层字段，包含 fingerprint 变化触发的自动 seed_bundled，
-不只用户主动编辑。明确接受该降级损失。一次性数据库验收须用旧 v19 代码读取并实际重写新记录。
-不增加存储 owner 门禁、删除历史或格式号；未知数据库格式仍按原规则拒绝并保留字节。
+v19 的历史决定接受旧 v19 二进制重写时丢失当时新增顶层字段，包括自动
+seed_bundled 重写。这不允许旧 daemon 打开 v52 存储。未知数据库格式仍按原规则
+拒绝并保留字节。
 
 | 改动 | 对已采用 Session 的影响 |
 | --- | --- |
@@ -981,7 +989,7 @@ provider_selections 同样共用一次转换：工作区作用域是已存在目
 | 已存选择 | 对同一条已准入静态记录和捆绑目录，`stored_selection` 接受的模型 ID 与 `select`/`configuration` 完全一致，并返回相同协议和已采用能力；固定 driver 以及 New API 显式、推断、不支持、歧义路由；缺失、禁用、不可用、非文本、禁用 Provider、缺凭据和未声明上限的模型均被拒绝；`account_owned` 记录被拒绝；mock 端点未收到请求；Migration 的 provider/选择流程和 `provider.import_legacy` 经共享合同给出相同结果 |
 | 账号 | 既有登录/登出/用量；托管目录同账号 refresh 保留偏好、descriptor 覆盖和禁用项，换账号则一起清空；方法已公布但包缺实现的实际错误；Usage 不变，无静态用量配置 |
 | 并发/恢复 | 新旧写方法双客户端类型化冲突；丢 create 回复按规范 UUID 恢复；拒绝非规范 create ID，其他方法仍支持已有非 UUID ID；重复 create 冲突；坏条目/草稿保留 |
-| 存储/导入 | 旧 v19 读取并重写新记录含 reseed；bundled 升级与内置 Provider 的用户新增模型冲突时 Provider 激活，该记录/定义/fingerprint/version 不变，其他记录更新，管理返回冲突；显式删除后保留需重启提示，启动再采用新定义；删除禁用用户模型时清理遗留禁用项，新内置项为启用状态；用已消失默认模型的 ID 新建用户模型时，新项启用且不继承原默认项的 descriptor 覆盖、偏好或端点覆盖；有效/非法/重复导入及源保留，均用一次性数据库 |
+| 存储/导入 | 旧 v19 读取并重写新记录含 reseed；bundled 升级与内置 Provider 的用户新增模型冲突时 Provider 激活，该记录/定义/fingerprint/version 不变，独立接纳的其他记录更新，管理返回冲突；显式删除后保留需重启提示，下次激活后访问再采用新定义；删除禁用用户模型时清理遗留禁用项，新内置项为启用状态；用已消失默认模型的 ID 新建用户模型时，新项启用且不继承原默认项的 descriptor 覆盖、偏好或端点覆盖；有效/非法/重复导入及源保留，均用一次性数据库 |
 | 客户端 | 实际源码 App Server 和 Desktop/CLI：草稿→probe→创建→选模型→调用→修改→调用→重启→断开/删除，不只 fake daemon |
 
 Provider、transport、托管账号与源码构建的原生 CLI 流程使用隔离 home 和真实 HTTP 请求
@@ -1034,3 +1042,8 @@ identity、保留秘密的局部写和未保存网络探测；Disconnect 复用 
 公开形状；返回整个目录或客户端 DTO 会暴露更多，且仍需同一判断。Migration 侧不增加谓词或
 目录构建，选择转换调用本合同，而不是保留一份只服务旧格式的私有判断。
 不需要通知、跨删除版本服务、模板实体、凭据抽象或第二份客户端配置。
+
+稀疏表示不需要重复头部投影、模型重写触发器、驻留解码目录或第二解析器。
+源归档让已接纳基线无需旧二进制即可读取；按键保存的可变行独立保留用户状态。
+命名依赖索引保存既有冲突规则所需的输入，不另存发布名称。摘要回复复用既有管理数据面
+与版本合同。这些结构承担必要的持久化和读取边界，无需额外层次。

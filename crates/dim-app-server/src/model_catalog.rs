@@ -1,6 +1,7 @@
 //! Pure model descriptor projection owned by the provider service.
 
 mod id;
+pub(crate) mod name_inputs;
 mod tokens;
 
 use self::id::{Lookup, variants};
@@ -14,31 +15,16 @@ pub use dim_agent_types::{
     ReasoningOff,
 };
 
-struct CatalogData {
-    providers: &'static [ProviderData],
-    models: &'static [ModelData],
-}
-
-struct ProviderData {
-    fingerprint: &'static str,
-    id: &'static str,
-    first: usize,
-    end: usize,
-    bytes: &'static [u8],
-}
-
-struct ModelData {
-    provider: usize,
-    id: &'static str,
-    index: Option<id::Index>,
-    tokens: &'static [&'static str],
-    tag: Option<&'static str>,
-    canonical: Option<&'static [&'static str]>,
-    display: &'static [&'static str],
-    bytes: &'static [u8],
-}
+pub(crate) mod source;
+use source::CatalogData;
 
 include!(concat!(env!("OUT_DIR"), "/catalog.rs"));
+
+fn bundled_model(bytes: &[u8]) -> ModelEntry {
+    #[cfg(feature = "testing")]
+    crate::provider::read_work::update(|work| work.source_payloads += 1);
+    bundled_record(bytes)
+}
 
 fn bundled_record<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> T {
     serde_json::from_reader(flate2::read::GzDecoder::new(bytes))
@@ -225,6 +211,8 @@ pub struct ProviderProjection {
     /// added.
     pub source: Option<ModelSource>,
     pub models: Vec<ModelEntry>,
+    /// The models are the owner's admitted defaults and user rows, including a pinned old base.
+    pub admitted_defaults: bool,
     pub context_window_override: Option<u64>,
     /// The prefix this provider's listed ids carry, stripped once before an id
     /// is broken into the tokens the steps compare.
@@ -416,11 +404,15 @@ impl BundledCatalog {
     }
 
     pub(crate) fn fingerprint(&self, id: &str) -> Option<&'static str> {
-        self.data?
-            .providers
-            .iter()
-            .find(|p| p.id == id)
-            .map(|p| p.fingerprint)
+        self.data?.provider_named(id).map(|p| p.fingerprint)
+    }
+
+    pub(crate) fn image(&self) -> &'static [u8] {
+        DATA.bytes
+    }
+
+    pub(crate) fn source(&self) -> &CatalogData {
+        &DATA
     }
 
     pub(crate) fn revision(&self) -> &'static str {
@@ -430,17 +422,17 @@ impl BundledCatalog {
     pub fn provider_ids(&self) -> impl Iterator<Item = &str> {
         self.data
             .into_iter()
-            .flat_map(|data| data.providers.iter().map(|p| p.id))
+            .flat_map(|data| data.providers().map(|p| p.id))
             .chain(self.providers.iter().map(|p| p.provider_id.as_str()))
     }
 
     pub fn model(&self, provider_id: &str, model_id: &str) -> Option<ModelEntry> {
         if let Some(data) = self.data {
-            let provider = data.providers.iter().find(|p| p.id == provider_id)?;
-            let row = data.models[provider.first..provider.end]
-                .iter()
-                .find(|row| row.id == model_id)?;
-            let mut entry: ModelEntry = bundled_record(row.bytes);
+            let row = data.model(
+                data.matching(&format!("t\0{provider_id}\0{model_id}"))
+                    .next()?,
+            );
+            let mut entry: ModelEntry = bundled_model(row.bytes);
             drop_undeclared_limits(&mut entry);
             Some(entry)
         } else {
@@ -454,12 +446,12 @@ impl BundledCatalog {
 
     pub fn bundled_models(&self, provider_id: &str) -> Option<Vec<ModelEntry>> {
         if let Some(data) = self.data {
-            let provider = data.providers.iter().find(|p| p.id == provider_id)?;
+            let provider = data.provider_named(provider_id)?;
             Some(
-                data.models[provider.first..provider.end]
-                    .iter()
+                (provider.first..provider.end)
+                    .map(|i| data.model(i))
                     .map(|row| {
-                        let mut entry: ModelEntry = bundled_record(row.bytes);
+                        let mut entry: ModelEntry = bundled_model(row.bytes);
                         drop_undeclared_limits(&mut entry);
                         entry
                     })
@@ -488,9 +480,7 @@ impl BundledCatalog {
     /// Provider settings without model descriptors.
     pub(crate) fn provider_header(&self, provider_id: &str) -> Option<CatalogProvider> {
         if let Some(data) = self.data {
-            Some(bundled_record(
-                data.providers.iter().find(|p| p.id == provider_id)?.bytes,
-            ))
+            Some(bundled_record(data.provider_named(provider_id)?.bytes))
         } else {
             let mut provider = self.providers[*self.by_provider.get(provider_id)?].clone();
             provider.models.clear();
@@ -542,9 +532,9 @@ impl BundledCatalog {
             .map(|m| m.capability_override_fields.clone())
             .unwrap_or_default();
         let kind = entry_kind(&entry);
-        let lookup = self.lookup(provider, &id, kind.as_deref());
-        let identification = self.identify_record(provider, &id, kind.as_deref(), &explicit);
-        if let Some(found_lookup) = lookup {
+        let identified = self.identify(provider, &id, kind.as_deref());
+        let identification = Self::identification_record(&identified, &explicit);
+        if let Ok(Some(found_lookup)) = identified {
             let pid = found_lookup.provider_id.clone();
             let found = found_lookup.entry;
             let strategy = found_lookup.strategy;
@@ -596,28 +586,25 @@ impl BundledCatalog {
     /// the limits the entry states itself: a merge adopts one minimum per limit
     /// from a joining row, and a limit the entry declares is not one it
     /// adopted, even when the two values are equal.
-    fn identify_record(
-        &self,
-        provider: &ProviderProjection,
-        id: &str,
-        kind: Option<&str>,
+    fn identification_record(
+        identified: &Result<Option<Lookup>, Vec<id::Candidate>>,
         declared: &[String],
     ) -> Option<ModelIdentification> {
-        match self.identify(provider, id, kind) {
+        match identified {
             Ok(Some(found)) => Some(ModelIdentification {
                 rule: found.rule.into(),
                 narrowed_by_display_name: found.narrowed,
                 candidates: Vec::new(),
-                filled: adopted(found.suppliers, declared),
+                filled: adopted(found.suppliers.clone(), declared),
             }),
             Err(candidates) => Some(ModelIdentification {
                 rule: "ambiguous".into(),
                 narrowed_by_display_name: false,
                 candidates: candidates
-                    .into_iter()
+                    .iter()
                     .map(|candidate| CandidateId {
-                        provider_id: candidate.provider_id,
-                        model_id: candidate.model_id,
+                        provider_id: candidate.provider_id.clone(),
+                        model_id: candidate.model_id.clone(),
                     })
                     .collect(),
                 filled: Vec::new(),
@@ -739,14 +726,15 @@ impl BundledCatalog {
             .map(|metadata| metadata.capability_override_fields.clone())
             .unwrap_or_default();
         let kind = entry_kind(entry);
+        let identified = self.identify(provider, &entry.model_id, kind.as_deref());
         entry.metadata.get_or_insert_default().identification =
-            self.identify_record(provider, &entry.model_id, kind.as_deref(), &marked);
+            Self::identification_record(&identified, &marked);
         let needs = [
             !marked.iter().any(|name| name == "contextWindow"),
             !marked.iter().any(|name| name == "maxOutputTokens"),
         ];
-        let filled = match self.lookup(provider, &entry.model_id, kind.as_deref()) {
-            Some(found) => {
+        let filled = match identified {
+            Ok(Some(found)) => {
                 let metadata = entry.metadata.get_or_insert_default();
                 metadata.matched_provider_id = Some(found.provider_id.clone());
                 metadata.matched_model_id = Some(found.entry.model_id.clone());
@@ -754,7 +742,7 @@ impl BundledCatalog {
                 metadata.match_score = Some(found.score);
                 Self::fill_from(&found, entry, needs)
             }
-            None => {
+            _ => {
                 let metadata = entry.metadata.get_or_insert_default();
                 metadata.matched_provider_id = None;
                 metadata.matched_model_id = None;
@@ -777,17 +765,16 @@ impl BundledCatalog {
             .map(|model| {
                 let mut model = model.clone();
                 let kind = entry_kind(&model);
-                let identification = self.identify_record(
-                    provider,
-                    &model.model_id,
-                    kind.as_deref(),
+                let identified = self.identify(provider, &model.model_id, kind.as_deref());
+                let identification = Self::identification_record(
+                    &identified,
                     model
                         .metadata
                         .as_ref()
                         .map(|metadata| metadata.capability_override_fields.as_slice())
                         .unwrap_or_default(),
                 );
-                if let Some(found) = self.lookup(provider, &model.model_id, kind.as_deref()) {
+                if let Ok(Some(found)) = identified {
                     let provider_id = found.provider_id.clone();
                     let strategy = found.strategy.clone();
                     let score = found.score;

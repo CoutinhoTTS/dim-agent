@@ -20,6 +20,7 @@ export type ManagementInfo = {
   account?: { namespace: string; loginMethods: string[]; state: AccountState }
   connection: { driverKind: string; auth: StaticAuth; baseUrl: string; credentialConfigured: boolean; headerNames: string[]; proxyUrl: string | null; proxyAuthConfigured: boolean; timeoutMs: number | null; gluedPrefix?: string } | null
 }
+export type ManagementUpdateSummary = ManagementInfo & { modelsListed?: "listed" | "bundled" | "unsupported" | "disabled" }
 export type ManagementProvider = ManagementInfo & {
   models: ManagementModel[] | null
   preferences: Record<string, { reasoningEffort?: string; serviceTier?: string }>
@@ -110,6 +111,12 @@ export function readManagementInfo(value: unknown): ManagementInfo {
       return { driverKind: string(c.driverKind), auth: { type: string(auth.type), headerName: optional(auth.headerName, string), prefix: optional(auth.prefix, string) }, baseUrl: string(c.baseUrl), credentialConfigured: boolean(c.credentialConfigured), headerNames: list(c.headerNames, string), proxyUrl: c.proxyUrl === null ? null : string(c.proxyUrl), proxyAuthConfigured: boolean(c.proxyAuthConfigured), timeoutMs: c.timeoutMs === null ? null : number(c.timeoutMs), gluedPrefix: optional(c.gluedPrefix, string) }
     })(),
   }
+}
+export function readManagementUpdateSummary(value: unknown): ManagementUpdateSummary {
+  const v = object(value)
+  const modelsListed = optional(v.modelsListed, string)
+  if (modelsListed !== undefined && modelsListed !== "listed" && modelsListed !== "bundled" && modelsListed !== "unsupported" && modelsListed !== "disabled") throw new ProtocolError("Invalid provider listing result")
+  return { ...readManagementInfo(v), modelsListed }
 }
 export function readManagementProvider(value: unknown): ManagementProvider {
   const v = object(value), preferences = object(v.preferences)

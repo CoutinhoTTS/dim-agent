@@ -22,8 +22,7 @@ use dim_app_server::{
     provider::{
         ConnectionInput, CreateProvider, CredentialUpdate, LegacyRow, ModelPreferences,
         ProviderCatalog, ProviderError, ProviderModel, ProviderPlugin, ProviderService, StaticAuth,
-        StaticProviderRecord, StoredSelectionError, convert_legacy_provider, parse_static,
-        stored_selection,
+        StaticProviderRecord, StoredSelectionError, convert_legacy_provider, stored_selection,
     },
     storage::SqliteStoragePlugin,
 };
@@ -263,26 +262,34 @@ fn target(provider: &str) -> ModelId {
     }
 }
 
+fn provider_body(db: &rusqlite::Connection, id: &str) -> rusqlite::Result<String> {
+    dim_app_server::provider::testing::stored_provider(db, id)
+        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?
+        .map(|v| v.to_string())
+        .ok_or(rusqlite::Error::QueryReturnedNoRows)
+}
+
+fn provider_row(db: &rusqlite::Connection, id: &str) -> rusqlite::Result<(u32, String)> {
+    let body = provider_body(db, id)?;
+    let value: Value = serde_json::from_str(&body).unwrap();
+    Ok((value["version"].as_u64().unwrap() as u32, body))
+}
+
 fn stored_record(home: &Path, provider_id: &str) -> StaticProviderRecord {
     let db = rusqlite::Connection::open(home.join("native.sqlite")).unwrap();
-    let (version, body): (u32, String) = db
-        .query_row(
-            "SELECT version,record FROM providers WHERE provider_id=?1",
-            [provider_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .unwrap();
-    parse_static(provider_id, version, &body).unwrap()
+    dim_app_server::provider::read_stored_static(&db, provider_id)
+        .unwrap()
+        .unwrap()
 }
 
 /// One stored record's own JSON, for the fields the record owner keeps
 /// private to its module.
 fn stored_record_json(home: &Path, provider_id: &str) -> String {
     let db = rusqlite::Connection::open(home.join("native.sqlite")).unwrap();
-    db.query_row(
-        "SELECT record FROM providers WHERE provider_id=?1",
-        [provider_id],
-        |row| row.get(0),
+    serde_json::to_string(
+        &dim_app_server::provider::read_stored_static(&db, provider_id)
+            .unwrap()
+            .unwrap(),
     )
     .unwrap()
 }
@@ -291,13 +298,7 @@ fn stored_record_json(home: &Path, provider_id: &str) -> String {
 /// field is the record owner's, and the store is where the statement lives.
 fn stored_prefix(home: &Path, provider_id: &str) -> Option<String> {
     let db = rusqlite::Connection::open(home.join("native.sqlite")).unwrap();
-    let body: String = db
-        .query_row(
-            "SELECT record FROM providers WHERE provider_id=?1",
-            [provider_id],
-            |row| row.get(0),
-        )
-        .unwrap();
+    let body: String = provider_body(&db, provider_id).unwrap();
     let value: Value = serde_json::from_str(&body).unwrap();
     value["gluedPrefix"].as_str().map(str::to_owned)
 }
@@ -946,13 +947,7 @@ async fn external_secrets_are_request_local_and_follow_plugin_lifetime() {
         ["Bearer probe-resolved", "Bearer catalog-resolved"]
     );
     let db = rusqlite::Connection::open(home.join("native.sqlite")).unwrap();
-    let record: String = db
-        .query_row(
-            "SELECT record FROM providers WHERE provider_id=?1",
-            [EXTERNAL],
-            |r| r.get(0),
-        )
-        .unwrap();
+    let record: String = provider_body(&db, EXTERNAL).unwrap();
     assert_eq!(
         serde_json::from_str::<Value>(&record).unwrap()["credential"],
         json!({"secretRef":"opaque-account-key"})
@@ -2091,21 +2086,16 @@ async fn selectable_modality_models_carry_declared_operations_without_chat_rules
     // record then reads as unavailable, like one written before the
     // credential requirement existed.
     let database = rusqlite::Connection::open(home.join("native.sqlite")).unwrap();
-    let (version, body): (u32, String) = database
-        .query_row(
-            "SELECT version,record FROM providers WHERE provider_id=?1",
-            [NOCRED],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .unwrap();
+    let (version, body): (u32, String) = provider_row(&database, NOCRED).unwrap();
     let mut body: Value = serde_json::from_str(&body).unwrap();
     body["credential"] = Value::Null;
-    database
-        .execute(
-            "UPDATE providers SET version=?2,record=?3 WHERE provider_id=?1",
-            rusqlite::params![NOCRED, version, body.to_string()],
-        )
-        .unwrap();
+    dim_app_server::provider::testing::replace_provider(
+        &database,
+        NOCRED,
+        version,
+        &body.to_string(),
+    )
+    .unwrap();
 
     let modality = selectable
         .selectable_for_modality(cancel.clone())
@@ -3331,10 +3321,8 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
         db.execute_batch("DELETE FROM provider_catalog_revision; DELETE FROM provider_bundle")
             .unwrap();
         db.execute("UPDATE providers SET record=json_set(record,'$.definitionFingerprint','previous-bundle') WHERE provider_id='openai'", []).unwrap();
-        db.execute("UPDATE providers SET record=json_set(record,'$.modelPreferences',json(?1)) WHERE provider_id='openai'",
-            [json!({"gpt-5-nano":{"reasoningEffort":"high"}}).to_string()]).unwrap();
-        db.execute("UPDATE providers SET record=json_set(record,'$.modelPreferences',json(?1)) WHERE provider_id=?2",
-            [json!({"gone":{"reasoningEffort":"high"}}).to_string(), REMOTE.into()]).unwrap();
+        db.execute("INSERT INTO provider_model_state VALUES ('openai','gpt-5-nano','modelPreferences',0,?1)",[json!({"reasoningEffort":"high"}).to_string()]).unwrap();
+        db.execute("INSERT INTO provider_model_state VALUES (?1,'gone','modelPreferences',0,?2) ON CONFLICT(provider_id,model_id,field) DO UPDATE SET value=excluded.value",[REMOTE,json!({"reasoningEffort":"high"}).to_string().as_str()]).unwrap();
     }
     let root = Ctx::root().unwrap();
     root.plugin(
@@ -3401,13 +3389,7 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
         "stored preferences are not applied implicitly"
     );
     let db = rusqlite::Connection::open(home.join("native.sqlite")).unwrap();
-    let record: String = db
-        .query_row(
-            "SELECT record FROM providers WHERE provider_id='openai'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
+    let record: String = provider_body(&db, "openai").unwrap();
     let record: Value = serde_json::from_str(&record).unwrap();
     assert_eq!(
         record["modelPreferences"],
@@ -6440,13 +6422,7 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
         database
             .execute_batch("DELETE FROM provider_catalog_revision; DELETE FROM provider_bundle")
             .unwrap();
-        let body: String = database
-            .query_row(
-                "SELECT record FROM providers WHERE provider_id='openai'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
+        let body: String = provider_body(&database, "openai").unwrap();
         let mut old: Value = serde_json::from_str(&body).unwrap();
         old["displayName"] = json!("Old definition");
         old["definitionFingerprint"] = json!("old");
@@ -6456,22 +6432,23 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
         old["disabledModelIds"] = json!(["missing-model"]);
         old["modelConfigOverrides"] = json!([model("missing-model", 817)]);
         old["models"] = json!([]);
-        database
-            .execute(
-                "UPDATE providers SET record=?1 WHERE provider_id='openai'",
-                [old.to_string()],
-            )
-            .unwrap();
-        let custom: String = database
-            .query_row(
-                "SELECT record FROM providers WHERE provider_id=?1",
-                [PROVIDER_A],
-                |r| r.get(0),
-            )
-            .unwrap();
+        dim_app_server::provider::testing::replace_provider(
+            &database,
+            "openai",
+            old["version"].as_u64().unwrap() as u32,
+            &old.to_string(),
+        )
+        .unwrap();
+        let custom: String = provider_body(&database, PROVIDER_A).unwrap();
         let mut removed: Value = serde_json::from_str(&custom).unwrap();
         removed["kind"] = json!("builtin");
-        database.execute("INSERT INTO providers(provider_id,version,record) VALUES ('removed-builtin',?1,?2)", rusqlite::params![removed["version"].as_i64().unwrap(), removed.to_string()]).unwrap();
+        dim_app_server::provider::testing::replace_provider(
+            &database,
+            "removed-builtin",
+            removed["version"].as_u64().unwrap() as u32,
+            &removed.to_string(),
+        )
+        .unwrap();
         database
             .execute(
                 "INSERT INTO providers(provider_id,version,record) VALUES ('0-broken',1,'{broken')",
@@ -6480,17 +6457,11 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
             .unwrap();
         database
             .execute(
-                "UPDATE providers SET record='{broken' WHERE provider_id='anthropic'",
+                "INSERT INTO providers VALUES ('anthropic',1,'{broken') ON CONFLICT(provider_id) DO UPDATE SET record=excluded.record",
                 [],
             )
             .unwrap();
-        let body: String = database
-            .query_row(
-                "SELECT record FROM providers WHERE provider_id='deepseek'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
+        let body: String = provider_body(&database, "deepseek").unwrap();
         let mut collision: Value = serde_json::from_str(&body).unwrap();
         let model = collision["models"][0].clone();
         let id = model["modelId"].as_str().unwrap().to_owned();
@@ -6499,12 +6470,13 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
         collision["userModels"] = json!([model]);
         collision["disabledModelIds"] = json!([id]);
         collision["enabled"] = json!(false);
-        database
-            .execute(
-                "UPDATE providers SET record=?1 WHERE provider_id='deepseek'",
-                [collision.to_string()],
-            )
-            .unwrap();
+        dim_app_server::provider::testing::replace_provider(
+            &database,
+            "deepseek",
+            collision["version"].as_u64().unwrap() as u32,
+            &collision.to_string(),
+        )
+        .unwrap();
         (id, collision)
     };
     let isolated = Ctx::root().unwrap();
@@ -6529,6 +6501,24 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
     for id in ["0-broken", "anthropic"] {
         assert!(usable.catalog_for(id.into(), &cancel).await.is_err());
     }
+    assert_eq!(
+        usable
+            .list(&cancel)
+            .await
+            .unwrap()
+            .providers
+            .iter()
+            .find(|p| p.provider_id == "openai")
+            .unwrap()
+            .version,
+        1,
+        "activation leaves admitted providers unchanged until access"
+    );
+    usable.catalog_for("openai".into(), &cancel).await.unwrap();
+    usable
+        .catalog_for("removed-builtin".into(), &cancel)
+        .await
+        .unwrap();
     let listing = usable.list(&cancel).await.unwrap();
     assert!(
         listing
@@ -6606,13 +6596,7 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
     assert!(!candidate_models[0].enabled);
     {
         let database = rusqlite::Connection::open(home.join("native.sqlite")).unwrap();
-        let body: String = database
-            .query_row(
-                "SELECT record FROM providers WHERE provider_id='deepseek'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
+        let body: String = provider_body(&database, "deepseek").unwrap();
         assert_eq!(serde_json::from_str::<Value>(&body).unwrap(), collision.1);
     }
     let deleted = usable
@@ -6653,13 +6637,7 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
     isolated.shutdown().await.unwrap();
     {
         let database = rusqlite::Connection::open(home.join("native.sqlite")).unwrap();
-        let body: String = database
-            .query_row(
-                "SELECT record FROM providers WHERE provider_id='openai'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
+        let body: String = provider_body(&database, "openai").unwrap();
         let upgraded: Value = serde_json::from_str(&body).unwrap();
         assert_eq!(upgraded["credential"], "preserved-secret");
         assert_eq!(upgraded["headers"]["x-old"], "preserved-header");
@@ -6673,7 +6651,7 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
                     .query_row(
                         "SELECT record FROM providers WHERE provider_id=?1",
                         [id],
-                        |row| row.get::<_, String>(0)
+                        |r| r.get::<_, String>(0)
                     )
                     .unwrap(),
                 "{broken"
@@ -6998,16 +6976,7 @@ async fn legacy_import_declares_only_the_limits_the_source_does() {
     let cancel = CancellationToken::new();
     let stored = |id: &str| -> Value {
         let native = rusqlite::Connection::open(home.join("native.sqlite")).unwrap();
-        serde_json::from_str(
-            &native
-                .query_row(
-                    "SELECT record FROM providers WHERE provider_id=?1",
-                    [id],
-                    |row| row.get::<_, String>(0),
-                )
-                .unwrap(),
-        )
-        .unwrap()
+        serde_json::from_str(&provider_body(&native, id).unwrap()).unwrap()
     };
     let seeded = stored("openai");
     assert_eq!(seeded["version"], 1);
@@ -7399,18 +7368,8 @@ async fn legacy_import_applies_one_frozen_rule_to_omitted_fields_builtins_and_sc
             .all(|item| item.get("omitted").is_none())
     );
     let native = rusqlite::Connection::open(home.join("native.sqlite")).unwrap();
-    let record = |id: &str| -> Value {
-        serde_json::from_str(
-            &native
-                .query_row(
-                    "SELECT record FROM providers WHERE provider_id=?1",
-                    [id],
-                    |row| row.get::<_, String>(0),
-                )
-                .unwrap(),
-        )
-        .unwrap()
-    };
+    let record =
+        |id: &str| -> Value { serde_json::from_str(&provider_body(&native, id).unwrap()).unwrap() };
     let clean = record("legacy-clean");
     assert_eq!(clean["kind"], "custom");
     assert_eq!(clean["version"], 1);
@@ -7549,18 +7508,8 @@ async fn legacy_import_applies_one_frozen_rule_to_omitted_fields_builtins_and_sc
         active(plugin).await;
     }
     let native = rusqlite::Connection::open(home.join("native.sqlite")).unwrap();
-    let record = |id: &str| -> Value {
-        serde_json::from_str(
-            &native
-                .query_row(
-                    "SELECT record FROM providers WHERE provider_id=?1",
-                    [id],
-                    |row| row.get::<_, String>(0),
-                )
-                .unwrap(),
-        )
-        .unwrap()
-    };
+    let record =
+        |id: &str| -> Value { serde_json::from_str(&provider_body(&native, id).unwrap()).unwrap() };
     assert_eq!(record("anthropic"), imported_builtin);
     assert_eq!(record("deepseek")["version"], 1);
     restarted.shutdown().await.unwrap();
@@ -8127,18 +8076,8 @@ async fn legacy_import_keeps_the_builtin_seed_through_a_restart() {
         active(plugin).await;
     }
     let native = rusqlite::Connection::open(home.join("native.sqlite")).unwrap();
-    let record = |id: &str| -> Value {
-        serde_json::from_str(
-            &native
-                .query_row(
-                    "SELECT record FROM providers WHERE provider_id=?1",
-                    [id],
-                    |row| row.get::<_, String>(0),
-                )
-                .unwrap(),
-        )
-        .unwrap()
-    };
+    let record =
+        |id: &str| -> Value { serde_json::from_str(&provider_body(&native, id).unwrap()).unwrap() };
     // The store's own seed for each id, captured before the import replaces
     // it; `deepseek` is removed so the row has no target and goes through
     // `bundled_seed_for`.
@@ -8215,16 +8154,7 @@ async fn legacy_import_keeps_the_builtin_seed_through_a_restart() {
     }
     let native = rusqlite::Connection::open(home.join("native.sqlite")).unwrap();
     for (id, before) in imported {
-        let after: Value = serde_json::from_str(
-            &native
-                .query_row(
-                    "SELECT record FROM providers WHERE provider_id=?1",
-                    [id],
-                    |row| row.get::<_, String>(0),
-                )
-                .unwrap(),
-        )
-        .unwrap();
+        let after: Value = serde_json::from_str(&provider_body(&native, id).unwrap()).unwrap();
         assert_eq!(after, before, "{id}: the start rewrote the imported record");
     }
     drop(native);
@@ -8983,16 +8913,7 @@ async fn a_v25_seed_upgrades_to_the_fresh_bundle_record() {
     };
     let record = |id: &str| -> Value {
         let native = rusqlite::Connection::open(home.join("native.sqlite")).unwrap();
-        serde_json::from_str(
-            &native
-                .query_row(
-                    "SELECT record FROM providers WHERE provider_id=?1",
-                    [id],
-                    |row| row.get::<_, String>(0),
-                )
-                .unwrap(),
-        )
-        .unwrap()
+        serde_json::from_str(&provider_body(&native, id).unwrap()).unwrap()
     };
     let (root, plugins) = start(home.clone());
     for plugin in &plugins {
@@ -9031,17 +8952,18 @@ async fn a_v25_seed_upgrades_to_the_fresh_bundle_record() {
         v25["definitionFingerprint"] = json!("v25-bundle");
         native
             .execute(
-                "UPDATE providers SET record=?2 WHERE provider_id=?1",
+                "INSERT INTO providers VALUES (?1,1,?2) ON CONFLICT(provider_id) DO UPDATE SET record=excluded.record",
                 rusqlite::params!["openai", v25.to_string()],
             )
             .unwrap();
         native
             .execute_batch(
                 "PRAGMA foreign_keys=OFF;
-                 DROP TRIGGER provider_models_insert;
-                 DROP TRIGGER provider_models_update;
+                 DROP TABLE provider_model_state; DROP TABLE provider_name_keys;
+                 DROP TABLE provider_names;
+                 DROP TABLE provider_bases;
+                 DROP TABLE provider_sources;
                  DROP TABLE provider_models;
-                 DROP TABLE provider_query_records;
                  DROP TABLE provider_bundle;
                  DROP TABLE provider_catalog_revision;
                  CREATE TEMP TABLE agents_rows AS SELECT * FROM agents;
@@ -9089,6 +9011,16 @@ async fn a_v25_seed_upgrades_to_the_fresh_bundle_record() {
     for plugin in &plugins {
         active(plugin).await;
     }
+    assert_eq!(
+        record("openai")["version"],
+        1,
+        "migration preserves the admitted version"
+    );
+    root.get::<ProviderService>()
+        .unwrap()
+        .catalog_for("openai".into(), &CancellationToken::new())
+        .await
+        .unwrap();
     let upgraded = record("openai");
     assert_eq!(upgraded["version"], 2, "the reseed bumps the version once");
     assert_eq!(upgraded["models"], fresh["models"]);
@@ -10383,7 +10315,16 @@ async fn measure_on_demand_provider_reads() {
     let (root, provider) = provider_root(&home).await;
     let cancel = CancellationToken::new();
     let mut db = rusqlite::Connection::open(home.join("native.sqlite")).unwrap();
-    let records: Vec<(String, u32, String)> = db.prepare("SELECT provider_id,version,record FROM providers ORDER BY provider_id='deepseek' DESC,provider_id").unwrap().query_map([], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap().collect::<Result<_,_>>().unwrap();
+    let bundled = dim_app_server::model_catalog::BundledCatalog::load().unwrap();
+    let mut records: Vec<_> = bundled
+        .provider_ids()
+        .filter_map(|id| {
+            dim_app_server::provider::testing::stored_provider(&db, id)
+                .unwrap()
+                .map(|body| (id.to_owned(), 1, body.to_string()))
+        })
+        .collect();
+    records.sort_by_key(|(id, _, _)| (id != "deepseek", id.clone()));
     for count in [1, 32, 128] {
         let tx = db.transaction().unwrap();
         tx.execute("DELETE FROM providers", []).unwrap();
@@ -10394,11 +10335,7 @@ async fn measure_on_demand_provider_reads() {
             } else {
                 id.clone()
             };
-            tx.execute(
-                "INSERT INTO providers(provider_id,version,record) VALUES (?1,?2,?3)",
-                rusqlite::params![id, version, body],
-            )
-            .unwrap();
+            dim_app_server::provider::testing::replace_provider(&tx, &id, *version, body).unwrap();
         }
         tx.commit().unwrap();
         for mode in ["detail", "page"] {
@@ -10436,3 +10373,6 @@ async fn measure_on_demand_provider_reads() {
     root.shutdown().await.unwrap();
     std::fs::remove_dir_all(home).unwrap();
 }
+
+#[path = "provider_flow/indexed.rs"]
+mod indexed;

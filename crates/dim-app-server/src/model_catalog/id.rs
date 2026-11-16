@@ -506,6 +506,14 @@ impl BundledCatalog {
         if provider.source == Some(ModelSource::Custom) {
             return None;
         }
+        if provider.admitted_defaults {
+            return provider
+                .models
+                .iter()
+                .find(|model| model.model_id == id)
+                .cloned()
+                .map(|entry| (provider.provider_id.clone(), entry));
+        }
         // The bundled entry is the declaration for a builtin provider's model,
         // so the model the user added to it is read through the bundle when the
         // two name the same id.
@@ -538,11 +546,11 @@ impl BundledCatalog {
             .iter()
             .map(|&position| {
                 if let Some(data) = self.data {
-                    let row = &data.models[position];
-                    let mut entry: ModelEntry = bundled_record(row.bytes);
+                    let row = data.model(position);
+                    let mut entry: ModelEntry = bundled_model(row.bytes);
                     drop_undeclared_limits(&mut entry);
                     OwnedRow {
-                        provider_id: data.providers[row.provider].id.to_owned(),
+                        provider_id: data.provider(row.provider).id.to_owned(),
                         entry,
                         tokens: row.tokens.iter().map(|token| (*token).to_owned()).collect(),
                     }
@@ -563,10 +571,7 @@ impl BundledCatalog {
             return self.ids.qualified_rows(id).to_vec();
         };
         let id = id.trim();
-        data.models
-            .iter()
-            .enumerate()
-            .filter_map(|(i, row)| row.id.eq_ignore_ascii_case(id).then_some(i))
+        data.matching(&format!("q\0{}", id.to_ascii_lowercase()))
             .collect()
     }
 
@@ -577,15 +582,10 @@ impl BundledCatalog {
                 .token_rows(index, query)
                 .map(|(n, rows)| (n, rows.to_vec()));
         };
+        let index = if index == Index::Vendor { "v" } else { "c" };
         for longest in (1..=query.len()).rev() {
             let rows: Vec<_> = data
-                .models
-                .iter()
-                .enumerate()
-                .filter_map(|(i, row)| {
-                    (row.index == Some(index) && tokens_equal(row.tokens, &query[..longest]))
-                        .then_some(i)
-                })
+                .matching(&format!("{index}t\0{}", query[..longest].join("\0")))
                 .collect();
             if !rows.is_empty() {
                 return Some((longest, rows));
@@ -598,25 +598,30 @@ impl BundledCatalog {
         let Some(data) = self.data else {
             return self.ids.name_rows(index, query);
         };
-        let mut canonical = Vec::new();
-        let mut display = Vec::new();
-        for (i, row) in data
-            .models
-            .iter()
-            .enumerate()
-            .filter(|(_, row)| row.index == Some(index))
-        {
-            if row
-                .canonical
-                .is_some_and(|tokens| names_tokens(tokens, query))
-            {
-                canonical.push(i);
+        let index = if index == Index::Vendor { "v" } else { "c" };
+        let find = |kind| {
+            let mut rows = std::collections::BTreeSet::new();
+            for length in 1..=query.len() {
+                if !tail_allowed(&query[length..]) {
+                    continue;
+                }
+                for position in
+                    data.matching(&format!("{index}{kind}\0{}", query[..length].join("\0")))
+                {
+                    let row = data.model(position);
+                    let tokens = if kind == 'd' {
+                        row.display
+                    } else {
+                        row.canonical
+                    };
+                    if names_tokens(&tokens, query) {
+                        rows.insert(position);
+                    }
+                }
             }
-            if names_tokens(row.display, query) {
-                display.push(i);
-            }
-        }
-        (canonical, display)
+            rows.into_iter().collect()
+        };
+        (find('n'), find('d'))
     }
 
     /// Steps 2 and 4: a row whose own tokens are the input's head, with the
@@ -1018,13 +1023,16 @@ impl BundledCatalog {
     fn merge_rows(&self, id: &str, query: &Query, kind: Option<&str>) -> Outcome {
         let input_tag = id.rsplit_once(':').map(|(_, tag)| tag.to_lowercase());
         let positions: Vec<_> = if let Some(data) = self.data {
-            data.models
-                .iter()
-                .enumerate()
-                .filter_map(|(i, row)| {
-                    same_model_with_tag(row.tokens, row.tag, &query.tokens, input_tag.as_deref())
-                        .then_some(i)
+            (1..=query.tokens.len())
+                .flat_map(|length| {
+                    data.matching(&format!("a\0{}", query.tokens[..length].join("\0")))
                 })
+                .filter(|&i| {
+                    let row = data.model(i);
+                    same_model_with_tag(&row.tokens, row.tag, &query.tokens, input_tag.as_deref())
+                })
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
                 .collect()
         } else {
             self.ids

@@ -9,7 +9,9 @@ use dim_agent_runtime::Names;
 use dim_app_server::{
     managed_provider::ManagedProvidersPlugin,
     model_catalog::BundledCatalog,
-    provider::{ProviderPlugin, ProviderService},
+    provider::{
+        ManagementPageRequest, ProviderPlugin, ProviderService, UpdateReplyKind, read_work,
+    },
     storage::SqliteStoragePlugin,
 };
 use rutis::Ctx;
@@ -75,8 +77,22 @@ async fn provider_activation_and_target_reads_release_their_catalogs() {
         let sqlite_before = unsafe { rusqlite::ffi::sqlite3_memory_used() };
         unsafe { rusqlite::ffi::sqlite3_memory_highwater(1) };
         allocation::reset_peak_now();
+        let decoded_before = read_work::source_payloads();
         let provider = root.plugin(ProviderPlugin::new(&names).unwrap());
         active(&provider).await;
+        assert_eq!(
+            read_work::source_payloads(),
+            decoded_before,
+            "activation decoded builtin model payloads"
+        );
+        let db = rusqlite::Connection::open(home.join("native.sqlite")).unwrap();
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM provider_models", [], |r| r
+                .get::<_, u32>(0))
+                .unwrap(),
+            0
+        );
+        drop(db);
         let retained = allocation::live().saturating_sub(before);
         let peak = allocation::peak().saturating_sub(before);
         let sqlite_retained = unsafe { rusqlite::ffi::sqlite3_memory_used() } - sqlite_before;
@@ -89,11 +105,23 @@ async fn provider_activation_and_target_reads_release_their_catalogs() {
         let cancel = CancellationToken::new();
         if phase == "first-install" {
             let record = service
-                .management("deepseek".into(), None, &cancel)
+                .management_page(
+                    ManagementPageRequest {
+                        provider_id: Some("deepseek".into()),
+                        ..Default::default()
+                    },
+                    &cancel,
+                )
                 .await
                 .unwrap();
-            service.update("deepseek".into(), record.providers[0].info.version.unwrap(),
-                serde_json::from_value(serde_json::json!({"enabled":true,"credential":{"action":"set","value":"measurement-fixture"}})).unwrap(), &cancel).await.unwrap();
+            let before_update = read_work::source_payloads();
+            service.update_reply("deepseek".into(), record.providers[0].version.unwrap(),
+                serde_json::from_value(serde_json::json!({"enabled":true,"credential":{"action":"set","value":"measurement-fixture"}})).unwrap(), UpdateReplyKind::Summary,&cancel).await.unwrap();
+            assert_eq!(
+                read_work::source_payloads(),
+                before_update,
+                "summary configuration decoded builtin model payloads"
+            );
             service
                 .select(
                     None,
@@ -144,6 +172,32 @@ async fn provider_activation_and_target_reads_release_their_catalogs() {
             allocation::live().saturating_sub(before_read) < 64 * 1024,
             "completed management results accumulated"
         );
+        if phase == "restart" {
+            let summary = service
+                .management_page(
+                    ManagementPageRequest {
+                        provider_id: Some("deepseek".into()),
+                        ..Default::default()
+                    },
+                    &cancel,
+                )
+                .await
+                .unwrap();
+            let before_delete = read_work::source_payloads();
+            service
+                .delete_static(
+                    "deepseek".into(),
+                    summary.providers[0].version.unwrap(),
+                    &cancel,
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                read_work::source_payloads(),
+                before_delete,
+                "disabling a builtin decoded unchanged models"
+            );
+        }
         drop(service);
         provider.dispose().await.unwrap();
         root.shutdown().await.unwrap();
