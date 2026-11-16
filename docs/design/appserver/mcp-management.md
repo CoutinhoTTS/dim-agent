@@ -1358,6 +1358,8 @@ business configuration, not an event.
 | `McpAuth` ([MCP OAuth](mcp-oauth.md)) | The `mcp.auth.*` methods of the same namespace; the credential record is untouched by a move |
 | `credentialVariablesHost` (capabilities host, D19) | The names of the environment variables the daemon reads credentials from; `McpPublication` and `McpPlugin` declare it, and the assembly root in `serve` provides it |
 
+The MCP publication coordinator is private typed wiring within the MCP owner. Its command queue, connection generations and application watch have no public catalog name; the existing management methods and `mcpSession` expose the owner operations. The explicit private dependency still orders assembly and shutdown.
+
 ## 9. Cross-module requirements
 
 One requirement is raised to the capabilities host: the `CredentialVariablesHost` port with its

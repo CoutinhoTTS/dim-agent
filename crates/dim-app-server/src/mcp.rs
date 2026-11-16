@@ -13,7 +13,6 @@ pub use import::testing as import_testing;
 pub mod server;
 mod session;
 mod temporary;
-pub(crate) use publication::Publication;
 pub use publication::{McpApplication, McpOwner, McpPublication};
 pub use session::{
     McpAppCallResult, McpAppError, McpSession, McpSessionPlugin, McpSessionState, McpSourceState,
@@ -1785,7 +1784,7 @@ impl McpPlugin {
         Ok(Self {
             home_root,
             settings: names.key()?,
-            publication: names.key()?,
+            publication: Key::of(),
             files: names.key()?,
             methods: names.key()?,
             parts: names.key()?,
