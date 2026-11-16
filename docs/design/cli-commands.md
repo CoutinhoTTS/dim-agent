@@ -177,7 +177,8 @@ Session's catalog: the client rereads it on attach, on a Session switch, after
 `/reload-skills`, and after a change in `/skills`. A daemon that does not serve
 `skills.catalog` shows the commands alone, without an error. Choosing a Skill row,
 with `Enter` or `Tab`, fills `/skill:<name> ` and never sends; the token is part
-of the message text and the draft draws it as one highlighted unit. Typing `/skill:`
+of the message text and the draft draws it as one highlighted unit, reading the
+Skill's name. Typing `/skill:`
 narrows the menu to Skills: the query after the `skill:` namespace matches Skill
 names only. A draft that begins with `/skill:` is sent as a message and never run as
 a command, and a token may stand mid-sentence as long as it starts the message or
@@ -185,6 +186,27 @@ follows whitespace. Skills come after commands; a Skill leads only when its name
 starts with the query and no command name or alias does, so a name shared with a
 command keeps both rows, the command first. `/` is the only trigger: `@` stays the
 file picker.
+
+The draft draws a reference the palette filled by the Skill's name, so a chosen
+`status` reads `/status` and not the parser's `/skill:status`:
+
+```text
+› /stat|                 › /status |
+  ├─ /skill:status       ├─ a filled /skill:status
+  └─ /skill:staged       └─ drawn by its name, sent as /skill:status
+```
+
+Only a filled reference is a named unit; text the operator typed is drawn as typed,
+so no character of the operator's own words ever reads as something else and a
+half-typed or malformed reference stays visible. The draft's text is still
+`/skill:<name> `: that is what it submits, what the input history keeps and what a
+selection copies, so a Skill loads from the same message either way and pasting a
+copied reference back loads the same Skill. The cursor steps over the reference as
+one unit, a delete takes it whole, and the input wraps by the name it draws. A Skill
+whose name is also a command the input dispatches keeps the canonical token
+(`/skill:models`, not `/models`), because the plain name would read as that command
+while the draft is still a message. The menu's rows read `/skill:<name>` in both
+modes: a row states the token it fills, and the draft states what is sent.
 
 The menu fits the available terminal columns and rows in both modes. Command
 names take priority over descriptions and shortcut labels. A shortcut that
