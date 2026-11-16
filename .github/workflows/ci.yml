@@ -104,13 +104,23 @@ jobs:
           node-version-file: .node-version
           package-manager-cache: false
       - name: Build and test the Web workspace
-        shell: bash
         run: |
-          set -euo pipefail
-          export PATH="$(cygpath -u "$WINDIR")/System32:$PATH"
-          node scripts/stage-web.mjs staging/release-web "$(node -p "require('./npm/package.json').version")" "$GITHUB_SHA"
-          git diff --exit-code -- web/src/auto-imports.d.ts web/src/components.d.ts
-          npm test --prefix web
+          $declarations = 'web/src/auto-imports.d.ts', 'web/src/components.d.ts'
+          $original = @{}
+          foreach ($file in $declarations) {
+            $original[$file] = (Get-Content -Raw -Encoding UTF8 $file).Replace("`r`n", "`n")
+          }
+          $version = node -p "require('./npm/package.json').version"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:Path = "$env:WINDIR\System32;$env:Path"
+          node scripts/stage-web.mjs staging/release-web $version $env:GITHUB_SHA
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          foreach ($file in $declarations) {
+            if ((Get-Content -Raw -Encoding UTF8 $file).Replace("`r`n", "`n") -cne $original[$file]) {
+              throw "Generated declaration changed: $file"
+            }
+          }
+          npm.cmd test --prefix web
   verify:
     needs: changes
     if: >-
