@@ -602,3 +602,10 @@ export interface TimelineStore {
   saveSnapshot(request: { sessionId: string; branchId: string; snapshot: TimelineRecoverySnapshot }): Promise<{}>;
   latestSnapshot(request: { sessionId: string; branchId: string; through: number; interpreter: string }): Promise<{ snapshot: TimelineRecoverySnapshot | null }>;
 }
+
+/** Pinned reads on the filesystem owner; see resource-faces §4.1. */
+export interface FsHost {
+  openRead(request: { path: string }): Promise<{ readId: string; size: number }>;
+  readAt(request: { readId: string; offset: number; limit: number }): Promise<{ bytes: string }>;
+  closeRead(request: { readId: string }): Promise<Record<string, never>>;
+}
