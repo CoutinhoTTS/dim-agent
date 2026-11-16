@@ -82,11 +82,13 @@ fn update_entry(fullscreen: bool, package: Option<&str>) {
         ));
     } else {
         terminal.until_plain("Cannot update this installation");
-        assert!(strip_ansi(&terminal.transcript).contains("pull and rebuild"));
     }
     terminal.write(b"/exit\r");
     terminal.until("Bye!");
     assert!(terminal.wait().success(), "{}", terminal.transcript);
+    if package.is_none() {
+        assert!(strip_ansi(&terminal.transcript).contains("pull and rebuild"));
+    }
     let methods = wait_asked.recv_timeout(PATIENCE).unwrap();
     daemon.join().unwrap();
     assert!(
