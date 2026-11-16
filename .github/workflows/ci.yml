@@ -107,6 +107,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          export PATH="$(cygpath -u "$WINDIR")/System32:$PATH"
           node scripts/stage-web.mjs staging/release-web "$(node -p "require('./npm/package.json').version")" "$GITHUB_SHA"
           git diff --exit-code -- web/src/auto-imports.d.ts web/src/components.d.ts
           npm test --prefix web
