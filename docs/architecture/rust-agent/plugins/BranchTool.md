@@ -43,7 +43,7 @@ shares the rule). The target is the line the caller was cut from, and on
 `main` a tool line it opened; with no
 `after`, the read continues after the caller's last successful read of that
 line, which BranchLine retains from live results and otherwise reads for that
-specific target from its own `tool/use` and `tool/result` (design [§6](../../../design/timeline-branches.md#6-messages-between-lines)).
+specific target from its own `step/tool-use` and `step/tool-result` (design [§6](../../../design/timeline-branches.md#6-messages-between-lines)).
 
 ## Tests
 
@@ -97,8 +97,8 @@ creation and at restore.
 ### Events and lifetime
 
 Consumes `branch/create`, `branch/create-failed`, `branch/ended`, `branch/end`,
-`input/message`, `input/consumed`, `input/deleted`, `turn/end`, `tool/use` and
-`tool/result`. It writes only `input/message`, through the tree's input path.
+`input/message`, `input/consumed`, `input/deleted`, `turn/end`, `step/tool-use` and
+`step/tool-result`. It writes only `input/message`, through the tree's input path.
 
 - **Roster.** On `main`, a keyed Append of `<dim-branch-lines>` lists the tool
   lines it opened that are still open, in the order it opened them, with the
@@ -109,7 +109,7 @@ Consumes `branch/create`, `branch/create-failed`, `branch/ended`, `branch/end`,
   line's opening, the sequence of its `branch/create` on the parent. It names
   the parent, that head and the cursor, and never carries the parent's
   content. The fold keeps the cursor of each successful read from the line's
-  own `tool/use` and `tool/result`, so a replay rebuilds it. The block is
+  own `step/tool-use` and `step/tool-result`, so a replay rebuilds it. The block is
   decided from the line's state rather than the parent's signal: the parent's
   turn-end, published by TimelineTree, and the line's own write queue wake the
   writer, and consuming, deleting or interrupting a held block queues the same

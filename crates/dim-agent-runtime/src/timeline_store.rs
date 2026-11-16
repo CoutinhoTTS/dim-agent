@@ -150,6 +150,7 @@ pub trait TimelineStore: Send + Sync + 'static {
             }
         })
     }
+    /// Reads one `read_segments` interval and returns that segment directly.
     /// Range starts may be inside a batch; the end must be a batch boundary.
     fn read<'a>(
         &'a self,

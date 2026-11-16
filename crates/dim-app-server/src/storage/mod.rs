@@ -21,11 +21,14 @@ pub(crate) use catalog::{ACTIVITY_KINDS, truncate_preview};
 pub use codec::NodeLoads;
 pub use dim_agent_capabilities::file_access::WorktreeDirectory;
 pub use export::export_timeline;
+pub use face::Store;
 pub use identities::initialize_session_output_id_index;
 pub use members::initialize_session_member_index;
 #[cfg(feature = "testing")]
 pub use metadata::testing;
-pub use metadata::{MetadataError, SessionMetadata, Title, TitleFields, TitleSource};
+pub use metadata::{
+    MetadataError, SessionMetadata, SessionMetadataService, Title, TitleFields, TitleSource,
+};
 #[cfg(feature = "testing")]
 pub use query::{QueryStatementStats, sqlite_memory};
 #[cfg(feature = "testing")]
