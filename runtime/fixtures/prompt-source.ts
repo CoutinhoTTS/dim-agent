@@ -16,6 +16,7 @@ const part = definePlugin<{ gate: string }>({
         void cancelled().then(async () => { if (!finished) await fetch(`${config.gate}/cancel/${id}`) })
         await fetch(`${config.gate}/load/${id}`)
         finished = true
+        if (id === 'abandoned') await fetch(`${config.gate}/settled/${id}`)
         if (id === 'cancel-error') throw Object.assign(new Error('source cancelled'), { code: 'cancelled' })
       }
       const entry: PromptEntry = {

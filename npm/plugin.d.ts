@@ -149,12 +149,13 @@ export interface PromptEntry {
 }
 export interface PromptLoadError extends Error { code: 'failed' | 'cancelled' }
 export interface PromptHost {
-  /** Cancellation notifies the load and waits for its own result. */
+  /** Explicit cancellation or caller-row unload notifies the source and waits for its own result.
+   * Abandoning the returned Promise does not cancel an accepted load. */
   load(target: import('./branch-services.js').PromptSourceTarget, cancelled: () => Promise<void>): Promise<PromptEntry | null>;
 }
 export interface PromptRegistrationError extends Error { code: 'failed' }
 export interface PromptRegistry {
-  names(): Promise<string[]>;
+  names(): string[];
   /** Withdrawal removes future lookups; accepted loads keep their original callback. */
   register(name: string, load: (target: import('./branch-services.js').PromptSourceTarget, cancelled: () => Promise<void>) => Promise<PromptEntry | null>): Promise<void>;
 }

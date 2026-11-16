@@ -157,7 +157,7 @@ name-bound (#391, #392, #396–#398, #400).
 
 | Element | Form |
 | --- | --- |
-| Methods | A name, `sync` or `async`. Callers in other languages always get a Promise |
+| Methods | A name, `sync` or `async`. TypeScript callers receive a direct value for `sync` and a Promise for `async` |
 | Requests and replies | serde data, described as field tables or JSON shapes |
 | Errors | Data, `{code, message}`, with the codes documented by the service. A forwarding part rethrows the error it received, and the wire boundary maps it ([plugin contract](plugin-contract.md#9-requirements-raised-to-mechanism-owners) R3) |
 | Cancellation | A protocol action: a cancel callback or promise in the request, or the consumer dropping the call |
@@ -323,8 +323,7 @@ These requirements concern how Dim uses rutis. They follow
     another language as a callable reference (`RemoteFunction`).
 - **Needed:** each owner exposes `register` for its contributions: ToolRegistry for tools and tool
   sources, PromptRegistry for prompt sources, Rpc for Session and management method namespaces.
-  Tools and method namespaces register from any language; prompt and tool sources stay Rust-only
-  until a foreign part needs one.
+  The public registration operations are data faces under [service faces §2](service-faces.md). Each owner defines its contribution shape and callback lifetime.
   - A registration belongs to its caller. In Rust the caller passes its ctx; from another language
     the bridge ties the registration to the calling row, and the handler is the caller's function,
     called back through the bridge. It is withdrawn when the caller unloads.

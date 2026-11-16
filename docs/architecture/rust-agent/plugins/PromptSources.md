@@ -46,8 +46,9 @@ A target is `{source, scope}`. `scope` is the existing branch, turn or task
 scope. An entry carries the same target identity plus `version`, `body`,
 `delivery` and `order`; `null` means that source has no entry for the target.
 The load callback accepts the same target and a `cancelled()` function that
-settles when the caller cancels. Cancellation notifies an accepted load and
-waits for that load's own result. Source withdrawal removes future lookups;
+settles when the caller cancels. Only the explicit cancellation function or
+caller-row unload cancels the load; abandoning its returned Promise does not.
+Cancellation notifies an accepted load and waits for that load's own result. Source withdrawal removes future lookups;
 it does not cancel or discard an already accepted load. Its retained callback
 settles normally, including when the source row has unloaded. A source remains
 responsible for how its own lifecycle affects its I/O.
