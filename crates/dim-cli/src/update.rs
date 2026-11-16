@@ -438,13 +438,9 @@ pub fn command() -> Result<String, String> {
     let package = package()?;
     let current = dim_agent_capabilities::build::VERSION;
     let executable = std::env::current_exe().map_err(|error| error.to_string())?;
-    command_for(&executable, &package, current)
-}
-
-fn command_for(executable: &Path, package: &str, current: &str) -> Result<String, String> {
-    match installer(executable, package, channel(current)) {
-        Some(_) => Ok(update_command(package)),
-        None => Err(not_installable(package, current)),
+    match installer(&executable, &package, channel(current)) {
+        Some(_) => Ok(update_command(&package)),
+        None => Err(not_installable(&package, current)),
     }
 }
 
@@ -765,37 +761,6 @@ mod tests {
         assert_eq!(upgrade_tag("0.1.0-alpha.8", false), None);
         assert_eq!(upgrade_tag("0.1.0-alpha.8", true), Some("alpha"));
         assert_eq!(upgrade_tag("0.5.22", true), Some("latest"));
-    }
-
-    /// The report a client that cannot install leaves: the owner's entry point
-    /// for a recognised installation, and the same refusal `run` gives for any
-    /// other layout.
-    #[cfg(unix)]
-    #[test]
-    fn the_update_report_names_the_command_of_this_copy() {
-        let current = "0.1.0-alpha.25";
-        let prefix = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(prefix.path().join("bin")).unwrap();
-        std::fs::write(prefix.path().join("bin/npm"), "").unwrap();
-        for (package, command) in [(PACKAGE, PACKAGE), (ALPHA_PACKAGE, ALPHA_COMMAND)] {
-            let installed = prefix.path().join("lib/node_modules").join(package);
-            assert_eq!(
-                command_for(&installed.join("dimcode"), package, current),
-                Ok(format!("{command} update"))
-            );
-        }
-        let source = prefix.path().join("target/debug/dimcode");
-        for (package, manual) in [
-            (PACKAGE, "npm i -g dimcode@alpha"),
-            (ALPHA_PACKAGE, "npm i -g dimcode-alpha@alpha"),
-        ] {
-            let Err(refusal) = command_for(&source, package, current) else {
-                panic!("a source build has no installation to update")
-            };
-            assert_eq!(refusal, not_installable(package, current));
-            assert!(refusal.contains(manual), "{refusal}");
-            assert!(refusal.contains("pull and rebuild"), "{refusal}");
-        }
     }
 
     #[cfg(unix)]

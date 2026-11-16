@@ -4,17 +4,16 @@
 //! cannot run while it serves (cli-commands.md, Update dialog).
 use super::*;
 
-/// The opening of the owner's answer for an installation it does not
-/// recognise, which is what a binary running out of a build tree is. A
-/// release-stamped build names its own entry point instead, and this flow has
-/// no npm installation to offer it.
-const REFUSAL: &str = "Cannot update this installation";
-
 #[test]
 fn update_names_the_command_and_sends_no_input() {
-    if dim_agent_capabilities::build::RELEASE {
-        return;
+    for fullscreen in [false, true] {
+        for package in [None, Some("dimcode"), Some("dimcode-alpha")] {
+            update_entry(fullscreen, package);
+        }
     }
+}
+
+fn update_entry(fullscreen: bool, package: Option<&str>) {
     let home = Home::new();
     let (asked, wait_asked) = std::sync::mpsc::channel();
     let daemon = home.daemon(move |wire| {
@@ -29,9 +28,6 @@ fn update_names_the_command_and_sends_no_input() {
         wire.no_context();
         let providers = wire.read("account.providers");
         wire.reply(&providers, json!([]));
-        // A draft that names no command becomes model input, so every
-        // `session.submit` between here and the exit is the defect this flow
-        // pins. Nothing else is expected but the detach an exit sends.
         let mut methods = Vec::new();
         while let Some(request) = wire.trailing_request() {
             let value: Value = serde_json::from_str(&request).unwrap();
@@ -41,25 +37,62 @@ fn update_names_the_command_and_sends_no_input() {
         }
         asked.send(methods).unwrap();
     });
-    let mut command = home.command();
+    let attempted_install = home.0.join("attempted-install");
+    let mut command = if let Some(package) = package {
+        let prefix = home.0.join("node prefix");
+        let binary = prefix
+            .join("lib/node_modules")
+            .join(package)
+            .join("bin/dimcode");
+        fs::create_dir_all(binary.parent().unwrap()).unwrap();
+        fs::copy(env!("CARGO_BIN_EXE_dimcode"), &binary).unwrap();
+        let npm = prefix.join("bin/npm");
+        fs::create_dir_all(npm.parent().unwrap()).unwrap();
+        fs::write(&npm, "#!/bin/sh\n: > \"$UPDATE_ATTEMPT\"\nexit 1\n").unwrap();
+        fs::set_permissions(&npm, fs::Permissions::from_mode(0o700)).unwrap();
+        let mut command = Command::new(binary);
+        command.args(["--home", home.0.to_str().unwrap()]);
+        command.env("DIMCODE_NPM_PACKAGE", package);
+        command.env("DIMCODE_UPDATE_CHECK", "0");
+        command.env("UPDATE_ATTEMPT", &attempted_install);
+        command
+    } else {
+        let mut command = home.command();
+        command.env("DIMCODE_NPM_PACKAGE", "dimcode-alpha");
+        command
+    };
+    if fullscreen {
+        command.arg("--fullscreen");
+    }
     sized(&mut command, 120, 32);
     let mut terminal = Terminal::resume_tui(command);
     terminal.until("test / model");
 
-    // The palette offers it, so the entry is discoverable and not only
-    // typable: the draft is still being edited while its row is listed.
     terminal.write(b"/upd");
     terminal.until_plain("/update");
-    terminal.raw(b"\x03");
-    terminal.until_plain("Ask anything...");
-
-    terminal.write(b"/update\r");
-    terminal.until_plain(REFUSAL);
+    terminal.write(b"ate\r");
+    if let Some(package) = package {
+        let entry = if package == "dimcode-alpha" {
+            "dima"
+        } else {
+            "dimcode"
+        };
+        terminal.until_plain(&format!(
+            "To update, exit every client and stop the server, then run {entry} update"
+        ));
+    } else {
+        terminal.until_plain("Cannot update this installation");
+        assert!(strip_ansi(&terminal.transcript).contains("pull and rebuild"));
+    }
     terminal.write(b"/exit\r");
     terminal.until("Bye!");
     assert!(terminal.wait().success(), "{}", terminal.transcript);
     let methods = wait_asked.recv_timeout(PATIENCE).unwrap();
     daemon.join().unwrap();
+    assert!(
+        !attempted_install.exists(),
+        "/update must not start an installer"
+    );
     assert!(
         !methods.iter().any(|method| method == "session.submit"),
         "{methods:?} followed /update; the draft must not become model input"
