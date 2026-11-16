@@ -326,7 +326,7 @@ fn two_starting_clients_replace_an_idle_daemon_once() {
         ] {
             assert!(
                 output.status.success(),
-                "iteration {iteration}, {label}, pid {pid}:\n{}",
+                "iteration {iteration}, {label}, pid={pid}:\n{}",
                 describe_client(&home, output)
             );
         }
