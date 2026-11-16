@@ -876,8 +876,15 @@ export interface CollaborationDirectory {
 /**
  * Admission for process-owned work, including work accepted before a Session
  * exists. A hold starts before acceptance and ends after the last owned effect.
+ * It also observes the host's initial publication.
  */
 export interface ProcessActivity {
+  /**
+   * Resolves once the host has opened after every required process row
+   * became Active. Resolves false when startup fails or shutdown begins
+   * before that observation. A row reload does not reset it.
+   */
+  activated(): Promise<boolean>
   /**
    * Admits work unless admission is paused. Release the returned id after
    * settlement. A lost owner leaves admission busy until process shutdown;
