@@ -245,7 +245,7 @@
         ]
       },
       {
-        "id": 76,
+        "id": 75,
         "parent": 71,
         "name": "eventhub-ready",
         "state": "Active",
@@ -1564,17 +1564,22 @@
             "status": "Ready"
           },
           {
+            "service": "dim_app_server::storage::face::Store",
+            "scope": null,
+            "status": "Ready"
+          },
+          {
+            "service": "dim_app_server::storage::metadata::binding::SessionMetadata",
+            "scope": null,
+            "status": "Ready"
+          },
+          {
             "service": "dim_app_server::storage::sqlite::SqliteStorage",
             "scope": null,
             "status": "Ready"
           },
           {
             "service": "dim_app_server::storage::timeline::SessionStore",
-            "scope": null,
-            "status": "Ready"
-          },
-          {
-            "service": "dim_app_server::storage::timeline::SessionStore#store",
             "scope": null,
             "status": "Ready"
           },
@@ -1610,6 +1615,18 @@
             "generation": 1
           },
           {
+            "service": "dim_app_server::storage::face::Store",
+            "scope": null,
+            "provider": 8,
+            "generation": 1
+          },
+          {
+            "service": "dim_app_server::storage::metadata::binding::SessionMetadata",
+            "scope": null,
+            "provider": 8,
+            "generation": 1
+          },
+          {
             "service": "dim_app_server::storage::sqlite::SqliteStorage",
             "scope": null,
             "provider": 6,
@@ -1617,12 +1634,6 @@
           },
           {
             "service": "dim_app_server::storage::timeline::SessionStore",
-            "scope": null,
-            "provider": 8,
-            "generation": 1
-          },
-          {
-            "service": "dim_app_server::storage::timeline::SessionStore#store",
             "scope": null,
             "provider": 8,
             "generation": 1
@@ -1660,6 +1671,18 @@
             "external": true
           },
           {
+            "service": "dim_app_server::storage::face::Store",
+            "provider": 8,
+            "declared": true,
+            "external": true
+          },
+          {
+            "service": "dim_app_server::storage::metadata::binding::SessionMetadata",
+            "provider": 8,
+            "declared": true,
+            "external": true
+          },
+          {
             "service": "dim_app_server::storage::sqlite::SqliteStorage",
             "provider": 6,
             "declared": true,
@@ -1667,12 +1690,6 @@
           },
           {
             "service": "dim_app_server::storage::timeline::SessionStore",
-            "provider": 8,
-            "declared": true,
-            "external": true
-          },
-          {
-            "service": "dim_app_server::storage::timeline::SessionStore#store",
             "provider": 8,
             "declared": true,
             "external": true
@@ -3063,7 +3080,7 @@
             "status": "Ready"
           },
           {
-            "service": "dim_app_server::storage::timeline::SessionStore#store",
+            "service": "dim_app_server::storage::face::Store",
             "scope": null,
             "status": "Ready"
           }
@@ -3076,7 +3093,7 @@
             "generation": 1
           },
           {
-            "service": "dim_app_server::storage::timeline::SessionStore#store",
+            "service": "dim_app_server::storage::face::Store",
             "scope": null,
             "provider": 8,
             "generation": 1
@@ -3090,7 +3107,7 @@
             "external": true
           },
           {
-            "service": "dim_app_server::storage::timeline::SessionStore#store",
+            "service": "dim_app_server::storage::face::Store",
             "provider": 8,
             "declared": true,
             "external": true
@@ -3519,6 +3536,18 @@
         "removing": false
       },
       {
+        "service": "dim_app_server::storage::face::Store",
+        "provider": 8,
+        "generation": 1,
+        "removing": false
+      },
+      {
+        "service": "dim_app_server::storage::metadata::binding::SessionMetadata",
+        "provider": 8,
+        "generation": 1,
+        "removing": false
+      },
+      {
         "service": "dim_app_server::storage::sqlite::SqliteStorage",
         "provider": 6,
         "generation": 1,
@@ -3526,12 +3555,6 @@
       },
       {
         "service": "dim_app_server::storage::timeline::SessionStore",
-        "provider": 8,
-        "generation": 1,
-        "removing": false
-      },
-      {
-        "service": "dim_app_server::storage::timeline::SessionStore#store",
         "provider": 8,
         "generation": 1,
         "removing": false

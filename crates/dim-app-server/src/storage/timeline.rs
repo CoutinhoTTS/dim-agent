@@ -1667,8 +1667,9 @@ impl DynPlugin for SessionStorePlugin {
             })?;
             files.start();
             ctx.provide_as::<SessionStore>(store.clone())?;
-            ctx.provide_at(Key::<SessionStore>::named("store"), store.clone())?;
-            ctx.provide_at(host_key("store"), store.clone() as Arc<dyn HostDispatch>)?;
+            let binding = Arc::new(super::Store(store.clone()));
+            ctx.provide_as::<super::Store>(binding.clone())?;
+            ctx.provide_at(host_key("store"), binding as Arc<dyn HostDispatch>)?;
             let associations = store.clone();
             ctx.provide_as::<WorktreeAssociations>(Arc::new(WorktreeAssociations::new(Arc::new(
                 move |request: WorktreeAssociation| {
@@ -1693,9 +1694,11 @@ impl DynPlugin for SessionStorePlugin {
                 binding.clone() as Arc<dyn HostDispatch>,
             )?;
             ctx.provide_as::<SessionFiles>(binding)?;
+            let metadata = Arc::new(metadata::SessionMetadataService(store));
+            ctx.provide_as::<metadata::SessionMetadataService>(metadata.clone())?;
             ctx.provide_at(
                 host_key("sessionMetadata"),
-                Arc::new(metadata::Dispatch(store)) as Arc<dyn HostDispatch>,
+                metadata as Arc<dyn HostDispatch>,
             )?;
             Ok(Effect::Done)
         })
