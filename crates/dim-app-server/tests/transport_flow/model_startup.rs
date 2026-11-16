@@ -954,16 +954,18 @@ async fn temporary_startup_rebinds_after_restart_and_preserves_parent_cut_connec
                         .any(|event| matches!(&event.kind, EventKind::TurnEnd(_)))
                 });
             if woken {
-                return;
+                break;
             }
             changed.changed().await.unwrap();
         }
+        session.idle("main").await.unwrap();
+        assert_ok(&client.rpc("session.detach", json!({"sessionId":sid})).await);
+        while !session.unload_if_idle().await.unwrap() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     })
     .await
-    .expect("the request's result and the turn it wakes are committed");
-    session.idle("main").await.unwrap();
-    assert_ok(&client.rpc("session.detach", json!({"sessionId":sid})).await);
-    assert!(session.unload_if_idle().await.unwrap());
+    .expect("the request settles and the detached Session unloads");
     assert_ok(&client.rpc("session.attach", json!({"sessionId":sid})).await);
     submit(&mut client, &sid, &child_id).await;
     assert_eq!(
