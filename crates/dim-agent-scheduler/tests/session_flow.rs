@@ -724,19 +724,30 @@ async fn reloading_after_publication_still_counts_against_the_bound() {
             &job_id,
             &session,
             "scheduler:seed-reloading",
-            None,
+            Some(4),
         ));
     });
 
+    let hold = Arc::new(dim_app_server::PublicationHold::default());
+    let path = home.path().to_owned();
+    let starting = {
+        let hold = hold.clone();
+        tokio::spawn(async move { start_held(&path, Arc::new(Script::default()), hold).await })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(30), hold.waiting.notified())
+        .await
+        .expect("the restarted host reaches publication");
     holds(home.path()).reloading_lookups(1);
-    let server = start(home.path(), Arc::new(Script::default())).await;
+    hold.release();
+    let server = starting.await.unwrap();
     let mut client = support::connect(&server).await;
-    let run = wait_attempts(home.path(), "seed-reloading", 1).await;
-    assert_eq!(run["state"], "delivering", "{run}");
-    assert_eq!(run["attempts"], 1, "{run}");
+    let run = settled(&mut client, &job_id, "seed-reloading").await;
+    assert_eq!(run["state"], "lost", "{run}");
+    assert_eq!(run["detail"], "reloading", "{run}");
+    assert_eq!(run["attempts"], 5, "{run}");
     assert!(
         scheduled_inputs(&mut client, &session).await.is_empty(),
-        "the unsettled record wrote nothing"
+        "the exhausted lookup wrote no duplicate input"
     );
 
     drop(client);
