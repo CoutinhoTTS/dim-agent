@@ -1336,7 +1336,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
 /// the names its process parts share across languages. Registering them again
 /// does nothing, so each installer applies them.
 pub(crate) fn register_names(catalog: &mut dim_agent_runtime::names::ServiceCatalog) {
-    use dim_agent_capabilities::host::{ModalityConnectionHost, SelectableModelsHost};
+    use dim_agent_capabilities::host::SelectableModelsHost;
     use dim_agent_runtime::{SESSION_GROUP, names::register};
     register::<ServerControl>(catalog, None);
     register::<ProcessActivity>(catalog, None);
@@ -1364,7 +1364,6 @@ pub(crate) fn register_names(catalog: &mut dim_agent_runtime::names::ServiceCata
     register::<provider::ProviderSecretHost>(catalog, None);
     register::<provider::ProviderService>(catalog, None);
     catalog.register_shared(dim_agent_runtime::names::name_of::<SelectableModelsHost>());
-    register::<ModalityConnectionHost>(catalog, None);
     register::<mcp::McpService>(catalog, None);
     register::<mcp::McpAuth>(catalog, None);
     register::<mcp::Publication>(catalog, None);
@@ -1430,7 +1429,6 @@ pub fn register_faces(builder: &mut dim_agent_runtime::AgentBuilder) {
         ("mcpAuth", "secret"),
         ("mcpService", "host-resource"),
         ("mentionIndex", "host-resource"),
-        ("modalityConnectionHost", "legacy-no-consumer"),
         ("modelHost", "owner-api"),
         ("modelProvider", "hot-path"),
         ("openAICodexOAuthService", "secret"),
@@ -1458,7 +1456,6 @@ pub fn register_faces(builder: &mut dim_agent_runtime::AgentBuilder) {
         ("timelineTreeControl", "owner-api"),
         ("toolBinding", "hot-path"),
         ("toolExecutor", "hot-path"),
-        ("toolSourcesView", "owner-api"),
         ("uiExtensions", "control"),
         ("uiHost", "control"),
     ] {
