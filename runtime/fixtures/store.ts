@@ -1,6 +1,6 @@
 import { definePlugin } from '@arcships/rutis'
 import type { ManagementMethods, MethodReply, Store } from '../../npm/plugin.js'
-import { writeFile, rm } from 'node:fs/promises'
+import { writeFile, rename, rm } from 'node:fs/promises'
 import assert from 'node:assert/strict'
 
 export default definePlugin({
@@ -54,7 +54,8 @@ export default definePlugin({
           const removed = await store.removeWorktree(params.directory, async path => {
             assert.deepEqual(await store.worktreeUsages(params.directory), { usages: [] })
             const gate = new Promise<void>(resolve => { release = resolve })
-            await writeFile(params.ready, path)
+            await writeFile(`${params.ready}.pending`, path)
+            await rename(`${params.ready}.pending`, params.ready)
             await gate
             await rm(path, { recursive: true })
           })
