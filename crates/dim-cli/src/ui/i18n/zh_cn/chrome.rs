@@ -555,6 +555,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "本会话因提示建议未被采用而暂停。在 /settings 中关闭再开启即可恢复。"
         }
         "show the key bindings" => "显示快捷键",
+        "show the command that updates this installation" => "显示如何升级当前安装",
         "Application keys" => "应用快捷键",
         "Enter submit when idle · Shift+Enter / Alt+Enter / Ctrl+J newline · ↑↓ history" => {
             "空闲时 Enter 提交 · Shift+Enter / Alt+Enter / Ctrl+J 换行 · ↑↓ 历史"
