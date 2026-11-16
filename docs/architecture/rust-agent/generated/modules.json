@@ -52800,6 +52800,7 @@
         "path crate::PluginTargetState::Outdated",
         "path crate::PluginTargetState::Ready",
         "path crate::Reason",
+        "path crate::adapter_key",
         "path crate::evaluate",
         "path crate::host_target_for",
         "path crate::is_realtime",
