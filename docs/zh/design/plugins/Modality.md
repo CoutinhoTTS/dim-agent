@@ -6,7 +6,7 @@
 
 > **P3：按 rutis 现有能力重新设计。** rutis 是外部依赖，本文向 rutis 提出的需求已撤回（[原则 §4 第 8 条](../../../architecture/rust-agent/principles.md)）。
 
-Modality 是一个进程插件（[ADR 002](../../adr/002-plugin-scope.md)：任务与提供方连接在各 Session 间共享），是九个类别非对话式多模态工作的唯一入口：图像、视频、语音、音乐、音频、3D 资产、动作、实时和 OCR。它按类别报告可用性及原因，按操作从它自己的 `modality` 设置文档解析默认模型（显式 → 配置的默认值 → 经 Provider 选择自动解析），运行异步任务（提交、状态、等待、取消）并通过 `pluginFiles`（扩展）保存，并持有绑定到发起客户端连接的实时连接。提供方适配器内置于 Modality，或由进程内的 Rust 适配器插件以 `modalityAdapter` 的进程副本提供；在 Provider 暴露执行操作之前，外部语言适配器完全无法执行媒体，而 Provider 目前不提供该操作（[Provider 管理 §3.8](../appserver/provider-management.md#38-适配器的媒体执行)），因为每次适配器调用都携带不可序列化的 `ModalityConnection`；OCR 作为控制节点上的宿主任务运行，由 Modality 经 HostPlatform 的受限 spawn 启动所解析目标的 helper——Apple Vision 用本构建自带的 `dimcode` helper，插件提供的目标用其进程插件提供的 helper。它的方法是它注册到 `managementMethods` 的命名空间 `modality`：关于宿主的进程插件方法，由 Rpc 分发，从不提供给已配对的远程设备。Modality 的设置（含其操作默认值）是业务配置，存放在它自己的 Settings 业务来源中，经 Settings 类型化操作写入，在使用时读取。它没有 Session 或分支部分：不写任何 Timeline 事件，也不提供模型可见的工具。Rust 实现位于 `dim-modality` crate，它依赖 App Server 提供 Settings 服务与管理方法；OCR helper 的契约与 Apple Vision 引擎位于 `dim-ocr` crate；产品的安装器把它们与执行 aimux 媒体操作（A.2）的内置 `dim-modality-aimux` 适配器一起加入进程装配。
+Modality 是一个进程插件（[ADR 002](../../adr/002-plugin-scope.md)：任务与提供方连接在各 Session 间共享），是九个类别非对话式多模态工作的唯一入口：图像、视频、语音、音乐、音频、3D 资产、动作、实时和 OCR。它按类别报告可用性及原因，按操作从它自己的 `modality` 设置文档解析默认模型（显式 → 配置的默认值 → 经 Provider 选择自动解析），运行异步任务（提交、状态、等待、取消）并通过 `pluginFiles`（扩展）保存，并持有绑定到发起客户端连接的实时连接。提供方适配器内置于 Modality，或由进程内的 Rust 适配器插件以 `modalityAdapter` 的进程副本提供；在 Provider 暴露执行操作之前，外部语言适配器完全无法执行媒体，而 Provider 目前不提供该操作（[Provider 管理 §3.8](../appserver/provider-management.md#38-适配器的媒体执行)），因为 `submit`、`wait`、`cancelRemote` 和 `realtimeOpen` 携带不可序列化的 `ModalityConnection`；OCR 作为控制节点上的宿主任务运行，由 Modality 经 HostPlatform 的受限 spawn 启动所解析目标的 helper——Apple Vision 用本构建自带的 `dimcode` helper，插件提供的目标用其进程插件提供的 helper。它的方法是它注册到 `managementMethods` 的命名空间 `modality`：关于宿主的进程插件方法，由 Rpc 分发，从不提供给已配对的远程设备。Modality 的设置（含其操作默认值）是业务配置，存放在它自己的 Settings 业务来源中，经 Settings 类型化操作写入，在使用时读取。它没有 Session 或分支部分：不写任何 Timeline 事件，也不提供模型可见的工具。Rust 实现位于 `dim-modality` crate，它依赖 App Server 提供 Settings 服务与管理方法；OCR helper 的契约与 Apple Vision 引擎位于 `dim-ocr` crate；产品的安装器把它们与执行 aimux 媒体操作（A.2）的内置 `dim-modality-aimux` 适配器一起加入进程装配。
 
 ## 1. 结构
 
@@ -224,7 +224,7 @@ sequenceDiagram
 | `modality.realtime.open/send/close`、`modality.realtime.event`、`modality.realtime.ended` | 管理方法及绑定连接的通知 | 实时会话 |
 | `modalityTasks` | 进程服务，无 key | 与任务方法相同的操作，供其他进程插件使用 |
 | `modalityTargets` | 进程服务，无 key | 向进程使用方回答某个操作当前解析到的目标，或它不可用的原因（§9.4）；无任务、无凭据 |
-| `modalityAdapter` | 进程服务，key 为适配器名；[#861](https://github.com/arcships/dim/issues/861) 落地后按任务按名解析，图像切片在此之前每次调用读取单个进程服务（§9.1） | 由提供方执行的类别 |
+| `modalityAdapter` | 进程内 Rust 绑定（A.2），进程服务，key 为适配器名；[#861](https://github.com/arcships/dim/issues/861) 落地后按任务按名解析，图像切片在此之前每次调用读取单个进程服务（§9.1） | 由提供方执行的类别 |
 | `ocrHelper` | 进程服务，无 key，由插件的进程行提供；Modality 每次调用时读取（§9.1） | `local/pp-ocr` 目标的描述：可执行文件、参数、可读路径（A.2.1） |
 | `modality` 设置文档 | 业务配置（Settings 来源，schema 由 Modality 声明，经 Settings 类型化操作写入） | 操作默认值、上限；使用时读取 |
 | `dimcode modality`、`image`、`video`、`speech`、`music`、`audio`、`asset`、`motion`、`ocr`、`realtime` | CLI | 方法的薄客户端 |

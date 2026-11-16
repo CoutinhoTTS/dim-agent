@@ -222,15 +222,11 @@ Rust 产品装配的现状以 [生成的 catalog](../architecture/rust-agent/gen
 
 ### 3.7 待迁移的数据内容
 原因 `legacy-no-consumer`：内容是数据，但还没有转成 data face。没有 leaf 消费者不是保留 internal 的理由；这些名字按批次迁移，`legacy-no-consumer` 只是迁移状态，不是永久分类。
+角色为 typed binding 的名字在此只记录从目录移出的动作，不转为 data face（§2.6）。
 
 | 名字 | scope | provider | reason | 动作 |
 | --- | --- | --- | --- | --- |
-| `executionSettingsHost` | process | ExecutionSettings | legacy-no-consumer | 按 #1292 定义操作面 |
-| `toolchainSourceHost` | process | ToolchainSource | legacy-no-consumer | 按 #1292 定义操作面 |
-| `promptSuggestionSettingsHost` | process | PromptSuggestionSettings | legacy-no-consumer | 按 #1292 定义操作面 |
-| `selectableModelsHost` | process | Provider | legacy-no-consumer | 按 #1292 定义操作面 |
-| `modelSelectionHost` | process | Provider | legacy-no-consumer | 按 #1292 定义操作面 |
-| `modalityConnectionHost` | process | Provider | legacy-no-consumer | 作为 Provider 的 typed binding 从目录移出：它返回一次调用的凭据材料，不落为 data face（[#1613](https://github.com/arcships/dim/issues/1613)，[Provider 管理 §3.8](appserver/provider-management.md#38-media-execution-for-adapters)） |
+| `modalityConnectionHost` | process | Provider | legacy-no-consumer | 作为 Provider 的 typed binding 从目录移出：它返回一次调用的凭据材料，不落为 data face（决定：[#1613](https://github.com/arcships/dim/issues/1613)、[Provider 管理 §3.8](appserver/provider-management.md#38-media-execution-for-adapters)；移出实现：[#1634](https://github.com/arcships/dim/issues/1634)） |
 | `collaborationSession` | session | CollaborationSession | legacy-no-consumer | 按 #1292 定义操作面 |
 
 ## 4. 批次契约（#1292）
