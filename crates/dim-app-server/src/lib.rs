@@ -1428,7 +1428,6 @@ pub fn register_faces(builder: &mut dim_agent_runtime::AgentBuilder) {
         ("mcpService", "host-resource"),
         ("mentionIndex", "host-resource"),
         ("modelHost", "owner-api"),
-        ("modelProvider", "hot-path"),
         ("openAICodexOAuthService", "secret"),
         ("pluginFileTransactions", "host-resource"),
         ("prepareContextHost", "hot-path"),
