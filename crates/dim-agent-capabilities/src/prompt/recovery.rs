@@ -1394,10 +1394,17 @@ impl Prompt {
             if let Some(error) = self.dispatcher.failure() {
                 return Err(error);
             }
-            tokio::select! {
-                changed = progress.changed() => changed.map_err(|_|AgentError::Closed("Prompt".into()))?,
-                _ = self.lifecycle.cancelled() => return Err(AgentError::Closed("Prompt".into())),
-                _ = self.branch_phase.closing() => return Err(AgentError::Cancelled("prompt adoption".into())),
+            let progress = tokio::select! {
+                changed = progress.changed() => changed.map_err(|_| AgentError::Closed("Prompt".into())),
+                _ = self.lifecycle.cancelled() => Err(AgentError::Closed("Prompt".into())),
+                _ = self.branch_phase.closing() => Err(AgentError::Cancelled("prompt adoption".into())),
+            };
+            if let Err(error) = progress {
+                return Err(self
+                    .timeline
+                    .failure()
+                    .or_else(|| self.dispatcher.failure())
+                    .unwrap_or(error));
             }
         }
         if let Some(error) = self.dispatcher.failure() {

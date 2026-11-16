@@ -549,3 +549,12 @@ export interface Store {
   /** Callback runs under the native ownership mutex: do not await createOwnedSession, fork, delete, removeWorktreeDirectory, removeWorktree or worktreeAssociations.associate from it. */
   removeWorktree(request: WorktreeDirectory, remove: (path: string) => Promise<void>): Promise<{ removed: boolean }>;
 }
+
+/** The ToolRegistry owner's read-only source status view. */
+export interface ToolSourceRejection { version: string; reason: string }
+export interface ToolSourceStatus { adopted: string | null; rejected: ToolSourceRejection | null }
+export type ToolSourcesState = Record<string, ToolSourceStatus>
+export interface ToolSourcesView {
+  get(request: Record<string, never>): ToolSourcesState
+  observe(request: Record<string, never>, onState: (state: ToolSourcesState) => void | Promise<void>): Promise<void>
+}
