@@ -61,7 +61,7 @@ async fn provider_activation_and_target_reads_release_their_catalogs() {
             root.plugin(dim_app_server::methods::ManagementMethodsPlugin::typed(&catalog).unwrap()),
             root.plugin(FileStoragePlugin::new(vec![home.clone()])),
             root.plugin(SqliteStoragePlugin::new(home.join("native.sqlite"))),
-            root.plugin(ManagedProvidersPlugin),
+            root.plugin(ManagedProvidersPlugin::new(None)),
             root.plugin(
                 dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names, 0).unwrap(),
             ),

@@ -283,6 +283,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "Queue ({count})" => "佇列（{count}）",
         "Thinking…" => "思考中…",
+        "Thinking excerpt" => "思考摘錄",
         "Thought" => "已思考",
         "Thought for {duration}" => "已思考 {duration}",
         "Welcome to DIM {version}!" => "歡迎使用 DIM {version}！",
@@ -493,6 +494,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         // keys.rs
         "show the key bindings" => "顯示快速鍵",
+        "show the command that updates this installation" => "顯示如何更新目前安裝",
         "Application keys" => "應用程式快速鍵",
         "Enter submit when idle · Shift+Enter / Alt+Enter / Ctrl+J newline · ↑↓ history" => {
             "閒置時 Enter 送出 · Shift+Enter / Alt+Enter / Ctrl+J 換行 · ↑↓ 歷程"
@@ -584,6 +586,12 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Upgrading the local store from format v{from} to v{to}; this can take a while on a large store." => {
             "正在把本機資料庫從格式 v{from} 升級到 v{to}；大型資料庫可能需要一段時間。"
         }
+        "Upgrading the local store · {seconds} s · {stage}" => {
+            "正在升級本機資料庫 · 已用 {seconds} 秒 · {stage}"
+        }
+        "moving retained images into Session files" => "把保留的圖片寫入工作階段檔案",
+        "updating the text index of the rows that changed" => "更新已改動列的文字索引",
+        "checking and committing the upgraded store" => "校驗並提交升級後的資料庫",
         _ => return None,
     })
 }

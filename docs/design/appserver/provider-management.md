@@ -1170,11 +1170,8 @@ request executed on the adapter's behalf — not the connection.
 **Decision: no such operation now.** The connection is Provider's private typed binding, not a
 public service: what it returns is credential material for one call, so it neither becomes a data
 face nor stays a catalog name. [Service faces §2.6](../service-faces.md#26-migration-rule) already
-says a name whose role is a typed binding leaves the catalog, and
-[§3.7](../service-faces.md#37-待迁移的数据内容) lists this one's next step as that removal rather
-than an operation face. The sixth migration of
-[#1292](https://github.com/arcships/dim/issues/1292) therefore ends here, and media adapters
-execute in-process (`dim-modality-aimux`) through this native path. No media operation, signing,
+says a name whose role is a typed binding leaves the catalog. Media adapters execute in-process
+(`dim-modality-aimux`) through this native path. No media operation, signing,
 retry, redirect, upload, download or streaming behavior changes.
 
 **Why a `modalityRequest` executor is a different contract.** It would be a new HTTP executor, not

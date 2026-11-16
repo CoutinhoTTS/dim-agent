@@ -297,6 +297,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "Queue ({count})" => "队列（{count}）",
         "Thinking…" => "思考中…",
+        "Thinking excerpt" => "思考摘录",
         "Thought" => "已思考",
         "Thought for {duration}" => "已思考 {duration}",
         "Welcome to DIM {version}!" => "欢迎使用 DIM {version}！",
@@ -555,6 +556,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "本会话因提示建议未被采用而暂停。在 /settings 中关闭再开启即可恢复。"
         }
         "show the key bindings" => "显示快捷键",
+        "show the command that updates this installation" => "显示如何升级当前安装",
         "Application keys" => "应用快捷键",
         "Enter submit when idle · Shift+Enter / Alt+Enter / Ctrl+J newline · ↑↓ history" => {
             "空闲时 Enter 提交 · Shift+Enter / Alt+Enter / Ctrl+J 换行 · ↑↓ 历史"
@@ -646,6 +648,12 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Upgrading the local store from format v{from} to v{to}; this can take a while on a large store." => {
             "正在把本地库从格式 v{from} 升级到 v{to}；大库可能需要一段时间。"
         }
+        "Upgrading the local store · {seconds} s · {stage}" => {
+            "正在升级本地库 · 已用 {seconds} 秒 · {stage}"
+        }
+        "moving retained images into Session files" => "把保留下来的图片写入会话文件",
+        "updating the text index of the rows that changed" => "更新已改动行的文本索引",
+        "checking and committing the upgraded store" => "校验并提交升级后的库",
         _ => return None,
     })
 }

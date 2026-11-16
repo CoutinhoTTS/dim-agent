@@ -48,11 +48,10 @@ a replacement during preparation. A retired handler follows its own stopping
 contract; it is not replaced by a current handler of the same name. Failed
 preparation drops its source references without registering a request.
 
-For a continuation request ([Loop](Loop.md#a-failed-model-step-and-its-disposer)),
-request preparation declares no tools and ToolBinding fixes an empty snapshot
-for that request. The choice belongs to the Loop's request preparation and has
-no separate flag: the committed `context/prepare` already records the declared
-tools.
+The [Loop continuation for announced but unexecuted calls](Loop.md#a-failed-step-whose-calls-were-announced-and-never-executed)
+uses ordinary request tool binding. A request's committed `context/prepare`
+records its declared tools; carrying a failure chain does not itself make the
+request text-only.
 
 ### Rule check
 

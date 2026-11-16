@@ -777,9 +777,21 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     rows.push(register_part(&mut builtins, builder.catalog(), |names| {
         Ok(Box::new(connection::CallChannelPlugin::new(names)?))
     })?);
-    rows.push(register_part(&mut builtins, builder.catalog(), |_| {
-        Ok(Box::new(managed_provider::ManagedProvidersPlugin))
-    })?);
+    let host_account_methods = product_root.is_some();
+    rows.push(register_part(
+        &mut builtins,
+        builder.catalog(),
+        move |names| {
+            let account = if host_account_methods {
+                Some(names.key::<methods::ManagementMethods>()?)
+            } else {
+                None
+            };
+            Ok(Box::new(managed_provider::ManagedProvidersPlugin::new(
+                account,
+            )))
+        },
+    )?);
     if let Some(home_root) = plugin_root {
         rows.push(register_part(
             &mut builtins,
@@ -792,17 +804,10 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         )?);
     }
     if let Some(home_root) = product_root {
-        rows.push(register_part(&mut builtins, builder.catalog(), |names| {
-            Ok(Box::new(
-                managed_provider::ManagedProviderMethodsPlugin::new(names)?,
-            ))
-        })?);
         if let Some(provider) = &config.managed_provider {
             rows.push((provider.0)(&mut builtins, home_root));
-            rows.push(register_part(&mut builtins, builder.catalog(), |names| {
-                Ok(Box::new(managed_provider::ManagedProviderBinding::new(
-                    names,
-                )?))
+            rows.push(register_part(&mut builtins, builder.catalog(), |_| {
+                Ok(Box::new(managed_provider::ManagedProviderBinding))
             })?);
         }
         rows.push(register_part(
@@ -1331,7 +1336,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
 /// the names its process parts share across languages. Registering them again
 /// does nothing, so each installer applies them.
 pub(crate) fn register_names(catalog: &mut dim_agent_runtime::names::ServiceCatalog) {
-    use dim_agent_capabilities::host::{ModalityConnectionHost, SelectableModelsHost};
+    use dim_agent_capabilities::host::SelectableModelsHost;
     use dim_agent_runtime::{SESSION_GROUP, names::register};
     register::<ServerControl>(catalog, None);
     register::<ProcessActivity>(catalog, None);
@@ -1352,14 +1357,13 @@ pub(crate) fn register_names(catalog: &mut dim_agent_runtime::names::ServiceCata
     register::<ui_extensions::UiExtensions>(catalog, None);
     register::<ui_extensions::UiResources>(catalog, Some(SESSION_GROUP));
     register::<settings::SettingsService>(catalog, None);
-    register::<managed_provider::ManagedProviders>(catalog, None);
+    register::<managed_provider::ManagedSearch>(catalog, None);
     register::<dyn managed_provider::ManagedProvider>(catalog, None);
     register::<codex_oauth::OpenAICodexOAuthService>(catalog, None);
     register::<grok_oauth::GrokOAuthService>(catalog, None);
     register::<provider::ProviderSecretHost>(catalog, None);
     register::<provider::ProviderService>(catalog, None);
     catalog.register_shared(dim_agent_runtime::names::name_of::<SelectableModelsHost>());
-    register::<ModalityConnectionHost>(catalog, None);
     register::<mcp::McpService>(catalog, None);
     register::<mcp::McpAuth>(catalog, None);
     register::<mcp::Publication>(catalog, None);
@@ -1379,6 +1383,7 @@ pub(crate) fn register_names(catalog: &mut dim_agent_runtime::names::ServiceCata
         "sessions",
         "sessionMetadata",
         "sessionFiles",
+        "managedSearch",
         "auxiliaryModel",
         "settings",
         "ocrHelper",
@@ -1422,11 +1427,9 @@ pub fn register_faces(builder: &mut dim_agent_runtime::AgentBuilder) {
         ("loopState", "hot-path"),
         // Session creation calls it directly; no leaf needs the service.
         ("managedWorktrees", "hot-path"),
-        ("managedProviders", "secret"),
         ("mcpAuth", "secret"),
         ("mcpService", "host-resource"),
         ("mentionIndex", "host-resource"),
-        ("modalityConnectionHost", "legacy-no-consumer"),
         ("modelHost", "owner-api"),
         ("modelProvider", "hot-path"),
         ("openAICodexOAuthService", "secret"),
@@ -1454,7 +1457,6 @@ pub fn register_faces(builder: &mut dim_agent_runtime::AgentBuilder) {
         ("timelineTreeControl", "owner-api"),
         ("toolBinding", "hot-path"),
         ("toolExecutor", "hot-path"),
-        ("toolSourcesView", "owner-api"),
         ("uiExtensions", "control"),
         ("uiHost", "control"),
     ] {
@@ -1501,7 +1503,7 @@ async fn coordinate(root: Ctx, control: Arc<ServerControl>) -> Result<ShutdownRe
         return Ok(ShutdownReason::Forced);
     }
     let mut errors = vec![];
-    if let Some(providers) = root.get::<managed_provider::ManagedProviders>() {
+    if let Some(providers) = root.get_at(&managed_provider::owner_key()) {
         providers.quiesce().await;
     }
     if let Some(index) = root.get::<AgentIndex>() {

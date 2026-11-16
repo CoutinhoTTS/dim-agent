@@ -372,7 +372,7 @@ async fn provider_network_is_request_local_and_covers_catalogs_and_stream_bodies
         );
         root.plugin(FileStoragePlugin::new(vec![home.clone()]));
         root.plugin(SqliteStoragePlugin::new(home.join("native.sqlite")));
-        root.plugin(ManagedProvidersPlugin);
+        root.plugin(ManagedProvidersPlugin::new(None));
         root.plugin(dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names(), 0).unwrap());
         root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap());
         active(&root.plugin(dim_agent_aimux::AimuxPlugin::default())).await;
@@ -752,7 +752,7 @@ async fn external_secrets_are_request_local_and_follow_plugin_lifetime() {
     );
     root.plugin(FileStoragePlugin::new(vec![home.clone()]));
     root.plugin(SqliteStoragePlugin::new(home.join("native.sqlite")));
-    root.plugin(ManagedProvidersPlugin);
+    root.plugin(ManagedProvidersPlugin::new(None));
     root.plugin(dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names(), 0).unwrap());
     root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap());
     active(&root.plugin(dim_agent_aimux::AimuxPlugin::default())).await;
@@ -1053,7 +1053,7 @@ async fn an_undeclared_model_limit_is_refused_until_a_source_declares_it() {
     );
     root.plugin(FileStoragePlugin::new(vec![home.clone()]));
     root.plugin(SqliteStoragePlugin::new(home.join("native.sqlite")));
-    root.plugin(ManagedProvidersPlugin);
+    root.plugin(ManagedProvidersPlugin::new(None));
     root.plugin(dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names(), 0).unwrap());
     root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap());
     root.plugin(dim_agent_aimux::AimuxPlugin::default());
@@ -1293,7 +1293,7 @@ impl ServedListing {
         );
         root.plugin(FileStoragePlugin::new(vec![home.clone()]));
         root.plugin(SqliteStoragePlugin::new(home.join("native.sqlite")));
-        root.plugin(ManagedProvidersPlugin);
+        root.plugin(ManagedProvidersPlugin::new(None));
         root.plugin(dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names(), 0).unwrap());
         root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap());
         root.plugin(dim_agent_aimux::AimuxPlugin::default());
@@ -1594,7 +1594,7 @@ async fn a_declared_output_limit_at_or_above_the_window_adopts_a_derived_allowan
     );
     root.plugin(FileStoragePlugin::new(vec![home.clone()]));
     root.plugin(SqliteStoragePlugin::new(home.join("native.sqlite")));
-    root.plugin(ManagedProvidersPlugin);
+    root.plugin(ManagedProvidersPlugin::new(None));
     root.plugin(dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names(), 0).unwrap());
     root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap());
     root.plugin(dim_agent_aimux::AimuxPlugin::default());
@@ -1694,7 +1694,7 @@ async fn selectable_models_match_execution_and_hide_unavailable_models() {
     );
     root.plugin(FileStoragePlugin::new(vec![home.clone()]));
     root.plugin(SqliteStoragePlugin::new(home.join("native.sqlite")));
-    root.plugin(ManagedProvidersPlugin);
+    root.plugin(ManagedProvidersPlugin::new(None));
     root.plugin(dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names(), 0).unwrap());
     root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap());
     root.plugin(dim_agent_aimux::AimuxPlugin::default());
@@ -2024,7 +2024,7 @@ async fn selectable_modality_models_carry_declared_operations_without_chat_rules
     );
     root.plugin(FileStoragePlugin::new(vec![home.clone()]));
     root.plugin(SqliteStoragePlugin::new(home.join("native.sqlite")));
-    root.plugin(ManagedProvidersPlugin);
+    root.plugin(ManagedProvidersPlugin::new(None));
     root.plugin(dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names(), 0).unwrap());
     root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap());
     root.plugin(dim_agent_aimux::AimuxPlugin::default());
@@ -2318,7 +2318,7 @@ async fn modality_connection_resolution_reaches_the_stub_and_refuses_unselectabl
     );
     root.plugin(FileStoragePlugin::new(vec![home.clone()]));
     root.plugin(SqliteStoragePlugin::new(home.join("native.sqlite")));
-    root.plugin(ManagedProvidersPlugin);
+    root.plugin(ManagedProvidersPlugin::new(None));
     root.plugin(dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names(), 0).unwrap());
     root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap());
     root.plugin(dim_agent_aimux::AimuxPlugin::default());
@@ -2327,6 +2327,10 @@ async fn modality_connection_resolution_reaches_the_stub_and_refuses_unselectabl
         .await
         .unwrap();
     let provider = root.get::<ProviderService>().unwrap();
+    assert!(
+        !names().registered::<ModalityConnectionHost>(),
+        "the credential-bearing connection is a private typed binding, not a catalog service"
+    );
     let modality = root.get::<ModalityConnectionHost>().unwrap();
     let selectable = root.get::<SelectableModelsHost>().unwrap();
     let cancel = CancellationToken::new();
@@ -2596,7 +2600,7 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
     );
     root.plugin(FileStoragePlugin::new(vec![home.clone()]));
     root.plugin(SqliteStoragePlugin::new(home.join("native.sqlite")));
-    root.plugin(ManagedProvidersPlugin);
+    root.plugin(ManagedProvidersPlugin::new(None));
     root.plugin(dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names(), 0).unwrap());
     root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap());
     root.plugin(dim_agent_aimux::AimuxPlugin::default());
@@ -3339,7 +3343,7 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
     );
     root.plugin(FileStoragePlugin::new(vec![home.clone()]));
     root.plugin(SqliteStoragePlugin::new(home.join("native.sqlite")));
-    root.plugin(ManagedProvidersPlugin);
+    root.plugin(ManagedProvidersPlugin::new(None));
     root.plugin(dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names(), 0).unwrap());
     root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap());
     root.plugin(dim_agent_aimux::AimuxPlugin::default());
@@ -3458,7 +3462,7 @@ async fn connection_updates_list_the_new_endpoint_and_keep_bundled_models() {
     );
     root.plugin(FileStoragePlugin::new(vec![home.clone()]));
     root.plugin(SqliteStoragePlugin::new(home.join("native.sqlite")));
-    root.plugin(ManagedProvidersPlugin);
+    root.plugin(ManagedProvidersPlugin::new(None));
     root.plugin(dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names(), 0).unwrap());
     root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap());
     root.plugin(dim_agent_aimux::AimuxPlugin::default());
@@ -3831,7 +3835,7 @@ async fn a_listing_that_collides_with_a_user_model_names_it_and_writes_nothing()
     );
     root.plugin(FileStoragePlugin::new(vec![home.clone()]));
     root.plugin(SqliteStoragePlugin::new(home.join("native.sqlite")));
-    root.plugin(ManagedProvidersPlugin);
+    root.plugin(ManagedProvidersPlugin::new(None));
     root.plugin(dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names(), 0).unwrap());
     root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap());
     root.plugin(dim_agent_aimux::AimuxPlugin::default());
@@ -4092,7 +4096,7 @@ async fn a_disabled_provider_can_refresh_its_catalog_after_a_connection_change()
     );
     root.plugin(FileStoragePlugin::new(vec![home.clone()]));
     root.plugin(SqliteStoragePlugin::new(home.join("native.sqlite")));
-    root.plugin(ManagedProvidersPlugin);
+    root.plugin(ManagedProvidersPlugin::new(None));
     root.plugin(dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names(), 0).unwrap());
     root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap());
     root.plugin(dim_agent_aimux::AimuxPlugin::default());
@@ -4368,7 +4372,7 @@ async fn object_kind_listings_classify_their_models_as_chat() {
     );
     root.plugin(FileStoragePlugin::new(vec![home.clone()]));
     root.plugin(SqliteStoragePlugin::new(home.join("native.sqlite")));
-    root.plugin(ManagedProvidersPlugin);
+    root.plugin(ManagedProvidersPlugin::new(None));
     root.plugin(dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names(), 0).unwrap());
     root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap());
     root.plugin(dim_agent_aimux::AimuxPlugin::default());
@@ -4525,7 +4529,7 @@ async fn vendor_routes_agree_across_selection_and_actual_http_execution() {
     );
     root.plugin(FileStoragePlugin::new(vec![home.clone()]));
     root.plugin(SqliteStoragePlugin::new(home.join("native.sqlite")));
-    root.plugin(ManagedProvidersPlugin);
+    root.plugin(ManagedProvidersPlugin::new(None));
     root.plugin(dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names(), 0).unwrap());
     root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap());
     active(&root.plugin(dim_agent_aimux::AimuxPlugin::default())).await;
@@ -4906,7 +4910,7 @@ async fn new_api_metadata_routes_and_builtin_routes_survive_restart() {
         );
         root.plugin(FileStoragePlugin::new(vec![home.clone()]));
         root.plugin(SqliteStoragePlugin::new(home.join("native.sqlite")));
-        root.plugin(ManagedProvidersPlugin);
+        root.plugin(ManagedProvidersPlugin::new(None));
         root.plugin(dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names(), 0).unwrap());
         root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap());
         active(&root.plugin(dim_agent_aimux::AimuxPlugin::default())).await;
@@ -5371,7 +5375,7 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
             .unwrap(),
     );
     let files = root.plugin(FileStoragePlugin::new(vec![home.clone()]));
-    let oauth = root.plugin(ManagedProvidersPlugin);
+    let oauth = root.plugin(ManagedProvidersPlugin::new(None));
     root.plugin(dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names(), 0).unwrap());
     root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap());
     let sqlite = root.plugin(SqliteStoragePlugin::new(home.join("native.sqlite")));
@@ -6370,7 +6374,7 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
     let plugins = [
         restarted.plugin(FileStoragePlugin::new(vec![home.clone()])),
         restarted.plugin(SqliteStoragePlugin::new(home.join("native.sqlite"))),
-        restarted.plugin(ManagedProvidersPlugin),
+        restarted.plugin(ManagedProvidersPlugin::new(None)),
         restarted
             .plugin(dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names(), 0).unwrap()),
         restarted.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap()),
@@ -6511,7 +6515,7 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
     let plugins = [
         isolated.plugin(FileStoragePlugin::new(vec![home.clone()])),
         isolated.plugin(SqliteStoragePlugin::new(home.join("native.sqlite"))),
-        isolated.plugin(ManagedProvidersPlugin),
+        isolated.plugin(ManagedProvidersPlugin::new(None)),
         isolated
             .plugin(dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names(), 0).unwrap()),
         isolated.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap()),
@@ -6750,7 +6754,7 @@ async fn legacy_import_preserves_sources_model_origins_and_scoped_choices() {
     let plugins = [
         root.plugin(FileStoragePlugin::new(vec![home.clone()])),
         root.plugin(SqliteStoragePlugin::new(home.join("native.sqlite"))),
-        root.plugin(ManagedProvidersPlugin),
+        root.plugin(ManagedProvidersPlugin::new(None)),
         root.plugin(dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names(), 0).unwrap()),
         root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap()),
         root.plugin(provider_part(ProviderPlugin::new)),
@@ -6981,7 +6985,7 @@ async fn legacy_import_declares_only_the_limits_the_source_does() {
     let plugins = [
         root.plugin(FileStoragePlugin::new(vec![home.clone()])),
         root.plugin(SqliteStoragePlugin::new(home.join("native.sqlite"))),
-        root.plugin(ManagedProvidersPlugin),
+        root.plugin(ManagedProvidersPlugin::new(None)),
         root.plugin(dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names(), 0).unwrap()),
         root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap()),
         root.plugin(provider_part(ProviderPlugin::new)),
@@ -7323,7 +7327,7 @@ async fn legacy_import_applies_one_frozen_rule_to_omitted_fields_builtins_and_sc
     let plugins = [
         root.plugin(FileStoragePlugin::new(vec![home.clone()])),
         root.plugin(SqliteStoragePlugin::new(home.join("native.sqlite"))),
-        root.plugin(ManagedProvidersPlugin),
+        root.plugin(ManagedProvidersPlugin::new(None)),
         root.plugin(dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names(), 0).unwrap()),
         root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap()),
         root.plugin(provider_part(ProviderPlugin::new)),
@@ -7534,7 +7538,7 @@ async fn legacy_import_applies_one_frozen_rule_to_omitted_fields_builtins_and_sc
     let plugins = [
         restarted.plugin(FileStoragePlugin::new(vec![home.clone()])),
         restarted.plugin(SqliteStoragePlugin::new(home.join("native.sqlite"))),
-        restarted.plugin(ManagedProvidersPlugin),
+        restarted.plugin(ManagedProvidersPlugin::new(None)),
         restarted
             .plugin(dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names(), 0).unwrap()),
         restarted.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap()),
@@ -7742,7 +7746,7 @@ async fn auxiliary_model_calls_the_given_model_once_without_tools_or_fallback() 
     );
     root.plugin(FileStoragePlugin::new(vec![home.clone()]));
     root.plugin(SqliteStoragePlugin::new(home.join("native.sqlite")));
-    root.plugin(ManagedProvidersPlugin);
+    root.plugin(ManagedProvidersPlugin::new(None));
     root.plugin(dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names(), 0).unwrap());
     root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap());
     active(&root.plugin(dim_agent_aimux::AimuxPlugin::default())).await;
@@ -8113,7 +8117,7 @@ async fn legacy_import_keeps_the_builtin_seed_through_a_restart() {
     let plugins = [
         root.plugin(FileStoragePlugin::new(vec![home.clone()])),
         root.plugin(SqliteStoragePlugin::new(home.join("native.sqlite"))),
-        root.plugin(ManagedProvidersPlugin),
+        root.plugin(ManagedProvidersPlugin::new(None)),
         root.plugin(dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names(), 0).unwrap()),
         root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap()),
         root.plugin(provider_part(ProviderPlugin::new)),
@@ -8199,7 +8203,7 @@ async fn legacy_import_keeps_the_builtin_seed_through_a_restart() {
     let plugins = [
         restarted.plugin(FileStoragePlugin::new(vec![home.clone()])),
         restarted.plugin(SqliteStoragePlugin::new(home.join("native.sqlite"))),
-        restarted.plugin(ManagedProvidersPlugin),
+        restarted.plugin(ManagedProvidersPlugin::new(None)),
         restarted
             .plugin(dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names(), 0).unwrap()),
         restarted.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap()),
@@ -8248,7 +8252,7 @@ async fn a_bundled_entry_without_limits_takes_the_identified_numbers_or_reports_
     let plugins = [
         root.plugin(FileStoragePlugin::new(vec![home.clone()])),
         root.plugin(SqliteStoragePlugin::new(home.join("native.sqlite"))),
-        root.plugin(ManagedProvidersPlugin),
+        root.plugin(ManagedProvidersPlugin::new(None)),
         root.plugin(dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names(), 0).unwrap()),
         root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap()),
         root.plugin(provider_part(ProviderPlugin::new)),
@@ -8416,7 +8420,7 @@ async fn a_refused_ambiguity_names_the_rows_that_disagree() {
     let plugins = [
         root.plugin(FileStoragePlugin::new(vec![home.clone()])),
         root.plugin(SqliteStoragePlugin::new(home.join("native.sqlite"))),
-        root.plugin(ManagedProvidersPlugin),
+        root.plugin(ManagedProvidersPlugin::new(None)),
         root.plugin(dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names(), 0).unwrap()),
         root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap()),
         root.plugin(provider_part(ProviderPlugin::new)),
@@ -8517,7 +8521,7 @@ async fn a_provider_states_the_prefix_its_ids_carry_and_that_statement_resolves_
     let plugins = [
         root.plugin(FileStoragePlugin::new(vec![home.clone()])),
         root.plugin(SqliteStoragePlugin::new(home.join("native.sqlite"))),
-        root.plugin(ManagedProvidersPlugin),
+        root.plugin(ManagedProvidersPlugin::new(None)),
         root.plugin(dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names(), 0).unwrap()),
         root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap()),
         root.plugin(provider_part(ProviderPlugin::new)),
@@ -8663,7 +8667,7 @@ async fn a_created_provider_states_the_prefix_its_ids_carry() {
     let plugins = [
         root.plugin(FileStoragePlugin::new(vec![home.clone()])),
         root.plugin(SqliteStoragePlugin::new(home.join("native.sqlite"))),
-        root.plugin(ManagedProvidersPlugin),
+        root.plugin(ManagedProvidersPlugin::new(None)),
         root.plugin(dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names(), 0).unwrap()),
         root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap()),
         root.plugin(provider_part(ProviderPlugin::new)),
@@ -8817,7 +8821,7 @@ async fn a_model_edit_sets_an_alias_on_the_record_and_creates_no_override() {
     let plugins = [
         root.plugin(FileStoragePlugin::new(vec![home.clone()])),
         root.plugin(SqliteStoragePlugin::new(home.join("native.sqlite"))),
-        root.plugin(ManagedProvidersPlugin),
+        root.plugin(ManagedProvidersPlugin::new(None)),
         root.plugin(dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names(), 0).unwrap()),
         root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap()),
         root.plugin(provider_part(ProviderPlugin::new)),
@@ -8967,7 +8971,7 @@ async fn a_v25_seed_upgrades_to_the_fresh_bundle_record() {
         let plugins = [
             root.plugin(FileStoragePlugin::new(vec![home.clone()])),
             root.plugin(SqliteStoragePlugin::new(home.join("native.sqlite"))),
-            root.plugin(ManagedProvidersPlugin),
+            root.plugin(ManagedProvidersPlugin::new(None)),
             root.plugin(
                 dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names(), 0).unwrap(),
             ),
@@ -9121,7 +9125,7 @@ async fn an_unreadable_recorded_protocol_rejects_a_preference_update() {
     );
     root.plugin(FileStoragePlugin::new(vec![home.clone()]));
     root.plugin(SqliteStoragePlugin::new(home.join("native.sqlite")));
-    root.plugin(ManagedProvidersPlugin);
+    root.plugin(ManagedProvidersPlugin::new(None));
     root.plugin(dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names(), 0).unwrap());
     root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap());
     active(&root.plugin(dim_agent_aimux::AimuxPlugin::default())).await;
@@ -9208,7 +9212,7 @@ async fn an_edited_merged_limit_stays_edited() {
     let plugins = [
         root.plugin(FileStoragePlugin::new(vec![home.clone()])),
         root.plugin(SqliteStoragePlugin::new(home.join("native.sqlite"))),
-        root.plugin(ManagedProvidersPlugin),
+        root.plugin(ManagedProvidersPlugin::new(None)),
         root.plugin(dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names(), 0).unwrap()),
         root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap()),
         root.plugin(provider_part(ProviderPlugin::new)),
@@ -9384,7 +9388,7 @@ async fn provider_root(home: &Path) -> (Ctx, Arc<ProviderService>) {
     );
     root.plugin(FileStoragePlugin::new(vec![home.to_path_buf()]));
     root.plugin(SqliteStoragePlugin::new(home.join("native.sqlite")));
-    root.plugin(ManagedProvidersPlugin);
+    root.plugin(ManagedProvidersPlugin::new(None));
     root.plugin(dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names(), 0).unwrap());
     root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names(), 0).unwrap());
     root.plugin(dim_agent_aimux::AimuxPlugin::default());

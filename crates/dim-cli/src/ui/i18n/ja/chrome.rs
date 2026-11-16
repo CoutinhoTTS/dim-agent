@@ -524,6 +524,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         // keys.rs
         "show the key bindings" => "キーバインドを表示",
+        "show the command that updates this installation" => {
+            "このインストールを更新するコマンドを表示"
+        }
         "Application keys" => "アプリキー",
         "Enter submit when idle · Shift+Enter / Alt+Enter / Ctrl+J newline · ↑↓ history" => {
             "待機中は Enter で送信 · Shift+Enter / Alt+Enter / Ctrl+J で改行 · ↑↓ 履歴"
@@ -618,6 +621,18 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "Upgrading the local store from format v{from} to v{to}; this can take a while on a large store." => {
             "ローカルストアをフォーマット v{from} から v{to} にアップグレードしています。大きなストアでは時間がかかることがあります。"
+        }
+        "Upgrading the local store · {seconds} s · {stage}" => {
+            "ローカルストアをアップグレード中 · {seconds} 秒経過 · {stage}"
+        }
+        "moving retained images into Session files" => {
+            "保持された画像をセッションファイルに移しています"
+        }
+        "updating the text index of the rows that changed" => {
+            "変更された行のテキストインデックスを更新しています"
+        }
+        "checking and committing the upgraded store" => {
+            "アップグレードしたストアを検証してコミットしています"
         }
         _ => return None,
     })

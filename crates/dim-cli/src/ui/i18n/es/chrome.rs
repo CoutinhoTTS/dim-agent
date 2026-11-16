@@ -560,6 +560,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         // keys.rs
         "show the key bindings" => "ver atajos de teclado",
+        "show the command that updates this installation" => {
+            "ver el comando que actualiza esta instalación"
+        }
         "Application keys" => "Atajos de la app",
         "Enter submit when idle · Shift+Enter / Alt+Enter / Ctrl+J newline · ↑↓ history" => {
             "Enter envía sin ejecución activa · Shift+Enter / Alt+Enter / Ctrl+J nueva línea · ↑↓ historial"
@@ -658,6 +661,18 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "Upgrading the local store from format v{from} to v{to}; this can take a while on a large store." => {
             "Se está actualizando el almacén local del formato v{from} al v{to}; esto puede tardar un rato en un almacén grande."
+        }
+        "Upgrading the local store · {seconds} s · {stage}" => {
+            "Actualizando el almacén local · {seconds} s · {stage}"
+        }
+        "moving retained images into Session files" => {
+            "moviendo las imágenes conservadas a archivos de sesión"
+        }
+        "updating the text index of the rows that changed" => {
+            "actualizando el índice de texto de las filas modificadas"
+        }
+        "checking and committing the upgraded store" => {
+            "comprobando y confirmando el almacén actualizado"
         }
         _ => return None,
     })
