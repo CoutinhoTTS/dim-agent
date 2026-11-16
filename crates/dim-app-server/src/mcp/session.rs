@@ -185,7 +185,7 @@ fn usable(state: McpServerState) -> bool {
 
 /// Management view, without credentials, transport handles or registry access.
 pub struct McpSession {
-    files: Option<Arc<dim_agent_capabilities::host::SessionFilesHost>>,
+    files: Option<Arc<dim_agent_capabilities::host::SessionFiles>>,
     session_id: String,
     connections: super::McpOwner,
     entries: Mutex<BTreeMap<String, Published>>,
@@ -429,7 +429,7 @@ impl ToolProvider for Sources {
 }
 
 pub struct McpSessionPlugin {
-    files: Key<dim_agent_capabilities::host::SessionFilesHost>,
+    files: Key<dim_agent_capabilities::host::SessionFiles>,
     identity: Key<dim_agent_runtime::SessionIdentity>,
     session: InstanceId,
     mcp: Key<McpSession>,
@@ -961,7 +961,7 @@ pub(super) fn contribution(
     tool: &McpTool,
     connection: Arc<McpConnection>,
     stopped: CancellationToken,
-    files: Option<Arc<dim_agent_capabilities::host::SessionFilesHost>>,
+    files: Option<Arc<dim_agent_capabilities::host::SessionFiles>>,
     session_id: String,
 ) -> Arc<ToolContribution> {
     let mut hash = Sha256::new();
@@ -1001,7 +1001,7 @@ pub(super) fn contribution(
 }
 
 struct McpToolHandler {
-    files: Option<Arc<dim_agent_capabilities::host::SessionFilesHost>>,
+    files: Option<Arc<dim_agent_capabilities::host::SessionFiles>>,
     session_id: String,
     server: String,
     connection: Arc<McpConnection>,

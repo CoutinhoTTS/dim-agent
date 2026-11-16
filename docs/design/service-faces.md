@@ -89,7 +89,7 @@ Rust 产品装配的现状以 [生成的 catalog](../architecture/rust-agent/gen
 | `scheduleJobs` | `scheduleJobs.call(JobRequest)` | 按 [Scheduler](plugins/Scheduler.md#a2-tool-schedule) 的 flat `JobRequest`/`JobReply`，与 `wakeups` 同一批次（[#1396](https://github.com/arcships/dim/pull/1396)）。 |
 | `wakeups` | `wakeups.create/list/cancel` | 形状按 [Scheduler](plugins/Scheduler.md#102-methods-and-tool) §10.2。 |
 | `loops` | `loops.start/next/list/stop` | 形状按 [Scheduler](plugins/Scheduler.md#126-interfaces) §12.6；`start`、`next`、`stop` 是迁改，`list` 是读取。投递 pass、恢复与 `settle_delivering` 不在此面。 |
-| `sessionFiles` | `sessionFiles.put/import/read/register/owns/owned_paths` | 形状按 [Session files](appserver/session-files.md) §9.1，`SessionFilesHost` 是进程内绑定。 |
+| `sessionFiles` | `sessionFiles.put/import/read/register/owns/owned_paths` | 形状按 [Session files](appserver/session-files.md) §9.1，`SessionFiles` 是进程内绑定。 |
 | `managedSearch` | `managedSearch.search` | 凭据由实现持有，见 §4.6。 |
 | `agentConfig` | `agentConfig.get()` | 形状见 §4.8。 |
 | `sessionLanguage` | `sessionLanguage.get()` | 形状见 §4.8。 |
@@ -110,7 +110,6 @@ Rust 产品装配的现状以 [生成的 catalog](../architecture/rust-agent/gen
 | `modelHost` | `auxiliaryModel` | PromptSuggestion 的请求与流式语义见 §4.2。 |
 | `auxiliaryModelHost` | `auxiliaryModel` | 模型调用走 `complete` |
 | `loader` | `rutis/loader` | 插件管理走数据面 |
-| `sessionFilesHost` | `sessionFiles` | Rust 绑定；wire 名按 owner 契约 |
 | `basePromptSettingsHost` | — | 宿主 prompt settings 端口；`owner-api` |
 | `skillsInstructionsSettingsHost` | — | 宿主 skills settings 端口；`owner-api` |
 | `summaryPromptSettingsHost` | — | 宿主 summary settings 端口；`owner-api` |
@@ -266,7 +265,7 @@ workflowRuns.call(RunRequest)
 
 ### 4.5 `sessionFiles`
 
-按 owner 契约 [Session files](appserver/session-files.md) §9.1 暴露 `sessionFiles`。`SessionFilesHost` 作为这组操作的进程内绑定。
+按 owner 契约 [Session files](appserver/session-files.md) §9.1 暴露 `sessionFiles`。`SessionFiles` 作为这组操作的进程内绑定。
 
 文件导入、分块读取、归属操作的参数、回复、错误及取消语义均由 §9.1 定义。文件传输使用按路径导入与有界读取操作。
 

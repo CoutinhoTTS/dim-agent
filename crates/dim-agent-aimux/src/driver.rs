@@ -475,7 +475,7 @@ fn build_model(
 }
 
 pub(crate) struct AimuxDriver {
-    files: Option<Arc<dim_agent_capabilities::host::SessionFilesHost>>,
+    files: Option<Arc<dim_agent_capabilities::host::SessionFiles>>,
     /// The transport every connection without a proxy reuses, so their
     /// clients share one connection pool.
     transport: ReqwestFetch,
@@ -488,7 +488,7 @@ pub(crate) struct AimuxDriver {
 impl AimuxDriver {
     pub fn with_files(
         generation: CancellationToken,
-        files: Option<Arc<dim_agent_capabilities::host::SessionFilesHost>>,
+        files: Option<Arc<dim_agent_capabilities::host::SessionFiles>>,
     ) -> Result<Arc<Self>, HostError> {
         let transport = ReqwestFetch::default();
         Ok(Arc::new(Self {

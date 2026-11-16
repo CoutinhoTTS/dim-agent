@@ -1444,7 +1444,6 @@ pub fn register_faces(builder: &mut dim_agent_runtime::AgentBuilder) {
         ("providerService", "secret"),
         ("publication", "host-resource"),
         ("serverControl", "control"),
-        ("sessionFilesHost", "owner-api"),
         ("sessionLoader", "control"),
         ("sessionSkills", "host-resource"),
         ("sessionStore", "owner-api"),

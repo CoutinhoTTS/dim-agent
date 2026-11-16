@@ -13,7 +13,7 @@ use crate::{
     text::{digest, preview, stamp},
 };
 use chrono::Utc;
-use dim_agent_capabilities::host::{SessionFilesHost, StoredSessionFile};
+use dim_agent_capabilities::host::{SessionFiles, StoredSessionFile};
 use dim_agent_types::{InputMode, markup::escaped};
 use futures_util::{StreamExt, stream};
 use rutis::Ctx;
@@ -448,7 +448,7 @@ async fn overflow_files(
             sessions.push(plan.session_id.clone());
         }
     }
-    let Some(service) = shared.ctx.get::<SessionFilesHost>() else {
+    let Some(service) = shared.ctx.get::<SessionFiles>() else {
         // No native store: the markers carry `truncated="true"` (design §3.2).
         return sessions
             .into_iter()

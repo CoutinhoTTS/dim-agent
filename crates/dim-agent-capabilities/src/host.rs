@@ -1458,7 +1458,7 @@ pub trait SessionFilesService: Send + Sync + 'static {
 }
 /// The process service `sessionFiles`, provided by SessionStore, so that its
 /// consumers name no App Server type.
-pub struct SessionFilesHost(pub Arc<dyn SessionFilesService>);
+pub struct SessionFiles(pub Arc<dyn SessionFilesService>);
 
 pub struct IdentityContext;
 impl PrepareContext for IdentityContext {
