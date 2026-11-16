@@ -2097,7 +2097,7 @@ impl AgentsPlugin {
                 .then(|| names.key::<SettingsService>())
                 .transpose()?,
             loader: names.key()?,
-            directory: names.key()?,
+            directory: Key::of(),
             activity: names.key()?,
             parts: names.key()?,
             builder,

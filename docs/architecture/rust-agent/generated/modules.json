@@ -23475,7 +23475,6 @@
         "mod agents",
         "path AgentIndex",
         "path AgentsPlugin::new",
-        "path agents::AgentDirectory",
         "path agents::AgentDirectoryPlugin",
         "path agents::group_row",
         "path agents::register",

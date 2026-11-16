@@ -105,7 +105,7 @@ Rust 产品装配的现状以 [生成的 catalog](../architecture/rust-agent/gen
 
 | 名字 | 数据兄弟 | 说明 |
 | --- | --- | --- |
-| `agentDirectory`、`agentIndex` | `sessions` | 目录查询走 `sessions` |
+| `agentIndex` | `sessions` | 目录查询走 `sessions` |
 | `settingsService` | `settings` | GoalBranch 的取消契约见 §4.1。 |
 | `modelHost` | `auxiliaryModel` | PromptSuggestion 的请求与流式语义见 §4.2。 |
 | `loader` | `rutis/loader` | 插件管理走数据面 |

@@ -1339,7 +1339,6 @@ pub(crate) fn register_names(catalog: &mut dim_agent_runtime::names::ServiceCata
     register::<storage::SessionStore>(catalog, None);
     catalog.register_shared("store");
     register::<worktrees::ManagedWorktrees>(catalog, None);
-    register::<agents::AgentDirectory>(catalog, None);
     register::<AgentIndex>(catalog, None);
     register::<rutis_loader::Loader>(catalog, None);
     catalog.register_shared(dim_agent_runtime::names::name_of::<
@@ -1396,7 +1395,6 @@ pub fn register_faces(builder: &mut dim_agent_runtime::AgentBuilder) {
         ("promptSourcesBranch", "hot-path"),
         ("skillsInstructionsSettingsHost", "owner-api"),
         ("summaryPromptSettingsHost", "owner-api"),
-        ("agentDirectory", "owner-api"),
         ("agentIndex", "owner-api"),
         ("agentLoop", "hot-path"),
         ("branchLine", "hot-path"),
