@@ -448,6 +448,33 @@ mod tests {
         set(previous);
     }
 
+    /// The two strings `/update` prints, translated in every locale with the
+    /// command's placeholder kept.
+    #[test]
+    fn every_locale_translates_the_update_entry_strings() {
+        let previous = active();
+        for (locale, code, _) in LOCALES {
+            if locale == Locale::En {
+                continue;
+            }
+            for key in [
+                "show the command that updates this installation",
+                "To update, exit every client and stop the server, then run {command}",
+            ] {
+                let translated = table(locale, key);
+                assert!(translated.is_some(), "{code} lacks {key:?}");
+                assert_ne!(translated.unwrap(), key, "{code} copies {key:?}");
+            }
+            set(locale);
+            let text = tf(
+                "To update, exit every client and stop the server, then run {command}",
+                &[("command", "fixture-command")],
+            );
+            assert!(text.contains("fixture-command"), "{code} drops the command");
+        }
+        set(previous);
+    }
+
     #[test]
     fn every_locale_translates_the_daemon_notice_strings() {
         // The strings the notice prints, so a changed text cannot pass here

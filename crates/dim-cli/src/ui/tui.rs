@@ -5608,6 +5608,22 @@ impl App {
                 });
                 Outcome::Continue
             }
+            "update" => {
+                self.reports.push(match crate::update::command() {
+                    Ok(command) => Block::Status {
+                        text: tf(
+                            "To update, exit every client and stop the server, then run {command}",
+                            &[("command", &command)],
+                        ),
+                        tone: Tone::Muted,
+                    },
+                    Err(reason) => Block::Status {
+                        text: reason,
+                        tone: Tone::Warning,
+                    },
+                });
+                Outcome::Continue
+            }
             "settings" => {
                 self.settings(args);
                 Outcome::Continue

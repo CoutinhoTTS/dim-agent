@@ -572,6 +572,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         // keys.rs
         "show the key bindings" => "afficher les raccourcis",
+        "show the command that updates this installation" => "afficher la commande de mise à jour",
         "Application keys" => "Raccourcis de l'app",
         "Enter submit when idle · Shift+Enter / Alt+Enter / Ctrl+J newline · ↑↓ history" => {
             "Enter envoie au repos · Shift+Enter / Alt+Enter / Ctrl+J nouvelle ligne · ↑↓ historique"

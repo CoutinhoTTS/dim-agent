@@ -528,6 +528,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         // keys.rs
         "show the key bindings" => "단축키 보기",
+        "show the command that updates this installation" => "이 설치를 업데이트하는 명령 표시",
         "Application keys" => "앱 단축키",
         "Enter submit when idle · Shift+Enter / Alt+Enter / Ctrl+J newline · ↑↓ history" => {
             "대기 중 Enter로 제출 · Shift+Enter / Alt+Enter / Ctrl+J 줄바꿈 · ↑↓ 기록"

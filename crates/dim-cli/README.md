@@ -245,11 +245,14 @@ failed export removes the file it created. See the
 [Timeline export design](../../docs/design/appserver/timeline-export.md).
 
 Use `dimcode daemon vacuum [--database PATH]` after `dimcode daemon stop` to
-reclaim the space deleted Sessions leave in the native store. It runs the App
+reclaim space in the native store. It runs the App
 Server binary (the sibling or `--server PATH`) with `--vacuum`, takes the store's
-maintenance lock, checks the current format, rewrites the database with SQLite
-`VACUUM` and prints its size before and after. It refuses while a daemon owns
-the database, never creates a database or upgrades one, and needs free disk space
+maintenance lock and checks the current format. It removes unreachable `node` and
+`message` content rows, then rewrites the database with SQLite `VACUUM`, reporting
+the removed rows and their body bytes alongside the size before and after. If any
+Session references missing content, it refuses before deleting any rows. It also
+refuses while a daemon owns the database, never creates a database or upgrades
+one, and needs free disk space
 about the store's size. The database path follows `dimcode export`. See the
 [storage format](../../docs/design/appserver/native-storage-format.md#sqlite-运行参数与空间回收).
 
@@ -1249,6 +1252,8 @@ Terminals that draw a progress bar for `OSC 9;4` (ConEmu's sequence, which Windo
 A bar means a run is under way or held up, so a finished or failed run removes it; the result stays in the record. `OSC 9;4` shares its number with iTerm2's notification, and a terminal that knows only the notification shows every update as one, so the bar is drawn only where it is known to work: Windows Terminal (`WT_SESSION`), ConEmu (`ConEmuANSI=ON`), Ghostty (`TERM_PROGRAM=ghostty` or `TERM=xterm-ghostty`), WezTerm, and iTerm2 from 3.6.6. Inside tmux, GNU screen or herdr there is no bar: tmux and screen keep the sequence, the outer terminal's variables leak into the pane, and passed through, the outer terminal would show one bar for all panes and keep a killed pane's. A terminal that answered the probe's `OSC 7501;?` keeps the record and draws the bar from it, so none is drawn there either. `DIM_TERMINAL_PROGRESS=off` turns the bar off and `on` draws it in any terminal, for one this list does not recognise or a record-bearing one whose bar does not show; it is independent of `DIM_TERMINAL_STATUS`. Ghostty drops a bar it has not seen for about 15 seconds, so a bar that shows is drawn again every second. Once a bar was drawn, leaving removes it, also from the restore after a panic or a fatal signal. As with the reports, only the terminal UI draws it.
 
 `/keys` writes the interface's keys into the transcript; in scrollback it adds how the terminal that owns the history scrolls, searches and copies (tmux copy mode, iTerm2 and Apple Terminal `Cmd` keys, `Shift+PageUp` in Ghostty, WezTerm, kitty and Alacritty, Windows Terminal).
+
+`/update` writes the command that installs this copy into the transcript (`dima update`, `dim update` or `dimcode update` for a recognised npm installation; the package manager's own line and a rebuild for any other layout). It installs nothing: the interface is itself a client of the installation the updater replaces, so the command runs once every client has exited and the server stopped. See [Update dialog](../../docs/design/cli-commands.md#update-dialog).
 
 `/language` (`/lang`, `/locale`) picks the interface language: the system default (`LC_ALL`, `LC_MESSAGES`, `LANG`) or one of English, 简体中文, 日本語, 한국어, 繁體中文, Bahasa Indonesia, Deutsch, Français, Español, Português (Brasil) and Português (Portugal). Moving previews, `Enter` saves it as `locale` in `config.json`, `Esc` restores. Every language is translated; a string missing from a table reads as English. Rows already in the transcript keep their language. This is the interface locale of this machine: it does not set the Session's reply language, which is a Session setting (`session.language.update`).
 

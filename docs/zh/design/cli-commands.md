@@ -20,7 +20,7 @@ scrollback 与 fullscreen TUI 都按同一个固定的、经过整理的顺序�
 /tasks /rename /web /connect /login
 /skills /reload-skills /mcp /plugins /runtime
 /hooks /scheduled /workflow /workflow:save
-/tools /tui /theme /language /keys /report /exit
+/tools /tui /theme /language /keys /update /report /exit
 ```
 
 `/fast` 仅在模型声明支持服务层级时列出。搜索时匹配程度优先，同等匹配保持上述顺序。
@@ -975,7 +975,7 @@ Remove 先在提示栏询问，`Remove deny prefix git push? Enter confirm · Es
 | `/resume` | 在当前工作区上打开 Session 选择面板（[`/resume` 选择面板](#resume-选择面板)）；`Ctrl+S` 在本地范围（启动工作区，或 git 回答后的当前仓库）与所有工作区之间切换，`Ctrl+X` 在确认后一次删除一行。 |
 | `/export markdown PATH` 或 `/export json PATH` | 交互客户端空闲时把当前主分支导出到文件。 |
 | `dimcode export SESSION_ID [--output PATH] [--database PATH]` | 不经守护进程，把 Session 的完整 Timeline 写成带版本的 JSONL（[Timeline 导出](appserver/timeline-export.md)）；未给输出路径时写到 stdout。 |
-| `dimcode daemon vacuum [--database PATH]` | 用 SQLite `VACUUM` 重写离线原生库，回收已删除 Session 留下的页，并打印操作前后的大小（[存储格式](appserver/native-storage-format.md#sqlite-运行参数与空间回收)）；守护进程持库时失败，也不创建或升级库。 |
+| `dimcode daemon vacuum [--database PATH]` | 先删除离线原生库中没有任何存储引用到达的内容行（仅 `node`/`message`，每个 Session 一个事务），再用 SQLite `VACUUM` 重写，回收这些行与已删除 Session 留下的页；打印操作前后的大小、删除的行数及其正文字节数，某个 Session 指向库中不存在的内容时不删除任何东西（[存储格式](appserver/native-storage-format.md#sqlite-运行参数与空间回收)）；守护进程持库时失败，也不创建或升级库。 |
 | `dimcode skills list` | 经 `skills.catalog` 列出工作区的 Skills：每个条目的名称、来源、状态、文件与描述，然后是目录的 issues。 |
 | `dimcode skills enable\|disable ID` | 经 `skills.set_enabled` 启用或停用单个 Skill，然后再次报告目录。 |
 | `dimcode skills reload` | 经 `skills.refresh` 重新扫描用户与项目根，并通过 [Skills 管理界面](#管理界面)报告结果。 |
@@ -1497,6 +1497,16 @@ Esc 关闭。宽屏空间足够时保留确认布局。
 | > Close 2/2              |
 | Left/Right Tab Enter Esc |
 +----------- Up/Down 1-2/7-+
+```
+
+`/update` 就是那条命令在两种终端 UI 模式下的客户端侧报告。它不执行任何安装：更新命令持有
+安装的排他租约，而界面本身就是持有该租约共享锁的客户端，服务操作者期间无法释放。因此
+`/update` 只给出对话框会给的命令：可识别的安装给出该命令，其他布局给出[手动与重建
+说明](#更新对话框)，并且不查询渠道——自动启动检查仍独占对话框与跳过列表。
+
+```text
+> /update
+要升级，请退出所有客户端并停止服务器，然后运行 dima update
 ```
 
 ### 客户端／服务器协调升级
