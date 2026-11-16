@@ -552,6 +552,7 @@ async function sendNowAndStop(): Promise<void> {
 }
 
 async function stop(): Promise<void> {
+  if (sendNow.value) return
   error.value = ""
   try {
     await props.stop?.()
@@ -788,7 +789,7 @@ defineExpose({ focus: () => field.value?.focus(), quote })
               :icon="showStop ? 'i-lucide-square' : running && primaryMode === 'queue' ? 'i-lucide-hourglass' : 'i-lucide-arrow-up'"
               :aria-label="showStop ? t('composer.stopResponse') : t('composer.send')"
               :aria-description="showStop || !running ? undefined : primaryMode === 'steer' ? t('composer.steerAlternate') : t('composer.queueAlternate')"
-              :disabled="showStop ? stopping : !canSend || sending || sendNow"
+              :disabled="showStop ? stopping || sendNow : !canSend || sending || sendNow"
               @click.stop="showStop ? stop() : submit()"
             />
           </UTooltip>

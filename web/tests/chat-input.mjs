@@ -642,17 +642,22 @@ const heldInput = (id, ...blocks) => {
  */
 function soloComposer(t, props = {}, stores = {}, calls = {}) {
   const sent = [], stopped = [], withdrawn = []
+  const events = calls.events ?? []
   const mounted = mount(t, "main", [], ComposerPanel, stores, {
     running: true,
     attachments: true,
-    send: async (value, attachments, mode) => { sent.push({ value, attachments, mode }) },
+    send: async (value, attachments, mode) => { events.push("submit"); sent.push({ value, attachments, mode }) },
     stop: async () => {
+      events.push("stop")
       stopped.push(true)
       if (calls.stopFails) throw new Error("the run would not stop")
       await calls.stopGate?.promise
     },
     withdrawHeld: async (item) => {
+      events.push(`withdraw-start:${item.id}`)
       withdrawn.push(item.id)
+      await calls.withdrawGate?.promise
+      events.push(`withdraw-reply:${item.id}`)
       return calls.adopted?.includes(item.id) ? "notHeld" : "deleted"
     },
     ...props,
@@ -723,6 +728,31 @@ test("interrupt and send now withdraws every held message oldest first, stops, t
   await gesture
   await flush()
   assert.deepEqual(sent.map((submission) => [submission.value, submission.mode]), [["one\ntwo\nand then", "queue"]], "one submit, after the stop's reply, with the recalled messages ahead of the draft")
+})
+
+test("an empty draft held through a delayed withdrawal stops once, after every reply", async (t) => {
+  let release
+  const withdrawGate = { promise: new Promise((resolve) => { release = resolve }) }
+  const events = []
+  const held = [heldInput("first", "one"), heldInput("second", "two")]
+  const run = soloComposer(t, { held }, {}, { withdrawGate, events })
+
+  const gesture = click(button(run.root, "composer.sendNowHint"))
+  await flush()
+  assert.deepEqual(events, ["withdraw-start:first"], "the withdrawal is out and unanswered")
+
+  const stopButton = button(run.root, "composer.stopResponse")
+  assert.equal(stopButton.props.disabled, true, "the ordinary Stop waits for the gesture that is already stopping the run")
+  await click(stopButton)
+  await flush()
+  assert.deepEqual(events, ["withdraw-start:first"], "a Stop click while the gesture runs sends no stop of its own")
+
+  release()
+  await gesture
+  await flush()
+  assert.deepEqual(events, ["withdraw-start:first", "withdraw-reply:first", "withdraw-start:second", "withdraw-reply:second", "stop", "submit"], "every withdrawal replies before the one stop, and the submit follows it")
+  assert.equal(run.stopped.length, 1, "one stop for the gesture")
+  assert.deepEqual(run.sent.map((submission) => submission.value), ["one\ntwo"], "the recalled messages are submitted once")
 })
 
 test("a stop that fails keeps the whole draft in the composer and sends nothing", async (t) => {

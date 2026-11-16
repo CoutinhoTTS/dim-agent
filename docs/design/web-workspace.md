@@ -1003,7 +1003,7 @@ switches it, so a missing or unknown stored value means `steer`.
 | Combined draft | The recalled messages in queue order, then the draft that was typed, each message keeping its own content in the order it was written: a text run stays where it stood and an image keeps the place it held between text runs, as the TUI's inline token does. Recalled text goes ahead of the typed text through the same separator rule the TUI uses: a newline before a recalled message when the draft there does not end a line, one between two adjacent text blocks, and one after the message when typed text follows |
 | Recalled images | A recalled message's stored images keep the draft offset they stood at and are sent with it as their existing file references, the text around them split at that offset; the draft's own pasted or dropped files are uploaded as usual and follow. Editing the draft moves an image with the text it stood between, and an inserted `@` file is linked within the run of text it belongs to, so a link never straddles an image |
 | Failed stop | Nothing is submitted: the whole combined draft stays in the composer with the reason, and the withdrawals that already went are not repeated |
-| Guards | An empty draft with nothing held is a no-op. While that stop is out, no action submits, and a second trigger sends no second stop: one reply decides one submit. A command or `@` menu open takes `Ctrl+Enter` as Enter itself, and text composition (IME) never reaches the gesture |
+| Guards | An empty draft with nothing held is a no-op. While that stop is out, no other action sends anything and the ordinary Stop is unavailable, because the gesture owns that stop; a second trigger sends no second stop: one reply decides one submit. A command or `@` menu open takes `Ctrl+Enter` as Enter itself, and text composition (IME) never reaches the gesture |
 | Destination | After a submit during a run the composer says where it went, `Sent into the running turn` or `Held for the next turn`, and clears the line when the run ends. A held message's row is the queue strip's, not a second notice |
 | Preference | `Appearance` → `Send during a run`, saved in this browser beside the theme and font size, applying immediately. Browser storage that refuses the write keeps the choice for this page and says it will not survive a reload |
 
@@ -1027,7 +1027,8 @@ which of a run's two destinations a draft takes, and an idle line has only one.
 
 Verification is the existing Web tests: `web/tests/chat-input.mjs` drives the
 default and alternate modes, the preference's effect on both, the recall order
-and the single submit of `Ctrl+Enter`, a failed stop that keeps the draft, a
+and the single submit of `Ctrl+Enter`, the reply order and single stop of a
+delayed withdrawal with an empty draft, a failed stop that keeps the draft, a
 message the run already adopted, recalled images in their own order, and an idle
 submit. The preference's own storage is `web/src/stores/composer.test.mjs`. The
 flows against a running entry are browser checks with an offline model that
