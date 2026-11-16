@@ -642,6 +642,66 @@ notification {subscriptionId, batchId, branchId, through, result: "committed" | 
 
 ### 5.2 Session rows
 
+The process `store` face exposes the existing Session repository operations below.
+Every method is asynchronous. Paths are the caller's already resolved absolute strings;
+`config` is the existing SessionConfig data and `configText` retains its exact stored bytes.
+The operations keep the owner transactions and existing existence checks; they do not
+resolve paths, decide permission or create a second Session lifecycle.
+
+| Operation | Request | Reply |
+| --- | --- | --- |
+| `addGrant` | `{sessionId,path,kind,mode}` | `{}` |
+| `removeGrant` | `{sessionId,path}` | `{}` |
+| `grants` | `{sessionId}` | `{grants:[{path,kind,mode}]}` |
+| `setSessionLanguage` | `{sessionId,language}` | `{}` |
+| `creationRecord` | `{sessionId}` | `{origin,leaderSessionId}` |
+| `owner` | `{sessionId}` | `{agentId}` |
+| `hasRecords` | `{sessionId}` | `{exists}` |
+| `createOwnedSession` | `{sessionId,config,agentId,protocolVersion,leaderSessionId,origin,worktree}` | `{}` |
+| `sessionConfig` | `{sessionId}` | `{config}` |
+| `sessionConfigText` | `{sessionId}` | `{configText}` |
+| `fork` | `{sourceSessionId,sessionId,at,configText}` | `{}` |
+| `delete` | `{sessionId}` | `{removed}` |
+| `worktreeDirectories` | `{}` | `{directories:[{repository,root,lastUsedAtMs}]}` |
+| `sessionsUnderWorkspace` | `{root}` | `{sessionIds}` |
+| `worktreeUsages` | `{repository,root}` | `{usages:[{sessionId,subtree}]}` |
+| `removeWorktreeDirectory` | `{repository,root}` | `{removed}` |
+| `removeWorktree` | `{repository,root}`, asynchronous removal callback | `{removed}` |
+| `catalog` | `{request,agent?,version,hosts,closed}` | existing catalog page |
+| `query` | `{scope,query,page?}` | `{result,next}` |
+
+Grant kind is `file` or `dir`, mode is `read` or `write`; adding read never downgrades
+an existing write grant. `language` is a ReplyLanguage code or null to clear it.
+`origin` is the existing Session origin. `leaderSessionId`, `agentId`, `config` and
+`configText` are null when the corresponding optional owner value is absent;
+`creationRecord` and language writes still reject a missing Session. `worktree`
+is null or `{repository,root,subtree}`. Session creation retains the atomic
+owner/configuration/worktree publication. `lastUsedAtMs` is null for legacy directory
+records without an association timestamp.
+
+`removeWorktree` keeps the owner exclusion from its usage checks through the physical
+removal and directory-row deletion. Its callback receives the checked root path and
+is awaited; no SQL or Timeline commit lock is held while awaiting it. A callback failure
+leaves the directory row in place. The callback may refuse with `invalid`, `cancelled`
+or `storage`; unexpected callback or transport failures are `storage`. There is no
+separate check/remove lease and no window for a concurrent Session creation to use
+a directory being removed. `removeWorktreeDirectory` is the existing database-only
+candidate cleanup, with its existing association checks.
+
+`catalog` takes the existing Session catalog request and the calling Agent owner's
+loaded/closed snapshots; its pagination and classification belong to the Session
+catalog contract. `query` takes the existing fixed read scope: `{key:{sessionId,
+branchId},through,segments:[{branchId,from,through,storedThrough,tail}]}`. Its query,
+page, result and immutable tail events retain the Timeline query contract. Neither
+operation adds a preliminary query or rereads the caller's snapshots.
+
+Refusals are `{code,message}`: `invalid`, `closed`, `cancelled` or `storage`, preserving
+the owner message. These methods expose storage operations to trusted plugins, not
+new external client entry points. Session files, title metadata and worktree association
+continue to use their existing `sessionFiles`, `sessionMetadata` and
+`worktreeAssociations` public contracts rather than additional aliases on `store`.
+
+
 - `associateWorktree {sessionId, repository, root, subtree}` writes the worktree directory record
   and the Session usage association as one commit and answers `{}` after it, so the reply is the
   acknowledgement the file facts owner waits for before publishing a confirmed root (§4.2.1). Its

@@ -3,6 +3,7 @@ mod backup;
 mod catalog;
 mod codec;
 mod export;
+mod face;
 mod files;
 mod identities;
 mod image_upgrade;

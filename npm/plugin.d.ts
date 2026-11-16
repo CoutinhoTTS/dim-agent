@@ -295,6 +295,9 @@ export interface SessionConfig {
   readonly collaborationRole: 'leader' | 'member';
   /** Native serde omits true; absence means interactive. */
   readonly interactive?: false;
+  readonly excludedTools?: readonly string[];
+  readonly language?: import('./branch-services.js').ReplyLanguage;
+  readonly initialTitle?: string;
 }
 
 /**
@@ -503,3 +506,32 @@ export interface SessionFiles {
   owned_paths(request: { sessionId: string }): Promise<{ paths: string[] }>;
 }
 export interface StoredSessionFile { fileId: string; path: string; bytes: number }
+
+export interface WorktreeDirectory { repository: string; root: string }
+export interface TimelineReadScope {
+  key: { sessionId: string; branchId: string };
+  through: number;
+  segments: { branchId: string; from: number; through: number; storedThrough: number; tail: AgentEvent[] }[];
+}
+export interface Store {
+  query(request: { scope: TimelineReadScope; query: import('./branch-services.js').QuerySpec; page?: import('./branch-services.js').QueryPage | null }): Promise<{ result: import('./branch-services.js').QueryOutput; next: import('./branch-services.js').QueryCursor | null }>;
+  catalog(request: { request: { limit?: number; cursor?: string; query?: string; cwd?: string | string[]; withPreview?: boolean; withInternal?: boolean; withAcpSessions?: boolean; withAutomationSessions?: boolean; includeClosed?: boolean }; agent?: string | null; version: number; hosts: string[]; closed: string[] }): Promise<{ sessions: import('./client-protocol.js').SessionSummary[]; nextCursor?: string }>;
+
+  addGrant(request: { sessionId: string; path: string; kind: 'file' | 'dir'; mode: 'read' | 'write' }): Promise<{}>;
+  removeGrant(request: { sessionId: string; path: string }): Promise<{}>;
+  grants(request: { sessionId: string }): Promise<{ grants: { path: string; kind: 'file' | 'dir'; mode: 'read' | 'write' }[] }>;
+  setSessionLanguage(request: { sessionId: string; language: import('./branch-services.js').ReplyLanguage | null }): Promise<{}>;
+  creationRecord(request: { sessionId: string }): Promise<{ origin: 'client' | 'acp' | 'internal' | 'unknown' | 'automation'; leaderSessionId: string | null }>;
+  owner(request: { sessionId: string }): Promise<{ agentId: string | null }>;
+  hasRecords(request: { sessionId: string }): Promise<{ exists: boolean }>;
+  delete(request: { sessionId: string }): Promise<{ removed: boolean }>;
+  fork(request: { sourceSessionId: string; sessionId: string; at: number; configText: string }): Promise<{}>;
+  sessionConfigText(request: { sessionId: string }): Promise<{ configText: string | null }>;
+  sessionConfig(request: { sessionId: string }): Promise<{ config: SessionConfig | null }>;
+  createOwnedSession(request: { sessionId: string; config: SessionConfig; agentId: string; protocolVersion: number; leaderSessionId: string | null; origin: 'client' | 'acp' | 'internal' | 'unknown' | 'automation'; worktree: (WorktreeDirectory & { subtree: string }) | null }): Promise<{}>;
+  worktreeDirectories(request: {}): Promise<{ directories: (WorktreeDirectory & { lastUsedAtMs: number | null })[] }>;
+  sessionsUnderWorkspace(request: { root: string }): Promise<{ sessionIds: string[] }>;
+  removeWorktreeDirectory(request: WorktreeDirectory): Promise<{ removed: boolean }>;
+  worktreeUsages(request: WorktreeDirectory): Promise<{ usages: { sessionId: string; subtree: string }[] }>;
+  removeWorktree(request: WorktreeDirectory, remove: (path: string) => Promise<void>): Promise<{ removed: boolean }>;
+}

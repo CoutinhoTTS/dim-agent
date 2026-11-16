@@ -1178,7 +1178,7 @@ pub struct ManagedWorktreesPlugin {
 impl ManagedWorktreesPlugin {
     pub fn new(names: &Names<'_>, home: PathBuf) -> rutis::Result<Self> {
         Ok(Self {
-            sessions: names.key()?,
+            sessions: Key::named("store"),
             methods: names.key()?,
             root: home.join("worktrees"),
         })

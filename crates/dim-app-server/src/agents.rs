@@ -892,7 +892,6 @@ impl AgentIndex {
                         .session_store
                         .as_ref()
                         .unwrap()
-                        .timeline_store()
                         .session_config(id)
                         .await?
                         .ok_or_else(|| AgentError::Storage(format!("unknown session {id}")))?;
@@ -1174,7 +1173,6 @@ impl AgentIndex {
                     }],
                 };
                 store
-                    .timeline_store()
                     .query(&scope, &query.query, query.page.as_ref())
                     .await?
                     .result
@@ -1305,7 +1303,6 @@ impl AgentIndex {
                     }],
                 };
                 store
-                    .timeline_store()
                     .query(&scope, &query.query, query.page.as_ref())
                     .await?
                     .result
@@ -2074,7 +2071,7 @@ pub(crate) struct AgentsPlugin {
     /// The process root: top-level loader instances are created from it.
     root: Ctx,
     /// Native storage only with a database.
-    stored: Option<(Key<SessionStore>, Key<SqliteStorage>)>,
+    stored: Option<(Key<SessionStore>, Key<SessionStore>, Key<SqliteStorage>)>,
     /// Settings only with local execution.
     settings: Option<Key<SettingsService>>,
     loader: Key<Loader>,
@@ -2093,7 +2090,7 @@ impl AgentsPlugin {
             stored: config
                 .database_path
                 .is_some()
-                .then(|| Ok::<_, Error>((names.key()?, names.key()?)))
+                .then(|| Ok::<_, Error>((Key::named("store"), names.key()?, names.key()?)))
                 .transpose()?,
             settings: config
                 .local_execution()
@@ -2115,8 +2112,9 @@ impl DynPlugin for AgentsPlugin {
     }
     fn injects(&self) -> Vec<TypeKey> {
         let mut injects = Vec::new();
-        if let Some((store, storage)) = &self.stored {
+        if let Some((store, native, storage)) = &self.stored {
             injects.push(store.erase());
+            injects.push(native.erase());
             injects.push(storage.erase());
         }
         if let Some(settings) = &self.settings {
@@ -2131,7 +2129,11 @@ impl DynPlugin for AgentsPlugin {
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
             let stored = match &self.stored {
-                Some((store, storage)) => Some((ctx.require_at(store)?, ctx.require_at(storage)?)),
+                Some((store, native, storage)) => Some((
+                    ctx.require_at(store)?,
+                    ctx.require_at(native)?,
+                    ctx.require_at(storage)?,
+                )),
                 None => None,
             };
             let settings = match &self.settings {
@@ -2168,8 +2170,8 @@ impl DynPlugin for AgentsPlugin {
             )?;
             let mut builder = self.builder.clone();
             let (records, session_store) = match stored {
-                Some((store, storage)) => {
-                    builder.timeline_store(store.timeline_store());
+                Some((store, native, storage)) => {
+                    builder.timeline_store(native.timeline_store());
                     (Some(Arc::new(AgentRecords(storage))), Some(store))
                 }
                 None => (None, None),

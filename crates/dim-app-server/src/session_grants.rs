@@ -50,7 +50,7 @@ impl SessionGrantsPlugin {
     fn new(names: &Names<'_>) -> Result<Self, Error> {
         Ok(Self {
             host: names.key()?,
-            store: names.key()?,
+            store: Key::named("store"),
             identity: names.key()?,
             config: names.key()?,
             methods: names.key()?,

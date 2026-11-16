@@ -1315,3 +1315,171 @@ async fn node_session_files_reuses_native_storage_and_ownership() {
     server.join().await.unwrap();
     std::fs::remove_dir_all(home).unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+async fn node_store_preserves_repository_results_and_worktree_removal_exclusion() {
+    use dim_agent_runtime::{AgentError, SessionConfig};
+    use dim_app_server::{
+        protocol::SessionOrigin,
+        storage::{SessionStore, WorktreeDirectory},
+    };
+    let home = std::fs::canonicalize(std::env::temp_dir())
+        .unwrap()
+        .join(format!("dim-store-{}", uuid::Uuid::new_v4()));
+    let workspace = home.join("worktree");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let directory = WorktreeDirectory {
+        repository: home.join("repo/.git"),
+        root: workspace.clone(),
+    };
+    let mut parts = session_typescript::fixture();
+    parts.rows = vec![
+        json!({"id":"store", "name":parts.anchor.parent().unwrap().join("fixtures/store.ts"),"provides":{},"config":{}}),
+    ];
+    let (server, _, _) = session_typescript::start(config(&home, parts)).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    files_available(&mut client, "storefixture.status", json!({})).await;
+    let store = server.service::<SessionStore>().unwrap();
+    let listed = client.rpc("agent.list", json!({})).await;
+    assert_ok(&listed);
+    let agent_id = listed["result"][0]["agentId"].as_str().unwrap().to_owned();
+    let config = SessionConfig {
+        cwd: workspace.to_string_lossy().into_owned(),
+        ..Default::default()
+    };
+    let created = client.rpc("storefixture.create", json!({"create": {
+        "sessionId":"wire-source", "config":config, "agentId":agent_id, "protocolVersion":3,
+        "leaderSessionId":null, "origin":"client",
+        "worktree":{"repository":directory.repository,"root":directory.root,"subtree":workspace}
+    }})).await;
+    assert_ok(&created);
+    assert!(store.has_records("wire-source").await.unwrap());
+    let reply = client
+        .rpc(
+            "storefixture.cycle",
+            json!({"sessionId":"wire-source","forkId":"wire-fork","grant":workspace}),
+        )
+        .await;
+    assert_ok(&reply);
+    assert_eq!(
+        reply["result"]["grants"],
+        json!({"grants":[{"path":workspace,"kind":"dir","mode":"write"}]})
+    );
+    assert_eq!(
+        reply["result"]["config"]["configText"],
+        store
+            .session_config_text("wire-source")
+            .await
+            .unwrap()
+            .unwrap()
+    );
+    assert_eq!(
+        store
+            .session_config("wire-source")
+            .await
+            .unwrap()
+            .unwrap()
+            .language,
+        Some(dim_agent_runtime::ReplyLanguage::SimplifiedChinese)
+    );
+    assert!(
+        rutis_bridge::session::HostDispatch::invoke(
+            &*store,
+            "setSessionLanguage",
+            json!([{"sessionId":"wire-source"}]).into()
+        )
+        .is_err()
+    );
+    assert_eq!(
+        store
+            .session_config("wire-source")
+            .await
+            .unwrap()
+            .unwrap()
+            .language,
+        Some(dim_agent_runtime::ReplyLanguage::SimplifiedChinese)
+    );
+    assert!(store.grants("wire-source").await.unwrap().is_empty());
+    assert_eq!(
+        reply["result"]["origin"],
+        json!({"origin":"client","leaderSessionId":null})
+    );
+    assert_eq!(
+        reply["result"]["owner"],
+        json!({"agentId":store.owner("wire-source").await.unwrap()})
+    );
+    assert_eq!(reply["result"]["fork"], json!({"exists":true}));
+    assert_eq!(reply["result"]["removed"], json!({"removed":true}));
+    assert_eq!(reply["result"]["absent"], json!({"exists":false}));
+    assert!(!store.has_records("wire-fork").await.unwrap());
+    let missing = store
+        .set_session_language("wire-missing", None)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        reply["result"]["missing"],
+        json!({"code":"closed","message":missing.to_string()})
+    );
+    store.delete_session("wire-source").await.unwrap();
+    let refused = client
+        .rpc(
+            "storefixture.refuse",
+            json!({"directory":{"repository":directory.repository,"root":directory.root}}),
+        )
+        .await;
+    assert_ok(&refused);
+    assert_eq!(refused["result"]["code"], "invalid");
+    assert!(workspace.exists());
+    assert_eq!(store.worktree_directories().await.unwrap().len(), 1);
+
+    let ready = home.join("removal-ready");
+    let removal = client.send("storefixture.remove", json!({"directory":{"repository":directory.repository,"root":directory.root},"ready":ready})).await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !ready.exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&ready).unwrap(),
+        workspace.to_string_lossy()
+    );
+    let mut concurrent_creation = {
+        let store = store.clone();
+        tokio::spawn(async move {
+            store
+                .create_owned_session(
+                    "late",
+                    &config,
+                    &agent_id,
+                    3,
+                    None,
+                    SessionOrigin::Client,
+                    None,
+                )
+                .await
+        })
+    };
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut concurrent_creation)
+            .await
+            .is_err(),
+        "creation must remain excluded until the foreign removal settles"
+    );
+    assert_ok(&client.rpc("storefixture.release", json!({})).await);
+    let removed = client.response(removal).await;
+    assert_ok(&removed);
+    assert_eq!(removed["result"], json!({"removed":true}));
+    assert!(matches!(
+        concurrent_creation.await.unwrap(),
+        Err(AgentError::InvalidInput(_))
+    ));
+    assert!(!workspace.exists());
+    assert!(store.worktree_directories().await.unwrap().is_empty());
+    assert!(!store.has_records("late").await.unwrap());
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}

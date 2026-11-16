@@ -32,7 +32,7 @@ impl SessionLanguagePlugin {
         Ok(Self {
             tree: names.key()?,
             methods: names.key()?,
-            store: stored.then(|| names.key::<SessionStore>()).transpose()?,
+            store: stored.then(|| Key::named("store")),
         })
     }
 }

@@ -6,6 +6,12 @@
 
 ## 1. 结构与所有权
 
+SessionStore 在进程名 `store` 下提供[仓储数据接口](../../design/resource-faces.md#52-session-rows)。
+Rust named binding 与 HostDispatch 持有同一个 owner；grant、语言、创建、分叉、删除、目录查询及
+worktree 清理都调用原实现。AgentBuilder 使用的 TimelineStore 端口仍由该 owner 提供，
+其写入队列、发布回调与关闭排空没有增加第二套实现。`sessionFiles`、`sessionMetadata` 和
+`worktreeAssociations` 保持各自的现有接口。
+
 ```text
  能力 ──append──> Timeline（每分支）
                     │ before 链、分配 sequence、登记回调、放入热窗口（不等待磁盘）

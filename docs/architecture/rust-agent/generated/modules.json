@@ -3620,6 +3620,16 @@
       ]
     },
     {
+      "id": "dim_app_server::storage::face",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::storage",
+      "file": "crates/dim-app-server/src/storage/face.rs",
+      "unexpandedMacros": [
+        "json",
+        "vec"
+      ]
+    },
+    {
       "id": "dim_app_server::storage::files",
       "crate": "dim_app_server",
       "parent": "dim_app_server::storage",
@@ -32685,6 +32695,13 @@
     },
     {
       "from": "dim_app_server::storage",
+      "to": "dim_app_server::storage::face",
+      "references": [
+        "mod face"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage",
       "to": "dim_app_server::storage::files",
       "references": [
         "mod files"
@@ -33174,6 +33191,82 @@
         "path read_range",
         "use super::timeline::read_directory",
         "use super::timeline::read_range"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::face",
+      "to": "dim_agent_capabilities::file_access",
+      "references": [
+        "path WorktreeDirectory",
+        "use super::WorktreeDirectory"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::face",
+      "to": "dim_agent_runtime::config",
+      "references": [
+        "path ReplyLanguage",
+        "path SessionConfig",
+        "use dim_agent_runtime::ReplyLanguage",
+        "use dim_agent_runtime::SessionConfig"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::face",
+      "to": "dim_agent_runtime::error",
+      "references": [
+        "path AgentError",
+        "path AgentError::Cancelled",
+        "path AgentError::Closed",
+        "path AgentError::InvalidInput",
+        "path AgentError::Storage",
+        "path dim_agent_runtime::Result",
+        "use dim_agent_runtime::AgentError"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::face",
+      "to": "dim_agent_runtime::timeline_query::properties",
+      "references": [
+        "path dim_agent_runtime::QueryPage",
+        "path dim_agent_runtime::QueryResult",
+        "path dim_agent_runtime::QuerySpec"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::face",
+      "to": "dim_agent_runtime::timeline_store",
+      "references": [
+        "path dim_agent_runtime::TimelineReadScope"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::face",
+      "to": "dim_agent_types::grant",
+      "references": [
+        "path GrantKind",
+        "path GrantMode",
+        "use dim_agent_types::grant::GrantKind",
+        "use dim_agent_types::grant::GrantMode"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::face",
+      "to": "dim_app_server::protocol",
+      "references": [
+        "path SessionOrigin",
+        "path crate::protocol::Catalog",
+        "use crate::protocol::SessionOrigin"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::face",
+      "to": "dim_app_server::storage::timeline",
+      "references": [
+        "path PreparedWorktree",
+        "path SessionStore",
+        "use super::PreparedWorktree",
+        "use super::SessionStore"
       ]
     },
     {

@@ -245,7 +245,7 @@
         ]
       },
       {
-        "id": 76,
+        "id": 77,
         "parent": 72,
         "name": "eventhub-ready",
         "state": "Active",
@@ -1574,6 +1574,11 @@
             "status": "Ready"
           },
           {
+            "service": "dim_app_server::storage::timeline::SessionStore#store",
+            "scope": null,
+            "status": "Ready"
+          },
+          {
             "service": "rutis_loader::loader::Loader",
             "scope": null,
             "status": "Ready"
@@ -1612,6 +1617,12 @@
           },
           {
             "service": "dim_app_server::storage::timeline::SessionStore",
+            "scope": null,
+            "provider": 8,
+            "generation": 1
+          },
+          {
+            "service": "dim_app_server::storage::timeline::SessionStore#store",
             "scope": null,
             "provider": 8,
             "generation": 1
@@ -1656,6 +1667,12 @@
           },
           {
             "service": "dim_app_server::storage::timeline::SessionStore",
+            "provider": 8,
+            "declared": true,
+            "external": true
+          },
+          {
+            "service": "dim_app_server::storage::timeline::SessionStore#store",
             "provider": 8,
             "declared": true,
             "external": true
@@ -3073,7 +3090,7 @@
             "status": "Ready"
           },
           {
-            "service": "dim_app_server::storage::timeline::SessionStore",
+            "service": "dim_app_server::storage::timeline::SessionStore#store",
             "scope": null,
             "status": "Ready"
           }
@@ -3086,7 +3103,7 @@
             "generation": 1
           },
           {
-            "service": "dim_app_server::storage::timeline::SessionStore",
+            "service": "dim_app_server::storage::timeline::SessionStore#store",
             "scope": null,
             "provider": 8,
             "generation": 1
@@ -3100,7 +3117,7 @@
             "external": true
           },
           {
-            "service": "dim_app_server::storage::timeline::SessionStore",
+            "service": "dim_app_server::storage::timeline::SessionStore#store",
             "provider": 8,
             "declared": true,
             "external": true
@@ -3535,6 +3552,12 @@
         "removing": false
       },
       {
+        "service": "dim_app_server::storage::timeline::SessionStore#store",
+        "provider": 8,
+        "generation": 1,
+        "removing": false
+      },
+      {
         "service": "dim_app_server::transport::ListenAddresses",
         "provider": 45,
         "generation": 1,
@@ -3741,6 +3764,12 @@
       {
         "service": "dyn rutis_bridge::session::services::HostDispatch#settings",
         "provider": 19,
+        "generation": 1,
+        "removing": false
+      },
+      {
+        "service": "dyn rutis_bridge::session::services::HostDispatch#store",
+        "provider": 8,
         "generation": 1,
         "removing": false
       },

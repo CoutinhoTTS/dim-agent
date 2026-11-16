@@ -1,16 +1,19 @@
 use crate::{BoxFuture, BranchRecord, Result, SessionConfig, TimelineTrace};
 use dim_agent_types::{AgentEvent, RecoverySnapshot};
+use serde::{Deserialize, Serialize};
 use std::{ops::RangeInclusive, sync::Arc};
 
 /// Storage address of one Timeline inside an Agent's shared store.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TimelineKey {
     pub session_id: String,
     pub branch_id: String,
 }
 
 /// A complete logical scope, captured by the Timeline before storage I/O.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TimelineReadScope {
     pub key: TimelineKey,
     pub through: u64,
@@ -38,7 +41,8 @@ impl TimelineReadScope {
 
 /// One inclusive branch interval. Stored events stop at `stored_through`;
 /// the tail supplies the remaining committed events without overlap.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TimelineReadSegment {
     pub branch_id: String,
     pub from: u64,

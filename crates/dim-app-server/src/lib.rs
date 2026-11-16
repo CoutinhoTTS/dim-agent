@@ -1337,6 +1337,7 @@ pub(crate) fn register_names(catalog: &mut dim_agent_runtime::names::ServiceCata
     register::<ProcessActivity>(catalog, None);
     register::<storage::SqliteStorage>(catalog, None);
     register::<storage::SessionStore>(catalog, None);
+    catalog.register_shared("store");
     register::<worktrees::ManagedWorktrees>(catalog, None);
     register::<agents::AgentDirectory>(catalog, None);
     register::<AgentIndex>(catalog, None);

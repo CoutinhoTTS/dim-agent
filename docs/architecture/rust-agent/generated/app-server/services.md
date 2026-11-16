@@ -12,7 +12,7 @@ flowchart LR
     p74["Report"]
     p73["goal"]
     p72["eventhub"]
-    p76["eventhub-ready"]
+    p77["eventhub-ready"]
     p71["Scheduler"]
     p70["Questions"]
     p69["PromptSuggestion"]
@@ -93,7 +93,7 @@ flowchart LR
   p10 -->|"dim_app_server::methods::ManagementMethods"| p72
   p14 -->|"dim_app_server::plugin_files::PluginFileTransactions"| p72
   p38 -->|"dyn rutis_bridge::session::services::HostDispatch#sessions"| p72
-  p72 -->|"dim_event_hub::bridge::EventHub"| p76
+  p72 -->|"dim_event_hub::bridge::EventHub"| p77
   p46 -->|"dim_agent_runtime::parts::PartRegistry"| p71
   p3 -->|"dim_app_server::control::ProcessActivity"| p71
   p10 -->|"dim_app_server::methods::ManagementMethods"| p71
@@ -152,6 +152,7 @@ flowchart LR
   p19 -->|"dim_app_server::settings::SettingsService"| p40
   p6 -->|"dim_app_server::storage::sqlite::SqliteStorage"| p40
   p8 -->|"dim_app_server::storage::timeline::SessionStore"| p40
+  p8 -->|"dim_app_server::storage::timeline::SessionStore#store"| p40
   p2 -->|"rutis_loader::loader::Loader"| p40
   p46 -->|"dim_agent_runtime::parts::PartRegistry"| p37
   p10 -->|"dim_app_server::methods::ManagementMethods"| p37
@@ -214,7 +215,7 @@ flowchart LR
   p60 -->|"dim_agent_capabilities::workspace_tools::mentions::MentionIndex"| p11
   p10 -->|"dim_app_server::methods::ManagementMethods"| p11
   p10 -->|"dim_app_server::methods::ManagementMethods"| p9
-  p8 -->|"dim_app_server::storage::timeline::SessionStore"| p9
+  p8 -->|"dim_app_server::storage::timeline::SessionStore#store"| p9
   p6 -->|"dim_app_server::storage::sqlite::SqliteStorage"| p8
   p10 -->|"dim_app_server::methods::ManagementMethods"| p7
   p6 -->|"dim_app_server::storage::sqlite::SqliteStorage"| p7
