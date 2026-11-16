@@ -107,8 +107,10 @@ fn require_current_format(path: &Path) -> Result<()> {
     )))
 }
 
-/// Migrates one branch through the store alone: the ancestors its Timeline
-/// needs are read from the directory it has to load anyway.
+/// Migrates one branch through the store alone: the branch directory is read
+/// once, and its parent chain becomes the ancestors [`Timeline::restore`] is
+/// handed. Following that chain, and so refusing a directory that cycles, is
+/// this entry's own: `restore` takes the cuts as given and reads no parent.
 async fn migrate(store: &Arc<SqliteTimelineStore>, session: &str, branch: &str) -> Result<bool> {
     let directory = store
         .branches(session)
