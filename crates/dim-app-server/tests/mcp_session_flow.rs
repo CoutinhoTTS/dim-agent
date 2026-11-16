@@ -661,7 +661,7 @@ impl Env {
         .await
         .unwrap();
         authorize_project(&agent, &home).await;
-        let directory = agent.root().get::<McpService>().unwrap();
+        let directory = agent.root().get_at(&mcp::owner_key()).unwrap();
         Self {
             home,
             agent,

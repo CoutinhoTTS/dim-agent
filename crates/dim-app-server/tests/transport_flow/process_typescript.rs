@@ -1545,7 +1545,7 @@ async fn node_store_preserves_repository_results_and_worktree_removal_exclusion(
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
 async fn node_mcp_registration_uses_the_native_content_owner() {
-    use dim_app_server::mcp::McpService;
+    use dim_app_server::mcp::{McpService, McpServiceBinding};
     let home = home();
     let mut parts = session_typescript::fixture();
     parts.rows = vec![json!({
@@ -1558,7 +1558,18 @@ async fn node_mcp_registration_uses_the_native_content_owner() {
         files_available(&mut client, "mcpprobe.read", json!({})).await,
         json!({"plugins":[], "refusal":null})
     );
-    let mcp = server.service::<McpService>().unwrap();
+    assert!(server.service::<McpService>().is_none());
+    let mcp = server.service::<McpServiceBinding>().unwrap();
+    for method in ["resolved", "server", "catalog", "editable"] {
+        assert!(
+            rutis_bridge::session::HostDispatch::invoke(
+                mcp.as_ref(),
+                method,
+                rutis_bridge::session::Value::List(vec![json!({}).into()]),
+            )
+            .is_err()
+        );
+    }
     let malformed = rutis_bridge::session::HostDispatch::invoke(
         mcp.as_ref(),
         "plugins",
@@ -1615,7 +1626,7 @@ async fn node_mcp_registration_uses_the_native_content_owner() {
         mcp.plugins(&CancellationToken::new()).await,
         Err(dim_app_server::mcp::McpError::Closed)
     ));
-    let mcp = server.service::<McpService>().unwrap();
+    let mcp = server.service::<McpServiceBinding>().unwrap();
     assert_ok(&client.rpc("mcpprobe.withdraw", json!({})).await);
     assert!(
         mcp.plugins(&CancellationToken::new())

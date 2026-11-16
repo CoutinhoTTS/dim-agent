@@ -1366,8 +1366,8 @@ The process service `mcpService` exposes the MCP owner's existing PluginManager 
 
 | Method | Request | Reply |
 | --- | --- | --- |
-| `register` (async) | `{plugin: string, dir: string, document: JSON}` | no value |
-| `withdraw` (async) | `{plugin: string}` | no value |
+| `register` (async) | `{plugin: string, dir: string, document: JSON}` | `null` |
+| `withdraw` (async) | `{plugin: string}` | `null` |
 | `plugins` (async) | `{}` | registered plugin IDs |
 | `refusal` (sync) | `{plugin: string}` | `[message, reason or null]`, or `null` when none |
 
@@ -1378,12 +1378,23 @@ converted lossily. A document is registered as one unit under the existing plugi
 contract; a refused replacement withdraws that plugin's previous entries and records the refusal.
 Withdrawal removes both registration and refusal. The refusal tuple is read atomically.
 
+`plugin` is an identifier value, not authorization. Registration accepts a string containing
+at least one non-whitespace character and stores it verbatim; the other operations address that
+same value. Registration is persisted, not owned by the calling row's lifetime. Unloading a
+caller does not withdraw its document; the caller is responsible for explicit withdrawal.
+
 Failures retain the existing MCP management application code and message, including
 `mcp_invalid_config`, `mcp_settings_read`, `service_reloading`, `operation_interrupted` and
 `mcp_unavailable`; worker failures retain their existing sanitized message. This data face adds
 no management authorization or client RPC entry. Secret overlays, resolved server configuration,
 credential state, connection handles and application watches are not operations of this face.
 MCP's Session parts reach those internal resources through their declared owner-private binding.
+
+Rust parts resolve `McpServiceBinding` under `mcpService`. Its only owner operations are the
+four above, and it has no dereference or owner accessor. The native key and dispatcher hold the
+same binding, which directly calls the existing owner. The exported `McpService` owner type
+remains available for MCP's own embedding code at its private key; the public name does not
+provide that raw type. PluginManager depends on the public binding.
 
 Native and wire operations use the same owner state, admission gate, task set and publication
 coordinator. Native callers retain the existing explicit cancellation-token checks. The wire

@@ -3,6 +3,7 @@ mod auth;
 pub mod config;
 mod discovery;
 mod face;
+pub use face::McpService as McpServiceBinding;
 mod import;
 pub(crate) mod management;
 mod publication;
@@ -451,20 +452,20 @@ fn resolved_entry(
 /// A plugin document's last refusal message and optional stable reason.
 pub type McpPluginRefusal = (String, Option<&'static str>);
 
-#[derive(Clone)]
 pub struct McpService {
     settings: Arc<SettingsService>,
     credentials: Arc<CredentialVariablesHost>,
     /// Why the last registration of a plugin was refused, by plugin id: the
     /// raw error, and its static reason when the cause has one
     /// (PluginManager A.2).
-    refused: Arc<Mutex<BTreeMap<String, McpPluginRefusal>>>,
+    refused: Mutex<BTreeMap<String, McpPluginRefusal>>,
     publication: Arc<publication::Publication>,
     stopping: CancellationToken,
-    gate: Arc<Mutex<()>>,
+    gate: Mutex<()>,
     tasks: TaskTracker,
 }
-fn owner_key() -> Key<McpService> {
+/// The private native key for MCP owner parts and embedding hosts.
+pub fn owner_key() -> Key<McpService> {
     Key::named("dim/mcp/owner")
 }
 
@@ -1827,10 +1828,10 @@ impl DynPlugin for McpPlugin {
             let service = Arc::new(McpService {
                 settings,
                 credentials,
-                refused: Arc::default(),
+                refused: Mutex::default(),
                 publication,
                 stopping: ctx.cancellation_token(),
-                gate: Arc::default(),
+                gate: Mutex::default(),
                 tasks: TaskTracker::new(),
             });
             let (owner, closing) = (service.clone(), auth.clone());
@@ -1852,10 +1853,11 @@ impl DynPlugin for McpPlugin {
             )?;
             ctx.provide_as::<McpAuth>(auth)?;
             ctx.provide_at(owner_key(), service.clone())?;
-            ctx.provide_as::<McpService>(service.clone())?;
+            let binding = Arc::new(McpServiceBinding(service));
+            ctx.provide_as::<McpServiceBinding>(binding.clone())?;
             ctx.provide_at::<dyn rutis_bridge::session::HostDispatch>(
                 rutis_bridge::session::host_key("mcpService"),
-                service,
+                binding,
             )?;
             parts.register(
                 ctx,

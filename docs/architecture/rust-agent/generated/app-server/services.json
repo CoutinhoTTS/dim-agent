@@ -3471,12 +3471,6 @@
         "removing": false
       },
       {
-        "service": "dim_app_server::mcp::McpService",
-        "provider": 23,
-        "generation": 1,
-        "removing": false
-      },
-      {
         "service": "dim_app_server::mcp::McpService#dim/mcp/owner",
         "provider": 23,
         "generation": 1,
@@ -3484,6 +3478,12 @@
       },
       {
         "service": "dim_app_server::mcp::auth::McpAuth",
+        "provider": 23,
+        "generation": 1,
+        "removing": false
+      },
+      {
+        "service": "dim_app_server::mcp::face::McpService",
         "provider": 23,
         "generation": 1,
         "removing": false

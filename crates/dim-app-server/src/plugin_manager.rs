@@ -9,7 +9,7 @@ mod record;
 mod tools;
 
 use crate::hooks_settings::HooksService;
-use crate::mcp::{McpError, McpService};
+use crate::mcp::{McpError, McpServiceBinding};
 use crate::methods::ManagementMethods;
 use crate::settings::{SettingsError, SettingsService, SourceDeclaration};
 use crate::ui_extensions::UiExtensions;
@@ -689,7 +689,7 @@ pub(crate) struct Manager {
 pub(crate) struct Owners {
     ctx: Ctx,
     skills: Key<SkillsCatalog>,
-    mcp: Key<McpService>,
+    mcp: Key<McpServiceBinding>,
     hooks: Key<HooksService>,
     ui: Key<UiExtensions>,
     /// Content refusals PluginManager made itself, by plugin id and kind
@@ -2332,7 +2332,7 @@ pub(crate) struct PluginManagerPlugin {
     methods: Key<ManagementMethods>,
     parts: Key<PartRegistry>,
     skills: Key<SkillsCatalog>,
-    mcp: Key<McpService>,
+    mcp: Key<McpServiceBinding>,
     hooks: Key<HooksService>,
     ui: Key<UiExtensions>,
     runtimes: Key<crate::runtime_manager::RuntimeService>,

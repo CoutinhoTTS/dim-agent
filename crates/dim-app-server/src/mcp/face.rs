@@ -1,7 +1,47 @@
-use super::{McpService, Result, management};
+use super::{McpPluginRefusal, Result, management};
 use rutis_bridge::session::{Error, HostDispatch, Reply, Value, arg};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use std::{future::Future, path::PathBuf, sync::Arc};
 use tokio_util::sync::CancellationToken;
+
+/// The four plugin-content operations of the public `mcpService` face.
+#[derive(Clone)]
+pub struct McpService(pub(super) Arc<super::McpService>);
+
+impl McpService {
+    /// Registers one complete document using the MCP owner's existing validation and settlement.
+    pub fn register_plugin<'a>(
+        &'a self,
+        plugin: String,
+        dir: PathBuf,
+        document: serde_json::Value,
+        cancel: &'a CancellationToken,
+    ) -> impl Future<Output = Result<()>> + Send + 'a {
+        self.0.register_plugin(plugin, dir, document, cancel)
+    }
+
+    /// Withdraws a plugin's persisted document through the same owner.
+    pub fn withdraw_plugin<'a>(
+        &'a self,
+        plugin: String,
+        cancel: &'a CancellationToken,
+    ) -> impl Future<Output = Result<()>> + Send + 'a {
+        self.0.withdraw_plugin(plugin, cancel)
+    }
+
+    /// Reads the registered plugin IDs.
+    pub fn plugins<'a>(
+        &'a self,
+        cancel: &'a CancellationToken,
+    ) -> impl Future<Output = Result<Vec<String>>> + Send + 'a {
+        self.0.plugins(cancel)
+    }
+
+    /// Reads the last refused registration's message and stable reason.
+    pub fn plugin_refusal(&self, plugin: &str) -> Option<McpPluginRefusal> {
+        self.0.plugin_refusal(plugin)
+    }
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
