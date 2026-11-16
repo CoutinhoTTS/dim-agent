@@ -595,13 +595,26 @@ test('fails a dist-tag that never converges and a concurrent publication that ou
   assert.equal(raced.read().tags['dimcode-alpha'].latest, '1.2.3-alpha.11');
 });
 
-test('waits out a registry that rate-limits the dist-tag read before it answers', (t) => {
+test('snapshots protected tags and promotes through a registry that rate-limits its reads', (t) => {
   for (const status of [429, 503]) {
     const registry = nightlyRegistry(t);
-    assert.equal(registry.run('snapshot').status, 0);
+    const snapshot = registry.run('snapshot', '--dry-run', '', { tagTransient: 2, tagStatus: status });
+    assert.equal(snapshot.status, 0, `${status}: ${snapshot.stderr}`);
+    const { protectedTags, wrapperTags } = JSON.parse(readFileSync(registry.receipt));
+    assert.deepEqual(wrapperTags, registry.initialTags['dimcode-alpha'],
+      `${status}: the snapshot records the wrapper tags its retried reads returned`);
+    assert.deepEqual(protectedTags['dimcode'], registry.initialTags['dimcode'],
+      `${status}: the snapshot keeps every dimcode tag`);
+    assert.deepEqual(protectedTags['dimcode-alpha'], { canary: '1.2.3-alpha.8' },
+      `${status}: the snapshot keeps the wrapper tags other than latest and alpha`);
+    assert.deepEqual(protectedTags['dimcode-web'], { latest: '1.2.2', beta: '1.2.3-beta.1' },
+      `${status}: the snapshot keeps a package's non-alpha tags`);
+    assert.equal(Object.keys(protectedTags).length, Object.keys(registry.initialTags).length);
+    assert.deepEqual(registry.read().tags, registry.initialTags, `${status}: a snapshot publishes nothing`);
     const promoted = registry.run('promote', '--apply', '', { tagTransient: 2, tagStatus: status });
     assert.equal(promoted.status, 0, `${status}: ${promoted.stderr}`);
-    assert.equal(registry.read().tags['dimcode-alpha'].latest, '1.2.3-alpha.10');
+    assert.deepEqual(registry.read().tags, { ...registry.initialTags,
+      'dimcode-alpha': { ...registry.initialTags['dimcode-alpha'], latest: '1.2.3-alpha.10' } });
   }
 });
 
