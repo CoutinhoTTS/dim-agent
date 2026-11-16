@@ -123,6 +123,7 @@ fn register_names_in(catalog: &mut dim_agent_runtime::names::ServiceCatalog) {
     register::<wait::Wait>(catalog, branch);
     register::<workspace_tools::file_reads::FileReads>(catalog, branch);
     register::<timeline_tree::BranchLine>(catalog, branch);
+    catalog.register_shared_instance("branchLine", BRANCH_GROUP);
     register::<host_platform::HostPlatform>(catalog, None);
     register::<file_storage::FileStorage>(catalog, None);
     register::<host::ModelHost>(catalog, None);

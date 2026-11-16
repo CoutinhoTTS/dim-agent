@@ -1397,7 +1397,6 @@ pub fn register_faces(builder: &mut dim_agent_runtime::AgentBuilder) {
         ("agentDirectory", "owner-api"),
         ("agentIndex", "owner-api"),
         ("agentLoop", "hot-path"),
-        ("branchLine", "hot-path"),
         ("branchOpening", "hot-path"),
         ("callers", "owner-api"),
         ("collaboration", "host-resource"),

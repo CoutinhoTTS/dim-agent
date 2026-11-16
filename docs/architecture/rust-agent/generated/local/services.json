@@ -2201,6 +2201,12 @@
         "removing": false
       },
       {
+        "service": "dyn rutis_bridge::session::services::HostDispatch#branchLine@main",
+        "provider": 65,
+        "generation": 1,
+        "removing": false
+      },
+      {
         "service": "dyn rutis_bridge::session::services::HostDispatch#dispatcher@main",
         "provider": 60,
         "generation": 1,

@@ -652,6 +652,20 @@ export interface TreeCommands {
   create(parent: string, at: number | bigint, options: BranchOptions, cancelled: () => void | Promise<void>): Promise<string>
 }
 
+export type LineRole = "main" | "tool" | "host"
+
+export interface BranchLine {
+  /** The line committed its own `branch/end`. */
+  ending(): Promise<boolean>
+  /**
+   * The `nextCursor` of the line's latest successful read of `target`.
+   * @throws {AgentErrorThrown}
+   */
+  cursor(target: string): Promise<number | bigint | null>
+  /** The line's role and parent, from its directory record. */
+  resolved(): Promise<[LineRole, string | null] | null>
+}
+
 export type WaitResult =
   | { reason: "notification"; taskIds: string[]; waitedMs: number | bigint }
   | { reason: "user_steer"; waitedMs: number | bigint }
@@ -1309,6 +1323,7 @@ export interface Services {
   sessionLanguage: SessionLanguage
   skillsConfig: SkillsConfig
   treeCommands: TreeCommands
+  branchLine: BranchLine
   wait: Wait
   backgroundExec: BackgroundExec
   agentConfig: AgentConfig
