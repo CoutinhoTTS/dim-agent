@@ -1347,7 +1347,9 @@ policy](subagent-model-policy.md#5-native-cli-interaction)).
 
 The management section holds one `Manage models` entry and the compact
 diagnostics: models with missing limits, unavailable and disabled models, a
-Provider with no models, and a catalog the owner cannot read. Enter opens a
+Provider with no models, and a catalog the owner cannot read. A Provider's
+models with missing limits are its reason, so they are not counted again as
+unavailable. Enter opens a
 Provider list whose rows name each Provider and its state; a Provider that
 offers no selectable model is listed there too. Choosing a Provider opens its
 existing model management area, with its existing editing, enablement, refresh
@@ -1366,13 +1368,13 @@ diagnostics and their recovery guidance stay as read-only lines.
 │ › Ready / flash                         ZDR  ‹ high ›  current                                │
 │   Other / model-x                       low                                                   │
 │   Manual / house-model                                                                        │
-│ Selected: Ready / flash  identified: flash at ready                            │
+│ Selected: Ready / flash  identified: flash at ready                                           │
 │ Subagent models                                                                               │
 │ › Agent choice                                                                          Enter │
 │ Model management                                                                              │
-│ › Manage models                                                                  3 providers │
+│ › Manage models                                                                   3 providers │
 │   4 with missing limits / 2 unavailable                                                       │
-╰───── Enter select + default · ←/→ effort · Tab section · Esc clear/close ─╯
+╰───────────────────────── Enter select + default · ←/→ effort · Tab section · Esc clear/close ─╯
 ```
 
 ```text
@@ -1382,8 +1384,8 @@ diagnostics and their recovery guidance stay as read-only lines.
 │   Other                     ready                                                             │
 │   Manual                    no models                                                         │
 │   Relay                     2 unavailable                                                     │
-│   Ready: 4 models need a window · dimcode models ready --set-missing-limits                    │
-╰────────────────────────────────── Enter manage · Esc back ───────────────────────────────────╯
+│   Ready: 4 models need a window · dimcode models ready --set-missing-limits                   │
+╰─────────────────────────────────── Enter manage · Esc back ───────────────────────────────────╯
 ```
 
 `dimcode models PROVIDER remove MODEL` removes without the panel's confirmation, and `dimcode

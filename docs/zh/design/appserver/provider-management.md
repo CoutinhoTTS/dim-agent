@@ -756,7 +756,7 @@ credential clear 和 enabled:false，修复只 clear 导致已启用记录缺凭
 若强度被切换过，
 先把它存成该模型的 `reasoningEffort`，再连同其余已保存偏好一起发送。编辑提供方的模型列表属于
 Models 管理领域（[CLI 命令 § Models 领域](../cli-commands.md#models-领域)）：`/models` 的
-`Edit models` 与 `dimcode models PROVIDER add|edit|set|remove|inspect` 读取
+`Manage models` 与 `dimcode models PROVIDER add|edit|set|remove|inspect` 读取
 `provider.management`，并经 `provider.models.*` 写入；上面的选择器动作保持不变。
 
 catalog 条目带 `zdr: true` 的模型在推理强度前显示 `ZDR` 标签，固定子代理模型选择器也一样。
@@ -769,9 +769,14 @@ catalog 条目带 `zdr: true` 的模型在推理强度前显示 `ZDR` 标签，�
 改端点）后再问一次。读取或刷新失败时该 provider 的提示行保留；面板关闭后才到达的
 回复只记录这次填充，下次打开再读。
 
-未声明的模型不是选择器行。每个至少有一个此类模型的 Provider 在模型行之后保留一行灰色提示：
-统计需要窗口的模型数量并给出声明命令；该 Provider 没有任何可选模型时，这条提示取代空 Provider
-行，而不是与之并列。`dimcode models PROVIDER --set-limits MODEL --context-window N
+未声明的模型不是选择器行。选择器的 `Model management` 分区位于滚动的候选列表之外，保留紧凑的诊断：
+多少模型缺少上限、多少不可用或已禁用、多少 Provider 没有模型、多少目录所有者无法读取
+（[CLI 命令 § Models 领域](../cli-commands.md#models-领域)）。Enter 打开 Provider 列表，每行写明
+Provider 及其状态；至少有一个模型缺少上限的 Provider 写明数量，footer 给出声明命令
+（`dimcode models PROVIDER --set-missing-limits ...`）。没有任何可选模型的 Provider 仍可在该列表中
+找到，并写明原因，包括 `no models` 与 `catalog unreadable`。选择 Provider 打开既有的 Models
+管理领域，因此诊断从不成为模型候选。守护进程未声明 `provider.management` 时，同样的原因及其
+恢复命令以只读行显示，没有可执行的管理操作。`dimcode models PROVIDER --set-limits MODEL --context-window N
 --max-output-tokens N` 通过 `models.edit` 为单个模型声明两项上限；
 `--set-missing-limits --context-window N --max-output-tokens N` 为列表标为 `undeclared`
 的每个模型声明，即缺失上限是唯一障碍的启用模型；被禁用或因其他原因不可用的模型不写入。
@@ -781,9 +786,11 @@ catalog 条目带 `zdr: true` 的模型在推理强度前显示 `ZDR` 标签，�
 `undeclared`，并在行下列出声明命令。
 
 ```text
-Select a model
-> Provider / model          ZDR  ‹ high ›
-Enter 选择并设为默认 · ←/→ 推理强度 · Tab 切换分区 · Esc 清除/关闭
+Models
+  Conversation model
+  > Provider / model          ZDR  ‹ high ›
+  Selected: Provider / model
+Enter select + default · ←/→ effort · Tab section · Esc clear/close
 ```
 
 ```text

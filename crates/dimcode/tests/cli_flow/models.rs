@@ -937,10 +937,10 @@ fn area_models_unavailable_after_toggle() -> Value {
     models
 }
 
-/// `/models` → `Edit models` opens one Provider's area: the title names the
-/// Provider, rows are grouped by source, Enter toggles with the complete
-/// enabled set at the read's version, Tab shows the descriptor, and Esc
-/// closes back to the prompt.
+/// `/models` → `Manage models` → a Provider opens that Provider's area: the
+/// title names the Provider, rows are grouped by source, Enter toggles with
+/// the complete enabled set at the read's version, Tab shows the descriptor,
+/// and Esc closes back to the Provider list and then the picker.
 #[test]
 fn tui_models_area_opens_and_toggles_a_model() {
     let home = Home::new();
@@ -976,7 +976,7 @@ fn tui_models_area_opens_and_toggles_a_model() {
         wire.reply(&request, picker_catalog());
         let request = wire.read("provider.management");
         wire.reply(&request, test_provider(area_models(true), 3));
-        // Edit models opens the Provider's area.
+        // Manage models, then the Provider, opens its area.
         let request = wire.read("provider.management");
         wire.reply(&request, test_provider(area_models(true), 3));
         // Enter: the toggle reads, writes the complete set, reads again.
@@ -1081,7 +1081,7 @@ fn tui_models_area_offers_no_toggle_for_an_unavailable_model() {
         wire.reply(&request, picker_catalog());
         let request = wire.read("provider.management");
         wire.reply(&request, test_provider(area_models_unavailable(), 3));
-        // Edit models opens the Provider's area.
+        // Manage models, then the Provider, opens its area.
         let request = wire.read("provider.management");
         wire.reply(&request, test_provider(area_models_unavailable(), 3));
         // Tab on the unavailable model: an inspect reads the area. Had Enter
@@ -1294,7 +1294,7 @@ fn tui_models_area_rereads_after_a_conflict() {
         wire.reply(&request, picker_catalog());
         let request = wire.read("provider.management");
         wire.reply(&request, test_provider(area_models(true), 3));
-        // Edit models opens the Provider's area.
+        // Manage models, then the Provider, opens its area.
         let request = wire.read("provider.management");
         wire.reply(&request, test_provider(area_models(true), 3));
         // Ctrl+E reads the fresh template, then writes at the revision the
@@ -1418,7 +1418,7 @@ fn tui_models_area_reports_a_conflict_whose_reread_fails() {
         wire.reply(&request, picker_catalog());
         let request = wire.read("provider.management");
         wire.reply(&request, test_provider(area_models(true), 3));
-        // Edit models opens the Provider's area.
+        // Manage models, then the Provider, opens its area.
         let request = wire.read("provider.management");
         wire.reply(&request, test_provider(area_models(true), 3));
         // Ctrl+E reads the fresh template, then writes at the revision the

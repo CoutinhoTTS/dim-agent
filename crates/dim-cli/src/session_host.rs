@@ -3708,7 +3708,7 @@ impl Worker {
                     candidates,
                 });
             }
-            if models.len() == before {
+            if models.len() == before && undeclared == 0 {
                 let reason = if total == 0 {
                     EmptyReason::NoModels { listable }
                 } else if unavailable > 0 && disabled > 0 {

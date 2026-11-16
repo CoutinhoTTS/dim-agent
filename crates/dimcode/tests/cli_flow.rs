@@ -12190,10 +12190,12 @@ fn tui_models_picker_edits_only_the_subagent_model_policy() {
     );
 }
 
-/// `/models` lists a Provider's models without offering `Edit models` when
-/// the daemon does not advertise the area's method.
+/// `/models` lists a Provider's models without offering `Manage models` when
+/// the daemon does not advertise the area's method, and keeps the recovery
+/// guidance as a read-only line. A Provider whose only models lack limits is
+/// named once, for its missing limits, and not again as unavailable.
 #[test]
-fn tui_models_picker_hides_edit_models_without_management_methods() {
+fn tui_models_picker_hides_manage_models_without_management_methods() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
         wire.2 = true;
@@ -12210,7 +12212,11 @@ fn tui_models_picker_hides_edit_models_without_management_methods() {
                 "session.attach" => attach_record(&request),
                 "session.history" => json!({"events":[],"through":8,"nextAfter":8,"done":true}),
                 "session.idle" => json!({"sequence":8}),
-                "provider.list" => json!({"providers":[{"providerId":"test","displayName":"Test","enabled":true}]}),
+                "provider.list" => json!({"providers":[
+                    {"providerId":"test","displayName":"Test","enabled":true},
+                    {"providerId":"bare","displayName":"Bare","enabled":true}]}),
+                "provider.catalog" if request["params"]["providerId"] == "bare" => json!({"catalog":{"version":1,"disabledModelIds":[],"models":[
+                    {"id":"narrow","name":"Narrow","unavailableReason":"limits_undeclared","missingLimits":["contextWindow","maxOutputTokens"],"capabilities":dim_agent_types::CatalogCapabilities::default()}]}}),
                 "provider.catalog" => json!({"catalog":{"version":1,"disabledModelIds":[],"models":[
                     {"id":"model","name":"Model","capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)}]}}),
                 "account.providers" => json!([]),
@@ -12223,10 +12229,13 @@ fn tui_models_picker_hides_edit_models_without_management_methods() {
     terminal.until("test / model");
     terminal.write(b"/models\r");
     terminal.until("Test / model");
+    terminal.until("dimcode models bare --set-missing-limits");
     thread::sleep(Duration::from_millis(300));
     let opened = terminal.transcript.clone();
-    assert!(opened.contains("Model"), "{opened}");
-    assert!(!opened.contains("Edit models"), "{opened}");
+    assert!(opened.contains("Model management"), "{opened}");
+    assert!(opened.contains("Bare: 1 model needs a window"), "{opened}");
+    assert!(!opened.contains("unavailable"), "{opened}");
+    assert!(!opened.contains("Manage models"), "{opened}");
     terminal.raw(b"\x1b");
     thread::sleep(Duration::from_millis(200));
     terminal.write(b"/exit\r");

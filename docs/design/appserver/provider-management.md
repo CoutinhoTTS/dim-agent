@@ -1158,6 +1158,7 @@ Models whose catalog entry has `zdr: true` show a `ZDR` tag before the
 reasoning effort, including in the fixed subagent model picker. Searching
 `zdr` includes these models. Missing or false values show no tag; replacing
 the catalog list replaces the tag with the latest server value.
+
 The picker also fills a static provider whose catalog holds no models through
 `provider.refresh`, once per version of its catalog in a connection, when
 `provider.list` says its models can be listed, and shows what the refresh
