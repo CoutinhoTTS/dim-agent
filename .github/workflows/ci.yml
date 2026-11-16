@@ -7,7 +7,8 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  # Main check jobs join their shared groups only after path classification.
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || (github.ref == 'refs/heads/main' && github.run_id) || github.ref }}
   cancel-in-progress: true
 env:
   # CI only needs pass/fail; skipping debug info shortens compiling and linking.
@@ -42,6 +43,8 @@ jobs:
           package-manager-cache: false
       - name: Select check groups
         id: groups
+        env:
+          DIM_CI_PUSH_BEFORE: ${{ github.event.before }}
         run: node scripts/ci-changes.mjs
       - name: Check accepted ADRs
         if: github.event_name == 'pull_request'
@@ -51,6 +54,9 @@ jobs:
   dependencies:
     needs: changes
     if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.dependencies == 'true'
+    concurrency:
+      group: ci-main-dependencies-${{ github.ref == 'refs/heads/main' && needs.changes.outputs.rust == 'true' && 'shared' || github.run_id }}
+      cancel-in-progress: true
     runs-on: [self-hosted, macOS, ARM64]
     timeout-minutes: 15
     env:
@@ -67,6 +73,9 @@ jobs:
   windows-cli:
     needs: changes
     if: needs.changes.outputs.windows == 'true'
+    concurrency:
+      group: ci-main-windows-cli-${{ github.ref == 'refs/heads/main' && needs.changes.outputs.rust == 'true' && 'shared' || github.run_id }}
+      cancel-in-progress: true
     runs-on: [self-hosted, windows, x64]
     timeout-minutes: 15
     env:
@@ -83,6 +92,9 @@ jobs:
     if: >-
       needs.changes.outputs.rust == 'true' || needs.changes.outputs.xtask == 'true' ||
       needs.changes.outputs.web == 'true' || needs.changes.outputs.scripts == 'true'
+    concurrency:
+      group: ci-main-verify-${{ github.ref == 'refs/heads/main' && needs.changes.outputs.rust == 'true' && 'shared' || github.run_id }}
+      cancel-in-progress: true
     # PR runners must be isolated from release credentials and private networks.
     runs-on: [self-hosted, macOS, ARM64]
     timeout-minutes: 45
@@ -212,6 +224,9 @@ jobs:
   acp-registry:
     needs: changes
     if: github.event_name != 'pull_request' && (needs.changes.outputs.rust == 'true' || needs.changes.outputs.scripts == 'true')
+    concurrency:
+      group: ci-main-acp-registry-${{ github.ref == 'refs/heads/main' && needs.changes.outputs.rust == 'true' && 'shared' || github.run_id }}
+      cancel-in-progress: true
     runs-on: [self-hosted, linux, x64]
     timeout-minutes: 30
     env:
