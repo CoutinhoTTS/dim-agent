@@ -1181,7 +1181,8 @@
       "parent": "dim_agent_capabilities",
       "file": "crates/dim-agent-capabilities/src/session_files.rs",
       "unexpandedMacros": [
-        "matches"
+        "matches",
+        "serde_json::json"
       ]
     },
     {
@@ -3629,7 +3630,6 @@
         "format",
         "matches",
         "params",
-        "serde_json::json",
         "tokio::select",
         "tracing::warn"
       ]
@@ -8384,7 +8384,7 @@
         "path ModelDriver",
         "path ModelNetwork",
         "path ModelStream",
-        "path dim_agent_capabilities::host::SessionFilesHost"
+        "path dim_agent_capabilities::host::SessionFiles"
       ]
     },
     {
@@ -8562,7 +8562,7 @@
         "path ResolveModelConnection",
         "path ResolvedModelConnection",
         "path SelectableModelsHost::new",
-        "path SessionFilesHost",
+        "path SessionFiles",
         "path dim_agent_capabilities::host::provide_model_selection",
         "path dim_agent_capabilities::host::provide_selectable_models",
         "path undeclared_modality_operation"
@@ -9060,10 +9060,10 @@
         "path SessionFileErrorCode::NotFound",
         "path SessionFileErrorCode::Storage",
         "path SessionFileErrorCode::TooLarge",
-        "path SessionFilesHost",
+        "path SessionFiles",
         "use dim_agent_capabilities::host::SessionFileError",
         "use dim_agent_capabilities::host::SessionFileErrorCode",
-        "use dim_agent_capabilities::host::SessionFilesHost"
+        "use dim_agent_capabilities::host::SessionFiles"
       ]
     },
     {
@@ -9314,7 +9314,6 @@
         "path host::PrepareModelHost",
         "path host::PromptHost",
         "path host::ProviderConnectionResolver",
-        "path host::SessionFilesHost",
         "path host::ToolHost"
       ]
     },
@@ -10309,7 +10308,7 @@
         "path AuxiliaryErrorCode::Failed",
         "path AuxiliaryErrorCode::InvalidRequest",
         "path AuxiliaryErrorCode::ModelUnavailable",
-        "path AuxiliaryModelHost",
+        "path AuxiliaryModel",
         "path AuxiliaryReply",
         "path AuxiliaryRequest",
         "path CompleteAuxiliary",
@@ -10324,7 +10323,7 @@
         "path ResolveModelConnection",
         "use crate::host::AuxiliaryError",
         "use crate::host::AuxiliaryErrorCode",
-        "use crate::host::AuxiliaryModelHost",
+        "use crate::host::AuxiliaryModel",
         "use crate::host::AuxiliaryReply",
         "use crate::host::AuxiliaryRequest",
         "use crate::host::CompleteAuxiliary",
@@ -11821,6 +11820,13 @@
     },
     {
       "from": "dim_agent_capabilities::defaults",
+      "to": "dim_agent_capabilities::workspace_tools::background",
+      "references": [
+        "path crate::workspace_tools::background::BackgroundExecPlugin::new"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::defaults",
       "to": "dim_agent_runtime::assembly",
       "references": [
         "path AgentBuilder",
@@ -12139,10 +12145,10 @@
         "path HostError::Cancelled",
         "path HostError::failed",
         "path HostFuture",
-        "path SessionFilesHost",
+        "path SessionFiles",
         "use crate::host::HostError",
         "use crate::host::HostFuture",
-        "use crate::host::SessionFilesHost"
+        "use crate::host::SessionFiles"
       ]
     },
     {
@@ -16050,13 +16056,19 @@
         "path HostError::failed",
         "path HostErrorKind::InvalidRequest",
         "path HostErrorKind::Transport",
+        "path SessionFileError",
         "path SessionFileErrorCode::Cancelled",
+        "path SessionFileErrorCode::Invalid",
         "path SessionFileErrorCode::NodeUnavailable",
-        "path SessionFilesHost",
+        "path SessionFileErrorCode::NotFound",
+        "path SessionFileErrorCode::Storage",
+        "path SessionFileErrorCode::TooLarge",
+        "path SessionFiles",
         "use crate::host::HostError",
         "use crate::host::HostErrorKind",
+        "use crate::host::SessionFileError",
         "use crate::host::SessionFileErrorCode",
-        "use crate::host::SessionFilesHost"
+        "use crate::host::SessionFiles"
       ]
     },
     {
@@ -16304,9 +16316,9 @@
         "path HostError",
         "path HostError::Cancelled",
         "path HostError::failed",
-        "path SessionFilesHost",
+        "path SessionFiles",
         "use crate::host::HostError",
-        "use crate::host::SessionFilesHost"
+        "use crate::host::SessionFiles"
       ]
     },
     {
@@ -16343,10 +16355,8 @@
       "from": "dim_agent_capabilities::shell_session",
       "to": "dim_agent_capabilities::workspace_tools::background",
       "references": [
-        "path wake_input",
-        "path wakes",
-        "use crate::workspace_tools::background::wake_input",
-        "use crate::workspace_tools::background::wakes"
+        "path BackgroundExec",
+        "use crate::workspace_tools::background::BackgroundExec"
       ]
     },
     {
@@ -18405,13 +18415,13 @@
         "path HostError::Cancelled",
         "path HostError::failed",
         "path HostFuture",
-        "path SessionFilesHost",
+        "path SessionFiles",
         "path ToolDriver",
         "path ToolExecutionContext",
         "path ToolHost",
         "use crate::host::HostError",
         "use crate::host::HostFuture",
-        "use crate::host::SessionFilesHost",
+        "use crate::host::SessionFiles",
         "use crate::host::ToolDriver",
         "use crate::host::ToolExecutionContext",
         "use crate::host::ToolHost"
@@ -26945,7 +26955,7 @@
       "from": "dim_app_server::connection::tree",
       "to": "dim_agent_capabilities::host",
       "references": [
-        "path dim_agent_capabilities::host::SessionFilesHost"
+        "path dim_agent_capabilities::host::SessionFiles"
       ]
     },
     {
@@ -29030,7 +29040,7 @@
         "path HostError::failed",
         "path HostFuture",
         "path ToolExecutionContext",
-        "path dim_agent_capabilities::host::SessionFilesHost",
+        "path dim_agent_capabilities::host::SessionFiles",
         "use dim_agent_capabilities::host::HostError",
         "use dim_agent_capabilities::host::HostFuture",
         "use dim_agent_capabilities::host::ToolExecutionContext"
@@ -29226,7 +29236,7 @@
       "from": "dim_app_server::mcp::temporary",
       "to": "dim_agent_capabilities::host",
       "references": [
-        "path dim_agent_capabilities::host::SessionFilesHost"
+        "path dim_agent_capabilities::host::SessionFiles"
       ]
     },
     {
@@ -33938,8 +33948,8 @@
       "from": "dim_app_server::storage::timeline",
       "to": "dim_agent_capabilities::host",
       "references": [
-        "path SessionFilesHost",
-        "use dim_agent_capabilities::host::SessionFilesHost"
+        "path SessionFiles",
+        "use dim_agent_capabilities::host::SessionFiles"
       ]
     },
     {
@@ -34135,15 +34145,13 @@
       "from": "dim_app_server::storage::timeline",
       "to": "dim_app_server::storage::files",
       "references": [
-        "path SessionFiles",
-        "path SessionFiles::new",
         "path files",
-        "path files::SessionFilesFace",
+        "path files::SessionFiles",
+        "path files::SessionFiles::new",
         "path files::release",
         "path files::share",
         "path files::share_output",
-        "use super::files",
-        "use super::files::SessionFiles"
+        "use super::files"
       ]
     },
     {
@@ -35028,8 +35036,8 @@
       "from": "dim_app_server::web_entry::uploads",
       "to": "dim_agent_capabilities::host",
       "references": [
-        "path SessionFilesHost",
-        "use dim_agent_capabilities::host::SessionFilesHost"
+        "path SessionFiles",
+        "use dim_agent_capabilities::host::SessionFiles"
       ]
     },
     {
@@ -53611,9 +53619,9 @@
       "from": "dim_session_title",
       "to": "dim_agent_capabilities::host",
       "references": [
-        "path AuxiliaryModelHost",
+        "path AuxiliaryModel",
         "path AuxiliaryRequest",
-        "use dim_agent_capabilities::host::AuxiliaryModelHost",
+        "use dim_agent_capabilities::host::AuxiliaryModel",
         "use dim_agent_capabilities::host::AuxiliaryRequest"
       ]
     },
@@ -53919,6 +53927,42 @@
     {
       "module": "dim_agent_capabilities::session_broadcast",
       "path": "S::Ok"
+    },
+    {
+      "module": "dim_agent_capabilities::session_files",
+      "path": "Error::Value"
+    },
+    {
+      "module": "dim_agent_capabilities::session_files",
+      "path": "Operation::Import"
+    },
+    {
+      "module": "dim_agent_capabilities::session_files",
+      "path": "Operation::OwnedPaths"
+    },
+    {
+      "module": "dim_agent_capabilities::session_files",
+      "path": "Operation::Owns"
+    },
+    {
+      "module": "dim_agent_capabilities::session_files",
+      "path": "Operation::Put"
+    },
+    {
+      "module": "dim_agent_capabilities::session_files",
+      "path": "Operation::Read"
+    },
+    {
+      "module": "dim_agent_capabilities::session_files",
+      "path": "Operation::Register"
+    },
+    {
+      "module": "dim_agent_capabilities::session_files",
+      "path": "Value::cancellable_future"
+    },
+    {
+      "module": "dim_agent_capabilities::session_files",
+      "path": "Value::from"
     },
     {
       "module": "dim_agent_capabilities::skills::catalog",
@@ -54575,42 +54619,6 @@
     {
       "module": "dim_app_server::storage::codec",
       "path": "Field::Tools"
-    },
-    {
-      "module": "dim_app_server::storage::files",
-      "path": "Error::Value"
-    },
-    {
-      "module": "dim_app_server::storage::files",
-      "path": "Operation::Import"
-    },
-    {
-      "module": "dim_app_server::storage::files",
-      "path": "Operation::OwnedPaths"
-    },
-    {
-      "module": "dim_app_server::storage::files",
-      "path": "Operation::Owns"
-    },
-    {
-      "module": "dim_app_server::storage::files",
-      "path": "Operation::Put"
-    },
-    {
-      "module": "dim_app_server::storage::files",
-      "path": "Operation::Read"
-    },
-    {
-      "module": "dim_app_server::storage::files",
-      "path": "Operation::Register"
-    },
-    {
-      "module": "dim_app_server::storage::files",
-      "path": "Value::cancellable_future"
-    },
-    {
-      "module": "dim_app_server::storage::files",
-      "path": "Value::from"
     },
     {
       "module": "dim_app_server::storage::files::tests",

@@ -422,7 +422,8 @@ like `session_file_owners`, so output stays readable after the source is deleted
 | `owned_paths` | async | `{sessionId: string}` | `{paths: string[]}`, a Session file's directory and each output path |
 
 `sessionFiles` is a data face: its catalog entry is shared and SessionStore publishes
-its dispatch at `host_key("sessionFiles")`. Native calls and wire calls use this owner.
+the same `SessionFiles` binding at its Rust type key and `host_key("sessionFiles")`.
+Native calls invoke the owner directly; wire calls decode and invoke the same operations.
 
 `import` applies the same Session, name, 16 MiB, pending/owned transaction,
 permissions and cancellation rules as `put`. FileStorage pins the source while
@@ -750,6 +751,10 @@ pub struct StoredSessionFile { pub file_id: String, pub path: PathBuf, pub bytes
 pub enum SessionFileErrorCode { NotFound, Invalid, TooLarge, NodeUnavailable, Cancelled, Storage }
 pub struct SessionFileError { pub code: SessionFileErrorCode, pub message: String }
 pub trait SessionFilesService: Send + Sync + 'static {
+    fn import(&self, session_id: String, name: String, source: String, cancel: CancellationToken)
+        -> Pin<Box<dyn Future<Output = Result<StoredSessionFile, SessionFileError>> + Send + '_>>;
+    fn read(&self, session_id: String, file_id: String, offset: u64, cancel: CancellationToken)
+        -> Pin<Box<dyn Future<Output = Result<Vec<u8>, SessionFileError>> + Send + '_>>;
     fn put(&self, session_id: String, name: String, content: Vec<u8>, cancel: CancellationToken)
         -> Pin<Box<dyn Future<Output = Result<StoredSessionFile, SessionFileError>> + Send + '_>>;
     fn register(&self, session_id: String, path: PathBuf)
@@ -759,7 +764,7 @@ pub trait SessionFilesService: Send + Sync + 'static {
     fn owned_paths(&self, session_id: String)
         -> Pin<Box<dyn Future<Output = Result<Vec<PathBuf>, SessionFileError>> + Send + '_>>;
 }
-pub struct SessionFilesHost(pub Arc<dyn SessionFilesService>);
+pub struct SessionFiles(pub Arc<dyn SessionFilesService>);
 ```
 
 `register` stores a resolved output path; the producer has checked it against its own root.
@@ -768,7 +773,7 @@ pub struct SessionFilesHost(pub Arc<dyn SessionFilesService>);
 in `<db>.session-files/<fileId>/`. A query failure is an error that denies access.
 `owned_paths` lists the owned file-id directories and output paths.
 
-`SessionStorePlugin` takes the database directory's root index, provides `SessionFilesHost`, and
+`SessionStorePlugin` takes the database directory's root index, provides `SessionFiles`, and
 reads `FileStorage` with `ctx.get_as` on each call. The fork, release and sweep steps are
 SessionStore methods over the native store connection, used by S5c.
 

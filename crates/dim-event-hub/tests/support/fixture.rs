@@ -5,8 +5,7 @@
 use super::wait_for;
 use dim_agent_capabilities::file_storage::FileStoragePlugin;
 use dim_agent_capabilities::host::{
-    SessionFileError, SessionFileErrorCode, SessionFilesHost, SessionFilesService,
-    StoredSessionFile,
+    SessionFileError, SessionFileErrorCode, SessionFiles, SessionFilesService, StoredSessionFile,
 };
 use dim_agent_capabilities::methods::{Owner, RpcError};
 use dim_agent_runtime::testing::MinimalHost;
@@ -781,7 +780,7 @@ impl LoaderFixture {
             root.provide_at::<dyn HostDispatch>(host_key("sessions"), Arc::new(fake.clone()))
                 .map_err(dim_agent_runtime::AgentError::from)?;
             if let Some(session_files) = session_files {
-                root.provide_as::<SessionFilesHost>(Arc::new(SessionFilesHost(session_files)))
+                root.provide_as::<SessionFiles>(Arc::new(SessionFiles(session_files)))
                     .map_err(dim_agent_runtime::AgentError::from)?;
             }
             Ok(())

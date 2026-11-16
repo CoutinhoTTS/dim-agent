@@ -9,7 +9,7 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use dim_agent_capabilities::{
     file_storage::FileStoragePlugin,
     host::{
-        AuxiliaryErrorCode, AuxiliaryModelHost, AuxiliaryRequest, CredentialRecoveryPhase,
+        AuxiliaryErrorCode, AuxiliaryModel, AuxiliaryRequest, CredentialRecoveryPhase,
         CredentialRejection, HostError, HostErrorKind, ModalityConnectionHost, ModalityTarget,
         ModelChunk, ModelHost, ModelProtocol, ProviderConnectionResolver, SelectableModelsHost,
     },
@@ -1316,7 +1316,7 @@ async fn managed_provider_selection_http_recovery_and_restart_flow() {
     .await
     .unwrap();
     assert!(grok.status(&cancel).await.unwrap().authenticated);
-    let auxiliary = root.get::<AuxiliaryModelHost>().unwrap();
+    let auxiliary = root.get::<AuxiliaryModel>().unwrap();
     let sent = f.model_requests.lock().unwrap().len();
     f.model_rejections.store(2, Ordering::SeqCst);
     let error = auxiliary

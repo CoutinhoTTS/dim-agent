@@ -4,14 +4,14 @@ use super::{
         self, CONTENT_BUDGET, ContentRow, ListReferences, Previous, Reader, RequestBodies, Values,
         WireEvent,
     },
-    files::{self, SessionFiles},
+    files,
     metadata::{self, Titles},
     sqlite::error,
 };
 use crate::protocol::SessionOrigin;
 use dim_agent_capabilities::{
     file_access::{WorktreeAssociation, WorktreeAssociationError, WorktreeAssociations},
-    host::SessionFilesHost,
+    host::SessionFiles,
 };
 use dim_agent_runtime::Names;
 use dim_agent_runtime::{
@@ -967,7 +967,7 @@ pub struct SessionStore {
     pub(super) timeline: Arc<SqliteTimelineStore>,
     /// The file steps on the Session's resource node: Session files and the
     /// command output a delete removes.
-    files: SessionFiles,
+    files: files::SessionFiles,
     /// Title metadata (S5b): its one writer.
     pub(super) titles: Titles,
     /// Serializes output ownership across Sessions: a delete's shared-owner
@@ -1008,7 +1008,7 @@ impl SessionStore {
     pub fn new(db: Arc<SqliteStorage>, ctx: Ctx, files_root: usize) -> Self {
         let timeline = SqliteTimelineStore::new(db.clone());
         let titles = Titles::new(db.clone(), ctx.clone());
-        let files = SessionFiles::new(db, ctx, files_root, timeline.sweep_files.clone());
+        let files = files::SessionFiles::new(db, ctx, files_root, timeline.sweep_files.clone());
         Self {
             timeline,
             files,
@@ -1681,11 +1681,12 @@ impl DynPlugin for SessionStorePlugin {
                     })
                 },
             ))))?;
+            let binding = Arc::new(SessionFiles(Arc::new(files)));
             ctx.provide_at(
                 host_key("sessionFiles"),
-                Arc::new(files::SessionFilesFace(files.clone())) as Arc<dyn HostDispatch>,
+                binding.clone() as Arc<dyn HostDispatch>,
             )?;
-            ctx.provide_as::<SessionFilesHost>(Arc::new(SessionFilesHost(Arc::new(files))))?;
+            ctx.provide_as::<SessionFiles>(binding)?;
             ctx.provide_at(
                 host_key("sessionMetadata"),
                 Arc::new(metadata::Dispatch(store)) as Arc<dyn HostDispatch>,

@@ -119,7 +119,7 @@ release their process trees before returning; collaboration members do not
 background commands. Output files are not deleted simply by plugin unload.
 A result that carries `outputPath` registers that path with `sessionFiles` before
 it leaves the part; a registration failure fails the call (ADR 013 D2). A
-`SessionFilesHost` in the process is read without injection, so a host without
+`SessionFiles` in the process is read without injection, so a host without
 native storage keeps working and its output stays unowned.
 Before admission, `ToolHost.resolve_write` resolves a native `write` or `edit`
 target and returns that same call with an absolute canonical `path`. ToolExecutor
@@ -528,7 +528,10 @@ a filesystem lock, permission grant or cross-process compare-and-swap.
 
 Owner: [workspace_tools/background.rs](../../../../crates/dim-agent-capabilities/src/workspace_tools/background.rs).
 Owns commands transferred from foreground execution, their terminal records and
-bounded completion notices on the calling branch.
+bounded completion notices on the calling branch. It also settles abandoned exec
+facts and posts completion notices for ShellSession; that producer retains its live
+PTY and stop port. See [Shell exec recovery](../../../design/shell-exec-recovery.md)
+for the profile and generation handoff.
 
 `start` carries an optional task `title` into `exec/started` alongside the unchanged command-derived `description`. `session.exec.pending` returns that same title in each `PendingExec` item. The fact and inventory field are optional strings: missing values deserialize as absent and absent values are omitted on serialization. Existing persisted facts and inventories without a title remain readable. Persistence uses [native format v48](../../../design/appserver/native-storage-format.md#v48-task-titles), a marker-only, one-way upgrade that makes older strict readers reject the store at startup; ShellInput's command facts have no supplied title. This adds no state owner or service face and changes neither execution nor cancellation. The existing `toolHost`, `treeCommands` and `backgroundExec` faces retain their operations.
 

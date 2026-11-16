@@ -1060,7 +1060,7 @@ pub trait CompleteAuxiliary: Send + Sync + 'static {
         cancel: CancellationToken,
     ) -> Pin<Box<dyn Future<Output = Result<AuxiliaryReply, AuxiliaryError>> + Send + '_>>;
 }
-pub struct AuxiliaryModelHost(pub Arc<dyn CompleteAuxiliary>);
+pub struct AuxiliaryModel(pub Arc<dyn CompleteAuxiliary>);
 
 pub trait ModelDriver: Send + Sync + 'static {
     fn invoke(
@@ -1458,7 +1458,7 @@ pub trait SessionFilesService: Send + Sync + 'static {
 }
 /// The process service `sessionFiles`, provided by SessionStore, so that its
 /// consumers name no App Server type.
-pub struct SessionFilesHost(pub Arc<dyn SessionFilesService>);
+pub struct SessionFiles(pub Arc<dyn SessionFilesService>);
 
 pub struct IdentityContext;
 impl PrepareContext for IdentityContext {

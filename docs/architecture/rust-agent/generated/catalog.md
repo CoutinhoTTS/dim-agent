@@ -13,7 +13,6 @@ Each catalog name a part of the assembly provides or injects. `data` means share
 | `agentDirectory` | process | AgentDirectory | internal(owner-api) | — |
 | `agentIndex` | process | Agents | internal(owner-api) | — |
 | `auxiliaryModel` | process | Provider | data | `complete` async |
-| `auxiliaryModelHost` | process | Provider | internal(owner-api) | — |
 | `basePromptSettingsHost` | process | PromptSettings | internal(owner-api) | — |
 | `callChannel` | process | CallChannel | data | `closed` async, `notify` async |
 | `callers` | process | CallChannel | internal(owner-api) | — |
@@ -59,7 +58,6 @@ Each catalog name a part of the assembly provides or injects. `data` means share
 | `serverControl` | process | ServerControl | internal(control) | — |
 | `sessionClientsHost` | process | Connection | data | `presences` async |
 | `sessionFiles` | process | SessionStore | data | `import` async, `owned_paths` async, `owns` async, `put` async, `read` async, `register` async |
-| `sessionFilesHost` | process | SessionStore | internal(owner-api) | — |
 | `sessionMetadata` | process | SessionStore | data | `read` async, `setTitle` async |
 | `sessionPermissions` | process | AgentDirectory | data | `permission` async, `permissionDefaults` async |
 | `sessionStore` | process | SessionStore | internal(owner-api) | — |

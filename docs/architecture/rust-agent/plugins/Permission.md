@@ -124,7 +124,7 @@ decided from. The `FileAccessFacts` Session part registers `fileAccessFacts`
 with `facts(session_id, fileAccess, path, mode, cancel) -> FileFacts`: `workspace` from
 `SessionConfig` and the Session's confirmed worktree roots, `system` from HostPlatform's platform roots, `owned` from `SessionFiles.owns`, and `grant` from the Session's grants.
 The facts part requires SessionConfig, SessionIdentity, SessionLifecycle, HostPlatform,
-SessionFilesHost and SessionGrantsHost. Only external directory membership is cached;
+SessionFiles and SessionGrantsHost. Only external directory membership is cached;
 permission decisions are read at use time.
 The facts part consumes the association port and imports no SessionStore. Ownership or grant
 query failure denies; discovery unavailability preserves approval with its reason.

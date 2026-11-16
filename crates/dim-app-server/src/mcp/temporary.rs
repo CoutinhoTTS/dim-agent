@@ -92,7 +92,7 @@ fn missing() -> RpcError {
 
 pub(super) struct TemporaryMcp {
     identity: Key<dim_agent_runtime::SessionIdentity>,
-    files: Key<dim_agent_capabilities::host::SessionFilesHost>,
+    files: Key<dim_agent_capabilities::host::SessionFiles>,
     session: InstanceId,
     methods: Key<SessionMethods>,
     config: Key<SessionConfig>,
@@ -263,7 +263,7 @@ impl ToolProvider for Tools {
     }
 }
 struct BindingPlugin {
-    files: Option<Arc<dim_agent_capabilities::host::SessionFilesHost>>,
+    files: Option<Arc<dim_agent_capabilities::host::SessionFiles>>,
     session_id: String,
     id: uuid::Uuid,
     session: InstanceId,

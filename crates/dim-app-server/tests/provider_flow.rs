@@ -8,7 +8,7 @@ use axum::{
 use dim_agent_capabilities::{
     file_storage::FileStoragePlugin,
     host::{
-        AuxiliaryErrorCode, AuxiliaryModelHost, AuxiliaryRequest, AwsCredentials, BedrockAuth,
+        AuxiliaryErrorCode, AuxiliaryModel, AuxiliaryRequest, AwsCredentials, BedrockAuth,
         HostError, ModalityConnectionHost, ModalityTarget, ModelChunk, ModelConnection, ModelHost,
         ModelPortError, ModelProtocol, ModelStopReason, ProviderConnectionResolver,
         SelectableModelsHost,
@@ -7702,7 +7702,7 @@ async fn auxiliary_model_calls_the_given_model_once_without_tools_or_fallback() 
     let view = root.plugin(provider_part(ProviderPlugin::new));
     active(&view).await;
     let provider = root.get::<ProviderService>().unwrap();
-    let auxiliary = root.get::<AuxiliaryModelHost>().unwrap();
+    let auxiliary = root.get::<AuxiliaryModel>().unwrap();
     let cancel = CancellationToken::new();
     let saved = provider
         .create(
@@ -7758,6 +7758,31 @@ async fn auxiliary_model_calls_the_given_model_once_without_tools_or_fallback() 
     assert!(sent.body.to_string().contains("hello"));
     assert!(sent.body.get("tools").is_none());
     assert_eq!(max_tokens(&sent.body), Some(32));
+    let face = root
+        .get_at::<dyn rutis_bridge::session::HostDispatch>(&rutis_bridge::session::host_key(
+            "auxiliaryModel",
+        ))
+        .unwrap();
+    let wire = rutis_bridge::session::settle(
+        face.invoke(
+            "complete",
+            rutis_bridge::session::Value::List(vec![
+                json!({"model": target(AUX), "request": {
+                    "system": "Title this conversation",
+                    "messages": [{"role": "user", "content": "hello"}],
+                    "maxOutputTokens": 32
+                }})
+                .into(),
+            ]),
+        )
+        .unwrap(),
+    )
+    .await
+    .unwrap()
+    .json()
+    .unwrap();
+    assert_eq!(wire, serde_json::to_value(&reply).unwrap());
+    assert_eq!(seen.lock().unwrap().pop().unwrap().body, sent.body);
     auxiliary
         .0
         .complete(target(AUX), request(Some(1_000_000)), cancel.clone())

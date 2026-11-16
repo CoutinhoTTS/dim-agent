@@ -11,7 +11,7 @@ use dim_agent_capabilities::{
     adapters::MockTools,
     defaults,
     file_storage::FileStoragePlugin,
-    host::SessionFilesHost,
+    host::SessionFiles,
     methods::{MethodProvider, RpcError, SessionMethods},
     workspace_tools::{self, WorkspaceToolsConfig},
 };
@@ -419,7 +419,7 @@ impl Contract {
         defaults::install(&mut builder);
         defaults::mock_hosts(&mut builder);
         dim_agent_attachments::install(&mut builder);
-        builder.process_value(root.get::<SessionFilesHost>().unwrap());
+        builder.process_value(root.get::<SessionFiles>().unwrap());
         let agent = MinimalHost::start(&builder).await.unwrap();
         Self { root, store, agent }
     }

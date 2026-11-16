@@ -89,7 +89,7 @@ Rust 产品装配的现状以 [生成的 catalog](../architecture/rust-agent/gen
 | `scheduleJobs` | `scheduleJobs.call(JobRequest)` | 按 [Scheduler](plugins/Scheduler.md#a2-tool-schedule) 的 flat `JobRequest`/`JobReply`，与 `wakeups` 同一批次（[#1396](https://github.com/arcships/dim/pull/1396)）。 |
 | `wakeups` | `wakeups.create/list/cancel` | 形状按 [Scheduler](plugins/Scheduler.md#102-methods-and-tool) §10.2。 |
 | `loops` | `loops.start/next/list/stop` | 形状按 [Scheduler](plugins/Scheduler.md#126-interfaces) §12.6；`start`、`next`、`stop` 是迁改，`list` 是读取。投递 pass、恢复与 `settle_delivering` 不在此面。 |
-| `sessionFiles` | `sessionFiles.put/import/read/register/owns/owned_paths` | 形状按 [Session files](appserver/session-files.md) §9.1，`SessionFilesHost` 是进程内绑定。 |
+| `sessionFiles` | `sessionFiles.put/import/read/register/owns/owned_paths` | 形状按 [Session files](appserver/session-files.md) §9.1，`SessionFiles` 是进程内绑定。 |
 | `managedSearch` | `managedSearch.search` | 凭据由实现持有，见 §4.6。 |
 | `agentConfig` | `agentConfig.get()` | 形状见 §4.8。 |
 | `sessionLanguage` | `sessionLanguage.get()` | 形状见 §4.8。 |
@@ -108,9 +108,7 @@ Rust 产品装配的现状以 [生成的 catalog](../architecture/rust-agent/gen
 | `agentDirectory`、`agentIndex` | `sessions` | 目录查询走 `sessions` |
 | `settingsService` | `settings` | GoalBranch 的取消契约见 §4.1。 |
 | `modelHost` | `auxiliaryModel` | PromptSuggestion 的请求与流式语义见 §4.2。 |
-| `auxiliaryModelHost` | `auxiliaryModel` | 模型调用走 `complete` |
 | `loader` | `rutis/loader` | 插件管理走数据面 |
-| `sessionFilesHost` | `sessionFiles` | Rust 绑定；wire 名按 owner 契约 |
 | `basePromptSettingsHost` | — | 宿主 prompt settings 端口；`owner-api` |
 | `skillsInstructionsSettingsHost` | — | 宿主 skills settings 端口；`owner-api` |
 | `summaryPromptSettingsHost` | — | 宿主 summary settings 端口；`owner-api` |
@@ -221,10 +219,11 @@ Rust 产品装配的现状以 [生成的 catalog](../architecture/rust-agent/gen
 
 ### 3.7 待迁移的数据内容
 原因 `legacy-no-consumer`：内容是数据，但还没有转成 data face。没有 leaf 消费者不是保留 internal 的理由；这些名字按批次迁移，`legacy-no-consumer` 只是迁移状态，不是永久分类。
+角色为 typed binding 的名字在此只记录从目录移出的动作，不转为 data face（§2.6）。
 
 | 名字 | scope | provider | reason | 动作 |
 | --- | --- | --- | --- | --- |
-| `modalityConnectionHost` | process | Provider | legacy-no-consumer | 按 [#1613](https://github.com/arcships/dim/issues/1613) 定义操作面；凭据连接不直接序列化 |
+| `modalityConnectionHost` | process | Provider | legacy-no-consumer | 作为 Provider 的 typed binding 从目录移出：它返回一次调用的凭据材料，不落为 data face（决定：[#1613](https://github.com/arcships/dim/issues/1613)、[Provider 管理 §3.8](appserver/provider-management.md#38-media-execution-for-adapters)；移出实现：[#1634](https://github.com/arcships/dim/issues/1634)） |
 | `collaborationSession` | session | CollaborationSession | legacy-no-consumer | 按 #1292 定义操作面 |
 
 ## 4. 批次契约（#1292）
@@ -265,7 +264,7 @@ workflowRuns.call(RunRequest)
 
 ### 4.5 `sessionFiles`
 
-按 owner 契约 [Session files](appserver/session-files.md) §9.1 暴露 `sessionFiles`。`SessionFilesHost` 作为这组操作的进程内绑定。
+按 owner 契约 [Session files](appserver/session-files.md) §9.1 暴露 `sessionFiles`。`SessionFiles` 作为这组操作的进程内绑定。
 
 文件导入、分块读取、归属操作的参数、回复、错误及取消语义均由 §9.1 定义。文件传输使用按路径导入与有界读取操作。
 
