@@ -13545,6 +13545,47 @@ mod tests {
         );
     }
 
+    /// Both TUI modes draw a filled Skill by its name, and the message the same
+    /// draft sends still carries the canonical `/skill:<name>` token.
+    #[test]
+    fn a_filled_skill_draws_its_name_in_both_modes() {
+        use crate::management::skills::Entry;
+        for fullscreen in [false, true] {
+            let mut drawn = Drawn::new((100, 30), None, false);
+            drawn.app.fullscreen = fullscreen;
+            drawn.app.apply(Update::Skills(vec![Entry {
+                id: "user:status".into(),
+                source: Some("user".into()),
+                name: "status".into(),
+                description: "Show the status".into(),
+                file_path: "/home/.agents/skills/status/SKILL.md".into(),
+                enabled: true,
+                shadowed_by: None,
+                user_invocable: true,
+            }]));
+            drawn.app.composer.clear();
+            for ch in "/stat".chars() {
+                drawn.key(KeyCode::Char(ch));
+            }
+            drawn.key(KeyCode::Tab);
+
+            let screen = drawn.emu.rows_text().join("\n");
+            assert!(
+                screen.contains("/status"),
+                "the input draws the Skill's name in fullscreen={fullscreen}: {screen}"
+            );
+            assert!(
+                !screen.contains("skill:status"),
+                "the parser's namespace is not drawn in fullscreen={fullscreen}: {screen}"
+            );
+            assert_eq!(
+                drawn.app.composer.text(),
+                "/skill:status ",
+                "the draft still holds the canonical token in fullscreen={fullscreen}"
+            );
+        }
+    }
+
     /// A resumed session of `count` user messages `ask N`, each cut at `N`.
     fn resume_asks(drawn: &mut Drawn, count: usize) {
         drawn
