@@ -46,20 +46,30 @@ async function json(url, allowMissing = false) {
 }
 
 /**
- * The registry's response, or null when the read itself failed. A dropped
- * connection, a timeout, 429 and 5xx say nothing about what the registry
- * holds, so they are not an answer; every other status is returned for the
- * caller to interpret.
+ * A registry response whose body has already arrived, or null when the read
+ * failed. A dropped connection, a deadline that expires, 429 and 5xx say
+ * nothing about what the registry holds, so they are not an answer; every
+ * other status is returned for the caller to interpret.
+ *
+ * `fetch` resolves as soon as the headers arrive, so the transfer that can
+ * still fail is the body's: a connection reset mid-download, or a deadline
+ * expiring while a large tarball streams, rejects in `consume` and not in
+ * `fetch`. `consume` therefore runs inside this boundary, and it does
+ * transport only: a body that arrived is decoded by the caller, so a truncated
+ * or malformed payload stays the caller's error rather than being retried.
  */
-async function read(url, timeout) {
+async function read(url, timeout, consume = response => response.text()) {
   try {
     const response = await fetch(url, { signal: AbortSignal.timeout(timeout) });
-    if (response.status !== 429 && response.status < 500) return response;
-    console.error(`${url}: HTTP ${response.status}`);
+    if (response.status === 429 || response.status >= 500) {
+      console.error(`${url}: HTTP ${response.status}`);
+      return null;
+    }
+    return { ok: response.ok, status: response.status, body: await consume(response) };
   } catch (error) {
     console.error(`${url}: ${error.message}`);
+    return null;
   }
-  return null;
 }
 
 async function tags(name) {
@@ -106,14 +116,14 @@ const FOREIGN = 'foreign';
  * A value that contradicts what this run published about itself is an error.
  */
 async function provenance(name, version, sourceCommit) {
-  const response = await read(`${upstream}/${name}/${version}`, 30_000);
-  if (response === null) {
+  const document = await read(`${upstream}/${name}/${version}`, 30_000);
+  if (document === null) {
     console.error(`Cannot read ${name}@${version}: the registry did not answer`);
     return UNKNOWN;
   }
-  if (response.status === 404) return ABSENT;
-  assert(response.ok, `${name}@${version}: HTTP ${response.status}`);
-  const metadata = await response.json();
+  if (document.status === 404) return ABSENT;
+  assert(document.ok, `${name}@${version}: HTTP ${document.status}`);
+  const metadata = JSON.parse(document.body);
   assert.equal(metadata.name, name);
   assert.equal(metadata.version, version);
   if (name === wrapper) {
@@ -121,14 +131,15 @@ async function provenance(name, version, sourceCommit) {
     return READY;
   }
   assert(metadata.dist.tarball.startsWith(`${upstream}/${name}/-/`), `Unexpected tarball URL: ${name}`);
-  const archive = await read(metadata.dist.tarball, 120_000);
+  const archive = await read(metadata.dist.tarball, 120_000,
+    response => response.arrayBuffer());
   if (archive === null) {
     console.error(`Cannot read ${metadata.dist.tarball}: the registry did not answer`);
     return UNKNOWN;
   }
   if (archive.status === 404) return UNSERVED;
   assert(archive.ok, `${metadata.dist.tarball}: HTTP ${archive.status}`);
-  const bytes = Buffer.from(await archive.arrayBuffer());
+  const bytes = Buffer.from(archive.body);
   assert.equal(`sha512-${createHash('sha512').update(bytes).digest('base64')}`, metadata.dist.integrity, `Tarball integrity mismatch: ${name}`);
   const unpacked = spawnSync('tar', ['-xzO', 'package/release-manifest.json'], { input: bytes, maxBuffer: 16 * 1024 * 1024 });
   assert.ifError(unpacked.error);
@@ -177,12 +188,12 @@ async function settle(version, sourceCommit, retry) {
 async function settledTags(name, expected, replaced = {}) {
   const deadline = Date.now() + settleMilliseconds;
   for (;;) {
-    const response = await read(`${upstream}/-/package/${name}/dist-tags`, 30_000);
-    if (response === null) {
+    const document = await read(`${upstream}/-/package/${name}/dist-tags`, 30_000);
+    if (document === null) {
       console.error(`Cannot read ${name} dist-tags: the registry did not answer`);
     } else {
-      assert(response.ok, `${name} dist-tags: HTTP ${response.status}`);
-      const actual = await response.json();
+      assert(document.ok, `${name} dist-tags: HTTP ${document.status}`);
+      const actual = JSON.parse(document.body);
       if (isDeepStrictEqual(actual, expected)) return actual;
       assert(Object.entries(actual).every(([tag, value]) => value === expected[tag] || value === replaced[tag]),
         `${name} dist-tags changed concurrently: expected ${JSON.stringify(expected)}, read ${JSON.stringify(actual)}`);

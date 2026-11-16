@@ -246,11 +246,13 @@ function nightlyRegistry(t, shipped = platforms) {
     const failure = process.env.FAILURE;
     const tarballMisses = Number(process.env.TARBALL_404 ?? 0);
     const transient = Number(process.env.TRANSIENT ?? 0);
+    const bodyResets = Number(process.env.BODY_RESET ?? 0);
     const root = ${JSON.stringify(root)};
     const lagFile = ${JSON.stringify(path.join(root, 'tag-lag'))};
     const lagLeft = () => { try { return Number(readFileSync(lagFile, 'utf8').trim()); } catch { return 0; } };
     const spendLag = () => writeFileSync(lagFile, String(lagLeft() - 1));
     let transientLeft = transient;
+    let bodyResetsLeft = bodyResets;
     const remote = ${JSON.stringify(remote)};
     const names = ${JSON.stringify(names)};
     const version = ${JSON.stringify(manifest.version)};
@@ -308,6 +310,14 @@ function nightlyRegistry(t, shipped = platforms) {
           integrity: 'sha512-' + createHash('sha512').update(bytes).digest('base64') };
         if (failure === 'integrity') metadata.dist.integrity = 'sha512-corrupt';
       }
+      // Headers arrive, then the body transfer fails: fetch() has already
+      // resolved, so only a boundary that consumes the body can retry this.
+      if (bodyResetsLeft > 0) {
+        bodyResetsLeft -= 1;
+        return new Response(new ReadableStream({
+          start(controller) { controller.error(new TypeError('terminated')); },
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
       return Response.json(metadata);
     };
   `);
@@ -341,11 +351,12 @@ function nightlyRegistry(t, shipped = platforms) {
   `, { mode: 0o755 });
   const check = fileURLToPath(new URL('./check-alpha-registry.mjs', import.meta.url));
   return { receipt, remote, initialTags,
-    run(mode, flag = '--dry-run', failure = '', { tarballMisses = 0, tagLag = 0, transient = 0 } = {}) {
+    run(mode, flag = '--dry-run', failure = '', { tarballMisses = 0, tagLag = 0, transient = 0, bodyResets = 0 } = {}) {
       return spawnSync(process.execPath, ['--import', preload, check, receipt, mode, flag], {
         encoding: 'utf8', timeout: 10_000,
         env: { ...process.env, PATH: `${path.join(root, 'bin')}${path.delimiter}${process.env.PATH}`, FAILURE: failure,
-          TARBALL_404: String(tarballMisses), TAG_LAG: String(tagLag), TRANSIENT: String(transient), ...settle },
+          TARBALL_404: String(tarballMisses), TAG_LAG: String(tagLag), TRANSIENT: String(transient),
+          BODY_RESET: String(bodyResets), ...settle },
       });
     },
     read() { return JSON.parse(readFileSync(remote)); },
@@ -515,4 +526,19 @@ test('refuses to rebuild on an unanswered registry but reuses a nightly a blip h
   const reused = blip.run('source', '--dry-run', '', { transient: 1 });
   assert.equal(reused.status, 0, reused.stderr);
   assert.equal(JSON.parse(readFileSync(blip.receipt)).version, '1.2.3-alpha.10', 'a retried read still finds the nightly');
+});
+
+test('retries a response whose body transfer fails after its headers arrived', (t) => {
+  const source = nightlyRegistry(t);
+  writeFileSync(source.receipt, JSON.stringify({ sourceCommit }));
+  const reused = source.run('source', '--dry-run', '', { bodyResets: 1 });
+  assert.equal(reused.status, 0, reused.stderr);
+  assert.equal(JSON.parse(readFileSync(source.receipt)).version, '1.2.3-alpha.10',
+    'a body that ended mid-transfer is not an incomplete nightly');
+
+  const promote = nightlyRegistry(t);
+  assert.equal(promote.run('snapshot').status, 0);
+  const promoted = promote.run('promote', '--apply', '', { bodyResets: 1 });
+  assert.equal(promoted.status, 0, promoted.stderr);
+  assert.equal(promote.read().tags['dimcode-alpha'].latest, '1.2.3-alpha.10');
 });
