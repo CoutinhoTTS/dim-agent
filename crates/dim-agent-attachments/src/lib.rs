@@ -2,7 +2,7 @@
 //! Session attachment methods import files through SessionStore and return
 //! durable references. Reads verify the calling Session owns the file.
 use dim_agent_capabilities::{
-    host::{SessionFileError, SessionFileErrorCode, SessionFilesHost},
+    host::{SessionFileError, SessionFileErrorCode, SessionFiles},
     methods::{self, Interruption, MethodCall, MethodDecl, RpcError, SessionMethods},
 };
 use dim_agent_runtime::{AgentBuilder, Names, SessionIdentity};
@@ -115,7 +115,7 @@ fn prepare_image(path: String) -> Result<(tempfile::NamedTempFile, &'static str)
 
 pub struct AttachmentsPlugin {
     identity: Key<SessionIdentity>,
-    files: Key<SessionFilesHost>,
+    files: Key<SessionFiles>,
     methods: Key<SessionMethods>,
 }
 impl AttachmentsPlugin {

@@ -3202,14 +3202,14 @@
         "generation": 1,
         "injects": [
           {
-            "service": "dim_agent_capabilities::host::SessionFilesHost",
+            "service": "dim_agent_capabilities::host::SessionFiles",
             "scope": null,
             "status": "Ready"
           }
         ],
         "resolved": [
           {
-            "service": "dim_agent_capabilities::host::SessionFilesHost",
+            "service": "dim_agent_capabilities::host::SessionFiles",
             "scope": null,
             "provider": 8,
             "generation": 1
@@ -3217,7 +3217,7 @@
         ],
         "reads": [
           {
-            "service": "dim_agent_capabilities::host::SessionFilesHost",
+            "service": "dim_agent_capabilities::host::SessionFiles",
             "provider": 8,
             "declared": true,
             "external": true
@@ -3313,7 +3313,7 @@
         "removing": false
       },
       {
-        "service": "dim_agent_capabilities::host::SessionFilesHost",
+        "service": "dim_agent_capabilities::host::SessionFiles",
         "provider": 8,
         "generation": 1,
         "removing": false

@@ -13,7 +13,7 @@
 use crate::workspace_tools::background::{wake_input, wakes};
 use crate::{
     exec_stop::{ExecStop, TaskError},
-    host::{HostError, SessionFilesHost},
+    host::{HostError, SessionFiles},
     host_platform::{
         HostPlatform, PtyProcessTree, PtySize, ShellEdition, ShellStatus, kill_job, stop_job,
     },
@@ -312,7 +312,7 @@ pub struct ShellSession {
     dispatcher: Arc<Dispatcher>,
     /// SessionStore's output ownership (ADR 013); absent in hosts without
     /// native storage, where shell output has no owner.
-    owner: Option<Arc<SessionFilesHost>>,
+    owner: Option<Arc<SessionFiles>>,
     session_id: String,
     tasks: Arc<tokio::sync::Mutex<TaskTracker>>,
 }
@@ -323,7 +323,7 @@ impl ShellSession {
         host: Arc<HostPlatform>,
         timeline: Arc<Timeline>,
         dispatcher: Arc<Dispatcher>,
-        owner: Option<Arc<SessionFilesHost>>,
+        owner: Option<Arc<SessionFiles>>,
         session_id: String,
     ) -> Self {
         Self {
@@ -1529,7 +1529,7 @@ impl DynPlugin for ShellSessionPlugin {
             let host = ctx.require_at(&self.host)?;
             let config = ctx.require_at(&self.session_config)?;
             let identity = ctx.require_at(&self.identity)?;
-            let owner = ctx.get::<SessionFilesHost>();
+            let owner = ctx.get::<SessionFiles>();
             let mut session = ShellSession::new(
                 self.config.clone().unwrap_or_else(|| ShellSessionConfig {
                     cwd: PathBuf::from(&config.cwd),
