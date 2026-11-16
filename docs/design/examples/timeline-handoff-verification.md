@@ -54,7 +54,7 @@ Loop 与 provider 的新代 Active，没有等待同样依赖 ToolBinding 的 To
 ## 旧发现及独立负责的工作
 
 - BranchLine 文档中的 `tool/use`、`tool/result` 已按实际事件 key 修正为 `step/tool-use`、`step/tool-result`，不改变事件格式。
-- Loop 文档仍描述不存在于当前 EventKind 和 Loop 实现中的 disposer / `step/disposition`。它又被设计文档引用，不能直接当作普通拼写错误删除。由 [#1669](https://github.com/arcships/dim/issues/1669) 决定是未交付要求还是失效设计，并对齐合同与实现；本次不实现一个模型要求的虚构事件。
+- 基线 Loop 文档把不存在于 EventKind 和实现中的 disposer / `step/disposition` 描述为现有机制。现行说明按实际重试、有限续接与预算恢复对齐；插件式续接保留在 [ModelRecovery 提案](../plugins/ModelRecovery.md)，不作为可用接口。决定与交付见 [#1669](https://github.com/arcships/dim/issues/1669)，不因此新增运行时机制。
 - `context/scope`：当前 Rust 生产代码找到类型、序列化和消费/恢复路径；写入构造位于 `prompt_boundaries` 测试，未找到实际生产调用方；TypeScript 运行时代码也未定位写入路径。保留“端到端生产路径未建立”的边界，不凭消费者存在宣称产品流程已验证，也不新增生产者。
 - [#1661](https://github.com/arcships/dim/issues/1661) 的恢复错误传播与已发布迁移入口由原负责人处理，本次不放宽其恢复 guard；[服务面迁移 #1292](https://github.com/arcships/dim/issues/1292) 和 [存储后端 #1298](https://github.com/arcships/dim/issues/1298) 也保持独立验收。
 
