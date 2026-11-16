@@ -619,12 +619,7 @@ pub(super) fn ids(
         .map_err(storage)?
         .collect::<rusqlite::Result<BTreeSet<_>>>()
         .map_err(storage)?;
-    ids.extend(
-        bundled
-            .provider_ids()
-            .filter(|id| bundled.provider_header(id).is_some_and(|p| seeded(&p)))
-            .map(str::to_owned),
-    );
+    ids.extend(bundled.provider_ids().map(str::to_owned));
     Ok(ids)
 }
 

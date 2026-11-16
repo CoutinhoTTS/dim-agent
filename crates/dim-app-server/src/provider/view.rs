@@ -572,6 +572,9 @@ impl ProviderService {
                             }
                             let header = persistence::header(&tx, &id)?;
                             if target.is_none() {
+                                if header.is_none() && !account_ids.contains_key(&id) {
+                                    continue;
+                                }
                                 if let Some((_, body)) = &header {
                                     if let Ok(body) = serde_json::from_str::<Value>(body) {
                                         let account = account_ids.contains_key(&id)

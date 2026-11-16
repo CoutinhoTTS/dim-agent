@@ -10118,6 +10118,16 @@ async fn management_pages_read_overviews_and_reread_a_changed_provider() {
     ordered.sort();
     ordered.dedup();
     assert_eq!(ids, ordered, "pages cover each provider once");
+    let mut listed: Vec<_> = provider
+        .list(&cancel)
+        .await
+        .unwrap()
+        .providers
+        .into_iter()
+        .map(|provider| provider.provider_id)
+        .collect();
+    listed.sort();
+    assert_eq!(ids, listed, "pagination preserves Provider list membership");
     let detail = provider
         .management(target.into(), None, &cancel)
         .await
