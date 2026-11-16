@@ -204,8 +204,8 @@ curve and the one `malformed_response` retry are request-local and restart in
 the continuation. A request without the field gets a fresh budget; a normal
 request after a tool step is never part of a chain.
 
-The 8 attempts and the 300 s are ModelProvider's public limits: a disposer
-reads them and declines a spent chain without reading ModelProvider's state.
+ModelProvider enforces the shared attempt and wait limits when invoking a
+chain-carrying request; no separate disposer is required.
 ModelProvider sets `failure.retryForbidden` when its failure policy forbids
 retrying the failure that ended the request; the field is written only when
 true, and a continuation declines it.
@@ -218,12 +218,10 @@ same forward-compatibility limit `presentation` has, so a downgrade across this
 change is unsupported, as it already was for `presentation`.
 
 The same decision covers the continuation fields, the retry prohibition and
-the new kind. The optional `failure_chain` on `ContextPrepareData` and
+handover inputs. The optional `failure_chain` on `ContextPrepareData` and
 `ModelCallData`, the optional `handover` on `InputMessageData`, and the optional
 `retryForbidden` on `ModelFailure` are additive, and a binary without them
 cannot read a record that carries them, so a downgrade across this change is
-unsupported. The new `step/disposition` kind is additive for the native store
-and absent from v1: the outbound boundary filters it like `input/consumed`, so
-the frozen v1 notification set is unchanged. Each addition registers the
+unsupported. Each addition registers the
 decision in the contract tests with its compatibility cases; the frozen
 fixtures stay unchanged.
