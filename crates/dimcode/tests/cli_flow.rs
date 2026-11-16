@@ -13180,8 +13180,9 @@ fn tui_default_theme_respects_background_and_saved_choice() {
     }
 }
 
-/// `dimcode daemon vacuum` rewrites an offline store through the sibling App
-/// Server and reports its size before and after (#600).
+/// `dimcode daemon vacuum` removes the content rows nothing references, rewrites
+/// an offline store through the sibling App Server, and reports its size before
+/// and after with what it removed (#600, #1697).
 #[test]
 fn daemon_vacuum_reclaims_an_offline_store() {
     use dim_app_server::storage::SqliteStorage;
@@ -13205,6 +13206,13 @@ fn daemon_vacuum_reclaims_an_offline_store() {
             )
             .unwrap();
     }
+    // A node content row nothing references: the maintenance entry removes it.
+    connection
+        .execute(
+            "INSERT INTO timeline_content(session_id, hash, kind, body) VALUES ('s', ?1, 'node', ?2)",
+            rusqlite::params!["unreferenced", json!({"parent":null,"message":{"role":"user","content":"gone"}}).to_string()],
+        )
+        .unwrap();
     connection
         .execute_batch("COMMIT; DELETE FROM timeline_events; PRAGMA wal_checkpoint(TRUNCATE)")
         .unwrap();
@@ -13218,6 +13226,18 @@ fn daemon_vacuum_reclaims_an_offline_store() {
     );
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.starts_with("Vacuumed "), "{stdout}");
+    assert!(
+        stdout.contains("Removed 1 unreachable content rows"),
+        "the command reports what it removed: {stdout}"
+    );
+    let connection = rusqlite::Connection::open(&database).unwrap();
+    let left: i64 = connection
+        .query_row("SELECT count(*) FROM timeline_content", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(left, 0, "the unreferenced row is gone");
+    drop(connection);
     let after = fs::metadata(&database).unwrap().len();
     assert!(
         after < before,
