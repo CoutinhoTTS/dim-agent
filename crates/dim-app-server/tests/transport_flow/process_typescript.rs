@@ -1322,7 +1322,7 @@ async fn node_store_preserves_repository_results_and_worktree_removal_exclusion(
     use dim_agent_runtime::{AgentError, SessionConfig};
     use dim_app_server::{
         protocol::SessionOrigin,
-        storage::{SessionStore, WorktreeDirectory},
+        storage::{SessionStore, Store, WorktreeDirectory},
     };
     let home = std::fs::canonicalize(std::env::temp_dir())
         .unwrap()
@@ -1340,7 +1340,7 @@ async fn node_store_preserves_repository_results_and_worktree_removal_exclusion(
     let (server, _, _) = session_typescript::start(config(&home, parts)).await;
     let mut client = Client::new_version(&server, false, 3).await;
     files_available(&mut client, "storefixture.status", json!({})).await;
-    let store = server.service::<SessionStore>().unwrap();
+    let store = server.service::<Store>().unwrap();
     let listed = client.rpc("agent.list", json!({})).await;
     assert_ok(&listed);
     let agent_id = listed["result"][0]["agentId"].as_str().unwrap().to_owned();
@@ -1382,7 +1382,7 @@ async fn node_store_preserves_repository_results_and_worktree_removal_exclusion(
         ));
         assert_eq!(std::fs::read_to_string(&marker).unwrap(), "untouched");
     }
-    let raw = store.timeline_store();
+    let raw = server.service::<SessionStore>().unwrap().timeline_store();
     raw.create_session(protected.to_str().unwrap(), &config)
         .await
         .unwrap();
@@ -1462,6 +1462,23 @@ async fn node_store_preserves_repository_results_and_worktree_removal_exclusion(
     assert_eq!(
         reply["result"]["origin"],
         json!({"origin":"client","leaderSessionId":null})
+    );
+    assert_eq!(
+        reply["result"]["catalog"],
+        serde_json::to_value(
+            store
+                .catalog(
+                    serde_json::from_value(json!({})).unwrap(),
+                    None,
+                    3,
+                    vec![agent_id.clone()],
+                    Vec::new(),
+                    CancellationToken::new(),
+                )
+                .await
+                .unwrap()
+        )
+        .unwrap()
     );
     assert_eq!(
         reply["result"]["owner"],
