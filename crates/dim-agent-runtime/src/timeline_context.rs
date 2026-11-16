@@ -685,8 +685,8 @@ impl TimelineContext {
     }
     /// Loop's state channel. A reloading Loop is a restart of Loop: its
     /// successor takes over from the committed history, the interrupt
-    /// included, so this waits for it. Closed once the branch closes and
-    /// Loop is gone for good.
+    /// included, so this waits for it. When the branch is closing and Loop
+    /// is gone, returns the recorded Dispatcher fault, or Closed if none exists.
     async fn loop_watch(&self) -> Result<watch::Receiver<LoopSnapshot>> {
         loop {
             match self.loop_state() {
