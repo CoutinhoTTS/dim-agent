@@ -937,14 +937,37 @@ async fn temporary_startup_rebinds_after_restart_and_preserves_parent_cut_connec
         seen.lock().unwrap().last().unwrap().1["authorization"],
         "Bearer private-original"
     );
-    assert_ok(&client.rpc("session.detach", json!({"sessionId":sid})).await);
+    // The earlier `delegate-startup` request is detached work: Collaboration
+    // holds this Session from that request until its `collaboration/result`
+    // commits (idle unload R4, §5.1), and the result wakes a turn on `main`
+    // that runs after the hold is gone. `idle` excludes detached work, so no
+    // call above witnesses either the hold or that turn; the release below is
+    // due only once both are history, which is what this waits for.
+    let mut changed = session.watch("main").unwrap();
     tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let events = branch_events(&session, "main", ..).await.unwrap();
+            let woken = events
+                .iter()
+                .rposition(|event| matches!(&event.kind, EventKind::CollaborationResult(_)))
+                .is_some_and(|result| {
+                    events[result + 1..]
+                        .iter()
+                        .any(|event| matches!(&event.kind, EventKind::TurnEnd(_)))
+                });
+            if woken {
+                break;
+            }
+            changed.changed().await.unwrap();
+        }
+        session.idle("main").await.unwrap();
+        assert_ok(&client.rpc("session.detach", json!({"sessionId":sid})).await);
         while !session.unload_if_idle().await.unwrap() {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await
-    .expect("the detached Session unloads after its accepted work settles");
+    .expect("the request settles and the detached Session unloads");
     assert_ok(&client.rpc("session.attach", json!({"sessionId":sid})).await);
     submit(&mut client, &sid, &child_id).await;
     assert_eq!(

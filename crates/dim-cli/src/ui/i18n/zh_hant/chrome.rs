@@ -286,6 +286,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "Queue ({count})" => "佇列（{count}）",
         "Thinking…" => "思考中…",
+        "Thinking excerpt" => "思考摘錄",
         "Thought" => "已思考",
         "Thought for {duration}" => "已思考 {duration}",
         "Welcome to DIM {version}!" => "歡迎使用 DIM {version}！",
@@ -496,6 +497,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         // keys.rs
         "show the key bindings" => "顯示快速鍵",
+        "show the command that updates this installation" => "顯示如何更新目前安裝",
         "Application keys" => "應用程式快速鍵",
         "Enter submit when idle · Shift+Enter / Alt+Enter / Ctrl+J newline · ↑↓ history" => {
             "閒置時 Enter 送出 · Shift+Enter / Alt+Enter / Ctrl+J 換行 · ↑↓ 歷程"

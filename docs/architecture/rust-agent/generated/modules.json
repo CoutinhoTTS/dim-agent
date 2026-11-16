@@ -1093,6 +1093,7 @@
       "unexpandedMacros": [
         "format",
         "matches",
+        "serde_json::json",
         "tokio::select",
         "tracing::warn",
         "vec"
@@ -3725,6 +3726,16 @@
       ]
     },
     {
+      "id": "dim_app_server::storage::reclaim",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::storage",
+      "file": "crates/dim-app-server/src/storage/reclaim.rs",
+      "unexpandedMacros": [
+        "format",
+        "params"
+      ]
+    },
+    {
       "id": "dim_app_server::storage::sqlite",
       "crate": "dim_app_server",
       "parent": "dim_app_server::storage",
@@ -4843,6 +4854,16 @@
         "assert_eq",
         "panic",
         "serde_json::json"
+      ]
+    },
+    {
+      "id": "dim_cli::projection::thinking",
+      "crate": "dim_cli",
+      "parent": "dim_cli::projection",
+      "file": "crates/dim-cli/src/projection/thinking.rs",
+      "unexpandedMacros": [
+        "format",
+        "matches"
       ]
     },
     {
@@ -6159,6 +6180,7 @@
         "assert",
         "assert_eq",
         "format",
+        "unreachable",
         "vec"
       ]
     },
@@ -9375,8 +9397,7 @@
       "from": "dim_agent_capabilities",
       "to": "dim_agent_capabilities::model_provider",
       "references": [
-        "mod model_provider",
-        "path model_provider::ModelProvider"
+        "mod model_provider"
       ]
     },
     {
@@ -15235,6 +15256,7 @@
         "path HostFuture",
         "path LoadPrompt",
         "path PromptHost",
+        "path crate::host::ModelPortError::from",
         "use crate::host::HostError",
         "use crate::host::HostFuture",
         "use crate::host::LoadPrompt",
@@ -15271,6 +15293,16 @@
         "use crate::host_platform::OutputEncoding",
         "use crate::host_platform::ShellEdition",
         "use crate::host_platform::ShellStatus"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::prompt_sources",
+      "to": "dim_agent_capabilities::port_faces",
+      "references": [
+        "path crate::port_faces::Empty",
+        "path crate::port_faces::request",
+        "path crate::port_faces::serving",
+        "path crate::port_faces::unknown_method"
       ]
     },
     {
@@ -16571,7 +16603,18 @@
       "to": "dim_agent_capabilities::host",
       "references": [
         "path HostFuture",
+        "path crate::host::ModelPortError::from",
         "use crate::host::HostFuture"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::skills",
+      "to": "dim_agent_capabilities::port_faces",
+      "references": [
+        "path crate::port_faces::Empty",
+        "path crate::port_faces::request",
+        "path crate::port_faces::serving",
+        "path crate::port_faces::unknown_method"
       ]
     },
     {
@@ -17162,6 +17205,7 @@
         "path StrategyOutcome::Failed",
         "path StrategyOutcome::Skipped",
         "path add_usage",
+        "path crate::host::ModelPortError::from",
         "path reasoning_config"
       ]
     },
@@ -17172,6 +17216,16 @@
         "path crate::model_provider::RetryObserver",
         "path invoke_with_recovery",
         "use crate::model_provider::invoke_with_recovery"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::summary_strategy",
+      "to": "dim_agent_capabilities::port_faces",
+      "references": [
+        "path crate::port_faces::Empty",
+        "path crate::port_faces::request",
+        "path crate::port_faces::serving",
+        "path crate::port_faces::unknown_method"
       ]
     },
     {
@@ -23385,13 +23439,6 @@
     },
     {
       "from": "dim_app_server",
-      "to": "dim_agent_capabilities::prompt_sources",
-      "references": [
-        "path dim_agent_capabilities::prompt_sources::BasePromptSettingsHost"
-      ]
-    },
-    {
-      "from": "dim_app_server",
       "to": "dim_agent_capabilities::prompt_suggestion",
       "references": [
         "path dim_agent_capabilities::prompt_suggestion::PromptSuggestionSettingsHost"
@@ -23403,20 +23450,6 @@
       "references": [
         "path dim_agent_capabilities::session_broadcast::SessionNotice",
         "path dim_agent_capabilities::session_broadcast::notify"
-      ]
-    },
-    {
-      "from": "dim_app_server",
-      "to": "dim_agent_capabilities::skills",
-      "references": [
-        "path dim_agent_capabilities::skills::SkillsInstructionsSettingsHost"
-      ]
-    },
-    {
-      "from": "dim_app_server",
-      "to": "dim_agent_capabilities::summary_strategy",
-      "references": [
-        "path dim_agent_capabilities::summary_strategy::SummaryPromptSettingsHost"
       ]
     },
     {
@@ -23471,8 +23504,7 @@
       "to": "dim_agent_runtime::names",
       "references": [
         "path dim_agent_runtime::Names::copy",
-        "path dim_agent_runtime::names::name_of",
-        "path dim_agent_runtime::names::register"
+        "path dim_agent_runtime::names::name_of"
       ]
     },
     {
@@ -32777,6 +32809,14 @@
     },
     {
       "from": "dim_app_server::storage",
+      "to": "dim_app_server::storage::reclaim",
+      "references": [
+        "mod reclaim",
+        "use reclaim::Reclaimed"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage",
       "to": "dim_app_server::storage::sqlite",
       "references": [
         "mod sqlite",
@@ -33478,6 +33518,14 @@
     },
     {
       "from": "dim_app_server::storage::image_upgrade",
+      "to": "dim_app_server::storage::reclaim",
+      "references": [
+        "path super::reclaim::remove",
+        "path super::reclaim::replaced"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::image_upgrade",
       "to": "dim_app_server::storage::sqlite",
       "references": [
         "path error",
@@ -33837,6 +33885,30 @@
       ]
     },
     {
+      "from": "dim_app_server::storage::reclaim",
+      "to": "dim_agent_runtime::error",
+      "references": [
+        "path Result",
+        "use dim_agent_runtime::Result"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::reclaim",
+      "to": "dim_app_server::storage::sqlite",
+      "references": [
+        "path error",
+        "use super::sqlite::error"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::reclaim",
+      "to": "dim_app_server::storage::timeline",
+      "references": [
+        "path Row",
+        "use super::timeline::Row"
+      ]
+    },
+    {
       "from": "dim_app_server::storage::sqlite",
       "to": "dim_agent_runtime::assembly",
       "references": [
@@ -33909,6 +33981,15 @@
       "to": "dim_app_server::storage::query",
       "references": [
         "path super::query::register"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::sqlite",
+      "to": "dim_app_server::storage::reclaim",
+      "references": [
+        "path Reclaimed",
+        "path super::reclaim::obsolete_content",
+        "use super::reclaim::Reclaimed"
       ]
     },
     {
@@ -39412,6 +39493,15 @@
     },
     {
       "from": "dim_cli::projection",
+      "to": "dim_cli::projection::thinking",
+      "references": [
+        "mod thinking",
+        "path thinking::Excerpt",
+        "path thinking::Excerpt::default"
+      ]
+    },
+    {
+      "from": "dim_cli::projection",
       "to": "dim_cli::ui::i18n",
       "references": [
         "path crate::ui::i18n::t",
@@ -39539,6 +39629,14 @@
       "references": [
         "path Event",
         "path Progress"
+      ]
+    },
+    {
+      "from": "dim_cli::projection::thinking",
+      "to": "dim_cli::sanitize",
+      "references": [
+        "path Sanitizer",
+        "use crate::sanitize::Sanitizer"
       ]
     },
     {
@@ -45719,8 +45817,11 @@
         "path Document",
         "path FullScreen",
         "path FullScreen::new",
+        "path MouseOutcome::Click",
+        "path MouseOutcome::Thought",
         "path WHEEL_ROWS",
-        "path Wheel::default"
+        "path Wheel::default",
+        "path columns_of"
       ]
     },
     {
@@ -49068,6 +49169,7 @@
         "path MouseOutcome::Overlay",
         "path MouseOutcome::Redraw",
         "path MouseOutcome::Task",
+        "path MouseOutcome::Thought",
         "path crate::ui::render::fullscreen::MIN_VIEW_ROWS",
         "use crate::ui::render::FullScreen",
         "use crate::ui::render::fullscreen::Document",
@@ -49490,6 +49592,7 @@
       "from": "dim_cli::ui::tui",
       "to": "dim_cli::update",
       "references": [
+        "path crate::update::command",
         "path crate::update::skip"
       ]
     },
@@ -49812,6 +49915,7 @@
       "references": [
         "path FullScreen",
         "path FullScreen::new",
+        "path MouseOutcome::Click",
         "path crate::ui::render::fullscreen::FullScreen::new"
       ]
     },
@@ -49932,7 +50036,9 @@
       "from": "dim_cli::ui::tui::tests",
       "to": "dim_cli::ui::transcript::block",
       "references": [
-        "path Block::Shell"
+        "path Block::Hook",
+        "path Block::Shell",
+        "path crate::ui::transcript::block::HookRow::Context"
       ]
     },
     {
@@ -55450,6 +55556,10 @@
     {
       "module": "dim_cli::ui::tui::tests",
       "path": "MouseKind::Press"
+    },
+    {
+      "module": "dim_cli::ui::tui::tests",
+      "path": "MouseKind::Release"
     },
     {
       "module": "dim_cli::ui::tui::tests",

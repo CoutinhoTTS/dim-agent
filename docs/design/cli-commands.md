@@ -131,7 +131,23 @@ history, without a preview line limit or an omitted-prefix marker. Only the
 unfinished wrapping tail remains live. A streamed thought has a fixed `Thought`
 heading and appends its duration below the body on completion; it never prints
 the body again to replace the heading. Collapsed thinking remains a single-row
-summary. Fullscreen and the line side panel retain their existing previews.
+excerpt. It uses only visible provider reasoning in its original language,
+not a generated summary. New complete sentences or nonempty hard lines replace
+the excerpt; an unfinished suffix keeps the previous complete unit. Before any
+complete unit exists, show a marked, bounded prefix instead of a sliding tail.
+Content refreshes coalesce over 500ms; completion and phase changes are immediate.
+No visible reasoning adds no invented excerpt. Rendering uses terminal cells
+and whole graphemes, omitting the excerpt before squeezing out the status label.
+Selection is maintained incrementally from incoming text with bounded fragments,
+not by rescanning the full thinking text on animation frames. It adds no model
+request, RPC, Timeline fact or persisted setting. See the
+[thinking display design](tui-thinking-excerpts.md) for selection and cost bounds.
+
+Fullscreen and the line side panel retain their existing expanded previews.
+Their expanded and collapsed thought titles share the same gutter and label
+column; the body bar occupies that gutter, not an extra indentation layer.
+Fullscreen mouse gestures, including thought-body collapse and selection
+priority, follow the [CLI interaction contract](../../crates/dim-cli/README.md).
 
 ## Command menu
 
@@ -145,7 +161,7 @@ order, not alphabetically or by recent use. The menu draws no category column:
 /tasks /rename /web /connect /login
 /skills /reload-skills /mcp /plugins /runtime
 /hooks /scheduled /workflow /workflow:save
-/tools /tui /theme /language /keys /report /exit
+/tools /tui /theme /language /keys /update /report /exit
 ```
 
 `/fast` is listed only when the model advertises service tiers.
@@ -1674,7 +1690,7 @@ whole rule as one quoted argument, so global options stay unambiguous.
 | `/export markdown PATH` or `/export json PATH` | Export the current main branch to a file while the interactive client is idle. |
 | `/export` in either terminal UI | Choose Markdown or JSON in a dialog for an opened Session; save a uniquely named file in the CLI current directory. |
 | `dimcode export SESSION_ID [--output PATH] [--database PATH]` | Write the Session's whole Timeline as versioned JSONL without a daemon ([Timeline export](appserver/timeline-export.md)); write to stdout when no output path is supplied. |
-| `dimcode daemon vacuum [--database PATH]` | Rewrite an offline native store with SQLite `VACUUM` to reclaim the pages deleted Sessions left, and print its size before and after ([storage format](appserver/native-storage-format.md#sqlite-运行参数与空间回收)); it fails while a daemon owns the database and never creates or upgrades one. |
+| `dimcode daemon vacuum [--database PATH]` | Remove the content rows no stored reference reaches from an offline native store (`node`/`message` only, one transaction per Session), then rewrite it with SQLite `VACUUM` to reclaim the pages they and deleted Sessions left; print the size before and after with the removed rows and their content bytes, and remove nothing when a Session names content the store does not hold ([storage format](appserver/native-storage-format.md#sqlite-运行参数与空间回收)). It fails while a daemon owns the database and never creates or upgrades one. |
 | `dimcode migration [run\|inspect] [--source OLD_HOME]` | Import by default, or inspect, a stopped legacy data home through the shared [Migration plugin](../../crates/dim-migration/README.md). |
 | `dimcode migration list\|show TASK\|cancel TASK` | Query durable results or request cancellation without a daemon. |
 | `dimcode migration retry TASK [--source OLD_HOME]` | Reconcile a previous task's source again; return a new task linked to the old report. |
@@ -2549,6 +2565,19 @@ when it fits.
 | > Close 2/2              |
 | Left/Right Tab Enter Esc |
 +----------- Up/Down 1-2/7-+
+```
+
+`/update` is that command as a client-side report in both terminal UI modes. It
+runs nothing: the update command holds the installation's exclusive lease, and
+the interface itself is a client whose share of that lease it cannot release
+while it serves the operator. So `/update` names the command the dialog would
+name, for a recognised installation, or the [manual and rebuild
+instructions](#update-dialog) for any other layout, and it never consults the
+channel: the automatic startup check keeps owning the dialog and its skip list.
+
+```text
+> /update
+To update, exit every client and stop the server, then run dima update
 ```
 
 ### Coordinated client/server upgrade
