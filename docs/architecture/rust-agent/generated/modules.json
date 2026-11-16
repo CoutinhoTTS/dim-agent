@@ -3229,6 +3229,7 @@
       "file": "crates/dim-app-server/src/protocol.rs",
       "unexpandedMacros": [
         "env",
+        "format",
         "macro_rules",
         "matches",
         "notifications"
@@ -24219,6 +24220,7 @@
         "path crate::protocol::CatalogResult",
         "path crate::protocol::PROTOCOL_VERSION",
         "path crate::protocol::SessionInfo",
+        "path crate::protocol::check_session_id",
         "use crate::protocol::AgentInfo",
         "use crate::protocol::SessionOrigin"
       ]
@@ -30260,6 +30262,14 @@
     },
     {
       "from": "dim_app_server::protocol",
+      "to": "dim_agent_runtime::error",
+      "references": [
+        "path dim_agent_runtime::AgentError::InvalidInput",
+        "path dim_agent_runtime::Result"
+      ]
+    },
+    {
+      "from": "dim_app_server::protocol",
       "to": "dim_agent_types",
       "references": [
         "path JS_MAX_SAFE_INTEGER",
@@ -34184,6 +34194,7 @@
         "path SessionOrigin",
         "path SessionOrigin::Unknown",
         "path SessionOrigin::from_stored",
+        "path crate::protocol::check_session_id",
         "use crate::protocol::SessionOrigin"
       ]
     },
