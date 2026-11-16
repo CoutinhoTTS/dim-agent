@@ -2,7 +2,7 @@
   "source": {
     "corpus": "dim-badcase-usercases",
     "data_branch": "eval-badcase",
-    "notes": "P0 2026-11-16: 2 primary tasks + 2 paired controls from public GitHub issues",
+    "notes": "P0 2026-11-16: 2 primary tasks + 2 paired controls from public GitHub issues; uc-003 instruction states the required git worktree side effects (review f7d1cbb6)",
     "upstream": "arcships/dim issues"
   },
   "tasks": {
@@ -19,7 +19,7 @@
       "upstream": "dim-issues"
     },
     "uc-003-worktree-outside-workspace": {
-      "digest": "234e3eb03570f9c5fd869ccaab8e435de893413490331a5e308a742a9c81e95a",
+      "digest": "f68c9e1bba42f8dc3f2faf6a93d8e6beae5edf283fde41aa7766ea9fde93b829",
       "kind": "primary",
       "source_issue": "arcships/dim#911",
       "upstream": "dim-issues"
@@ -31,5 +31,5 @@
       "upstream": "dim-issues"
     }
   },
-  "tree_digest": "053996e50a0b8d669a575f331ce4f9bf4e8f0b9638910f3b69a4bbd308a8a44d"
+  "tree_digest": "29b2402c5e9e75f10a3a1cceb191f6a0064c0f98f7693260d69033b977aef30a"
 }

@@ -38,19 +38,32 @@
   Timeline 导出核对，属于**记录项**不是判分项；窗口变大后按 `tools/make_fixture.py`
   扩充语料并升 manifest 版本，不得静默换题。
 
-## 与 nightly 的关系
+## 运行方式与窗口语义
 
-**当前不接入 `host/nightly.sh`，不进 L1 窗口判定**：`nightly.sh` 的 suite 路由、state、
-known-failures 与 issue 报告都绑定现有两语料；usercases 的结果走自己的 state 文件
-（`usercases-state.json`），手工运行：
+**当前没有 cron 条目，不接 issue 报告路由，state 独立**（`usercases-state.json`）。但
+`daily_run.py` 是唯一的 L2 入口：daily/checkpoint 沿用与 frontier/officeqa 相同的窗口
+机制，不绕开 L1——
+
+- 首次运行必须 `--base <sha>` 初始化窗口，否则以 `no window base` 退出；
+- 窗口内没有模型可见变更时 **L2 被跳过、窗口照常推进**（`no model-visible change; L2
+  skipped`）——这是共享机制的省费行为，不是失败；
+- 唯一不判窗口、不推进 state 的路径是 `--run-type baseline`（k=3，在指定 commit 上做
+  参照测量，人工触发）；日常粗筛读的参照就是它采的。baseline 文件落在
+  `benchmarks/baselines/<pin>.json`，经自己的 PR 合入——换参照是 review 过的改动。
 
 ```bash
-# 日常粗筛（评测机上）
-python3 benchmarks/daily_run.py --remote-judge --tasks-dir <dim-eval-data>/usercases \
-    --concurrency 4 --state benchmarks/ledger/usercases-state.json
+# 采集参照（k=3，无窗口语义；先于任何日常粗筛跑一次）
+python3 benchmarks/daily_run.py --run-type baseline --head <commit> \
+    --tasks-dir <dim-eval-data>/usercases --concurrency 4
 
-# 基线采集（k=3，人工触发）
-python3 benchmarks/daily_run.py --run-type baseline --head <commit> --tasks-dir <dim-eval-data>/usercases
+# 日常粗筛（评测机上；首跑加 --base <sha> 初始化 usercases-state.json）
+python3 benchmarks/daily_run.py --remote-judge --tasks-dir <dim-eval-data>/usercases \
+    --concurrency 4 --state benchmarks/ledger/usercases-state.json [--base <sha>]
+
+# 上机自检：判定窗口并打印计划，不构建、不写 ledger（首跑同样需要 --base）
+python3 benchmarks/daily_run.py --dry-run --no-ledger --remote-judge \
+    --tasks-dir <dim-eval-data>/usercases --state benchmarks/ledger/usercases-state.json \
+    --base <sha>
 ```
 
 是否进入 cron，等首批结果证明可复现、有负责人处理失败之后再决定；决定本身走 review。
