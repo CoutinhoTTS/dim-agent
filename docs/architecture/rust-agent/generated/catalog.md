@@ -30,7 +30,7 @@ Each catalog name a part of the assembly provides or injects. `data` means share
 | `loader` | process | rutis-loader | internal(owner-api) | — |
 | `localId` | process | root | data | `get` sync |
 | `loops` | process | Scheduler | data | `list` async, `next` async, `start` async, `stop` async |
-| `managedProviders` | process | ManagedProviders | internal(secret) | — |
+| `managedSearch` | process | ManagedProviders | data | `search` async |
 | `managedWorktrees` | process | ManagedWorktrees | internal(hot-path) | — |
 | `managementMethods` | process | ManagementMethods | data | `register` async |
 | `mcpAuth` | process | Mcp | internal(secret) | — |
