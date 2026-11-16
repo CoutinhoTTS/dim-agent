@@ -657,7 +657,7 @@ impl DynPlugin for PromptSourcesBranchPlugin {
                     for target in targets(CHECKED).into_iter().filter(|target| target.source != LANGUAGE) {
                         let current = tokio::select! {
                             _ = lifecycle.cancelled() => return,
-                            loaded = host.0.load(target.clone(), lifecycle.child_token()) => loaded,
+                            loaded = host.load(target.clone(), lifecycle.child_token()) => loaded,
                         };
                         match current {
                             Ok(current) if current.as_ref() != prompts.borrow().entries.get(&(target.source.clone(), target.scope.clone())) => changed.push((target, current)),
@@ -669,7 +669,7 @@ impl DynPlugin for PromptSourcesBranchPlugin {
                     let target = targets([LANGUAGE]).pop().expect("language target");
                     let current = tokio::select! {
                         _ = lifecycle.cancelled() => return,
-                        loaded = host.0.load(target.clone(), lifecycle.child_token()) => loaded,
+                        loaded = host.load(target.clone(), lifecycle.child_token()) => loaded,
                     };
                     let mut language_changed = false;
                     match current {

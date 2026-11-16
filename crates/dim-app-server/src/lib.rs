@@ -1416,7 +1416,6 @@ pub fn register_faces(builder: &mut dim_agent_runtime::AgentBuilder) {
         ("historyRenderer", "hot-path"),
         ("hooksService", "host-resource"),
         ("hostPlatform", "object"),
-        ("initialPromptConfiguration", "hot-path"),
         ("loader", "owner-api"),
         ("loopState", "hot-path"),
         // Session creation calls it directly; no leaf needs the service.
@@ -1433,8 +1432,6 @@ pub fn register_faces(builder: &mut dim_agent_runtime::AgentBuilder) {
         ("prepareContextHost", "hot-path"),
         ("prepareModelHost", "hot-path"),
         ("prompt", "hot-path"),
-        ("promptHost", "hot-path"),
-        ("promptRegistry", "hot-path"),
         ("providerConnectionResolver", "host-resource"),
         ("providerService", "secret"),
         ("publication", "host-resource"),

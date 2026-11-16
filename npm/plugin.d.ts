@@ -113,6 +113,52 @@ export interface CommandRulesReply { rules: CommandRule[] }
 export interface CommandRulesError extends Error { code: 'unavailable' | 'cancelled' }
 export interface CommandRules { read(request: Record<string, never>): Promise<CommandRulesReply> }
 
+/** Model configuration's existing serde form; numeric fields are finite numbers. */
+export interface ModelConfig {
+  temperature?: number; maxTokens?: number; topP?: number; topK?: number;
+  stopSequences?: string[];
+  reasoning?: {
+    enabled?: true; effort?: string; budgetTokens?: number;
+    summary?: 'auto' | 'concise' | 'detailed'; includeThoughts?: boolean; interleavedThinking?: boolean;
+  };
+  providerOptions?: {
+    openai?: {
+      reasoningEffort?: string; serviceTier?: string; summary?: 'auto' | 'concise' | 'detailed';
+      interleavedThinking?: boolean;
+    };
+    'openai-compatible'?: {
+      reasoningEffort?: string; serviceTier?: string; interleavedThinking?: boolean;
+      thinking?: { type?: 'enabled' | 'disabled' }; enable_thinking?: boolean;
+    };
+    anthropic?: {
+      effort?: string; thinking?: { type?: 'adaptive' | 'enabled' | 'disabled'; budgetTokens?: number };
+      sendReasoning?: boolean; interleavedThinking?: boolean;
+    };
+    gemini?: { thinkingConfig?: { thinkingBudget?: number; includeThoughts?: boolean } };
+    deepseek?: EffortProviderOptions; moonshotai?: EffortProviderOptions; xai?: EffortProviderOptions;
+    zenmux?: EffortProviderOptions; aihubmix?: EffortProviderOptions;
+  };
+}
+export interface EffortProviderOptions { reasoningEffort?: string; interleavedThinking?: boolean }
+
+/** One source's loaded prompt value, using the same target identity. */
+export interface PromptEntry {
+  source: string; version: string; body: string;
+  scope: import('./branch-services.js').PromptScope;
+  delivery: 'system' | 'context' | 'state'; order: number;
+}
+export interface PromptLoadError extends Error { code: 'failed' | 'cancelled' }
+export interface PromptHost {
+  /** Cancellation notifies the load and waits for its own result. */
+  load(target: import('./branch-services.js').PromptSourceTarget, cancelled: () => Promise<void>): Promise<PromptEntry | null>;
+}
+export interface PromptRegistrationError extends Error { code: 'failed' }
+export interface PromptRegistry {
+  names(): Promise<string[]>;
+  /** Withdrawal removes future lookups; accepted loads keep their original callback. */
+  register(name: string, load: (target: import('./branch-services.js').PromptSourceTarget, cancelled: () => Promise<void>) => Promise<PromptEntry | null>): Promise<void>;
+}
+
 export interface PermissionPolicy {
   preset: PermissionPreset;
   allowedTools: string[];

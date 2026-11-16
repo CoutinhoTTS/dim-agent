@@ -72,7 +72,7 @@ fn install_profile(
     branch_text: BranchToolConfig,
 ) {
     builder
-        .session_value(Arc::new(PromptHost(host)))
+        .session_data_value(Arc::new(PromptHost(host)))
         .session_value(Arc::new(InitialPromptConfiguration::fixed(initial)))
         .session_data_value(Arc::new(CommandRules(Arc::new(NoCommandRules))));
     install_with_prompt_capability_and_branch(builder, model, true, branch_text);

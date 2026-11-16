@@ -35,6 +35,10 @@ fn declarations(root: &Path) -> Result<String> {
             "dim_agent_runtime::SessionConfig",
             "import('./plugin.js').SessionConfig",
         )
+        .declared(
+            "dim_agent_types::ModelConfig",
+            "import('./plugin.js').ModelConfig",
+        )
         .declared("std::num::NonZeroU64", "number | bigint")
         .declared(
             "dim_agent_types::ToolCall",

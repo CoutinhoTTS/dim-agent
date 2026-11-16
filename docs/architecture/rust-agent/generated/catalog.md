@@ -83,12 +83,12 @@ Each catalog name a part of the assembly provides or injects. `data` means share
 | `faultReporter` | session | SessionScope | internal(hot-path) | — |
 | `guideEntries` | session | PromptGuide | data | `register` async |
 | `historyRenderer` | session | SessionScope | internal(hot-path) | — |
-| `initialPromptConfiguration` | session | PromptRegistry | internal(hot-path) | — |
+| `initialPromptConfiguration` | session | PromptRegistry | data | `get` async |
 | `mcpSession` | session | McpSession | data | `call` async, `refresh` async, `state` async, `widget` async |
 | `prepareContextHost` | session | SessionScope | internal(hot-path) | — |
 | `prepareModelHost` | session | PrepareModelHost | internal(hot-path) | — |
-| `promptHost` | session | PromptRegistry | internal(hot-path) | — |
-| `promptRegistry` | session | PromptRegistry | internal(hot-path) | — |
+| `promptHost` | session | PromptRegistry | data | `load` async |
+| `promptRegistry` | session | PromptRegistry | data | `names` sync, `register` async |
 | `sessionConfig` | session | SessionScope | data | `get` async |
 | `sessionIdentity` | session | SessionScope | data | `get` async |
 | `sessionLanguage` | session | PromptSources | data | `get` async |

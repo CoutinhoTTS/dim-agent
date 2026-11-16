@@ -280,6 +280,159 @@ export interface Permission {
   check(call: ApprovalCallData, risk: string | null, cancelled: () => void | Promise<void>): Promise<Decision>
 }
 
+export type PromptScope =
+  | { kind: "branch"; timeline: string }
+  | { kind: "turn"; timeline: string; id: string }
+  | { kind: "task"; timeline: string; id: string }
+
+export interface PromptSourceTarget {
+  source: string
+  scope: PromptScope
+}
+
+export interface ModelId {
+  providerId: string
+  modelId: string
+}
+
+/**
+ * The adopted capabilities of a model: an exact value a Session carries and
+ * ContextCompaction reads. Both limits are required and positive; absence is
+ * a property of the catalog, which carries [`CatalogCapabilities`] and
+ * converts through [`CatalogCapabilities::declared`].
+ */
+export interface ModelCapabilities {
+  modalities: string[]
+  toolCalling: boolean
+  streaming: boolean
+  structuredOutput: boolean
+  vision: boolean
+  audio: boolean
+  reasoning: boolean
+  contextWindow: number | bigint
+  maxOutputTokens: number | bigint
+  providerState?: Record<string, unknown> | null
+}
+
+export interface ReasoningBudget {
+  min?: number | null
+  max?: number | null
+  default?: number | null
+  unit?: string | null
+}
+
+export type ReasoningOff =
+  | { kind: "thinking_type"; value: string }
+  | { kind: "thinking_budget"; value: number | bigint }
+  | { kind: "enable_thinking"; value: boolean }
+  | { kind: "chat_template_kwargs"; keys: string[] }
+
+export interface ModelReasoning {
+  supported: boolean
+  defaultEnabled?: boolean | null
+  mode?: string | null
+  effort?: string | null
+  effortOptions?: string[] | null
+  level?: string | null
+  levelOptions?: string[] | null
+  verbosity?: string | null
+  verbosityOptions?: string[] | null
+  interleaved?: boolean | null
+  summaries?: boolean | null
+  visibility?: string | null
+  continuation?: string[] | null
+  budget?: ReasoningBudget | null
+  notes?: string[] | null
+  off?: ReasoningOff | null
+}
+
+export interface ModelServiceTier {
+  supported: boolean
+  default?: string | null
+  options?: string[]
+}
+
+export interface ModelCapabilitySnapshot {
+  target: ModelId
+  capabilities: ModelCapabilities
+  reasoning?: ModelReasoning | null
+  serviceTier?: ModelServiceTier | null
+}
+
+export type ModelProtocol =
+  | "openai-chat"
+  | "openai-compatible"
+  | "openai-responses"
+  | "xai"
+  | "xai-responses"
+  | "anthropic"
+  | "gemini"
+  | "bedrock"
+
+export type StartupAuth = "anonymous" | "apiKey" | "bearer"
+
+/**
+ * Non-secret connection declaration. Credentials are rebound in Provider
+ * memory; this identity remains valid across Session unload and restore.
+ */
+export interface StartupConnectionSource {
+  id: string
+  apiFormat: ModelProtocol
+  baseUrl: string
+  auth: StartupAuth
+  headerNames: string[]
+}
+
+/**
+ * Adopted startup policy, copied with the model at a branch cut and into
+ * newly created native members and summary requests. Contains no secrets.
+ */
+export interface ModelStartup {
+  connection?: StartupConnectionSource | null
+  autoCompactWindow?: number | bigint | null
+}
+
+export type RequestMetadata = {
+  sessionId?: string | null
+  runId?: string | null
+  traceId?: string | null
+  turnId?: string | null
+  startup?: ModelStartup | null
+  /**
+   * The Agent profile whose prompt the branch runs: the profile it last
+   * adopted. An adoption from a profile records it; a model selection and a
+   * preference update carry it into the new configuration, and only
+   * another adoption replaces it.
+   */
+  agentId?: string | null
+} & Record<string, unknown>
+
+/**
+ * The model-owned part of configuration. Tool declarations and system content
+ * are adopted by their own capabilities, not supplied by a provider.
+ */
+export interface ModelSelection {
+  providerId: string
+  modelId: string
+  capabilitySnapshot?: ModelCapabilitySnapshot | null
+  config?: import('./plugin.js').ModelConfig | null
+  metadata?: RequestMetadata | null
+}
+
+export interface ConfigureUpdate {
+  sources: PromptSourceTarget[]
+  model?: ModelSelection | null
+}
+
+/**
+ * What a branch adopts when it opens: the Session's prompt sources, and the
+ * model a new Session adopts. Read when the branch opens, so it holds the
+ * sources registered then.
+ */
+export interface InitialPromptConfiguration {
+  get(): Promise<ConfigureUpdate | null>
+}
+
 /**
  * The operator's reply-language choices, by their stable wire codes. The
  * names are the ones the operator selects, named in English for the prompt
@@ -601,11 +754,6 @@ export interface BackgroundExec {
    * @throws {TaskErrorThrown}
    */
   stop(taskId: string): Promise<ExecEndedData>
-}
-
-export interface ModelId {
-  providerId: string
-  modelId: string
 }
 
 export interface AgentConfig2 {
@@ -1157,6 +1305,7 @@ export interface Services {
   inputQueue: InputQueue
   reservedMethods: ReservedMethods
   permission: Permission
+  initialPromptConfiguration: InitialPromptConfiguration
   sessionLanguage: SessionLanguage
   skillsConfig: SkillsConfig
   treeCommands: TreeCommands

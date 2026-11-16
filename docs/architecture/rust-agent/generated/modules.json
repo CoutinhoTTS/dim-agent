@@ -1083,6 +1083,7 @@
       "file": "crates/dim-agent-capabilities/src/prompt_registry.rs",
       "unexpandedMacros": [
         "format",
+        "serde_json::json",
         "vec"
       ]
     },
@@ -9311,7 +9312,6 @@
         "path host::ModelSelectionHost",
         "path host::PrepareContextHost",
         "path host::PrepareModelHost",
-        "path host::PromptHost",
         "path host::ProviderConnectionResolver",
         "path host::ToolHost"
       ]
@@ -9383,7 +9383,6 @@
       "to": "dim_agent_capabilities::prompt",
       "references": [
         "mod prompt",
-        "path prompt::InitialPromptConfiguration",
         "path prompt::Prompt"
       ]
     },
@@ -9399,8 +9398,7 @@
       "from": "dim_agent_capabilities",
       "to": "dim_agent_capabilities::prompt_registry",
       "references": [
-        "mod prompt_registry",
-        "path prompt_registry::PromptRegistry"
+        "mod prompt_registry"
       ]
     },
     {
@@ -13221,6 +13219,7 @@
       "references": [
         "path crate::port_faces::Empty",
         "path crate::port_faces::face_key",
+        "path crate::port_faces::invalid",
         "path crate::port_faces::read",
         "path crate::port_faces::request",
         "path crate::port_faces::serving",
@@ -15143,6 +15142,7 @@
       "from": "dim_agent_capabilities::prompt_registry",
       "to": "dim_agent_capabilities::host",
       "references": [
+        "path HostError::Cancelled",
         "path HostError::failed",
         "path HostFuture",
         "path LoadPrompt",
@@ -15151,6 +15151,14 @@
         "use crate::host::HostFuture",
         "use crate::host::LoadPrompt",
         "use crate::host::PromptHost"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::prompt_registry",
+      "to": "dim_agent_capabilities::port_faces",
+      "references": [
+        "path crate::port_faces::invalid",
+        "path crate::port_faces::unknown_method"
       ]
     },
     {

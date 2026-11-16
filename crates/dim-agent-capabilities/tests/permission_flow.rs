@@ -305,7 +305,7 @@ async fn ruled_agent(tools: Arc<RiskTools>, rules: Arc<dyn ReadCommandRules>) ->
     let mut builder = AgentBuilder::new(AgentConfig::default());
     builder
         .timeline_store(Arc::new(MemoryTimelineStore::default()))
-        .session_value(Arc::new(PromptHost(Arc::new(EmptyPromptHost))))
+        .session_data_value(Arc::new(PromptHost(Arc::new(EmptyPromptHost))))
         .session_value(Arc::new(InitialPromptConfiguration::fixed(None)))
         .session_data_value(Arc::new(CommandRules(rules)));
     defaults::install_with_prompt_capability(&mut builder, ModelProviderPlugin::new);
@@ -343,7 +343,7 @@ async fn granted_agent_with(
     let mut builder = AgentBuilder::new(AgentConfig::default());
     builder
         .timeline_store(Arc::new(MemoryTimelineStore::default()))
-        .session_value(Arc::new(PromptHost(Arc::new(EmptyPromptHost))))
+        .session_data_value(Arc::new(PromptHost(Arc::new(EmptyPromptHost))))
         .session_value(Arc::new(InitialPromptConfiguration::fixed(None)))
         .session_data_value(Arc::new(CommandRules(Arc::new(NoCommandRules))))
         .session_value(Arc::new(SessionGrantsHost(grants)))
@@ -1909,7 +1909,7 @@ async fn advised_agent(
     let mut builder = AgentBuilder::new(AgentConfig::default());
     builder
         .timeline_store(Arc::new(MemoryTimelineStore::default()))
-        .session_value(Arc::new(PromptHost(Arc::new(EmptyPromptHost))))
+        .session_data_value(Arc::new(PromptHost(Arc::new(EmptyPromptHost))))
         .session_value(Arc::new(InitialPromptConfiguration::fixed(None)))
         .session_data_value(Arc::new(CommandRules(rules)));
     defaults::install_with_prompt_capability(&mut builder, ModelProviderPlugin::new);
