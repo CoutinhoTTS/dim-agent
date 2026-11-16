@@ -10615,7 +10615,7 @@ mod tests {
                 "-m",
                 "Initial",
             ]);
-            crate::ui::tilde(&path.to_string_lossy())
+            path.to_string_lossy().into_owned()
         };
 
         let theme = test_theme();
@@ -10671,14 +10671,15 @@ mod tests {
         // it takes over once the tail beside the branch would be too short.
         let path = root.path().join("checkout").to_string_lossy().into_owned();
         let branch = format!("team/{}", "x".repeat(width_of(&crate::ui::tilde(&path))));
-        let path = repository("checkout", &branch);
+        let checkout = repository("checkout", &branch);
+        let path = crate::ui::tilde(&checkout);
         let suffix = format!(" ({branch})");
         let whole = format!("{path}{suffix}");
         assert!(
             width_of(&suffix) + TAIL > width_of(&path),
             "this repository shows the path-alone rung"
         );
-        attach(&mut app, "s-a", &path);
+        attach(&mut app, "s-a", &checkout);
 
         // The whole label, at the last column that holds it.
         assert_eq!(label(&mut app, width_of(&whole)), whole);
@@ -10718,9 +10719,10 @@ mod tests {
         // on a character, so the same columns hold fewer of them.
         let ascii = repository("ascii", "main");
         let cjk = repository("项目", "main");
+        let shown = crate::ui::tilde(&cjk);
         assert!(
-            width_of(&cjk) > cjk.chars().count(),
-            "{cjk:?} must spend two cells on a character"
+            width_of(&shown) > shown.chars().count(),
+            "{shown:?} must spend two cells on a character"
         );
         let tail_of = |app: &mut App, path: &str| {
             attach(app, "s-b", path);
