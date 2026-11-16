@@ -276,6 +276,45 @@ pub fn run_with(
         );
         return Ok(());
     }
+    if argv.first().map(String::as_str) == Some("--migrate-prompt-references") {
+        let mut session = None;
+        let mut branch = None;
+        let mut database = None;
+        let mut args = argv.iter().skip(1);
+        let usage = || -> Box<dyn std::error::Error> {
+            "Use --migrate-prompt-references --database PATH --session ID --branch NAME".into()
+        };
+        while let Some(flag) = args.next() {
+            let value = args.next().ok_or_else(usage)?;
+            match flag.as_str() {
+                "--database" => database = Some(PathBuf::from(value)),
+                "--session" => session = Some(value.clone()),
+                "--branch" => branch = Some(value.clone()),
+                _ => return Err(usage()),
+            }
+        }
+        let (Some(database), Some(session), Some(branch)) = (database, session, branch) else {
+            return Err(usage());
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        let migrated = runtime.block_on(crate::storage::migrate_prompt_references(
+            database.clone(),
+            session.clone(),
+            branch.clone(),
+        ))?;
+        println!(
+            "{} prompt reference(s) for Session {session}, branch {branch} in {}",
+            if migrated.written {
+                "Wrote 1"
+            } else {
+                "Wrote 0"
+            },
+            database.display()
+        );
+        return Ok(());
+    }
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
@@ -358,7 +397,8 @@ pub fn run_with(
                 println!(
                     "dim-app-server (--product-home PATH | --model-config PATH | --mock-model) [--unix PATH | --pipe NAME] [--ws HOST:PORT | --no-ws] [--threads COUNT] [--home PATH | --database PATH] [--defaults FILE] [--session-rows FILE] [--node PATH --js-runtime PATH] [--python PATH] [--web-assets PATH]\n\
                      dim-app-server --export-timeline SESSION_ID --database PATH\n\
-                     dim-app-server --vacuum --database PATH"
+                     dim-app-server --vacuum --database PATH\n\
+                     dim-app-server --migrate-prompt-references --database PATH --session ID --branch NAME"
                 );
                 return Ok(());
             }
