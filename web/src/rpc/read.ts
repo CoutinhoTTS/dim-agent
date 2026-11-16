@@ -974,7 +974,8 @@ export function readPendingInputs(value: unknown): InputPage {
     if (row.user === null) return []
     const user = readUserInput(obj(row.user, `${rowAt}.user`), `${rowAt}.user`)
     const display = userText(user.content, `${rowAt}.user.content`)
-    return [{ id: str(row, "inputId", rowAt), text: display.text, skills: display.skills, ...(display.hooks === 0 ? {} : { hooks: display.hooks }), user }]
+    const images = fileImages(user.content, `${rowAt}.user.content`)
+    return [{ id: str(row, "inputId", rowAt), text: display.text, skills: display.skills, ...(display.hooks === 0 ? {} : { hooks: display.hooks }), ...(images.length === 0 ? {} : { images }), user }]
   })
   return { branchId: str(source, "branchId", at), through: num(source, "through", at), inputs, next: source.next }
 }

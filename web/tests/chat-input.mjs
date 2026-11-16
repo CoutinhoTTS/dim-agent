@@ -17,7 +17,7 @@ globalThis.ResizeObserver = class {
   disconnect() { this.observed = [] }
 }
 
-const components = /\/(ChatPage|LineConversation|ComposerPanel|ComposerPermissionMenu|ConfirmDialog|QuestionPrompt|TimelineUserMessage)\.vue$/
+const components = /\/(AppearanceSettings|ChatPage|LineConversation|ComposerPanel|ComposerPermissionMenu|ConfirmDialog|QuestionPrompt|TimelineUserMessage)\.vue$/
 registerHooks({
   resolve(specifier, context, next) {
     if (specifier.startsWith("../../stores/") || (context.parentURL?.endsWith("/stores/chat.ts") && ["./connection", "./sessions", "./ui"].includes(specifier))) {
@@ -46,6 +46,7 @@ const { default: ChatPage } = await import("../src/features/chat/ChatPage.vue")
 const { default: LineConversation } = await import("../src/features/lines/LineConversation.vue")
 const { default: ComposerPanel } = await import("../src/features/chat/ComposerPanel.vue")
 const { default: TimelineUserMessage } = await import("../src/features/chat/TimelineUserMessage.vue")
+const { default: AppearanceSettings } = await import("../src/features/settings/AppearanceSettings.vue")
 const { useChatStore } = await import("../src/stores/chat.ts")
 const { readNotification } = await import("../src/rpc/read.ts")
 const { RpcError } = await import("../src/rpc/client.ts")
@@ -86,6 +87,8 @@ const question = (branchId, callId, multiSelect = false) => ({
 function mount(t, branchId, questions = [], component, stores = {}, props = {}) {
   const replies = [], submissions = []
   globalThis.chatInputNavigations = []
+  globalThis.chatInputStops = []
+  globalThis.chatInputWithdrawals = []
   const view = reactive({
     status: "ready", rows: [], running: true, stopping: false, sessionRunning: true,
     approvals: [], questions, methods: ["attachment.put", "session.files.search"], queued: [],
@@ -95,7 +98,12 @@ function mount(t, branchId, questions = [], component, stores = {}, props = {}) 
   globalThis.chatInputStores = {
     chat: {
       views: { session: view }, open() {}, ensureLine() {},
-      async submit(sessionId, branch, value, attachments) { submissions.push({ sessionId, branch, value, attachments }) },
+      async submit(sessionId, branch, value, attachments, mode) { submissions.push({ sessionId, branch, value, attachments, mode }) },
+      async stop(sessionId, branch) { globalThis.chatInputStops.push({ sessionId, branch }) },
+      async withdrawInput(sessionId, branch, inputId) {
+        globalThis.chatInputWithdrawals.push({ sessionId, branch, inputId })
+        return { status: "deleted" }
+      },
       async answerQuestion(sessionId, ask, answers) { replies.push({ sessionId, branch: ask.branchId, callId: ask.callId, answers }) },
       searchFiles: async () => [
         { relativePath: "report.md", absolutePath: "/repo/report.md", dir: false },
@@ -103,6 +111,7 @@ function mount(t, branchId, questions = [], component, stores = {}, props = {}) 
       ],
     },
     connection: { supports: () => false },
+    composer: reactive({ sendMode: "steer", alternate() { return this.sendMode === "steer" ? "queue" : "steer" } }),
     models: { available: false, load: async () => {} },
     sessions: { byId: new Map(), summaries: [] },
     toast: { push() {} },
@@ -278,7 +287,7 @@ for (const branchId of ["main", "worker"]) {
     await click(send)
     const { onProgress, ...attachments } = submissions[0].attachments
     assert.equal(typeof onProgress, "function")
-    assert.deepEqual({ ...submissions[0], attachments }, { sessionId: "session", branch: branchId, value: "", attachments: { images: [image], pastes: [paste] } })
+    assert.deepEqual({ ...submissions[0], attachments }, { sessionId: "session", branch: branchId, value: "", attachments: { images: [image], pastes: [paste] }, mode: "steer" })
   })
 }
 
@@ -519,6 +528,13 @@ test("image submission uploads the File before sending only its durable referenc
   await chat.submit("session", "main", "retry", { images: [image], pastes: [] })
   assert.equal(uploads.length, 1, "retrying a draft reuses its accepted file identity")
   assert.equal(calls[1].params.user.content[1].source.fileId, "image-1")
+  assert.equal(calls[1].params.mode, "queue", "a submit with no mode asked for holds the message")
+
+  const restored = { type: "image", source: { type: "file", mediaType: "image/png", fileId: "recalled" } }
+  await chat.submit("session", "main", "send now", { images: [], pastes: [], restored: [restored] }, "steer")
+  assert.equal(uploads.length, 1, "a recalled image uploads nothing")
+  assert.equal(calls[2].params.mode, "steer")
+  assert.deepEqual(calls[2].params.user.content, [{ type: "text", text: "send now" }, restored], "a recalled image keeps its stored file reference")
 })
 
 test("the /skill: namespace offers Skills, fills the token, and sends it as a message", async (t) => {
@@ -606,4 +622,209 @@ test("the chip layer follows the field's width when the field resizes", async (t
   watched.scrollTop = 12
   watched.props.onScroll()
   assert.equal(body.style.transform, "translateY(-12px)", "the scroll path still carries the offset")
+})
+
+/** A held message as `session.input.pending` and `input/message` deliver it. */
+const heldInput = (id, text, images) => ({
+  id, text, skills: [], user: { content: [{ type: "text", text }, ...(images ?? [])] },
+  ...(images === undefined ? {} : { images }),
+})
+
+/**
+ * The composer alone, wired to recordings: `sent` takes every submit, `stop`
+ * answers the stop, and `withdraw` answers each withdrawal, so a test drives
+ * the gestures the chat page's own callbacks drive.
+ */
+function soloComposer(t, props = {}, stores = {}, calls = {}) {
+  const sent = [], stopped = [], withdrawn = []
+  const mounted = mount(t, "main", [], ComposerPanel, stores, {
+    running: true,
+    attachments: true,
+    send: async (value, attachments, mode) => { sent.push({ value, attachments, mode }) },
+    stop: async () => {
+      stopped.push(true)
+      if (calls.stopFails) throw new Error("the run would not stop")
+      await calls.stopGate?.promise
+    },
+    withdrawHeld: async (item) => {
+      withdrawn.push(item.id)
+      return calls.adopted?.includes(item.id) ? "notHeld" : "deleted"
+    },
+    ...props,
+  })
+  const field = all(mounted.root).find((element) => element.type === "textarea")
+  field.props.onFocus()
+  const enter = (modifiers = {}) => field.props.onKeydown({ key: "Enter", preventDefault() {}, stopPropagation() {}, ...modifiers })
+  const type = async (value) => { field.props["onUpdate:modelValue"](value); await flush() }
+  return { ...mounted, field, enter, type, sent, stopped, withdrawn }
+}
+
+for (const [label, sendMode, expected, alternate] of [
+  ["steer by default", "steer", "steer", "queue"],
+  ["a held default queues", "queue", "queue", "steer"],
+]) {
+  test(`during a run ${label}: Enter uses it and the other action does the opposite`, async (t) => {
+    const { type, enter, root, sent } = soloComposer(t, {}, {
+      composer: reactive({ sendMode, alternate() { return sendMode === "steer" ? "queue" : "steer" } }),
+    })
+    await type("follow up")
+    enter()
+    await flush()
+    assert.deepEqual(sent.map((submission) => submission.mode), [expected], "Enter sends in this browser's mode")
+    assert.match(text(root), /composer\.(sentIntoRun|heldForNextTurn)/, "the composer says where the draft went")
+
+    await type("and another")
+    await click(button(root, alternate === "steer" ? "composer.steerAlternate" : "composer.queueAlternate"))
+    await flush()
+    assert.deepEqual(sent.map((submission) => submission.mode), [expected, alternate], "the other action sends in the other mode")
+  })
+}
+
+test("an idle run always submits as queue, whatever this browser's default is", async (t) => {
+  for (const sendMode of ["steer", "queue"]) {
+    const { type, enter, root, sent } = soloComposer(t, { running: false }, {
+      composer: reactive({ sendMode, alternate() { return "queue" } }),
+    })
+    await type("start it")
+    enter()
+    await flush()
+    assert.deepEqual(sent.map((submission) => submission.mode), ["queue"], `idle with a ${sendMode} default`)
+    assert.equal(button(root, "composer.steerAlternate"), undefined, "no run, no alternate action")
+    assert.equal(button(root, "composer.queueAlternate"), undefined)
+    assert.equal(button(root, "composer.sendNowHint"), undefined)
+  }
+})
+
+test("interrupt and send now withdraws every held message oldest first, stops, then submits once", async (t) => {
+  let release
+  const stopGate = { promise: new Promise((resolve) => { release = resolve }) }
+  const held = [heldInput("first", "one"), heldInput("second", "two")]
+  const { type, enter, root, sent, stopped, withdrawn } = soloComposer(t, { held }, {}, { stopGate })
+  await type("and then")
+
+  const gesture = click(button(root, "composer.sendNowHint"))
+  await flush()
+  assert.deepEqual(withdrawn, ["first", "second"], "the withdrawals reach the session before the stop finishes")
+  assert.deepEqual(stopped, [true], "one stop follows the withdrawals")
+  assert.deepEqual(sent, [], "nothing is submitted while the stop settles")
+
+  enter({ ctrlKey: true })
+  enter()
+  await flush()
+  assert.deepEqual(stopped, [true], "a second trigger asks for no second stop")
+  assert.deepEqual(sent, [], "and submits nothing while the first one settles")
+
+  release()
+  await gesture
+  await flush()
+  assert.deepEqual(sent.map((submission) => [submission.value, submission.mode]), [["one\ntwo\nand then", "queue"]], "one submit, after the stop's reply, with the recalled messages ahead of the draft")
+})
+
+test("a stop that fails keeps the whole draft in the composer and sends nothing", async (t) => {
+  const held = [heldInput("first", "one"), heldInput("second", "two")]
+  const { type, root, field, sent, withdrawn } = soloComposer(t, { held }, {}, { stopFails: true })
+  await type("and then")
+  await click(button(root, "composer.sendNowHint"))
+  await flush()
+  assert.match(text(root), /composer\.sendNowFailed/, "the reason is reported")
+  assert.equal(field.value, "one\ntwo\nand then", "every recalled message and the typed draft stay")
+  assert.deepEqual(sent, [], "nothing was sent")
+  assert.deepEqual(withdrawn, ["first", "second"], "the withdrawals that already went are not repeated")
+})
+
+test("a message the run already adopted is not recalled or sent again", async (t) => {
+  const held = [heldInput("first", "one"), heldInput("second", "two")]
+  const { type, root, sent } = soloComposer(t, { held }, {}, { adopted: ["first"] })
+  await type("and then")
+  await click(button(root, "composer.sendNowHint"))
+  await flush()
+  assert.deepEqual(sent.map((submission) => submission.value), ["two\nand then"], "only the message that was still held comes back")
+})
+
+test("recalled messages keep their stored images beside the draft's own attachments", async (t) => {
+  const picture = { type: "image", source: { type: "file", mediaType: "image/png", fileId: "stored-1" } }
+  const { field, type, root, sent } = soloComposer(t, { held: [heldInput("first", "look", [picture])] })
+  const local = new File(["bytes"], "draft.png", { type: "image/png" })
+  field.props.onPaste({ clipboardData: { files: [local] }, preventDefault() {} })
+  await type("and then")
+  await click(button(root, "composer.sendNowHint"))
+  await flush()
+  assert.equal(sent.length, 1)
+  assert.equal(sent[0].value, "look\nand then")
+  assert.deepEqual(sent[0].attachments.images.map((image) => image.name), ["draft.png"], "the draft's own file is still uploaded")
+  assert.deepEqual(sent[0].attachments.restored, [picture], "the recalled message's stored image is sent unchanged")
+})
+
+test("Ctrl+Enter while the run is idle submits as Enter does, and a picker keeps it as Enter", async (t) => {
+  const idle = soloComposer(t, { running: false })
+  await idle.type("start it")
+  idle.enter({ ctrlKey: true })
+  await flush()
+  assert.deepEqual(idle.sent.map((submission) => submission.value), ["start it"], "idle, the key sends the draft")
+  assert.deepEqual(idle.stopped, [], "and stops nothing")
+
+  const picker = soloComposer(t, { createBranch: async () => {} })
+  await picker.type("/branch")
+  picker.enter({ ctrlKey: true })
+  await flush()
+  assert.deepEqual(picker.stopped, [], "a picker takes the key as Enter itself, so no run is stopped")
+})
+
+test("a send-now with an empty draft and nothing held does nothing, and one with no held message still stops", async (t) => {
+  const empty = soloComposer(t, { held: [] })
+  await click(button(empty.root, "composer.sendNowHint"))
+  await flush()
+  assert.deepEqual([empty.stopped, empty.sent], [[], []], "an empty draft with nothing held is a no-op")
+
+  const typed = soloComposer(t, { held: [] })
+  await typed.type("and then")
+  await click(button(typed.root, "composer.sendNowHint"))
+  await flush()
+  assert.deepEqual(typed.stopped, [true], "a typed draft stops the run")
+  assert.deepEqual(typed.sent.map((submission) => [submission.value, submission.mode]), [["and then", "queue"]], "and is sent once it settles")
+})
+
+test("a composer with no withdrawal action sends now without recalling, and reports what it cannot do", async (t) => {
+  const held = [heldInput("first", "one")]
+  const { type, root, sent, stopped } = soloComposer(t, { held, withdrawHeld: undefined })
+  await type("and then")
+  assert.equal(button(root, "composer.sendNowHint").props.disabled, true, "a message it cannot recall keeps the action unavailable")
+  const typed = soloComposer(t, { held: [], withdrawHeld: undefined })
+  await typed.type("and then")
+  await click(button(typed.root, "composer.sendNowHint"))
+  await flush()
+  assert.deepEqual(typed.stopped, [true], "with nothing held it is the same gesture")
+  assert.deepEqual(typed.sent.map((submission) => submission.value), ["and then"])
+  const idle = soloComposer(t, { running: false, held: [] })
+  await idle.type("start it")
+  await idle.enter({ ctrlKey: true })
+  await flush()
+  assert.deepEqual([idle.stopped, idle.sent.map((submission) => submission.value)], [[], ["start it"]], "idle it submits and stops nothing")
+})
+
+test("the send-mode control on the Appearance page changes which action steers", async (t) => {
+  globalThis.chatInputStores = {
+    chat: { views: {}, open() {}, ensureLine() {} },
+    connection: { supports: () => false },
+    models: { available: false, load: async () => {} },
+    sessions: { byId: new Map(), summaries: [] },
+    toast: { push() {} },
+    ui: { shellMode: "wide" },
+    appearance: reactive({ theme: "system", fontSize: 14, language: "", error: "", selectLanguage: async () => {} }),
+    composer: reactive({ sendMode: "steer", error: "", alternate() { return this.sendMode === "steer" ? "queue" : "steer" } }),
+  }
+  const root = node("root")
+  const app = renderer.createApp(AppearanceSettings)
+  app.use(nuxtUiTestPlugin)
+  app.mount(root)
+  t.after(() => app.unmount())
+  await flush()
+
+  const modeButton = (label) => all(root).find((element) => element.type === "button" && text(element) === label)
+  assert.equal(modeButton("Steer into the run").props["aria-pressed"], true, "steer is the default the page draws")
+  await click(modeButton("Hold for the next turn"))
+  await flush()
+  assert.equal(globalThis.chatInputStores.composer.sendMode, "queue", "the page writes this browser's choice")
+  assert.equal(modeButton("Hold for the next turn").props["aria-pressed"], true)
+  assert.equal(modeButton("Steer into the run").props["aria-pressed"], false)
 })

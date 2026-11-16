@@ -102,8 +102,14 @@ export type UserInput = { content: Array<Record<string, unknown>> }
 /** A stored image content block. */
 export type ImageBlock = { type: "image"; source: { type: "file"; mediaType: string; fileId: string } }
 
-/** Local files and pasted text held until the message is accepted. */
-export type DraftAttachments = { images: File[]; pastes: string[]; onProgress?: (percent: number) => void }
+/**
+ * Local files and pasted text held until the message is accepted, plus the
+ * stored images a withdrawn queue message carried, which are sent unchanged.
+ */
+export type DraftAttachments = { images: File[]; pastes: string[]; restored?: ImageBlock[]; onProgress?: (percent: number) => void }
+
+/** `session.submit.mode`: held for the next turn, or steered into the running one. */
+export type SubmitMode = "queue" | "steer"
 
 /** A file or directory the `@` mention picker offers: its path under the workspace and its absolute path. */
 export type FileCandidate = { relativePath: string; absolutePath: string; dir: boolean }
@@ -121,8 +127,8 @@ export type PermissionPolicy = {
 /** `session.permission.get`: the policy of `main` and the version a change must expect. */
 export type PermissionState = { version: number; policy: PermissionPolicy }
 
-/** A message the server holds in the queue of a running branch. */
-export type QueuedInput = { id: string; text: string; skills?: string[]; hooks?: number; user: UserInput }
+/** A message the server holds in the queue of a running branch: the operator's words, its Skills and its stored images. */
+export type QueuedInput = { id: string; text: string; skills?: string[]; hooks?: number; images?: ImageBlock[]; user: UserInput }
 
 /**
  * `session.input.withdraw`: the queued input was removed, or the server had already adopted it.

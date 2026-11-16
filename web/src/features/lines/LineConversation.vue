@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue"
 import { useI18n } from "vue-i18n"
-import { MAIN_BRANCH, type DraftAttachments } from "../../rpc/protocol"
+import { MAIN_BRANCH, type DraftAttachments, type QueuedInput, type SubmitMode, type WithdrawResult } from "../../rpc/protocol"
 import { useChatStore } from "../../stores/chat"
 import { useConnectionStore } from "../../stores/connection"
+import { useToastStore } from "../../stores/toast"
 import { useUiStore } from "../../stores/ui"
 import ApprovalPrompt from "../chat/ApprovalPrompt.vue"
 import ComposerPanel from "../chat/ComposerPanel.vue"
@@ -16,6 +17,7 @@ const { t } = useI18n()
 const chat = useChatStore()
 const connection = useConnectionStore()
 const ui = useUiStore()
+const toast = useToastStore()
 const composer = ref<InstanceType<typeof ComposerPanel>>()
 
 const view = computed(() => chat.views[props.sessionId])
@@ -47,8 +49,15 @@ const stopping = computed(() => branch.value?.stopping ?? false)
 
 watch(() => [props.sessionId, props.branchId], () => chat.ensureLine(props.sessionId, props.branchId), { immediate: true })
 
-function send(text: string, attachments: DraftAttachments): Promise<void> {
-  return chat.submit(props.sessionId, props.branchId, text, attachments)
+function send(text: string, attachments: DraftAttachments, mode: SubmitMode): Promise<void> {
+  return chat.submit(props.sessionId, props.branchId, text, attachments, mode)
+}
+
+/** Withdraws one held message of this line, so the composer can recall it into the draft; a message the run already adopted stays out. */
+async function withdrawHeld(input: QueuedInput): Promise<WithdrawResult["status"]> {
+  const result = await chat.withdrawInput(props.sessionId, props.branchId, input.id, undefined)
+  if (result.status === "notHeld") toast.push({ tone: "info", title: t("queue.notHeld") })
+  return result.status
 }
 
 function quote(text: string): void {
@@ -145,6 +154,7 @@ function noModel(): void {
       <ComposerPanel
         v-else-if="open"
         ref="composer"
+        :session-id="sessionId"
         :running="running"
         :stopping="stopping"
         :model="view.model"
@@ -152,6 +162,8 @@ function noModel(): void {
         :stores-pastes="view?.methods.includes('attachment.put') === true"
         :search-files="searchFiles"
         :stop="stop"
+        :held="branch?.queued ?? []"
+        :withdraw-held="view?.methods.includes('session.input.withdraw') === true ? withdrawHeld : undefined"
         :model-selectable="false"
         :select-model="noModel"
         :placeholder="t('lines.placeholder')"

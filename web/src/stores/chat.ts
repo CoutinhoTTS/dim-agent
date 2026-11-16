@@ -8,7 +8,7 @@ import { ConnectionLost, RpcError } from "../rpc/client"
 import type { Goal, GoalCall } from "../goal"
 import { readLoops as readLoopsReply, readStartedLoop, type Loop } from "../loop"
 import { readUploadedImage } from "../rpc/read"
-import { MAIN_BRANCH, type ApprovalDecision, type ApprovalRequest, type DraftAttachments, type FileCandidate, type ModelId, type ModelProgress, type Notification, type PendingQuestion, type PermissionPreset, type ModelRetryProgress, type PermissionPolicy, type QueuedInput, type QuestionAnswer, type SessionEvent, type UserInput, type WithdrawResult } from "../rpc/protocol"
+import { MAIN_BRANCH, type ApprovalDecision, type ApprovalRequest, type DraftAttachments, type FileCandidate, type ModelId, type ModelProgress, type Notification, type PendingQuestion, type PermissionPreset, type ModelRetryProgress, type PermissionPolicy, type QueuedInput, type QuestionAnswer, type SessionEvent, type SubmitMode, type UserInput, type WithdrawResult } from "../rpc/protocol"
 import { readRevision, readRules } from "../rpc/general-settings"
 import { ProtocolError, readAttached, readBranches, readBranchDetail, readPendingInputs, readPendingQuestions, readTurn, readGoal, readTool, readAck, readAttachmentPath, readBranchCreate, readCompactResult, readConfigurationOutcome, readContextUsage, readFileCandidates, readForkedSessionId, readHistory, readDisplayHistory, readModelUpdate, readMemberApproval, readPermissionState, readPermissionVersion, readSessionMethods, readSessionSkills, readWithdrawResult } from "../rpc/read"
 import { useConnectionStore } from "./connection"
@@ -23,6 +23,8 @@ export type BranchView = {
   rows: readonly TimelineRow[]
   running: boolean
   stopping: boolean
+  /** The messages the server still holds on this line, oldest first. */
+  queued: readonly QueuedInput[]
   status: "loading" | "ready" | "failed"
   error: string
   lastTurnEnd: number | undefined
@@ -615,6 +617,7 @@ export const useChatStore = defineStore("chat", () => {
       const state = stateOf(channel, id)
       branches[id] = {
         rows: branch.projection.rows.slice(),
+        queued: branch.projection.queued(),
         running: state.running,
         stopping: state.stopping,
         status: branch.error !== "" ? "failed" : branch.done ? "ready" : "loading",
@@ -677,7 +680,7 @@ export const useChatStore = defineStore("chat", () => {
     })
   }
 
-  async function submit(sessionId: string, branchId: string, text: string, attachments: DraftAttachments = { images: [], pastes: [] }): Promise<void> {
+  async function submit(sessionId: string, branchId: string, text: string, attachments: DraftAttachments = { images: [], pastes: [] }, mode: SubmitMode = "queue"): Promise<void> {
     let body = text
     const total = attachments.pastes.length + attachments.images.length
     let completed = 0
@@ -688,7 +691,7 @@ export const useChatStore = defineStore("chat", () => {
       const path = readAttachmentPath(uploaded)
       body = `${body}${body === "" ? "" : "\n"}[Pasted text: ${path} (${paste.split("\n").length} lines)]`
     }
-    const images = []
+    const images = [...(attachments.restored ?? [])]
     for (const file of attachments.images) {
       let source = uploadedImages.get(file)?.get(sessionId)
       if (source === undefined) {
@@ -705,8 +708,8 @@ export const useChatStore = defineStore("chat", () => {
       completed++
       images.push({ type: "image", source })
     }
-    const params: Record<string, unknown> = { sessionId, branchId, submissionId: crypto.randomUUID(), mode: "queue" }
-    if (attachments.images.length === 0) params.text = body
+    const params: Record<string, unknown> = { sessionId, branchId, submissionId: crypto.randomUUID(), mode }
+    if (images.length === 0) params.text = body
     else params.user = { content: [...(body === "" ? [] : [{ type: "text", text: body }]), ...images] }
     await client().call("session.submit", params, readAck)
   }
@@ -837,9 +840,9 @@ export const useChatStore = defineStore("chat", () => {
   }
 
   /** Writes the main line's reasoning effort through `session.model.update`'s preferences; returns the server's outcome. */
-  /** Withdraws a queued message; with `steer`, the same content joins the running turn at its next boundary. */
-  async function withdrawInput(sessionId: string, inputId: string, steer: UserInput | undefined): Promise<WithdrawResult> {
-    return client().call("session.input.withdraw", { sessionId, branchId: MAIN_BRANCH, inputId, ...(steer === undefined ? {} : { steer }) }, readWithdrawResult)
+  /** Withdraws a queued message of `branchId`; with `steer`, the same content joins the running turn at its next boundary. */
+  async function withdrawInput(sessionId: string, branchId: string, inputId: string, steer: UserInput | undefined): Promise<WithdrawResult> {
+    return client().call("session.input.withdraw", { sessionId, branchId, inputId, ...(steer === undefined ? {} : { steer }) }, readWithdrawResult)
   }
 
   /** The policy of `main`, or undefined when the Session serves no permission method or the read fails. */

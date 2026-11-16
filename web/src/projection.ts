@@ -88,7 +88,7 @@ export class Projection {
     const content = event.content
     switch (content.kind) {
       case "input":
-        if (content.user !== undefined) this.held.set(event.id, { id: event.id, text: content.text ?? "", skills: content.skills, hooks: content.hooks, user: content.user })
+        if (content.user !== undefined) this.held.set(event.id, { id: event.id, text: content.text ?? "", skills: content.skills, hooks: content.hooks, ...(content.images === undefined ? {} : { images: content.images }), user: content.user })
         break
       case "input-consumed":
       case "input-deleted": this.held.delete(content.inputId); break
