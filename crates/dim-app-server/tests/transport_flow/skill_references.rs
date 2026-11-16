@@ -45,7 +45,12 @@ impl DynPlugin for CatalogHost {
                 ),
             )
             .await?;
+            ctx.provide_at(dim_agent_capabilities::skills::owner_key(), catalog.clone())?;
             ctx.provide_as::<SkillsCatalog>(catalog.clone())?;
+            ctx.provide_at::<dyn rutis_bridge::session::HostDispatch>(
+                rutis_bridge::session::host_key("skillsCatalog"),
+                catalog.clone(),
+            )?;
             skills::register_parts(ctx, &parts)?;
             *self.catalog.lock().unwrap() = Some(catalog);
             Ok(Effect::Done)

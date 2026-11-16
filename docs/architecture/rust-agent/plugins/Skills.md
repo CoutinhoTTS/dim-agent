@@ -15,6 +15,29 @@ in every branch. The App Server's
 plugin of the same name mounts this catalog, adds its management methods and
 registers the same parts.
 
+### Plugin content data face
+
+`skillsCatalog` is the process data face for the existing plugin-content operations.
+Each method accepts one object: `register({plugin, root})` returns the scan's
+`SkillIssue[]`, `withdraw({plugin})` returns no value, `plugins({})` returns the
+registered plugin ids, and `issues({plugin})` returns that plugin's current issues.
+The Rust binding calls the same catalog operations directly. The embedding host
+and the Skills Session parts retain a private binding to this same owner for
+query, content and management work; no second catalog or scan is introduced.
+
+The wire root is a string converted at the filesystem input boundary. Native
+paths remain lossless. Diagnostic issues are tagged by `kind`:
+`invalidManifest {path, reason}`, `unreadable {path, reason}`,
+`rootUnreadable {root, reason}` and `scanLimitReached {root}`. Diagnostic paths
+use their existing display representation; they are not file identities.
+Errors retain the owner's code and message (`closed`, `skills_write_failed`,
+`skills_unavailable`); malformed requests return `invalid_request`.
+
+These operations have no caller cancellation argument. Once an asynchronous
+wire operation starts, abandoning its wait does not cancel or roll it back.
+Settings work uses the existing owner closing token. Completed registrations
+remain in Settings and are restored when the catalog reloads.
+
 ### Dependencies
 
 | Service | Purpose |
@@ -108,7 +131,7 @@ settings mutation was durably saved.
 | --- | --- |
 | 作用域 | 进程 |
 | 注入 | `P:HostPlatform`、`P:PartRegistry`、`P:SkillSettingsHost` |
-| 提供 | `P:SkillsCatalog` |
+| 提供 | `P:SkillsCatalog`、`P:SkillsCatalog#dim/skills/catalog-owner`、`P:dyn HostDispatch#skillsCatalog` |
 | 被注入于 | `Skills` |
 <!-- /generated -->
 
@@ -147,7 +170,7 @@ protocol, and the loaded body is the skill author's own text.
 
 | Service | Purpose |
 | --- | --- |
-| `P:SkillsCatalog` | Query user/project skills; its `skills.catalog_changed` events drive replacement. |
+| `P:SkillsCatalog#dim/skills/catalog-owner` | Query user/project skills; its `skills.catalog_changed` events drive replacement. |
 | `S:SessionConfig` | Select the Session working directory. |
 | `S:SessionLoader` | Lock-free creation of Session-owned content instances. |
 | `S:SessionLifecycle` | Start catalog-driven replacement only after the Session is published. |
@@ -236,7 +259,7 @@ The `skills` check is covered by `crates/dim-app-server/tests/transport_flow/ski
 | 项 | 值 |
 | --- | --- |
 | 作用域 | Session |
-| 注入 | `P:SkillsCatalog`、`S:PromptRegistry`、`S:SessionConfig`、`S:SessionLifecycle`、`S:SessionLoader`、`S:SkillsConfig`、`S:SubmitChecks`、`S:ToolRegistry` |
+| 注入 | `P:SkillsCatalog#dim/skills/catalog-owner`、`S:PromptRegistry`、`S:SessionConfig`、`S:SessionLifecycle`、`S:SessionLoader`、`S:SkillsConfig`、`S:SubmitChecks`、`S:ToolRegistry` |
 | 提供 | `S:SessionSkills` |
 | 被注入于 | `SkillsBranch` |
 <!-- /generated -->

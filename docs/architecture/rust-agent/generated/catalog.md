@@ -58,7 +58,7 @@ Each catalog name a part of the assembly provides or injects. `data` means share
 | `sessions` | process | AgentDirectory | data | `delete` async, `exists` async, `history` async, `idle` async, `input` async, `launch` async, `lookup` async, `pending` async, `stop` async, `withdraw` async |
 | `settings` | process | Settings | data | `projects` sync, `read` async, `register` async, `update` async |
 | `settingsService` | process | Settings | internal(owner-api) | — |
-| `skillsCatalog` | process | SkillsCatalog | internal(host-resource) | — |
+| `skillsCatalog` | process | SkillsCatalog | data | `issues` async, `plugins` async, `register` async, `withdraw` async |
 | `skillsInstructionsSettingsHost` | process | PromptSettings | internal(owner-api) | — |
 | `sqliteStorage` | process | SqliteStorage | internal(object) | — |
 | `store` | process | SessionStore | data | `addGrant` async, `catalog` async, `createOwnedSession` async, `creationRecord` async, `delete` async, `fork` async, `grants` async, `hasRecords` async, `owner` async, `query` async, `removeGrant` async, `removeWorktree` async, `removeWorktreeDirectory` async, `sessionConfig` async, `sessionConfigText` async, `sessionsUnderWorkspace` async, `setSessionLanguage` async, `worktreeDirectories` async, `worktreeUsages` async |

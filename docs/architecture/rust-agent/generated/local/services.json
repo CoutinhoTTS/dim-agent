@@ -2440,6 +2440,12 @@
         "removing": false
       },
       {
+        "service": "dim_agent_capabilities::skills::catalog::SkillsCatalog#dim/skills/catalog-owner",
+        "provider": 28,
+        "generation": 1,
+        "removing": false
+      },
+      {
         "service": "dim_agent_capabilities::workspace_tools::mentions::MentionIndex",
         "provider": 19,
         "generation": 1,
@@ -2460,6 +2466,12 @@
       {
         "service": "dyn rutis_bridge::session::services::HostDispatch#rutis/loader",
         "provider": 2,
+        "generation": 1,
+        "removing": false
+      },
+      {
+        "service": "dyn rutis_bridge::session::services::HostDispatch#skillsCatalog",
+        "provider": 28,
         "generation": 1,
         "removing": false
       },
@@ -2940,7 +2952,7 @@
             "status": "Ready"
           },
           {
-            "service": "dim_agent_capabilities::skills::catalog::SkillsCatalog",
+            "service": "dim_agent_capabilities::skills::catalog::SkillsCatalog#dim/skills/catalog-owner",
             "scope": null,
             "status": "Ready"
           },
@@ -2985,7 +2997,7 @@
             "generation": 1
           },
           {
-            "service": "dim_agent_capabilities::skills::catalog::SkillsCatalog",
+            "service": "dim_agent_capabilities::skills::catalog::SkillsCatalog#dim/skills/catalog-owner",
             "scope": null,
             "provider": 28,
             "generation": 1
@@ -3035,7 +3047,7 @@
             "external": false
           },
           {
-            "service": "dim_agent_capabilities::skills::catalog::SkillsCatalog",
+            "service": "dim_agent_capabilities::skills::catalog::SkillsCatalog#dim/skills/catalog-owner",
             "provider": 28,
             "declared": true,
             "external": true

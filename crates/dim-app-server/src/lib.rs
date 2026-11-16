@@ -1435,7 +1435,6 @@ pub fn register_faces(builder: &mut dim_agent_runtime::AgentBuilder) {
         ("sessionLoader", "control"),
         ("sessionStore", "owner-api"),
         ("settingsService", "owner-api"),
-        ("skillsCatalog", "host-resource"),
         ("sqliteStorage", "object"),
         ("submitChecks", "hot-path"),
         ("timelineFactory", "control"),

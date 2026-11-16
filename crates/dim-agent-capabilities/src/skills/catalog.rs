@@ -54,19 +54,25 @@ struct CatalogState {
 }
 
 /// Process-wide Skill discovery and global enablement.
+#[derive(Clone)]
 pub struct SkillsCatalog {
     user_root: PathBuf,
     settings: Arc<dyn SkillSettings>,
-    state: tokio::sync::Mutex<CatalogState>,
+    state: Arc<tokio::sync::Mutex<CatalogState>>,
     /// Serializes settings reloads so a later read is never overwritten by
     /// an earlier one.
-    reloading: tokio::sync::Mutex<()>,
+    reloading: Arc<tokio::sync::Mutex<()>>,
     /// Serializes the scans of the roots with an installation placing or
     /// removing files, so no view is built from a half-swapped directory.
-    operating: tokio::sync::Mutex<()>,
+    operating: Arc<tokio::sync::Mutex<()>>,
     /// The owner's context, which announces catalog changes.
     events: Ctx,
     closed: CancellationToken,
+}
+
+/// The private native binding for Skills' own parts and embedding hosts.
+pub fn owner_key() -> Key<SkillsCatalog> {
+    Key::named("dim/skills/catalog-owner")
 }
 
 async fn scan(root: PathBuf, kind: RootKind) -> Result<RootSnapshot, SkillIssue> {
@@ -747,7 +753,12 @@ impl DynPlugin for SkillsCatalogPlugin {
             let settings = ctx.require_at(&self.settings)?;
             let parts = ctx.require_at(&self.parts)?;
             let catalog = Self::mount(ctx, (platform, settings)).await?;
-            ctx.provide_as::<SkillsCatalog>(catalog)?;
+            ctx.provide_at(owner_key(), catalog.clone())?;
+            ctx.provide_as::<SkillsCatalog>(catalog.clone())?;
+            ctx.provide_at::<dyn rutis_bridge::session::HostDispatch>(
+                rutis_bridge::session::host_key("skillsCatalog"),
+                catalog,
+            )?;
             super::register_parts(ctx, &parts)?;
             Ok(Effect::Done)
         })
@@ -777,15 +788,15 @@ impl SkillsCatalogPlugin {
         let catalog = Arc::new(SkillsCatalog {
             user_root: platform.home.join(SKILLS_DIR),
             settings: settings.clone(),
-            state: tokio::sync::Mutex::new(CatalogState {
+            state: Arc::new(tokio::sync::Mutex::new(CatalogState {
                 user: None,
                 plugins: BTreeMap::new(),
                 projects: HashMap::new(),
                 settings: initial,
                 version: 0,
-            }),
-            reloading: tokio::sync::Mutex::new(()),
-            operating: tokio::sync::Mutex::new(()),
+            })),
+            reloading: Arc::default(),
+            operating: Arc::default(),
             events: ctx.clone(),
             closed: lifecycle.clone(),
         });

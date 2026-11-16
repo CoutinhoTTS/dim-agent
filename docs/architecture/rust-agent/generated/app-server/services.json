@@ -245,7 +245,7 @@
         ]
       },
       {
-        "id": 79,
+        "id": 77,
         "parent": 72,
         "name": "eventhub-ready",
         "state": "Active",
@@ -3378,6 +3378,12 @@
         "removing": false
       },
       {
+        "service": "dim_agent_capabilities::skills::catalog::SkillsCatalog#dim/skills/catalog-owner",
+        "provider": 32,
+        "generation": 1,
+        "removing": false
+      },
+      {
         "service": "dim_agent_capabilities::summary_strategy::SummaryPromptSettingsHost",
         "provider": 28,
         "generation": 1,
@@ -3782,6 +3788,12 @@
       {
         "service": "dyn rutis_bridge::session::services::HostDispatch#settings",
         "provider": 19,
+        "generation": 1,
+        "removing": false
+      },
+      {
+        "service": "dyn rutis_bridge::session::services::HostDispatch#skillsCatalog",
+        "provider": 32,
         "generation": 1,
         "removing": false
       },

@@ -151,7 +151,7 @@ impl SkillsPlugin {
     pub fn new(names: &Names<'_>) -> Result<Self, Error> {
         Ok(Self {
             session: names.instance(SESSION_GROUP)?,
-            catalog: names.key()?,
+            catalog: super::owner_key(),
             config: names.key()?,
             loader: names.key()?,
             lifecycle: names.key()?,

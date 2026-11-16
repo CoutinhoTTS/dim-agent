@@ -638,7 +638,12 @@ impl DynPlugin for SkillsCatalogPlugin {
                 (platform, settings),
             )
             .await?;
+            ctx.provide_at(dim_agent_capabilities::skills::owner_key(), catalog.clone())?;
             ctx.provide_as::<SkillsCatalog>(catalog.clone())?;
+            ctx.provide_at::<dyn rutis_bridge::session::HostDispatch>(
+                rutis_bridge::session::host_key("skillsCatalog"),
+                catalog.clone(),
+            )?;
             dim_agent_capabilities::skills::register_parts(ctx, &parts)?;
             methods.register(
                 ctx,

@@ -134,7 +134,7 @@ fn register_names_in(catalog: &mut dim_agent_runtime::names::ServiceCatalog) {
     catalog.register_shared(name_of::<environment_clients::SessionClientsHost>());
     catalog.register_shared(name_of::<execution_settings::ExecutionSettingsHost>());
     catalog.register_shared(name_of::<toolchain::ToolchainSourceHost>());
-    register::<skills::SkillsCatalog>(catalog, None);
+    catalog.register_shared("skillsCatalog");
 }
 impl PublicService for approval::Approval {}
 impl PublicService for input_queue::InputQueue {}

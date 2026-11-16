@@ -568,3 +568,16 @@ export interface McpService {
   plugins(request: Record<string, never>): Promise<string[]>;
   refusal(request: { plugin: string }): [string, string | null] | null;
 }
+
+export type SkillIssue =
+  | { kind: 'invalidManifest'; path: string; reason: string }
+  | { kind: 'unreadable'; path: string; reason: string }
+  | { kind: 'rootUnreadable'; root: string; reason: string }
+  | { kind: 'scanLimitReached'; root: string };
+/** Process Skills owner operations for plugin content; discovery state stays private. */
+export interface SkillsCatalog {
+  register(request: { plugin: string; root: string }): Promise<SkillIssue[]>;
+  withdraw(request: { plugin: string }): Promise<void>;
+  plugins(request: Record<string, never>): Promise<string[]>;
+  issues(request: { plugin: string }): Promise<SkillIssue[]>;
+}

@@ -1628,3 +1628,98 @@ async fn node_mcp_registration_uses_the_native_content_owner() {
     server.join().await.unwrap();
     std::fs::remove_dir_all(home).unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+async fn node_skills_registration_uses_the_native_catalog_owner() {
+    use dim_agent_capabilities::skills::{SkillsCatalog, SkillsError};
+    let home = home();
+    let package = home.join("foreign-kit");
+    let root = package.join("skills");
+    std::fs::create_dir_all(root.join("valid")).unwrap();
+    let root = root.canonicalize().unwrap();
+    #[cfg(target_os = "linux")]
+    let invalid = {
+        use std::os::unix::ffi::OsStringExt;
+        root.join(std::ffi::OsString::from_vec(b"invalid-\xff".to_vec()))
+    };
+    #[cfg(not(target_os = "linux"))]
+    let invalid = root.join("invalid-診断");
+    std::fs::create_dir_all(&invalid).unwrap();
+    std::fs::write(
+        root.join("valid/SKILL.md"),
+        "---\nname: valid\ndescription: fixture\n---\nValid body",
+    )
+    .unwrap();
+    std::fs::write(invalid.join("SKILL.md"), "---\nname: [\n---\nInvalid body").unwrap();
+    std::fs::write(
+        package.join("dim-plugin.json"),
+        json!({"name":"foreign-kit","skills":"skills"}).to_string(),
+    )
+    .unwrap();
+    let mut parts = session_typescript::fixture();
+    parts.rows = vec![json!({
+        "id":"skills-catalog", "name":parts.anchor.parent().unwrap().join("fixtures/skills-catalog.ts"),
+        "provides":{}, "config":{}
+    })];
+    let mut configuration = config(&home, parts);
+    configuration.platform_home = Some(home.join("user"));
+    let (server, _, _) = session_typescript::start(configuration.clone()).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    assert_eq!(
+        files_available(&mut client, "skillprobe.read", json!({})).await,
+        json!({"plugins":[],"issues":[]})
+    );
+    let catalog = server.service::<SkillsCatalog>().unwrap();
+    let registered = client
+        .rpc("skillprobe.register", json!({"root":root}))
+        .await;
+    assert_ok(&registered);
+    let issues = catalog.plugin_issues("foreign-kit").await.unwrap();
+    assert_eq!(issues.len(), 1);
+    assert_eq!(registered["result"], json!(issues));
+    assert_eq!(registered["result"][0]["kind"], "invalidManifest");
+    assert_eq!(
+        registered["result"][0]["path"],
+        invalid.join("SKILL.md").display().to_string()
+    );
+    assert_eq!(
+        files_available(&mut client, "skillprobe.read", json!({})).await,
+        json!({"plugins":catalog.plugins().await.unwrap(),"issues":issues})
+    );
+    catalog.withdraw_plugin("foreign-kit").await.unwrap();
+    assert_eq!(
+        files_available(&mut client, "skillprobe.read", json!({})).await,
+        json!({"plugins":[],"issues":[]})
+    );
+    catalog.register_plugin("foreign-kit", root).await.unwrap();
+    assert_ok(
+        &client
+            .rpc("plugin.install", json!({"source":{"path":package}}))
+            .await,
+    );
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    let (server, _, _) = session_typescript::start(configuration).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    assert_eq!(
+        files_available(&mut client, "skillprobe.read", json!({})).await,
+        json!({"plugins":["foreign-kit"],"issues":issues})
+    );
+    assert!(matches!(catalog.plugins().await, Err(SkillsError::Closed)));
+    assert_ok(&client.rpc("skillprobe.withdraw", json!({})).await);
+    assert!(
+        server
+            .service::<SkillsCatalog>()
+            .unwrap()
+            .plugins()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
