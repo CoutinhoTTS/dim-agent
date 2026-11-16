@@ -2316,6 +2316,10 @@ async fn modality_connection_resolution_reaches_the_stub_and_refuses_unselectabl
         .await
         .unwrap();
     let provider = root.get::<ProviderService>().unwrap();
+    assert!(
+        !names().registered::<ModalityConnectionHost>(),
+        "the credential-bearing connection is a private typed binding, not a catalog service"
+    );
     let modality = root.get::<ModalityConnectionHost>().unwrap();
     let selectable = root.get::<SelectableModelsHost>().unwrap();
     let cancel = CancellationToken::new();
