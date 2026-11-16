@@ -1816,51 +1816,17 @@ impl Connection {
             }
         };
         let managed = rpc.ctx.get::<crate::worktrees::ManagedWorktrees>();
-        let worktree = match (params.worktree, &managed) {
-            (Some(request), Some(managed)) => Some(
-                managed
-                    .create(
-                        std::path::Path::new(&cwd),
-                        request.base.as_deref(),
-                        request.branch.as_deref(),
-                        &self.closed,
-                    )
-                    .await
-                    .map_err(|error| error.rpc())?,
-            ),
-            (Some(_), None) => {
-                return Err(RpcError::app(
-                    -32000,
-                    "worktree_unavailable",
-                    "This daemon has no managed worktree root",
-                ));
-            }
-            (None, _) => None,
-        };
-        if let Some(created) = &worktree {
-            config.cwd = created.prepared.subtree.to_string_lossy().into_owned();
-        }
-        let session = match rpc
+        let (session, worktree) = rpc
             .index
-            .create_session(
+            .create_with_worktree(
                 &host,
                 config,
                 self.protocol_version(),
-                None,
                 origin,
-                worktree.as_ref().map(|created| created.prepared.clone()),
+                params.worktree,
+                &self.closed,
             )
-            .await
-        {
-            Ok(session) => session,
-            Err(error) => {
-                if let (Some(created), Some(managed)) = (&worktree, &managed) {
-                    managed.discard(created, &self.closed).await;
-                }
-                clear_worktree_record(rpc, worktree.as_ref()).await;
-                return Err(RpcError::from(error));
-            }
-        };
+            .await?;
         if startup_admission.is_some() || source.is_some() {
             let retained = rpc
                 .ctx
@@ -1879,7 +1845,6 @@ impl Connection {
                 if let (Some(created), Some(managed)) = (&worktree, &managed) {
                     managed.discard(created, &self.closed).await;
                 }
-                clear_worktree_record(rpc, worktree.as_ref()).await;
                 return Err(error);
             }
         }
@@ -1948,22 +1913,6 @@ pub(crate) fn configuration_outcome(
             "Configuration was superseded by another update",
         )),
     }
-}
-
-/// A failed creation after the Session transaction removed its rows: the
-/// directory record it wrote stays a candidate, so drop it when nothing
-/// associates it. A cleanup failure is visible in the next `worktree list`.
-async fn clear_worktree_record(
-    rpc: &RpcService,
-    worktree: Option<&crate::worktrees::CreatedWorktree>,
-) {
-    let (Some(created), Some(store)) = (worktree, rpc.ctx.get::<crate::storage::SessionStore>())
-    else {
-        return;
-    };
-    let _ = store
-        .remove_worktree_directory(created.prepared.directory.clone())
-        .await;
 }
 
 /// Session operations wait for the product execution profile.

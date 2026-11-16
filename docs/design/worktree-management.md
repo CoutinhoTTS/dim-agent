@@ -36,11 +36,14 @@ SessionStore。`$DIMCODE_HOME` 是 daemon 服务的产品 home，客户端不拼
 
 ## 3. 创建
 
-入口是 `session.create`：`cwd` 仍是源工作区，新增可选
-`worktree: { base?: string, branch?: string }`。回复给出 `taskId`、`root`（管理根）、`cwd`（Session
-工作区）、`repository`、`base`、`branch`。成员由 `hello.features` 的 `session.create.worktree` 宣告，
-客户端只在 daemon 宣告时发送；旧 daemon 不会收到该成员，因此不需要拒绝未知字段。`sessions.launch` 的
-非交互创建不在第一版里：它的请求形状补上同一成员后复用这条路径。
+入口是 `session.create` 与非交互创建 `sessions.launch`：`cwd` 仍是源工作区，两者接受可选
+`worktree: { base?: string, branch?: string }`。该成员存在时必须是对象（包括空对象）；`null`、数组、
+非字符串的 base/branch 与未知字段在输入边界拒绝，不开始 Git 创建。回复在可选 `worktree` 对象内给出 `taskId`、`root`
+（管理根）、`cwd`（Session 工作区）、`repository`、`base`、`branch`；未请求时不返回该对象。
+成员分别由 `hello.features` 的 `session.create.worktree` 与 `sessions.launch.worktree` 宣告，
+两者都要求产品 home 与原生存储。客户端只在 daemon 宣告时发送；旧 daemon 不会收到该成员。
+两个入口共用下列创建、关联与失败清除路径。`sessions.launch` 在已接管的自持创建任务内才开始
+Git 创建；调用方停止等待不会撤回该任务，Session 与 worktree 一起完成或清除。
 
 1. 校验源工作区是 Git 工作树且不是 bare 仓库，解析仓库根、base 和源工作区相对仓库根的映射前缀；
    映射路径必须留在新根内。
@@ -53,8 +56,10 @@ SessionStore。`$DIMCODE_HOME` 是 daemon 服务的产品 home，客户端不拼
    [worktree-access §2.2](worktree-access.md#22-仓库身份与目录范围) 的范围映射成为实际工作区。映射前缀逐
    组件拒绝符号链接，解析后的路径必须仍在根内。目录记录与使用关联由 SessionStore 在新 Session 的同一事务
    里写入，记录的 subtree 等于这个 cwd；这一步失败即视为 Session 未创建。
-4. 第 2 步之后的任何失败，ManagedWorktrees 用未取消的清理路径删除本次创建的目录与分支；Git 拒绝删除或目录
-   写入他人内容时保留它们（不带 `-f`），由 `list` 列为未登记，入口返回原错误。
+4. 第 2 步之后的任何失败，ManagedWorktrees 用未取消的清理路径删除本次创建的目录与分支；已准备目录的撤回
+   复用 SessionStore 的删除操作，在 ownership 排他区内重查关联与根/子树下的 Session cwd，持锁完成 Git 撤回
+   后才删除目录记录。其他 Session 已使用该根或子树、Git 拒绝删除或目录写入他人内容时保留它们（不带 `-f`）；
+   没有目录记录的残留由 `list` 列为未登记，入口始终返回原错误。
 
 创建成功后不写 Timeline 事件：worktree 是进程级事实，不是分支状态。映射子树进入本 Session 的工作区范围，
 根的其余部分按 worktree-access §2.2 仍需审批；文件工具与显式 `exec` cwd 不再对映射子树逐文件审批
@@ -109,8 +114,8 @@ agent 工具，不经过 Permission 批准，也从不服务给配对设备的�
 | Owner | 现有机制为何不够 | 需要的合同 | 顺序与失败 |
 | --- | --- | --- | --- |
 | SessionStore | `associate_worktree` 要求 Session 已存在，不能补写创建期记录；目录记录没有时间；删除目录记录会撞上未级联的关联外键 | 创建 Session 时同一事务写入目录记录、使用关联与最后使用时间；关联写入/解除更新时间；按根查询任何存储中 Session 的 cwd；Session 创建/删除、关联写入与移除共用所有权锁，创建与关联在锁内重新核验 cwd/根；类型化移除操作 `remove_worktree` 在锁内运行调用方的 Git 删除与记录删除；删除目录记录的类型化操作（含核验缺失/Git 不登记的记录清理）。列变更遵守 native-storage-format.md | 创建失败不留记录；删除成功才删记录，失败保留供重试 |
-| Agents | 现有 `cwd` 只能指向已存在目录，不能把创建目录和创建 Session 合成一次请求 | `session.create` 的可选 `worktree` 与回复字段；`sessions.launch` 的同一成员留给后续 | 入口只校验格式与权限；Git、失败清除由 ManagedWorktrees 执行，创建失败时入口调用它清除 |
-| App Server 协议 | 客户端各自 `git worktree add` 会重新引入路径分歧；新成员会被旧 daemon 当作未知字段拒绝 | `hello.features` 新增 `session.create.worktree`（仅在产品 home 与原生存储都存在时宣告）、`worktree.list`、`worktree.remove`、`worktree.prune`；`cwd` 声明为源工作区；三个操作注册为 `managementMethods` 的 `worktree` 命名空间，不服务配对设备 | 客户端只在宣告存在时发送；失败不留半成品，重试创建新的 `<task-id>` |
+| Agents | 现有 `cwd` 只能指向已存在目录，不能把创建目录和创建 Session 合成一次请求 | `session.create` 与 `sessions.launch` 共用可选 `worktree`、嵌套回复、创建关联与失败清除；launch 保持既有策略上限与非交互语义 | 入口只校验格式与权限；Git、失败清除由 ManagedWorktrees 执行，创建失败时入口调用它清除 |
+| App Server 协议 | 客户端各自 `git worktree add` 会重新引入路径分歧；新成员会被旧 daemon 当作未知字段拒绝 | `hello.features` 宣告 `session.create.worktree` 与 `sessions.launch.worktree`（仅在产品 home 与原生存储都存在时宣告）、`worktree.list`、`worktree.remove`、`worktree.prune`；`cwd` 声明为源工作区；三个操作注册为 `managementMethods` 的 `worktree` 命名空间，不服务配对设备 | 客户端只在宣告存在时发送；失败不留半成品，重试创建新的 `<task-id>` |
 | CLI 与 Desktop | 没有可调用的创建入口，只能让模型跑 Git | 各自的入口与展示（`--worktree`、`dimcode worktree ...`；TUI 的 `/worktree` 面板留待后续），只消费类型化结果与拒绝原因 | 由各自 owner 更新 cli-commands.md 与 clients.md；不拼路径、不读存储、不直接调用 Git |
 | ManagedWorktrees（本部件） | 现有 `Worktrees` 只做 Session 内识别，没有 Process 级根与创建/清理 | Process 部件：根与命名、Git 调用、创建与失败清除、list/remove/prune 的选择、复核与锁的编排 | 不持有 Session 或分支状态；只在用户命令或 Session 创建时动作 |
 

@@ -182,6 +182,7 @@ async fn launch(index: &Arc<AgentIndex>, agent: Option<String>, cwd: &Path) -> S
             starter: None,
             origin: None,
             title: None,
+            worktree: None,
         })
         .await
         .unwrap()

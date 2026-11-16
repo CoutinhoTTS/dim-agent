@@ -100,7 +100,7 @@ pub enum WorktreeError {
 }
 
 impl WorktreeError {
-    fn code(&self) -> &'static str {
+    pub(crate) fn code(&self) -> &'static str {
         match self {
             Self::Unavailable(_) => "worktree_unavailable",
             Self::Invalid(_) => "worktree_invalid",
@@ -112,7 +112,7 @@ impl WorktreeError {
             Self::Interrupted(_) => "worktree_interrupted",
         }
     }
-    fn message(&self) -> &str {
+    pub(crate) fn message(&self) -> &str {
         match self {
             Self::Unavailable(message)
             | Self::Invalid(message)
@@ -267,14 +267,16 @@ impl ManagedWorktrees {
             let root_dir = match canonical(directory.clone()).await {
                 Ok(root_dir) => root_dir,
                 Err(error) => {
-                    self.rollback_add(&top, &directory, &branch_name).await;
+                    self.rollback_add(&repository, &directory, &branch_name)
+                        .await;
                     return Err(error);
                 }
             };
             let subtree = match checked_subtree(&root_dir, &relative).await {
                 Ok(subtree) => subtree,
                 Err(error) => {
-                    self.rollback_add(&top, &root_dir, &branch_name).await;
+                    self.rollback_add(&repository, &root_dir, &branch_name)
+                        .await;
                     return Err(error);
                 }
             };
@@ -294,31 +296,53 @@ impl ManagedWorktrees {
         Err(last.unwrap_or_else(|| WorktreeError::Invalid("no task id was free".into())))
     }
 
-    /// Removes a worktree this call just added, without `--force` and with a
-    /// token that cannot be cancelled; the branch goes only after Git accepted
-    /// the removal. Content that appeared since the checkout keeps both.
-    async fn rollback_add(&self, top: &Path, root: &Path, branch: &str) {
-        let Some(text) = root.to_str() else {
-            return;
+    /// Removes a worktree this call just added under the store's ownership
+    /// exclusion, without `--force` and with a token that cannot be cancelled.
+    /// The branch goes only after Git accepted the removal. A Session or
+    /// content that appeared since the checkout keeps both.
+    async fn rollback_add(&self, repository: &Path, root: &Path, branch: &str) {
+        let directory = WorktreeDirectory {
+            repository: repository.to_owned(),
+            root: root.to_owned(),
         };
-        let cancel = CancellationToken::new();
-        let removed = self
-            .git(top, &["worktree", "remove", text], &cancel)
-            .await
-            .is_ok();
-        if !removed {
-            return;
-        }
-        let _ = tokio::fs::remove_dir_all(root).await;
-        if let Some(parent) = root.parent() {
-            let _ = tokio::fs::remove_dir(parent).await;
-        }
-        let _ = self.git(top, &["branch", "-D", branch], &cancel).await;
+        let repository = directory.repository.clone();
+        let branch = branch.to_owned();
+        let _ = self
+            .sessions
+            .remove_worktree(directory, move |root| {
+                Box::pin(async move {
+                    let text = root.to_str().ok_or_else(|| {
+                        AgentError::InvalidInput("the worktree path is not UTF-8".into())
+                    })?;
+                    let cancel = CancellationToken::new();
+                    git(
+                        &repository,
+                        &["worktree", "remove", text],
+                        &cancel,
+                        GIT_WRITE_TIMEOUT,
+                    )
+                    .await
+                    .map_err(|error| AgentError::Storage(error.message().to_owned()))?;
+                    if let Some(parent) = root.parent() {
+                        let _ = tokio::fs::remove_dir(parent).await;
+                    }
+                    let _ = git(
+                        &repository,
+                        &["branch", "-D", &branch],
+                        &cancel,
+                        GIT_WRITE_TIMEOUT,
+                    )
+                    .await;
+                    Ok(())
+                })
+            })
+            .await;
     }
 
     /// Removes what a failed creation made: the worktree and the branch this
     /// call created. A failure leaves both for the operator, reported by the
-    /// caller; a retry never reuses the task id.
+    /// caller; a retry never reuses the task id. A Session using the root or
+    /// a subtree prevents removal under the store's ownership exclusion.
     pub async fn discard(&self, created: &CreatedWorktree, _cancel: &CancellationToken) {
         self.rollback_add(
             &created.prepared.directory.repository,

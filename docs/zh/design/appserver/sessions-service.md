@@ -120,9 +120,12 @@ spike 改变了三处设计：服务由谁提供（第 5 条）、生命周期�
   "policy?": { /* PermissionPolicy */ },
   "starter?": { "sessionId": "string", "branchId": "string" },
   "origin?": "automation",                             // 缺省：调用方自己的工作，`internal`
-  "title?": "string" }                                  // 缺省：无；由 SessionTitle 写入
+  "title?": "string",                                  // 缺省：无；由 SessionTitle 写入
+  "worktree?": { "base?": "string", "branch?": "string" } }
 // 回复
-{ "sessionId": "string", "policy": { /* 生效的 PermissionPolicy */ } }
+{ "sessionId": "string", "policy": { /* 生效的 PermissionPolicy */ },
+  "worktree?": { "taskId": "string", "root": "string", "cwd": "string",
+                 "repository": "string", "base": "string", "branch": "string" } }
 ```
 
 **策略。** 启动方的当前策略是启动方分支的 `PermissionState`：Permission 已分发的状态，由 Session 配置的策略加上该分支及其祖先上的 `permission/changed` 事实折叠而成。Agents 在持有启动方租约时读取一次。
@@ -153,7 +156,7 @@ spike 改变了三处设计：服务由谁提供（第 5 条）、生命周期�
 | --- | --- |
 | Agent | `agent`，否则为默认 Agent。未知 id 以 `agent_unknown` 失败 |
 | 系统提示词、工具 | Agent profile 覆盖宿主 Session 默认值（`session_config`），与不带覆盖的 `session.create` 相同 |
-| `cwd` | 绝对路径、UTF-8、规范化：沿用 `session.create` 的规则，作为同一个检查共用 |
+| `cwd` | 绝对路径、UTF-8、规范化：沿用 `session.create` 的规则，作为同一个检查共用。带 `worktree` 时这是源工作区，保存的 Session cwd 是新 worktree 内的映射子树 |
 | `model` | 请求的 `model`，否则为 profile 的模型。有模型选择宿主时（产品配置），经 Agents 每次调用查找的宿主（`AgentIndex::model_selection`）解析，与 Collaboration 成员相同；宿主未激活时为 `reloading`。否则用这两个 id 替换默认值 |
 | `permissionPolicy` | 生效策略 |
 | `interactive` | `false` |
@@ -163,7 +166,9 @@ spike 改变了三处设计：服务由谁提供（第 5 条）、生命周期�
 | 协议版本 | `PROTOCOL_VERSION`（3）：写入记录，并在创建后用 `insert_version` 登记，与 `session.create` 和 Collaboration 相同。Rpc 只在版本已登记后才服务已装载的 Session，当前客户端也才能列出它。创建与登记在同一个任务中进行，即使调用方不再等待，两者也一起完成 |
 | 记录 | 预备创建（`AgentIndex::create_session`）：先项目授权，再写拥有者记录，与 `session.create` 相同 |
 
-错误：`rejected`（结构、`cwd`、`policy` 中的空工具名、`automation` 以外的 `origin`、不是字符串的 `title`）、`agent_unknown`、`session_closed` 或 `branch_missing`（启动方）、`reloading`（启动方的 Permission 重载期间也是）、`failed`（模型解析、项目授权、存储、已存储但不可用的 Agent、无法恢复的启动方、Session 构建）。
+**托管 worktree。** 可选 `worktree` 请求与回复复用 `session.create` 的所有者类型及创建、关联、失败清除路径；语义见[托管 Worktree §3](../../../design/worktree-management.md#3-创建)。调用方只在 `hello.features` 宣告 `sessions.launch.worktree` 时发送（要求原生存储与产品 home）。不传时创建与回复不变。Git 创建在已接管的自持创建任务内开始，丢弃调用结果不能留下失去所有者的半成品。Session 创建失败后，由所有者以未取消且不强制的清理路径处理；无法安全移除的残留仍可由 `worktree.list` 查看。既有策略上限、origin 和非交互语义不变。
+
+错误：`rejected`（结构、`cwd`、`policy` 中的空工具名、`automation` 以外的 `origin`、不是字符串的 `title`）、`agent_unknown`、`session_closed` 或 `branch_missing`（启动方）、`reloading`（启动方的 Permission 重载期间也是）、`failed`（模型解析、项目授权、存储、已存储但不可用的 Agent、无法恢复的启动方、Session 构建或托管 worktree 创建）。托管 worktree 错误的信息保留所有者的 `worktree_*` 代号；清理不替换原始错误。
 
 启动不是幂等的。回复丢失时，可能留下一个没有调用方知道的空 Session。它是非交互的，并像其他 Session 一样被列出：`session.summaries` 列出它，`session.catalog` 在它创建时所属类别的过滤器下也列出它。不为这种无害情况增加启动查找。
 

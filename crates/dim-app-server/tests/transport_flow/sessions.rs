@@ -15,6 +15,9 @@ use std::sync::OnceLock;
 #[path = "workflow_reports.rs"]
 mod workflow_reports;
 
+#[path = "sessions_launch_worktree.rs"]
+mod managed_launch;
+
 #[path = "idle_unload.rs"]
 pub(super) mod idle_unload;
 
@@ -184,6 +187,7 @@ struct Setup {
     loads: Option<idle_unload::Loads>,
     /// The model instead of the echo model.
     model: Option<Arc<dyn dim_agent_capabilities::host::ModelDriver>>,
+    creation: Option<managed_launch::CreationControl>,
 }
 pub(super) async fn serve_sessions(database: Option<std::path::PathBuf>) -> Served {
     serve_with(Setup {
@@ -273,6 +277,9 @@ async fn serve_with(setup: Setup) -> Served {
         }),
     );
     sessions.install(&mut builder);
+    if let Some(creation) = setup.creation {
+        creation.install(&mut builder);
+    }
     if let Some(loads) = setup.loads {
         loads.install(&mut builder);
     }

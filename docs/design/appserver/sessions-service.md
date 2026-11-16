@@ -164,9 +164,12 @@ are the contract's ([A.1](../contracts/session-access.md#a1-the-sessions-service
   "policy?": { /* PermissionPolicy */ },
   "starter?": { "sessionId": "string", "branchId": "string" },
   "origin?": "automation",                             // absent: the caller's own work, `internal`
-  "title?": "string" }                                  // absent: none; SessionTitle writes it
+  "title?": "string",                                  // absent: none; SessionTitle writes it
+  "worktree?": { "base?": "string", "branch?": "string" } }
 // reply
-{ "sessionId": "string", "policy": { /* the effective PermissionPolicy */ } }
+{ "sessionId": "string", "policy": { /* the effective PermissionPolicy */ },
+  "worktree?": { "taskId": "string", "root": "string", "cwd": "string",
+                 "repository": "string", "base": "string", "branch": "string" } }
 ```
 
 **Policy.** The starter's current policy is the `PermissionState` of the starter's branch: Permission's dispatched
@@ -204,7 +207,7 @@ side's preset.
 | --- | --- |
 | Agent | `agent`, else the default Agent. An unknown id fails `agent_unknown` |
 | System prompt, tools | The Agent profile over the host Session defaults (`session_config`), as `session.create` without overrides |
-| `cwd` | Absolute, UTF-8 and canonicalized: the rule `session.create` applies, shared as one check |
+| `cwd` | Absolute, UTF-8 and canonicalized: the rule `session.create` applies, shared as one check. With `worktree`, this is the source workspace; the stored Session cwd is its mapped subtree in the new worktree |
 | `model` | The request's `model`, else the profile's. With a model-selection host (the product profile), it is resolved through the host Agents looks up on each call (`AgentIndex::model_selection`), as for Collaboration members; with none active, `reloading`. Otherwise the ids replace the defaults |
 | `permissionPolicy` | The effective policy |
 | `interactive` | `false` |
@@ -214,10 +217,12 @@ side's preset.
 | Protocol version | `PROTOCOL_VERSION` (3): written to the record, and registered with `insert_version` after creation, as `session.create` and Collaboration do. Rpc serves a loaded Session only once its version is registered, and current clients list it. Creation and registration run in one task, so they finish together even if the caller stops waiting |
 | Record | Prepared creation (`AgentIndex::create_session`): project authorization, then the owned record, as for `session.create` |
 
+**Managed worktree.** The optional `worktree` request and reply use the same owner types and creation/association/rollback path as `session.create`; their meaning belongs to [managed worktrees §3](../worktree-management.md#3-创建). Callers send the member only when `hello.features` advertises `sessions.launch.worktree` (native store and product home required). Without it, creation and the reply are unchanged. Git creation starts inside the owned creation task, so dropping the caller's result cannot abandon a half-created worktree. A failed Session creation invokes the owner's uncancelled, non-forcing cleanup and leaves unsafe-to-remove residue visible to `worktree.list`. Launch's existing policy cap, origin and non-interactive behavior are unchanged.
+
 Errors: `rejected` (shape, `cwd`, empty tool names in `policy`, an `origin` other than `automation`, a `title` that
 is not a string), `agent_unknown`, `session_closed` or `branch_missing` (the starter), `reloading` (also while the
 starter's Permission reloads), `failed` (model resolution, project authorization, storage, an unavailable stored
-Agent, a starter that cannot be restored, Session build).
+Agent, a starter that cannot be restored, Session build, or managed-worktree creation). A managed-worktree failure includes the owner's `worktree_*` code in its message; cleanup never replaces the original failure.
 
 A launch is not idempotent. If the reply is lost, the result can be an empty Session that no caller knows about. It
 is non-interactive and listed like any other Session — by `session.summaries`, and by `session.catalog` under the
