@@ -131,7 +131,23 @@ history, without a preview line limit or an omitted-prefix marker. Only the
 unfinished wrapping tail remains live. A streamed thought has a fixed `Thought`
 heading and appends its duration below the body on completion; it never prints
 the body again to replace the heading. Collapsed thinking remains a single-row
-summary. Fullscreen and the line side panel retain their existing previews.
+excerpt. It uses only visible provider reasoning in its original language,
+not a generated summary. New complete sentences or nonempty hard lines replace
+the excerpt; an unfinished suffix keeps the previous complete unit. Before any
+complete unit exists, show a marked, bounded prefix instead of a sliding tail.
+Content refreshes coalesce over 500ms; completion and phase changes are immediate.
+No visible reasoning adds no invented excerpt. Rendering uses terminal cells
+and whole graphemes, omitting the excerpt before squeezing out the status label.
+Selection is maintained incrementally from incoming text with bounded fragments,
+not by rescanning the full thinking text on animation frames. It adds no model
+request, RPC, Timeline fact or persisted setting. See the
+[thinking display design](tui-thinking-excerpts.md) for selection and cost bounds.
+
+Fullscreen and the line side panel retain their existing expanded previews.
+Their expanded and collapsed thought titles share the same gutter and label
+column; the body bar occupies that gutter, not an extra indentation layer.
+Fullscreen mouse gestures, including thought-body collapse and selection
+priority, follow the [CLI interaction contract](../../crates/dim-cli/README.md).
 
 ## Command menu
 
