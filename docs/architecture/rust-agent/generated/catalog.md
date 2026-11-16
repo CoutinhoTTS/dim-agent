@@ -29,7 +29,6 @@ Each catalog name a part of the assembly provides or injects. `data` means share
 | `hostPlatform` | process | HostPlatform | internal(object) | — |
 | `listenAddresses` | process | Transport | data | `read` async |
 | `loader` | process | rutis-loader | internal(owner-api) | — |
-| `loaderService` | process | rutis-loader | shared-no-dispatcher | — |
 | `localId` | process | root | data | `get` sync |
 | `loops` | process | Scheduler | data | `list` async, `next` async, `start` async, `stop` async |
 | `managedSearch` | process | ManagedProviders | data | `search` async |
@@ -38,14 +37,12 @@ Each catalog name a part of the assembly provides or injects. `data` means share
 | `mcpAuth` | process | Mcp | internal(secret) | — |
 | `mcpService` | process | Mcp | internal(host-resource) | — |
 | `mentionIndex` | process | WorkspaceToolsOwner | internal(host-resource) | — |
-| `modalityConnectionHost` | process | Provider | internal(legacy-no-consumer) | — |
 | `modelHost` | process | Aimux | internal(owner-api) | — |
 | `modelSelectionHost` | process | Provider | data | `resolve` async |
 | `openAICodexOAuthService` | process | OpenAICodexOAuth | internal(secret) | — |
 | `partRegistry` | process | PartRegistry | data | `registerDefinition` async |
 | `pluginFileTransactions` | process | PluginFiles | internal(host-resource) | — |
 | `pluginFiles` | process | PluginFiles | data | `open` async |
-| `pluginMounter` | process | rutis-loader | shared-no-dispatcher | — |
 | `processActivity` | process | ServerControl | data | `hold` async, `release` async |
 | `promptSuggestionSettingsHost` | process | PromptSuggestionSettings | data | `read` async |
 | `providerConnectionResolver` | process | Provider | internal(host-resource) | — |
@@ -104,7 +101,7 @@ Each catalog name a part of the assembly provides or injects. `data` means share
 | `timelineTreeControl` | session | TimelineTree | internal(owner-api) | — |
 | `toolHost` | session | WorkspaceTools | data | `execute` async |
 | `toolRegistry` | session | ToolRegistry | data | `register` async |
-| `toolSourcesView` | session | ToolRegistry | internal(owner-api) | — |
+| `toolSourcesView` | session | ToolRegistry | data | `get` sync, `observe` async |
 | `treeCommands` | session | TimelineTree | data | `create` async, `end` async, `info` async, `input` async, `list` async, `page` async, `query` async |
 | `uiResources` | session | UiResources | data | `publishFile` async, `withdraw` async |
 | `agentLoop` | branch | Loop | internal(hot-path) | — |
