@@ -450,7 +450,7 @@ moves the Git probe away from the Session that has to persist the result.
 | --- | --- |
 | Git probe, repository identity, fixed-prefix mapping, root directory identity | `fsHost.resolve`, on the node holding the files |
 | Session view: confirmed roots with their identities, in-flight recognitions, "already known" answers, branch-independent cache | the file facts Session part — ADR 014's `fileAccessFacts` service — on the control node (worktree access §3) |
-| Worktree directory record and Session usage association, deduplicated and written atomically | the `store` face's `associateWorktree` operation, provided by SessionStore (worktree access §4, R2) |
+| Worktree directory record and Session usage association, deduplicated and written atomically | `worktreeAssociations.associate`, provided by SessionStore (worktree access §4, R2) |
 | Publishing the expanded range, and its revalidation | the Session part, after the store acknowledges (§4.2.2) |
 | Admission, asks, presets | `Permission` and `Approval`, on the control side, unchanged |
 
@@ -460,7 +460,7 @@ The order is fixed, and the Session part is the only participant that both waits
    `recognize` only when its own view does not already cover the path.
 2. The node answers the resolution, the node facts, and either a `worktree` candidate or a
    `discoveryError`.
-3. A candidate goes to `store.associateWorktree {sessionId, repository, root, subtree}`. That
+3. A candidate goes to `worktreeAssociations.associate {sessionId, repository, root, subtree}`. That
    operation writes the directory record and the usage association together and answers `{}` only
    after both commit, deduplicated by repository and root and by Session and directory. A failed
    write is a `discoveryError` for the caller: the range is not published, and the user can still
@@ -479,16 +479,16 @@ and the node cannot expand a Session's range on its own.
 Session close releases the view; restore and reload start from an empty view and re-verify; fork
 copies neither the view nor the associations. Session deletion releases the associations inside
 its own delete transaction and keeps the directory records. The persisted records are read only
-through `associateWorktree` and the store's own Session deletion step, never by reading tables: no
-other part queries them for admission.
+through `worktreeAssociations.associate` and the store's own Session deletion step, never by reading
+tables: no other part queries them for admission.
 
 #### 4.2.2 Revalidation before publication
 
 The candidate is a filesystem observation made before a storage wait. It must still be true when
 it is published, or it must not be published:
 
-1. After `associateWorktree` returns, the Session part checks its own lifecycle: a Session that is
-   closing, deleted or between generations publishes nothing and answers the call with its normal
+1. After `worktreeAssociations.associate` returns, the Session part checks its own lifecycle: a Session
+   that is closing, deleted or between generations publishes nothing and answers the call with its normal
    closing or cancelled outcome. A committed association stays; only publication stops.
 2. It revalidates the candidate with a second `resolve` — `recognize: false`, so no Git probe and
    no new grant — passing the candidate's `{root, subtree, rootIdentity}` in `roots` and the target
@@ -606,7 +606,8 @@ the split follows §9(6), without changing Session placement or the storage engi
 | --- | --- |
 | Timeline (`timelineStore`) | `createSession`, `sessionConfig`, `releaseSession`, `rollbackSession`, `append` (sync), `head`, `branches`, `readPage`, `readSegments`, `query`, `trace`, `batchEnd`, `batchEndAt`, `saveSnapshot`, `latestSnapshot` |
 | Timeline completion (`timelineStore`) | `commits`, `closeCommits`; notifications `{subscriptionId, batchId, branchId, through, result}` |
-| Session rows (`store`) | `createSession`, `sessionConfig`, `releaseSession`, `rollbackSession`, `associateWorktree`, the row-set operations for sessions, owners, branches, content, snapshots, grants, metadata, settings, providers, agents and Session-file rows, and `fork` and `delete` |
+| Session rows (`store`) | The repository operations listed in §5.2 |
+| Worktree association (`worktreeAssociations`) | `associate`; [service faces](service-faces.md) §4.8 |
 
 ### 5.1 Ordered admission and durable completion
 
@@ -786,8 +787,8 @@ boundary serializes paths as data. The existing asynchronous removal callback ke
 original path argument and ownership exclusion.
 
 
-- `associateWorktree {sessionId, repository, root, subtree}` writes the worktree directory record
-  and the Session usage association as one commit and answers `{}` after it, so the reply is the
+- `worktreeAssociations.associate {sessionId, repository, root, subtree}` writes the worktree directory
+  record and the Session usage association as one commit and answers `{}` after it, so the reply is the
   acknowledgement the file facts owner waits for before publishing a confirmed root (§4.2.1). Its
   deduplication, its place in Session deletion and its format decision belong to
   [worktree access §4](worktree-access.md#4-持久使用关联与清理边界) and the storage owner; the
@@ -841,7 +842,7 @@ The owners that read node files or start node processes, and the operations they
 | UI extension resources | `stat`, `openRead`, `readAt`, `closeRead` |
 | Migration ledger and snapshots | `createDirectory`, `list`, `remove` |
 | Hooks configuration commands | `execHost.configured` |
-| Worktree association | `store.associateWorktree` |
+| Worktree association | `worktreeAssociations.associate` |
 
 ## 7. Rule check
 
