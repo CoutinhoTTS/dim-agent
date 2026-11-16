@@ -415,7 +415,8 @@ Plugin documents are kept in the Settings source `hooks-plugins`, one `{dir, hoo
 ### A.2.1 Plugin content data face
 
 `hooksService` is the process data face for the existing plugin-content operations.
-It is separate from the local client management entry in A.7.
+It is separate from the local client management entry in A.7. Each operation accepts exactly
+one JSON object; positional arrays and scalar requests are invalid.
 
 | Operation | Request | Reply |
 | --- | --- | --- |

@@ -415,6 +415,7 @@ AcpGateway 自己的设计把 Hooks 对 `session.submit` 的 `input_blocked` 拒
 ### A.2.1 插件内容数据面
 
 `hooksService` 是现有插件内容操作的进程数据面，与 A.7 的本地客户端管理入口分开。
+每个操作只接受一个 JSON 对象；位置参数数组和标量请求无效。
 
 | 操作 | 请求 | 回复 |
 | --- | --- | --- |

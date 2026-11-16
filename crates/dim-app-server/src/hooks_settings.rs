@@ -459,7 +459,11 @@ fn face_request<T: serde::de::DeserializeOwned>(
     let [value] = args.as_slice() else {
         return Err(invalid());
     };
-    serde_json::from_value(value.clone().json().map_err(|_| invalid())?).map_err(|_| invalid())
+    let value = value.clone().json().map_err(|_| invalid())?;
+    if !value.is_object() {
+        return Err(invalid());
+    }
+    serde_json::from_value(value).map_err(|_| invalid())
 }
 
 fn face_reply<T: Serialize>(result: crate::settings::Result<T>) -> rutis_bridge::session::Reply {

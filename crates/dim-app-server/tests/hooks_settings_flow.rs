@@ -503,6 +503,13 @@ async fn plugin_documents_are_registered_listed_and_kept_by_their_owner() {
         Some("invalid_request")
     );
 
+    for request in [json!([]), json!(null), json!(["kit"])] {
+        assert_eq!(
+            fixture.face("plugins", request).await.unwrap_err().code(),
+            Some("invalid_request")
+        );
+    }
+
     assert_eq!(service.plugins(&fixture.cancel).await.unwrap(), ["kit"]);
 
     // A second registration replaces the first, and withdrawal removes it.

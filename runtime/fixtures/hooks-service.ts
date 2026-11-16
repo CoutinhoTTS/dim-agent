@@ -16,9 +16,11 @@ export default definePlugin({
         if (call.method === 'hooksprobe.register') {
           const params = call.params
           if (params === null || typeof params !== 'object' || Array.isArray(params) || typeof params.dir !== 'string' || params.document === undefined) throw new Error('expected dir and document')
-          await hooks.register({ plugin: 'foreign-kit', dir: params.dir, document: params.document })
+          const reply = await hooks.register({ plugin: 'foreign-kit', dir: params.dir, document: params.document })
+          if (reply !== null) throw new Error('register must return null')
         } else if (call.method === 'hooksprobe.withdraw') {
-          await hooks.withdraw({ plugin: 'foreign-kit' })
+          const reply = await hooks.withdraw({ plugin: 'foreign-kit' })
+          if (reply !== null) throw new Error('withdraw must return null')
         }
         return { kind: 'value', value: { plugins: await hooks.plugins({}), refusal: hooks.refusal({ plugin: 'foreign-kit' }) } }
       },
