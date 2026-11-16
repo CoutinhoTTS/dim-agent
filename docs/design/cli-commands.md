@@ -199,14 +199,15 @@ The draft draws a reference the palette filled by the Skill's name, so a chosen
 Only a filled reference is a named unit; text the operator typed is drawn as typed,
 so no character of the operator's own words ever reads as something else and a
 half-typed or malformed reference stays visible. The draft's text is still
-`/skill:<name> `: that is what it submits, what the input history keeps and what a
-selection copies, so a Skill loads from the same message either way and pasting a
-copied reference back loads the same Skill. The cursor steps over the reference as
-one unit, a delete takes it whole, and the input wraps by the name it draws. A Skill
+`/skill:<name> `: that is what it submits and what the input history keeps. Native
+terminal selection copies the displayed `/status`; pasting that label does not
+restore a Skill reference. Choose the Skill again or paste its canonical token.
+The cursor steps over the reference as one unit, a delete takes it whole, and the
+input wraps by the name it draws. A Skill
 whose name is also a command the input dispatches keeps the canonical token
 (`/skill:models`, not `/models`), because the plain name would read as that command
 while the draft is still a message. The menu's rows read `/skill:<name>` in both
-modes: a row states the token it fills, and the draft states what is sent.
+modes: a row states the token it fills; the transcript keeps the submitted token.
 
 The menu fits the available terminal columns and rows in both modes. Command
 names take priority over descriptions and shortcut labels. A shortcut that

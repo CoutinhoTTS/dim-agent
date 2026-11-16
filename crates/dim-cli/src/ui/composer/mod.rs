@@ -622,7 +622,7 @@ impl Composer {
     /// Fills a Skill's reference as one element: the draft holds
     /// `/skill:<name> ` and draws the Skill's name, so the operator reads the
     /// reference they chose rather than the parser's namespace. The element is
-    /// what keeps the two apart — its buffer text is submitted and copied, its
+    /// what keeps the two apart: its buffer text is submitted, its
     /// display line is painted, and cursor, wrap and delete stay atomic over it.
     fn fill_skill(&mut self, name: &str) {
         self.clear();
@@ -2634,11 +2634,8 @@ mod tests {
         );
     }
 
-    /// The reference the draft draws is one element: a backspace deletes the
-    /// whole of it, the cursor steps over it in one move, and a copy takes the
-    /// canonical text rather than the drawn name.
     #[test]
-    fn a_filled_skill_edits_and_copies_as_one_token() {
+    fn a_filled_skill_deletes_as_one_token() {
         let mut c = Composer::new(Vec::new());
         c.set_skills(vec![palette::Skill {
             name: "status".into(),
