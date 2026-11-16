@@ -145,12 +145,15 @@ impl HostDispatch for SessionStore {
     fn invoke(&self, method: &str, args: Value) -> Reply {
         if method == "removeWorktree" {
             let mut args = args.list()?.into_iter();
-            let directory: Directory = serde_json::from_value(
-                args.next()
-                    .ok_or_else(|| Error::Value("missing directory".into()))?
-                    .json()?,
-            )
-            .map_err(|error| Error::Value(error.to_string()))?;
+            let directory = args
+                .next()
+                .ok_or_else(|| Error::Value("missing directory".into()))?
+                .json()?;
+            if !directory.is_object() {
+                return Err(Error::Value("store request must be an object".into()));
+            }
+            let directory: Directory = serde_json::from_value(directory)
+                .map_err(|error| Error::Value(error.to_string()))?;
             let remove = args
                 .next()
                 .ok_or_else(|| Error::Value("missing removal callback".into()))?
@@ -201,6 +204,9 @@ impl HostDispatch for SessionStore {
         }
         let [request]: [serde_json::Value; 1] = serde_json::from_value(args.json()?)
             .map_err(|error| Error::Value(error.to_string()))?;
+        if !request.is_object() {
+            return Err(Error::Value("store request must be an object".into()));
+        }
         if method == "catalog" {
             let p: Catalog =
                 serde_json::from_value(request).map_err(|error| Error::Value(error.to_string()))?;
