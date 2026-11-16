@@ -10190,7 +10190,7 @@ mod tests {
                 "-m",
                 "Initial",
             ]);
-            crate::ui::tilde(&path.to_string_lossy())
+            path.to_string_lossy().into_owned()
         };
 
         let theme = test_theme();
@@ -10244,13 +10244,21 @@ mod tests {
 
         // A branch wider than the path, so the path-alone rung is reachable:
         // it takes over once the tail beside the branch would be too short.
-        let path = root.path().join("checkout").to_string_lossy().into_owned();
-        let branch = format!("team/{}", "x".repeat(width_of(&crate::ui::tilde(&path))));
+        let checkout = root.path().join("checkout").to_string_lossy().into_owned();
+        let branch = format!(
+            "team/{}",
+            "x".repeat(width_of(&crate::ui::tilde(&checkout)))
+        );
+        // The attach carries the directory a daemon answers with. The border
+        // draws it through `tilde`, which shortens the temp root wherever the
+        // fixture lives below the home, so the label compares against the
+        // drawn form while the attach keeps the real path.
         let path = repository("checkout", &branch);
+        let shown = crate::ui::tilde(&path);
         let suffix = format!(" ({branch})");
-        let whole = format!("{path}{suffix}");
+        let whole = format!("{shown}{suffix}");
         assert!(
-            width_of(&suffix) + TAIL > width_of(&path),
+            width_of(&suffix) + TAIL > width_of(&shown),
             "this repository shows the path-alone rung"
         );
         attach(&mut app, "s-a", &path);
@@ -10275,13 +10283,13 @@ mod tests {
         );
         // The path alone, whole at its own width, then cut from the front.
         assert_eq!(
-            label(&mut app, width_of(&path)),
-            path,
+            label(&mut app, width_of(&shown)),
+            shown,
             "the whole path stays when the branch gives way"
         );
-        let cut = label(&mut app, width_of(&path) - 1);
+        let cut = label(&mut app, width_of(&shown) - 1);
         assert!(
-            cut.starts_with('…') && cut != path,
+            cut.starts_with('…') && cut != shown,
             "the path is cut: {cut:?}"
         );
         // No form fits: with a cell left the label is the cut mark alone,
