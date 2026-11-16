@@ -955,6 +955,7 @@ Remove 先在提示栏询问，`Remove deny prefix git push? Enter confirm · Es
 | `/export markdown PATH` 或 `/export json PATH` | 交互客户端空闲时把当前主分支导出到文件。 |
 | `dimcode export SESSION_ID [--output PATH] [--database PATH]` | 不经守护进程，把 Session 的完整 Timeline 写成带版本的 JSONL（[Timeline 导出](appserver/timeline-export.md)）；未给输出路径时写到 stdout。 |
 | `dimcode daemon vacuum [--database PATH]` | 用 SQLite `VACUUM` 重写离线原生库，回收已删除 Session 留下的页，并打印操作前后的大小（[存储格式](appserver/native-storage-format.md#sqlite-运行参数与空间回收)）；守护进程持库时失败，也不创建或升级库。 |
+| `dimcode --migrate-prompt-references --database PATH --session ID --branch NAME` | 离线写出守卫的显式迁移提示所要求的已保存引用结果，并打印写入结果（[显式旧引用迁移](../../design/prompt-state-read.md#显式旧引用迁移入口)）；它必须是第一个参数，拒绝不存在的库、被守护进程持有的库和不在当前格式的库，从不创建或升级库，重复运行不写入任何内容并报告 `written: false`。 |
 | `dimcode skills list` | 经 `skills.catalog` 列出工作区的 Skills：每个条目的名称、来源、状态、文件与描述，然后是目录的 issues。 |
 | `dimcode skills enable\|disable ID` | 经 `skills.set_enabled` 启用或停用单个 Skill，然后再次报告目录。 |
 | `dimcode skills reload` | 经 `skills.refresh` 重新扫描用户与项目根，并通过 [Skills 管理界面](#管理界面)报告结果。 |
