@@ -201,6 +201,11 @@ pub fn product_session_defaults(defaults: &mut dim_agent_runtime::SessionConfig)
     defaults.permission_policy.preset = dim_agent_types::PermissionPreset::WorkspaceWrite;
 }
 
+/// How `--migrate-prompt-references` is written, printed both by its own usage
+/// error and by the one a flag in the wrong position reaches.
+const MIGRATE_PROMPT_REFERENCES_USAGE: &str =
+    "--migrate-prompt-references --database PATH --session ID --branch NAME";
+
 /// [`run`] with a managed provider plugin, which an account build's own
 /// executable supplies; it is installed when the server has a product home.
 /// `install` contributes the host's native plugins to the builder before assembly.
@@ -282,7 +287,7 @@ pub fn run_with(
         let mut database = None;
         let mut args = argv.iter().skip(1);
         let usage = || -> Box<dyn std::error::Error> {
-            "Use --migrate-prompt-references --database PATH --session ID --branch NAME".into()
+            format!("Use {MIGRATE_PROMPT_REFERENCES_USAGE}").into()
         };
         while let Some(flag) = args.next() {
             let value = args.next().ok_or_else(usage)?;
@@ -401,6 +406,11 @@ pub fn run_with(
                      dim-app-server --migrate-prompt-references --database PATH --session ID --branch NAME"
                 );
                 return Ok(());
+            }
+            _ if arg == "--migrate-prompt-references" => {
+                return Err(
+                    format!("Use {MIGRATE_PROMPT_REFERENCES_USAGE} as the first argument").into(),
+                );
             }
             _ => return Err(format!("Unknown argument: {arg}").into()),
         }
