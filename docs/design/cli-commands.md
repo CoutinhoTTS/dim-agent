@@ -161,7 +161,7 @@ order, not alphabetically or by recent use. The menu draws no category column:
 /tasks /rename /web /connect /login
 /skills /reload-skills /mcp /plugins /runtime
 /hooks /scheduled /workflow /workflow:save
-/tools /tui /theme /language /keys /report /exit
+/tools /tui /theme /language /keys /update /report /exit
 ```
 
 `/fast` is listed only when the model advertises service tiers.
@@ -2546,6 +2546,19 @@ when it fits.
 | > Close 2/2              |
 | Left/Right Tab Enter Esc |
 +----------- Up/Down 1-2/7-+
+```
+
+`/update` is that command as a client-side report in both terminal UI modes. It
+runs nothing: the update command holds the installation's exclusive lease, and
+the interface itself is a client whose share of that lease it cannot release
+while it serves the operator. So `/update` names the command the dialog would
+name, for a recognised installation, or the [manual and rebuild
+instructions](#update-dialog) for any other layout, and it never consults the
+channel: the automatic startup check keeps owning the dialog and its skip list.
+
+```text
+> /update
+To update, exit every client and stop the server, then run dima update
 ```
 
 ### Coordinated client/server upgrade

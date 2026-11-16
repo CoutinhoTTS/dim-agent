@@ -66,6 +66,8 @@ mod startup;
 mod tasks;
 #[path = "cli_flow/title.rs"]
 mod title;
+#[path = "cli_flow/update_entry.rs"]
+mod update_entry;
 #[path = "cli_flow/windows.rs"]
 mod windows;
 #[path = "cli_flow/workflow.rs"]
