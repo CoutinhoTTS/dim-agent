@@ -530,11 +530,11 @@ test("image submission uploads the File before sending only its durable referenc
   assert.equal(calls[1].params.user.content[1].source.fileId, "image-1")
   assert.equal(calls[1].params.mode, "queue", "a submit with no mode asked for holds the message")
 
-  const restored = { type: "image", source: { type: "file", mediaType: "image/png", fileId: "recalled" } }
+  const restored = { at: 8, image: { type: "image", source: { type: "file", mediaType: "image/png", fileId: "recalled" } } }
   await chat.submit("session", "main", "send now", { images: [], pastes: [], restored: [restored] }, "steer")
   assert.equal(uploads.length, 1, "a recalled image uploads nothing")
   assert.equal(calls[2].params.mode, "steer")
-  assert.deepEqual(calls[2].params.user.content, [{ type: "text", text: "send now" }, restored], "a recalled image keeps its stored file reference")
+  assert.deepEqual(calls[2].params.user.content, [{ type: "text", text: "send now" }, restored.image], "a recalled image keeps its stored file reference and the draft offset it stood at")
 })
 
 test("the /skill: namespace offers Skills, fills the token, and sends it as a message", async (t) => {
@@ -624,11 +624,16 @@ test("the chip layer follows the field's width when the field resizes", async (t
   assert.equal(body.style.transform, "translateY(-12px)", "the scroll path still carries the offset")
 })
 
-/** A held message as `session.input.pending` and `input/message` deliver it. */
-const heldInput = (id, text, images) => ({
-  id, text, skills: [], user: { content: [{ type: "text", text }, ...(images ?? [])] },
-  ...(images === undefined ? {} : { images }),
-})
+/** A stored image as the wire holds it: a reference to a Session file. */
+const storedImage = (fileId) => ({ type: "image", source: { type: "file", mediaType: "image/png", fileId } })
+/**
+ * A held message as `session.input.pending` and `input/message` deliver it: its
+ * own blocks in the order they were written, a string standing for a text run.
+ */
+const heldInput = (id, ...blocks) => {
+  const content = blocks.map((block) => (typeof block === "string" ? { type: "text", text: block } : block))
+  return { id, text: content.flatMap((block) => (block.type === "text" ? [block.text] : [])).join("\n"), skills: [], content, user: { content } }
+}
 
 /**
  * The composer alone, wired to recordings: `sent` takes every submit, `stop`
@@ -742,8 +747,8 @@ test("a message the run already adopted is not recalled or sent again", async (t
 })
 
 test("recalled messages keep their stored images beside the draft's own attachments", async (t) => {
-  const picture = { type: "image", source: { type: "file", mediaType: "image/png", fileId: "stored-1" } }
-  const { field, type, root, sent } = soloComposer(t, { held: [heldInput("first", "look", [picture])] })
+  const picture = storedImage("stored-1")
+  const { field, type, root, sent } = soloComposer(t, { held: [heldInput("first", "look", picture)] })
   const local = new File(["bytes"], "draft.png", { type: "image/png" })
   field.props.onPaste({ clipboardData: { files: [local] }, preventDefault() {} })
   await type("and then")
@@ -752,7 +757,107 @@ test("recalled messages keep their stored images beside the draft's own attachme
   assert.equal(sent.length, 1)
   assert.equal(sent[0].value, "look\nand then")
   assert.deepEqual(sent[0].attachments.images.map((image) => image.name), ["draft.png"], "the draft's own file is still uploaded")
-  assert.deepEqual(sent[0].attachments.restored, [picture], "the recalled message's stored image is sent unchanged")
+  assert.deepEqual(sent[0].attachments.restored, [{ at: 4, image: picture }], "the recalled message's stored image is sent unchanged, where it stood after 'look'")
+})
+
+test("recalled messages keep their images between their own words through stop and the final submit", async (t) => {
+  const before = storedImage("stored-before"), after = storedImage("stored-after")
+  const held = [heldInput("first", "look ", before), heldInput("second", "here ", after, " end")]
+  const { type, root, sent } = soloComposer(t, { held })
+  await type("draft")
+  await click(button(root, "composer.sendNowHint"))
+  await flush()
+  assert.equal(sent.length, 1, "the draft is submitted once")
+  assert.equal(sent[0].value, "look \nhere  end\ndraft", "the recalled words keep queue order, each image between them taking no room in the field")
+  assert.deepEqual(sent[0].attachments.restored.map(({ at, image }) => [at, image.source.fileId]), [[5, "stored-before"], [11, "stored-after"]], "every image keeps the draft offset it stood at")
+})
+
+test("a recalled mixed message reaches session.submit with its images where they stood", async (t) => {
+  setActivePinia(createPinia())
+  const chat = useChatStore()
+  t.after(() => chat.$dispose())
+  const calls = []
+  const connection = { supports: () => false, client: { async call(method, params, read) { calls.push({ method, params }); return read({}) } } }
+  const before = storedImage("stored-before")
+  const held = [heldInput("mixed", "before ", before, " after"), heldInput("second", "next message")]
+  const send = (value, attachments, mode) => chat.submit("session", "main", value, attachments, mode)
+  const { type, root } = soloComposer(t, { held, send }, { connection })
+  await type("draft")
+  await click(button(root, "composer.sendNowHint"))
+  await flush()
+  assert.deepEqual(calls.map((call) => call.method), ["session.submit"], "the stop and the recall reach the session through their own calls")
+  assert.deepEqual(calls[0].params.user.content, [
+    { type: "text", text: "before " },
+    before,
+    { type: "text", text: " after\nnext message\ndraft" },
+  ], "each recalled image stays between the words it stood between, ahead of the next message and the draft")
+})
+
+test("a recalled image keeps the place an edit moved it to after a failed stop", async (t) => {
+  setActivePinia(createPinia())
+  const chat = useChatStore()
+  t.after(() => chat.$dispose())
+  const calls = []
+  const connection = { supports: () => false, client: { async call(method, params, read) { calls.push({ method, params }); return read({}) } } }
+  const picture = storedImage("stored-1")
+  const send = (value, attachments, mode) => chat.submit("session", "main", value, attachments, mode)
+  let stops = 0
+  const stop = async () => {
+    stops++
+    if (stops === 1) throw new Error("the run would not stop")
+  }
+  const { type, root, field } = soloComposer(t, { held: [heldInput("first", "see ", picture, " here")], send, stop }, { connection })
+  await click(button(root, "composer.sendNowHint"))
+  await flush()
+  assert.equal(field.value, "see  here", "the recalled words stay, the image keeping its own offset between them")
+  assert.match(text(root), /composer\.sendNowFailed/, "the failed stop is reported")
+  assert.deepEqual(calls, [], "a stop that fails sends nothing")
+
+  await type("look: see  here")
+  await click(button(root, "composer.sendNowHint"))
+  await flush()
+  assert.equal(stops, 2, "the retry asks for the stop again")
+  assert.deepEqual(calls.map((call) => call.method), ["session.submit"], "the retry sends once")
+  assert.deepEqual(calls[0].params.user.content, [{ type: "text", text: "look: see " }, picture, { type: "text", text: " here" }], "the image moved with the words around it")
+})
+
+test("a recalled image still splits the message when an inserted @ file is linked around it", async (t) => {
+  setActivePinia(createPinia())
+  const chat = useChatStore()
+  t.after(() => chat.$dispose())
+  const calls = []
+  const connection = { supports: () => false, client: { async call(method, params, read) { calls.push({ method, params }); return read({}) } } }
+  const picture = storedImage("stored-1")
+  const send = (value, attachments, mode) => chat.submit("session", "main", value, attachments, mode)
+  let stops = 0
+  const stop = async () => {
+    stops++
+    if (stops === 1) throw new Error("the run would not stop")
+  }
+  const { root, field } = soloComposer(t, { held: [heldInput("first", "see ", picture, " here")], send, stop, searchFiles: async () => [{ relativePath: "report.md", absolutePath: "/repo/report.md", dir: false }] }, { connection })
+  await click(button(root, "composer.sendNowHint"))
+  await flush()
+  assert.deepEqual(calls, [], "the failed stop kept the recalled draft instead of sending it")
+
+  const draft = "see  here @report"
+  field.value = draft
+  field.selectionStart = draft.length
+  field.props["onUpdate:modelValue"](draft)
+  await flush()
+  field.props.onInput()
+  await new Promise((resolve) => setTimeout(resolve, 100))
+  await flush()
+  const candidate = all(root).find((element) => element.props.role === "option" && text(element) === "report.md")
+  assert(candidate)
+  await click(candidate)
+  await flush()
+  assert.equal(field.value, "see  here @report.md ", "the file is inserted with its token")
+
+  await click(button(root, "composer.sendNowHint"))
+  await flush()
+  assert.deepEqual(calls.map((call) => call.method), ["session.submit"], "the retry sends once")
+  assert.deepEqual(calls[0].params.user.content, [{ type: "text", text: "see " }, picture, { type: "text", text: " here [@report.md](/repo/report.md) " }], "the link is the text after the image, which keeps its place between the words")
+  assert.equal(field.value, "", "the line clears once the draft is accepted")
 })
 
 test("Ctrl+Enter while the run is idle submits as Enter does, and a picker keeps it as Enter", async (t) => {

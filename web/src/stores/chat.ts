@@ -691,7 +691,17 @@ export const useChatStore = defineStore("chat", () => {
       const path = readAttachmentPath(uploaded)
       body = `${body}${body === "" ? "" : "\n"}[Pasted text: ${path} (${paste.split("\n").length} lines)]`
     }
-    const images = [...(attachments.restored ?? [])]
+    // Each recalled image keeps the draft offset it stood at; the text around
+    // them is sent as the runs those offsets split it into.
+    const content: Array<Record<string, unknown>> = []
+    let cursor = 0
+    for (const { at, image } of [...(attachments.restored ?? [])].sort((left, right) => left.at - right.at)) {
+      const offset = Math.max(cursor, Math.min(at, text.length))
+      if (offset > cursor) content.push({ type: "text", text: body.slice(cursor, offset) })
+      content.push(image)
+      cursor = offset
+    }
+    if (cursor < body.length) content.push({ type: "text", text: body.slice(cursor) })
     for (const file of attachments.images) {
       let source = uploadedImages.get(file)?.get(sessionId)
       if (source === undefined) {
@@ -706,11 +716,11 @@ export const useChatStore = defineStore("chat", () => {
       }
       progress(100)
       completed++
-      images.push({ type: "image", source })
+      content.push({ type: "image", source })
     }
     const params: Record<string, unknown> = { sessionId, branchId, submissionId: crypto.randomUUID(), mode }
-    if (images.length === 0) params.text = body
-    else params.user = { content: [...(body === "" ? [] : [{ type: "text", text: body }]), ...images] }
+    if (!content.some((block) => block.type === "image")) params.text = body
+    else params.user = { content }
     await client().call("session.submit", params, readAck)
   }
 

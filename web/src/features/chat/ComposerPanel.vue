@@ -2,7 +2,7 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, useId, watch } from "vue"
 import { useRoute, useRouter } from "vue-router"
 import { useI18n } from "vue-i18n"
-import type { DraftAttachments, FileCandidate, ImageBlock, ModelId, PermissionPreset, PermissionPolicy, QueuedInput, SubmitMode, UserInput, WithdrawResult } from "../../rpc/protocol"
+import type { DraftAttachments, FileCandidate, ModelId, PermissionPreset, PermissionPolicy, QueuedInput, RestoredImage, SubmitMode, UserInput, WithdrawResult } from "../../rpc/protocol"
 import { linkMentions, mentionTrigger, type FileMention, type MentionTrigger } from "../../mentions"
 import { SKILL_TOKEN_PREFIX, namesSkillToken, skillCommandQuery, skillSegments, startsWithSkillToken } from "../../skill-token"
 import { useComposerStore } from "../../stores/composer"
@@ -114,8 +114,8 @@ const MAX_PASTE = 10 * 1024 * 1024
 const MAX_IMAGES = 20
 const images = ref<Array<{ id: number; url: string; file: File }>>([])
 const pastes = ref<Array<{ id: number; text: string }>>([])
-/** The stored images a recalled message carried: they already name a file and send unchanged. */
-const restored = ref<ImageBlock[]>([])
+/** The stored images a recalled message carried, each with the draft offset it keeps its place at. */
+const restored = ref<RestoredImage[]>([])
 let attachmentSeq = 0
 const composerSettings = useComposerStore()
 /**
@@ -290,6 +290,30 @@ function removeRestored(index: number): void {
   restored.value = restored.value.filter((_, at) => at !== index)
 }
 
+/** The draft text the restored images' offsets were last measured in. */
+let anchored = ""
+/** True while a recall writes the draft itself, so its own insertions are not read as edits. */
+let recalling = false
+
+/**
+ * An edit around a recalled image moves it with the text it stood between, as a
+ * token does: the edit is the draft's common prefix and suffix, so typing or
+ * deleting shifts the offsets after it and an image inside a replaced run
+ * settles at the run's start.
+ */
+watch(text, (next) => {
+  const previous = anchored
+  anchored = next
+  if (recalling || next === previous || restored.value.length === 0) return
+  let start = 0
+  while (start < next.length && start < previous.length && next[start] === previous[start]) start++
+  let end = 0
+  while (end < next.length - start && end < previous.length - start && next[next.length - 1 - end] === previous[previous.length - 1 - end]) end++
+  const delta = next.length - previous.length
+  const tail = previous.length - end
+  restored.value = restored.value.map(({ at, image }) => ({ at: at <= start ? at : at >= tail ? at + delta : start, image }))
+}, { flush: "sync" })
+
 /** The `@` mention the caret is in, read from the field's own value (the field is the source of truth for the caret). */
 function updateMention(): void {
   const element = field.value
@@ -335,24 +359,52 @@ function acceptCandidate(candidate: FileCandidate): void {
 }
 
 /**
- * Puts a withdrawn message back into the composer: its words ahead of the typed
- * draft and behind the messages recalled before it, then its stored images.
+ * Puts a withdrawn message back into the composer at `at`: its content blocks in
+ * the order the server holds them, behind the messages recalled before it and
+ * ahead of the typed draft, and returns the offset just past what it inserted.
  * The layout is the TUI's `restore_at`: a newline before the message when the
- * draft there does not end a line, and one after it when typed text follows.
- * Returns the offset just past what it inserted.
+ * draft there does not end a line, one between two adjacent text blocks, and one
+ * after the message when typed text follows. The field is plain text, so an
+ * image takes no room in it: the offset recorded for it is where it stood between
+ * the words, and the submit sends it back there.
  */
 function recall(item: QueuedInput, at: number): number {
   if (recalled.value.has(item.id)) return at
   recalled.value = new Set([...recalled.value, item.id])
-  if (item.images !== undefined && item.images.length > 0) restored.value = [...restored.value, ...item.images]
-  if (item.text === "") return at
-  const draft = text.value
-  const position = Math.min(at, draft.length)
-  const lead = position > 0 && !draft.slice(0, position).endsWith("\n") ? "\n" : ""
-  const tail = position < draft.length ? "\n" : ""
-  const insert = `${lead}${item.text}${tail}`
-  text.value = draft.slice(0, position) + insert + draft.slice(position)
-  return position + insert.length
+  const blocks = item.content
+  if (blocks.length === 0) return at
+  recalling = true
+  try {
+    const draft = text.value
+    let cursor = Math.min(at, draft.length)
+    const followed = cursor < draft.length
+    let opened = false
+    const insert = (value: string): void => {
+      text.value = text.value.slice(0, cursor) + value + text.value.slice(cursor)
+      cursor += value.length
+    }
+    let previousText = false
+    for (const block of blocks) {
+      if (!opened) {
+        opened = true
+        if (cursor > 0 && !text.value.slice(0, cursor).endsWith("\n")) insert("\n")
+      } else if (block.type === "text" && previousText) {
+        insert("\n")
+      }
+      if (block.type === "image") {
+        previousText = false
+        restored.value = [...restored.value, { at: cursor, image: block }]
+        continue
+      }
+      insert(block.text)
+      previousText = true
+    }
+    if (followed) insert("\n")
+    return cursor
+  } finally {
+    recalling = false
+    anchored = text.value
+  }
 }
 
 async function submit(sendMode: SubmitMode = primaryMode.value): Promise<void> {
@@ -416,7 +468,20 @@ async function submit(sendMode: SubmitMode = primaryMode.value): Promise<void> {
       const sentImages = images.value
       const sentPastes = pastes.value
       const sentRestored = restored.value
-      await props.send(linkMentions(message, sentMentions), { images: sentImages.map((image) => image.file), pastes: sentPastes.map((paste) => paste.text), ...(sentRestored.length === 0 ? {} : { restored: sentRestored }), onProgress: (percent) => { uploadProgress.value = percent } }, sendMode)
+      // A recalled image keeps the place it held in the draft: each gap around
+      // one is linked on its own, so a link never straddles it and every offset
+      // still lands between the words it held between.
+      const gaps: Array<{ at: number; image: typeof sentRestored[number]["image"] }> = []
+      let body = ""
+      let cursor = 0
+      for (const { at, image } of [...sentRestored].sort((left, right) => left.at - right.at)) {
+        const offset = Math.max(cursor, Math.min(at, message.length))
+        body += linkMentions(message.slice(cursor, offset), sentMentions)
+        gaps.push({ at: body.length, image })
+        cursor = offset
+      }
+      body += linkMentions(message.slice(cursor), sentMentions)
+      await props.send(body, { images: sentImages.map((image) => image.file), pastes: sentPastes.map((paste) => paste.text), ...(gaps.length === 0 ? {} : { restored: gaps }), onProgress: (percent) => { uploadProgress.value = percent } }, sendMode)
       fileMentions.value = fileMentions.value.filter((mention) => !sentMentions.includes(mention))
       sentImages.forEach((image) => URL.revokeObjectURL(image.url))
       images.value = images.value.filter((image) => !sentImages.includes(image))
@@ -623,8 +688,8 @@ defineExpose({ focus: () => field.value?.focus(), quote })
           <img :src="image.url" :alt="t('composer.imageAttachment')" class="draft-thumb">
           <UButton color="neutral" variant="ghost" size="xs" square icon="i-lucide-x" :aria-label="t('composer.removeAttachment')" @click="removeImage(image.id)" />
         </span>
-        <span v-for="(block, index) in restored" :key="block.source.fileId" class="draft-chip">
-          <img v-if="sessionId" :src="`/api/sessions/${encodeURIComponent(sessionId)}/files/${encodeURIComponent(block.source.fileId)}`" :alt="t('composer.imageAttachment')" class="draft-thumb" loading="lazy">
+        <span v-for="(block, index) in restored" :key="index" class="draft-chip">
+          <img v-if="sessionId" :src="`/api/sessions/${encodeURIComponent(sessionId)}/files/${encodeURIComponent(block.image.source.fileId)}`" :alt="t('composer.imageAttachment')" class="draft-thumb" loading="lazy">
           <span v-else>{{ t("composer.imageAttachment") }}</span>
           <UButton color="neutral" variant="ghost" size="xs" square icon="i-lucide-x" :aria-label="t('composer.removeAttachment')" @click="removeRestored(index)" />
         </span>
