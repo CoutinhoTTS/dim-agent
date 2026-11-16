@@ -18,8 +18,7 @@
 //!                                               before it
 //! ```
 //!
-//! The first edge is [`codec::WireEvent::references`], the call a fork already
-//! makes to decide what to copy, so the two cannot drift. Array locators name
+//! The first edge uses `WireEvent::references`, also used by fork. Array locators name
 //! `array-element` rows, a kind no rewrite turns into a node and this module
 //! never removes.
 //!
@@ -54,7 +53,7 @@ const PAGE: usize = 256;
 pub struct Reclaimed {
     /// Content rows removed.
     pub rows: u64,
-    /// The bytes those rows held in their text columns. This is what the store
+    /// The UTF-8 bytes those rows held in their bodies. This is what the store
     /// no longer holds; it is not space returned to the file system. A delete
     /// returns the rows' pages to the store's freelist, and only a `VACUUM`
     /// gives them back, so this count and the database file's size answer
@@ -68,11 +67,14 @@ impl Reclaimed {
     }
 }
 
-/// The Sessions that still hold content rows, so a store with none finishes
-/// without reading anything.
+/// Sessions with stored events or content, including events whose content
+/// rows are all missing and content left by an interrupted Session deletion.
 fn sessions(connection: &Connection) -> Result<Vec<String>> {
     let mut query = connection
-        .prepare("SELECT DISTINCT session_id FROM timeline_content ORDER BY session_id")
+        .prepare(
+            "SELECT session_id FROM timeline_events \
+             UNION SELECT session_id FROM timeline_content ORDER BY session_id",
+        )
         .map_err(error)?;
     query
         .query_map([], |row| row.get::<_, String>(0))
@@ -119,8 +121,8 @@ fn reachable(connection: &Connection, session: &str) -> Result<BTreeSet<String>>
     closure(connection, session, &roots)
 }
 
-/// The roots and every node `parent` they reach, in one statement on the same
-/// edges the fork's copy walks, so the two cannot drift. A node body that is not
+/// The roots and every node `parent` they reach, following the same edges as
+/// a fork copy. A node body that is not
 /// readable JSON contributes no parent, exactly as a fork copy treats it: such a
 /// node cannot be read back either, so following it is not what fails.
 fn closure(
@@ -182,8 +184,7 @@ fn unreached(
     let names = serde_json::to_string(reachable).map_err(error)?;
     connection
         .prepare(&format!(
-            "SELECT hash, length(CAST(hash AS BLOB)) + length(CAST(kind AS BLOB)) \
-                    + length(CAST(body AS BLOB)) \
+            "SELECT hash, length(CAST(body AS BLOB)) \
              FROM timeline_content \
              WHERE session_id = ?1 AND kind IN ({CANDIDATE_KINDS}) \
                AND hash NOT IN (SELECT value FROM json_each(?2))"

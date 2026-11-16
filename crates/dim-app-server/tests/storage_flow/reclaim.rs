@@ -231,8 +231,11 @@ fn v49_store_with_replaced_content(database: &Database) -> Connection {
         connection
             .execute(
                 "INSERT INTO agent_sessions (session_id, config, created_at_ms, origin) \
-                 VALUES (?1, '{}', 1, 'client')",
-                [session],
+                 VALUES (?1, ?2, 1, 'client')",
+                params![
+                    session,
+                    serde_json::to_string(&SessionConfig::default()).unwrap()
+                ],
             )
             .unwrap();
         connection
@@ -565,6 +568,38 @@ async fn the_offline_entry_repairs_a_store_that_already_committed_v50() {
     let database = Database::new();
     drop(v49_store_with_replaced_content(&database));
     let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let connection = Connection::open(&database.0).unwrap();
+    dim_app_server::storage::initialize_session_member_index(&connection, "converted").unwrap();
+    dim_app_server::storage::initialize_session_output_id_index(&connection, "converted").unwrap();
+    drop(connection);
+    let store = SqliteTimelineStore::new(db.clone());
+    let call = |text: &str| {
+        EventKind::ModelCall(ModelCallData {
+            turn_id: "trace-turn".into(),
+            request_id: "trace-request".into(),
+            request: Arc::new(ModelRequest::new(
+                "mock",
+                "test",
+                vec![Message::text(Role::User, text)],
+            )),
+            configuration: None,
+            prompt: None,
+            failure_chain: None,
+        })
+    };
+    let mut traced = record(4, call("final request"));
+    traced.trace = Some(TimelineTrace {
+        event_id: traced.event.id.clone(),
+        original: EventDraft::new(call("original request only in trace")),
+        steps: vec![TraceStep {
+            handler: "before".into(),
+            result: Some(EventDraft::new(call("intermediate request only in trace"))),
+        }],
+    });
+    append(&store, key("converted", "main"), vec![traced])
+        .await
+        .unwrap();
+    store.close().await.unwrap();
     db.close().await.unwrap();
 
     // The state an earlier build committed: the facts name new addresses, and
@@ -582,6 +617,13 @@ async fn the_offline_entry_repairs_a_store_that_already_committed_v50() {
     for session in ["converted", "shared", "untouched"] {
         insert_content(&connection, session, "node", &stale);
     }
+    let bytes_before: i64 = connection
+        .query_row(
+            "SELECT sum(length(CAST(body AS BLOB))) FROM timeline_content",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
     let before = content_rows(&connection, "converted");
     let mut exported_before = Vec::new();
     drop(connection);
@@ -603,10 +645,22 @@ async fn the_offline_entry_repairs_a_store_that_already_committed_v50() {
 
     assert_eq!(
         assert_every_fact_reads(&database, "converted").await,
-        6,
+        7,
         "the repair removes no address a fact names"
     );
     let connection = Connection::open(&database.0).unwrap();
+    let bytes_after: i64 = connection
+        .query_row(
+            "SELECT sum(length(CAST(body AS BLOB))) FROM timeline_content",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        vacuumed.reclaimed.bytes,
+        u64::try_from(bytes_before - bytes_after).unwrap(),
+        "removed bytes count only content bodies, not their hashes or kinds"
+    );
     assert!(
         !content_rows(&connection, "converted")
             .iter()
@@ -642,6 +696,42 @@ async fn the_offline_entry_repairs_a_store_that_already_committed_v50() {
         exported_before, exported_after,
         "the repair changes no fact another reader sees"
     );
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    let config = store
+        .session_config_text("converted")
+        .await
+        .unwrap()
+        .unwrap();
+    store
+        .fork_session("converted", "fork", 4, &config)
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .read(&key("converted", "main"), 1..=4)
+            .await
+            .unwrap()
+            .iter()
+            .map(|record| (
+                record.event.clone(),
+                serde_json::to_value(&record.trace).unwrap()
+            ))
+            .collect::<Vec<_>>(),
+        store
+            .read(&key("fork", "main"), 1..=4)
+            .await
+            .unwrap()
+            .iter()
+            .map(|record| (
+                record.event.clone(),
+                serde_json::to_value(&record.trace).unwrap()
+            ))
+            .collect::<Vec<_>>(),
+        "a fork after reclamation keeps requests and both trace drafts readable"
+    );
+    store.close().await.unwrap();
+    db.close().await.unwrap();
 }
 
 /// #1697: the repair reports a Session whose facts name content the store lost
@@ -822,10 +912,49 @@ async fn a_repair_refuses_the_whole_store_when_one_session_is_damaged() {
         assert_every_fact_reads(&database, session).await;
     }
 
-    // Restore the row the test removed, then let the next run finish.
+    let connection = Connection::open(&database.0).unwrap();
+    connection
+        .execute("DELETE FROM timeline_content WHERE session_id='shared'", [])
+        .unwrap();
+    drop(connection);
+    let missing_all = vacuum_store(database.0.clone()).unwrap_err();
+    assert!(
+        missing_all.to_string().contains("does not hold"),
+        "a Session whose content rows are all missing must still be checked: {missing_all}"
+    );
+    let connection = Connection::open(&database.0).unwrap();
+    for (session, rows) in &stored_before {
+        let expected = if session == "shared" {
+            &[][..]
+        } else {
+            rows.as_slice()
+        };
+        assert_eq!(
+            content_rows(&connection, session),
+            expected,
+            "missing all content in one Session must prevent deletion in {session}"
+        );
+    }
+    drop(connection);
+
     {
         let connection = Connection::open(&database.0).unwrap();
-        insert_content(&connection, "shared", "tools", "[]");
+        let (_, rows) = stored_before
+            .iter()
+            .find(|(session, _)| session == "shared")
+            .unwrap();
+        for row in rows {
+            let mut fields = row.splitn(3, '|');
+            let hash = fields.next().unwrap();
+            let kind = fields.next().unwrap();
+            let body = fields.next().unwrap();
+            connection
+                .execute(
+                    "INSERT INTO timeline_content(session_id,hash,kind,body) VALUES ('shared',?1,?2,?3)",
+                    params![hash, kind, body],
+                )
+                .unwrap();
+        }
     }
     let finished = vacuum_store(database.0.clone()).unwrap();
     // `converted` held the stale node and one unreachable node, `shared` the
