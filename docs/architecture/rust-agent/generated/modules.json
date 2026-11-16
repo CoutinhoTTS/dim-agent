@@ -4867,6 +4867,16 @@
       ]
     },
     {
+      "id": "dim_cli::projection::thinking",
+      "crate": "dim_cli",
+      "parent": "dim_cli::projection",
+      "file": "crates/dim-cli/src/projection/thinking.rs",
+      "unexpandedMacros": [
+        "format",
+        "matches"
+      ]
+    },
+    {
       "id": "dim_cli::prompt_command",
       "crate": "dim_cli",
       "parent": "dim_cli",
@@ -6180,6 +6190,7 @@
         "assert",
         "assert_eq",
         "format",
+        "unreachable",
         "vec"
       ]
     },
@@ -39627,6 +39638,15 @@
     },
     {
       "from": "dim_cli::projection",
+      "to": "dim_cli::projection::thinking",
+      "references": [
+        "mod thinking",
+        "path thinking::Excerpt",
+        "path thinking::Excerpt::default"
+      ]
+    },
+    {
+      "from": "dim_cli::projection",
       "to": "dim_cli::ui::i18n",
       "references": [
         "path crate::ui::i18n::t",
@@ -39754,6 +39774,14 @@
       "references": [
         "path Event",
         "path Progress"
+      ]
+    },
+    {
+      "from": "dim_cli::projection::thinking",
+      "to": "dim_cli::sanitize",
+      "references": [
+        "path Sanitizer",
+        "use crate::sanitize::Sanitizer"
       ]
     },
     {
@@ -45934,8 +45962,11 @@
         "path Document",
         "path FullScreen",
         "path FullScreen::new",
+        "path MouseOutcome::Click",
+        "path MouseOutcome::Thought",
         "path WHEEL_ROWS",
-        "path Wheel::default"
+        "path Wheel::default",
+        "path columns_of"
       ]
     },
     {
@@ -49283,6 +49314,7 @@
         "path MouseOutcome::Overlay",
         "path MouseOutcome::Redraw",
         "path MouseOutcome::Task",
+        "path MouseOutcome::Thought",
         "path crate::ui::render::fullscreen::MIN_VIEW_ROWS",
         "use crate::ui::render::FullScreen",
         "use crate::ui::render::fullscreen::Document",
@@ -50027,6 +50059,7 @@
       "references": [
         "path FullScreen",
         "path FullScreen::new",
+        "path MouseOutcome::Click",
         "path crate::ui::render::fullscreen::FullScreen::new"
       ]
     },
@@ -50147,7 +50180,9 @@
       "from": "dim_cli::ui::tui::tests",
       "to": "dim_cli::ui::transcript::block",
       "references": [
-        "path Block::Shell"
+        "path Block::Hook",
+        "path Block::Shell",
+        "path crate::ui::transcript::block::HookRow::Context"
       ]
     },
     {
@@ -55665,6 +55700,10 @@
     {
       "module": "dim_cli::ui::tui::tests",
       "path": "MouseKind::Press"
+    },
+    {
+      "module": "dim_cli::ui::tui::tests",
+      "path": "MouseKind::Release"
     },
     {
       "module": "dim_cli::ui::tui::tests",
