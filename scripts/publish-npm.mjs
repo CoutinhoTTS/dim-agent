@@ -108,19 +108,21 @@ const unanswered = (code) => /^E(429|5\d\d)$/.test(code ?? '') || transportFailu
  * holds, so they are asked again inside `deadline`, the window
  * `check-alpha-registry.mjs` waits out; every other failure is final, and the
  * 404 that means "not published" is an answer. Each attempt gets only the time
- * left, so a hung npm cannot outlive the operation it belongs to. A reply that
- * arrived is decoded here, so a malformed one stays this run's error rather
- * than a read that is worth repeating.
+ * left and is killed outright when it runs out, so a read that handles the
+ * signal cannot hold the operation past its deadline, and what a killed read
+ * printed is not an answer. A reply that arrived is decoded here, so a
+ * malformed one stays this run's error rather than a read that is worth
+ * repeating.
  */
 async function registryField(spec, field, deadline) {
   for (;;) {
     const result = spawnSync('npm', ['view', spec, field, '--json', '--registry', 'https://registry.npmjs.org'],
-      { encoding: 'utf8', timeout: Math.max(1, deadline - Date.now()) });
+      { encoding: 'utf8', timeout: Math.max(1, deadline - Date.now()), killSignal: 'SIGKILL' });
     const timedOut = result.error?.code === 'ETIMEDOUT';
     if (!timedOut) assert.ifError(result.error);
     let data;
     try { data = JSON.parse(result.stdout); } catch { data = undefined; }
-    if (result.status === 0) {
+    if (!timedOut && result.status === 0) {
       assert(data !== undefined, 'Cannot verify registry state: ' + spec);
       return data;
     }

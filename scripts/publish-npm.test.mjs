@@ -54,13 +54,24 @@ function fixture(t, version = '1.2.3', shipped = platforms) {
   const bin = path.join(root, 'bin');
   mkdirSync(bin);
   const transientLeft = path.join(root, 'transient');
+  const stubbornPid = path.join(root, 'stubborn.pid');
+  const stubborn = path.join(root, 'stubborn.mjs');
+  writeFileSync(stubborn, `#!${process.execPath}
+import { writeFileSync } from 'node:fs';
+writeFileSync(${JSON.stringify(stubbornPid)}, String(process.pid));
+process.on('SIGTERM', () => {});
+process.stdout.write('{"integrity":"' + process.env.EXISTING_INTEGRITY + '"}');
+setTimeout(() => process.exit(0), 20_000);
+`);
   writeFileSync(path.join(bin, 'npm'), `#!/bin/sh
 if [ "$1" = view ]; then
   left=$(cat "$TRANSIENT_LEFT" 2>/dev/null || echo 0)
   if [ "$left" -gt 0 ]; then
     echo $((left - 1)) > "$TRANSIENT_LEFT"
-    if [ "$TRANSIENT_CODE" = HANG ]; then sleep 5; fi
     printf '{"error":{"code":"%s"}}' "$TRANSIENT_CODE"; exit 1
+  fi
+  if [ "$REGISTRY_MODE" = stubborn ] && [ "$2" = dimcode@1.2.3 ] && [ "$3" = dist ]; then
+    exec '${process.execPath}' '${stubborn}'
   fi
   if [ "$2" = dimcode ] && [ "$3" = versions ]; then printf '%s' "$REGISTRY_VERSIONS"; exit 0; fi
   if [ "$REGISTRY_MODE" = newer ] && [ "$2" = dimcode-web@alpha ]; then printf '"1.2.3-alpha.10"'; exit 0; fi
@@ -76,6 +87,10 @@ printf "%s\\n" "$*" >> "$PUBLISH_LOG"
 `, { mode: 0o755 });
   const log = path.join(root, 'published.log');
   writeFileSync(log, '');
+  t.after(() => {
+    if (!existsSync(stubbornPid)) return;
+    try { process.kill(Number(readFileSync(stubbornPid, 'utf8')), 'SIGKILL'); } catch {}
+  });
   const release = { tag_name: `v${version}`, draft: false, published_at: '2026-10-14T00:00:00Z',
     assets: [...manifest.npmPackages.map(({ file }) => ({ name: file })), { name: 'release-manifest.json' }] };
   const releasePath = path.join(root, 'github-release.json');
@@ -91,7 +106,7 @@ printf "%s\\n" "$*" >> "$PUBLISH_LOG"
         EXISTING_INTEGRITY: 'sha512-' + createHash('sha512').update(readFileSync(path.join(root, manifest.npmPackages[0].file))).digest('base64') },
     });
   }
-  return { root, names, manifest, release, log, run };
+  return { root, names, manifest, release, log, stubbornPid, run };
 }
 
 test('validates Release and registry state without publishing', (t) => {
@@ -252,15 +267,25 @@ test('waits out an npm view that rate-limits or fails before it answers, then pu
   }
 });
 
-test('fails an npm view that never answers instead of publishing on an unknown registry', (t) => {
-  const window = { ...reads, DIM_REGISTRY_SETTLE_MS: '600' };
-  for (const transientCode of ['E503', 'HANG']) {
+test('does not accept an npm view that answers only after its deadline, and kills it', (t) => {
+  const window = { ...reads, DIM_REGISTRY_SETTLE_MS: '2000' };
+  for (const [transient, registry] of [[1_000_000, 'missing'], [0, 'stubborn']]) {
     const release = fixture(t);
-    const stuck = release.run({ publish: true, transient: 1_000_000, transientCode, window });
-    assert.notEqual(stuck.status, 0, transientCode);
-    assert.equal(stuck.error, undefined, `${transientCode}: an unanswered read must fail, not hang`);
-    assert.match(stuck.stderr, /did not answer within/);
-    assert.equal(readFileSync(release.log, 'utf8'), '', `${transientCode}: nothing is published after an unanswered read`);
+    const started = Date.now();
+    const stuck = release.run({ publish: true, transient, registry, window });
+    const elapsed = Date.now() - started;
+    assert.notEqual(stuck.status, 0,
+      `${registry}: a read still running at its deadline is no answer, even when it then succeeds`);
+    assert.equal(stuck.error, undefined, `${registry}: an unanswered read must fail, not hang`);
+    assert.match(stuck.stderr, /did not answer within/,
+      `${registry}: the run fails on the deadline, not on what the read printed`);
+    assert.equal(readFileSync(release.log, 'utf8'), '',
+      `${registry}: a read past its deadline is no answer, so nothing is published`);
+    if (registry === 'stubborn') {
+      assert.ok(elapsed < 10_000, 'the run ends at its deadline, not when the read finally exits');
+      assert.throws(() => process.kill(Number(readFileSync(release.stubbornPid, 'utf8')), 0), { code: 'ESRCH' },
+        'a read that ignores SIGTERM is killed at its deadline instead of answering after it');
+    }
   }
 });
 
