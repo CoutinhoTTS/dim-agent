@@ -111,7 +111,7 @@ export default definePlugin({
           if (!(error instanceof Error) || !('code' in error) || typeof error.code !== 'string') throw error
           missing = { code: error.code, message: error.message }
         }
-        return { kind: 'value', value: { grants, config, fork, removed, absent, origin, owner, missing } }
+        return { kind: 'value', value: { grants, config, fork, removed, absent, origin, owner, missing, catalog } }
       },
     )
   },

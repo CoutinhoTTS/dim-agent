@@ -3,7 +3,7 @@ use crate::{
     agent_records::AgentRecords,
     protocol::{AgentInfo, SessionOrigin},
     settings::SettingsService,
-    storage::{PreparedWorktree, SessionStore, SqliteStorage},
+    storage::{PreparedWorktree, SessionMetadataService, SessionStore, SqliteStorage, Store},
 };
 use dim_agent_capabilities::host::ModelSelectionHost;
 use dim_agent_runtime::{
@@ -377,7 +377,8 @@ pub struct AgentIndex {
     loader: OnceLock<(Loader, Ctx)>,
     startup_timeout: Duration,
     records: Option<Arc<AgentRecords>>,
-    session_store: Option<Arc<SessionStore>>,
+    session_store: Option<Arc<Store>>,
+    session_metadata: Option<Arc<SessionMetadataService>>,
     settings: Option<Arc<SettingsService>>,
     stopping: CancellationToken,
     /// Notified once an `idle` call on this generation is admitted and
@@ -1076,9 +1077,9 @@ impl AgentIndex {
         session: &Session,
         version: u32,
     ) -> dim_agent_runtime::Result<crate::protocol::SessionInfo> {
-        let title = match (&self.session_store, version >= 3) {
+        let title = match (&self.session_metadata, version >= 3) {
             (_, false) => None,
-            (Some(store), true) => Some(match store.metadata(session.id()).await {
+            (Some(store), true) => Some(match store.read(session.id()).await {
                 Ok(metadata) => metadata.into(),
                 Err(_) => crate::storage::TitleFields::default(),
             }),
@@ -2052,6 +2053,13 @@ impl AgentIndex {
     }
 }
 
+type StoredKeys = (
+    Key<Store>,
+    Key<SessionStore>,
+    Key<SqliteStorage>,
+    Key<SessionMetadataService>,
+);
+
 /// Owns every Agent subtree: the process assembly entry.
 pub(crate) struct AgentsPlugin {
     builder: AgentBuilder,
@@ -2059,7 +2067,7 @@ pub(crate) struct AgentsPlugin {
     /// The process root: top-level loader instances are created from it.
     root: Ctx,
     /// Native storage only with a database.
-    stored: Option<(Key<SessionStore>, Key<SessionStore>, Key<SqliteStorage>)>,
+    stored: Option<StoredKeys>,
     /// Settings only with local execution.
     settings: Option<Key<SettingsService>>,
     loader: Key<Loader>,
@@ -2078,7 +2086,7 @@ impl AgentsPlugin {
             stored: config
                 .database_path
                 .is_some()
-                .then(|| Ok::<_, Error>((Key::named("store"), names.key()?, names.key()?)))
+                .then(|| Ok::<_, Error>((names.key()?, names.key()?, names.key()?, names.key()?)))
                 .transpose()?,
             settings: config
                 .local_execution()
@@ -2100,10 +2108,11 @@ impl DynPlugin for AgentsPlugin {
     }
     fn injects(&self) -> Vec<TypeKey> {
         let mut injects = Vec::new();
-        if let Some((store, native, storage)) = &self.stored {
+        if let Some((store, native, storage, metadata)) = &self.stored {
             injects.push(store.erase());
             injects.push(native.erase());
             injects.push(storage.erase());
+            injects.push(metadata.erase());
         }
         if let Some(settings) = &self.settings {
             injects.push(settings.erase());
@@ -2117,10 +2126,11 @@ impl DynPlugin for AgentsPlugin {
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
             let stored = match &self.stored {
-                Some((store, native, storage)) => Some((
+                Some((store, native, storage, metadata)) => Some((
                     ctx.require_at(store)?,
                     ctx.require_at(native)?,
                     ctx.require_at(storage)?,
+                    ctx.require_at(metadata)?,
                 )),
                 None => None,
             };
@@ -2157,12 +2167,16 @@ impl DynPlugin for AgentsPlugin {
                 },
             )?;
             let mut builder = self.builder.clone();
-            let (records, session_store) = match stored {
-                Some((store, native, storage)) => {
+            let (records, session_store, session_metadata) = match stored {
+                Some((store, native, storage, metadata)) => {
                     builder.timeline_store(native.timeline_store());
-                    (Some(Arc::new(AgentRecords(storage))), Some(store))
+                    (
+                        Some(Arc::new(AgentRecords(storage))),
+                        Some(store),
+                        Some(metadata),
+                    )
                 }
-                None => (None, None),
+                None => (None, None, None),
             };
             let default_id = match &records {
                 Some(records) => records
@@ -2185,6 +2199,7 @@ impl DynPlugin for AgentsPlugin {
                 startup_timeout: self.config.startup_timeout,
                 records,
                 session_store,
+                session_metadata,
                 settings,
                 selects_models: self.config.protected_profile(),
                 stopping: CancellationToken::new(),

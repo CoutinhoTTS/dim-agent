@@ -568,3 +568,12 @@ export type ApprovalDestination = {
 export interface CollaborationSession {
   approvalDestination(request: { memberSessionId: string }): ApprovalDestination | null;
 }
+
+/** The ToolRegistry owner's read-only source status view. */
+export interface ToolSourceRejection { version: string; reason: string }
+export interface ToolSourceStatus { adopted: string | null; rejected: ToolSourceRejection | null }
+export type ToolSourcesState = Record<string, ToolSourceStatus>
+export interface ToolSourcesView {
+  get(request: Record<string, never>): ToolSourcesState
+  observe(request: Record<string, never>, onState: (state: ToolSourcesState) => void | Promise<void>): Promise<void>
+}

@@ -582,15 +582,26 @@ fn a_child_finding_the_store_owned_reports_the_owner() {
     // store, or one already at this format, upgrades nothing.
     lease.lock().unwrap();
     let owner = std::process::id();
-    let output = home
+    let child = home
         .command()
         .env("DIM_TEST_DAEMON_START_TIMEOUT_MS", "15000")
         .args(["models", "fixture"])
-        .output()
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
         .unwrap();
+    let child_pid = child.id();
+    let output = child.wait_with_output().unwrap();
     lease.unlock().unwrap();
-    let stderr = String::from_utf8_lossy_owned(output.stderr);
-    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "child pid {child_pid}: {}\nstartup note: {:?}",
+        daemon_replace::describe_client(&home, &output),
+        fs::read_to_string(note_path(&home)),
+    );
     assert!(
         stderr.contains("Another dimcode-server is using the store"),
         "the client names the owner: {stderr}"
