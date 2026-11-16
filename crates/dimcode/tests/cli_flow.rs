@@ -72,6 +72,8 @@ mod update_entry;
 mod windows;
 #[path = "cli_flow/workflow.rs"]
 mod workflow;
+#[path = "cli_flow/worktrees.rs"]
+mod worktrees;
 
 #[path = "support/daemon.rs"]
 mod daemon_cleanup;
