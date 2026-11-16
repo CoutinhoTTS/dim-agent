@@ -194,7 +194,7 @@ Rust 产品装配的现状以 [生成的 catalog](../architecture/rust-agent/gen
 
 ### 3.6 入口、凭据与宿主资源
 
-按 #1292 逐批确定各项的公共操作，并按 §2.6 迁移登记。状态、资源和凭据留在各自的 owner。`managedProviders` 的搜索操作见 §4.6。
+按 #1292 逐批确定各项的公共操作，并按 §2.6 迁移登记。状态、资源和凭据留在各自的 owner。`managedSearch` 的搜索操作见 §4.6。
 
 | 名字 | scope | provider | reason |
 | --- | --- | --- | --- |
@@ -218,7 +218,6 @@ Rust 产品装配的现状以 [生成的 catalog](../architecture/rust-agent/gen
 | `timelineFactory` | session | SessionScope | control |
 | `sessionSkills` | session | Skills | host-resource |
 | `skillsBranch` | branch | SkillsBranch | host-resource |
-| `managedProviders` | process | ManagedProviders | secret |
 
 ### 3.7 待迁移的数据内容
 原因 `legacy-no-consumer`：内容是数据，但还没有转成 data face。没有 leaf 消费者不是保留 internal 的理由；这些名字按批次迁移，`legacy-no-consumer` 只是迁移状态，不是永久分类。
