@@ -299,7 +299,9 @@ let recalling = false
  * An edit around a recalled image moves it with the text it stood between, as a
  * token does: the edit is the draft's common prefix and suffix, so typing or
  * deleting shifts the offsets after it and an image inside a replaced run
- * settles at the run's start.
+ * settles at the run's start. Only the offset moves: the anchor keeps its
+ * identity, so a submit that is already out still recognizes the image it took
+ * when its reply arrives.
  */
 watch(text, (next) => {
   const previous = anchored
@@ -311,7 +313,7 @@ watch(text, (next) => {
   while (end < next.length - start && end < previous.length - start && next[next.length - 1 - end] === previous[previous.length - 1 - end]) end++
   const delta = next.length - previous.length
   const tail = previous.length - end
-  restored.value = restored.value.map(({ at, image }) => ({ at: at <= start ? at : at >= tail ? at + delta : start, image }))
+  for (const block of restored.value) block.at = block.at <= start ? block.at : block.at >= tail ? block.at + delta : start
 }, { flush: "sync" })
 
 /** The `@` mention the caret is in, read from the field's own value (the field is the source of truth for the caret). */
@@ -367,6 +369,10 @@ function acceptCandidate(candidate: FileCandidate): void {
  * after the message when typed text follows. The field is plain text, so an
  * image takes no room in it: the offset recorded for it is where it stood between
  * the words, and the submit sends it back there.
+ *
+ * The message goes in as one insertion, so an image already in the draft moves
+ * with the words it stood between instead of staying at an offset the inserted
+ * text pushed it past.
  */
 function recall(item: QueuedInput, at: number): number {
   if (recalled.value.has(item.id)) return at
@@ -376,34 +382,34 @@ function recall(item: QueuedInput, at: number): number {
   recalling = true
   try {
     const draft = text.value
-    let cursor = Math.min(at, draft.length)
-    const followed = cursor < draft.length
+    const position = Math.min(at, draft.length)
+    const followed = position < draft.length
+    let inserted = ""
+    const placements: RestoredImage[] = []
     let opened = false
-    const insert = (value: string): void => {
-      text.value = text.value.slice(0, cursor) + value + text.value.slice(cursor)
-      cursor += value.length
-    }
     let previousText = false
     for (const block of blocks) {
       if (!opened) {
         opened = true
-        if (cursor > 0 && !text.value.slice(0, cursor).endsWith("\n")) insert("\n")
+        if (position > 0 && !draft.slice(0, position).endsWith("\n")) inserted += "\n"
       } else if (block.type === "text" && previousText) {
-        insert("\n")
+        inserted += "\n"
       }
       if (block.type === "image") {
         previousText = false
-        restored.value = [...restored.value, { at: cursor, image: block }]
+        placements.push({ at: position + inserted.length, image: block })
         continue
       }
-      insert(block.text)
+      inserted += block.text
       previousText = true
     }
-    if (followed) insert("\n")
-    return cursor
+    if (followed) inserted += "\n"
+    for (const block of restored.value) if (block.at > position) block.at += inserted.length
+    text.value = draft.slice(0, position) + inserted + draft.slice(position)
+    restored.value = [...restored.value, ...placements]
+    return position + inserted.length
   } finally {
     recalling = false
-    anchored = text.value
   }
 }
 

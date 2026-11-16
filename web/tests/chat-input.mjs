@@ -851,6 +851,74 @@ test("a recalled image keeps the place an edit moved it to after a failed stop",
   assert.deepEqual(calls[0].params.user.content, [{ type: "text", text: "look: see " }, picture, { type: "text", text: " here" }], "the image moved with the words around it")
 })
 
+test("a draft typed while a recalled image is being accepted stays out of the message already sent", async (t) => {
+  setActivePinia(createPinia())
+  const chat = useChatStore()
+  t.after(() => chat.$dispose())
+  const calls = []
+  const connection = { supports: () => false, client: { async call(method, params, read) { calls.push({ method, params }); return read({}) } } }
+  const picture = storedImage("stored-1")
+  let release
+  const gate = new Promise((resolve) => { release = resolve })
+  const send = async (value, attachments, mode) => {
+    await chat.submit("session", "main", value, attachments, mode)
+    if (calls.length === 1) await gate
+  }
+  const { type, root, field } = soloComposer(t, { held: [heldInput("first", "before", picture, "after")], send, stop: async () => {} }, { connection })
+  const gesture = click(button(root, "composer.sendNowHint"))
+  await flush()
+  assert.equal(calls.length, 1, "the recalled message is out and unanswered")
+  assert.deepEqual(calls[0].params.user.content, [{ type: "text", text: "before" }, picture, { type: "text", text: "after" }], "the recalled image keeps the place it stood at")
+
+  await type("next draft")
+  release()
+  await gesture
+  await flush()
+  await click(button(root, "composer.send"))
+  await flush()
+  assert.equal(calls.length, 2, "what was typed during the send goes out on its own")
+  assert.equal(calls[1].params.user, undefined, "the image the accepted message took is not sent a second time")
+  assert.equal(calls[1].params.text, "next draft", "only what was typed after the first message goes out")
+  assert.equal(field.value, "", "the line clears once the draft is accepted")
+})
+
+test("a message recalled after a failed stop moves the image already in the draft", async (t) => {
+  setActivePinia(createPinia())
+  const chat = useChatStore()
+  t.after(() => chat.$dispose())
+  const calls = []
+  const connection = { supports: () => false, client: { async call(method, params, read) { calls.push({ method, params }); return read({}) } } }
+  const first = storedImage("stored-first"), second = storedImage("stored-second")
+  const send = (value, attachments, mode) => chat.submit("session", "main", value, attachments, mode)
+  let stops = 0
+  const stop = async () => {
+    stops++
+    if (stops === 1) throw new Error("the run would not stop")
+  }
+  const held = reactive([heldInput("first", "see ", first, " here")])
+  const withdrawHeld = async (item) => {
+    held.splice(held.indexOf(item), 1)
+    return "deleted"
+  }
+  const { type, root, field } = soloComposer(t, { held, withdrawHeld, send, stop }, { connection })
+  await type("draft")
+  await click(button(root, "composer.sendNowHint"))
+  await flush()
+  assert.equal(field.value, "see  here\ndraft", "the failed stop keeps the recalled message ahead of the draft")
+
+  held.push(heldInput("second", "and ", second, " now"))
+  await click(button(root, "composer.sendNowHint"))
+  await flush()
+  assert.equal(stops, 2, "the retry asks for the stop again")
+  assert.deepEqual(calls.map((call) => call.method), ["session.submit"], "the retry sends once")
+  assert.deepEqual(calls[0].params.user.content, [
+    { type: "text", text: "and " }, second,
+    { type: "text", text: " now\nsee " }, first,
+    { type: "text", text: " here\ndraft" },
+  ], "the image the first recall placed moved with the text it stood between instead of staying behind the new message")
+  assert.equal(field.value, "", "the whole draft is accepted once")
+})
+
 test("a recalled image still splits the message when an inserted @ file is linked around it", async (t) => {
   setActivePinia(createPinia())
   const chat = useChatStore()
