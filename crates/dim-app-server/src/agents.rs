@@ -25,7 +25,6 @@ use rutis_loader::resolve::Build;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     num::NonZeroU64,
-    path::{Component, Path},
     sync::{
         Arc, Mutex, OnceLock,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
@@ -1461,7 +1460,7 @@ impl AgentIndex {
             .activity
             .take_hold()
             .ok_or_else(|| AgentError::Reloading("process admission".into()))?;
-        Self::check_session_id(id)?;
+        crate::protocol::check_session_id(id)?;
         let slot = self.slot(id);
         let gate = slot.gate.lock().await;
         let removed = self.remove_locked(id, &slot).await?;
@@ -1483,7 +1482,7 @@ impl AgentIndex {
         &self,
         id: &str,
     ) -> dim_agent_runtime::Result<DeleteOutcome> {
-        Self::check_session_id(id)?;
+        crate::protocol::check_session_id(id)?;
         let slot = self.slot(id);
         let gate = slot.gate.lock().await;
         // One match yields both the outcome and what there is to announce, so
@@ -1502,17 +1501,6 @@ impl AgentIndex {
             self.announce(removed).await;
         }
         Ok(outcome)
-    }
-
-    /// The id names `command-output/<id>`, so only a single path component
-    /// can be a Session's (D3); refused before any admission state exists.
-    fn check_session_id(id: &str) -> dim_agent_runtime::Result<()> {
-        if !matches!(Path::new(id).components().collect::<Vec<_>>()[..],
-            [Component::Normal(name)] if name == id)
-        {
-            return Err(AgentError::InvalidInput(format!("invalid Session id {id}")));
-        }
-        Ok(())
     }
 
     /// Removes `id` with its admission gate held: its led members, its owned

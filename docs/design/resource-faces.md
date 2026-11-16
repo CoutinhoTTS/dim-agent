@@ -670,6 +670,24 @@ resolve paths, decide permission or create a second Session lifecycle.
 | `catalog` | `{request,agent?,version,hosts,closed}` | existing catalog page |
 | `query` | `{scope,query,page?}` | `{result,next}` |
 
+These are repository steps, not the client lifecycle workflows `sessions.delete` and
+`session.fork`. Trusted plugins may address any Session id; the process face does not apply
+per-caller Session ownership or grant scoping. The lifecycle owner remains responsible for:
+
+- `createOwnedSession`: reserve the creation/admission identity, select a supported protocol,
+  validate the configuration and apply that protocol's live feature restrictions before
+  persisting it, then initialize/publish the Session or roll the preparation back.
+- `delete`: close the Session and settle its producers before removing its rows and output.
+  This operation neither closes a live Session nor removes its Agent admission slot.
+- `fork`: validate the source collaboration role, published main cut, atomic/context boundary
+  and rest point; supply the source's stored configuration text with `initialTitle` removed,
+  then initialize the fork under the source Agent/protocol. The repository copies the supplied
+  text without applying live protocol exclusions or rebuilding the configuration.
+
+`createOwnedSession`, `fork` and `delete` reject Session ids that are not a single normal path
+component with `invalid`, before acquiring ownership or touching rows or output paths. These
+checks are shared with the native Session admission/deletion boundary.
+
 Grant kind is `file` or `dir`, mode is `read` or `write`; adding read never downgrades
 an existing write grant. `language` is a ReplyLanguage code or null to clear it.
 `origin` is the existing Session origin. `leaderSessionId`, `agentId`, `config` and
@@ -682,21 +700,29 @@ records without an association timestamp.
 `removeWorktree` keeps the owner exclusion from its usage checks through the physical
 removal and directory-row deletion. Its callback receives the checked root path and
 is awaited; no SQL or Timeline commit lock is held while awaiting it. A callback failure
-leaves the directory row in place. The callback may refuse with `invalid`, `cancelled`
+leaves the directory row in place. As with the native callback, it must not await operations
+that acquire this same ownership mutex: `createOwnedSession`, `fork`, `delete`,
+`removeWorktreeDirectory`, `removeWorktree`, or `worktreeAssociations.associate`. Reads and
+other operations that do not acquire that mutex remain available. The callback may refuse with `invalid`, `cancelled`
 or `storage`; unexpected callback or transport failures are `storage`. There is no
 separate check/remove lease and no window for a concurrent Session creation to use
 a directory being removed. `removeWorktreeDirectory` is the existing database-only
 candidate cleanup, with its existing association checks.
 
 `catalog` takes the existing Session catalog request and the calling Agent owner's
-loaded/closed snapshots; its pagination and classification belong to the Session
-catalog contract. `query` takes the existing fixed read scope: `{key:{sessionId,
+loaded/closed snapshots. Its result is the stored catalog page: sequence comes from the
+database and `closed` is false on each returned row. The Agent lifecycle owner enriches that
+page with live sequence and closed state for client responses; `store.catalog` does not read
+or reproduce AgentIndex. Its pagination and filtering remain the storage catalog contract. `query` takes the existing fixed read scope: `{key:{sessionId,
 branchId},through,segments:[{branchId,from,through,storedThrough,tail}]}`. Its query,
 page, result and immutable tail events retain the Timeline query contract. Neither
 operation adds a preliminary query or rereads the caller's snapshots.
 
 Refusals are `{code,message}`: `invalid`, `closed`, `cancelled` or `storage`, preserving
-the owner message. These methods expose storage operations to trusted plugins, not
+the owner message. Existing absence behavior is retained: `addGrant` on an unknown Session
+fails `storage` (foreign-key refusal), `removeGrant` succeeds without a matching row, and
+`setSessionLanguage` fails `closed`. Unsupported protocol versions retain the native database
+`storage` refusal; the lifecycle owner validates versions before preparation. These methods expose storage operations to trusted plugins, not
 new external client entry points. Session files, title metadata and worktree association
 continue to use their existing `sessionFiles`, `sessionMetadata` and
 `worktreeAssociations` public contracts rather than additional aliases on `store`.
