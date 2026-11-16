@@ -430,7 +430,7 @@ A1–A12 是首版实现采用的策略。
 | --- | --- |
 | 注册到 `sessionMethods` 的命名空间 `session.rename` | Session 部分在 `Key<SessionMethods>` 依赖上调用 `methods.register(ctx, "session.rename", Vec<MethodDecl>, handler)` |
 | 已发布历史 | 稳定目录绑定上的 既有具名 `sessions.history` HostDispatch（在插件边界解析外部回复） |
-| 标题元数据 | `SessionStore::metadata` 与 `SessionStore::set_title` |
+| 标题元数据 | `SessionMetadataService::read` 与 `SessionMetadataService::set_title` |
 | 辅助调用 | 既有 `AuxiliaryModel.0.complete` 与取消 token |
 | Session 广播监听器 | `session_channel(session_id)` 上针对 `Event` 记录的监听器，由 `ctx.effect` 移除 |
 | 生成任务 | 在 `ctx.effect` 下派生 |

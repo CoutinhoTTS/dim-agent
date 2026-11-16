@@ -1689,9 +1689,11 @@ impl DynPlugin for SessionStorePlugin {
                 binding.clone() as Arc<dyn HostDispatch>,
             )?;
             ctx.provide_as::<SessionFiles>(binding)?;
+            let metadata = Arc::new(metadata::SessionMetadataService(store));
+            ctx.provide_as::<metadata::SessionMetadataService>(metadata.clone())?;
             ctx.provide_at(
                 host_key("sessionMetadata"),
-                Arc::new(metadata::Dispatch(store)) as Arc<dyn HostDispatch>,
+                metadata as Arc<dyn HostDispatch>,
             )?;
             Ok(Effect::Done)
         })

@@ -25,7 +25,9 @@ pub use identities::initialize_session_output_id_index;
 pub use members::initialize_session_member_index;
 #[cfg(feature = "testing")]
 pub use metadata::testing;
-pub use metadata::{MetadataError, SessionMetadata, Title, TitleFields, TitleSource};
+pub use metadata::{
+    MetadataError, SessionMetadata, SessionMetadataService, Title, TitleFields, TitleSource,
+};
 #[cfg(feature = "testing")]
 pub use query::{QueryStatementStats, sqlite_memory};
 #[cfg(feature = "testing")]

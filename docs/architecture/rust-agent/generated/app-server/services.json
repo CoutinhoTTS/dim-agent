@@ -245,7 +245,7 @@
         ]
       },
       {
-        "id": 77,
+        "id": 76,
         "parent": 72,
         "name": "eventhub-ready",
         "state": "Active",
@@ -3536,6 +3536,12 @@
       {
         "service": "dim_app_server::settings::workflow_files::WorkflowFiles",
         "provider": 19,
+        "generation": 1,
+        "removing": false
+      },
+      {
+        "service": "dim_app_server::storage::metadata::binding::SessionMetadata",
+        "provider": 8,
         "generation": 1,
         "removing": false
       },

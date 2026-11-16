@@ -3710,6 +3710,16 @@
       ]
     },
     {
+      "id": "dim_app_server::storage::metadata::binding",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::storage::metadata",
+      "file": "crates/dim-app-server/src/storage/metadata.rs",
+      "unexpandedMacros": [
+        "format",
+        "json"
+      ]
+    },
+    {
       "id": "dim_app_server::storage::metadata::testing",
       "crate": "dim_app_server",
       "parent": "dim_app_server::storage::metadata",
@@ -23824,6 +23834,13 @@
     },
     {
       "from": "dim_app_server",
+      "to": "dim_app_server::storage::metadata::binding",
+      "references": [
+        "path storage::SessionMetadataService"
+      ]
+    },
+    {
+      "from": "dim_app_server",
       "to": "dim_app_server::storage::sqlite",
       "references": [
         "path storage::SqliteStorage",
@@ -32744,6 +32761,13 @@
     },
     {
       "from": "dim_app_server::storage",
+      "to": "dim_app_server::storage::metadata::binding",
+      "references": [
+        "use metadata::SessionMetadataService"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage",
       "to": "dim_app_server::storage::metadata::testing",
       "references": [
         "use metadata::testing"
@@ -33718,6 +33742,14 @@
     },
     {
       "from": "dim_app_server::storage::metadata",
+      "to": "dim_app_server::storage::metadata::binding",
+      "references": [
+        "mod binding",
+        "use binding::SessionMetadata"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::metadata",
       "to": "dim_app_server::storage::metadata::testing",
       "references": [
         "mod testing",
@@ -33738,6 +33770,26 @@
       "references": [
         "path SessionStore",
         "use super::SessionStore"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::metadata::binding",
+      "to": "dim_app_server::storage::metadata",
+      "references": [
+        "path MetadataError",
+        "path ReadRequest",
+        "path SetTitleRequest",
+        "path Title",
+        "path envelope",
+        "path request",
+        "path super::SessionMetadata"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::metadata::binding",
+      "to": "dim_app_server::storage::timeline",
+      "references": [
+        "path SessionStore"
       ]
     },
     {
@@ -34276,9 +34328,15 @@
         "path Titles",
         "path Titles::new",
         "path metadata",
-        "path metadata::Dispatch",
         "use super::metadata",
         "use super::metadata::Titles"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::timeline",
+      "to": "dim_app_server::storage::metadata::binding",
+      "references": [
+        "path metadata::SessionMetadataService"
       ]
     },
     {
@@ -53918,10 +53976,10 @@
     },
     {
       "from": "dim_session_title",
-      "to": "dim_app_server::storage::timeline",
+      "to": "dim_app_server::storage::metadata::binding",
       "references": [
-        "path SessionStore",
-        "use dim_app_server::storage::SessionStore"
+        "path SessionMetadataService",
+        "use dim_app_server::storage::SessionMetadataService"
       ]
     }
   ],
