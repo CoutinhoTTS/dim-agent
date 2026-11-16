@@ -5,6 +5,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
+import { isDeepStrictEqual } from 'node:util';
 
 const [receipt, mode, flag, ...extra] = process.argv.slice(2);
 assert(receipt && ['source', 'snapshot', 'promote', 'npm', 'mirror'].includes(mode)
@@ -166,6 +167,33 @@ async function settle(version, sourceCommit, retry) {
   }
 }
 
+/**
+ * A package's dist-tags once they read `expected`. A registry may keep serving
+ * the value a tag had before this run wrote it, so `replaced` names those
+ * earlier values: reading one of them again is not news and is waited out.
+ * Any other difference belongs to another publisher, and waiting cannot take it
+ * back, so it fails at once.
+ */
+async function settledTags(name, expected, replaced = {}) {
+  const deadline = Date.now() + settleMilliseconds;
+  for (;;) {
+    const response = await read(`${upstream}/-/package/${name}/dist-tags`, 30_000);
+    if (response === null) {
+      console.error(`Cannot read ${name} dist-tags: the registry did not answer`);
+    } else {
+      assert(response.ok, `${name} dist-tags: HTTP ${response.status}`);
+      const actual = await response.json();
+      if (isDeepStrictEqual(actual, expected)) return actual;
+      assert(Object.entries(actual).every(([tag, value]) => value === expected[tag] || value === replaced[tag]),
+        `${name} dist-tags changed concurrently: expected ${JSON.stringify(expected)}, read ${JSON.stringify(actual)}`);
+      console.log(`${name} dist-tags still read ${JSON.stringify(actual)}; reading again in ${pollMilliseconds} ms`);
+    }
+    assert(Date.now() < deadline,
+      `${name} dist-tags did not reach ${JSON.stringify(expected)} within ${settleMilliseconds} ms`);
+    await delay(Math.min(pollMilliseconds, deadline - Date.now()));
+  }
+}
+
 function compare(left, right) {
   assert(alpha.test(left) && alpha.test(right), `Unexpected nightly version: ${left}, ${right}`);
   const a = left.match(alpha).slice(1).map(BigInt);
@@ -209,16 +237,18 @@ if (mode === 'snapshot' || mode === 'source') {
     if (expected[tag] !== undefined) assert(compare(expected[tag], state.version) <= 0, `${tag} already points to newer ${expected[tag]}`);
     assert(expected[tag] === state.wrapperTags[tag] || expected[tag] === state.version, `Concurrent publication changed ${tag}`);
   }
+  const replaced = {};
   for (const tag of ['alpha', 'latest']) {
-    if (expected[tag] === state.version) continue;
-    assert.deepEqual(await tags(wrapper), expected, 'Concurrent publication changed wrapper tags');
-    if (flag === '--apply') {
-      command(['dist-tag', 'add', `${wrapper}@${state.version}`, tag, '--registry', upstream]);
-      expected[tag] = state.version;
-      assert.deepEqual(await tags(wrapper), expected, 'Concurrent publication changed wrapper tags');
-    } else {
+    const current = await settledTags(wrapper, expected, replaced);
+    if (current[tag] === state.version) continue;
+    if (flag !== '--apply') {
       console.log(`Would set ${wrapper}@${state.version} ${tag}; no registry write performed.`);
+      continue;
     }
+    command(['dist-tag', 'add', `${wrapper}@${state.version}`, tag, '--registry', upstream]);
+    replaced[tag] = current[tag];
+    expected[tag] = state.version;
+    await settledTags(wrapper, expected, replaced);
   }
   await checkProtectedTags();
 } else {

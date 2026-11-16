@@ -247,6 +247,9 @@ function nightlyRegistry(t, shipped = platforms) {
     const tarballMisses = Number(process.env.TARBALL_404 ?? 0);
     const transient = Number(process.env.TRANSIENT ?? 0);
     const root = ${JSON.stringify(root)};
+    const lagFile = ${JSON.stringify(path.join(root, 'tag-lag'))};
+    const lagLeft = () => { try { return Number(readFileSync(lagFile, 'utf8').trim()); } catch { return 0; } };
+    const spendLag = () => writeFileSync(lagFile, String(lagLeft() - 1));
     let transientLeft = transient;
     const remote = ${JSON.stringify(remote)};
     const names = ${JSON.stringify(names)};
@@ -275,6 +278,10 @@ function nightlyRegistry(t, shipped = platforms) {
           writeFileSync(remote, JSON.stringify(state));
         }
         const tags = { ...state.tags[name] };
+        if (name === 'dimcode-alpha' && lagLeft() > 0) {
+          spendLag();
+          tags.latest = '1.2.3-alpha.9';
+        }
         if (failure === 'tags' && name === 'dimcode-web') tags.beta = '2.0.0-beta.1';
         return Response.json(tags);
       }
@@ -309,10 +316,12 @@ function nightlyRegistry(t, shipped = platforms) {
     const path = require('node:path');
     const args = process.argv.slice(2);
     const remote = ${JSON.stringify(remote)};
+    const lagFile = ${JSON.stringify(path.join(root, 'tag-lag'))};
     const state = JSON.parse(readFileSync(remote));
     if (args[0] === 'dist-tag') {
       if (args[1] !== 'add' || args[2] !== 'dimcode-alpha@1.2.3-alpha.10' || !['latest', 'alpha'].includes(args[3])) process.exit(1);
       state.tags['dimcode-alpha'][args[3]] = '1.2.3-alpha.10';
+      writeFileSync(lagFile, process.env.TAG_LAG ?? '0');
     } else if (args[0] === 'install') {
       const prefix = args[args.indexOf('--prefix') + 1];
       const cache = args[args.indexOf('--cache') + 1];
@@ -332,11 +341,11 @@ function nightlyRegistry(t, shipped = platforms) {
   `, { mode: 0o755 });
   const check = fileURLToPath(new URL('./check-alpha-registry.mjs', import.meta.url));
   return { receipt, remote, initialTags,
-    run(mode, flag = '--dry-run', failure = '', { tarballMisses = 0, transient = 0 } = {}) {
+    run(mode, flag = '--dry-run', failure = '', { tarballMisses = 0, tagLag = 0, transient = 0 } = {}) {
       return spawnSync(process.execPath, ['--import', preload, check, receipt, mode, flag], {
         encoding: 'utf8', timeout: 10_000,
         env: { ...process.env, PATH: `${path.join(root, 'bin')}${path.delimiter}${process.env.PATH}`, FAILURE: failure,
-          TARBALL_404: String(tarballMisses), TRANSIENT: String(transient), ...settle },
+          TARBALL_404: String(tarballMisses), TAG_LAG: String(tagLag), TRANSIENT: String(transient), ...settle },
       });
     },
     read() { return JSON.parse(readFileSync(remote)); },
@@ -468,6 +477,30 @@ test('waits out a tarball the registry publishes after its metadata', (t) => {
   const published = structuredClone(registry.initialTags);
   published['dimcode-alpha'].latest = '1.2.3-alpha.10';
   assert.deepEqual(registry.read().tags, published);
+});
+
+test('waits out a dist-tag the registry serves stale after a successful write', (t) => {
+  const registry = nightlyRegistry(t);
+  assert.equal(registry.run('snapshot').status, 0);
+  const promoted = registry.run('promote', '--apply', '', { tagLag: 2 });
+  assert.equal(promoted.status, 0, promoted.stderr);
+  assert.equal(registry.read().tags['dimcode-alpha'].latest, '1.2.3-alpha.10');
+});
+
+test('fails a dist-tag that never converges and a concurrent publication that outranks it', (t) => {
+  const stalled = nightlyRegistry(t);
+  assert.equal(stalled.run('snapshot').status, 0);
+  const stuck = stalled.run('promote', '--apply', '', { tagLag: 100_000 });
+  assert.notEqual(stuck.status, 0);
+  assert.equal(stuck.error, undefined, 'a tag that never converges must fail, not hang');
+  assert.match(stuck.stderr, /did not reach/);
+
+  const raced = nightlyRegistry(t);
+  assert.equal(raced.run('snapshot').status, 0);
+  const lost = raced.run('promote', '--apply', 'race');
+  assert.notEqual(lost.status, 0);
+  assert.equal(lost.error, undefined, 'a concurrent publication must fail fast, not hang');
+  assert.equal(raced.read().tags['dimcode-alpha'].latest, '1.2.3-alpha.11');
 });
 
 test('refuses to rebuild on an unanswered registry but reuses a nightly a blip hid', (t) => {
