@@ -2434,13 +2434,13 @@
         "removing": false
       },
       {
-        "service": "dim_agent_capabilities::skills::catalog::SkillsCatalog",
+        "service": "dim_agent_capabilities::skills::catalog::SkillsCatalog#dim/skills/catalog-owner",
         "provider": 28,
         "generation": 1,
         "removing": false
       },
       {
-        "service": "dim_agent_capabilities::skills::catalog::SkillsCatalog#dim/skills/catalog-owner",
+        "service": "dim_agent_capabilities::skills::face::SkillsCatalog",
         "provider": 28,
         "generation": 1,
         "removing": false

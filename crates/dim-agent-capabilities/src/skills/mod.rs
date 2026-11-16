@@ -5,6 +5,7 @@ mod catalog;
 pub(crate) mod content;
 mod discovery;
 mod face;
+pub use face::SkillsCatalog as SkillsCatalogBinding;
 mod install;
 mod session;
 

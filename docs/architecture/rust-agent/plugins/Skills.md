@@ -19,11 +19,17 @@ registers the same parts.
 
 `skillsCatalog` is the process data face for the existing plugin-content operations.
 Each method accepts one object: `register({plugin, root})` returns the scan's
-`SkillIssue[]`, `withdraw({plugin})` returns no value, `plugins({})` returns the
+`SkillIssue[]`, `withdraw({plugin})` returns `null`, `plugins({})` returns the
 registered plugin ids, and `issues({plugin})` returns that plugin's current issues.
 The Rust binding calls the same catalog operations directly. The embedding host
 and the Skills Session parts retain a private binding to this same owner for
 query, content and management work; no second catalog or scan is introduced.
+
+Rust consumers use `SkillsCatalogBinding` under this name. The binding exposes only these four
+owner operations, has no dereference or owner accessor, and shares one Arc with its dispatcher.
+Its static constructor lets an embedding host bind the catalog it already owns; it does not
+publish services or change `SkillsCatalogPlugin::mount`'s lifetime. The raw `SkillsCatalog` type
+is provided only at the private owner key. PluginManager keeps a public binding dependency.
 
 The wire root is a string converted at the filesystem input boundary. Native
 paths remain lossless. Diagnostic issues are tagged by `kind`:
@@ -37,6 +43,11 @@ These operations have no caller cancellation argument. Once an asynchronous
 wire operation starts, abandoning its wait does not cancel or roll it back.
 Settings work uses the existing owner closing token. Completed registrations
 remain in Settings and are restored when the catalog reloads.
+
+The plugin identifier is a content key, not authorization. Product registration retains the
+existing Settings validation of a nonblank plugin string and an absolute root. A registration
+is persisted independently of the caller row; callers explicitly withdraw it when needed.
+Caller unload does not automatically remove registered content.
 
 ### Dependencies
 

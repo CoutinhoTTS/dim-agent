@@ -18,7 +18,10 @@ export default definePlugin({
           if (params === null || typeof params !== 'object' || Array.isArray(params) || typeof params.root !== 'string') throw new Error('expected root')
           return { kind: 'value', value: await skills.register({ plugin: 'foreign-kit', root: params.root }) }
         }
-        if (call.method === 'skillprobe.withdraw') await skills.withdraw({ plugin: 'foreign-kit' })
+        if (call.method === 'skillprobe.withdraw') {
+          const result = await skills.withdraw({ plugin: 'foreign-kit' })
+          if (result !== null) throw new Error('withdraw must return null')
+        }
         return { kind: 'value', value: { plugins: await skills.plugins({}), issues: await skills.issues({ plugin: 'foreign-kit' }) } }
       },
     )

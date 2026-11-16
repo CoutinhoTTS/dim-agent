@@ -54,17 +54,16 @@ struct CatalogState {
 }
 
 /// Process-wide Skill discovery and global enablement.
-#[derive(Clone)]
 pub struct SkillsCatalog {
     user_root: PathBuf,
     settings: Arc<dyn SkillSettings>,
-    state: Arc<tokio::sync::Mutex<CatalogState>>,
+    state: tokio::sync::Mutex<CatalogState>,
     /// Serializes settings reloads so a later read is never overwritten by
     /// an earlier one.
-    reloading: Arc<tokio::sync::Mutex<()>>,
+    reloading: tokio::sync::Mutex<()>,
     /// Serializes the scans of the roots with an installation placing or
     /// removing files, so no view is built from a half-swapped directory.
-    operating: Arc<tokio::sync::Mutex<()>>,
+    operating: tokio::sync::Mutex<()>,
     /// The owner's context, which announces catalog changes.
     events: Ctx,
     closed: CancellationToken,
@@ -754,10 +753,11 @@ impl DynPlugin for SkillsCatalogPlugin {
             let parts = ctx.require_at(&self.parts)?;
             let catalog = Self::mount(ctx, (platform, settings)).await?;
             ctx.provide_at(owner_key(), catalog.clone())?;
-            ctx.provide_as::<SkillsCatalog>(catalog.clone())?;
+            let binding = Arc::new(super::SkillsCatalogBinding::new(catalog));
+            ctx.provide_as::<super::SkillsCatalogBinding>(binding.clone())?;
             ctx.provide_at::<dyn rutis_bridge::session::HostDispatch>(
                 rutis_bridge::session::host_key("skillsCatalog"),
-                catalog,
+                binding,
             )?;
             super::register_parts(ctx, &parts)?;
             Ok(Effect::Done)
@@ -788,15 +788,15 @@ impl SkillsCatalogPlugin {
         let catalog = Arc::new(SkillsCatalog {
             user_root: platform.home.join(SKILLS_DIR),
             settings: settings.clone(),
-            state: Arc::new(tokio::sync::Mutex::new(CatalogState {
+            state: tokio::sync::Mutex::new(CatalogState {
                 user: None,
                 plugins: BTreeMap::new(),
                 projects: HashMap::new(),
                 settings: initial,
                 version: 0,
-            })),
-            reloading: Arc::default(),
-            operating: Arc::default(),
+            }),
+            reloading: tokio::sync::Mutex::default(),
+            operating: tokio::sync::Mutex::default(),
             events: ctx.clone(),
             closed: lifecycle.clone(),
         });

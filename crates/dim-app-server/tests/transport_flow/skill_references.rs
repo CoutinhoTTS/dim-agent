@@ -7,7 +7,7 @@ use dim_agent_capabilities::{
     history::HistoryRenderer,
     host::{HostFuture, ModelConnection, ModelDriver, ModelStream},
     skill_settings::{SkillSettings, SkillSettingsHost},
-    skills::{self, MemorySkillSettings, SkillsCatalog},
+    skills::{self, MemorySkillSettings, SkillsCatalog, SkillsCatalogBinding},
 };
 use dim_agent_runtime::PartRegistry;
 use dim_agent_runtime::testing::branch_events;
@@ -46,10 +46,11 @@ impl DynPlugin for CatalogHost {
             )
             .await?;
             ctx.provide_at(dim_agent_capabilities::skills::owner_key(), catalog.clone())?;
-            ctx.provide_as::<SkillsCatalog>(catalog.clone())?;
+            let binding = Arc::new(SkillsCatalogBinding::new(catalog.clone()));
+            ctx.provide_as::<SkillsCatalogBinding>(binding.clone())?;
             ctx.provide_at::<dyn rutis_bridge::session::HostDispatch>(
                 rutis_bridge::session::host_key("skillsCatalog"),
-                catalog.clone(),
+                binding,
             )?;
             skills::register_parts(ctx, &parts)?;
             *self.catalog.lock().unwrap() = Some(catalog);

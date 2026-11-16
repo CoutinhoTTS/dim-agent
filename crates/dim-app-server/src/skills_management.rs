@@ -14,7 +14,7 @@ use dim_agent_capabilities::methods::{
 };
 use dim_agent_capabilities::skills::{
     InstallOutcome, RefreshTarget, Replace, SelectedSkill, SkillPreview, SkillStatus,
-    SkillsCatalog, SkillsError, selection_path, valid_installation_id,
+    SkillsCatalogBinding, SkillsError, selection_path, valid_installation_id,
 };
 use dim_agent_capabilities::{
     host_platform::HostPlatform,
@@ -639,10 +639,11 @@ impl DynPlugin for SkillsCatalogPlugin {
             )
             .await?;
             ctx.provide_at(dim_agent_capabilities::skills::owner_key(), catalog.clone())?;
-            ctx.provide_as::<SkillsCatalog>(catalog.clone())?;
+            let binding = Arc::new(SkillsCatalogBinding::new(catalog.clone()));
+            ctx.provide_as::<SkillsCatalogBinding>(binding.clone())?;
             ctx.provide_at::<dyn rutis_bridge::session::HostDispatch>(
                 rutis_bridge::session::host_key("skillsCatalog"),
-                catalog.clone(),
+                binding,
             )?;
             dim_agent_capabilities::skills::register_parts(ctx, &parts)?;
             methods.register(

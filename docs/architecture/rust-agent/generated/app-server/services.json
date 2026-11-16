@@ -245,7 +245,7 @@
         ]
       },
       {
-        "id": 77,
+        "id": 78,
         "parent": 71,
         "name": "eventhub-ready",
         "state": "Active",
@@ -3345,13 +3345,13 @@
         "removing": false
       },
       {
-        "service": "dim_agent_capabilities::skills::catalog::SkillsCatalog",
+        "service": "dim_agent_capabilities::skills::catalog::SkillsCatalog#dim/skills/catalog-owner",
         "provider": 31,
         "generation": 1,
         "removing": false
       },
       {
-        "service": "dim_agent_capabilities::skills::catalog::SkillsCatalog#dim/skills/catalog-owner",
+        "service": "dim_agent_capabilities::skills::face::SkillsCatalog",
         "provider": 31,
         "generation": 1,
         "removing": false
@@ -3477,12 +3477,6 @@
         "removing": false
       },
       {
-        "service": "dim_app_server::mcp::McpService",
-        "provider": 23,
-        "generation": 1,
-        "removing": false
-      },
-      {
         "service": "dim_app_server::mcp::McpService#dim/mcp/owner",
         "provider": 23,
         "generation": 1,
@@ -3490,6 +3484,12 @@
       },
       {
         "service": "dim_app_server::mcp::auth::McpAuth",
+        "provider": 23,
+        "generation": 1,
+        "removing": false
+      },
+      {
+        "service": "dim_app_server::mcp::face::McpService",
         "provider": 23,
         "generation": 1,
         "removing": false

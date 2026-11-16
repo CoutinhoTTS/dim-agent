@@ -16,9 +16,11 @@ export default definePlugin({
         if (call.method === 'mcpprobe.register') {
           const params = call.params
           if (params === null || typeof params !== 'object' || Array.isArray(params) || typeof params.dir !== 'string' || params.document === undefined) throw new Error('expected dir and document')
-          await mcp.register({ plugin: 'foreign-kit', dir: params.dir, document: params.document })
+          const result = await mcp.register({ plugin: 'foreign-kit', dir: params.dir, document: params.document })
+          if (result !== null) throw new Error('register must return null')
         } else if (call.method === 'mcpprobe.withdraw') {
-          await mcp.withdraw({ plugin: 'foreign-kit' })
+          const result = await mcp.withdraw({ plugin: 'foreign-kit' })
+          if (result !== null) throw new Error('withdraw must return null')
         }
         return { kind: 'value', value: { plugins: await mcp.plugins({}), refusal: mcp.refusal({ plugin: 'foreign-kit' }) } }
       },

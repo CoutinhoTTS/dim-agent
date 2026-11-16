@@ -1,7 +1,49 @@
-use super::{SkillsCatalog, SkillsError};
+use super::{SkillIssue, SkillsError};
 use crate::port_faces::{Empty, request, unknown_method};
 use rutis_bridge::session::{HostDispatch, Reply, Value, arg};
 use serde::{Deserialize, Serialize};
+use std::{future::Future, path::PathBuf, sync::Arc};
+
+/// The four plugin-content operations of the public `skillsCatalog` face.
+#[derive(Clone)]
+pub struct SkillsCatalog(Arc<super::SkillsCatalog>);
+
+impl SkillsCatalog {
+    /// Binds an embedding host's existing catalog without registering or copying owner state.
+    pub fn new(owner: Arc<super::SkillsCatalog>) -> Self {
+        Self(owner)
+    }
+
+    /// Registers and scans a plugin root through its existing owner.
+    pub fn register_plugin<'a>(
+        &'a self,
+        plugin: &'a str,
+        root: PathBuf,
+    ) -> impl Future<Output = Result<Vec<SkillIssue>, SkillsError>> + Send + 'a {
+        self.0.register_plugin(plugin, root)
+    }
+
+    /// Withdraws the plugin's persisted root through its existing owner.
+    pub fn withdraw_plugin<'a>(
+        &'a self,
+        plugin: &'a str,
+    ) -> impl Future<Output = Result<(), SkillsError>> + Send + 'a {
+        self.0.withdraw_plugin(plugin)
+    }
+
+    /// Reads the registered plugin IDs.
+    pub fn plugins(&self) -> impl Future<Output = Result<Vec<String>, SkillsError>> + Send + '_ {
+        self.0.plugins()
+    }
+
+    /// Reads the current scan issues for one registered plugin.
+    pub fn plugin_issues<'a>(
+        &'a self,
+        plugin: &'a str,
+    ) -> impl Future<Output = Result<Vec<SkillIssue>, SkillsError>> + Send + 'a {
+        self.0.plugin_issues(plugin)
+    }
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]

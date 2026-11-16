@@ -786,9 +786,7 @@ impl SkillSettings for SlowFirstResponse {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_late_update_response_does_not_overwrite_a_newer_setting() {
     use dim_agent_capabilities::{
-        host_platform::HostPlatform,
-        skill_settings::SkillSettingsHost,
-        skills::{SkillsCatalog, SkillsCatalogPlugin},
+        host_platform::HostPlatform, skill_settings::SkillSettingsHost, skills::SkillsCatalogPlugin,
     };
     use std::sync::Arc;
     let dirs = Dirs::new();
@@ -814,7 +812,9 @@ async fn a_late_update_response_does_not_overwrite_a_newer_setting() {
     (&root.plugin(SkillsCatalogPlugin::new(&names).unwrap()))
         .await
         .unwrap();
-    let catalog = root.get::<SkillsCatalog>().unwrap();
+    let catalog = root
+        .get_at(&dim_agent_capabilities::skills::owner_key())
+        .unwrap();
     let b = format!("workspace:{}:b", layout.project.to_string_lossy());
 
     let disabling = tokio::spawn({
@@ -1062,9 +1062,7 @@ async fn unavailable_settings_isolate_skills_and_refresh_recovers_existing_sessi
 #[tokio::test(flavor = "multi_thread")]
 async fn a_failed_read_back_is_reported_and_recovered_by_the_next_query() {
     use dim_agent_capabilities::{
-        host_platform::HostPlatform,
-        skill_settings::SkillSettingsHost,
-        skills::{SkillsCatalog, SkillsCatalogPlugin},
+        host_platform::HostPlatform, skill_settings::SkillSettingsHost, skills::SkillsCatalogPlugin,
     };
     use std::sync::Arc;
     let dirs = Dirs::new();
@@ -1088,7 +1086,9 @@ async fn a_failed_read_back_is_reported_and_recovered_by_the_next_query() {
     (&root.plugin(SkillsCatalogPlugin::new(&names).unwrap()))
         .await
         .unwrap();
-    let catalog = root.get::<SkillsCatalog>().unwrap();
+    let catalog = root
+        .get_at(&dim_agent_capabilities::skills::owner_key())
+        .unwrap();
     let b = format!("workspace:{}:b", layout.project.to_string_lossy());
 
     let failed = catalog.set_enabled(&b, false, Some(&layout.cwd)).await;
@@ -1910,7 +1910,7 @@ async fn a_new_catalog_restores_installations_from_settings() {
         .await
         .unwrap();
     let restored = root
-        .get::<dim_agent_capabilities::skills::SkillsCatalog>()
+        .get_at(&dim_agent_capabilities::skills::owner_key())
         .unwrap();
     let installations = restored.installations().await.unwrap();
     assert_eq!(installations["acme-skills"].skills, ["writing/review"]);
