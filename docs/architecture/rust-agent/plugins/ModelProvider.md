@@ -8,13 +8,14 @@ settlement and bounded retry/recovery.
 
 ## Image handling
 
-Every image block in a request is handled when the request is built, from that
-request's model (Attachments A.1; [images.rs](../../../../crates/dim-agent-capabilities/src/model_provider/images.rs)).
-The rule covers images in user content and images inside a tool result alike: a
-model that does not accept image input gets the text placeholder in the block's
-place, an image the request cannot carry gets the other placeholder, and every
-other image is sent as is. The decision changes the request only; the adopted
-input, the Timeline and the stored tool result never change.
+Every conversational request replaces image blocks in user content and tool
+results with content references, regardless of the model's vision capability.
+The reference and omission-placeholder rules are owned by
+[Attachments A.1](../../../design/plugins/Attachments.md#a1-image-handling-cli-checks-and-modelprovider),
+implemented by [images.rs](../../../../crates/dim-agent-capabilities/src/model_provider/images.rs)
+using the shared `images::image_reference` helper. The transformation changes
+the request only; adopted input, the Timeline and stored tool results never change.
+Auxiliary calls do not pass through ModelProvider, so their image pixels stay intact.
 
 The adapter selects replacements before copying content. An unchanged request
 keeps its Arc without cloning text, thinking, tool arguments or result blocks.
@@ -33,6 +34,7 @@ owner shutdown releases the waiters. Provider-specific limits still apply.
 | --- | --- |
 | `B:ContextPreparation` | Validate budget and access prepared context. |
 | `P:ModelHost` | The process model driver; scripted in this local graph. |
+| `P:sessionFiles` (optional) | Resolve durable images through the [SessionStore data face](../../../design/appserver/session-files.md#9-interface) before request adaptation. Read at load without a gate; standalone hosts need no file service for text or inline-image requests. |
 | `B:Dispatcher` | Replay unsettled calls, receive calls/steers/interrupts and report faults. |
 | `B:Timeline` | Commit output. |
 | `B:TimelineIdentity` | Session and branch ids of the `model.invoke` span. |
@@ -134,7 +136,10 @@ a continuation declines it.
 [host_flows.rs](../../../../crates/dim-agent-capabilities/tests/host_flows.rs):
 `invalid_model_stream_is_cancelled_and_drained_before_settlement`,
 `transient_retries_are_bounded_and_stop_after_irreversible_output`,
-`stop_during_native_drain_keeps_an_already_completed_model_result`.
+`stop_during_native_drain_keeps_an_already_completed_model_result`,
+`image_references_survive_vision_and_text_model_switches_without_changing_history`,
+`replacing_a_tool_image_preserves_other_messages_and_the_stored_result`,
+`stored_attachment_and_tool_images_share_a_reference_without_changing_file_history`.
 
 <!-- generated:plugin ModelProvider — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
 | 项 | 值 |
@@ -147,16 +152,21 @@ a continuation declines it.
 
 ## Durable images at model execution
 
-Request adaptation recognizes file-backed image sources and preserves their
-position in user content and tool results. A non-vision request replaces each
-image with the existing placeholder; subsequent vision requests reuse the
-canonical references still present in effective context.
+Before reference adaptation and budget validation, ModelProvider uses
+`session_files::materialize` to read file-backed image sources for the request
+metadata's Session into a request-local inline representation. The same path
+handles user content and tool results for vision and text-only models; only
+images in effective context are read. Adaptation then replaces those images
+with references. The stored request and its File sources remain unchanged.
 
-The native-storage profile gates Aimux on SessionStore's
-[`sessionFiles` data face](../../../design/appserver/session-files.md#9-interface).
-Immediately before provider conversion it reads referenced images for the
-request metadata's Session and builds
-a request-local inline representation. The stored request remains unchanged.
-Missing owner/session identity or unavailable content fails execution; it never
-silently substitutes a placeholder for a readable-model request. Cancellation
-propagates to bounded reads. Provider conversion rejects unresolved file references.
+The optional dependency is named through `Names` and read with `get_at` at
+load. It does not gate or create a reload relation. A missing file service,
+Session identity or stored image fails a request that needs file bytes, rather
+than inventing a reference or silently omitting it. Cancellation propagates to
+bounded reads, and the existing image-data budget remains enforced.
+
+SessionStore provides `sessionFiles` in the process, under both its shared
+dispatch name and the native binding. The native-storage profile also gates
+Aimux on that owner, so it is available before ModelProvider's required model
+host. Aimux retains its final materialization boundary for direct and auxiliary
+image requests; those requests are not converted to conversational references.

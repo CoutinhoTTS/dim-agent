@@ -870,6 +870,7 @@
       "parent": "dim_agent_capabilities",
       "file": "crates/dim-agent-capabilities/src/images.rs",
       "unexpandedMacros": [
+        "format",
         "matches"
       ]
     },
@@ -7140,6 +7141,32 @@
       ]
     },
     {
+      "id": "dim_image_understanding",
+      "crate": "dim_image_understanding",
+      "parent": null,
+      "file": "crates/dim-image-understanding/src/lib.rs",
+      "unexpandedMacros": [
+        "format",
+        "json",
+        "matches",
+        "tokio::select",
+        "unreachable",
+        "vec"
+      ]
+    },
+    {
+      "id": "dim_image_understanding::history",
+      "crate": "dim_image_understanding",
+      "parent": "dim_image_understanding",
+      "file": "crates/dim-image-understanding/src/history.rs",
+      "unexpandedMacros": [
+        "json",
+        "matches",
+        "unreachable",
+        "vec"
+      ]
+    },
+    {
       "id": "dim_migration",
       "crate": "dim_migration",
       "parent": null,
@@ -7370,6 +7397,18 @@
         "format",
         "json",
         "tokio::select"
+      ]
+    },
+    {
+      "id": "dim_modality::targets",
+      "crate": "dim_modality",
+      "parent": "dim_modality",
+      "file": "crates/dim-modality/src/targets.rs",
+      "unexpandedMacros": [
+        "format",
+        "serde_json::json",
+        "tokio::select",
+        "vec"
       ]
     },
     {
@@ -13633,6 +13672,16 @@
       ]
     },
     {
+      "from": "dim_agent_capabilities::images",
+      "to": "dim_agent_types::content",
+      "references": [
+        "path ImageSource",
+        "path ImageSourceType::Base64",
+        "use dim_agent_types::ImageSource",
+        "use dim_agent_types::ImageSourceType"
+      ]
+    },
+    {
       "from": "dim_agent_capabilities::input_queue",
       "to": "dim_agent_capabilities::host",
       "references": [
@@ -14088,7 +14137,8 @@
         "path ModelFailureFacts::unknown",
         "path ModelHost",
         "path ProviderConnectionResolver",
-        "path ResolvedModelConnection"
+        "path ResolvedModelConnection",
+        "path SessionFiles"
       ]
     },
     {
@@ -14128,6 +14178,13 @@
         "use crate::output::StartedCall",
         "use crate::output::closure",
         "use crate::output::consume_output"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::model_provider",
+      "to": "dim_agent_capabilities::session_files",
+      "references": [
+        "path crate::session_files::materialize"
       ]
     },
     {
@@ -14293,13 +14350,19 @@
     },
     {
       "from": "dim_agent_capabilities::model_provider::images",
+      "to": "dim_agent_capabilities::images",
+      "references": [
+        "path image_reference",
+        "use crate::images::image_reference"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::model_provider::images",
       "to": "dim_agent_types::content",
       "references": [
         "path ContentBlock::Image",
         "path ContentBlock::Text",
         "path ImageSource",
-        "path ImageSourceType::Base64",
-        "path ImageSourceType::File",
         "path Message",
         "path MessageContent::Parts",
         "path MessagePart::Image",
@@ -17451,6 +17514,7 @@
       "to": "dim_agent_runtime::timeline_query",
       "references": [
         "path TimelineQueryScope::Branch",
+        "path TimelineQueryScope::Chain",
         "use dim_agent_runtime::TimelineQueryScope"
       ]
     },
@@ -51436,6 +51500,270 @@
       ]
     },
     {
+      "from": "dim_image_understanding",
+      "to": "dim_agent_capabilities::host",
+      "references": [
+        "path AuxiliaryErrorCode::Cancelled",
+        "path AuxiliaryModel",
+        "path AuxiliaryRequest",
+        "path HostError",
+        "path HostError::Cancelled",
+        "path HostFuture",
+        "path ModelStopReason::EndTurn",
+        "path ModelStopReason::MaxTokens",
+        "path ModelStopReason::StopSequence",
+        "path ModelStopReason::ToolUse",
+        "path SessionFiles",
+        "path ToolExecutionContext",
+        "use dim_agent_capabilities::host::AuxiliaryErrorCode",
+        "use dim_agent_capabilities::host::AuxiliaryModel",
+        "use dim_agent_capabilities::host::AuxiliaryRequest",
+        "use dim_agent_capabilities::host::HostError",
+        "use dim_agent_capabilities::host::HostFuture",
+        "use dim_agent_capabilities::host::ModelStopReason",
+        "use dim_agent_capabilities::host::SessionFiles",
+        "use dim_agent_capabilities::host::ToolExecutionContext"
+      ]
+    },
+    {
+      "from": "dim_image_understanding",
+      "to": "dim_agent_capabilities::prompt_guide",
+      "references": [
+        "path GuideEntries",
+        "path GuideEntry",
+        "path GuideScope::Session",
+        "use dim_agent_capabilities::prompt_guide::GuideEntries",
+        "use dim_agent_capabilities::prompt_guide::GuideEntry",
+        "use dim_agent_capabilities::prompt_guide::GuideScope"
+      ]
+    },
+    {
+      "from": "dim_image_understanding",
+      "to": "dim_agent_capabilities::timeline_tree",
+      "references": [
+        "path TreeCommands",
+        "use dim_agent_capabilities::timeline_tree::TreeCommands"
+      ]
+    },
+    {
+      "from": "dim_image_understanding",
+      "to": "dim_agent_capabilities::tool_registry",
+      "references": [
+        "path ToolConcurrency",
+        "path ToolConcurrency::Concurrent",
+        "path ToolContribution",
+        "path ToolHandler",
+        "path ToolRegistry",
+        "path definition",
+        "use dim_agent_capabilities::tool_registry::ToolConcurrency",
+        "use dim_agent_capabilities::tool_registry::ToolContribution",
+        "use dim_agent_capabilities::tool_registry::ToolHandler",
+        "use dim_agent_capabilities::tool_registry::ToolRegistry",
+        "use dim_agent_capabilities::tool_registry::definition"
+      ]
+    },
+    {
+      "from": "dim_image_understanding",
+      "to": "dim_agent_runtime::assembly",
+      "references": [
+        "path AgentBuilder",
+        "use dim_agent_runtime::AgentBuilder"
+      ]
+    },
+    {
+      "from": "dim_image_understanding",
+      "to": "dim_agent_runtime::config",
+      "references": [
+        "path SessionIdentity",
+        "use dim_agent_runtime::SessionIdentity"
+      ]
+    },
+    {
+      "from": "dim_image_understanding",
+      "to": "dim_agent_runtime::names",
+      "references": [
+        "path Names",
+        "use dim_agent_runtime::Names"
+      ]
+    },
+    {
+      "from": "dim_image_understanding",
+      "to": "dim_agent_runtime::parts",
+      "references": [
+        "path Feature::new",
+        "use dim_agent_runtime::Feature"
+      ]
+    },
+    {
+      "from": "dim_image_understanding",
+      "to": "dim_agent_types::content",
+      "references": [
+        "path dim_agent_types::ToolContent::Text",
+        "use dim_agent_types::Message",
+        "use dim_agent_types::MessageContent",
+        "use dim_agent_types::MessagePart",
+        "use dim_agent_types::Role"
+      ]
+    },
+    {
+      "from": "dim_image_understanding",
+      "to": "dim_agent_types::profile",
+      "references": [
+        "path ModelId",
+        "use dim_agent_types::ModelId"
+      ]
+    },
+    {
+      "from": "dim_image_understanding",
+      "to": "dim_agent_types::tool",
+      "references": [
+        "path ToolCall",
+        "path ToolResult",
+        "path ToolResult::error",
+        "path ToolResult::text",
+        "path dim_agent_types::ToolSource::Extension",
+        "use dim_agent_types::ToolCall",
+        "use dim_agent_types::ToolResult"
+      ]
+    },
+    {
+      "from": "dim_image_understanding",
+      "to": "dim_image_understanding::history",
+      "references": [
+        "mod history",
+        "path history::Index",
+        "path history::answer",
+        "path history::image"
+      ]
+    },
+    {
+      "from": "dim_image_understanding",
+      "to": "dim_modality::targets",
+      "references": [
+        "path ModalityTargets",
+        "path TargetReply::Resolved",
+        "path TargetReply::Unavailable",
+        "path TargetRequest",
+        "use dim_modality::ModalityTargets",
+        "use dim_modality::TargetReply",
+        "use dim_modality::TargetRequest"
+      ]
+    },
+    {
+      "from": "dim_image_understanding::history",
+      "to": "dim_agent_capabilities::host",
+      "references": [
+        "path HostError",
+        "path HostError::failed"
+      ]
+    },
+    {
+      "from": "dim_image_understanding::history",
+      "to": "dim_agent_capabilities::images",
+      "references": [
+        "path image_reference",
+        "use dim_agent_capabilities::images::image_reference"
+      ]
+    },
+    {
+      "from": "dim_image_understanding::history",
+      "to": "dim_agent_capabilities::session_files",
+      "references": [
+        "path session_files::image",
+        "use dim_agent_capabilities::session_files"
+      ]
+    },
+    {
+      "from": "dim_image_understanding::history",
+      "to": "dim_agent_runtime::timeline_query",
+      "references": [
+        "path TimelineQueryScope",
+        "path TimelineQueryScope::Branch",
+        "path TimelineQueryScope::Chain",
+        "use dim_agent_runtime::TimelineQueryScope"
+      ]
+    },
+    {
+      "from": "dim_image_understanding::history",
+      "to": "dim_agent_runtime::timeline_query::properties",
+      "references": [
+        "path QueryComparison::Eq",
+        "path QueryFilter",
+        "path QueryFilter::Compare",
+        "path QueryFilter::In",
+        "path QueryOperand::Field",
+        "path QueryOperand::Value",
+        "path QueryOutput::Events",
+        "path QueryPage",
+        "path QuerySelect",
+        "path QuerySelect::Count",
+        "path QuerySelect::Events",
+        "path QuerySpec",
+        "path TimelineQuery",
+        "use dim_agent_runtime::QueryComparison",
+        "use dim_agent_runtime::QueryFilter",
+        "use dim_agent_runtime::QueryOperand",
+        "use dim_agent_runtime::QueryOutput",
+        "use dim_agent_runtime::QueryPage",
+        "use dim_agent_runtime::QuerySelect",
+        "use dim_agent_runtime::QuerySpec",
+        "use dim_agent_runtime::TimelineQuery"
+      ]
+    },
+    {
+      "from": "dim_image_understanding::history",
+      "to": "dim_agent_types::checkpoint",
+      "references": [
+        "path TimelinePosition",
+        "use dim_agent_types::TimelinePosition"
+      ]
+    },
+    {
+      "from": "dim_image_understanding::history",
+      "to": "dim_agent_types::content",
+      "references": [
+        "path ContentBlock::Image",
+        "path ImageSource",
+        "path ImageSourceType::File",
+        "path ToolContent::Blocks",
+        "use dim_agent_types::ContentBlock",
+        "use dim_agent_types::ImageSource",
+        "use dim_agent_types::ImageSourceType",
+        "use dim_agent_types::ToolContent"
+      ]
+    },
+    {
+      "from": "dim_image_understanding::history",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path AgentEvent",
+        "path EventKind::InputMessage",
+        "path EventKind::ToolCall",
+        "path EventKind::ToolResult",
+        "use dim_agent_types::AgentEvent",
+        "use dim_agent_types::EventKind"
+      ]
+    },
+    {
+      "from": "dim_image_understanding::history",
+      "to": "dim_agent_types::tool",
+      "references": [
+        "path ToolResult"
+      ]
+    },
+    {
+      "from": "dim_image_understanding::history",
+      "to": "dim_image_understanding",
+      "references": [
+        "path AnswerStamp",
+        "path ImageUnderstanding",
+        "path Input",
+        "path ReuseKey",
+        "path TOOL",
+        "path VERSION"
+      ]
+    },
+    {
       "from": "dim_migration",
       "to": "dim_agent_capabilities::file_storage",
       "references": [
@@ -52788,6 +53116,20 @@
     },
     {
       "from": "dim_modality",
+      "to": "dim_modality::targets",
+      "references": [
+        "mod targets",
+        "path ModalityTargets",
+        "path ModalityTargets::new",
+        "path targets",
+        "use targets::ModalityTargets",
+        "use targets::TargetError",
+        "use targets::TargetReply",
+        "use targets::TargetRequest"
+      ]
+    },
+    {
+      "from": "dim_modality",
       "to": "dim_modality::task",
       "references": [
         "mod task",
@@ -53183,6 +53525,45 @@
         "use crate::engine::not_found",
         "use crate::engine::resolve_task_model",
         "use crate::engine::unavailable"
+      ]
+    },
+    {
+      "from": "dim_modality::targets",
+      "to": "dim_agent_capabilities::methods",
+      "references": [
+        "path RpcError",
+        "path RpcError::interrupted",
+        "path RpcError::reloading",
+        "use dim_agent_capabilities::methods::RpcError"
+      ]
+    },
+    {
+      "from": "dim_modality::targets",
+      "to": "dim_agent_types::profile",
+      "references": [
+        "path ModelId",
+        "use dim_agent_types::ModelId"
+      ]
+    },
+    {
+      "from": "dim_modality::targets",
+      "to": "dim_modality",
+      "references": [
+        "path Reason",
+        "path catalog_category",
+        "path crate::unknown_operation",
+        "use crate::OcrLookup",
+        "use crate::Reason",
+        "use crate::catalog_category",
+        "use crate::evaluate"
+      ]
+    },
+    {
+      "from": "dim_modality::targets",
+      "to": "dim_modality::engine",
+      "references": [
+        "path Shared",
+        "use crate::engine::Shared"
       ]
     },
     {

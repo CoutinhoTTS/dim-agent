@@ -1,20 +1,16 @@
-//! Image blocks in a request the model cannot take become text, per request
-//! (Attachments A.1). The rule covers user content and tool results alike.
+//! Image blocks become content references per request (Attachments A.1).
+//! The rule covers user content and tool results alike.
 //! The adopted input and the history are never changed.
-use base64::Engine;
+use crate::images::image_reference;
 use dim_agent_types::*;
 use std::sync::Arc;
 
 const NO_IMAGE_INPUT: &str = "[Image omitted: the current model does not accept images.]";
 const UNSENDABLE: &str = "[Image omitted: the image cannot be sent to this model.]";
 
-/// Image formats every adapter accepts (feature list).
-const FORMATS: [&str; 4] = ["image/png", "image/jpeg", "image/webp", "image/gif"];
-
-/// Returns the request to send: the same request when every image is sent as
-/// is, otherwise a copy whose unsendable images are text placeholders.
+/// Returns the request with image references or placeholders in place of
+/// image blocks, sharing messages that contain no images.
 pub(super) fn adapt(request: &Arc<ModelRequest>) -> Arc<ModelRequest> {
-    // Unknown capability: the image is sent and the provider decides (A4).
     let vision = request
         .capability_snapshot
         .as_ref()
@@ -42,7 +38,7 @@ pub(super) fn adapt(request: &Arc<ModelRequest>) -> Arc<ModelRequest> {
     })
 }
 
-/// The message with its unsendable images replaced, or `None` if it has none.
+/// The message with its images replaced, or `None` if it has none.
 fn replace_images(message: &Message, vision: bool) -> Option<Message> {
     let MessageContent::Parts(parts) = &message.content else {
         return None;
@@ -52,14 +48,12 @@ fn replace_images(message: &Message, vision: bool) -> Option<Message> {
         .enumerate()
         .filter_map(|(index, part)| {
             let replacement = match part {
-                MessagePart::Image { source } => {
-                    placeholder(source, vision).map(|text| MessagePart::Text {
-                        provider_metadata: None,
-                        text: text.into(),
-                        start_time: None,
-                        end_time: None,
-                    })
-                }
+                MessagePart::Image { source } => Some(MessagePart::Text {
+                    provider_metadata: None,
+                    text: reference_or_placeholder(source, vision),
+                    start_time: None,
+                    end_time: None,
+                }),
                 MessagePart::ToolResult {
                     tool_use_id,
                     content: ToolContent::Blocks(blocks),
@@ -73,8 +67,12 @@ fn replace_images(message: &Message, vision: bool) -> Option<Message> {
                             let ContentBlock::Image { source } = block else {
                                 return None;
                             };
-                            placeholder(source, vision)
-                                .map(|text| (index, ContentBlock::Text { text: text.into() }))
+                            Some((
+                                index,
+                                ContentBlock::Text {
+                                    text: reference_or_placeholder(source, vision),
+                                },
+                            ))
                         })
                         .collect();
                     (!replacements.is_empty()).then(|| MessagePart::ToolResult {
@@ -110,28 +108,7 @@ fn replace_selected<T: Clone>(values: &[T], replacements: Vec<(usize, T)>) -> Ve
         .collect()
 }
 
-/// The placeholder an image becomes, or `None` when the image is sent as is.
-fn placeholder(source: &ImageSource, vision: bool) -> Option<&'static str> {
-    if !vision {
-        Some(NO_IMAGE_INPUT)
-    } else if !sendable(source) {
-        Some(UNSENDABLE)
-    } else {
-        None
-    }
-}
-
-/// A URL source, undecodable data or a format adapters do not accept (A10).
-fn sendable(source: &ImageSource) -> bool {
-    (source.source_type == ImageSourceType::File
-        && FORMATS.contains(&source.media_type.as_str())
-        && source.file_id.as_ref().is_some_and(|id| !id.is_empty()))
-        || source.source_type == ImageSourceType::Base64
-            && FORMATS.contains(&source.media_type.as_str())
-            && source.data.as_deref().is_some_and(|data| {
-                !data.is_empty()
-                    && base64::engine::general_purpose::STANDARD
-                        .decode(data)
-                        .is_ok()
-            })
+fn reference_or_placeholder(source: &ImageSource, vision: bool) -> String {
+    image_reference(source)
+        .unwrap_or_else(|| if vision { UNSENDABLE } else { NO_IMAGE_INPUT }.into())
 }
