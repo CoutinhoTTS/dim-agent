@@ -24,14 +24,8 @@ const MIN_FORMAT: u32 = UPGRADES[0].0;
 const CHECKPOINT_BYTES: u64 = 4 * 1024 * 1024;
 /// The WAL file is truncated to this size when a checkpoint restarts it.
 const WAL_LIMIT_BYTES: i64 = 64 * 1024 * 1024;
-/// The writer connection's page-cache ceiling in KiB (#1673). Point reads and
-/// ordinary writes keep a working set of a few dozen pages; 512 KiB holds that
-/// without the multi-MiB idle cache the old 32 MiB ceiling allowed. It is a
-/// ceiling, not preallocation: SQLite allocates pages as it reads them.
+// #1673
 const WRITER_CACHE_KIB: i64 = 512;
-/// A reader connection's page-cache ceiling in KiB (#1673). A point read
-/// touches a few B-tree pages; this bounds what one reader keeps while one
-/// idle reader and the writer stay inside the 1.5 MiB idle store budget.
 const READER_CACHE_KIB: i64 = 256;
 /// Indexes a format range had and the current schema no longer creates, with
 /// the first and last format that had them.
@@ -933,45 +927,32 @@ pub(super) struct Readers {
     demand: bool,
 }
 struct ReaderState {
-    /// Connections no read holds.
     idle: Vec<Connection>,
-    /// Held connections, including one being opened outside the lock, so the
-    /// bound holds while that open runs.
-    busy: usize,
+    open: usize,
+    running: usize,
 }
-/// Returns a reader to the pool. Idle holds one connection; a returning read
-/// closes the others (#1673).
 struct ReaderLease<'a> {
     readers: &'a Readers,
     connection: Option<Connection>,
 }
 impl Drop for ReaderLease<'_> {
     fn drop(&mut self) {
-        let Some(connection) = self.connection.take() else {
-            return;
-        };
         let mut state = self
             .readers
             .state
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        state.busy -= 1;
-        if state.busy > 0 {
-            state.idle.push(connection);
-            self.readers.available.notify_one();
-            return;
-        }
-        let mut closing = std::mem::take(&mut state.idle);
-        if let Some(keep) = closing.pop() {
-            state.idle.push(keep);
-            closing.push(connection);
-        } else {
+        state.running -= 1;
+        if let Some(connection) = self.connection.take() {
             state.idle.push(connection);
         }
-        drop(state);
-        for connection in closing {
-            close_reader(connection);
+        if state.running == 0 {
+            while state.idle.len() > 1 {
+                close_reader(state.idle.pop().unwrap());
+                state.open -= 1;
+            }
         }
+        self.readers.available.notify_one();
     }
 }
 impl Readers {
@@ -980,7 +961,8 @@ impl Readers {
         Self {
             state: Mutex::new(ReaderState {
                 idle: Vec::new(),
-                busy: 0,
+                open: 0,
+                running: 0,
             }),
             available: Condvar::new(),
             demand: true,
@@ -991,16 +973,12 @@ impl Readers {
         Self {
             state: Mutex::new(ReaderState {
                 idle: Vec::new(),
-                busy: 0,
+                open: 0,
+                running: 0,
             }),
             available: Condvar::new(),
             demand: false,
         }
-    }
-    /// Whether this store serves reads on readers rather than its one
-    /// connection.
-    fn enabled(&self) -> bool {
-        self.demand
     }
     /// Runs `operation` on a reader.
     fn run<T>(
@@ -1010,8 +988,9 @@ impl Readers {
     ) -> Result<T> {
         let mut lease = ReaderLease {
             readers: self,
-            connection: Some(self.acquire(path)?),
+            connection: None,
         };
+        lease.connection = Some(self.acquire(path)?);
         operation(
             lease
                 .connection
@@ -1023,20 +1002,19 @@ impl Readers {
     /// wait for one to return.
     fn acquire(&self, path: &Path) -> Result<Connection> {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.running += 1;
         loop {
             if let Some(connection) = state.idle.pop() {
-                state.busy += 1;
                 return Ok(connection);
             }
-            if state.busy < READ_CONNECTIONS {
-                state.busy += 1;
+            if state.open < READ_CONNECTIONS {
+                state.open += 1;
                 drop(state);
                 return match reader_connection(path) {
                     Ok(connection) => Ok(connection),
                     Err(error) => {
                         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-                        state.busy -= 1;
-                        self.available.notify_one();
+                        state.open -= 1;
                         Err(error)
                     }
                 };
@@ -1051,7 +1029,7 @@ impl Readers {
     #[cfg(feature = "testing")]
     fn live(&self) -> usize {
         let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        state.idle.len() + state.busy
+        state.open
     }
 }
 /// Opens one read-only reader (#599). It sets only the read path's pragmas and
@@ -1560,8 +1538,7 @@ impl SqliteStorage {
             let connection = guard
                 .as_mut()
                 .ok_or_else(|| storage("SQLite storage is closed"))?;
-            let result = catch_unwind(AssertUnwindSafe(|| operation(connection)));
-            outcome(connection, result)
+            guarded(connection, operation)
         })
         .await
         .map_err(storage)?
@@ -1577,13 +1554,11 @@ impl SqliteStorage {
         operation: impl FnOnce(&mut Connection) -> Result<T> + Send + 'static,
     ) -> Result<T> {
         let admitted = self.admit()?;
-        let path = self.path.clone();
         tokio::task::spawn_blocking(move || {
-            if admitted.0.readers.enabled() {
-                return admitted
-                    .0
-                    .readers
-                    .run(&path, |connection| guarded(connection, operation));
+            if admitted.0.readers.demand {
+                return admitted.0.readers.run(&admitted.0.path, |connection| {
+                    guarded(connection, operation)
+                });
             }
             let mut guard = admitted
                 .0
@@ -1746,6 +1721,7 @@ impl SqliteStorage {
                         readers.idle.push(connection);
                         return Err(storage(failure));
                     }
+                    readers.open -= 1;
                 }
                 drop(readers);
                 let mut guard = db
@@ -1806,6 +1782,124 @@ fn outcome<T>(connection: &Connection, result: std::thread::Result<Result<T>>) -
             Err(failure)
         }
     }
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn saturated_reads_drain_errors_panics_and_cancellation_before_close() {
+    use std::{future::Future, task::Poll};
+
+    let directory = std::env::temp_dir().join(format!("dim-reader-close-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let db = SqliteStorage::open(directory.join("dimcode.sqlite")).unwrap();
+    db.run(|connection| {
+        connection
+            .execute(
+                "INSERT INTO settings_documents (source, version, document, imported_revision) \
+                 VALUES ('user/test', 1, 'committed', 'revision')",
+                [],
+            )
+            .map_err(storage)?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+
+    let (entered, mut ready) = tokio::sync::mpsc::unbounded_channel();
+    let mut releases = Vec::new();
+    let mut holders = Vec::new();
+    for index in 0..READ_CONNECTIONS {
+        let db = db.clone();
+        let entered = entered.clone();
+        let (release, blocked) = std::sync::mpsc::channel();
+        releases.push(release);
+        holders.push(tokio::spawn(async move {
+            db.run_read(move |connection| {
+                entered.send(()).unwrap();
+                blocked.recv_timeout(Duration::from_secs(10)).unwrap();
+                match index {
+                    0 => {
+                        connection.execute_batch("BEGIN").map_err(storage)?;
+                        panic!("reader flow panic")
+                    }
+                    1 => Err(storage("reader flow error")),
+                    _ => Ok(()),
+                }
+            })
+            .await
+        }));
+    }
+    for _ in 0..READ_CONNECTIONS {
+        ready.recv().await.unwrap();
+    }
+    let mut reads = Vec::new();
+    for _ in 0..24 {
+        let db = db.clone();
+        reads.push(tokio::spawn(async move {
+            db.run_read(|connection| {
+                assert!(
+                    connection.is_autocommit(),
+                    "a panic must roll back its read transaction"
+                );
+                connection
+                    .query_row(
+                        "SELECT document FROM settings_documents WHERE source='user/test'",
+                        [],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .map_err(storage)
+            })
+            .await
+        }));
+    }
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let cancelled = {
+        let db = db.clone();
+        let cancel = cancel.clone();
+        tokio::spawn(async move {
+            db.run_read_cancellable(cancel, |_| -> Result<()> {
+                panic!("cancelled queued reads must not start SQL")
+            })
+            .await
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if db.readers.state.lock().unwrap().running == READ_CONNECTIONS + 25 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("the reader pool must saturate before shutdown");
+    assert_eq!(db.reader_connections(), READ_CONNECTIONS);
+    cancel.cancel();
+    let mut close = Box::pin(db.close());
+    assert!(std::future::poll_fn(|cx| Poll::Ready(close.as_mut().poll(cx).is_pending())).await);
+    assert!(db.run_read(|_| Ok(())).await.is_err());
+    for release in releases {
+        release.send(()).unwrap();
+    }
+    tokio::time::timeout(Duration::from_secs(10), async {
+        for (index, holder) in holders.into_iter().enumerate() {
+            assert_eq!(holder.await.unwrap().is_err(), index < 2);
+        }
+        for read in reads {
+            assert_eq!(read.await.unwrap().unwrap(), "committed");
+        }
+        assert!(matches!(
+            cancelled.await.unwrap(),
+            Err(AgentError::Cancelled(_))
+        ));
+        close.await.unwrap();
+    })
+    .await
+    .expect("every accepted read and shutdown must finish after the pool is released");
+    assert_eq!(db.reader_connections(), 0);
+    let reopened = SqliteStorage::open(directory.join("dimcode.sqlite")).unwrap();
+    reopened.close().await.unwrap();
+    std::fs::remove_dir_all(directory).unwrap();
 }
 
 /// What `vacuum_store` reclaimed, as bytes on disk before and after.
