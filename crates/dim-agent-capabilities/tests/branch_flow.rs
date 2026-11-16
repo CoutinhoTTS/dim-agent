@@ -7916,7 +7916,7 @@ async fn timeline_store_binding_preserves_memory_batch_publication_and_wire_read
     let native_records = native.read_page(&key, 0, 1, 2).await.unwrap();
     assert_eq!(
         reply["events"],
-        serde_json::to_value(native_records).unwrap()
+        serde_json::to_value(&native_records).unwrap()
     );
     assert_eq!(
         reply["events"].as_array().unwrap().len(),
@@ -7957,6 +7957,28 @@ async fn timeline_store_binding_preserves_memory_batch_publication_and_wire_read
         message,
         native.batch_end(&key, 1).await.unwrap_err().to_string()
     );
+    assert!(
+        wire.invoke("head", json!([["parity", "main"]]).into())
+            .is_err()
+    );
+    let mut local = native_records[1].clone();
+    let event = Arc::make_mut(&mut local.event);
+    event.id = "local-wire-append".into();
+    event.sequence = 3;
+    local.batch_end = 3;
+    let admitted = wire
+        .invoke(
+            "append",
+            json!([{
+                "sessionId":"parity","branchId":"main","batchId":"local-wire","events":[local]
+            }])
+            .into(),
+        )
+        .unwrap()
+        .json()
+        .unwrap();
+    assert_eq!(admitted, json!({"accepted":true}));
+    assert_eq!(native.head(&key).await.unwrap(), 3);
     wire.invoke("releaseSession", json!([{"sessionId":"parity"}]).into())
         .unwrap()
         .reference()
@@ -7964,7 +7986,7 @@ async fn timeline_store_binding_preserves_memory_batch_publication_and_wire_read
         .wait_async()
         .await
         .unwrap();
-    assert_eq!(native.head(&key).await.unwrap(), 2);
+    assert_eq!(native.head(&key).await.unwrap(), 3);
     wire.invoke("rollbackSession", json!([{"sessionId":"parity"}]).into())
         .unwrap()
         .reference()

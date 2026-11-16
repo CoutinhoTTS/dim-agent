@@ -52,6 +52,8 @@ impl Event for Completion {
 }
 impl TimelineStoreBinding {
     /// Creates the one binding shared by all consumers of this backend.
+    /// Providers must call [`Self::install`] before exposing or invoking its
+    /// `HostDispatch`; `AgentBuilder` installs it before providing Session services.
     pub fn new(backend: Arc<dyn TimelineStore>) -> Arc<Self> {
         Arc::new(Self(Arc::new(Binding {
             backend,
@@ -337,8 +339,14 @@ impl HostDispatch for TimelineStoreBinding {
                 .list()?
                 .try_into()
                 .map_err(|_| Error::Value("commits expects a request and listener".into()))?;
-            let request: Session = serde_json::from_value(request.json()?)
-                .map_err(|error| Error::Value(error.to_string()))?;
+            let request = request.json()?;
+            if !request.is_object() {
+                return Err(Error::Value(
+                    "timelineStore request must be an object".into(),
+                ));
+            }
+            let request: Session =
+                serde_json::from_value(request).map_err(|error| Error::Value(error.to_string()))?;
             let listener = listener.reference()?;
             let owner = self.clone();
             return Ok(Value::future(async move {
@@ -388,6 +396,11 @@ impl HostDispatch for TimelineStoreBinding {
         }
         let [request]: [serde_json::Value; 1] = serde_json::from_value(args.json()?)
             .map_err(|error| Error::Value(error.to_string()))?;
+        if !request.is_object() {
+            return Err(Error::Value(
+                "timelineStore request must be an object".into(),
+            ));
+        }
         if method == "append" {
             if rutis_bridge::session::caller().is_some() {
                 return Err(failure(AgentError::InvalidInput(

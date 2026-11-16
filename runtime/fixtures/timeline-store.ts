@@ -39,6 +39,8 @@ export const part = definePlugin({
           case 'release': await store.releaseSession({ sessionId: p.target }); break
           case 'read': {
             const key = { sessionId: p.target, branchId: 'main' }
+            await assert.rejects(() => Reflect.apply(store.head, store, [[p.target, 'main']]), /request must be an object/)
+            await assert.rejects(() => Reflect.apply(store.commits, store, [[p.target], () => {}]), /request must be an object/)
             const { sequence: through } = await store.head(key)
             const { events } = await store.readPage({ ...key, after: 0, limit: 1, through })
             assert.ok(events.length > 0)
