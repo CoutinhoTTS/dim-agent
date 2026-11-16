@@ -3229,6 +3229,7 @@
       "file": "crates/dim-app-server/src/protocol.rs",
       "unexpandedMacros": [
         "env",
+        "format",
         "macro_rules",
         "matches",
         "notifications"
@@ -23530,10 +23531,8 @@
       "references": [
         "mod collaboration",
         "path CollaborationPlugin::new",
-        "path collaboration::Collaboration",
         "path collaboration::CollaborationDirectory",
         "path collaboration::CollaborationDirectoryPlugin",
-        "path collaboration::CollaborationSession",
         "use collaboration::CollaborationPlugin"
       ]
     },
@@ -24236,6 +24235,7 @@
         "path crate::protocol::CatalogResult",
         "path crate::protocol::PROTOCOL_VERSION",
         "path crate::protocol::SessionInfo",
+        "path crate::protocol::check_session_id",
         "use crate::protocol::AgentInfo",
         "use crate::protocol::SessionOrigin"
       ]
@@ -25799,7 +25799,8 @@
       "references": [
         "mod approvals",
         "path approvals::Route",
-        "path approvals::install"
+        "path approvals::install",
+        "use approvals::ApprovalDestination"
       ]
     },
     {
@@ -30276,6 +30277,14 @@
     },
     {
       "from": "dim_app_server::protocol",
+      "to": "dim_agent_runtime::error",
+      "references": [
+        "path dim_agent_runtime::AgentError::InvalidInput",
+        "path dim_agent_runtime::Result"
+      ]
+    },
+    {
+      "from": "dim_app_server::protocol",
       "to": "dim_agent_types",
       "references": [
         "path JS_MAX_SAFE_INTEGER",
@@ -34221,6 +34230,7 @@
         "path SessionOrigin",
         "path SessionOrigin::Unknown",
         "path SessionOrigin::from_stored",
+        "path crate::protocol::check_session_id",
         "use crate::protocol::SessionOrigin"
       ]
     },

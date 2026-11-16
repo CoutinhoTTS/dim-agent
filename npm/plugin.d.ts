@@ -548,3 +548,15 @@ export type SkillSummary = { id: string; name: string; description: string; user
 export interface SkillsBranch {
   list(request: Record<string, never>): SkillSummary[];
 }
+
+export type ApprovalDestination = {
+  branchId: string;
+  delegationId: string;
+  agentId: string;
+  interactive: boolean;
+  approvalTools: boolean;
+};
+/** Session service owned by Collaboration; reads an active delegation without changing it. */
+export interface CollaborationSession {
+  approvalDestination(request: { memberSessionId: string }): ApprovalDestination | null;
+}

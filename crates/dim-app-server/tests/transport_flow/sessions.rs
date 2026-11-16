@@ -131,15 +131,6 @@ struct HeldRulesPart(
     Key<CommandRulesHost>,
     rutis::host::Key<dim_app_server::collaboration::Collaboration>,
 );
-impl HeldRulesPart {
-    fn new(
-        names: &dim_agent_runtime::Names<'_>,
-        a0: HeldRules,
-        a1: Key<CommandRulesHost>,
-    ) -> rutis::Result<Self> {
-        Ok(Self(a0, a1, names.key()?))
-    }
-}
 impl rutis::host::DynPlugin for HeldRulesPart {
     fn name(&self) -> &str {
         "held-rules"
@@ -236,11 +227,11 @@ async fn serve_with(setup: Setup) -> Served {
                 .session_value(Arc::new(InitialPromptConfiguration::fixed(None)))
                 .require_feature(
                     Feature::new("held-rules").session("held-rules", move |names| {
-                        Ok(Box::new(HeldRulesPart::new(
-                            names,
+                        Ok(Box::new(HeldRulesPart(
                             rules.clone(),
                             names.key()?,
-                        )?))
+                            Key::of(),
+                        )))
                     }),
                 );
             defaults::install_with_prompt_capability(&mut builder, ModelProviderPlugin::new);

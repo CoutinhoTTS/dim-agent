@@ -15,7 +15,6 @@ Each catalog name a part of the assembly provides or injects. `data` means share
 | `basePromptSettingsHost` | process | PromptSettings | internal(owner-api) | — |
 | `callChannel` | process | CallChannel | data | `closed` async, `notify` async |
 | `callers` | process | CallChannel | internal(owner-api) | — |
-| `collaboration` | process | Collaboration | internal(host-resource) | — |
 | `collaborationDirectory` | process | CollaborationDirectory | data | `relations` async |
 | `connectionHub` | process | Connection | internal(control) | — |
 | `credentialVariablesHost` | process | root | data | `variables` async |
@@ -72,7 +71,7 @@ Each catalog name a part of the assembly provides or injects. `data` means share
 | `worktreeAssociations` | process | SessionStore | data | `associate` async |
 | `agentConfig` | session | SessionScope | data | `get` async |
 | `collaborationConfig` | session | SessionScope | data | `get` async |
-| `collaborationSession` | session | CollaborationSession | internal(legacy-no-consumer) | — |
+| `collaborationSession` | session | CollaborationSession | data | `approvalDestination` sync |
 | `commandRulesHost` | session | CommandRules | internal(hot-path) | — |
 | `compactionStrategyHost` | session | ProductSummaryStrategy | internal(hot-path) | — |
 | `contextModelHost` | session | SessionScope | internal(hot-path) | — |

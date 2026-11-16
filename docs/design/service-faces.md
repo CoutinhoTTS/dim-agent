@@ -209,7 +209,6 @@ Rust 产品装配的现状以 [生成的 catalog](../architecture/rust-agent/gen
 | `hooksService` | process | HooksSettings | host-resource |
 | `providerService` | process | Provider | secret |
 | `providerConnectionResolver` | process | Provider | host-resource |
-| `collaboration` | process | Collaboration | host-resource |
 | `sessionLoader` | session | SessionScope | control |
 | `timelineFactory` | session | SessionScope | control |
 | `managedProviders` | process | ManagedProviders | secret |
@@ -221,7 +220,6 @@ Rust 产品装配的现状以 [生成的 catalog](../architecture/rust-agent/gen
 | 名字 | scope | provider | reason | 动作 |
 | --- | --- | --- | --- | --- |
 | `modalityConnectionHost` | process | Provider | legacy-no-consumer | 作为 Provider 的 typed binding 从目录移出：它返回一次调用的凭据材料，不落为 data face（决定：[#1613](https://github.com/arcships/dim/issues/1613)、[Provider 管理 §3.8](appserver/provider-management.md#38-media-execution-for-adapters)；移出实现：[#1634](https://github.com/arcships/dim/issues/1634)） |
-| `collaborationSession` | session | CollaborationSession | legacy-no-consumer | 按 #1292 定义操作面 |
 
 ## 4. 批次契约（#1292）
 
@@ -312,7 +310,7 @@ loops.stop {sessionId, loopId} -> 记录形状，未结算时另带 {settled: fa
 
 ### 4.8 旧主机端口：`agentConfig` 等五个
 
-这五个端口的内容是配置或一次写入：所有者把操作绑定到端口类型上，`#[rutis::service]` 生成 dispatcher，名字 shared；Rust 调用方直接调同一个方法，不另写适配层。`collaborationSession` 不在这五个操作面的范围内，按 §2.6 处理其公共操作或私有实现职责。
+这五个端口的内容是配置或一次写入：所有者把操作绑定到端口类型上，`#[rutis::service]` 生成 dispatcher，名字 shared；Rust 调用方直接调同一个方法，不另写适配层。`collaborationSession` 的审批目标读取由 [Collaboration owner](subagent-tool-approval.md#31-data-face) 定义。
 
 ```text
 agentConfig.get() -> {name, systemPrompt, model: {providerId, modelId}}
