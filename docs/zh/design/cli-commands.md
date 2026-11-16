@@ -164,7 +164,8 @@ Home / End          滚动（fullscreen，草稿为空） 滚动（fullscreen，
 
 默认发送模式是 TUI 的设置：ACP client 自行决定运行期间输入的消息如何暂存，中断并立即发送
 在 ACP 上是 `session/cancel` 之后发送新的 `session/prompt`
-（[AcpGateway §4.2](../plugins/AcpGateway.md#42-prompt-与取消)）。Web 输入框见 #1601。
+（[AcpGateway §4.2](../plugins/AcpGateway.md#42-prompt-与取消)）。Web 工作区提供同样的两种模式，缺省值保存在浏览器，
+中断并立即发送的步骤也相同（[Web 工作区 §4.5](../../design/web-workspace.md#45-sending-during-a-run)）。
 
 草稿为空时按 Enter 只有在更早的分支都不适用时才打开 `/tasks`：先是两种模式下的
 shell 运行拦截，再是 steer 最早的排队消息，只有在没有排队消息时才轮到它。任务行必须
