@@ -589,9 +589,9 @@ impl ProviderService {
         })).await?;
         for descriptor in &descriptors {
             if request.query.as_ref().is_none_or(|query| {
-                format!("{} {}", descriptor.provider_id, descriptor.display_name)
-                    .to_lowercase()
-                    .contains(&query.to_lowercase())
+                let query = query.to_lowercase();
+                descriptor.provider_id.to_lowercase().contains(&query)
+                    || descriptor.display_name.to_lowercase().contains(&query)
             }) && request
                 .provider_id
                 .as_ref()

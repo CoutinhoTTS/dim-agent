@@ -920,21 +920,7 @@ impl Query {
     /// token. A prefix that consumes the id leaves nothing to identify, and an
     /// empty result tells the steps that no name is left.
     fn parse(id: &str, glued_prefix: Option<&str>) -> Option<Self> {
-        let lower = id.trim().to_lowercase();
-        let mut name = lower.rsplit('/').next()?.to_owned();
-        if let Some((head, _)) = name.rsplit_once(':') {
-            name = head.to_owned();
-        }
-        if let Some(start) = name.rfind('[')
-            && name.ends_with(']')
-        {
-            name.truncate(start);
-        }
-        let mut tokens: Vec<_> = name
-            .split(['-', '_', '.', ' '])
-            .filter(|token| !token.is_empty())
-            .map(str::to_owned)
-            .collect();
+        let mut tokens = split_id(id);
         if let Some(glued_prefix) = glued_prefix {
             let prefix = split_tokens(&glued_prefix.to_lowercase());
             // A prefix that consumes the whole name leaves none, so the strip

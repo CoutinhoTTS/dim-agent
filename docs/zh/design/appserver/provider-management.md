@@ -62,7 +62,7 @@ Capability、通知流、目录副本、凭据服务或注册表。继续遵守
 | `provider.management` | `{providerId, modelId?}` | `{drivers: ManagementDriver[], providers: ManagementProvider[], errors: ProviderRecordError[]}`；每个连接新增 `gluedPrefix`，即其记录声明的前缀，每个模型新增 `alias`，即所列 id 所指的 catalog id，以及 `catalogName`，即 `provider.catalog` 为该行发布的名字；未设置时省略 | false | `Drain` |
 | `provider.list` | `{}` | 原 `{providers,errors}` 摘要；每项新增 `remoteModelList`，表示 `provider.refresh` 能否列举该 Provider 的模型，客户端据此在空 catalog 的提示行给出或省略该命令，以及 `gluedPrefix`，即其记录声明的前缀，未设置时省略 | false | `Drain` |
 | `provider.selection` | `{cwd?}` | 既有 `{selection}`，其 scope/version 独立。带 `cwd` 时只读该作用域的行，该文件夹没有行时返回 `null`；工作区优先于全局是一条 `configuration` 规则，不属于此读取 | false | `Drain` |
-| `provider.catalog` | `{providerId}` | 既有 `{catalog}` 和 `ProviderModel`；每个模型的 `name` 在其 Provider 内唯一（见下方 §3.1） | false | `Drain` |
+| `provider.catalog` | `{providerId, modelId?}` | 既有 `{catalog}` 和 `ProviderModel`；每个模型的 `name` 在其 Provider 内唯一（见下方 §3.1） | false | `Drain` |
 
 `provider.catalog` 发布的 `name` 在所属 Provider 内唯一。重复判定覆盖该目录的全部行，
 停用或不可用的行也算在内，因此开关某一行不会改名其他行，各客户端读到的名字一致。名字按
@@ -82,8 +82,7 @@ Capability、通知流、目录副本、凭据服务或注册表。继续遵守
 
 详情必须指定 Provider ID，返回该项或明确错误；可再指定 modelId，只返回该模型和它的偏好。模型不存在时返回明确的未找到错误。
 管理读取独自提供编辑视图：version、模型 descriptor、管理说明来自同一 Provider 记录快照，
-不能把另一次 `provider.catalog` 的目录与该 version 拼接后写入。选择和只读 web 客户端
-继续使用原 catalog。不承诺账号 owner 之间的原子快照。
+不能把另一次 `provider.catalog` 的目录与该 version 拼接后写入。已知目标的能力读取指定 Provider 和模型 ID；模型选择界面使用 `provider.models.query`。不承诺账号 owner 之间的原子快照。
 
 | `ManagementProvider` 字段 | 类型与含义 |
 | --- | --- |
@@ -122,6 +121,55 @@ actions 只说明当前可用性，
 不能变成用户新增。
 账号退出或切换后，已有目录仍保留版本和描述，但模型标为不可用；刷新到当前账号前不提供模型写操作。
 `source:"override"` 表示有 descriptor 覆盖的默认模型；编辑用户模型后仍为 `source:"user"`。
+
+### 启动、选择与内存
+
+Provider 根据持久状态查询。显式选择按 Provider ID 和模型 ID 点查；默认选择依次尝试
+工作区选择、全局选择，找到可用目标即返回。两者均不可用时，才查询已启用且已配置的
+候选项，按账号优先、Provider ID 排序。账号是否可用由账号拥有方判断，持久凭据和标志
+不能代表当前已登录。路由、能力和限额仍由执行条件决定。
+业务选择不使用分页游标。仅指定模型的启动按模型 ID 查询，优先采用有效 Provider；
+多个 Provider 均可用时拒绝歧义。输入优先级见[模型启动](../../../design/model-startup.md)。
+
+随程序发布的目录在构建时编译为独立可读的记录和查找键。激活时不展开完整目录，
+也不保留解析后的目录、识别结果或查询结果。模型识别只读取匹配的描述，遵守命名空间、
+别名、规范名称和歧义规则；目录查找数据在发布前构建。
+
+内置定义按目录修订号同步。修订号未变时，只读取修订号和待处理的 Provider ID。
+首次安装或修订号变化时逐项协调定义，保留连接设置、凭据、用户模型、覆盖字段和启用状态。
+更新冲突保留为待处理项，下次激活重试，即使目录修订号未变。修订号与成功的记录更新
+原子提交，提交后释放同步产生的 SQLite 临时页缓存。修订号未变且无待处理项时不写入。
+目录移除的内置项退出内置定义；升级不会重新启用用户已停用的 Provider。
+
+展示列表使用有界分页和服务端搜索。打开会话只读取已采用的模型。Web 和 CLI 模型选择器
+打开时查询、关闭时释放结果，写入后只重读受影响的查询。Agent 和模态选择通过现有服务
+数据接口使用 Provider 拥有的可用性条件。
+
+空闲时只保留必要的 I/O 句柄和生命周期状态。验证分别报告常驻分配、临时峰值和随程序
+发布的只读目录字节数，不能用进程总 RSS 替代，也不能漏计保留的目录索引。展示和更新流程
+同样报告峰值，并限制单次请求接收的数据量。测量使用临时 home，覆盖重复激活和读取，
+确认结果释放后没有累计缓存。
+
+### 模型展示查询
+
+`provider.models.query` 是进程 `managementMethods` 数据接口的只读操作，请求为
+`{providerId?, modelId?, query?, after?, limit?}`。`limit` 默认 32，范围 1–128。
+搜索匹配模型 ID、显示名或 Provider 名称；`zdr` 还匹配账号拥有方提供的 ZDR 标志。
+`after` 与回复中的 `next` 都是按 `{providerId, modelId}` 排序的排他游标：下一页从该位置
+之后开始。游标表示遍历位置，空模型 ID 表示已启用但没有模型行的 Provider。
+客户端原样传回游标。
+
+回复为 `{models, empty, next}`。每个模型行包含 `providerId`、`providerName`、
+`model`（发布的 `ProviderModel`）、`version`、`preferences` 和 `disabled`。
+停用及不可用的模型仍用于展示诊断。`empty` 项包含 `providerId`、`providerName` 和
+带标签的 `reason`：`{kind:"no_models", listable}` 或 `{kind:"unreadable"}`。
+每页最多访问 `limit` 个模型或空 Provider 候选项，因此有错误时实际模型数可以更少。
+`next:null` 表示遍历结束。无效的 limit 返回 `provider_invalid_config`；取消与存储错误
+遵循 Provider 操作合同。远程目录刷新由显式管理操作发起。
+
+已知目标的 `provider.catalog` 请求携带 `modelId`，回复保留原 catalog 外层结构，
+只包含该模型，并保留根据所属 Provider 命名字段计算的名字。CLI 打开会话、更换模型和
+采用失败诊断均使用此形式。
 
 ### 按需读取管理数据
 

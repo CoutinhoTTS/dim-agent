@@ -1,8 +1,13 @@
-/// A model id without its namespace segment and tag, lowercased and split.
+/// A model id without its namespace segment, tag and bracket modifier, lowercased and split.
 pub(crate) fn split_id(id: &str) -> Vec<String> {
-    let lower = id.to_lowercase();
+    let lower = id.trim().to_lowercase();
     let name = lower.rsplit('/').next().unwrap_or(&lower);
     let name = name.rsplit_once(':').map_or(name, |(head, _)| head);
+    let name = if name.ends_with(']') {
+        name.rfind('[').map_or(name, |start| &name[..start])
+    } else {
+        name
+    };
     split_tokens(name)
 }
 

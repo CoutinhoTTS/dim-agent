@@ -2548,6 +2548,16 @@ fn a_providers_glued_prefix_is_stripped_before_matching() {
         entry.metadata.as_ref().unwrap().match_strategy.as_deref(),
         Some("acme-token")
     );
+    let bracketed = BundledCatalog::from_value(json!({"providers":[vendor(
+        "acme",
+        json!([row("acme-k3[1m]", "Acme K3", 1_048_576, 1_048_576)]),
+    )]}))
+    .unwrap();
+    for id in ["auto-acme-k3", "auto-acme-k3[1m]:latest"] {
+        let entry = prefixed_relay(&bracketed, id, Some("auto"));
+        assert_eq!(matched(&entry), ("acme", "acme-k3[1m]"));
+        assert_eq!(rule(&entry), "token");
+    }
 }
 
 /// The same provider without the statement is unidentified, so the field is

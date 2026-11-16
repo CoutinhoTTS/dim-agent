@@ -1386,6 +1386,21 @@ async fn managed_catalog_writes_distinguish_account_changes_from_version_conflic
         Some(version),
         "searching the account descriptor still reads its stored catalog version"
     );
+    let cross_field = provider
+        .management_page(
+            dim_app_server::provider::ManagementPageRequest {
+                query: Some(format!("{PROVIDER} Dim OAuth")),
+                accounts_only: true,
+                ..Default::default()
+            },
+            &cancel(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        cross_field.providers.is_empty(),
+        "search matches each field separately"
+    );
     root.shutdown().await.unwrap();
     std::fs::remove_dir_all(home).unwrap();
 }
