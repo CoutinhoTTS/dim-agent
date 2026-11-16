@@ -9,10 +9,7 @@ use std::{
     io::Write,
     panic::{AssertUnwindSafe, catch_unwind},
     path::{Path, PathBuf},
-    sync::{
-        Arc, Mutex, MutexGuard, PoisonError, TryLockError,
-        atomic::{AtomicUsize, Ordering},
-    },
+    sync::{Arc, Condvar, Mutex, PoisonError},
     time::Duration,
 };
 
@@ -27,10 +24,15 @@ const MIN_FORMAT: u32 = UPGRADES[0].0;
 const CHECKPOINT_BYTES: u64 = 4 * 1024 * 1024;
 /// The WAL file is truncated to this size when a checkpoint restarts it.
 const WAL_LIMIT_BYTES: i64 = 64 * 1024 * 1024;
-/// The process connection's page cache in KiB. A measurement over a 650 MB
-/// store with 2,300 Sessions put their hot tail pages (about 20 MB) in cache
-/// from 32 MiB on; larger caches read no fewer bytes.
-const PAGE_CACHE_KIB: i64 = 32 * 1024;
+/// The writer connection's page-cache ceiling in KiB (#1673). Point reads and
+/// ordinary writes keep a working set of a few dozen pages; 512 KiB holds that
+/// without the multi-MiB idle cache the old 32 MiB ceiling allowed. It is a
+/// ceiling, not preallocation: SQLite allocates pages as it reads them.
+const WRITER_CACHE_KIB: i64 = 512;
+/// A reader connection's page-cache ceiling in KiB (#1673). A point read
+/// touches a few B-tree pages; this bounds what one reader keeps while one
+/// idle reader and the writer stay inside the 1.5 MiB idle store budget.
+const READER_CACHE_KIB: i64 = 256;
 /// Indexes a format range had and the current schema no longer creates, with
 /// the first and last format that had them.
 const LEGACY_INDEXES: &[(&str, &str, u32, u32)] = &[
@@ -921,44 +923,157 @@ pub struct SqliteStorage {
     upgraded_from: Option<u32>,
 }
 /// The read-only connections that serve reads while the writer keeps its own
-/// (#599). Four let the catalog scan, a history page and the settings,
-/// provider and Session-file reads run together; reads are short calls, and a
-/// fifth connection adds a page cache without a measured gain.
+/// (#599). Up to four let a catalog scan, a history page and the settings,
+/// provider and Session-file reads run together. A reader is opened by the read
+/// that needs it, never at open, and idle holds at most one (#1673).
 const READ_CONNECTIONS: usize = 4;
 pub(super) struct Readers {
-    pub(super) connections: Vec<Mutex<Option<Connection>>>,
-    next: AtomicUsize,
+    state: Mutex<ReaderState>,
+    available: Condvar,
+    demand: bool,
+}
+struct ReaderState {
+    /// Connections no read holds.
+    idle: Vec<Connection>,
+    /// Held connections, including one being opened outside the lock, so the
+    /// bound holds while that open runs.
+    busy: usize,
+}
+/// Returns a reader to the pool. Idle holds one connection; a returning read
+/// closes the others (#1673).
+struct ReaderLease<'a> {
+    readers: &'a Readers,
+    connection: Option<Connection>,
+}
+impl Drop for ReaderLease<'_> {
+    fn drop(&mut self) {
+        let Some(connection) = self.connection.take() else {
+            return;
+        };
+        let mut state = self
+            .readers
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        state.busy -= 1;
+        if state.busy > 0 {
+            state.idle.push(connection);
+            self.readers.available.notify_one();
+            return;
+        }
+        let mut closing = std::mem::take(&mut state.idle);
+        if let Some(keep) = closing.pop() {
+            state.idle.push(keep);
+            closing.push(connection);
+        } else {
+            state.idle.push(connection);
+        }
+        drop(state);
+        for connection in closing {
+            close_reader(connection);
+        }
+    }
 }
 impl Readers {
-    /// Opens `READ_CONNECTIONS` read-only connections beside the writer.
-    fn open(path: &Path) -> Result<Self> {
-        let mut connections = Vec::with_capacity(READ_CONNECTIONS);
-        for _ in 0..READ_CONNECTIONS {
-            let connection = Connection::open_with_flags(
-                path,
-                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-            )
-            .map_err(storage)?;
-            connection
-                .busy_timeout(Duration::from_secs(5))
-                .map_err(storage)?;
-            connection
-                .pragma_update(None, "cache_size", -PAGE_CACHE_KIB)
-                .map_err(storage)?;
-            functions(&connection)?;
-            connections.push(Mutex::new(Some(connection)));
+    /// Readers for the daemon store, created on demand.
+    fn demand() -> Self {
+        Self {
+            state: Mutex::new(ReaderState {
+                idle: Vec::new(),
+                busy: 0,
+            }),
+            available: Condvar::new(),
+            demand: true,
         }
-        Ok(Self {
-            connections,
-            next: AtomicUsize::new(0),
-        })
     }
     /// The read-only export opens one connection that serves its reads.
     fn none() -> Self {
         Self {
-            connections: Vec::new(),
-            next: AtomicUsize::new(0),
+            state: Mutex::new(ReaderState {
+                idle: Vec::new(),
+                busy: 0,
+            }),
+            available: Condvar::new(),
+            demand: false,
         }
+    }
+    /// Whether this store serves reads on readers rather than its one
+    /// connection.
+    fn enabled(&self) -> bool {
+        self.demand
+    }
+    /// Runs `operation` on a reader.
+    fn run<T>(
+        &self,
+        path: &Path,
+        operation: impl FnOnce(&mut Connection) -> Result<T>,
+    ) -> Result<T> {
+        let mut lease = ReaderLease {
+            readers: self,
+            connection: Some(self.acquire(path)?),
+        };
+        operation(
+            lease
+                .connection
+                .as_mut()
+                .expect("a reader was acquired above"),
+        )
+    }
+    /// An idle reader, a new one while below `READ_CONNECTIONS`, or a sleeping
+    /// wait for one to return.
+    fn acquire(&self, path: &Path) -> Result<Connection> {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        loop {
+            if let Some(connection) = state.idle.pop() {
+                state.busy += 1;
+                return Ok(connection);
+            }
+            if state.busy < READ_CONNECTIONS {
+                state.busy += 1;
+                drop(state);
+                return match reader_connection(path) {
+                    Ok(connection) => Ok(connection),
+                    Err(error) => {
+                        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+                        state.busy -= 1;
+                        self.available.notify_one();
+                        Err(error)
+                    }
+                };
+            }
+            state = self
+                .available
+                .wait(state)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+    /// Read-only connections currently open. Feature `testing` only.
+    #[cfg(feature = "testing")]
+    fn live(&self) -> usize {
+        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.idle.len() + state.busy
+    }
+}
+/// Opens one read-only reader (#599). It sets only the read path's pragmas and
+/// the query functions, not the writer's journal, sync or WAL settings.
+fn reader_connection(path: &Path) -> Result<Connection> {
+    let connection = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(storage)?;
+    connection
+        .busy_timeout(Duration::from_secs(5))
+        .map_err(storage)?;
+    connection
+        .pragma_update(None, "cache_size", -READER_CACHE_KIB)
+        .map_err(storage)?;
+    functions(&connection)?;
+    Ok(connection)
+}
+fn close_reader(connection: Connection) {
+    if let Err((_, failure)) = connection.close() {
+        tracing::error!(phase = "reader", %failure, "storage.transaction");
     }
 }
 /// SQLite's busy handler for the writer and a copy connection (#599): retry
@@ -1350,7 +1465,7 @@ impl SqliteStorage {
             .pragma_update(None, "journal_size_limit", WAL_LIMIT_BYTES)
             .map_err(storage)?;
         connection
-            .pragma_update(None, "cache_size", -PAGE_CACHE_KIB)
+            .pragma_update(None, "cache_size", -WRITER_CACHE_KIB)
             .map_err(storage)?;
         connection
             .pragma_update(None, "foreign_keys", true)
@@ -1360,7 +1475,7 @@ impl SqliteStorage {
             .pragma_update(None, "fullfsync", true)
             .map_err(storage)?;
         let _ = std::fs::remove_file(startup_note_path(&path));
-        let readers = Readers::open(&path)?;
+        let readers = Readers::demand();
         Ok(Arc::new(Self {
             connection: Mutex::new(Some(connection)),
             readers,
@@ -1451,42 +1566,42 @@ impl SqliteStorage {
         .await
         .map_err(storage)?
     }
-    /// Runs a read on one of the read-only connections (#599). A read sees the
-    /// last commit when its statement starts and does not wait for the
-    /// writer's transaction or fsync. An available reader is reused before
-    /// waiting for a busy reader; sequential reads reuse its page cache.
-    /// The read-only export store's one connection serves both.
+    /// Runs a read on a read-only connection (#599), opening a reader when the
+    /// read needs one. A read sees the last commit when its statement starts
+    /// and does not wait for the writer's transaction or fsync. An available
+    /// reader is reused before waiting for a busy reader; sequential reads
+    /// reuse its page cache. The read-only export store reads on its one
+    /// connection.
     pub(crate) async fn run_read<T: Send + 'static>(
         self: &Arc<Self>,
         operation: impl FnOnce(&mut Connection) -> Result<T> + Send + 'static,
     ) -> Result<T> {
         let admitted = self.admit()?;
+        let path = self.path.clone();
         tokio::task::spawn_blocking(move || {
-            let reader = admitted.0.reader();
-            match reader {
-                Some(mut guard) => {
-                    let connection = guard
-                        .as_mut()
-                        .ok_or_else(|| storage("SQLite storage is closed"))?;
-                    let result = catch_unwind(AssertUnwindSafe(|| operation(connection)));
-                    outcome(connection, result)
-                }
-                None => {
-                    let mut guard = admitted
-                        .0
-                        .connection
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner);
-                    let connection = guard
-                        .as_mut()
-                        .ok_or_else(|| storage("SQLite storage is closed"))?;
-                    let result = catch_unwind(AssertUnwindSafe(|| operation(connection)));
-                    outcome(connection, result)
-                }
+            if admitted.0.readers.enabled() {
+                return admitted
+                    .0
+                    .readers
+                    .run(&path, |connection| guarded(connection, operation));
             }
+            let mut guard = admitted
+                .0
+                .connection
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let connection = guard
+                .as_mut()
+                .ok_or_else(|| storage("SQLite storage is closed"))?;
+            guarded(connection, operation)
         })
         .await
         .map_err(storage)?
+    }
+    /// Read-only connections currently open. Feature `testing` only.
+    #[cfg(feature = "testing")]
+    pub fn reader_connections(&self) -> usize {
+        self.readers.live()
     }
     fn admit(self: &Arc<Self>) -> Result<Operation> {
         let mut admission = self.admission.lock().unwrap();
@@ -1519,7 +1634,7 @@ impl SqliteStorage {
                 .pragma_update(None, "journal_size_limit", WAL_LIMIT_BYTES)
                 .map_err(storage)?;
             connection
-                .pragma_update(None, "cache_size", -PAGE_CACHE_KIB)
+                .pragma_update(None, "cache_size", -WRITER_CACHE_KIB)
                 .map_err(storage)?;
             connection
                 .pragma_update(None, "foreign_keys", false)
@@ -1533,25 +1648,6 @@ impl SqliteStorage {
         })
         .await
         .map_err(storage)?
-    }
-    fn reader(&self) -> Option<MutexGuard<'_, Option<Connection>>> {
-        let readers = &self.readers;
-        if readers.connections.is_empty() {
-            return None;
-        }
-        for connection in &readers.connections {
-            match connection.try_lock() {
-                Ok(guard) => return Some(guard),
-                Err(TryLockError::Poisoned(error)) => return Some(error.into_inner()),
-                Err(TryLockError::WouldBlock) => {}
-            }
-        }
-        let index = readers.next.fetch_add(1, Ordering::Relaxed) % readers.connections.len();
-        Some(
-            readers.connections[index]
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner),
-        )
     }
     pub(crate) async fn run_read_cancellable<T: Send + 'static>(
         self: &Arc<Self>,
@@ -1640,15 +1736,18 @@ impl SqliteStorage {
                 idle.await;
             }
             tokio::task::spawn_blocking(move || {
-                for reader in &db.readers.connections {
-                    let mut slot = reader.lock().unwrap_or_else(PoisonError::into_inner);
-                    if let Some(connection) = slot.take()
-                        && let Err((connection, failure)) = connection.close()
-                    {
-                        *slot = Some(connection);
+                let mut readers = db
+                    .readers
+                    .state
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
+                while let Some(connection) = readers.idle.pop() {
+                    if let Err((connection, failure)) = connection.close() {
+                        readers.idle.push(connection);
                         return Err(storage(failure));
                     }
                 }
+                drop(readers);
                 let mut guard = db
                     .connection
                     .lock()
@@ -1680,6 +1779,15 @@ impl SqliteStorage {
     }
 }
 
+/// Runs `operation` on a connection and rolls back a panic so the connection
+/// returns to the writer or the reader pool usable.
+fn guarded<T>(
+    connection: &mut Connection,
+    operation: impl FnOnce(&mut Connection) -> Result<T>,
+) -> Result<T> {
+    let result = catch_unwind(AssertUnwindSafe(|| operation(connection)));
+    outcome(connection, result)
+}
 /// The result of a connection call, with a panic rolled back so the
 /// connection stays usable.
 fn outcome<T>(connection: &Connection, result: std::thread::Result<Result<T>>) -> Result<T> {

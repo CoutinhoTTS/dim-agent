@@ -5337,6 +5337,58 @@ fn sqlite_shutdown_drains_cancelled_and_queued_operations_before_releasing_owner
 }
 
 #[tokio::test]
+async fn readers_open_on_demand_and_only_one_stays_idle() {
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    assert_eq!(
+        db.reader_connections(),
+        0,
+        "opening the store must not open a reader"
+    );
+    store
+        .create_session("session", &SessionConfig::default())
+        .await
+        .unwrap();
+    assert_eq!(db.reader_connections(), 0, "a write must not open a reader");
+    assert!(store.session_config("session").await.unwrap().is_some());
+    assert_eq!(db.reader_connections(), 1);
+    let writer = {
+        let store = store.clone();
+        tokio::spawn(async move {
+            for sequence in 1..=50 {
+                append(
+                    &store,
+                    key("session", "main"),
+                    vec![text(sequence, "concurrent")],
+                )
+                .await
+                .unwrap();
+            }
+        })
+    };
+    let reads: Vec<_> = (0..16)
+        .map(|_| {
+            let store = store.clone();
+            tokio::spawn(async move { store.session_config("session").await.unwrap().is_some() })
+        })
+        .collect();
+    for read in reads {
+        assert!(read.await.unwrap());
+    }
+    writer.await.unwrap();
+    assert_eq!(store.head(&key("session", "main")).await.unwrap(), 50);
+    assert_eq!(
+        db.reader_connections(),
+        1,
+        "a read burst must leave one idle reader, not its connections"
+    );
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+    assert_eq!(db.reader_connections(), 0, "close must drop every reader");
+}
+
+#[tokio::test]
 async fn concurrent_and_cancelled_close_waits_for_the_same_durable_round() {
     use std::{future::Future, task::Poll};
     let database = Database::new();
