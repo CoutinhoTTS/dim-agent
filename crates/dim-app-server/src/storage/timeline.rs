@@ -1667,8 +1667,9 @@ impl DynPlugin for SessionStorePlugin {
             })?;
             files.start();
             ctx.provide_as::<SessionStore>(store.clone())?;
-            ctx.provide_at(Key::<SessionStore>::named("store"), store.clone())?;
-            ctx.provide_at(host_key("store"), store.clone() as Arc<dyn HostDispatch>)?;
+            let binding = Arc::new(super::Store(store.clone()));
+            ctx.provide_as::<super::Store>(binding.clone())?;
+            ctx.provide_at(host_key("store"), binding as Arc<dyn HostDispatch>)?;
             let associations = store.clone();
             ctx.provide_as::<WorktreeAssociations>(Arc::new(WorktreeAssociations::new(Arc::new(
                 move |request: WorktreeAssociation| {
