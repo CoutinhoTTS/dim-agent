@@ -49479,6 +49479,7 @@
       "from": "dim_cli::ui::tui",
       "to": "dim_cli::update",
       "references": [
+        "path crate::update::command",
         "path crate::update::skip"
       ]
     },
