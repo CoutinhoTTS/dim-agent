@@ -507,6 +507,14 @@ export interface SessionFiles {
 }
 export interface StoredSessionFile { fileId: string; path: string; bytes: number }
 
+/** Process data face owned by the managed provider; credentials remain with the owner. */
+export interface ManagedSearch {
+  /** Rejects with unavailable or search_failed; abandoning the call cancels the request. */
+  search(request: { query: string; count: number }): Promise<{
+    results: { title: string; url: string; snippet: string; publishedAt?: string }[]
+  }>
+}
+
 export interface WorktreeDirectory { repository: string; root: string }
 export interface TimelineReadScope {
   key: { sessionId: string; branchId: string };
