@@ -965,7 +965,16 @@ async fn temporary_startup_rebinds_after_restart_and_preserves_parent_cut_connec
     .expect("the request's result and the turn it wakes are committed");
     session.idle("main").await.unwrap();
     assert_ok(&client.rpc("session.detach", json!({"sessionId":sid})).await);
-    assert!(session.unload_if_idle().await.unwrap());
+    // `idle` returns once a turn ends, but ContextUsage records the turn's
+    // usage afterwards in its own task, so an unload right then can be
+    // refused; the host's sweep tries again, and so does this.
+    tokio::time::timeout(Duration::from_secs(15), async {
+        while !session.unload_if_idle().await.unwrap() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the Session becomes idle and releases");
     assert_ok(&client.rpc("session.attach", json!({"sessionId":sid})).await);
     submit(&mut client, &sid, &child_id).await;
     assert_eq!(
