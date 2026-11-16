@@ -138,7 +138,7 @@ jobs:
       cancel-in-progress: true
     # PR runners must be isolated from release credentials and private networks.
     runs-on: [self-hosted, macOS, ARM64]
-    timeout-minutes: 45
+    timeout-minutes: 75
     env:
       CARGO_BUILD_JOBS: "4"
       CARGO_INCREMENTAL: "0"
