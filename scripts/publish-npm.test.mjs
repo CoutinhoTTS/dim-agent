@@ -10,6 +10,8 @@ import { fileURLToPath } from 'node:url';
 const script = fileURLToPath(new URL('./publish-npm.mjs', import.meta.url));
 /** The checker's waits are injectable, so a run fits the fixture's ten-second budget. */
 const settle = { DIM_REGISTRY_SETTLE_MS: '2000', DIM_REGISTRY_POLL_MS: '25' };
+/** One window covers every read of a run, and the npm view path spawns a process per read. */
+const reads = { DIM_REGISTRY_SETTLE_MS: '30000', DIM_REGISTRY_POLL_MS: '25' };
 const sourceCommit = 'a'.repeat(40);
 const platforms = [
   ['darwin-arm64', 'darwin', 'arm64'], ['darwin-x64', 'darwin', 'x64'],
@@ -51,8 +53,26 @@ function fixture(t, version = '1.2.3', shipped = platforms) {
   }
   const bin = path.join(root, 'bin');
   mkdirSync(bin);
+  const transientLeft = path.join(root, 'transient');
+  const stubbornPid = path.join(root, 'stubborn.pid');
+  const stubborn = path.join(root, 'stubborn.mjs');
+  writeFileSync(stubborn, `#!${process.execPath}
+import { writeFileSync } from 'node:fs';
+writeFileSync(${JSON.stringify(stubbornPid)}, String(process.pid));
+process.on('SIGTERM', () => {});
+process.stdout.write('{"integrity":"' + process.env.EXISTING_INTEGRITY + '"}');
+setTimeout(() => process.exit(0), 20_000);
+`);
   writeFileSync(path.join(bin, 'npm'), `#!/bin/sh
 if [ "$1" = view ]; then
+  left=$(cat "$TRANSIENT_LEFT" 2>/dev/null || echo 0)
+  if [ "$left" -gt 0 ]; then
+    echo $((left - 1)) > "$TRANSIENT_LEFT"
+    printf '{"error":{"code":"%s"}}' "$TRANSIENT_CODE"; exit 1
+  fi
+  if [ "$REGISTRY_MODE" = stubborn ] && [ "$2" = dimcode@1.2.3 ] && [ "$3" = dist ]; then
+    exec '${process.execPath}' '${stubborn}'
+  fi
   if [ "$2" = dimcode ] && [ "$3" = versions ]; then printf '%s' "$REGISTRY_VERSIONS"; exit 0; fi
   if [ "$REGISTRY_MODE" = newer ] && [ "$2" = dimcode-web@alpha ]; then printf '"1.2.3-alpha.10"'; exit 0; fi
   if [ "$REGISTRY_MODE" = newer-latest ] && [ "$2" = dimcode-alpha@latest ]; then printf '"1.2.3-alpha.10"'; exit 0; fi
@@ -67,18 +87,26 @@ printf "%s\\n" "$*" >> "$PUBLISH_LOG"
 `, { mode: 0o755 });
   const log = path.join(root, 'published.log');
   writeFileSync(log, '');
+  t.after(() => {
+    if (!existsSync(stubbornPid)) return;
+    try { process.kill(Number(readFileSync(stubbornPid, 'utf8')), 'SIGKILL'); } catch {}
+  });
   const release = { tag_name: `v${version}`, draft: false, published_at: '2026-10-14T00:00:00Z',
     assets: [...manifest.npmPackages.map(({ file }) => ({ name: file })), { name: 'release-manifest.json' }] };
   const releasePath = path.join(root, 'github-release.json');
-  function run({ publish = false, checkRelease = false, local = false, commit = sourceCommit, registry = 'missing', versions = [] } = {}) {
+  function run({ publish = false, checkRelease = false, local = false, commit = sourceCommit, registry = 'missing', versions = [],
+    transient = 0, transientCode = 'E503', window = reads } = {}) {
     writeFileSync(path.join(root, 'release-manifest.json'), JSON.stringify(manifest));
     writeFileSync(releasePath, JSON.stringify(release));
+    writeFileSync(transientLeft, String(transient));
     return spawnSync(process.execPath, [script, root, version, commit, ...(local ? ['--publish-local'] : publish ? ['--publish', releasePath] : checkRelease ? ['--check-release', releasePath] : [])], {
-      encoding: 'utf8', env: { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH}`, PUBLISH_LOG: log,
-        REGISTRY_MODE: registry, REGISTRY_VERSIONS: JSON.stringify(versions), EXISTING_INTEGRITY: 'sha512-' + createHash('sha512').update(readFileSync(path.join(root, manifest.npmPackages[0].file))).digest('base64') },
+      encoding: 'utf8', timeout: 60_000, env: { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH}`, PUBLISH_LOG: log,
+        REGISTRY_MODE: registry, REGISTRY_VERSIONS: JSON.stringify(versions), TRANSIENT_LEFT: transientLeft,
+        TRANSIENT_CODE: transientCode, ...window,
+        EXISTING_INTEGRITY: 'sha512-' + createHash('sha512').update(readFileSync(path.join(root, manifest.npmPackages[0].file))).digest('base64') },
     });
   }
-  return { root, names, manifest, release, log, run };
+  return { root, names, manifest, release, log, stubbornPid, run };
 }
 
 test('validates Release and registry state without publishing', (t) => {
@@ -228,6 +256,50 @@ test('rejects an alpha that would outrank the newest beta before registry writes
   assert.equal(readFileSync(release.log,'utf8'),'');
 });
 
+test('waits out an npm view that rate-limits or fails before it answers, then publishes in order', (t) => {
+  for (const [code, transient] of [['E429', 2], ['E503', 2], ['ECONNRESET', 1], ['ETIMEDOUT', 1]]) {
+    const release = fixture(t);
+    const published = release.run({ publish: true, transient, transientCode: code });
+    assert.equal(published.status, 0, `${code}: ${published.stderr}`);
+    const calls = readFileSync(release.log, 'utf8').trim().split('\n');
+    assert.equal(calls.length, 8, `${code}: every package publishes once the registry answers`);
+    assert(calls.at(-1).includes('dimcode-1.2.3.tgz'), `${code}: the wrapper still publishes last`);
+  }
+});
+
+test('does not accept an npm view that answers only after its deadline, and kills it', (t) => {
+  const window = { ...reads, DIM_REGISTRY_SETTLE_MS: '2000' };
+  for (const [transient, registry] of [[1_000_000, 'missing'], [0, 'stubborn']]) {
+    const release = fixture(t);
+    const started = Date.now();
+    const stuck = release.run({ publish: true, transient, registry, window });
+    const elapsed = Date.now() - started;
+    assert.notEqual(stuck.status, 0,
+      `${registry}: a read still running at its deadline is no answer, even when it then succeeds`);
+    assert.equal(stuck.error, undefined, `${registry}: an unanswered read must fail, not hang`);
+    assert.match(stuck.stderr, /did not answer within/,
+      `${registry}: the run fails on the deadline, not on what the read printed`);
+    assert.equal(readFileSync(release.log, 'utf8'), '',
+      `${registry}: a read past its deadline is no answer, so nothing is published`);
+    if (registry === 'stubborn') {
+      assert.ok(elapsed < 10_000, 'the run ends at its deadline, not when the read finally exits');
+      assert.throws(() => process.kill(Number(readFileSync(release.stubbornPid, 'utf8')), 0), { code: 'ESRCH' },
+        'a read that ignores SIGTERM is killed at its deadline instead of answering after it');
+    }
+  }
+});
+
+test('keeps a 404 and an authentication failure final on the npm view read', (t) => {
+  const release = fixture(t);
+  const missing = release.run({ checkRelease: true, transient: 1_000_000, transientCode: 'E404' });
+  assert.equal(missing.status, 0, missing.stderr);
+  const denied = release.run({ checkRelease: true, transient: 1_000_000, transientCode: 'E401' });
+  assert.notEqual(denied.status, 0);
+  assert.match(denied.stderr, /Cannot verify registry state: dimcode-darwin-arm64@1\.2\.3/,
+    'a rejected read is final and names the package it could not read');
+  assert.doesNotMatch(denied.stderr, /reading again/, 'a rejection is not waited out');
+});
+
 function nightlyRegistry(t, shipped = platforms) {
   const { root, manifest, names } = fixture(t, '1.2.3-alpha.10', shipped);
   const receipt = path.join(root, 'npm-publication.json');
@@ -247,6 +319,8 @@ function nightlyRegistry(t, shipped = platforms) {
     const tarballMisses = Number(process.env.TARBALL_404 ?? 0);
     const transient = Number(process.env.TRANSIENT ?? 0);
     const bodyResets = Number(process.env.BODY_RESET ?? 0);
+    const tagTransient = Number(process.env.TAG_TRANSIENT ?? 0);
+    const tagStatus = Number(process.env.TAG_STATUS ?? 503);
     const root = ${JSON.stringify(root)};
     const lagFile = ${JSON.stringify(path.join(root, 'tag-lag'))};
     const lagLeft = () => { try { return Number(readFileSync(lagFile, 'utf8').trim()); } catch { return 0; } };
@@ -258,6 +332,7 @@ function nightlyRegistry(t, shipped = platforms) {
     const version = ${JSON.stringify(manifest.version)};
     let wrapperReads = 0;
     let tarballReads = 0;
+    const tagFailuresLeft = new Map();
     globalThis.fetch = async (url, options = {}) => {
       const { hostname, pathname } = new URL(url);
       assert(['registry.npmjs.org', 'registry.npmmirror.com'].includes(hostname));
@@ -274,6 +349,11 @@ function nightlyRegistry(t, shipped = platforms) {
         if (failure === 'tag-auth') return new Response('', { status: 401 });
         if (failure === 'tag-server') return new Response('', { status: 503 });
         if (failure === 'tag-network') throw new Error('network failure');
+        const left = tagFailuresLeft.get(pathname) ?? tagTransient;
+        if (left > 0) {
+          tagFailuresLeft.set(pathname, left - 1);
+          return new Response('', { status: tagStatus });
+        }
         if (!state.tags[name]) return new Response('', { status: 404 });
         if (failure === 'race' && name === 'dimcode-alpha' && ++wrapperReads === 3) {
           state.tags[name].latest = '1.2.3-alpha.11';
@@ -351,12 +431,13 @@ function nightlyRegistry(t, shipped = platforms) {
   `, { mode: 0o755 });
   const check = fileURLToPath(new URL('./check-alpha-registry.mjs', import.meta.url));
   return { receipt, remote, initialTags,
-    run(mode, flag = '--dry-run', failure = '', { tarballMisses = 0, tagLag = 0, transient = 0, bodyResets = 0 } = {}) {
+    run(mode, flag = '--dry-run', failure = '', { tarballMisses = 0, tagLag = 0, transient = 0, bodyResets = 0,
+      tagTransient = 0, tagStatus = 503 } = {}) {
       return spawnSync(process.execPath, ['--import', preload, check, receipt, mode, flag], {
         encoding: 'utf8', timeout: 10_000,
         env: { ...process.env, PATH: `${path.join(root, 'bin')}${path.delimiter}${process.env.PATH}`, FAILURE: failure,
           TARBALL_404: String(tarballMisses), TAG_LAG: String(tagLag), TRANSIENT: String(transient),
-          BODY_RESET: String(bodyResets), ...settle },
+          BODY_RESET: String(bodyResets), TAG_TRANSIENT: String(tagTransient), TAG_STATUS: String(tagStatus), ...settle },
       });
     },
     read() { return JSON.parse(readFileSync(remote)); },
@@ -512,6 +593,37 @@ test('fails a dist-tag that never converges and a concurrent publication that ou
   assert.notEqual(lost.status, 0);
   assert.equal(lost.error, undefined, 'a concurrent publication must fail fast, not hang');
   assert.equal(raced.read().tags['dimcode-alpha'].latest, '1.2.3-alpha.11');
+});
+
+test('snapshots protected tags and promotes through a registry that rate-limits its reads', (t) => {
+  for (const status of [429, 503]) {
+    const registry = nightlyRegistry(t);
+    const snapshot = registry.run('snapshot', '--dry-run', '', { tagTransient: 2, tagStatus: status });
+    assert.equal(snapshot.status, 0, `${status}: ${snapshot.stderr}`);
+    const { protectedTags, wrapperTags } = JSON.parse(readFileSync(registry.receipt));
+    assert.deepEqual(wrapperTags, registry.initialTags['dimcode-alpha'],
+      `${status}: the snapshot records the wrapper tags its retried reads returned`);
+    assert.deepEqual(protectedTags['dimcode'], registry.initialTags['dimcode'],
+      `${status}: the snapshot keeps every dimcode tag`);
+    assert.deepEqual(protectedTags['dimcode-alpha'], { canary: '1.2.3-alpha.8' },
+      `${status}: the snapshot keeps the wrapper tags other than latest and alpha`);
+    assert.deepEqual(protectedTags['dimcode-web'], { latest: '1.2.2', beta: '1.2.3-beta.1' },
+      `${status}: the snapshot keeps a package's non-alpha tags`);
+    assert.equal(Object.keys(protectedTags).length, Object.keys(registry.initialTags).length);
+    assert.deepEqual(registry.read().tags, registry.initialTags, `${status}: a snapshot publishes nothing`);
+    const promoted = registry.run('promote', '--apply', '', { tagTransient: 2, tagStatus: status });
+    assert.equal(promoted.status, 0, `${status}: ${promoted.stderr}`);
+    assert.deepEqual(registry.read().tags, { ...registry.initialTags,
+      'dimcode-alpha': { ...registry.initialTags['dimcode-alpha'], latest: '1.2.3-alpha.10' } });
+  }
+});
+
+test('fails a dist-tag the registry never answers instead of waiting forever', (t) => {
+  const registry = nightlyRegistry(t);
+  const stuck = registry.run('snapshot', '--dry-run', '', { tagTransient: 1_000_000 });
+  assert.notEqual(stuck.status, 0);
+  assert.equal(stuck.error, undefined, 'an unanswered read must fail, not hang');
+  assert.match(stuck.stderr, /did not answer within/);
 });
 
 test('refuses to rebuild on an unanswered registry but reuses a nightly a blip hid', (t) => {

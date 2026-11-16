@@ -1,6 +1,6 @@
 import { definePlugin } from '@arcships/rutis'
 import { partRow } from './part-row.ts'
-import type { CommandRules, SessionMethods } from '../../npm/plugin.js'
+import type { CommandRules, MethodReply, SessionMethods } from '../../npm/plugin.js'
 import type { SessionIdentity } from '../../npm/branch-services.js'
 
 export const part = definePlugin({
@@ -13,7 +13,7 @@ export const part = definePlugin({
     await ctx.use<SessionMethods>('sessionMethods').register(
       'session.commandrules',
       [{ name: 'session.commandrules.read', mutating: false, interruption: 'report', progress: false }],
-      async () => {
+      async (): Promise<MethodReply> => {
         try {
           return { kind: 'value', value: { sessionId: identity.sessionId, reply: await rules.read({}) } }
         } catch (error) {

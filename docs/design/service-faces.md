@@ -34,15 +34,15 @@ During migration, an existing entry may carry `internal(reason)`:
 `xtask graph` and `check` classify the current catalog:
 
 - shared + dispatcher → `data`;
-- shared without dispatcher → failure, with the two upstream entries in §3.1 currently reported as
-  `shared-no-dispatcher`;
+- shared without dispatcher → failure;
 - dispatcher without shared → failure;
 - not shared + known migration reason → `internal(reason)`;
 - not shared without a reason → failure;
 - shared and internal at once → failure.
 
-The target check rejects every shared name without a dispatcher once the upstream migration in §3.1
-is complete. The target catalog has only `data` rows.
+A Rust type key is catalogued only when its registered name maps to that key, or its binding has
+a matching dispatcher. The catalog's shared-name fallback does not turn private implementation
+keys into public services. The target catalog has only `data` rows.
 
 ### 2.4 Leaf readiness
 
@@ -77,10 +77,10 @@ Rust 产品装配的现状以 [生成的 catalog](../architecture/rust-agent/gen
 | --- | --- |
 | `managementMethods` | 数据面，shared 名字与 dispatcher 一同注册。 |
 | `localId` | 数据面，由 root 提供 `get`。 |
-| `loaderService` | rutis-loader 的装配键，当前为 `shared-no-dispatcher`。插件管理已有 `rutis/loader` 数据面。 |
-| `pluginMounter` | rutis-loader 提供的装配键，当前为 `shared-no-dispatcher`。`rutis-bridge` 的 `PluginMounter::mount` 接收 `&Ctx` 并返回 `Box<dyn DynPlugin>`。 |
+| `rutis/loader` | 插件管理数据面；`LoaderService` 是提供方的私有 Rust 类型，不是另一个服务名。 |
+| `PluginMounter` 类型键 | rutis-loader 与 rutis-bridge 内部挂载插件定义的装配键，不是公共服务目录项。 |
 
-[#1292](https://github.com/arcships/dim/issues/1292) 跟踪两个装配键的迁移。由 rutis 上游确认各自的本地消费者和装配方式。插件管理复用 `rutis/loader`，其余确有独立公共需求的操作由上游先定义数据契约。两项登记按 §2.6 处理完后，移除临时检查放行。
+插件管理复用 `rutis/loader`。类型键是否属于公共目录由实际名称与 dispatcher 决定；不能仅凭类型名查询时的 shared 回退制造一个公共服务名。私有挂载机制遵循 §2.6，不新增面向插件的挂载操作。
 
 ### 3.2 第一批数据面（#1292）
 
@@ -97,6 +97,7 @@ Rust 产品装配的现状以 [生成的 catalog](../architecture/rust-agent/gen
 | `skillsConfig` | `skillsConfig.get()` | 形状见 §4.8。 |
 | `collaborationConfig` | `collaborationConfig.get()` | 形状见 §4.8。 |
 | `worktreeAssociations` | `worktreeAssociations.associate` | 形状见 §4.8。 |
+| `toolSourcesView` | `toolSourcesView.get/observe` | 同一 ToolRegistry owner 的独立只读观察面；贡献注册仍由 `toolRegistry` 负责，见 [工具贡献 §7.5](../architecture/rust-agent/tool-contributions.md#75-服务接口)。 |
 
 宿主读取端口的数据面（§4.10）包括 `executionSettingsHost`、`toolchainSourceHost`、`promptSuggestionSettingsHost`、`selectableModelsHost` 和 `modelSelectionHost`。名字不变，不新增 catalog 行。
 
@@ -115,7 +116,6 @@ Rust 产品装配的现状以 [生成的 catalog](../architecture/rust-agent/gen
 | `summaryPromptSettingsHost` | — | 宿主 summary settings 端口；`owner-api` |
 | `sessionStore` | `sessionMetadata`、`sessionFiles` | 行与文件分开 |
 | `timelineTree`、`timelineTreeControl` | `treeCommands` | 建/读分支走 `treeCommands` |
-| `toolSourcesView` | `toolRegistry` | 工具贡献走注册表 |
 | `callers` | `callChannel` | 调用通道走数据面 |
 
 ### 3.4 对象/句柄：拆成操作加 id
@@ -216,11 +216,9 @@ Rust 产品装配的现状以 [生成的 catalog](../architecture/rust-agent/gen
 
 ### 3.7 待迁移的数据内容
 原因 `legacy-no-consumer`：内容是数据，但还没有转成 data face。没有 leaf 消费者不是保留 internal 的理由；这些名字按批次迁移，`legacy-no-consumer` 只是迁移状态，不是永久分类。
-角色为 typed binding 的名字在此只记录从目录移出的动作，不转为 data face（§2.6）。
 
 | 名字 | scope | provider | reason | 动作 |
 | --- | --- | --- | --- | --- |
-| `modalityConnectionHost` | process | Provider | legacy-no-consumer | 作为 Provider 的 typed binding 从目录移出：它返回一次调用的凭据材料，不落为 data face（决定：[#1613](https://github.com/arcships/dim/issues/1613)、[Provider 管理 §3.8](appserver/provider-management.md#38-media-execution-for-adapters)；移出实现：[#1634](https://github.com/arcships/dim/issues/1634)） |
 | `collaborationSession` | session | CollaborationSession | legacy-no-consumer | 按 #1292 定义操作面 |
 
 ## 4. 批次契约（#1292）
@@ -388,7 +386,7 @@ modelSelectionHost.resolve({explicit?: ModelId, cwd?}) -> ModelSelection
 
 ## 5. 验证
 
-- `xtask check`：按 §2.3 验证当前 catalog，随 §3.1 的上游迁移收紧检查。
+- `xtask check`：按 §2.3 验证当前 catalog，拒绝缺少 dispatcher 的公共 shared 名称。
 - `xtask graph`：catalog 的 `face` 列与真实装配一致；`catalog.md` 的 diff 作为评审材料。
 - 每个服务：现有 flow 测试 + 一个 loopback session 的跨边界用例；不新增 mock-only 测试。
 - 数量：不改 `cargo test` 的总量要求；按受影响 crate 跑，最终 `cargo test --workspace --locked`。
@@ -400,4 +398,4 @@ modelSelectionHost.resolve({explicit?: ModelId, cwd?}) -> ModelSelection
 
 ## 7. 交付顺序
 
-[#1292](https://github.com/arcships/dim/issues/1292) 按 §3.2 的首批操作和各 owner 推进 §2.6 的迁移，包含 §3.1 的上游登记。各实现批次随代码更新生成的 catalog 及自己负责的操作契约。
+[#1292](https://github.com/arcships/dim/issues/1292) 按 §3.2 的首批操作和各 owner 推进 §2.6 的迁移，包含 §3.1 的公共名称与私有装配边界。各实现批次随代码更新生成的 catalog 及自己负责的操作契约。
