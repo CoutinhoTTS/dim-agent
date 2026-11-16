@@ -150,7 +150,7 @@ done
 
 原 34 个配置中，两个 `ExecLifecycle-Shell*` 预期返回 13（恢复活性反例），其余预期返回 0。
 补覆盖后的 `WaitSelectionCoverage` 预期返回 0；旧模型的 exit 13 反例保留为历史证据。
-新增配置均预期返回 0，精确范围见[第一轮记录](coverage-fill-results.md)和[第二轮记录](coverage-completion-results.md)。
+新增配置均预期返回 0，精确范围见[第一轮记录](coverage-fill-results.md)、[第二轮记录](coverage-completion-results.md)与[Shell 修复重跑记录](shell-recovery-results.md)。
 任何解析错误、超时或新的反例都不是通过。禁用 deadlock 检查是为了允许已完成/等待环境的状态 stutter；
 只有声明了时序性质和相应公平性的模型才检查进度，不把安全性通过误报为“永不挂起”。
 

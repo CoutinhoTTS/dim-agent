@@ -2,7 +2,7 @@
 
 Code correspondence: `8a5fe0980`. Java 17.0.18 / TLA+ tools 1.7.4 (TLC 2.19), one worker, 2 GiB heap. All fourteen changed/new/dependent configurations below completed with exit 0 and exhausted queues. [Exact hashes, seeds, properties and evidence reuse](coverage-fill-results.json).
 
-These runs check the [explicit additional scenarios and bounds](coverage-fill.md), not all business promises or Rust implementation refinement. Thirty-two unchanged original configurations retain their exact-hash evidence: thirty passes and the two existing Shell recovery counterexamples. Together these account for the current 46 configurations; this is evidence accounting, not a coverage percentage.
+These runs check the [explicit additional scenarios and bounds](coverage-fill.md), not all business promises or Rust implementation refinement. Thirty-two unchanged original configurations retain their exact-hash evidence: thirty passes and the two existing Shell recovery counterexamples. Together these account for the 46 configurations in this first-fill record; this is evidence accounting, not a coverage percentage.
 
 | Configuration | Distinct states | Depth | Exit |
 | --- | ---: | ---: | ---: |
