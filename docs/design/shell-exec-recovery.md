@@ -58,6 +58,6 @@ None. Existing query, publication and lifecycle contracts suffice.
 
 The minimal-execution flow restores disposable storage containing an unfinished start, an unreported
 completed end and a cancelled end. It checks failed settlement, preservation of the existing result,
-notice eligibility and no duplicates on another restoration. These are committed-prefix recovery
-cases, not a claim that the test killed a real host process. Existing live background, occupying-command,
-stop, shell-exit and close flows check normal execution and one notification per terminal.
+notice eligibility, each notice's stored command description and no duplicates on another restoration. These are committed-prefix recovery
+cases, not a claim that the test killed a real host process. Live background and occupying-command flows also check the completion notice.
+Stop and shell-exit flows check terminal outcomes; the close flow checks one terminal per admitted task.

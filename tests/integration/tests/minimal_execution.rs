@@ -1441,7 +1441,7 @@ async fn restoring_shell_exec_prefixes_settles_orphans_and_reposts_only_missing_
             request_id: "old-request".into(),
             call_id: task.into(),
             task_id: task.into(),
-            description: description.clone(),
+            description: format!("{description} # {task}"),
             title: None,
             output_path: output.to_string_lossy().into_owned(),
         })
@@ -1539,6 +1539,26 @@ async fn restoring_shell_exec_prefixes_settles_orphans_and_reposts_only_missing_
             .iter()
             .all(|(task, _)| task != "exec-cancelled")
     );
+    for task in ["exec-orphan", "exec-lost"] {
+        let tag = format!("exec-wake-task:{task}");
+        let notice = events
+            .iter()
+            .find(|event| {
+                event.tags.iter().flatten().any(|value| value == &tag)
+                    && matches!(event.kind, EventKind::InputMessage(_))
+            })
+            .expect("each recovered task has a notice");
+        let EventKind::InputMessage(input) = &notice.kind else {
+            unreachable!();
+        };
+        let expected = format!("{description} # {task}");
+        assert!(
+            input.blocks.iter().any(|block| matches!(block,
+                InputBlock::Raw { text, .. } if text.contains(&expected)
+            )),
+            "the notice must contain its own stored command description: {task}"
+        );
+    }
     assert!(
         !marker.exists(),
         "restoration must not execute a historical command"
