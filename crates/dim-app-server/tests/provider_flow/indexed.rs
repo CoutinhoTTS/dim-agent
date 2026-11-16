@@ -172,6 +172,7 @@ async fn sparse_startup_summary_cas_and_bounded_payload_reads() {
     assert_eq!(updated["version"], 2);
     assert!(updated.get("models").is_none());
     assert!(!updated.to_string().contains("fixture-reference"));
+    assert!(!dim_app_server::provider::testing::catalog_client_initialized(&provider));
     assert_eq!(
         db.query_row("SELECT count(*) FROM provider_models", [], |r| r
             .get::<_, u32>(0))

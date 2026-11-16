@@ -2603,6 +2603,7 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
     let probe_id = "018ec73f-4d19-7f61-bc79-7130618bb451";
     let connection = json!({"driverKind":"openai-compatible","auth":{"type":"bearer"},"baseUrl":format!("{base}/draft/v1"),"credential":{"action":"set","value":"probe-secret"}});
     let before_probe = serde_json::to_value(provider.list(&cancel).await.unwrap()).unwrap();
+    assert!(!dim_app_server::provider::testing::catalog_client_initialized(&provider));
     let probe = {
         let provider = provider.clone();
         let cancel = cancel.clone();
@@ -2620,6 +2621,7 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
         ))
         .unwrap();
     let probed = probe.await.unwrap().unwrap();
+    assert!(dim_app_server::provider::testing::catalog_client_initialized(&provider));
     assert_eq!(probed.models[0].model_id, "unsaved");
     assert_eq!(probed.models[0].capabilities.max_output_tokens, Some(123));
     assert_eq!(

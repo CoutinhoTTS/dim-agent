@@ -224,6 +224,12 @@ Source activation publishes the available generation without expanding providers
 Per-provider adoption, retirement and pending conflicts follow
 [Indexed source and sparse adoption](#indexed-source-and-sparse-adoption).
 
+The shared default HTTP client for remote model listings is created by the first
+listing request. Local reads, selection and bundled connection configuration do
+not create it. Construction failure fails that operation with the existing
+Provider failure instead of failing process assembly. Per-request network
+overrides still build their own client with the requested proxy and timeout.
+
 Display lists use bounded pages and server-side search. Opening a conversation
 reads its adopted model; it does not enumerate candidate catalogs. Web and CLI
 model pickers query when opened, discard their results when closed, and refresh

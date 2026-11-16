@@ -65,7 +65,10 @@ impl ProviderService {
             .await?;
         let (mut url, headers) = request(record, credential.as_ref())?;
         let client = if record.network.proxy.is_none() && record.network.timeout_ms.is_none() {
-            self.client.clone()
+            self.client
+                .get_or_try_init(|| async { client(&ModelNetwork::default()) })
+                .await?
+                .clone()
         } else {
             client(&record.network)?
         };

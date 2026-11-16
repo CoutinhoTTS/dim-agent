@@ -73,6 +73,7 @@ use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
+use tokio::sync::OnceCell;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 #[derive(Debug, thiserror::Error)]
@@ -1410,7 +1411,7 @@ pub struct ProviderService {
     grok: Arc<GrokOAuthService>,
     secret_host: Option<Arc<ProviderSecretHost>>,
     bundled: Arc<BundledCatalog>,
-    client: Client,
+    client: OnceCell<Client>,
     stop: CancellationToken,
     tasks: TaskTracker,
     admission: Mutex<()>,
@@ -3288,9 +3289,7 @@ impl DynPlugin for ProviderPlugin {
                     bundled: Arc::new(BundledCatalog::load().map_err(|error| {
                         rutis::Error::from(ErrorKind::PluginFailed(error.into()))
                     })?),
-                    client: remote::client(&ModelNetwork::default()).map_err(|error| {
-                        rutis::Error::from(ErrorKind::PluginFailed(error.to_string().into()))
-                    })?,
+                    client: OnceCell::new(),
                     stop: CancellationToken::new(),
                     tasks: TaskTracker::new(),
                     admission: Mutex::new(()),
@@ -3379,6 +3378,10 @@ pub(crate) fn adopted_selection_preferences(
 #[cfg(feature = "testing")]
 pub mod testing {
     use super::*;
+
+    pub fn catalog_client_initialized(provider: &ProviderService) -> bool {
+        provider.client.get().is_some()
+    }
 
     pub fn stored_provider(
         connection: &rusqlite::Connection,
