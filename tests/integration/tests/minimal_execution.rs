@@ -1,6 +1,5 @@
 //! Integration tests for the persistent shell execution capability.
-//!
-//! Covers the acceptance scenarios from docs/design/appserver/persistent-shell.md §10.
+//! Recovery contract: docs/design/shell-exec-recovery.md.
 
 #![cfg(unix)]
 #[path = "local_support/compaction.rs"]
@@ -25,6 +24,7 @@ use dim_agent_runtime::testing::{branch_events, chain_events};
 use dim_agent_runtime::*;
 use dim_agent_types::*;
 use process_support::{gone, pid_in};
+use rutis::host::CtxHost;
 use rutis::{Ctx, Plugin};
 use serde_json::{Value, json};
 use std::{
@@ -169,6 +169,7 @@ async fn platform(extra: &[(&str, &str)]) -> HostPlatform {
 struct Harness {
     agent: MinimalHost,
     model: Arc<Script>,
+    store: Arc<MemoryTimelineStore>,
     cwd: PathBuf,
     owned_dirs: Vec<PathBuf>,
     compacting: bool,
@@ -205,10 +206,11 @@ impl Harness {
         compacting: bool,
     ) -> Self {
         let model = Arc::new(Script::default());
+        let store = Arc::new(MemoryTimelineStore::default());
         let mut builder = AgentBuilder::new(AgentConfig::default());
         platform(&mut builder);
         builder
-            .timeline_store(Arc::new(MemoryTimelineStore::default()))
+            .timeline_store(store.clone())
             .session_value(Arc::new(HistoryRenderer::default()))
             .process_value(Arc::new(ModelHost(model.clone())))
             .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
@@ -259,6 +261,7 @@ impl Harness {
         Self {
             agent,
             model,
+            store,
             owned_dirs: vec![cwd.clone()],
             cwd,
             compacting,
@@ -1416,4 +1419,224 @@ fn a_stall_one_idle_window_before_the_ceiling_exits_idle() {
     assert_eq!(decision, SettleDecision::Idle);
     assert_eq!(wait.polls, MAX_SETTLE_POLLS);
     assert_eq!(wait.since_growth(), SETTLE_IDLE_POLLS);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn restoring_shell_exec_prefixes_settles_orphans_and_reposts_only_missing_wakes() {
+    let harness = Harness::new(platform(&[]).await).await;
+    let session = harness.session().await;
+    session.idle("main").await.unwrap();
+    assert!(session.unload_if_idle().await.unwrap());
+    let key = TimelineKey {
+        session_id: session.id().into(),
+        branch_id: "main".into(),
+    };
+    let output = harness.cwd.join("partial.log");
+    std::fs::write(&output, "partial output").unwrap();
+    let marker = harness.cwd.join("must-not-run");
+    let description = format!("touch {}", marker.display());
+    let started = |task: &str| {
+        EventKind::ExecStarted(ExecStartedData {
+            turn_id: "old-turn".into(),
+            request_id: "old-request".into(),
+            call_id: task.into(),
+            task_id: task.into(),
+            description: format!("{description} # {task}"),
+            title: None,
+            output_path: output.to_string_lossy().into_owned(),
+        })
+    };
+    let end = |task: &str, status| {
+        EventKind::ExecEnded(ExecEndedData {
+            task_id: task.into(),
+            status,
+            result: ToolResult::text("already finished"),
+        })
+    };
+    let drafts = vec![
+        EventDraft::from(started("exec-orphan")),
+        EventDraft::from(started("exec-lost")),
+        EventDraft::from(end("exec-lost", ExecStatus::Completed)),
+        EventDraft::from(started("exec-cancelled")),
+        EventDraft::from(end("exec-cancelled", ExecStatus::Cancelled)),
+    ];
+    let mut sequence = harness.store.head(&key).await.unwrap();
+    for draft in drafts {
+        sequence += 1;
+        let event = Arc::new(AgentEvent {
+            id: uuid::Uuid::new_v4().to_string(),
+            sequence,
+            create_at: 0,
+            tags: draft.tags,
+            parent_call_id: None,
+            kind: draft.kind,
+        });
+        let (sent, committed) = tokio::sync::oneshot::channel();
+        harness
+            .store
+            .append(
+                key.clone(),
+                vec![StoredEvent {
+                    event,
+                    trace: None,
+                    batch_end: sequence,
+                }],
+                Box::new(move |result| {
+                    let _ = sent.send(result);
+                }),
+            )
+            .unwrap();
+        committed.await.unwrap().unwrap();
+    }
+    let restored = harness
+        .agent
+        .restore_session(session.id().to_owned())
+        .await
+        .unwrap();
+    let events = until(
+        &restored,
+        "shell recovery terminals and notices",
+        |events| {
+            events
+                .iter()
+                .filter(|e| matches!(e.kind, EventKind::ExecEnded(_)))
+                .count()
+                == 3
+                && notifications(events).len() == 2
+        },
+    )
+    .await;
+    let ends = events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::ExecEnded(data) => Some(data),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        ends.iter()
+            .find(|end| end.task_id == "exec-orphan")
+            .unwrap()
+            .status,
+        ExecStatus::Failed
+    );
+    assert_eq!(
+        ends.iter()
+            .find(|end| end.task_id == "exec-lost")
+            .unwrap()
+            .status,
+        ExecStatus::Completed
+    );
+    assert_eq!(
+        ends.iter()
+            .find(|end| end.task_id == "exec-cancelled")
+            .unwrap()
+            .status,
+        ExecStatus::Cancelled
+    );
+    assert!(
+        notifications(&events)
+            .iter()
+            .all(|(task, _)| task != "exec-cancelled")
+    );
+    for task in ["exec-orphan", "exec-lost"] {
+        let tag = format!("exec-wake-task:{task}");
+        let notice = events
+            .iter()
+            .find(|event| {
+                event.tags.iter().flatten().any(|value| value == &tag)
+                    && matches!(event.kind, EventKind::InputMessage(_))
+            })
+            .expect("each recovered task has a notice");
+        let EventKind::InputMessage(input) = &notice.kind else {
+            unreachable!();
+        };
+        let expected = format!("{description} # {task}");
+        assert!(
+            input.blocks.iter().any(|block| matches!(block,
+                InputBlock::Raw { text, .. } if text.contains(&expected)
+            )),
+            "the notice must contain its own stored command description: {task}"
+        );
+    }
+    assert!(
+        !marker.exists(),
+        "restoration must not execute a historical command"
+    );
+    assert_eq!(std::fs::read_to_string(&output).unwrap(), "partial output");
+    restored.idle("main").await.unwrap();
+    assert!(restored.unload_if_idle().await.unwrap());
+    let again = harness
+        .agent
+        .restore_session(session.id().to_owned())
+        .await
+        .unwrap();
+    again.idle("main").await.unwrap();
+    let again_events = local_events(&again).await;
+    assert_eq!(
+        notifications(&again_events),
+        notifications(&events),
+        "reported ends must not wake twice"
+    );
+    assert_eq!(
+        again_events
+            .iter()
+            .filter(|e| matches!(e.kind, EventKind::ExecEnded(_)))
+            .count(),
+        3
+    );
+    harness.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn restarting_exec_recovery_settles_the_live_shell_before_rebuilding() {
+    let harness = Harness::new(platform(&[]).await).await;
+    let session = harness.session().await;
+    harness
+        .run(
+            &session,
+            &[(
+                "execute",
+                json!({"command": "sleep 60", "runInBackground": true}),
+            )],
+        )
+        .await;
+    let before = until(&session, "live shell admission", |events| {
+        count(events, "exec/started") == 1 && tool_results(events) == 1
+    })
+    .await;
+    assert!(ended(&before).is_empty());
+    let plugins = session.branch_diagnostics("main").unwrap().plugins;
+    let recovery = plugins
+        .iter()
+        .find(|plugin| plugin.name == "BackgroundExec")
+        .unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        harness.agent.root().view(recovery.id).unwrap().restart(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let after = until(&session, "old shell settlement", |events| {
+        ended(events).len() == 1 && notifications(events).len() == 1
+    })
+    .await;
+    assert_eq!(count(&after, "exec/started"), 1);
+    assert!(
+        text(&ended(&after)[0].1.result).contains("shell was reset"),
+        "the live shell must settle before recovery inspects history"
+    );
+    harness
+        .run(
+            &session,
+            &[("execute", json!({"command": "printf new-generation"}))],
+        )
+        .await;
+    session.idle("main").await.unwrap();
+    let final_events = local_events(&session).await;
+    assert_eq!(ended(&final_events).len(), 1);
+    assert_eq!(notifications(&final_events), notifications(&after));
+    assert!(text(results(&final_events).last().unwrap()).contains("new-generation"));
+    harness.shutdown().await;
 }

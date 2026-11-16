@@ -11818,6 +11818,13 @@
     },
     {
       "from": "dim_agent_capabilities::defaults",
+      "to": "dim_agent_capabilities::workspace_tools::background",
+      "references": [
+        "path crate::workspace_tools::background::BackgroundExecPlugin::new"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::defaults",
       "to": "dim_agent_runtime::assembly",
       "references": [
         "path AgentBuilder",
@@ -16346,10 +16353,8 @@
       "from": "dim_agent_capabilities::shell_session",
       "to": "dim_agent_capabilities::workspace_tools::background",
       "references": [
-        "path wake_input",
-        "path wakes",
-        "use crate::workspace_tools::background::wake_input",
-        "use crate::workspace_tools::background::wakes"
+        "path BackgroundExec",
+        "use crate::workspace_tools::background::BackgroundExec"
       ]
     },
     {
