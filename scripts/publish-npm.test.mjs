@@ -8,6 +8,8 @@ import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 const script = fileURLToPath(new URL('./publish-npm.mjs', import.meta.url));
+/** The checker's waits are injectable, so a run fits the fixture's ten-second budget. */
+const settle = { DIM_REGISTRY_SETTLE_MS: '2000', DIM_REGISTRY_POLL_MS: '25' };
 const sourceCommit = 'a'.repeat(40);
 const platforms = [
   ['darwin-arm64', 'darwin', 'arm64'], ['darwin-x64', 'darwin', 'x64'],
@@ -242,11 +244,15 @@ function nightlyRegistry(t, shipped = platforms) {
     import { createHash } from 'node:crypto';
     import path from 'node:path';
     const failure = process.env.FAILURE;
+    const tarballMisses = Number(process.env.TARBALL_404 ?? 0);
+    const transient = Number(process.env.TRANSIENT ?? 0);
     const root = ${JSON.stringify(root)};
+    let transientLeft = transient;
     const remote = ${JSON.stringify(remote)};
     const names = ${JSON.stringify(names)};
     const version = ${JSON.stringify(manifest.version)};
     let wrapperReads = 0;
+    let tarballReads = 0;
     globalThis.fetch = async (url, options = {}) => {
       const { hostname, pathname } = new URL(url);
       assert(['registry.npmjs.org', 'registry.npmmirror.com'].includes(hostname));
@@ -274,11 +280,15 @@ function nightlyRegistry(t, shipped = platforms) {
       }
       const [, name, ref] = pathname.split('/');
       assert(names.includes(name));
+      if (ref === '-' && transientLeft > 0) { transientLeft -= 1; throw new Error('connection reset'); }
       if (failure === 'auth') return new Response('', { status: 401 });
       if (failure === 'network') throw new Error('network failure');
       if (failure === 'server') return new Response('', { status: 503 });
       if (failure === 'missing' && name === 'dimcode-windows-x64') return new Response('', { status: 404 });
-      if (ref === '-') return new Response(readFileSync(path.join(root, name + '-' + version + '.tgz')));
+      if (ref === '-') {
+        if (tarballReads < tarballMisses) { tarballReads += 1; return new Response('', { status: 404 }); }
+        return new Response(readFileSync(path.join(root, name + '-' + version + '.tgz')));
+      }
       if (ref !== version && !['latest', 'alpha'].includes(ref)) return new Response('', { status: 404 });
       const metadata = JSON.parse(readFileSync(path.join(root, name, 'package/package.json')));
       if (ref === 'latest') metadata.version = failure === 'stale' ? '1.2.3-alpha.9' : state.tags[name].latest;
@@ -322,10 +332,11 @@ function nightlyRegistry(t, shipped = platforms) {
   `, { mode: 0o755 });
   const check = fileURLToPath(new URL('./check-alpha-registry.mjs', import.meta.url));
   return { receipt, remote, initialTags,
-    run(mode, flag = '--dry-run', failure = '') {
+    run(mode, flag = '--dry-run', failure = '', { tarballMisses = 0, transient = 0 } = {}) {
       return spawnSync(process.execPath, ['--import', preload, check, receipt, mode, flag], {
         encoding: 'utf8', timeout: 10_000,
-        env: { ...process.env, PATH: `${path.join(root, 'bin')}${path.delimiter}${process.env.PATH}`, FAILURE: failure },
+        env: { ...process.env, PATH: `${path.join(root, 'bin')}${path.delimiter}${process.env.PATH}`, FAILURE: failure,
+          TARBALL_404: String(tarballMisses), TRANSIENT: String(transient), ...settle },
       });
     },
     read() { return JSON.parse(readFileSync(remote)); },
@@ -446,4 +457,29 @@ test('does not reuse a nightly when a native manifest comes from another commit'
   assert.equal(result.status, 0, result.stderr);
   assert.equal(JSON.parse(readFileSync(registry.receipt)).version, null);
   assert.deepEqual(registry.read().tags, registry.initialTags);
+});
+
+test('waits out a tarball the registry publishes after its metadata', (t) => {
+  const registry = nightlyRegistry(t);
+  writeFileSync(registry.receipt, JSON.stringify({ sourceCommit }));
+  assert.equal(registry.run('source').status, 0, 'the complete nightly is reused, not rebuilt');
+  const promoted = registry.run('promote', '--apply', '', { tarballMisses: 2 });
+  assert.equal(promoted.status, 0, promoted.stderr);
+  const published = structuredClone(registry.initialTags);
+  published['dimcode-alpha'].latest = '1.2.3-alpha.10';
+  assert.deepEqual(registry.read().tags, published);
+});
+
+test('refuses to rebuild on an unanswered registry but reuses a nightly a blip hid', (t) => {
+  const unreadable = nightlyRegistry(t);
+  writeFileSync(unreadable.receipt, JSON.stringify({ sourceCommit }));
+  const failed = unreadable.run('source', '--dry-run', 'network');
+  assert.notEqual(failed.status, 0, 'an unanswered registry is not an incomplete publication');
+  assert.equal(failed.error, undefined);
+
+  const blip = nightlyRegistry(t);
+  writeFileSync(blip.receipt, JSON.stringify({ sourceCommit }));
+  const reused = blip.run('source', '--dry-run', '', { transient: 1 });
+  assert.equal(reused.status, 0, reused.stderr);
+  assert.equal(JSON.parse(readFileSync(blip.receipt)).version, '1.2.3-alpha.10', 'a retried read still finds the nightly');
 });
