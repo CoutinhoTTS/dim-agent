@@ -312,6 +312,7 @@ fn upgrade_stage_line(stage: client::UpgradeStage) -> &'static str {
 /// A store upgrade's report on stderr. A terminal gets one line rewritten in
 /// place, so a long upgrade shows that it is moving; a pipe gets one line per
 /// report, because nothing on the other end can overwrite it.
+#[derive(Default)]
 pub(crate) struct UpgradeLine {
     /// Something is on the last line and can be rewritten.
     drawn: bool,
@@ -346,62 +347,6 @@ impl UpgradeLine {
                 crossterm::terminal::Clear(crossterm::terminal::ClearType::CurrentLine),
             );
             self.drawn = false;
-        }
-    }
-}
-impl Default for UpgradeLine {
-    fn default() -> Self {
-        Self { drawn: false }
-    }
-}
-
-#[cfg(test)]
-mod upgrade_line_tests {
-    use super::{UpgradeLine, store_upgrade_progress_line};
-    use crate::{client::UpgradeStage, locale::Locale};
-
-    /// `UpgradeLine` redraws only where a line can be rewritten. A test's own
-    /// stderr is a pipe, which is the case a reporter of startup progress must
-    /// not fill with control characters: every report is a line of its own,
-    /// and nothing is left to erase afterwards.
-    #[test]
-    fn a_progress_line_is_one_line_when_nothing_can_be_rewritten() {
-        let mut line = UpgradeLine::default();
-        line.write("first");
-        line.write("second");
-        assert!(
-            !line.drawn,
-            "a stream that cannot be rewritten keeps no line to redraw"
-        );
-        line.finish();
-        assert!(!line.drawn);
-    }
-
-    /// A redrawn line names the elapsed time and the stage in the client's
-    /// language, and an unknown locale still says both.
-    #[test]
-    fn the_progress_line_names_the_time_and_the_stage() {
-        let english = store_upgrade_progress_line(
-            Locale::En,
-            UpgradeStage::Index,
-            std::time::Duration::from_secs(72),
-        );
-        assert!(english.contains("72"), "{english}");
-        assert!(english.contains("text index"), "{english}");
-        let chinese = store_upgrade_progress_line(
-            Locale::ZhCn,
-            UpgradeStage::Index,
-            std::time::Duration::from_secs(72),
-        );
-        assert!(chinese.contains("72"), "{chinese}");
-        assert!(chinese.contains("文本索引"), "{chinese}");
-        for stage in [
-            UpgradeStage::Images,
-            UpgradeStage::Index,
-            UpgradeStage::Verify,
-        ] {
-            let line = store_upgrade_progress_line(Locale::En, stage, Default::default());
-            assert!(!line.contains('{'), "{line}");
         }
     }
 }
@@ -1120,4 +1065,55 @@ async fn runtime_list(client: &mut client::Client) -> Result<()> {
         println!("{}", runtime_line(status));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod upgrade_line_tests {
+    use super::{UpgradeLine, store_upgrade_progress_line};
+    use crate::{client::UpgradeStage, locale::Locale};
+
+    /// `UpgradeLine` redraws only where a line can be rewritten. A test's own
+    /// stderr is a pipe, which is the case a reporter of startup progress must
+    /// not fill with control characters: every report is a line of its own,
+    /// and nothing is left to erase afterwards.
+    #[test]
+    fn a_progress_line_is_one_line_when_nothing_can_be_rewritten() {
+        let mut line = UpgradeLine::default();
+        line.write("first");
+        line.write("second");
+        assert!(
+            !line.drawn,
+            "a stream that cannot be rewritten keeps no line to redraw"
+        );
+        line.finish();
+        assert!(!line.drawn);
+    }
+
+    /// A redrawn line names the elapsed time and the stage in the client's
+    /// language, and an unknown locale still says both.
+    #[test]
+    fn the_progress_line_names_the_time_and_the_stage() {
+        let english = store_upgrade_progress_line(
+            Locale::En,
+            UpgradeStage::Index,
+            std::time::Duration::from_secs(72),
+        );
+        assert!(english.contains("72"), "{english}");
+        assert!(english.contains("text index"), "{english}");
+        let chinese = store_upgrade_progress_line(
+            Locale::ZhCn,
+            UpgradeStage::Index,
+            std::time::Duration::from_secs(72),
+        );
+        assert!(chinese.contains("72"), "{chinese}");
+        assert!(chinese.contains("文本索引"), "{chinese}");
+        for stage in [
+            UpgradeStage::Images,
+            UpgradeStage::Index,
+            UpgradeStage::Verify,
+        ] {
+            let line = store_upgrade_progress_line(Locale::En, stage, Default::default());
+            assert!(!line.contains('{'), "{line}");
+        }
+    }
 }
