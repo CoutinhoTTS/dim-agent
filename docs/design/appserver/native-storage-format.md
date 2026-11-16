@@ -16,6 +16,15 @@ snapshots of the Sessions those rows belong to. No other row's candidates change
 and no other Session's snapshot is dropped. The accepted image bytes are
 preserved. Older daemons reject v50 at admission.
 
+The conversion also removes, in that same transaction, the content rows its own
+rewrite made unreachable: the addresses the rewritten rows named before the
+rewrite, and the nodes those reach through `parent`, are deleted when nothing
+addresses them afterwards. A store that upgrades therefore never holds the inline
+payload beside the file it was moved into. The version number does not change — the
+schema, every other row and every event byte are the same — and a store that
+committed the conversion before this step keeps those rows until `dimcode daemon
+vacuum` removes them ([space reclamation](#sqlite-运行参数与空间回收)).
+
 ## v49: durable image references
 
 Image sources in inputs, tool results and model request content may contain
@@ -317,7 +326,11 @@ Cannot open native store <path>.
 
 fork 与 Session 删除各用一条复制连接，按 256 个逻辑序号（内容按 1024 个哈希）分块提交，每块之间让写入轮取得写锁。复制连接与写连接一样在 macOS 上设置 `fullfsync`。fork 的中间块以 `synchronous=NORMAL` 提交，最后插入 `agent_sessions` 的事务以 `FULL` 提交：它的 fsync（macOS 上为 F_FULLFSYNC）覆盖此前写入 WAL 的全部帧，中断只留下不可达的行，不会出现可见但不完整的 Session。删除先在一个 `FULL` 事务中移除使 Session 可见的行（文件与输出归属、授权、标题、目录、owner、session 与分支），再以 `NORMAL` 分块删除事件、快照和内容；中断只留下不可达的行，重试同一 id 即可清除。两者都不改变持久化格式。
 
-删除 Session 只释放库内页，数据库文件本身不缩小。维护入口是 `dimcode daemon vacuum [--database PATH]`：守护进程未运行时它取同一把维护锁，校验当前格式的精确结构后执行 `VACUUM`，打印操作前后数据库与 WAL 的字节数之和。`VACUUM` 重写整个库，需要约等于库大小的临时空间；守护进程持锁时该命令拒绝执行，也不升级或创建库。
+删除 Session 只释放库内页，数据库文件本身不缩小。维护入口是 `dimcode daemon vacuum [--database PATH]`：守护进程未运行时它取同一把维护锁，校验当前格式的精确结构，删除没有任何存储引用到达的 `node`/`message` 内容行，再执行 `VACUUM`，打印操作前后数据库与 WAL 的字节数之和，以及删除的行数与这些行正文的字节数。这两组数字不互相推断：删除只把行的页还给库内空闲列表，只有 `VACUUM` 重写整个库才把页还给文件系统。
+
+可达性按 Session 计算，边只有两种：事件行的 `record`、`trace.original`、`trace.steps[].result` 与输出行的 `refs`（`list`、`messages`、`tools`、`system`）指向的内容地址，以及 `node` 行正文的 `parent` 指向前一条消息的节点。恢复快照不持有内容地址，不参与可达性；`array-element` 行由定位行引用，不在删除范围；其余 kind 留给引入它们的所有者。
+
+命令先读完整个库、再删除：任一 Session 的行指向库中不存在的内容时，整次运行在删除任何一行之前失败，不删除任何东西，因此损坏的库不会缩成一个看起来健康的小库。删除按 Session 各自一个事务提交，运行在两次提交之间中断时，已完成的 Session 保持已修复，其余一律保持原样，下一次运行接着完成。没有引用的行不会再被引用，重复执行只在第一次有删除。守护进程持锁时该命令拒绝执行，也不升级或创建库；`VACUUM` 需要约等于库大小的临时空间。
 
 ## Current v48 tables
 

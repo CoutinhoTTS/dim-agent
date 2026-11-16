@@ -269,10 +269,12 @@ pub fn run_with(
         let path = PathBuf::from(database);
         let vacuumed = crate::storage::vacuum_store(path.clone())?;
         println!(
-            "Vacuumed {}: {} -> {} bytes",
+            "Vacuumed {}: {} -> {} bytes\nRemoved {} unreachable content rows holding {} bytes",
             path.display(),
             vacuumed.before,
-            vacuumed.after
+            vacuumed.after,
+            vacuumed.reclaimed.rows,
+            vacuumed.reclaimed.bytes
         );
         return Ok(());
     }
