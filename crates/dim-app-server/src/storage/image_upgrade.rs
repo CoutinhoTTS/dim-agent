@@ -150,7 +150,7 @@ pub(super) fn upgrade(
         progress.enter(super::sqlite::UpgradeStage::Index);
     }
     let mut indexed = 0;
-    for ((session, branch, sequence), _) in &changed.rows {
+    for (session, branch, sequence) in changed.rows.keys() {
         indexed += usize::from(super::text::rewrite_event(
             connection, session, branch, *sequence,
         )?);
