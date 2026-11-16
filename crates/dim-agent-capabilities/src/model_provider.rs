@@ -482,13 +482,7 @@ impl ModelProvider {
         } else {
             let result = AssertUnwindSafe(async {
                 crate::context_policy::check_cancel(&cancel)?;
-                let request = crate::session_files::materialize(
-                    &call.request,
-                    self.files.as_deref(),
-                    &cancel,
-                )
-                .await?;
-                let request = images::adapt(&request);
+                let request = images::adapt(&call.request, self.files.as_deref(), &cancel).await?;
                 self.context
                     .validate(&call.request_id, request.clone(), cancel.clone())
                     .await?;

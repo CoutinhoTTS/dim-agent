@@ -152,18 +152,21 @@ a continuation declines it.
 
 ## Durable images at model execution
 
-Before reference adaptation and budget validation, ModelProvider uses
-`session_files::materialize` to read file-backed image sources for the request
-metadata's Session into a request-local inline representation. The same path
-handles user content and tool results for vision and text-only models; only
-images in effective context are read. Adaptation then replaces those images
-with references. The stored request and its File sources remain unchanged.
+During reference adaptation and before budget validation, ModelProvider uses
+`session_files::resolve` to read one file-backed image for the request
+metadata's Session, hashes it and releases its bytes before reading the next.
+The same path handles user content and tool results for vision and text-only
+models; only images in effective context are read. Adaptation retains only
+references, not the resolved images. The stored request and its File sources
+remain unchanged.
 
 The optional dependency is named through `Names` and read with `get_at` at
 load. It does not gate or create a reload relation. A missing file service,
 Session identity or stored image fails a request that needs file bytes, rather
 than inventing a reference or silently omitting it. Cancellation propagates to
-bounded reads, and the existing image-data budget remains enforced.
+bounded reads with the existing per-file storage limit. The aggregate image-data
+budget applies only at Aimux's image-consuming boundary, not to conversational
+references, so retained images totaling more than 32 MiB do not block text calls.
 
 SessionStore provides `sessionFiles` in the process, under both its shared
 dispatch name and the native binding. The native-storage profile also gates

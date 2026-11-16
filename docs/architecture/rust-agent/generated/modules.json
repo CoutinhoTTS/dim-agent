@@ -14182,13 +14182,6 @@
     },
     {
       "from": "dim_agent_capabilities::model_provider",
-      "to": "dim_agent_capabilities::session_files",
-      "references": [
-        "path crate::session_files::materialize"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::model_provider",
       "to": "dim_agent_capabilities::steer",
       "references": [
         "path REPLACED_BY_STEER",
@@ -14350,10 +14343,34 @@
     },
     {
       "from": "dim_agent_capabilities::model_provider::images",
+      "to": "dim_agent_capabilities::context_policy",
+      "references": [
+        "path crate::context_policy::check_cancel"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::model_provider::images",
+      "to": "dim_agent_capabilities::host",
+      "references": [
+        "path HostError",
+        "path SessionFiles",
+        "use crate::host::HostError",
+        "use crate::host::SessionFiles"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::model_provider::images",
       "to": "dim_agent_capabilities::images",
       "references": [
         "path image_reference",
         "use crate::images::image_reference"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::model_provider::images",
+      "to": "dim_agent_capabilities::session_files",
+      "references": [
+        "path crate::session_files::resolve"
       ]
     },
     {
@@ -14363,6 +14380,7 @@
         "path ContentBlock::Image",
         "path ContentBlock::Text",
         "path ImageSource",
+        "path ImageSourceType::File",
         "path Message",
         "path MessageContent::Parts",
         "path MessagePart::Image",

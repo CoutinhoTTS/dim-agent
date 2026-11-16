@@ -47,6 +47,7 @@ struct Script {
     gate: Mutex<Option<CancellationToken>>,
     truncated: Mutex<bool>,
     dropped: AtomicUsize,
+    selections: AtomicUsize,
 }
 
 impl Script {
@@ -227,6 +228,42 @@ impl DynPlugin for Probe {
     }
 }
 
+struct ObserveSelection {
+    modality: dim_modality::ModalityPlugin,
+    script: Arc<Script>,
+}
+impl DynPlugin for ObserveSelection {
+    fn name(&self) -> &str {
+        self.modality.name()
+    }
+    fn injects(&self) -> Vec<TypeKey> {
+        self.modality.injects()
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
+        Box::pin(async move {
+            let selection = ctx.require::<ModelSelectionHost>()?;
+            let script = self.script.clone();
+            let observed = ModelSelectionHost::new(Arc::new(move |explicit, cwd, cancel| {
+                let selection = selection.clone();
+                let script = script.clone();
+                Box::pin(async move {
+                    let request = ModelSelectionRequest::at(explicit, cwd.as_deref())
+                        .expect("the owner's request has a UTF-8 directory");
+                    let result = selection.resolve(request, cancel).await;
+                    script.selections.fetch_add(1, Ordering::SeqCst);
+                    result.map_err(|error| HostError::failed(error.to_string()))
+                })
+            }));
+            let ctx = ctx.isolate(
+                TypeKey::of::<ModelSelectionHost>(),
+                "fixture-image-selection",
+            );
+            ctx.provide(observed)?;
+            self.modality.apply(&ctx).await
+        })
+    }
+}
+
 struct Fixture {
     server: RunningServer,
     script: Arc<Script>,
@@ -261,7 +298,15 @@ impl Fixture {
             script.clone(),
         );
         defaults::tool_host(&mut builder, Arc::new(ReadImage));
-        dim_modality::install(&mut builder);
+        names::register::<dim_modality::ModalityAdapterService>(builder.catalog_mut(), None);
+        builder.catalog_mut().register_shared("modalityTargets");
+        let observed = script.clone();
+        builder.optional_plugin(move |names| {
+            Ok(Box::new(ObserveSelection {
+                modality: dim_modality::ModalityPlugin::new(names, Default::default())?,
+                script: observed.clone(),
+            }))
+        });
         dim_image_understanding::install(&mut builder);
         let tools = Tools::default();
         let observed = tools.clone();
@@ -640,13 +685,18 @@ async fn concurrent_image_waiters_cancel_independently_and_last_drop_releases_pr
     })
     .await
     .unwrap();
-    assert!(
-        tokio::time::timeout(Duration::from_secs(2), async {
-            tokio::join!(&mut first, &mut second)
-        })
-        .await
-        .is_err()
-    );
+    let selections = fixture.script.selections.load(Ordering::SeqCst);
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            assert!(futures_util::poll!(&mut second).is_pending());
+            if fixture.script.selections.load(Ordering::SeqCst) > selections {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the second call finishes its current-target owner read and waits for the answer");
     assert_eq!(fixture.script.auxiliary.lock().unwrap().len(), 1);
     first_cancel.cancel();
     assert!(matches!(first.await, Err(HostError::Cancelled(_))));

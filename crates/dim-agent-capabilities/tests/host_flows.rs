@@ -4440,6 +4440,12 @@ async fn stored_attachment_and_tool_images_share_a_reference_without_changing_fi
     };
     let attachment = file_image("attachment.png");
     let tool_image = file_image("tool.png");
+    let retained = vec![
+        attachment.clone(),
+        file_image("large.png"),
+        file_image("large.png"),
+        file_image("large.png"),
+    ];
     let requests = Arc::new(Mutex::new(Vec::new()));
     let mut builder = builder(
         Arc::new(RecordingModel(requests.clone())),
@@ -4469,6 +4475,18 @@ async fn stored_attachment_and_tool_images_share_a_reference_without_changing_fi
             .await
             .unwrap();
     }
+    let mut large = bytes;
+    large.resize(9 * 1024 * 1024, 0);
+    assert!(3 * dim_agent_capabilities::images::base64_len(large.len() as u64) > 32 * 1024 * 1024);
+    files
+        .put(
+            session.id().into(),
+            "large.png".into(),
+            large,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
     let model = |id, vision| {
         let mut model = model_with_vision(id, vision);
         model.metadata = Some(RequestMetadata {
@@ -4491,7 +4509,7 @@ async fn stored_attachment_and_tool_images_share_a_reference_without_changing_fi
         .input(
             InputMessageData {
                 user: Some(UserInput {
-                    content: vec![attachment.clone()],
+                    content: retained.clone(),
                 }),
                 mode: Some(InputMode::Queue),
                 ..Default::default()
@@ -4519,6 +4537,14 @@ async fn stored_attachment_and_tool_images_share_a_reference_without_changing_fi
         session.idle("main").await.unwrap();
         let sent = requests.lock().unwrap().last().unwrap().clone();
         assert_eq!(sent.model_id, model_id);
+        assert_eq!(
+            sent_parts(&sent)
+                .iter()
+                .filter(|part| *part == "img:4739787cfd409e67")
+                .count(),
+            3,
+            "retained images exceeding the pixel budget still reach {model_id} as references"
+        );
         assert!(
             sent_parts(&sent)
                 .iter()
@@ -4544,7 +4570,7 @@ async fn stored_attachment_and_tool_images_share_a_reference_without_changing_fi
     let events = chain_events(&session, "main", ..).await.unwrap();
     assert!(events.iter().any(|event| matches!(&event.kind,
         EventKind::InputMessage(data) if data.user.as_ref().is_some_and(|user|
-            user.content == vec![attachment.clone()]))));
+            user.content == retained))));
     assert!(
         events.iter().any(|event| matches!(&event.kind,
         EventKind::ToolResult(data) if data.results.iter().any(|result| matches!(
