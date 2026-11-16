@@ -759,3 +759,198 @@ async fn a_swapped_task_directory_symlink_cannot_escape_the_managed_root() {
     server.shutdown();
     server.join().await.unwrap();
 }
+
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn committed_shell_completion_recovers_after_notice_failure_and_host_loss() {
+    const CHILD_HOME: &str = "DIM_TEST_EXEC_RECOVERY_HOME";
+    if let Some(home) = std::env::var_os(CHILD_HOME) {
+        let home = PathBuf::from(home);
+        let work = Work {
+            repo: home.join("repo"),
+            home,
+        };
+        let server = host(&work).await;
+        let session = session(&server, &work.repo).await;
+        session.idle("main").await.unwrap();
+        let connection =
+            rusqlite::Connection::open(work.home.join("native/dimcode.sqlite")).unwrap();
+        connection.execute_batch("CREATE TRIGGER fail_exec_notice BEFORE INSERT ON timeline_events WHEN NEW.kind = 'input/message' AND EXISTS (SELECT 1 FROM timeline_events WHERE kind = 'exec/ended' AND session_id = NEW.session_id) BEGIN SELECT RAISE(ABORT, 'injected exec notice failure'); END").unwrap();
+        session
+            .service::<ShellSession>("main")
+            .unwrap()
+            .run(
+                "echo executed >> execution-count".into(),
+                CallContext {
+                    turn_id: "fixture-turn".into(),
+                    request_id: "fixture-request".into(),
+                    call_id: "fixture-call".into(),
+                },
+                10_000,
+                true,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        let error = tokio::time::timeout(Duration::from_secs(30), session.closed())
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("injected exec notice failure"),
+            "{error}"
+        );
+        std::fs::write(work.home.join("ready"), session.id()).unwrap();
+        std::future::pending::<()>().await;
+        return;
+    }
+
+    let work = Work::new();
+    let log = std::fs::File::create(work.home.join("child.log")).unwrap();
+    let mut child = tokio::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "worktrees::committed_shell_completion_recovers_after_notice_failure_and_host_loss",
+            "--nocapture",
+        ])
+        .env(CHILD_HOME, &work.home)
+        .stdout(log.try_clone().unwrap())
+        .stderr(log)
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(60), async {
+        while !work.home.join("ready").exists() {
+            if let Some(status) = child.try_wait().unwrap() {
+                panic!(
+                    "child exited {status}: {}",
+                    std::fs::read_to_string(work.home.join("child.log")).unwrap()
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "child did not reach the committed-end/missing-notice boundary: {}",
+            std::fs::read_to_string(work.home.join("child.log")).unwrap()
+        );
+    });
+    child.kill().await.unwrap();
+    let status = child.wait().await.unwrap();
+    assert!(
+        !status.success(),
+        "the host must exit without graceful shutdown"
+    );
+    let id = std::fs::read_to_string(work.home.join("ready")).unwrap();
+    let connection = rusqlite::Connection::open(work.home.join("native/dimcode.sqlite")).unwrap();
+    let terminals: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM timeline_events WHERE session_id=?1 AND kind='exec/ended'",
+            [&id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        terminals, 1,
+        "the terminal survived before notification failed"
+    );
+    let pending_notices: i64 = connection.query_row(
+        "SELECT count(*) FROM timeline_events WHERE session_id=?1 AND kind='input/message' AND sequence > (SELECT max(sequence) FROM timeline_events WHERE session_id=?1 AND kind='exec/ended')",
+        [&id], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(
+        pending_notices, 0,
+        "no post-terminal input committed before host loss"
+    );
+    connection
+        .execute_batch("DROP TRIGGER fail_exec_notice")
+        .unwrap();
+    drop(connection);
+    let mut notice_id = None;
+    for generation in 0..2 {
+        let server = host(&work).await;
+        let session = server
+            .agent()
+            .unwrap()
+            .restore_session(id.clone())
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(30), session.idle("main"))
+            .await
+            .unwrap()
+            .unwrap();
+        let input = format!("user input after restore {generation}");
+        session
+            .submit(input.clone(), InputMode::Queue, "main")
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(30), session.idle("main"))
+            .await
+            .unwrap()
+            .unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e.kind, EventKind::ExecStarted(_)))
+                .count(),
+            1
+        );
+        let ends = events
+            .iter()
+            .filter_map(|e| match &e.kind {
+                EventKind::ExecEnded(data) => Some((e, data)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(ends.len(), 1);
+        assert_eq!(ends[0].1.status, dim_agent_types::ExecStatus::Completed);
+        let notices = events
+            .iter()
+            .filter(|e| {
+                matches!(e.kind, EventKind::InputMessage(_))
+                    && e.tags
+                        .iter()
+                        .flatten()
+                        .any(|tag| tag.starts_with("exec-wake-result:"))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            notices.len(),
+            1,
+            "restore must publish exactly one missing notice"
+        );
+        assert!(
+            notices[0]
+                .tags
+                .as_ref()
+                .unwrap()
+                .contains(&format!("exec-wake-result:{}", ends[0].0.id))
+        );
+        if let Some(previous) = &notice_id {
+            assert_eq!(&notices[0].id, previous);
+        }
+        notice_id = Some(notices[0].id.clone());
+        assert!(
+            events.iter().any(|event| matches!(&event.kind,
+                EventKind::InputConsumed(data) if data.input_id == notices[0].id
+            )),
+            "the recovered notice must reach the Loop's input handoff"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(&e.kind, EventKind::Text(data) if data.delta.contains(&input))),
+            "new user input must still produce model output"
+        );
+        assert_eq!(
+            std::fs::read_to_string(work.repo.join("execution-count")).unwrap(),
+            "executed\n",
+            "restore must not rerun the completed command"
+        );
+        server.shutdown();
+        server.join().await.unwrap();
+    }
+}

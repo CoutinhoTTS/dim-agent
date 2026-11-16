@@ -3725,6 +3725,16 @@
       ]
     },
     {
+      "id": "dim_app_server::storage::metadata::binding",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::storage::metadata",
+      "file": "crates/dim-app-server/src/storage/metadata.rs",
+      "unexpandedMacros": [
+        "format",
+        "json"
+      ]
+    },
+    {
       "id": "dim_app_server::storage::metadata::testing",
       "crate": "dim_app_server",
       "parent": "dim_app_server::storage::metadata",
@@ -18158,6 +18168,16 @@
     },
     {
       "from": "dim_agent_capabilities::tool_registry",
+      "to": "dim_agent_capabilities::port_faces",
+      "references": [
+        "path crate::port_faces::Empty",
+        "path crate::port_faces::invalid",
+        "path crate::port_faces::request",
+        "path crate::port_faces::unknown_method"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::tool_registry",
       "to": "dim_agent_capabilities::tool_registry::tests",
       "references": [
         "mod tests"
@@ -23935,6 +23955,20 @@
     },
     {
       "from": "dim_app_server",
+      "to": "dim_app_server::storage::face",
+      "references": [
+        "path storage::Store"
+      ]
+    },
+    {
+      "from": "dim_app_server",
+      "to": "dim_app_server::storage::metadata::binding",
+      "references": [
+        "path storage::SessionMetadataService"
+      ]
+    },
+    {
+      "from": "dim_app_server",
       "to": "dim_app_server::storage::sqlite",
       "references": [
         "path storage::SqliteStorage",
@@ -24359,9 +24393,25 @@
     },
     {
       "from": "dim_app_server::agents",
+      "to": "dim_app_server::storage::face",
+      "references": [
+        "path Store",
+        "use crate::storage::Store"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents",
       "to": "dim_app_server::storage::metadata",
       "references": [
         "path crate::storage::TitleFields::default"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents",
+      "to": "dim_app_server::storage::metadata::binding",
+      "references": [
+        "path SessionMetadataService",
+        "use crate::storage::SessionMetadataService"
       ]
     },
     {
@@ -26786,16 +26836,16 @@
     },
     {
       "from": "dim_app_server::connection",
-      "to": "dim_app_server::storage::metadata",
+      "to": "dim_app_server::storage::face",
       "references": [
-        "path crate::storage::TitleFields::default"
+        "path crate::storage::Store"
       ]
     },
     {
       "from": "dim_app_server::connection",
-      "to": "dim_app_server::storage::timeline",
+      "to": "dim_app_server::storage::metadata",
       "references": [
-        "path crate::storage::SessionStore"
+        "path crate::storage::TitleFields::default"
       ]
     },
     {
@@ -31948,10 +31998,10 @@
     },
     {
       "from": "dim_app_server::session_grants",
-      "to": "dim_app_server::storage::timeline",
+      "to": "dim_app_server::storage::face",
       "references": [
-        "path SessionStore",
-        "use crate::storage::SessionStore"
+        "path Store",
+        "use crate::storage::Store"
       ]
     },
     {
@@ -32017,10 +32067,10 @@
     },
     {
       "from": "dim_app_server::session_language",
-      "to": "dim_app_server::storage::timeline",
+      "to": "dim_app_server::storage::face",
       "references": [
-        "path SessionStore",
-        "use crate::storage::SessionStore"
+        "path Store",
+        "use crate::storage::Store"
       ]
     },
     {
@@ -32824,7 +32874,8 @@
       "from": "dim_app_server::storage",
       "to": "dim_app_server::storage::face",
       "references": [
-        "mod face"
+        "mod face",
+        "use face::Store"
       ]
     },
     {
@@ -32867,6 +32918,13 @@
         "use metadata::Title",
         "use metadata::TitleFields",
         "use metadata::TitleSource"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage",
+      "to": "dim_app_server::storage::metadata::binding",
+      "references": [
+        "use metadata::SessionMetadataService"
       ]
     },
     {
@@ -33348,24 +33406,34 @@
         "path AgentError::Closed",
         "path AgentError::InvalidInput",
         "path AgentError::Storage",
+        "path Result",
         "path dim_agent_runtime::Result",
-        "use dim_agent_runtime::AgentError"
+        "use dim_agent_runtime::AgentError",
+        "use dim_agent_runtime::Result"
       ]
     },
     {
       "from": "dim_app_server::storage::face",
       "to": "dim_agent_runtime::timeline_query::properties",
       "references": [
+        "path QueryPage",
+        "path QueryResult",
+        "path QuerySpec",
         "path dim_agent_runtime::QueryPage",
         "path dim_agent_runtime::QueryResult",
-        "path dim_agent_runtime::QuerySpec"
+        "path dim_agent_runtime::QuerySpec",
+        "use dim_agent_runtime::QueryPage",
+        "use dim_agent_runtime::QueryResult",
+        "use dim_agent_runtime::QuerySpec"
       ]
     },
     {
       "from": "dim_app_server::storage::face",
       "to": "dim_agent_runtime::timeline_store",
       "references": [
-        "path dim_agent_runtime::TimelineReadScope"
+        "path TimelineReadScope",
+        "path dim_agent_runtime::TimelineReadScope",
+        "use dim_agent_runtime::TimelineReadScope"
       ]
     },
     {
@@ -33374,8 +33442,10 @@
       "references": [
         "path GrantKind",
         "path GrantMode",
+        "path SessionGrant",
         "use dim_agent_types::grant::GrantKind",
-        "use dim_agent_types::grant::GrantMode"
+        "use dim_agent_types::grant::GrantMode",
+        "use dim_agent_types::grant::SessionGrant"
       ]
     },
     {
@@ -33384,6 +33454,7 @@
       "references": [
         "path SessionOrigin",
         "path crate::protocol::Catalog",
+        "path crate::protocol::CatalogResult",
         "use crate::protocol::SessionOrigin"
       ]
     },
@@ -33393,8 +33464,12 @@
       "references": [
         "path PreparedWorktree",
         "path SessionStore",
+        "path WorktreeDirectoryRecord",
+        "path WorktreeUsage",
         "use super::PreparedWorktree",
-        "use super::SessionStore"
+        "use super::SessionStore",
+        "use super::WorktreeDirectoryRecord",
+        "use super::WorktreeUsage"
       ]
     },
     {
@@ -33851,6 +33926,14 @@
     },
     {
       "from": "dim_app_server::storage::metadata",
+      "to": "dim_app_server::storage::metadata::binding",
+      "references": [
+        "mod binding",
+        "use binding::SessionMetadata"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::metadata",
       "to": "dim_app_server::storage::metadata::testing",
       "references": [
         "mod testing",
@@ -33871,6 +33954,26 @@
       "references": [
         "path SessionStore",
         "use super::SessionStore"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::metadata::binding",
+      "to": "dim_app_server::storage::metadata",
+      "references": [
+        "path MetadataError",
+        "path ReadRequest",
+        "path SetTitleRequest",
+        "path Title",
+        "path envelope",
+        "path request",
+        "path super::SessionMetadata"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::metadata::binding",
+      "to": "dim_app_server::storage::timeline",
+      "references": [
+        "path SessionStore"
       ]
     },
     {
@@ -34385,6 +34488,13 @@
     },
     {
       "from": "dim_app_server::storage::timeline",
+      "to": "dim_app_server::storage::face",
+      "references": [
+        "path super::Store"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::timeline",
       "to": "dim_app_server::storage::files",
       "references": [
         "path files",
@@ -34420,9 +34530,15 @@
         "path Titles",
         "path Titles::new",
         "path metadata",
-        "path metadata::Dispatch",
         "use super::metadata",
         "use super::metadata::Titles"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::timeline",
+      "to": "dim_app_server::storage::metadata::binding",
+      "references": [
+        "path metadata::SessionMetadataService"
       ]
     },
     {
@@ -35423,13 +35539,19 @@
     },
     {
       "from": "dim_app_server::worktrees",
+      "to": "dim_app_server::storage::face",
+      "references": [
+        "path Store",
+        "use crate::storage::Store"
+      ]
+    },
+    {
+      "from": "dim_app_server::worktrees",
       "to": "dim_app_server::storage::timeline",
       "references": [
         "path PreparedWorktree",
-        "path SessionStore",
         "path WorktreeDirectoryRecord",
         "use crate::storage::PreparedWorktree",
-        "use crate::storage::SessionStore",
         "use crate::storage::WorktreeDirectoryRecord"
       ]
     },

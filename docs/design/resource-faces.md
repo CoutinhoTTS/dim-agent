@@ -777,6 +777,14 @@ new external client entry points. Session files, title metadata and worktree ass
 continue to use their existing `sessionFiles`, `sessionMetadata` and
 `worktreeAssociations` public contracts rather than additional aliases on `store`.
 
+The Rust `Store` binding exposes only these repository operations and directly returns
+the same owner's operation futures. Its typed key and dispatcher share one binding;
+`SessionStore` remains the native bootstrap/implementation owner, not the public `store`
+type. Title reads use the existing `sessionMetadata` binding. Native shared result types
+and filesystem paths retain their existing lossless Rust representation; only the wire
+boundary serializes paths as data. The existing asynchronous removal callback keeps its
+original path argument and ownership exclusion.
+
 
 - `associateWorktree {sessionId, repository, root, subtree}` writes the worktree directory record
   and the Session usage association as one commit and answers `{}` after it, so the reply is the

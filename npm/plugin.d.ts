@@ -602,3 +602,12 @@ export interface TimelineStore {
   saveSnapshot(request: { sessionId: string; branchId: string; snapshot: TimelineRecoverySnapshot }): Promise<{}>;
   latestSnapshot(request: { sessionId: string; branchId: string; through: number; interpreter: string }): Promise<{ snapshot: TimelineRecoverySnapshot | null }>;
 }
+
+/** The ToolRegistry owner's read-only source status view. */
+export interface ToolSourceRejection { version: string; reason: string }
+export interface ToolSourceStatus { adopted: string | null; rejected: ToolSourceRejection | null }
+export type ToolSourcesState = Record<string, ToolSourceStatus>
+export interface ToolSourcesView {
+  get(request: Record<string, never>): ToolSourcesState
+  observe(request: Record<string, never>, onState: (state: ToolSourcesState) => void | Promise<void>): Promise<void>
+}
