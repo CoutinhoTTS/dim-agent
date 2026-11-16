@@ -650,6 +650,9 @@ The Timeline methods take one request object. Keys are `{sessionId, branchId}`;
 count: the final complete atomic batch may exceed it. `readSegments {sessionId,segments:
 [{branchId,from,through}]}` returns `{segments}` in request order, using the existing shared read
 scope. Each stored record is `{event,trace,batchEnd}` using the canonical event and trace data.
+The Rust `TimelineStore::read(key, range)` convenience corresponds to one interval of
+`readSegments`, returning that segment directly. The native binding preserves backend overrides;
+it does not introduce a separate wire operation or replace an override with fallback probes.
 `batchEnd {sessionId,branchId,sequence}` validates the boundary and returns `{}`;
 `batchEndAt` returns `{sequence}` for the containing batch's end through the backend's existing
 operation, without repeated remote probes. `trace` takes the same position and returns `{trace}`.

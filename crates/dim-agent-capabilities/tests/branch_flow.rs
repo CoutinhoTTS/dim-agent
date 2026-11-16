@@ -7924,6 +7924,30 @@ async fn timeline_store_binding_preserves_memory_batch_publication_and_wire_read
         "the event target cannot split an atomic batch"
     );
     assert_eq!(reply["events"][1]["event"]["id"], batch[1].id);
+    let segments = wire
+        .invoke(
+            "readSegments",
+            json!([{"sessionId":"parity","segments":[
+                {"branchId":"main","from":1,"through":2},
+                {"branchId":"main","from":2,"through":2}
+            ]}])
+            .into(),
+        )
+        .unwrap()
+        .reference()
+        .unwrap()
+        .wait_async()
+        .await
+        .unwrap()
+        .json()
+        .unwrap();
+    assert_eq!(
+        segments["segments"],
+        json!([
+            native.read(&key, 1..=2).await.unwrap(),
+            native.read(&key, 2..=2).await.unwrap(),
+        ])
+    );
     let boundary = wire
         .invoke(
             "batchEndAt",
