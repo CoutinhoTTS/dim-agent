@@ -16,12 +16,16 @@ const part = definePlugin({
     let pending: Promise<PromptEntry | null> | undefined
     await ctx.use<SessionMethods>('sessionMethods').register(
       'session.promptfixture',
-      ['snapshot', 'load', 'start', 'cancel', 'state', 'result', 'duplicate', 'missing'].map(name => ({
+      ['snapshot', 'load', 'start', 'cancel', 'state', 'result', 'duplicate', 'missing', 'abandon'].map(name => ({
         name: `session.promptfixture.${name}`, mutating: false, interruption: 'report', progress: false,
       })),
       async call => {
         const action = call.method.slice('session.promptfixture.'.length)
-        if (action === 'snapshot') return { kind: 'value', value: { names: await registry.names(), initial: await initial.get() } }
+        if (action === 'snapshot') {
+          const names = registry.names()
+          if (!Array.isArray(names)) throw new Error('promptRegistry.names must return a plain array')
+          return { kind: 'value', value: { names, initial: await initial.get() } }
+        }
         if (action === 'cancel') { cancel(); return { kind: 'value', value: null } }
         if (action === 'state') return { kind: 'value', value: { finished } }
         if (action === 'result') {
@@ -42,6 +46,10 @@ const part = definePlugin({
           }
         }
         const target = call.params.target as PromptSourceTarget
+        if (action === 'abandon') {
+          void host.load(target, () => new Promise(() => {}))
+          return { kind: 'value', value: null }
+        }
         if (action === 'load') return { kind: 'value', value: await host.load(target, () => new Promise(() => {})) }
         if (action === 'start') {
           finished = false

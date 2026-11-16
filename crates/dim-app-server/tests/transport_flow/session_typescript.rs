@@ -3436,6 +3436,35 @@ async fn node_prompt_sources_share_the_owner_and_settle_accepted_loads_after_wit
             id: id.into(),
         },
     };
+    assert_ok(
+        &client
+            .rpc(
+                "session.promptfixture.abandon",
+                json!({"sessionId":first,"target":held("abandoned")}),
+            )
+            .await,
+    );
+    let (action, id, release) = tokio::time::timeout(Duration::from_secs(5), events.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!((action.as_str(), id.as_str()), ("load", "abandoned"));
+    assert_eq!(
+        client
+            .rpc("session.promptfixture.snapshot", json!({"sessionId":first}))
+            .await["result"]["names"],
+        json!(["dim/skills/instructions", "dim/skills/list", "fixture"])
+    );
+    assert!(
+        events.try_recv().is_err(),
+        "abandoning the Promise does not notify source cancellation"
+    );
+    release.unwrap().send(()).unwrap();
+    let (action, id, _) = tokio::time::timeout(Duration::from_secs(5), events.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!((action.as_str(), id.as_str()), ("settled", "abandoned"));
     for case in ["cancelled", "cancel-error"] {
         assert_ok(
             &client
