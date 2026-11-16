@@ -306,9 +306,10 @@ fault path, not a successful delegation result. No timeout, client absence or re
 
 ## 7. Impact and requirements raised to mechanism owners
 
-Public additions are two Collaboration tools, one Collaboration-owned read method and one
-display-only Session notice. Their consumers are the leader model and clients rendering its
-approval. The source input is interpreted only by Collaboration. Permission, Approval notifications, command rules and public
+Public additions are two Collaboration tools, the client-facing `session.collaboration.approval.get`
+read, the Session face `collaborationSession.approvalDestination` (§3.1), and one display-only
+Session notice. Their consumers are the leader model, clients rendering its approval, and
+foreign-language Session parts reading the approval destination. The source input is interpreted only by Collaboration. Permission, Approval notifications, command rules and public
 Session input shapes are unchanged. Implementation updates Collaboration's owning architecture
 page and generated assembly/catalog only if the actual dependencies change.
 
