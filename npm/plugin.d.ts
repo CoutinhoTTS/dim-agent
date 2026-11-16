@@ -503,3 +503,20 @@ export interface SessionFiles {
   owned_paths(request: { sessionId: string }): Promise<{ paths: string[] }>;
 }
 export interface StoredSessionFile { fileId: string; path: string; bytes: number }
+
+/** Process data face owned by the managed provider; credentials remain with the owner. */
+export interface ManagedSearch {
+  /** Rejects with unavailable or search_failed; abandoning the call cancels the request. */
+  search(request: { query: string; count: number }): Promise<{
+    results: { title: string; url: string; snippet: string; publishedAt?: string }[]
+  }>
+}
+
+/** The ToolRegistry owner's read-only source status view. */
+export interface ToolSourceRejection { version: string; reason: string }
+export interface ToolSourceStatus { adopted: string | null; rejected: ToolSourceRejection | null }
+export type ToolSourcesState = Record<string, ToolSourceStatus>
+export interface ToolSourcesView {
+  get(request: Record<string, never>): ToolSourcesState
+  observe(request: Record<string, never>, onState: (state: ToolSourcesState) => void | Promise<void>): Promise<void>
+}

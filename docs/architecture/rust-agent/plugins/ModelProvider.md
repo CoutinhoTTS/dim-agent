@@ -127,8 +127,8 @@ its `step/model-output-end` carries no `failure`, and the turn ends Failed. Only
 the attempt count and the wait budget are shared: the backoff curve and the one
 `malformed_response` retry are request-local and restart in the continuation.
 
-The 8 calls and 300 s are ModelProvider's documented public limits: a disposer
-reads them and declines a spent chain without reading ModelProvider's state.
+The shared invocation path enforces the failure-chain limits before invoking
+the model; no separate disposer is required.
 ModelProvider sets `failure.retryForbidden` when its failure policy forbids
 retrying the failure that ended the request; it is written only when true, and
 a continuation declines it.
