@@ -1302,6 +1302,27 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         None => Err(processes.timed_out(&root).await),
     };
     if let Err(error) = started {
+        tracing::error!(%error, "App Server startup failed before cleanup");
+        for plugin in root.diagnostics().plugins {
+            if plugin.state != rutis::host::FiberState::Active {
+                let unmet: Vec<_> = plugin
+                    .injects
+                    .iter()
+                    .filter(|dependency| {
+                        dependency.status != rutis::host::diagnostics::DependencyStatus::Ready
+                    })
+                    .map(|dependency| {
+                        format!("{} {:?}", dependency.key.describe(), dependency.status)
+                    })
+                    .collect();
+                tracing::error!(
+                    plugin = %plugin.name,
+                    state = ?plugin.state,
+                    ?unmet,
+                    "App Server inactive startup row"
+                );
+            }
+        }
         startup.armed = false;
         handle.shutdown().cancel();
         let cleanup = root.shutdown().await;
