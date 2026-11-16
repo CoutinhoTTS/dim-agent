@@ -10152,7 +10152,7 @@ fn tui_queue_shows_held_messages_and_steers_or_withdraws_them() {
 
 #[test]
 fn tui_ctrl_enter_interrupts_the_run_and_starts_a_new_one_with_the_draft() {
-    let home = Home::new();
+    let home = Home::queued();
     let (done, checked) = std::sync::mpsc::channel();
     let daemon = home.daemon(move |wire| {
         wire.hello(&[]);

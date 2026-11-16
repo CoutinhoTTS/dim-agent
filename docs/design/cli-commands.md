@@ -131,7 +131,23 @@ history, without a preview line limit or an omitted-prefix marker. Only the
 unfinished wrapping tail remains live. A streamed thought has a fixed `Thought`
 heading and appends its duration below the body on completion; it never prints
 the body again to replace the heading. Collapsed thinking remains a single-row
-summary. Fullscreen and the line side panel retain their existing previews.
+excerpt. It uses only visible provider reasoning in its original language,
+not a generated summary. New complete sentences or nonempty hard lines replace
+the excerpt; an unfinished suffix keeps the previous complete unit. Before any
+complete unit exists, show a marked, bounded prefix instead of a sliding tail.
+Content refreshes coalesce over 500ms; completion and phase changes are immediate.
+No visible reasoning adds no invented excerpt. Rendering uses terminal cells
+and whole graphemes, omitting the excerpt before squeezing out the status label.
+Selection is maintained incrementally from incoming text with bounded fragments,
+not by rescanning the full thinking text on animation frames. It adds no model
+request, RPC, Timeline fact or persisted setting. See the
+[thinking display design](tui-thinking-excerpts.md) for selection and cost bounds.
+
+Fullscreen and the line side panel retain their existing expanded previews.
+Their expanded and collapsed thought titles share the same gutter and label
+column; the body bar occupies that gutter, not an extra indentation layer.
+Fullscreen mouse gestures, including thought-body collapse and selection
+priority, follow the [CLI interaction contract](../../crates/dim-cli/README.md).
 
 ## Command menu
 
@@ -1675,7 +1691,7 @@ whole rule as one quoted argument, so global options stay unambiguous.
 | `/export` in either terminal UI | Choose Markdown or JSON in a dialog for an opened Session; save a uniquely named file in the CLI current directory. |
 | `dimcode export SESSION_ID [--output PATH] [--database PATH]` | Write the Session's whole Timeline as versioned JSONL without a daemon ([Timeline export](appserver/timeline-export.md)); write to stdout when no output path is supplied. |
 | `dimcode daemon vacuum [--database PATH]` | Rewrite an offline native store with SQLite `VACUUM` to reclaim the pages deleted Sessions left, and print its size before and after ([storage format](appserver/native-storage-format.md#sqlite-运行参数与空间回收)); it fails while a daemon owns the database and never creates or upgrades one. |
-| `dimcode --migrate-prompt-references --database PATH --session ID --branch NAME` | Write the saved-reference result the guard's explicit-migration message asks for, offline, and print what it wrote ([explicit legacy migration](prompt-state-read.md#显式旧引用迁移入口)); it must be the first argument, refuses a missing database, a store a daemon holds and a store not at the current format, never creates or upgrades one, and a repeated run writes nothing and reports `written: false`. |
+| `dimcode --migrate-prompt-references --database PATH --session ID --branch NAME` | Write the saved-reference result the guard's explicit-migration message asks for, offline, and print what it wrote ([explicit legacy migration](prompt-state-read.md#显式旧引用迁移入口)); it must be the first argument, refuses a missing database, a store a daemon holds and a store not at the current format, never creates or upgrades one, and a repeated run writes nothing and reports `Wrote 0`. |
 | `dimcode migration [run\|inspect] [--source OLD_HOME]` | Import by default, or inspect, a stopped legacy data home through the shared [Migration plugin](../../crates/dim-migration/README.md). |
 | `dimcode migration list\|show TASK\|cancel TASK` | Query durable results or request cancellation without a daemon. |
 | `dimcode migration retry TASK [--source OLD_HOME]` | Reconcile a previous task's source again; return a new task linked to the old report. |
