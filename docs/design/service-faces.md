@@ -34,15 +34,15 @@ During migration, an existing entry may carry `internal(reason)`:
 `xtask graph` and `check` classify the current catalog:
 
 - shared + dispatcher → `data`;
-- shared without dispatcher → failure, with the two upstream entries in §3.1 currently reported as
-  `shared-no-dispatcher`;
+- shared without dispatcher → failure;
 - dispatcher without shared → failure;
 - not shared + known migration reason → `internal(reason)`;
 - not shared without a reason → failure;
 - shared and internal at once → failure.
 
-The target check rejects every shared name without a dispatcher once the upstream migration in §3.1
-is complete. The target catalog has only `data` rows.
+A Rust type key is catalogued only when its registered name maps to that key, or its binding has
+a matching dispatcher. The catalog's shared-name fallback does not turn private implementation
+keys into public services. The target catalog has only `data` rows.
 
 ### 2.4 Leaf readiness
 
@@ -77,10 +77,10 @@ Rust 产品装配的现状以 [生成的 catalog](../architecture/rust-agent/gen
 | --- | --- |
 | `managementMethods` | 数据面，shared 名字与 dispatcher 一同注册。 |
 | `localId` | 数据面，由 root 提供 `get`。 |
-| `loaderService` | rutis-loader 的装配键，当前为 `shared-no-dispatcher`。插件管理已有 `rutis/loader` 数据面。 |
-| `pluginMounter` | rutis-loader 提供的装配键，当前为 `shared-no-dispatcher`。`rutis-bridge` 的 `PluginMounter::mount` 接收 `&Ctx` 并返回 `Box<dyn DynPlugin>`。 |
+| `rutis/loader` | 插件管理数据面；`LoaderService` 是提供方的私有 Rust 类型，不是另一个服务名。 |
+| `PluginMounter` 类型键 | rutis-loader 与 rutis-bridge 内部挂载插件定义的装配键，不是公共服务目录项。 |
 
-[#1292](https://github.com/arcships/dim/issues/1292) 跟踪两个装配键的迁移。由 rutis 上游确认各自的本地消费者和装配方式。插件管理复用 `rutis/loader`，其余确有独立公共需求的操作由上游先定义数据契约。两项登记按 §2.6 处理完后，移除临时检查放行。
+插件管理复用 `rutis/loader`。类型键是否属于公共目录由实际名称与 dispatcher 决定；不能仅凭类型名查询时的 shared 回退制造一个公共服务名。私有挂载机制遵循 §2.6，不新增面向插件的挂载操作。
 
 ### 3.2 第一批数据面（#1292）
 
@@ -392,7 +392,7 @@ modelSelectionHost.resolve({explicit?: ModelId, cwd?}) -> ModelSelection
 
 ## 5. 验证
 
-- `xtask check`：按 §2.3 验证当前 catalog，随 §3.1 的上游迁移收紧检查。
+- `xtask check`：按 §2.3 验证当前 catalog，拒绝缺少 dispatcher 的公共 shared 名称。
 - `xtask graph`：catalog 的 `face` 列与真实装配一致；`catalog.md` 的 diff 作为评审材料。
 - 每个服务：现有 flow 测试 + 一个 loopback session 的跨边界用例；不新增 mock-only 测试。
 - 数量：不改 `cargo test` 的总量要求；按受影响 crate 跑，最终 `cargo test --workspace --locked`。
@@ -404,4 +404,4 @@ modelSelectionHost.resolve({explicit?: ModelId, cwd?}) -> ModelSelection
 
 ## 7. 交付顺序
 
-[#1292](https://github.com/arcships/dim/issues/1292) 按 §3.2 的首批操作和各 owner 推进 §2.6 的迁移，包含 §3.1 的上游登记。各实现批次随代码更新生成的 catalog 及自己负责的操作契约。
+[#1292](https://github.com/arcships/dim/issues/1292) 按 §3.2 的首批操作和各 owner 推进 §2.6 的迁移，包含 §3.1 的公共名称与私有装配边界。各实现批次随代码更新生成的 catalog 及自己负责的操作契约。
