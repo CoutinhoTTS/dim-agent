@@ -919,6 +919,100 @@ test("a message recalled after a failed stop moves the image already in the draf
   assert.equal(field.value, "", "the whole draft is accepted once")
 })
 
+test("a message recalled after a failed stop goes ahead of an image at the start of the draft", async (t) => {
+  setActivePinia(createPinia())
+  const chat = useChatStore()
+  t.after(() => chat.$dispose())
+  const calls = []
+  const connection = { supports: () => false, client: { async call(method, params, read) { calls.push({ method, params }); return read({}) } } }
+  const picture = storedImage("stored-1")
+  const send = (value, attachments, mode) => chat.submit("session", "main", value, attachments, mode)
+  let stops = 0
+  const stop = async () => {
+    stops++
+    if (stops === 1) throw new Error("the run would not stop")
+  }
+  const held = reactive([heldInput("first", picture, "old words")])
+  const withdrawHeld = async (item) => {
+    held.splice(held.indexOf(item), 1)
+    return "deleted"
+  }
+  const { root } = soloComposer(t, { held, withdrawHeld, send, stop }, { connection })
+  await click(button(root, "composer.sendNowHint"))
+  await flush()
+  assert.deepEqual(calls, [], "a stop that fails sends nothing")
+
+  held.push(heldInput("second", "new words"))
+  await click(button(root, "composer.sendNowHint"))
+  await flush()
+  assert.equal(stops, 2, "the retry asks for the stop again")
+  assert.deepEqual(calls[0].params.user.content, [
+    { type: "text", text: "new words\n" }, picture,
+    { type: "text", text: "old words" },
+  ], "the image the draft starts with stays with its own words, behind the whole new message")
+})
+
+test("two image-only messages recalled in one gesture keep the queue order", async (t) => {
+  setActivePinia(createPinia())
+  const chat = useChatStore()
+  t.after(() => chat.$dispose())
+  const calls = []
+  const connection = { supports: () => false, client: { async call(method, params, read) { calls.push({ method, params }); return read({}) } } }
+  const send = (value, attachments, mode) => chat.submit("session", "main", value, attachments, mode)
+  const pictures = [storedImage("stored-first"), storedImage("stored-second")]
+  const held = [heldInput("first", pictures[0]), heldInput("second", pictures[1])]
+  const { root } = soloComposer(t, { held, send }, { connection })
+  await click(button(root, "composer.sendNowHint"))
+  await flush()
+  assert.deepEqual(calls[0].params.user.content, pictures, "two image-only messages keep the order they were held in")
+})
+
+test("an image-only message stays ahead of the message recalled after it", async (t) => {
+  setActivePinia(createPinia())
+  const chat = useChatStore()
+  t.after(() => chat.$dispose())
+  const calls = []
+  const connection = { supports: () => false, client: { async call(method, params, read) { calls.push({ method, params }); return read({}) } } }
+  const send = (value, attachments, mode) => chat.submit("session", "main", value, attachments, mode)
+  const picture = storedImage("stored-first")
+  const held = [heldInput("image", picture), heldInput("text", "more")]
+  const { root } = soloComposer(t, { held, send }, { connection })
+  await click(button(root, "composer.sendNowHint"))
+  await flush()
+  assert.deepEqual(calls[0].params.user.content, [picture, { type: "text", text: "more" }], "an image-only message stays ahead of the message recalled after it")
+})
+
+test("an image-only message recalled after a failed stop goes ahead of the image-only draft", async (t) => {
+  setActivePinia(createPinia())
+  const chat = useChatStore()
+  t.after(() => chat.$dispose())
+  const calls = []
+  const connection = { supports: () => false, client: { async call(method, params, read) { calls.push({ method, params }); return read({}) } } }
+  const old = storedImage("stored-old"), next = storedImage("stored-next")
+  const send = (value, attachments, mode) => chat.submit("session", "main", value, attachments, mode)
+  let stops = 0
+  const stop = async () => {
+    stops++
+    if (stops === 1) throw new Error("the run would not stop")
+  }
+  const held = reactive([heldInput("first", old)])
+  const withdrawHeld = async (item) => {
+    held.splice(held.indexOf(item), 1)
+    return "deleted"
+  }
+  const { root, field } = soloComposer(t, { held, withdrawHeld, send, stop }, { connection })
+  await click(button(root, "composer.sendNowHint"))
+  await flush()
+  assert.deepEqual(calls, [], "a stop that fails sends nothing")
+  assert.equal(field.value, "", "an image-only message leaves no text in the draft")
+
+  held.push(heldInput("second", next))
+  await click(button(root, "composer.sendNowHint"))
+  await flush()
+  assert.equal(stops, 2, "the retry asks for the stop again")
+  assert.deepEqual(calls[0].params.user.content, [next, old], "the new message goes ahead of the image-only draft")
+})
+
 test("a recalled image still splits the message when an inserted @ file is linked around it", async (t) => {
   setActivePinia(createPinia())
   const chat = useChatStore()

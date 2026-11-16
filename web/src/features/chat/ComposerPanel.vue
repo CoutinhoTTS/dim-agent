@@ -114,8 +114,16 @@ const MAX_PASTE = 10 * 1024 * 1024
 const MAX_IMAGES = 20
 const images = ref<Array<{ id: number; url: string; file: File }>>([])
 const pastes = ref<Array<{ id: number; text: string }>>([])
+/**
+ * A recalled image: the protocol's anchor, plus the send-now gesture that recalled
+ * it. The gesture decides two things text offsets cannot: whether the image moves
+ * past text inserted at its own offset, and which of several images at one offset
+ * comes first.
+ */
+type RecalledImage = RestoredImage & { batch: number }
+
 /** The stored images a recalled message carried, each with the draft offset it keeps its place at. */
-const restored = ref<RestoredImage[]>([])
+const restored = ref<RecalledImage[]>([])
 let attachmentSeq = 0
 const composerSettings = useComposerStore()
 /**
@@ -294,6 +302,12 @@ function removeRestored(index: number): void {
 let anchored = ""
 /** True while a recall writes the draft itself, so its own insertions are not read as edits. */
 let recalling = false
+/**
+ * The send-now gesture the composer is recalling for. Its images stand ahead of
+ * the draft's older ones at the same offset, in the queue order they were
+ * recalled in.
+ */
+let recallBatch = 0
 
 /**
  * An edit around a recalled image moves it with the text it stood between, as a
@@ -372,7 +386,9 @@ function acceptCandidate(candidate: FileCandidate): void {
  *
  * The message goes in as one insertion, so an image already in the draft moves
  * with the words it stood between instead of staying at an offset the inserted
- * text pushed it past.
+ * text pushed it past. An image of an earlier gesture that stood exactly where
+ * the message goes in moves past the whole message: its words followed the
+ * message's, even when the message is images alone and inserts no text.
  */
 function recall(item: QueuedInput, at: number): number {
   if (recalled.value.has(item.id)) return at
@@ -385,7 +401,7 @@ function recall(item: QueuedInput, at: number): number {
     const position = Math.min(at, draft.length)
     const followed = position < draft.length
     let inserted = ""
-    const placements: RestoredImage[] = []
+    const placements: RecalledImage[] = []
     let opened = false
     let previousText = false
     for (const block of blocks) {
@@ -397,14 +413,16 @@ function recall(item: QueuedInput, at: number): number {
       }
       if (block.type === "image") {
         previousText = false
-        placements.push({ at: position + inserted.length, image: block })
+        placements.push({ at: position + inserted.length, image: block, batch: recallBatch })
         continue
       }
       inserted += block.text
       previousText = true
     }
     if (followed) inserted += "\n"
-    for (const block of restored.value) if (block.at > position) block.at += inserted.length
+    for (const block of restored.value) {
+      if (block.at > position || (block.at === position && block.batch !== recallBatch)) block.at += inserted.length
+    }
     text.value = draft.slice(0, position) + inserted + draft.slice(position)
     restored.value = [...restored.value, ...placements]
     return position + inserted.length
@@ -476,11 +494,12 @@ async function submit(sendMode: SubmitMode = primaryMode.value): Promise<void> {
       const sentRestored = restored.value
       // A recalled image keeps the place it held in the draft: each gap around
       // one is linked on its own, so a link never straddles it and every offset
-      // still lands between the words it held between.
+      // still lands between the words it held between. At one offset the later
+      // gesture's images come first, in the queue order they were recalled in.
       const gaps: Array<{ at: number; image: typeof sentRestored[number]["image"] }> = []
       let body = ""
       let cursor = 0
-      for (const { at, image } of [...sentRestored].sort((left, right) => left.at - right.at)) {
+      for (const { at, image } of [...sentRestored].sort((left, right) => left.at - right.at || right.batch - left.batch)) {
         const offset = Math.max(cursor, Math.min(at, message.length))
         body += linkMentions(message.slice(cursor, offset), sentMentions)
         gaps.push({ at: body.length, image })
@@ -530,6 +549,7 @@ async function sendNowAndStop(): Promise<void> {
   sendNow.value = true
   error.value = ""
   destination.value = undefined
+  recallBatch++
   let at = 0
   for (const item of held.value) {
     if (props.withdrawHeld === undefined) break
