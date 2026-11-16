@@ -32,7 +32,11 @@ pub(super) struct Converted {
     pub(super) indexed: usize,
 }
 
-pub(super) fn upgrade(connection: &Connection, database: &Path) -> Result<Converted> {
+pub(super) fn upgrade(
+    connection: &Connection,
+    database: &Path,
+    progress: Option<&super::sqlite::UpgradeProgress>,
+) -> Result<Converted> {
     let mut directory = database.as_os_str().to_os_string();
     directory.push(".session-files");
     let mut importer = Importer {
@@ -141,6 +145,9 @@ pub(super) fn upgrade(connection: &Connection, database: &Path) -> Result<Conver
     {
         super::text::backfill(connection)?;
         return Ok(Converted::default());
+    }
+    if let Some(progress) = progress {
+        progress.enter(super::sqlite::UpgradeStage::Index);
     }
     let mut indexed = 0;
     for ((session, branch, sequence), _) in &changed.rows {
