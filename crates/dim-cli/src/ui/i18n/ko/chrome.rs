@@ -481,7 +481,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Conversation model" => "대화 모델",
         "Selected: {model}" => "선택됨: {model}",
         "Model management" => "모델 관리",
-        "Manage models" => "모델 관리",
+        "Manage models" => "모델 관리하기",
         "1 provider" => "프로바이더 1개",
         "{count} providers" => "프로바이더 {count}개",
         "ready" => "준비됨",

@@ -3631,7 +3631,14 @@ impl Worker {
             let unavailable = catalog
                 .models
                 .iter()
-                .filter(|model| model.unavailable_reason.is_some())
+                .filter(|model| {
+                    model.unavailable_reason.is_some()
+                        && !crate::limits_undeclared(
+                            &model.missing_limits,
+                            model.unavailable_reason.as_deref(),
+                            catalog.disabled_model_ids.contains(&model.id),
+                        )
+                })
                 .count();
             let disabled = catalog
                 .models
@@ -3708,7 +3715,7 @@ impl Worker {
                     candidates,
                 });
             }
-            if models.len() == before && undeclared == 0 {
+            if models.len() == before && (undeclared == 0 || unavailable + disabled > 0) {
                 let reason = if total == 0 {
                     EmptyReason::NoModels { listable }
                 } else if unavailable > 0 && disabled > 0 {

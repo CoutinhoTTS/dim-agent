@@ -25,7 +25,7 @@
 //!   Existing members keep their models.
 //!
 //! Manage models
-//! › Test              10 models
+//! › Test              ready
 //!   Relay             3 with missing limits
 //!   Manual            no models
 //! Test: 3 models need a window · dimcode models test --set-missing-limits
@@ -249,7 +249,7 @@ impl ModelsPanel {
             .map(str::to_owned)
             .or_else(|| selected.clone())
             .or_else(|| marked.clone());
-        let effort = matches!(self.view, View::Models | View::Fixed);
+        let effort = self.view == View::Models;
         let items = match self.view {
             View::Policy => Some(Ok(self.policy_rows(mode))),
             View::Models | View::Fixed => self.listed.as_ref().map(|listed| {
