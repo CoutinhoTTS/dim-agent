@@ -506,8 +506,8 @@ auxiliary binding use the owner contracts in §0. The optional service contract 
 | Generation task | Spawned under `ctx.effect` |
 
 ```rust
-// SessionStore metadata (S5b; named service `sessionMetadata`)
-async fn metadata(&self, session_id: &str) -> Result<SessionMetadata, MetadataError>;
+// SessionMetadataService (S5b; named service `sessionMetadata`)
+async fn read(&self, session_id: &str) -> Result<SessionMetadata, MetadataError>;
 fn set_title(&self, session_id: &str, expected_revision: u64, title: Option<Title>)
     -> impl Future<Output = Result<u64, MetadataError>>; // Conflict | NotFound | Storage; the call is the handover
 pub struct SessionMetadata { pub revision: u64, pub title: Option<Title> }
