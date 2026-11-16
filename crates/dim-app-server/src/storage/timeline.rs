@@ -1237,9 +1237,10 @@ impl SessionStore {
     /// first commit leaves every row. The
     /// output removal's last-owner guard is scoped to this database: a
     /// directory another database's Session uses belongs to that database.
-    /// `id` is one path component, as Agents checked (D3). Returns whether
+    /// Rejects an `id` that is not one path component (D3). Returns whether
     /// this database had rows of the id.
     pub async fn delete_session(&self, id: &str) -> Result<bool> {
+        crate::protocol::check_session_id(id)?;
         let _ownership = self.ownership.lock().await;
         let stored = self.has_records(id).await?;
         if stored {
@@ -1284,6 +1285,8 @@ impl SessionStore {
         at: u64,
         config: &str,
     ) -> Result<()> {
+        crate::protocol::check_session_id(source)?;
+        crate::protocol::check_session_id(fork)?;
         let _ownership = self.ownership.lock().await;
         self.timeline.fork_session(source, fork, at, config).await
     }
@@ -1303,6 +1306,7 @@ impl SessionStore {
         origin: SessionOrigin,
         worktree: Option<PreparedWorktree>,
     ) -> Result<()> {
+        crate::protocol::check_session_id(session_id)?;
         let session = session_id.to_owned();
         let config = config.clone();
         let agent = agent_id.to_owned();

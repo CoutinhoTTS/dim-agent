@@ -12,7 +12,7 @@ export default definePlugin({
     let release: (() => void) | undefined
     await ctx.use<ManagementMethods>('managementMethods').register(
       'storefixture',
-      ['status', 'create', 'cycle', 'remove', 'refuse', 'release'].map(name => ({ name: `storefixture.${name}`, mutating: true, interruption: 'report', progress: false })),
+      ['status', 'create', 'cycle', 'remove', 'refuse', 'release', 'invalid_id'].map(name => ({ name: `storefixture.${name}`, mutating: true, interruption: 'report', progress: false })),
       async (call: { method: string; params: any }): Promise<MethodReply> => {
         const params = call.params
         if (call.method === 'storefixture.status') return { kind: 'value', value: {} }
@@ -20,6 +20,23 @@ export default definePlugin({
           if (!params.create) throw new Error('missing creation request')
           const result = await store.createOwnedSession(params.create)
           return { kind: 'value', value: result }
+        }
+        if (call.method === 'storefixture.invalid_id') {
+          const errors: { code: string; message: string }[] = []
+          for (const operation of [
+            () => store.createOwnedSession(params.create),
+            () => store.fork({ sourceSessionId: 'wire-source', sessionId: params.create.sessionId, at: 0, configText: '{}' }),
+            () => store.delete({ sessionId: params.create.sessionId }),
+          ]) {
+            await assert.rejects(operation, (error: unknown) => {
+              assert.ok(error instanceof Error && 'code' in error)
+              assert.equal(error.code, 'invalid')
+              assert.ok(typeof error.code === 'string')
+              errors.push({ code: error.code, message: error.message })
+              return true
+            })
+          }
+          return { kind: 'value', value: { errors } }
         }
         if (call.method === 'storefixture.release') { release?.(); return { kind: 'value', value: {} } }
         if (call.method === 'storefixture.refuse') {
@@ -35,6 +52,7 @@ export default definePlugin({
         }
         if (call.method === 'storefixture.remove') {
           const removed = await store.removeWorktree(params.directory, async path => {
+            assert.deepEqual(await store.worktreeUsages(params.directory), { usages: [] })
             const gate = new Promise<void>(resolve => { release = resolve })
             await writeFile(params.ready, path)
             await gate
@@ -46,6 +64,21 @@ export default definePlugin({
         await store.addGrant({ sessionId, path: grant, kind: 'dir', mode: 'write' })
         await store.addGrant({ sessionId, path: grant, kind: 'dir', mode: 'read' })
         const grants = await store.grants({ sessionId })
+        await store.setSessionLanguage({ sessionId, language: null })
+        const cleared = await store.sessionConfig({ sessionId })
+        assert.ok(cleared.config)
+        assert.equal(cleared.config.language, undefined)
+        const directories = await store.worktreeDirectories({})
+        assert.equal(directories.directories.length, 1)
+        const directory = directories.directories[0]
+        assert.deepEqual(await store.sessionsUnderWorkspace({ root: directory.root }), { sessionIds: [sessionId] })
+        assert.deepEqual(await store.worktreeUsages({ repository: directory.repository, root: directory.root }), {
+          usages: [{ sessionId, subtree: directory.root }],
+        })
+        await assert.rejects(() => store.removeWorktreeDirectory({ repository: directory.repository, root: directory.root }),
+          (error: unknown) => error instanceof Error && 'code' in error && error.code === 'invalid')
+        assert.deepEqual(await store.removeWorktreeDirectory({ repository: directory.repository, root: `${directory.root}/absent` }), { removed: false })
+        await assert.rejects(() => Reflect.apply(store.worktreeDirectories, store, [{ unexpected: true }]))
         await store.setSessionLanguage({ sessionId, language: 'zh-CN' })
         const config = await store.sessionConfigText({ sessionId })
         if (config.configText === null) throw new Error('missing source')
