@@ -4,6 +4,7 @@ This index is navigation. Delivery status lives in issues, not here.
 
 - [Timeline 关联部件逐项分析](design/examples/timeline-capability-analysis.md)（中文）：22 个候选部件、55 个事件的状态、恢复、交接与模型边界
 - [Timeline 承诺的有限模型检查](design/examples/capability-models/README.md)（中文）：逐项承诺、TLA+ 模型、恢复反例与可复现的 TLC 运行记录
+- [Timeline 跨模块交接验证](design/examples/timeline-handoff-verification.md)（中文）：SQLite 恢复、输入交接、插件换代与查询成本的流程证据及边界
 - [审批交接分析](design/examples/approval-handoff-analysis.md)（中文）：Permission、Approval 与 ToolExecutor 的准入边界和有限模型
 - [已知 Capability 与 Timeline 事件表](architecture/rust-agent/capability-event-inventory.md)（中文）：候选部件与事件导航，含作用域、职责、事件 key 和已知读写路径
 - [CLI feature list](feature-list.md)
@@ -78,6 +79,7 @@ This index is navigation. Delivery status lives in issues, not here.
 - [客户端 UI 扩展](design/client-ui-extensions.md)：框架无关的面板挂载、公开服务、内容生命周期与展示资源（#1136）
 - [Native CLI contract](../crates/dim-cli/README.md)
 - [CLI commands, conversation export and JSONL execution](design/cli-commands.md)（[中文](zh/design/cli-commands.md)）
+- [TUI 思考摘录与正文收起](design/tui-thinking-excerpts.md)（中文，#1658）：有界原文摘取、刷新合并、正文单击与文本选择边界
 - [CLI attachment input and paste handling](design/cli-attachment-input.md)
 - [Session and error reports](design/plugins/Report.md) ([#1319](https://github.com/arcships/dim/issues/1319))
 - [Read-only member conversations in the CLI](design/member-conversation.md) (#300, #333, #324, #263)
