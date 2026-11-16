@@ -1,3 +1,4 @@
+use super::reclaim::Reclaimed;
 use dim_agent_runtime::{AgentError, Result, panic_message};
 use rusqlite::{Connection, OpenFlags};
 use rutis::host::ErrorKind;
@@ -1775,10 +1776,13 @@ fn outcome<T>(connection: &Connection, result: std::thread::Result<Result<T>>) -
     }
 }
 
-/// What `vacuum_store` reclaimed, as bytes on disk before and after.
+/// What `vacuum_store` reclaimed, as bytes on disk before and after, and the
+/// obsolete content rows it removed before rewriting.
+#[derive(Debug)]
 pub struct Vacuumed {
     pub before: u64,
     pub after: u64,
+    pub reclaimed: Reclaimed,
 }
 
 /// What `storage.report` answers (`native-storage-format.md`): the store's own
@@ -1811,10 +1815,15 @@ pub(super) fn is_current_format(connection: &Connection) -> Result<bool> {
 }
 
 /// Reclaims free pages in an existing store by rewriting it with `VACUUM`
-/// (#600). It takes the same lease as `open`, so a running daemon makes it
-/// fail, and it requires the current format's exact schema: it never creates
-/// a store, upgrades one or touches an unsupported format. `VACUUM` rewrites
-/// the whole database, so it needs free space about the store's size.
+/// (#600), after removing the content rows no reference reaches (#1697). Those
+/// rows are what an already-upgraded store still holds: the v50 conversion
+/// removes them in its own transaction from now on, but a store that committed
+/// it earlier keeps the base64 payload of every image it externalized, and only
+/// `VACUUM` returns the pages the removal frees. It takes the same lease as
+/// `open`, so a running daemon makes it fail, and it requires the current
+/// format's exact schema: it never creates a store, upgrades one or touches an
+/// unsupported format. `VACUUM` rewrites the whole database, so it needs free
+/// space about the store's size.
 pub fn vacuum_store(path: PathBuf) -> Result<Vacuumed> {
     if !path.is_file() {
         return Err(storage(format!(
@@ -1840,7 +1849,7 @@ pub fn vacuum_store(path: PathBuf) -> Result<Vacuumed> {
         std::fs::TryLockError::Error(error) => storage(error),
     })?;
     let _lease = DatabaseLease(admission);
-    let connection = Connection::open(&path).map_err(storage)?;
+    let mut connection = Connection::open(&path).map_err(storage)?;
     connection
         .busy_timeout(Duration::from_secs(5))
         .map_err(storage)?;
@@ -1859,6 +1868,7 @@ pub fn vacuum_store(path: PathBuf) -> Result<Vacuumed> {
     connection
         .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
         .map_err(storage)?;
+    let reclaimed = super::reclaim::obsolete_content(&mut connection)?;
     connection.execute_batch("VACUUM").map_err(storage)?;
     connection
         .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
@@ -1869,6 +1879,7 @@ pub fn vacuum_store(path: PathBuf) -> Result<Vacuumed> {
     Ok(Vacuumed {
         before,
         after: store_bytes(&path),
+        reclaimed,
     })
 }
 

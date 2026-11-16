@@ -52,6 +52,9 @@ mod image_migration;
 #[path = "storage_flow/prompt_migration.rs"]
 mod prompt_migration;
 
+#[path = "storage_flow/reclaim.rs"]
+mod reclaim;
+
 const INTERPRETER: &str = "dim/context-projection/v4";
 fn snapshot(sequence: u64, checkpoint: &ProjectionCheckpoint) -> RecoverySnapshot {
     let mut snapshot = RecoverySnapshot {

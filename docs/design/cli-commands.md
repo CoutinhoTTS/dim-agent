@@ -161,7 +161,7 @@ order, not alphabetically or by recent use. The menu draws no category column:
 /tasks /rename /web /connect /login
 /skills /reload-skills /mcp /plugins /runtime
 /hooks /scheduled /workflow /workflow:save
-/tools /tui /theme /language /keys /report /exit
+/tools /tui /theme /language /keys /update /report /exit
 ```
 
 `/fast` is listed only when the model advertises service tiers.
@@ -1690,7 +1690,7 @@ whole rule as one quoted argument, so global options stay unambiguous.
 | `/export markdown PATH` or `/export json PATH` | Export the current main branch to a file while the interactive client is idle. |
 | `/export` in either terminal UI | Choose Markdown or JSON in a dialog for an opened Session; save a uniquely named file in the CLI current directory. |
 | `dimcode export SESSION_ID [--output PATH] [--database PATH]` | Write the Session's whole Timeline as versioned JSONL without a daemon ([Timeline export](appserver/timeline-export.md)); write to stdout when no output path is supplied. |
-| `dimcode daemon vacuum [--database PATH]` | Rewrite an offline native store with SQLite `VACUUM` to reclaim the pages deleted Sessions left, and print its size before and after ([storage format](appserver/native-storage-format.md#sqlite-运行参数与空间回收)); it fails while a daemon owns the database and never creates or upgrades one. |
+| `dimcode daemon vacuum [--database PATH]` | Remove the content rows no stored reference reaches from an offline native store (`node`/`message` only, one transaction per Session), then rewrite it with SQLite `VACUUM` to reclaim the pages they and deleted Sessions left; print the size before and after with the removed rows and their content bytes, and remove nothing when a Session names content the store does not hold ([storage format](appserver/native-storage-format.md#sqlite-运行参数与空间回收)). It fails while a daemon owns the database and never creates or upgrades one. |
 | `dimcode --migrate-prompt-references --database PATH --session ID --branch NAME` | Write the saved-reference result the guard's explicit-migration message asks for, offline, and print what it wrote ([explicit legacy migration](prompt-state-read.md#显式旧引用迁移入口)); it must be the first argument, refuses a missing database, a store a daemon holds and a store not at the current format, never creates or upgrades one, and a repeated run writes nothing and reports `Wrote 0`. |
 | `dimcode migration [run\|inspect] [--source OLD_HOME]` | Import by default, or inspect, a stopped legacy data home through the shared [Migration plugin](../../crates/dim-migration/README.md). |
 | `dimcode migration list\|show TASK\|cancel TASK` | Query durable results or request cancellation without a daemon. |
@@ -2547,6 +2547,19 @@ when it fits.
 | > Close 2/2              |
 | Left/Right Tab Enter Esc |
 +----------- Up/Down 1-2/7-+
+```
+
+`/update` is that command as a client-side report in both terminal UI modes. It
+runs nothing: the update command holds the installation's exclusive lease, and
+the interface itself is a client whose share of that lease it cannot release
+while it serves the operator. So `/update` names the command the dialog would
+name, for a recognised installation, or the [manual and rebuild
+instructions](#update-dialog) for any other layout, and it never consults the
+channel: the automatic startup check keeps owning the dialog and its skip list.
+
+```text
+> /update
+To update, exit every client and stop the server, then run dima update
 ```
 
 ### Coordinated client/server upgrade

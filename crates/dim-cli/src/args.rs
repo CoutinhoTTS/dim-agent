@@ -195,7 +195,8 @@ Commands:
                                   and apply it
 
   daemon stop                     Gracefully stop an existing daemon
-  daemon vacuum [--database PATH] Rewrite an offline database to reclaim
+  daemon vacuum [--database PATH] Remove content nothing references, then
+                                  rewrite an offline database to reclaim
                                   space; --database defaults to the home's
                                   rust/dimcode.sqlite
   migration [run|inspect] [--source OLD_HOME]
@@ -414,7 +415,8 @@ pub enum Action {
         output: Option<PathBuf>,
         database: Option<PathBuf>,
     },
-    /// `daemon vacuum`: rewrite an offline database to reclaim space (#600).
+    /// `daemon vacuum`: remove unreachable content rows, then rewrite an
+    /// offline database to reclaim space (#600, #1697).
     DaemonVacuum {
         database: Option<PathBuf>,
     },
