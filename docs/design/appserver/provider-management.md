@@ -1089,8 +1089,8 @@ routes, query parameters, redirects, download streaming and realtime cleanup; fi
 agrees with [#1564](https://github.com/arcships/dim/issues/1564) and its active changes rather than
 adding a second upload implementation.
 
-**Consumer consequence.** Modality's adapters are process services, so a foreign-language adapter
-serves no media operation until such an operation exists. Modality states that in its own document;
+**Consumer consequence.** Provider exposes no media-execution operation, so a foreign-language
+adapter serves no media operation. Modality states that in its own document;
 this page defines nothing about how an adapter declares or runs its work.
 
 ## 4. Client integration

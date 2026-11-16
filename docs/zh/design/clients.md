@@ -95,7 +95,7 @@ CLI 要求协议 v4，以及 `session.create` 和 `session.history` 两项功能
 | `/queue` 面板与删除排队消息 | 无 | — | 服务端契约已实现（S1） |
 | 取回排队消息重新编辑 | 已实现；带附件的消息会丢失附件（§4 第 3 条） | — | |
 | 多行、粘贴、大段粘贴、图片、混合附件、`@` 文件、`!` / `!!` | 已实现 | 附件：后续阶段 | [CLI 附件输入](../../design/cli-attachment-input.md)、[ShellInput](plugins/ShellInput.md) |
-| Skill 引用：`/` 选单列出 Skill，`$skill: <name>` 让它在随消息提交时加载 | 已实现 | 无 | [Skills](../../design/plugins/Skills.md#9-references-load-with-the-operators-input) |
+| Skill 引用：`/` 选单列出 Skill，`/skill:<name>` token 让它在随消息提交时加载 | 已实现 | 无 | [Skills](../../design/plugins/Skills.md#9-references-load-with-the-operators-input) |
 | 剪贴板文本、图片、文件；选区复制；OSC 52 | 已实现 | 浏览器自带 | |
 | 通过消息操作复制消息 | 无 | — | |
 | 打开链接、工具分组、`/tools` | 已实现 | 已实现（渲染） | |

@@ -2373,11 +2373,13 @@ impl App {
                     entries
                         .into_iter()
                         .filter(|entry| {
-                            // A name with whitespace cannot be referenced
-                            // (Skills §9), so it is not offered.
+                            // A Skill the operator may not invoke is not
+                            // offered, and neither is a name the
+                            // `/skill:<name>` token cannot carry (Skills §9).
                             entry.enabled
                                 && entry.shadowed_by.is_none()
-                                && !entry.name.chars().any(char::is_whitespace)
+                                && entry.user_invocable
+                                && dim_agent_types::skill_token::names_a_token(&entry.name)
                         })
                         .map(|entry| crate::ui::composer::palette::Skill {
                             name: entry.name,
@@ -13413,8 +13415,9 @@ mod tests {
         }
     }
 
-    /// The palette lists the Session's enabled, unshadowed Skills, and a row
-    /// completes its marker without sending.
+    /// The palette lists the Session's enabled, unshadowed, user-invocable
+    /// Skills whose names the token can carry, and a row completes the token
+    /// without sending.
     #[test]
     fn the_palette_lists_enabled_unshadowed_skills() {
         use crate::management::skills::Entry;
@@ -13428,19 +13431,25 @@ mod tests {
             file_path: format!("/home/.agents/skills/{name}/SKILL.md"),
             enabled,
             shadowed_by: shadowed_by.map(str::to_owned),
+            user_invocable: true,
         };
         app.apply(Update::Skills(vec![
             entry("commit", true, None),
             entry("deploy", false, None),
             entry("shadowed", true, Some("user:shadowed")),
             entry("two words", true, None),
+            entry("trailing.", true, None),
+            Entry {
+                user_invocable: false,
+                ..entry("model-only", true, None)
+            },
         ]));
         typed(&mut app, "/comm");
         assert!(matches!(app.handle(key(KeyCode::Enter)), Outcome::Continue));
-        assert_eq!(app.composer.text(), "$skill: commit ");
+        assert_eq!(app.composer.text(), "/skill:commit ");
         assert!(
             sent.borrow().is_empty(),
-            "the marker is a draft, not a message"
+            "the token is a draft, not a message"
         );
         app.composer.clear();
         typed(&mut app, "/dep");
@@ -13464,7 +13473,75 @@ mod tests {
         assert_eq!(
             app.composer.text(),
             "/two",
-            "a name with whitespace cannot be referenced and is not offered"
+            "a name the token cannot carry is not offered"
+        );
+        app.composer.clear();
+        typed(&mut app, "/trailing.");
+        assert!(
+            app.composer.palette_rows().is_empty(),
+            "a name ending with a full stop is not offered"
+        );
+        app.composer.clear();
+        typed(&mut app, "/skill:model");
+        assert!(
+            app.composer.palette_rows().is_empty(),
+            "a Skill the operator may not invoke is not offered"
+        );
+    }
+
+    /// `/skill:` narrows the palette to Skills, and Enter sends the draft as a
+    /// message rather than running a command.
+    #[test]
+    fn a_skill_token_narrows_the_palette_and_sends_as_a_message() {
+        use crate::management::skills::Entry;
+        let key = |code| InputEvent::Key(crate::ui::terminal::KeyEvent::new(code, Modifiers::NONE));
+        let (mut app, sent, _home) = session_with_queue(false, &[]);
+        let entry = |name: &str| Entry {
+            id: format!("user:{name}"),
+            source: Some("user".into()),
+            name: name.into(),
+            description: format!("About {name}"),
+            file_path: format!("/home/.agents/skills/{name}/SKILL.md"),
+            enabled: true,
+            shadowed_by: None,
+            user_invocable: true,
+        };
+        app.apply(Update::Skills(vec![entry("commit"), entry("deploy")]));
+
+        typed(&mut app, "/skill:");
+        let rows: Vec<_> = app
+            .composer
+            .palette_rows()
+            .into_iter()
+            .map(|row| row.label)
+            .collect();
+        assert_eq!(
+            rows,
+            ["/skill:commit", "/skill:deploy"],
+            "the namespace leaves the commands out"
+        );
+
+        typed(&mut app, "de");
+        let rows: Vec<_> = app
+            .composer
+            .palette_rows()
+            .into_iter()
+            .map(|row| row.label)
+            .collect();
+        assert_eq!(rows, ["/skill:deploy"], "the name narrows it");
+
+        app.composer.clear();
+        for ch in "/skill:commit fix the parser".chars() {
+            app.handle(key(KeyCode::Char(ch)));
+        }
+        assert!(matches!(app.handle(key(KeyCode::Enter)), Outcome::Continue));
+        assert_eq!(app.composer.text(), "");
+        assert!(
+            matches!(
+                sent.borrow().as_slice(),
+                [Command::Submit(text, _)] if text == "/skill:commit fix the parser"
+            ),
+            "the draft is a message, never a command"
         );
     }
 

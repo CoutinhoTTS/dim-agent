@@ -2,7 +2,7 @@
 //! native store (session-files design §16).
 use dim_agent_capabilities::{
     file_storage::FileStoragePlugin,
-    host::{SessionFileErrorCode, SessionFilesHost, StoredSessionFile},
+    host::{SessionFileErrorCode, SessionFiles, StoredSessionFile},
 };
 use dim_agent_runtime::SessionConfig;
 use dim_agent_runtime::testing::chain_events;
@@ -66,9 +66,9 @@ impl Drop for Home {
 }
 
 /// A process-scope consumer, as Attachments' enclosing-scope dependency is.
-struct Consumer(Arc<OnceLock<(Arc<SessionFilesHost>, Arc<SessionStore>)>>);
+struct Consumer(Arc<OnceLock<(Arc<SessionFiles>, Arc<SessionStore>)>>);
 impl Plugin for Consumer {
-    type Deps = (Arc<SessionFilesHost>, Arc<SessionStore>);
+    type Deps = (Arc<SessionFiles>, Arc<SessionStore>);
     fn name(&self) -> &str {
         "test.session-files-consumer"
     }
@@ -81,7 +81,7 @@ impl Plugin for Consumer {
 struct Store {
     root: Ctx,
     consumer: rutis::host::FiberView,
-    files: Arc<SessionFilesHost>,
+    files: Arc<SessionFiles>,
     sessions: Arc<SessionStore>,
 }
 impl Store {

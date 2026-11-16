@@ -14,7 +14,7 @@ use dim_agent_capabilities::{
     file_storage::FileStoragePlugin,
     hooks::{HookSourcesHost, NoHookSources},
     host::{
-        SessionFileError, SessionFileErrorCode, SessionFilesHost, SessionFilesService,
+        SessionFileError, SessionFileErrorCode, SessionFiles, SessionFilesService,
         StoredSessionFile,
     },
     host_platform::{HostPlatform, ShellStatus},
@@ -221,7 +221,7 @@ pub async fn local_graph() -> Result<BTreeMap<&'static str, Value>> {
         root.provide_as::<SkillSettingsHost>(Arc::new(SkillSettingsHost(Arc::new(
             MemorySkillSettings::default(),
         ))))?;
-        root.provide_as::<SessionFilesHost>(Arc::new(SessionFilesHost(Arc::new(GraphFiles))))?;
+        root.provide_as::<SessionFiles>(Arc::new(SessionFiles(Arc::new(GraphFiles))))?;
         root.provide_as::<ExecutionSettingsHost>(Arc::new(ExecutionSettingsHost::fixed(
             Default::default(),
         )))?;

@@ -245,7 +245,7 @@
         ]
       },
       {
-        "id": 79,
+        "id": 76,
         "parent": 72,
         "name": "eventhub-ready",
         "state": "Active",
@@ -3202,14 +3202,14 @@
         "generation": 1,
         "injects": [
           {
-            "service": "dim_agent_capabilities::host::SessionFilesHost",
+            "service": "dim_agent_capabilities::host::SessionFiles",
             "scope": null,
             "status": "Ready"
           }
         ],
         "resolved": [
           {
-            "service": "dim_agent_capabilities::host::SessionFilesHost",
+            "service": "dim_agent_capabilities::host::SessionFiles",
             "scope": null,
             "provider": 8,
             "generation": 1
@@ -3217,7 +3217,7 @@
         ],
         "reads": [
           {
-            "service": "dim_agent_capabilities::host::SessionFilesHost",
+            "service": "dim_agent_capabilities::host::SessionFiles",
             "provider": 8,
             "declared": true,
             "external": true
@@ -3271,7 +3271,7 @@
         "removing": false
       },
       {
-        "service": "dim_agent_capabilities::host::AuxiliaryModelHost",
+        "service": "dim_agent_capabilities::host::AuxiliaryModel",
         "provider": 18,
         "generation": 1,
         "removing": false
@@ -3313,7 +3313,7 @@
         "removing": false
       },
       {
-        "service": "dim_agent_capabilities::host::SessionFilesHost",
+        "service": "dim_agent_capabilities::host::SessionFiles",
         "provider": 8,
         "generation": 1,
         "removing": false

@@ -1234,3 +1234,84 @@ async fn node_reads_the_five_host_ports_through_the_product_owners() {
     server.join().await.unwrap();
     std::fs::remove_dir_all(home).unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+async fn node_session_files_reuses_native_storage_and_ownership() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    use dim_agent_capabilities::host::{SessionFiles, StoredSessionFile};
+    let home = std::fs::canonicalize("/tmp")
+        .unwrap()
+        .join(format!("dsf-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&home).unwrap();
+    let source = home.join("source.bin");
+    let bytes = vec![0x5a; 16 * 1024 * 1024];
+    std::fs::write(&source, &bytes).unwrap();
+    let output = home.join("output.txt");
+    std::fs::write(&output, b"owned output").unwrap();
+    let mut parts = session_typescript::fixture();
+    parts.rows = vec![json!({
+        "id":"session-files", "name":parts.anchor.parent().unwrap().join("fixtures/session-files.ts"),
+        "provides":{}, "config":{}
+    })];
+    let (server, _, _) = session_typescript::start(config(&home, parts)).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    select_model(&mut client).await;
+    let owner = client
+        .rpc("session.create", json!({"cwd":home,"tools":[]}))
+        .await;
+    assert_ok(&owner);
+    let owner = owner["result"]["sessionId"].as_str().unwrap();
+    let other = client
+        .rpc("session.create", json!({"cwd":home,"tools":[]}))
+        .await;
+    assert_ok(&other);
+    let other = other["result"]["sessionId"].as_str().unwrap();
+    let reply = files_available(
+        &mut client,
+        "sessionfilesprobe.exercise",
+        json!({
+            "sessionId":owner, "otherSessionId":other, "source":source, "output":output
+        }),
+    )
+    .await;
+    let put: StoredSessionFile = serde_json::from_value(reply["put"].clone()).unwrap();
+    let imported: StoredSessionFile = serde_json::from_value(reply["imported"].clone()).unwrap();
+    assert_eq!(std::fs::read(&put.path).unwrap(), b"wire text");
+    assert_eq!(imported.bytes, bytes.len() as u64);
+    assert_eq!(std::fs::read(&imported.path).unwrap(), bytes);
+    let files = server.service::<SessionFiles>().unwrap();
+    let chunk = files
+        .0
+        .read(
+            owner.into(),
+            imported.file_id.clone(),
+            0,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(chunk, bytes[..64 * 1024]);
+    assert_eq!(
+        reply["first"],
+        json!({"data":STANDARD.encode(chunk),"eof":false})
+    );
+    assert_eq!(reply["end"], json!({"data":"","eof":true}));
+    assert_eq!(reply["owned"], json!({"owned":true}));
+    assert!(files.0.owns(owner.into(), output.clone()).await.unwrap());
+    let native_paths = files.0.owned_paths(owner.into()).await.unwrap();
+    assert_eq!(reply["paths"], json!({"paths":native_paths}));
+    assert_eq!(reply["foreignError"], "not_found");
+    let denied = files
+        .0
+        .read(other.into(), imported.file_id, 0, CancellationToken::new())
+        .await
+        .unwrap_err();
+    assert_eq!(
+        denied.code,
+        dim_agent_capabilities::host::SessionFileErrorCode::NotFound
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}

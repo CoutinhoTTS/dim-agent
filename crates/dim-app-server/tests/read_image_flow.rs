@@ -266,9 +266,7 @@ async fn an_offloaded_read_result_registers_its_output_path() {
     .unwrap();
     platform.home = home.clone();
     let registered = Arc::new(Mutex::new(Vec::new()));
-    let owner = Arc::new(SessionFilesHost(Arc::new(RecordedOutputs(
-        registered.clone(),
-    ))));
+    let owner = Arc::new(SessionFiles(Arc::new(RecordedOutputs(registered.clone()))));
     let mut builder = AgentBuilder::new(AgentConfig::default());
     defaults::install(&mut builder);
     defaults::mock_model_hosts(&mut builder);
@@ -281,7 +279,7 @@ async fn an_offloaded_read_result_registers_its_output_path() {
     );
     let agent = MinimalHost::start_with(&builder, move |root, _| {
         root.provide_as::<HostPlatform>(Arc::new(platform))?;
-        root.provide_as::<SessionFilesHost>(owner)?;
+        root.provide_as::<SessionFiles>(owner)?;
         Ok(())
     })
     .await

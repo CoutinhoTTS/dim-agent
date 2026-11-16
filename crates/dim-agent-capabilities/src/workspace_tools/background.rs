@@ -580,20 +580,26 @@ impl BackgroundExec {
     /// unload) wakes, including the `failed` terminal a later generation
     /// wrote, unless the end comes after the branch-close interrupt.
     async fn ended(&self, event_id: &str, data: ExecEndedData) -> dim_agent_runtime::Result<()> {
-        let (name, done, closing) = {
+        let (name, done) = {
             let state = self.state.lock().unwrap();
             let task = state.tasks.get(&data.task_id);
             (
-                task.map_or_else(|| data.task_id.clone(), |task| task.description.clone()),
+                task.map(|task| task.description.clone()),
                 task.map(|task| task.ended.clone()),
-                state.closing,
             )
         };
-        if wakes(&data)
-            && !closing
-            && let Err(error) = self.wake(event_id, &data, name).await
-        {
-            tracing::warn!(%error, task_id = data.task_id, "exec wake was not posted");
+        if wakes(&data) {
+            let name = match name {
+                Some(name) => name,
+                None => self
+                    .started(&data.task_id, self.timeline.committed())
+                    .await?
+                    .map_or_else(|| data.task_id.clone(), |start| start.description),
+            };
+            let closing = self.state.lock().unwrap().closing;
+            if !closing && let Err(error) = self.wake(event_id, &data, name).await {
+                tracing::warn!(%error, task_id = data.task_id, "exec wake was not posted");
+            }
         }
         if let Some(done) = done {
             done.send_replace(Some(data));

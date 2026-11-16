@@ -270,6 +270,17 @@ and Escape dismisses without sending or deleting the draft. Mouse selection has
 the same behavior. Command handling does not run during IME composition. Known
 commands are handled locally rather than submitted as model input.
 
+The menu lists Skills after the commands, by the same rule as the TUI: only an enabled,
+unshadowed, user-invocable Skill whose name the `/skill:` token can carry. A Skill row reads
+`/skill:<name>` with its description; choosing it fills `/skill:<name> ` and sends nothing, and
+typing `/skill:` narrows the menu to Skills. A draft that begins with `/skill:` is sent as a
+message and never run as a command, the draft draws the token as one chip, and the transcript
+shows it as one unit ([Skills §9](plugins/Skills.md#9-references-load-with-the-operators-input)).
+The input draws that chip on a highlight layer behind the textarea, which repeats the field's
+font, wrapping and width and moves with its scroll, so a typed, filled, wrapped or scrolled
+token stays one unit while the caret, selection and IME composition remain the browser's.
+A daemon that does not serve `session.skills` shows the commands alone.
+
 | Category | Command | Action and availability |
 | --- | --- | --- |
 | `model` | `/models` | Open the existing model picker when model selection is available |

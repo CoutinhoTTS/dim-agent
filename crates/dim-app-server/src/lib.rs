@@ -1331,9 +1331,7 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
 /// the names its process parts share across languages. Registering them again
 /// does nothing, so each installer applies them.
 pub(crate) fn register_names(catalog: &mut dim_agent_runtime::names::ServiceCatalog) {
-    use dim_agent_capabilities::host::{
-        AuxiliaryModelHost, ModalityConnectionHost, SelectableModelsHost,
-    };
+    use dim_agent_capabilities::host::{ModalityConnectionHost, SelectableModelsHost};
     use dim_agent_runtime::{SESSION_GROUP, names::register};
     register::<ServerControl>(catalog, None);
     register::<ProcessActivity>(catalog, None);
@@ -1360,7 +1358,6 @@ pub(crate) fn register_names(catalog: &mut dim_agent_runtime::names::ServiceCata
     register::<grok_oauth::GrokOAuthService>(catalog, None);
     register::<provider::ProviderSecretHost>(catalog, None);
     register::<provider::ProviderService>(catalog, None);
-    register::<AuxiliaryModelHost>(catalog, None);
     catalog.register_shared(dim_agent_runtime::names::name_of::<SelectableModelsHost>());
     register::<ModalityConnectionHost>(catalog, None);
     register::<mcp::McpService>(catalog, None);
@@ -1400,7 +1397,6 @@ pub fn register_faces(builder: &mut dim_agent_runtime::AgentBuilder) {
         ("agentDirectory", "owner-api"),
         ("agentIndex", "owner-api"),
         ("agentLoop", "hot-path"),
-        ("auxiliaryModelHost", "owner-api"),
         ("branchLine", "hot-path"),
         ("branchOpening", "hot-path"),
         ("callers", "owner-api"),
@@ -1444,7 +1440,6 @@ pub fn register_faces(builder: &mut dim_agent_runtime::AgentBuilder) {
         ("providerService", "secret"),
         ("publication", "host-resource"),
         ("serverControl", "control"),
-        ("sessionFilesHost", "owner-api"),
         ("sessionLoader", "control"),
         ("sessionSkills", "host-resource"),
         ("sessionStore", "owner-api"),

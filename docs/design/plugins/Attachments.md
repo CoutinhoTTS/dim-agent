@@ -191,6 +191,6 @@ operations must return equivalent owner results, including a 16 MiB import.
 
 ## Appendix G. Rust binding
 
-`AttachmentsPlugin` declares `SessionIdentity`, `SessionFilesHost` and
+`AttachmentsPlugin` declares `SessionIdentity`, `SessionFiles` and
 `SessionMethods`, and registers its namespace during `apply`. Its binding delegates
 to SessionStore's [Rust contract](../appserver/session-files.md#appendix-a-rust-binding).

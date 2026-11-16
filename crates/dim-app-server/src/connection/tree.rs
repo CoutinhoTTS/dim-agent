@@ -80,7 +80,7 @@ impl Connection {
                     }
                     let files = rpc
                         .ctx
-                        .get::<dim_agent_capabilities::host::SessionFilesHost>()
+                        .get::<dim_agent_capabilities::host::SessionFiles>()
                         .ok_or_else(|| RpcError::invalid("Session file service is unavailable"))?;
                     files
                         .0
