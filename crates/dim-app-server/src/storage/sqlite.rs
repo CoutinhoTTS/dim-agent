@@ -919,6 +919,10 @@ pub struct SqliteStorage {
     idle: tokio::sync::Notify,
     pub(super) path: PathBuf,
     upgraded_from: Option<u32>,
+    /// What the v50 image conversion measured about its own work, kept for a
+    /// flow test that bounds it; feature `testing` only.
+    #[cfg(feature = "testing")]
+    converted: Option<super::image_upgrade::Converted>,
 }
 /// The read-only connections that serve reads while the writer keeps its own
 /// (#599). Four let the catalog scan, a history page and the settings,
@@ -1082,6 +1086,10 @@ impl SqliteStorage {
             ))
         };
         let mut upgraded_from = None;
+        // What the v50 image conversion measured about its own work, which a
+        // flow test bounds; feature `testing` only.
+        #[cfg(feature = "testing")]
+        let mut converted = None;
         // What the store left dangling before any upgrade step ran, by
         // `(table, parent)`; read only on the upgrade path.
         let mut violations_before: BTreeMap<(String, String), i64> = BTreeMap::new();
@@ -1154,7 +1162,15 @@ impl SqliteStorage {
                 violations_before = violations(&connection).map_err(storage)?;
                 for (from, added) in UPGRADES.iter().filter(|(from, _)| *from >= upgrade_from) {
                     if *from == 49 {
-                        super::image_upgrade::upgrade(&connection, &path)?;
+                        #[cfg(feature = "testing")]
+                        {
+                            converted =
+                                Some(super::image_upgrade::upgrade(&connection, &path)?);
+                        }
+                        #[cfg(not(feature = "testing"))]
+                        {
+                            super::image_upgrade::upgrade(&connection, &path)?;
+                        }
                     }
                     if *from == 26 {
                         connection.execute_batch(V27_COLUMNS).map_err(storage)?;
@@ -1372,6 +1388,8 @@ impl SqliteStorage {
             idle: tokio::sync::Notify::new(),
             path,
             upgraded_from,
+            #[cfg(feature = "testing")]
+            converted,
         }))
     }
     /// Opens an existing database for one read pass of the Timeline export
@@ -1419,6 +1437,8 @@ impl SqliteStorage {
                 idle: tokio::sync::Notify::new(),
                 path,
                 upgraded_from: None,
+                #[cfg(feature = "testing")]
+                converted: None,
             }),
             format,
         ))
@@ -1427,6 +1447,13 @@ impl SqliteStorage {
     /// committed; `None` when the store was created or already current.
     pub fn upgraded_from(&self) -> Option<u32> {
         self.upgraded_from
+    }
+    /// How many rows the image conversion derived text candidates for while
+    /// this store opened, `None` when this open ran no conversion; feature
+    /// `testing` only.
+    #[cfg(feature = "testing")]
+    pub fn converted_indexed(&self) -> Option<usize> {
+        self.converted.as_ref().map(|converted| converted.indexed)
     }
     /// Runs `operation` on the writer's connection. Only writes, checkpoints
     /// and reads that must follow them run here; business reads use
