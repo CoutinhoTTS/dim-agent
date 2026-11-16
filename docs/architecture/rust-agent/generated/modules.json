@@ -10306,7 +10306,7 @@
         "path AuxiliaryErrorCode::Failed",
         "path AuxiliaryErrorCode::InvalidRequest",
         "path AuxiliaryErrorCode::ModelUnavailable",
-        "path AuxiliaryModelHost",
+        "path AuxiliaryModel",
         "path AuxiliaryReply",
         "path AuxiliaryRequest",
         "path CompleteAuxiliary",
@@ -10321,7 +10321,7 @@
         "path ResolveModelConnection",
         "use crate::host::AuxiliaryError",
         "use crate::host::AuxiliaryErrorCode",
-        "use crate::host::AuxiliaryModelHost",
+        "use crate::host::AuxiliaryModel",
         "use crate::host::AuxiliaryReply",
         "use crate::host::AuxiliaryRequest",
         "use crate::host::CompleteAuxiliary",
@@ -53624,9 +53624,9 @@
       "from": "dim_session_title",
       "to": "dim_agent_capabilities::host",
       "references": [
-        "path AuxiliaryModelHost",
+        "path AuxiliaryModel",
         "path AuxiliaryRequest",
-        "use dim_agent_capabilities::host::AuxiliaryModelHost",
+        "use dim_agent_capabilities::host::AuxiliaryModel",
         "use dim_agent_capabilities::host::AuxiliaryRequest"
       ]
     },

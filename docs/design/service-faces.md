@@ -108,7 +108,6 @@ Rust 产品装配的现状以 [生成的 catalog](../architecture/rust-agent/gen
 | `agentDirectory`、`agentIndex` | `sessions` | 目录查询走 `sessions` |
 | `settingsService` | `settings` | GoalBranch 的取消契约见 §4.1。 |
 | `modelHost` | `auxiliaryModel` | PromptSuggestion 的请求与流式语义见 §4.2。 |
-| `auxiliaryModelHost` | `auxiliaryModel` | 模型调用走 `complete` |
 | `loader` | `rutis/loader` | 插件管理走数据面 |
 | `basePromptSettingsHost` | — | 宿主 prompt settings 端口；`owner-api` |
 | `skillsInstructionsSettingsHost` | — | 宿主 skills settings 端口；`owner-api` |
