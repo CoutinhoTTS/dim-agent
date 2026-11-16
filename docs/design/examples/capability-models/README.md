@@ -42,7 +42,7 @@
 | 5a Loop | 一个活动 turn；压缩排斥新 turn；当前 request 才能推进，旧结果不串入新步骤 | [LoopProtocol](LoopProtocol.tla)：`Start/Prepared/Output/ToolResult/Compact` 对应 try_start/consume；最多两个回合、四个 request，含工具后的下一步 |
 | 5b Loop | 中断不继续发模型调用；reload-settled 结果使旧回合失败；结束不重复启动旧回合 | 同模型 `Interrupt/Reload/End`；`NoRestart/NoRepeatModel/ReloadFailsTurn`。实际 deferred 输入选择和 continuation 内容不由该控制模型证明 |
 | 5c Loop | 自动 continuation 每 turn 最多一次；budget recovery 独立；compaction 延后不重置 failure chain；driving input/interrupt 阻止自动续跑 | [LoopContinuation](LoopContinuation.tla)：`Failure/CompactionResult` 对应 next_model 与 ModelOutputEnd；`OneAutomaticContinuation/DeferredKeepsChain/NoAutomaticOnDrivenTurn/NoAutomaticAfterInterrupt`。错误分类作为输入，等待预算另由 RetryBudget 检查 |
-| 5d Loop | 恢复根据未完成身份结算，不重新构造旧模型请求 | 恢复选择 + Loop 身份状态。`step/disposition` 文档漂移仍是未解决的契约对应问题，不能作为已实现动作 |
+| 5d Loop | 恢复根据未完成身份结算，不重新构造旧模型请求 | 恢复选择 + Loop 身份状态。`step/disposition` 属于 [ModelRecovery 提案](../../plugins/ModelRecovery.md)，不能作为已实现动作 |
 | 6a WaitBranch | 一个 waiting 槽；登记 tracker 后才释放接纳锁；先放槽后清 tracker 仍能正确 drain | [WaitRuntime](WaitRuntime.tla)：`Admit/EndCall/ReleaseTracking/Close/Restore` 对应 Wait 的锁、槽与 tracker；`SlotTracked/DrainBeforeRestore`。在调用 future 被 poll/drop、取消与 tracker 释放获公平调度的前提下，`CloseDrains` 检查关闭最终排空 |
 | 6b WaitBranch | 关闭后拒绝接纳；旧句柄不跨代接纳；按 task 取通知；turn/end、重载清通知 | 同模型 `NoAdmissionAfterClose/OldHandleRejected/SelectionMatches/ClosedTurnEmpty/RestoredNoNotifications`；EndCall 抽象通知、Steer、超时、取消或 drop 的释放点，不规定同时就绪时唯一赢家 |
 | 6c WaitBranch | 恢复 open 只看固定 cut 的最后 start/end，然后连续消费后缀 | [RecoveryBoundary](RecoveryBoundary.tla)：`LatestEqualsFold/LivePrefixMatches/NoSkippedSuffix`；`Capture/Restore/Consume` 对应 rebuild 与 Dispatcher 交接。归纳折叠只是数学参照，不是恢复算法 |

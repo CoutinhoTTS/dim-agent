@@ -108,8 +108,8 @@ export interface AuxiliaryModel {
 }
 export type PermissionPreset = 'read-only' | 'workspace-write' | 'full-access';
 /** Session command-rule read; the owner checks the current user source on each call. */
-export interface CommandRule { command: string; match: 'exact' | 'prefix'; decision: 'allow' | 'deny' }
-export interface CommandRulesReply { rules: CommandRule[] }
+export type CommandRule = { command: string; match: 'exact' | 'prefix'; decision: 'allow' | 'deny' }
+export type CommandRulesReply = { rules: CommandRule[] }
 export interface CommandRulesError extends Error { code: 'unavailable' | 'cancelled' }
 export interface CommandRules { read(request: Record<string, never>): Promise<CommandRulesReply> }
 
@@ -563,4 +563,13 @@ export interface ManagedSearch {
   search(request: { query: string; count: number }): Promise<{
     results: { title: string; url: string; snippet: string; publishedAt?: string }[]
   }>
+}
+
+/** The ToolRegistry owner's read-only source status view. */
+export interface ToolSourceRejection { version: string; reason: string }
+export interface ToolSourceStatus { adopted: string | null; rejected: ToolSourceRejection | null }
+export type ToolSourcesState = Record<string, ToolSourceStatus>
+export interface ToolSourcesView {
+  get(request: Record<string, never>): ToolSourcesState
+  observe(request: Record<string, never>, onState: (state: ToolSourcesState) => void | Promise<void>): Promise<void>
 }
