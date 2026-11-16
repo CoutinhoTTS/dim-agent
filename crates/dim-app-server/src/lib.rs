@@ -1402,7 +1402,6 @@ pub fn register_faces(builder: &mut dim_agent_runtime::AgentBuilder) {
         ("callers", "owner-api"),
         ("collaboration", "host-resource"),
         ("collaborationSession", "legacy-no-consumer"),
-        ("commandRulesHost", "hot-path"),
         ("compactionStrategyHost", "hot-path"),
         ("configurationPublisher", "hot-path"),
         ("configureControl", "hot-path"),

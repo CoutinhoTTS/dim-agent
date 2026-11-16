@@ -3085,3 +3085,148 @@ async fn node_session_typescript_closed_connection_does_not_hide_an_undeclared_n
     server.shutdown();
     server.join().await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+async fn node_session_command_rules_share_the_native_owner_and_survive_another_session_closing() {
+    use dim_agent_capabilities::{
+        host::{HostError, HostFuture},
+        permission::{CommandRules, ReadCommandRules},
+    };
+    use dim_agent_types::{CommandMatch, CommandRule, CommandRuleDecision};
+    use std::sync::atomic::{AtomicU8, Ordering};
+    struct Rules {
+        mode: AtomicU8,
+        started: tokio::sync::mpsc::UnboundedSender<CancellationToken>,
+    }
+    impl ReadCommandRules for Rules {
+        fn rules(&self, cancel: CancellationToken) -> HostFuture<'_, Vec<CommandRule>> {
+            Box::pin(async move {
+                if self.mode.load(Ordering::SeqCst) == 2 {
+                    self.started.send(cancel.clone()).unwrap();
+                    cancel.cancelled().await;
+                    return Err(HostError::Cancelled("command rules read cancelled".into()));
+                }
+                if self.mode.load(Ordering::SeqCst) == 1 {
+                    return Err(HostError::failed("command rules source unavailable"));
+                }
+                Ok(vec![CommandRule {
+                    command: "git status".into(),
+                    matching: CommandMatch::Exact,
+                    decision: CommandRuleDecision::Allow,
+                }])
+            })
+        }
+    }
+    let home = PathBuf::from("/tmp").join(format!("dim-command-rules-{}", uuid::Uuid::new_v4()));
+    let mut parts = fixture();
+    parts.rows = vec![json!({
+        "id":"command-rules", "name":parts.anchor.parent().unwrap().join("fixtures/command-rules.ts"),
+        "provides":{}, "config":{}
+    })];
+    let (started, mut reads) = tokio::sync::mpsc::unbounded_channel();
+    let owner = Arc::new(Rules {
+        mode: AtomicU8::new(0),
+        started,
+    });
+    let binding = Arc::new(CommandRules(owner.clone()));
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    defaults::install_with_prompt_capability(
+        &mut builder,
+        dim_agent_capabilities::model_provider::ModelProviderPlugin::new,
+    );
+    builder
+        .session_data_value(binding.clone())
+        .session_value(Arc::new(dim_agent_capabilities::host::PromptHost(
+            Arc::new(dim_agent_capabilities::host::EmptyPromptHost),
+        )))
+        .session_value(Arc::new(
+            dim_agent_capabilities::prompt::InitialPromptConfiguration::fixed(None),
+        ))
+        .session_value(Arc::new(HistoryRenderer::default()))
+        .process_value(Arc::new(ModelHost(Arc::new(EchoModel))))
+        .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
+        .session_value(Arc::new(ContextModelHost(None)))
+        .session_value(Arc::new(CompactionStrategyHost(None)))
+        .require_feature(
+            Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
+                Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
+            }),
+        );
+    defaults::tool_host(&mut builder, Arc::new(MockTools));
+    let server = serve(
+        builder,
+        ServerConfig {
+            product_home: Some(home.clone()),
+            target_home: Some(home.join("rust")),
+            unix_path: Some(home.join("server.sock")),
+            session_typescript: Some(parts.clone()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    plugin_active(&server, &parts.rows[0]).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    process_typescript::select_model(&mut client).await;
+    let first = new_session(&mut client, json!([])).await;
+    let second = new_session(&mut client, json!([])).await;
+    let expected = binding.read(CancellationToken::new()).await.unwrap();
+    for id in [&first, &second] {
+        let reply = when_served(
+            &mut client,
+            "session.commandrules.read",
+            json!({"sessionId":id}),
+        )
+        .await;
+        assert_eq!(reply["result"], json!({"sessionId":id, "reply":expected}));
+    }
+    owner.mode.store(1, Ordering::SeqCst);
+    assert!(binding.read(CancellationToken::new()).await.is_err());
+    let failed = client
+        .rpc("session.commandrules.read", json!({"sessionId":first}))
+        .await;
+    assert_ok(&failed);
+    assert_eq!(
+        failed["result"]["error"],
+        json!({
+            "code":"unavailable", "message":"command rules source unavailable"
+        })
+    );
+    owner.mode.store(2, Ordering::SeqCst);
+    let pending = client
+        .send("session.commandrules.read", json!({"sessionId":first}))
+        .await;
+    let owner_cancel = tokio::time::timeout(Duration::from_secs(5), reads.recv())
+        .await
+        .expect("the Node read reaches the command rules owner")
+        .unwrap();
+    let mut closer = Client::new_version(&server, false, 3).await;
+    let closed = tokio::time::timeout(
+        Duration::from_secs(5),
+        closer.rpc("session.close", json!({"sessionId":first})),
+    )
+    .await
+    .expect("closing the Session cancels its outstanding Node read");
+    assert_ok(&closed);
+    tokio::time::timeout(Duration::from_secs(5), owner_cancel.cancelled())
+        .await
+        .expect("Node unload ends the command rules owner's read");
+    assert_eq!(
+        client.response(pending).await["error"]["data"]["appError"],
+        "operation_interrupted"
+    );
+    owner.mode.store(0, Ordering::SeqCst);
+    let remaining = client
+        .rpc("session.commandrules.read", json!({"sessionId":second}))
+        .await;
+    assert_ok(&remaining);
+    assert_eq!(
+        remaining["result"],
+        json!({"sessionId":second, "reply":expected})
+    );
+    drop((client, closer));
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}

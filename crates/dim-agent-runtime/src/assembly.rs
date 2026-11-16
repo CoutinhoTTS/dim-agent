@@ -502,6 +502,25 @@ impl AgentBuilder {
         }));
         self
     }
+    /// Provides one Session value through its native binding and data face.
+    /// The catalog must register its name as shared in the Session group.
+    /// Both bindings belong to the Session scope and end with it.
+    pub fn session_data_value<T>(&mut self, value: Arc<T>) -> &mut Self
+    where
+        T: rutis_bridge::session::HostDispatch + 'static,
+    {
+        let name = crate::names::name_of::<T>();
+        self.assembly.value_names.push(name.clone());
+        self.assembly.values.push(Arc::new(move |ctx, scope| {
+            ctx.provide_at::<T>(scope.key::<T>(), value.clone())?;
+            ctx.provide_at(
+                rutis_bridge::session::host_key_in(&name, scope.instance),
+                value.clone() as Arc<dyn rutis_bridge::session::HostDispatch>,
+            )?;
+            Ok(())
+        }));
+        self
+    }
     /// Provides a host-configured value under its process name to this
     /// Agent's Sessions: each Agent instance provides it at the name's
     /// process key, in a scope of its own ([`Self::agent_row`]), which the

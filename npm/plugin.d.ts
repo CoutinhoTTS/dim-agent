@@ -107,6 +107,12 @@ export interface AuxiliaryModel {
   complete(call: { model: ModelId; request: AuxiliaryRequest }, cancelled?: () => Promise<void>): Promise<AuxiliaryReply>;
 }
 export type PermissionPreset = 'read-only' | 'workspace-write' | 'full-access';
+/** Session command-rule read; the owner checks the current user source on each call. */
+export interface CommandRule { command: string; match: 'exact' | 'prefix'; decision: 'allow' | 'deny' }
+export interface CommandRulesReply { rules: CommandRule[] }
+export interface CommandRulesError extends Error { code: 'unavailable' | 'cancelled' }
+export interface CommandRules { read(request: Record<string, never>): Promise<CommandRulesReply> }
+
 export interface PermissionPolicy {
   preset: PermissionPreset;
   allowedTools: string[];

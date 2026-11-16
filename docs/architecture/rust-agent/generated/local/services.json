@@ -783,7 +783,7 @@
         "generation": 1,
         "injects": [
           {
-            "service": "dim_agent_capabilities::permission::CommandRulesHost@session",
+            "service": "dim_agent_capabilities::permission::CommandRules@session",
             "scope": null,
             "status": "Ready"
           },
@@ -810,7 +810,7 @@
         ],
         "resolved": [
           {
-            "service": "dim_agent_capabilities::permission::CommandRulesHost@session",
+            "service": "dim_agent_capabilities::permission::CommandRules@session",
             "scope": null,
             "provider": 33,
             "generation": 1
@@ -842,7 +842,7 @@
         ],
         "reads": [
           {
-            "service": "dim_agent_capabilities::permission::CommandRulesHost@session",
+            "service": "dim_agent_capabilities::permission::CommandRules@session",
             "provider": 33,
             "declared": true,
             "external": true
@@ -3981,7 +3981,7 @@
         "removing": false
       },
       {
-        "service": "dim_agent_capabilities::permission::CommandRulesHost@session",
+        "service": "dim_agent_capabilities::permission::CommandRules@session",
         "provider": 33,
         "generation": 1,
         "removing": false
@@ -4108,6 +4108,12 @@
       },
       {
         "service": "dyn rutis_bridge::session::services::HostDispatch#agentConfig@session",
+        "provider": 33,
+        "generation": 1,
+        "removing": false
+      },
+      {
+        "service": "dyn rutis_bridge::session::services::HostDispatch#commandRules@session",
         "provider": 33,
         "generation": 1,
         "removing": false

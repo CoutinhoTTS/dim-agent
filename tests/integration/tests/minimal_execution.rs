@@ -15,7 +15,7 @@ use dim_agent_capabilities::{
     host::*,
     host_platform::{HostPlatform, HostPlatformConfig, HostPlatformPlugin, resolve_shell},
     model_provider::ModelProviderPlugin,
-    permission::{CommandRulesHost, NoCommandRules},
+    permission::{CommandRules, NoCommandRules},
     skill_settings::SkillSettingsHost,
     skills::{MemorySkillSettings, SkillsCatalogPlugin},
 };
@@ -217,7 +217,7 @@ impl Harness {
             .session_value(Arc::new(ContextModelHost(compacting.then(|| {
                 Arc::new(compaction_support::Window::default()) as Arc<dyn ResolveContextModel>
             }))))
-            .session_value(Arc::new(CommandRulesHost(Arc::new(NoCommandRules))))
+            .session_data_value(Arc::new(CommandRules(Arc::new(NoCommandRules))))
             .session_value(Arc::new(CompactionStrategyHost(compacting.then(|| {
                 Arc::new(compaction_support::Window::default()) as Arc<dyn CompactionStrategy>
             }))))

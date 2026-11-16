@@ -77,7 +77,7 @@ Each catalog name a part of the assembly provides or injects. `data` means share
 | `agentConfig` | session | SessionScope | data | `get` async |
 | `collaborationConfig` | session | SessionScope | data | `get` async |
 | `collaborationSession` | session | CollaborationSession | internal(legacy-no-consumer) | — |
-| `commandRulesHost` | session | CommandRules | internal(hot-path) | — |
+| `commandRules` | session | CommandRules | data | `read` async |
 | `compactionStrategyHost` | session | ProductSummaryStrategy | internal(hot-path) | — |
 | `contextModelHost` | session | SessionScope | internal(hot-path) | — |
 | `faultReporter` | session | SessionScope | internal(hot-path) | — |

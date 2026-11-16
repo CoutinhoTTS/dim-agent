@@ -1,6 +1,6 @@
 use super::*;
 use dim_agent_capabilities::approval::{AdmitCall, Approval};
-use dim_agent_capabilities::permission::{CommandRulesHost, ReadCommandRules};
+use dim_agent_capabilities::permission::{CommandRules, ReadCommandRules};
 use dim_agent_capabilities::tool_executor::ToolExecutor;
 use dim_agent_runtime::testing::{branch_events, chain_events};
 use dim_agent_runtime::{Dispatcher, Session, Timeline, TimelineKey, TimelineStore};
@@ -190,7 +190,7 @@ async fn setup_store(
         .session_value(Arc::new(
             dim_agent_capabilities::prompt::InitialPromptConfiguration::fixed(None),
         ))
-        .session_value(Arc::new(CommandRulesHost(probe.clone())));
+        .session_data_value(Arc::new(CommandRules(probe.clone())));
     defaults::install_with_prompt_capability(
         &mut builder,
         dim_agent_capabilities::model_provider::ModelProviderPlugin::new,
