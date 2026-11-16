@@ -45,7 +45,7 @@ fn insert_event(
 ///
 /// - `affected` holds an inline image in `input/message` and in
 ///   `step/tool-result`, a URL image, a request whose node content carries the
-///   same image bytes, an earlier `step/text` delta, and the
+///   same image bytes, two `step/text` deltas of one request, and the
 ///   `step/tool-result` whose candidates the conversion must derive again.
 /// - `shared` holds the same image bytes, so the two Sessions share one file
 ///   and get an ownership row each.
@@ -150,7 +150,7 @@ fn v49_store_with_images(database: &Database) -> Connection {
         "affected",
         3,
         "step/text",
-        json!({"turn_id": "turn", "request_id": "request", "delta": "an earlier delta"}),
+        json!({"turn_id": "turn", "request_id": "request", "delta": "an earlier delta about caching"}),
     );
     // An indexed `data` row the conversion rewrites: its candidates must be
     // derived again from the converted body.
@@ -160,6 +160,17 @@ fn v49_store_with_images(database: &Database) -> Connection {
         4,
         "step/tool-result",
         json!({"turn_id": "turn", "request_id": "request", "results": [{"call_id": "call", "result": {"content": [image]}}]}),
+    );
+    // A second delta of the same request, so the delta candidates carry a tail:
+    // the last 199 characters of the deltas before them. A term spanning the
+    // join reaches the later candidate only when that tail is there, which a
+    // rebuild from empty tables and an upgrade must agree on.
+    insert_event(
+        &connection,
+        "affected",
+        5,
+        "step/text",
+        json!({"turn_id": "turn", "request_id": "request", "delta": " eviction and later words"}),
     );
     // A second Session holding the same accepted bytes.
     insert_event(
@@ -238,12 +249,13 @@ fn candidates(connection: &Connection) -> Vec<(String, String, i64, i64, String,
         .unwrap()
 }
 
-/// The candidates `text` reaches through the index, as the search itself asks
-/// for it: the trigrams of the text, all present. The index keeps no
-/// positions, so a phrase cannot be queried.
-fn matches(connection: &Connection, text: &str) -> Vec<(String, String)> {
-    let text = text.to_lowercase();
+/// The Sessions whose candidates reach `text` through the index, as the search
+/// itself asks for it: the trigrams of the text, all present. The index keeps
+/// no positions, so a phrase cannot be queried. Sorted and deduplicated, so a
+/// Session that reaches the text through two candidates is named once.
+fn reaching(connection: &Connection, text: &str) -> Vec<String> {
     let grams = text
+        .to_lowercase()
         .as_bytes()
         .windows(3)
         .map(|gram| format!("\"{}\"", std::str::from_utf8(gram).unwrap()))
@@ -253,16 +265,28 @@ fn matches(connection: &Connection, text: &str) -> Vec<(String, String)> {
         .join(" AND ");
     let mut statement = connection
         .prepare(
-            "SELECT m.session_id, m.partition_key FROM timeline_text_fts f \
+            "SELECT DISTINCT m.session_id FROM timeline_text_fts f \
              CROSS JOIN timeline_text m ON m.id=f.rowid WHERE timeline_text_fts MATCH ?1 \
-             ORDER BY m.session_id, m.partition_key",
+             ORDER BY m.session_id",
         )
         .unwrap();
     statement
-        .query_map([grams], |row| Ok((row.get(0)?, row.get(1)?)))
+        .query_map([grams], |row| row.get::<_, String>(0))
         .unwrap()
         .collect::<rusqlite::Result<Vec<_>>>()
         .unwrap()
+}
+
+/// [`reaching`] for a probe that must reach something: an empty result proves
+/// nothing about an index, so it fails here instead of matching another empty
+/// one.
+fn sessions_reaching(connection: &Connection, text: &str) -> Vec<String> {
+    let sessions = reaching(connection, text);
+    assert!(
+        !sessions.is_empty(),
+        "{text:?} reaches no candidate at all, so it proves nothing about the index"
+    );
+    sessions
 }
 
 /// #1589: the v50 conversion derives text candidates for the rows it rewrote
@@ -368,8 +392,11 @@ async fn the_v50_conversion_rebuilds_only_the_rewritten_rows_and_keeps_other_sna
     let converted = candidates(&connection);
     drop(connection);
 
-    // The index the conversion left equals the one a full rebuild derives
-    // from the same rows: the same candidates, and the same documents.
+    // The index the conversion left equals the one a full rebuild derives from
+    // the same facts. The oracle starts from empty derived tables, as a store
+    // that had never indexed anything would: the tails table is derived state
+    // too, and leaving it in place would let the oracle read tails only the
+    // upgrade could have built.
     let db = SqliteStorage::open(reference.0.clone()).unwrap();
     assert_eq!(db.upgraded_from(), Some(49));
     assert_eq!(
@@ -379,22 +406,62 @@ async fn the_v50_conversion_rebuilds_only_the_rewritten_rows_and_keeps_other_sna
     );
     db.close().await.unwrap();
     let connection = Connection::open(&reference.0).unwrap();
+    connection
+        .execute_batch("DELETE FROM timeline_text; DELETE FROM timeline_text_tails")
+        .unwrap();
     dim_app_server::storage::rebuild_text_index(&connection).unwrap();
     assert_eq!(
         candidates(&connection),
         converted,
         "the row-by-row candidates are the ones a full rebuild derives"
     );
-    for term in [
-        "an-earlier-delta",
-        "shared-historical-image",
-        "plain-question",
-        "plain-answer",
+
+    // Documents, not only candidates: each probe below names text a fact
+    // carries after the conversion and fails when it reaches nothing. The
+    // Session sets say where it must reach, so a stale candidate — a row whose
+    // body the conversion rewrote while its candidates were left replaced — is
+    // caught as a Session the probe must not name.
+    let upgraded = Connection::open(&database.0).unwrap();
+    for (probe, expected) in [
+        // A row the conversion rewrote: the placeholder a URL image became.
+        ("omitted", vec!["affected".to_owned()]),
+        // A row the conversion rewrote: the file reference the bytes became.
+        ("fileid", vec!["affected".to_owned(), "shared".to_owned()]),
+        // A delta candidate and the text before its tail, whose candidate
+        // carries 199 characters of that tail.
+        ("an earlier delta", vec!["affected".to_owned()]),
+        // Text the later delta of the same request reaches only through the
+        // tail it carries: `caching eviction` spans the join of the two, so it
+        // exists only when the tail was rebuilt.
+        ("caching eviction", vec!["affected".to_owned()]),
+        // A row the conversion never reached.
+        ("plain question", vec!["untouched".to_owned()]),
+        ("plain answer", vec!["untouched".to_owned()]),
     ] {
+        let rebuilt = sessions_reaching(&connection, probe);
+        assert_eq!(rebuilt, expected, "the rebuild misses {probe:?}");
         assert_eq!(
-            matches(&connection, term),
-            matches(&Connection::open(&database.0).unwrap(), term),
-            "the index a term reaches differs for {term}"
+            sessions_reaching(&upgraded, probe),
+            rebuilt,
+            "the upgrade and a rebuild disagree on {probe:?}"
         );
     }
+    // The bytes the conversion moved into a file are no longer searchable. A
+    // Base64 payload has no spaces, so a 12-character slice of the encoded
+    // text is a real trigram probe rather than a phrase the tokenizer drops.
+    // Both indexes must reach nothing: the upgrade rewrote the body, and the
+    // rebuild derives from the same rewritten facts.
+    let payload = {
+        use base64::{Engine, engine::general_purpose::STANDARD};
+        STANDARD.encode(SHARED_IMAGE)
+    };
+    let payload = &payload[..12];
+    assert!(
+        reaching(&upgraded, payload).is_empty(),
+        "the Base64 payload a converted image held is still indexed"
+    );
+    assert!(
+        reaching(&connection, payload).is_empty(),
+        "the rebuild indexes a payload the conversion removed"
+    );
 }
