@@ -115,6 +115,13 @@ jobs:
           $env:Path = "$env:WINDIR\System32;$env:Path"
           node scripts/stage-web.mjs staging/release-web $version $env:GITHUB_SHA
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $notices = tar.exe -xOzf "staging/release-web/dimcode-web-$version.tar.gz" dimcode-web/web/THIRD-PARTY-NOTICES.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          foreach ($package in 'vue', 'vue-router', 'pinia') {
+            $entry = $notices -cmatch "^${package}@"
+            if (-not $entry) { throw "Missing third-party notice for $package" }
+            Write-Output $entry
+          }
           foreach ($file in $declarations) {
             if ((Get-Content -Raw -Encoding UTF8 $file).Replace("`r`n", "`n") -cne $original[$file]) {
               throw "Generated declaration changed: $file"
