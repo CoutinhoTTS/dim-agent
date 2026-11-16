@@ -2,7 +2,7 @@
   "source": {
     "corpus": "dim-badcase-usercases",
     "data_branch": "eval-badcase",
-    "notes": "P0 2026-11-16: 2 primary tasks + 2 paired controls from public GitHub issues; uc-003 instruction states the required git worktree side effects (review f7d1cbb6)",
+    "notes": "P0 2026-11-16: 2 primary tasks + 2 paired controls from public GitHub issues; uc-003 instruction states the required git worktree side effects (per the review on PR #1702)",
     "upstream": "arcships/dim issues"
   },
   "tasks": {
