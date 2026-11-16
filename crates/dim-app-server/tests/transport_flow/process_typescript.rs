@@ -1541,3 +1541,90 @@ async fn node_store_preserves_repository_results_and_worktree_removal_exclusion(
     server.join().await.unwrap();
     std::fs::remove_dir_all(home).unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+async fn node_mcp_registration_uses_the_native_content_owner() {
+    use dim_app_server::mcp::McpService;
+    let home = home();
+    let mut parts = session_typescript::fixture();
+    parts.rows = vec![json!({
+        "id":"mcp-service", "name":parts.anchor.parent().unwrap().join("fixtures/mcp-service.ts"),
+        "provides":{}, "config":{}
+    })];
+    let (server, _, _) = session_typescript::start(config(&home, parts)).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    assert_eq!(
+        files_available(&mut client, "mcpprobe.read", json!({})).await,
+        json!({"plugins":[], "refusal":null})
+    );
+    let mcp = server.service::<McpService>().unwrap();
+    let malformed = rutis_bridge::session::HostDispatch::invoke(
+        mcp.as_ref(),
+        "plugins",
+        rutis_bridge::session::Value::List(vec![json!({"extra":true}).into()]),
+    )
+    .unwrap_err();
+    assert_eq!(malformed.code(), Some("invalid_request"));
+    let document = json!({"mcpServers":{"fixture":{"command":"fixture-command"}}});
+    let registered = client
+        .rpc(
+            "mcpprobe.register",
+            json!({"dir":home, "document":document}),
+        )
+        .await;
+    assert_ok(&registered);
+    assert_eq!(
+        registered["result"]["plugins"],
+        json!(mcp.plugins(&CancellationToken::new()).await.unwrap())
+    );
+    let refused = client
+        .rpc(
+            "mcpprobe.register",
+            json!({"dir":home, "document":{"mcpServers":{"fixture":{"command":"fixture-command","cwd":"../outside"}}}}),
+        )
+        .await;
+    assert_eq!(
+        refused["error"]["data"]["appError"], "mcp_invalid_config",
+        "{refused}"
+    );
+    let read = files_available(&mut client, "mcpprobe.read", json!({})).await;
+    assert_eq!(
+        read,
+        json!({"plugins":[], "refusal":mcp.plugin_refusal("foreign-kit")})
+    );
+    assert!(mcp.plugin_refusal("foreign-kit").is_some());
+    mcp.register_plugin(
+        "foreign-kit".into(),
+        home.clone(),
+        document,
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        files_available(&mut client, "mcpprobe.read", json!({})).await,
+        json!({"plugins":["foreign-kit"], "refusal":null})
+    );
+    server.restart("Mcp").await.unwrap();
+    assert_eq!(
+        files_available(&mut client, "mcpprobe.read", json!({})).await,
+        json!({"plugins":["foreign-kit"], "refusal":null})
+    );
+    assert!(matches!(
+        mcp.plugins(&CancellationToken::new()).await,
+        Err(dim_app_server::mcp::McpError::Closed)
+    ));
+    let mcp = server.service::<McpService>().unwrap();
+    assert_ok(&client.rpc("mcpprobe.withdraw", json!({})).await);
+    assert!(
+        mcp.plugins(&CancellationToken::new())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}

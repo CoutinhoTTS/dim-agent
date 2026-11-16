@@ -205,7 +205,6 @@ Rust 产品装配的现状以 [生成的 catalog](../architecture/rust-agent/gen
 | `uiExtensions` | process | UiExtensions | control |
 | `mentionIndex` | process | WorkspaceToolsOwner | host-resource |
 | `skillsCatalog` | process | SkillsCatalog | host-resource |
-| `mcpService` | process | Mcp | host-resource |
 | `hooksService` | process | HooksSettings | host-resource |
 | `providerService` | process | Provider | secret |
 | `providerConnectionResolver` | process | Provider | host-resource |
@@ -387,6 +386,10 @@ modelSelectionHost.resolve({explicit?: ModelId, cwd?}) -> ModelSelection
 ### Skills Session 列表
 
 `skillsBranch` 的 `list({})` 与 Session 内部视图的边界由 [Skills owner](../architecture/rust-agent/plugins/Skills.md#data-face) 定义。Rust binding 与 wire 使用同一 owner；`sessionSkills` 保留为带 Session 实例身份的私有依赖。
+
+### MCP 插件内容
+
+`mcpService` 的四个既有插件文档操作与取消、错误、私有资源边界由 [MCP owner](appserver/mcp-management.md#81-plugin-content-data-face) 定义。
 
 ## 5. 验证
 

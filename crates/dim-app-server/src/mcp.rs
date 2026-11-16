@@ -2,6 +2,7 @@
 mod auth;
 pub mod config;
 mod discovery;
+mod face;
 mod import;
 pub(crate) mod management;
 mod publication;
@@ -447,18 +448,26 @@ fn resolved_entry(
     })
 }
 
+/// A plugin document's last refusal message and optional stable reason.
+pub type McpPluginRefusal = (String, Option<&'static str>);
+
+#[derive(Clone)]
 pub struct McpService {
     settings: Arc<SettingsService>,
     credentials: Arc<CredentialVariablesHost>,
     /// Why the last registration of a plugin was refused, by plugin id: the
     /// raw error, and its static reason when the cause has one
     /// (PluginManager A.2).
-    refused: Mutex<BTreeMap<String, (String, Option<&'static str>)>>,
+    refused: Arc<Mutex<BTreeMap<String, McpPluginRefusal>>>,
     publication: Arc<publication::Publication>,
     stopping: CancellationToken,
-    gate: Mutex<()>,
+    gate: Arc<Mutex<()>>,
     tasks: TaskTracker,
 }
+fn owner_key() -> Key<McpService> {
+    Key::named("dim/mcp/owner")
+}
+
 impl McpService {
     /// The credential variable names the daemon owns now.
     pub(crate) fn protected(&self) -> BTreeSet<String> {
@@ -511,7 +520,7 @@ impl McpService {
     /// fails validation is refused: the plugin then has no entries, and
     /// [`Self::plugin_refusal`] reports why.
     pub async fn register_plugin(
-        self: &Arc<Self>,
+        &self,
         plugin: String,
         dir: std::path::PathBuf,
         document: serde_json::Value,
@@ -569,11 +578,7 @@ impl McpService {
 
     /// Withdraws the MCP document of `plugin` and retires its entries in
     /// every Session; nothing when it registered none.
-    pub async fn withdraw_plugin(
-        self: &Arc<Self>,
-        plugin: String,
-        cancel: &CancellationToken,
-    ) -> Result<()> {
+    pub async fn withdraw_plugin(&self, plugin: String, cancel: &CancellationToken) -> Result<()> {
         self.refused.lock().unwrap().remove(&plugin);
         self.set_plugin(plugin, None, cancel).await
     }
@@ -582,7 +587,7 @@ impl McpService {
     /// and its static reason when the cause has one (PluginManager A.2).
     /// Both under one lock, so a registration between two reads cannot pair
     /// one cause's error with another's reason.
-    pub fn plugin_refusal(&self, plugin: &str) -> Option<(String, Option<&'static str>)> {
+    pub fn plugin_refusal(&self, plugin: &str) -> Option<McpPluginRefusal> {
         self.refused.lock().unwrap().get(plugin).cloned()
     }
 
@@ -601,7 +606,7 @@ impl McpService {
     }
 
     async fn set_plugin(
-        self: &Arc<Self>,
+        &self,
         plugin: String,
         registration: Option<McpPluginDocument>,
         cancel: &CancellationToken,
@@ -1822,10 +1827,10 @@ impl DynPlugin for McpPlugin {
             let service = Arc::new(McpService {
                 settings,
                 credentials,
-                refused: Mutex::default(),
+                refused: Arc::default(),
                 publication,
                 stopping: ctx.cancellation_token(),
-                gate: Mutex::new(()),
+                gate: Arc::default(),
                 tasks: TaskTracker::new(),
             });
             let (owner, closing) = (service.clone(), auth.clone());
@@ -1846,7 +1851,12 @@ impl DynPlugin for McpPlugin {
                 auth.clone(),
             )?;
             ctx.provide_as::<McpAuth>(auth)?;
-            ctx.provide_as::<McpService>(service)?;
+            ctx.provide_at(owner_key(), service.clone())?;
+            ctx.provide_as::<McpService>(service.clone())?;
+            ctx.provide_at::<dyn rutis_bridge::session::HostDispatch>(
+                rutis_bridge::session::host_key("mcpService"),
+                service,
+            )?;
             parts.register(
                 ctx,
                 dim_agent_runtime::PartScope::Session,

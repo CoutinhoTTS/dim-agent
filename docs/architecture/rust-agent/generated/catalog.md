@@ -32,7 +32,7 @@ Each catalog name a part of the assembly provides or injects. `data` means share
 | `managedProviders` | process | ManagedProviders | internal(secret) | — |
 | `managedWorktrees` | process | ManagedWorktrees | internal(hot-path) | — |
 | `managementMethods` | process | ManagementMethods | data | `register` async |
-| `mcpService` | process | Mcp | internal(host-resource) | — |
+| `mcpService` | process | Mcp | data | `plugins` async, `refusal` sync, `register` async, `withdraw` async |
 | `mentionIndex` | process | WorkspaceToolsOwner | internal(host-resource) | — |
 | `modalityConnectionHost` | process | Provider | internal(legacy-no-consumer) | — |
 | `modelHost` | process | Aimux | internal(owner-api) | — |

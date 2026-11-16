@@ -560,3 +560,11 @@ export type ApprovalDestination = {
 export interface CollaborationSession {
   approvalDestination(request: { memberSessionId: string }): ApprovalDestination | null;
 }
+
+/** Process MCP owner operations for PluginManager content; credentials and connections stay private. */
+export interface McpService {
+  register(request: { plugin: string; dir: string; document: JsonValue }): Promise<void>;
+  withdraw(request: { plugin: string }): Promise<void>;
+  plugins(request: Record<string, never>): Promise<string[]>;
+  refusal(request: { plugin: string }): [string, string | null] | null;
+}
