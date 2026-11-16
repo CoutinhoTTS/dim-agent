@@ -367,13 +367,13 @@ fn every_bundled_provider_states_whether_it_serves_or_resells() {
             continue;
         }
         match role {
-            Some(ProviderRole::Vendor) => sellers.push(provider.provider_id.as_str()),
-            Some(ProviderRole::Aggregator) => resellers.push(provider.provider_id.as_str()),
+            Some(ProviderRole::Vendor) => sellers.push(provider.provider_id.clone()),
+            Some(ProviderRole::Aggregator) => resellers.push(provider.provider_id.clone()),
             None => panic!("{} lists models but no role", provider.provider_id),
         }
     }
-    assert!(sellers.contains(&"openai"));
-    assert!(resellers.contains(&"openrouter"));
+    assert!(sellers.iter().any(|id| id == "openai"));
+    assert!(resellers.iter().any(|id| id == "openrouter"));
     assert_eq!(catalog.role("not-a-provider"), None);
 }
 
@@ -386,7 +386,7 @@ fn a_plan_provider_is_marked_and_its_api_entry_is_not() {
     let plans: Vec<_> = catalog
         .providers()
         .filter(|provider| catalog.is_plan(&provider.provider_id) == Some(true))
-        .map(|provider| provider.provider_id.as_str())
+        .map(|provider| provider.provider_id)
         .collect();
     assert!(
         !plans.is_empty(),
@@ -394,7 +394,7 @@ fn a_plan_provider_is_marked_and_its_api_entry_is_not() {
     );
     for plan in plans {
         assert!(
-            !catalog.bundled_models(plan).unwrap_or_default().is_empty(),
+            !catalog.bundled_models(&plan).unwrap_or_default().is_empty(),
             "{plan} is a plan with no declarations"
         );
     }
@@ -483,11 +483,11 @@ fn a_vendor_provider_answers_only_for_the_namespace_it_states() {
                     .iter()
                     .any(|model| canonical_namespace(model).is_some())
         })
-        .map(|provider| provider.provider_id.as_str())
+        .map(|provider| provider.provider_id)
         .collect();
     for vendor in vendors {
         assert!(
-            catalog.vendor_namespace(vendor).is_some(),
+            catalog.vendor_namespace(&vendor).is_some(),
             "{vendor} declares canonical ids but states no namespace"
         );
     }
@@ -529,7 +529,7 @@ fn a_plan_row_without_a_canonical_id_names_no_other_vendor() {
             for other in catalog.providers() {
                 let states = catalog.vendor_namespace(&other.provider_id);
                 for row in &other.models {
-                    if let Some(namespace) = states {
+                    if let Some(namespace) = states.as_deref() {
                         let declares = namespace != own
                             && canonical_namespace(row).is_none_or(|named| named == namespace)
                             && last_segment(&row.model_id).eq_ignore_ascii_case(segment);

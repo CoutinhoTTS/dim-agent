@@ -26,6 +26,7 @@ import type {
   ModelUpdateResult,
   Notification,
   ProviderCatalog,
+  ProviderModel,
   ProviderPresentation,
   ProviderSummary,
   RawBlock,
@@ -394,6 +395,21 @@ function readReasoningEfforts(model: Json, at: string): string[] | undefined {
     })
   if (reasoning.off !== undefined && reasoning.off !== null && !efforts.includes("none")) efforts.push("none")
   return efforts
+}
+
+export function readModelPage(value: unknown): { models: Array<{ providerId: string; providerName: string; model: ProviderModel; disabled: boolean }>; next?: ModelId } {
+  const page = obj(value, "provider.models.query")
+  const next = page.next === null ? undefined : modelId(page.next, "provider.models.query.next")
+  return {
+    models: arr(page.models, "provider.models.query.models").map((value, index) => {
+      const at = `provider.models.query.models[${index}]`
+      const row = obj(value, at)
+      const model = obj(row.model, `${at}.model`)
+      const efforts = readReasoningEfforts(model, `${at}.model`)
+      return { providerId: str(row, "providerId", at), providerName: str(row, "providerName", at), disabled: bool(row, "disabled", at), model: { id: str(model, "id", at), name: str(model, "name", at), ...(optStr(model, "unavailableReason", at) === undefined ? {} : { unavailableReason: optStr(model, "unavailableReason", at) }), ...(efforts === undefined ? {} : { reasoningEfforts: efforts }) } }
+    }),
+    ...(next === undefined ? {} : { next }),
+  }
 }
 
 export function readProviderCatalog(value: unknown): ProviderCatalog | undefined {

@@ -1,6 +1,7 @@
 //! Pure model descriptor projection owned by the provider service.
 
 mod id;
+mod tokens;
 
 use self::id::{Lookup, variants};
 use regex::Regex;
@@ -13,7 +14,36 @@ pub use dim_agent_types::{
     ReasoningOff,
 };
 
-const CATALOG: &str = include_str!("../resources/default-catalog.json");
+struct CatalogData {
+    providers: &'static [ProviderData],
+    models: &'static [ModelData],
+}
+
+struct ProviderData {
+    fingerprint: &'static str,
+    id: &'static str,
+    first: usize,
+    end: usize,
+    bytes: &'static [u8],
+}
+
+struct ModelData {
+    provider: usize,
+    id: &'static str,
+    index: Option<id::Index>,
+    tokens: &'static [&'static str],
+    tag: Option<&'static str>,
+    canonical: Option<&'static [&'static str]>,
+    display: &'static [&'static str],
+    bytes: &'static [u8],
+}
+
+include!(concat!(env!("OUT_DIR"), "/catalog.rs"));
+
+fn bundled_record<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> T {
+    serde_json::from_reader(flate2::read::GzDecoder::new(bytes))
+        .expect("checked-in bundled catalog records deserialize")
+}
 const REASONING_OFF: &str = include_str!("../resources/reasoning-off-overrides.json");
 
 /// Limits cross the JSON boundary into JavaScript clients without rounding.
@@ -321,18 +351,23 @@ struct OffReasoning {
     off: Option<ReasoningOff>,
 }
 
-/// Parsed bundled data and its indexes. Construct once as a normal ProviderPlugin member.
+/// Shipped records are decoded on demand; supplied catalogs own their input.
 pub struct BundledCatalog {
+    data: Option<&'static CatalogData>,
     providers: Vec<CatalogProvider>,
     by_provider: HashMap<String, usize>,
-    reasoning_off: HashMap<(String, String), ReasoningOff>,
     ids: id::IdIndex,
 }
 
 impl BundledCatalog {
     /// The catalog the bundled files describe, as every projection reads it.
     pub fn load() -> Result<Self, ProjectionError> {
-        Self::from_value(serde_json::from_str(CATALOG)?)
+        Ok(Self {
+            data: Some(&DATA),
+            providers: Vec::new(),
+            by_provider: HashMap::new(),
+            ids: id::IdIndex::new(&[]),
+        })
     }
 
     /// The same catalog `load` builds, from a parsed catalog file. A caller
@@ -357,63 +392,132 @@ impl BundledCatalog {
             .enumerate()
             .map(|(i, p)| (p.provider_id.clone(), i))
             .collect();
+        Ok(Self {
+            data: None,
+            ids: id::IdIndex::new(&file.providers),
+            providers: file.providers,
+            by_provider,
+        })
+    }
+
+    fn reasoning_overrides() -> Result<HashMap<(String, String), ReasoningOff>, ProjectionError> {
         let off_file: OffFile = serde_json::from_str(REASONING_OFF)?;
-        let mut reasoning_off = HashMap::new();
+        let mut result = HashMap::new();
         for (provider, overrides) in off_file.providers {
             for (model, entry) in overrides.models {
                 if let Some(off) = entry.reasoning.off {
                     for variant in variants(&model) {
-                        reasoning_off.insert((provider.clone(), variant), off.clone());
+                        result.insert((provider.clone(), variant), off.clone());
                     }
                 }
             }
         }
-        Ok(Self {
-            ids: id::IdIndex::new(&file.providers),
-            providers: file.providers,
-            by_provider,
-            reasoning_off,
-        })
+        Ok(result)
     }
 
-    pub fn bundled_models(&self, provider_id: &str) -> Option<&[ModelEntry]> {
-        self.by_provider
-            .get(provider_id)
-            .map(|i| self.providers[*i].models.as_slice())
+    pub(crate) fn fingerprint(&self, id: &str) -> Option<&'static str> {
+        self.data?
+            .providers
+            .iter()
+            .find(|p| p.id == id)
+            .map(|p| p.fingerprint)
     }
 
-    pub fn providers(&self) -> impl Iterator<Item = &CatalogProvider> {
-        self.providers.iter()
+    pub(crate) fn revision(&self) -> &'static str {
+        REVISION
     }
 
-    pub fn provider(&self, provider_id: &str) -> Option<&CatalogProvider> {
-        self.by_provider
-            .get(provider_id)
-            .map(|index| &self.providers[*index])
+    pub fn provider_ids(&self) -> impl Iterator<Item = &str> {
+        self.data
+            .into_iter()
+            .flat_map(|data| data.providers.iter().map(|p| p.id))
+            .chain(self.providers.iter().map(|p| p.provider_id.as_str()))
+    }
+
+    pub fn model(&self, provider_id: &str, model_id: &str) -> Option<ModelEntry> {
+        if let Some(data) = self.data {
+            let provider = data.providers.iter().find(|p| p.id == provider_id)?;
+            let row = data.models[provider.first..provider.end]
+                .iter()
+                .find(|row| row.id == model_id)?;
+            let mut entry: ModelEntry = bundled_record(row.bytes);
+            drop_undeclared_limits(&mut entry);
+            Some(entry)
+        } else {
+            self.providers[*self.by_provider.get(provider_id)?]
+                .models
+                .iter()
+                .find(|m| m.model_id == model_id)
+                .cloned()
+        }
+    }
+
+    pub fn bundled_models(&self, provider_id: &str) -> Option<Vec<ModelEntry>> {
+        if let Some(data) = self.data {
+            let provider = data.providers.iter().find(|p| p.id == provider_id)?;
+            Some(
+                data.models[provider.first..provider.end]
+                    .iter()
+                    .map(|row| {
+                        let mut entry: ModelEntry = bundled_record(row.bytes);
+                        drop_undeclared_limits(&mut entry);
+                        entry
+                    })
+                    .collect(),
+            )
+        } else {
+            Some(
+                self.providers[*self.by_provider.get(provider_id)?]
+                    .models
+                    .clone(),
+            )
+        }
+    }
+
+    pub fn providers(&self) -> impl Iterator<Item = CatalogProvider> + '_ {
+        self.provider_ids()
+            .map(|id| self.provider(id).expect("a catalog provider id"))
+    }
+
+    pub fn provider(&self, provider_id: &str) -> Option<CatalogProvider> {
+        let mut provider = self.provider_header(provider_id)?;
+        provider.models = self.bundled_models(provider_id)?;
+        Some(provider)
+    }
+
+    /// Provider settings without model descriptors.
+    pub(crate) fn provider_header(&self, provider_id: &str) -> Option<CatalogProvider> {
+        if let Some(data) = self.data {
+            Some(bundled_record(
+                data.providers.iter().find(|p| p.id == provider_id)?.bytes,
+            ))
+        } else {
+            let mut provider = self.providers[*self.by_provider.get(provider_id)?].clone();
+            provider.models.clear();
+            Some(provider)
+        }
     }
 
     /// Whether the bundled declarations for `provider_id` belong to that
     /// provider's own vendor or to a reseller's mixture, as the catalog states
     /// them. `None` when the provider is not bundled or lists no models.
     pub fn role(&self, provider_id: &str) -> Option<ProviderRole> {
-        self.provider(provider_id)?.metadata.as_ref()?.role
+        self.provider_header(provider_id)?.metadata.as_ref()?.role
     }
 
     /// Whether the bundled declarations for `provider_id` belong to a
     /// subscription or coding plan rather than the vendor's API entry.
     pub fn is_plan(&self, provider_id: &str) -> Option<bool> {
-        Some(self.provider(provider_id)?.metadata.as_ref()?.plan)
+        Some(self.provider_header(provider_id)?.metadata.as_ref()?.plan)
     }
 
     /// The canonical namespace `provider_id`'s own models name, as the
     /// provider's sync policy stated it. `None` when the provider is not
     /// bundled or states none.
-    pub fn vendor_namespace(&self, provider_id: &str) -> Option<&str> {
-        self.provider(provider_id)?
-            .metadata
-            .as_ref()?
+    pub fn vendor_namespace(&self, provider_id: &str) -> Option<String> {
+        self.provider_header(provider_id)?
+            .metadata?
             .vendor_namespace
-            .as_deref()
     }
 
     pub fn project(
@@ -823,11 +927,8 @@ impl BundledCatalog {
     }
 
     fn apply_provider_rules(&self, provider: &ProviderProjection, entry: &mut ModelEntry) {
-        let bundled = self
-            .by_provider
-            .get(&provider.provider_id)
-            .map(|i| &self.providers[*i]);
-        let metadata = bundled.and_then(|p| p.metadata.as_ref());
+        let bundled = self.provider_header(&provider.provider_id);
+        let metadata = bundled.as_ref().and_then(|p| p.metadata.as_ref());
         let override_window = provider
             .context_window_override
             .or_else(|| metadata.and_then(|m| m.context_window_override));
@@ -851,10 +952,15 @@ impl BundledCatalog {
                 .as_ref()
                 .and_then(|m| m.reasoning.as_ref())
                 .is_some_and(|r| r.supported && r.off.is_none())
-            && let Some(off) = variants(&entry.model_id).iter().find_map(|id| {
-                self.reasoning_off
-                    .get(&(provider.provider_id.clone(), id.clone()))
-            })
+            && let Some(off) = {
+                let overrides =
+                    Self::reasoning_overrides().expect("validated bundled reasoning overrides");
+                variants(&entry.model_id).iter().find_map(|id| {
+                    overrides
+                        .get(&(provider.provider_id.clone(), id.clone()))
+                        .cloned()
+                })
+            }
         {
             entry
                 .metadata

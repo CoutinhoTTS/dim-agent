@@ -10,7 +10,7 @@ registerHooks({
   resolve(specifier, context, next) {
     if (context.parentURL?.endsWith("ModalitySettings.vue")) {
       if (specifier === "../../stores/connection") return { url: "data:text/javascript,export const useConnectionStore=()=>globalThis.settingsConnection", shortCircuit: true }
-      if (specifier === "../../stores/models") return { url: "data:text/javascript,export const useModelsStore=()=>globalThis.settingsModels", shortCircuit: true }
+      if (specifier === "../../stores/models") return { url: "data:text/javascript,export const useModels=()=>globalThis.settingsModels", shortCircuit: true }
     }
     if (specifier === "vue-i18n") return { url: "data:text/javascript,export const useI18n=()=>({t:key=>key,locale:{value:'en'}})", shortCircuit: true }
     if (specifier.endsWith(".vue") && !specifier.endsWith("ModalitySettings.vue")) return { url: "data:text/javascript,export default { props: ['busy', 'error', 'saved'], setup() { return () => null } }", shortCircuit: true }

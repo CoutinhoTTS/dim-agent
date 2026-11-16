@@ -12,7 +12,7 @@ registerHooks({
   resolve(specifier, context, next) {
     if (specifier === "../../stores/connection") return { url: "data:text/javascript,export const useConnectionStore=()=>globalThis.defaultsConnection", shortCircuit: true }
     if (specifier === "../../stores/sessions") return { url: "data:text/javascript,export const useSessionsStore=()=>({workspaces:[{cwd:'/project',name:'Project'}]})", shortCircuit: true }
-    if (specifier === "../../stores/models") return { url: "data:text/javascript,export const useModelsStore=()=>({providers:[{providerId:'fixture',name:'Fixture',models:[{id:'a',name:'A'},{id:'b',name:'B'}]}],load:async()=>{},error:''})", shortCircuit: true }
+    if (specifier === "../../stores/models") return { url: "data:text/javascript,export const useModels=()=>({providers:[{providerId:'fixture',name:'Fixture',models:[{id:'a',name:'A'},{id:'b',name:'B'}]}],load:async()=>{},error:''})", shortCircuit: true }
     if (specifier === "vue-i18n") return { url: "data:text/javascript,export const useI18n=()=>({locale:{value:'en'}})", shortCircuit: true }
     try { return next(specifier, context) } catch (error) {
       if (specifier.startsWith(".") && !/\.(ts|vue)$/.test(specifier)) return next(`${specifier}.ts`, context)

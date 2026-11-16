@@ -473,15 +473,11 @@ impl ProviderService {
                 }
                 validate_static_record(&provider_id, &mut admitted)
                     .map_err(|error| ProviderError::InvalidConfig(error.to_string()))?;
-                let bundled_models =
-                    owner.bundled.provider(&provider_id).is_some() && !admitted.remote_models;
+                let bundled_models = owner.bundled.provider_ids().any(|id| id == provider_id)
+                    && !admitted.remote_models;
                 let own_models =
                     !bundled_models && owner.remote_model_list(&provider_id, &admitted);
                 let (models, models_listed) = if !admitted.enabled {
-                    // A re-pointed disabled record drops the old endpoint's
-                    // models in this same write, without a request: they are
-                    // not the new endpoint's, and the empty, listable catalog
-                    // is what the picker refills once the record is enabled.
                     (own_models.then(Vec::new), ModelsListed::Disabled)
                 } else if bundled_models {
                     // The bundled catalog defines these models; a later

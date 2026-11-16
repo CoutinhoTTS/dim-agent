@@ -668,7 +668,7 @@ fn listed_ids(catalog: &BundledCatalog) -> Vec<String> {
     let mut seen = HashSet::new();
     catalog
         .providers()
-        .flat_map(|provider| provider.models.iter().map(|model| model.model_id.clone()))
+        .flat_map(|provider| provider.models.into_iter().map(|model| model.model_id))
         .filter(|id| seen.insert(id.clone()))
         .collect()
 }

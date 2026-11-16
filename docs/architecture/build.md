@@ -41,7 +41,7 @@ Evaluation-tool tests are opt-in: `cargo test --locked -p xtask --features eval-
 
 ## Bundled provider catalog
 
-The App Server embeds the checked-in `crates/dim-app-server/resources/default-catalog.json`.
+The App Server build compiles the checked-in `crates/dim-app-server/resources/default-catalog.json` into independently compressed provider/model records and static lookup keys. Runtime reads decode individual matching records.
 It also serves as the starting catalog for maintenance. Use the Node version in `.node-version`.
 
 ```sh
@@ -64,7 +64,7 @@ or declare its bundled rows authoritative. `model-overrides.json` holds field pa
 provider and model, re-applied after every sync. A patch merges key by key into the
 upstream row, so a `limit` patch keeps the output cap upstream states, and a patch that no
 longer matches a model fails the run instead of disappearing. Both tables are read by the
-sync alone: the binary embeds `default-catalog.json` and `reasoning-off-overrides.json`
+sync alone: the binary embeds the compiled catalog and `reasoning-off-overrides.json`
 and reads neither table.
 
 The offline validation checks the tables against the catalog: every provider has a policy,

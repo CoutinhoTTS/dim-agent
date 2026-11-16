@@ -3075,6 +3075,7 @@
       "file": "crates/dim-app-server/src/model_catalog.rs",
       "unexpandedMacros": [
         "b",
+        "include",
         "include_str",
         "inherit",
         "inherit_capability",
@@ -3092,6 +3093,13 @@
         "matches",
         "vec"
       ]
+    },
+    {
+      "id": "dim_app_server::model_catalog::tokens",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::model_catalog",
+      "file": "crates/dim-app-server/src/model_catalog/tokens.rs",
+      "unexpandedMacros": []
     },
     {
       "id": "dim_app_server::model_log",
@@ -3348,6 +3356,15 @@
       ]
     },
     {
+      "id": "dim_app_server::provider::query",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::provider",
+      "file": "crates/dim-app-server/src/provider/query.rs",
+      "unexpandedMacros": [
+        "params"
+      ]
+    },
+    {
       "id": "dim_app_server::provider::remote",
       "crate": "dim_app_server",
       "parent": "dim_app_server::provider",
@@ -3388,6 +3405,7 @@
       "file": "crates/dim-app-server/src/provider/view.rs",
       "unexpandedMacros": [
         "format",
+        "params",
         "unreachable",
         "vec"
       ]
@@ -29512,10 +29530,18 @@
         "path id",
         "path id::IdIndex",
         "path id::IdIndex::new",
+        "path id::Index",
         "path id::is_placeholder",
         "path variants",
         "use self::id::Lookup",
         "use self::id::variants"
+      ]
+    },
+    {
+      "from": "dim_app_server::model_catalog",
+      "to": "dim_app_server::model_catalog::tokens",
+      "references": [
+        "mod tokens"
       ]
     },
     {
@@ -29537,7 +29563,22 @@
         "path ProviderProjection",
         "path ProviderRole",
         "path ProviderRole::Vendor",
+        "path bundled_record",
+        "path drop_undeclared_limits",
         "path entry_kind"
+      ]
+    },
+    {
+      "from": "dim_app_server::model_catalog::id",
+      "to": "dim_app_server::model_catalog::tokens",
+      "references": [
+        "path split_display",
+        "path split_id",
+        "path split_tokens",
+        "path tokens",
+        "use super::tokens::split_display",
+        "use super::tokens::split_id",
+        "use super::tokens::split_tokens"
       ]
     },
     {
@@ -30705,6 +30746,16 @@
     },
     {
       "from": "dim_app_server::provider",
+      "to": "dim_app_server::provider::query",
+      "references": [
+        "mod query",
+        "path query",
+        "use query::ModelPage",
+        "use query::ModelQuery"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider",
       "to": "dim_app_server::provider::remote",
       "references": [
         "mod remote",
@@ -30745,6 +30796,9 @@
       "to": "dim_app_server::provider::view",
       "references": [
         "mod view",
+        "use view::ManagementInfo",
+        "use view::ManagementPage",
+        "use view::ManagementPageRequest",
         "use view::ManagementProvider",
         "use view::ManagementView",
         "use view::ModelsListed"
@@ -31120,6 +31174,13 @@
       ]
     },
     {
+      "from": "dim_app_server::provider::management",
+      "to": "dim_app_server::provider::view",
+      "references": [
+        "path super::ManagementPageRequest"
+      ]
+    },
+    {
       "from": "dim_app_server::provider::models",
       "to": "dim_agent_types::model",
       "references": [
@@ -31196,9 +31257,7 @@
       "to": "dim_app_server::model_catalog",
       "references": [
         "path ModelEntry",
-        "path ModelMetadata",
-        "use crate::model_catalog::ModelEntry",
-        "use crate::model_catalog::ModelMetadata"
+        "use crate::model_catalog::ModelEntry"
       ]
     },
     {
@@ -31213,7 +31272,6 @@
       "to": "dim_app_server::model_catalog",
       "references": [
         "path ModelEntry",
-        "path ModelMetadata",
         "path crate::model_catalog::ModelStatus::Unavailable"
       ]
     },
@@ -31298,6 +31356,64 @@
         "path ProviderReasoningConfig::default",
         "path SummaryStyle::Detailed",
         "use dim_agent_capabilities::host::ModelProtocol"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::query",
+      "to": "dim_agent_capabilities::host",
+      "references": [
+        "path HostError::Cancelled"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::query",
+      "to": "dim_agent_types::input",
+      "references": [
+        "path input"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::query",
+      "to": "dim_agent_types::model",
+      "references": [
+        "path ModelPreferences",
+        "path model"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::query",
+      "to": "dim_agent_types::profile",
+      "references": [
+        "path ModelId"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::query",
+      "to": "dim_app_server::provider",
+      "references": [
+        "path ProviderError",
+        "path ProviderError::Failed",
+        "path ProviderError::InvalidConfig",
+        "path ProviderError::from",
+        "path ProviderModel",
+        "path ProviderService",
+        "path read_static",
+        "path storage"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::query",
+      "to": "dim_app_server::provider::naming",
+      "references": [
+        "path naming::Name",
+        "path naming::unique_names"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::query",
+      "to": "dim_app_server::provider::preferences",
+      "references": [
+        "path preferences"
       ]
     },
     {
@@ -31571,6 +31687,7 @@
         "path PersistedProviderRecord::Static",
         "path ProviderError",
         "path ProviderError::Failed",
+        "path ProviderError::InvalidConfig",
         "path ProviderError::NotFound",
         "path ProviderError::Unsupported",
         "path ProviderError::from",
@@ -31581,12 +31698,13 @@
         "path StaticAuth::Anonymous",
         "path StaticProviderRecord",
         "path StaticRecordKind::Builtin",
-        "path bundled_seeds",
+        "path bundled_seed_for",
         "path parse_provider_row",
+        "path read_model_record",
         "path reseed_candidate",
         "path same_account",
         "path static_entries",
-        "path static_models",
+        "path static_models_from_entries",
         "path storage",
         "path super::can_list_models"
       ]
@@ -31618,6 +31736,13 @@
       "to": "dim_app_server::provider::preferences",
       "references": [
         "path preferences"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::view",
+      "to": "dim_app_server::provider::query",
+      "references": [
+        "path query"
       ]
     },
     {
@@ -40170,6 +40295,7 @@
       "to": "dim_agent_types::profile",
       "references": [
         "path ModelId",
+        "path dim_agent_types::ModelId",
         "use dim_agent_types::ModelId"
       ]
     },
@@ -40388,6 +40514,7 @@
         "path Command::OpenLine",
         "path Command::Plugin",
         "path Command::Provider",
+        "path Command::QueryModels",
         "path Command::ReadIsolation",
         "path Command::ReadModelPolicy",
         "path Command::ReadPromptSettings",
@@ -40446,9 +40573,7 @@
         "path EmptyProvider",
         "path EmptyReason::Disabled",
         "path EmptyReason::Mixed",
-        "path EmptyReason::NoModels",
         "path EmptyReason::Unavailable",
-        "path EmptyReason::Unreadable",
         "path ExecutionSnapshot",
         "path ManagementReply",
         "path ModelItem",
@@ -40513,7 +40638,6 @@
         "path Update::ModelFeatures",
         "path Update::ModelPolicy",
         "path Update::Models",
-        "path Update::ModelsRefilled",
         "path Update::Notice",
         "path Update::Oauth",
         "path Update::PermissionSelected",
@@ -40773,6 +40897,7 @@
         "path CatalogModel",
         "path Created",
         "path ProviderCatalogSnapshot",
+        "path crate::wire::CatalogModel",
         "path crate::wire::CatalogPreferences",
         "path crate::wire::warnings",
         "use crate::wire::CatalogModel",
@@ -44272,6 +44397,7 @@
         "path Effect::Close",
         "path Effect::None",
         "path Effect::OpenArea",
+        "path Effect::QueryModels",
         "path Effect::ReadModelPolicy",
         "path Effect::SelectModel",
         "path Effect::SetModelPolicy",
@@ -44331,7 +44457,6 @@
       "references": [
         "path KeyCode",
         "path KeyCode::Char",
-        "path KeyCode::Delete",
         "path KeyCode::Down",
         "path KeyCode::Enter",
         "path KeyCode::Left",
@@ -44929,6 +45054,13 @@
       "to": "dim_agent_types::permission",
       "references": [
         "path dim_agent_types::PermissionPreset"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::prompts",
+      "to": "dim_agent_types::profile",
+      "references": [
+        "path dim_agent_types::ModelId"
       ]
     },
     {
@@ -48375,6 +48507,7 @@
         "path Command::OpenLine",
         "path Command::Plugin",
         "path Command::Provider",
+        "path Command::QueryModels",
         "path Command::ReadIsolation",
         "path Command::ReadModelPolicy",
         "path Command::ReadPromptSettings",
@@ -48473,7 +48606,6 @@
         "path Update::ModelFeatures",
         "path Update::ModelPolicy",
         "path Update::Models",
-        "path Update::ModelsRefilled",
         "path Update::Notice",
         "path Update::Oauth",
         "path Update::PermissionSelected",
@@ -48894,6 +49026,7 @@
         "path Effect::OpenUrl",
         "path Effect::Plugin",
         "path Effect::Provider",
+        "path Effect::QueryModels",
         "path Effect::ReadIsolation",
         "path Effect::ReadModelPolicy",
         "path Effect::Refresh",

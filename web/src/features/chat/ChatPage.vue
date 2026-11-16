@@ -15,14 +15,14 @@ import { goalCall, goalObjective, parseGoalRequest, type Goal, type GoalStatus }
 import { intervalSeconds, loopReport, parseLoopRequest } from "../../loop"
 import { useChatStore } from "../../stores/chat"
 import { useConnectionStore } from "../../stores/connection"
-import { useModelsStore } from "../../stores/models"
+import { useModels } from "../../stores/models"
 import { useSessionsStore, workspaceName } from "../../stores/sessions"
 import { useToastStore } from "../../stores/toast"
 import { useUiStore } from "../../stores/ui"
 
 const props = defineProps<{ sessionId: string }>()
 const { t } = useI18n()
-const models = useModelsStore()
+const models = useModels()
 const chat = useChatStore()
 const connection = useConnectionStore()
 const sessions = useSessionsStore()
@@ -72,7 +72,7 @@ const effortChoices = computed(() => {
   const entry = models.providers?.find((provider) => provider.providerId === model.providerId)?.models.find((candidate) => candidate.id === model.modelId)
   return entry?.reasoningEfforts
 })
-watch(() => view.value?.status, (status) => { if (status === "ready") void models.load() }, { immediate: true })
+watch(() => view.value?.model, (model) => { if (model && models.available) void models.load(model); else models.clear() }, { immediate: true })
 const sessionCommands = computed(() => {
   const session = view.value
   if (session?.status !== "ready") return undefined

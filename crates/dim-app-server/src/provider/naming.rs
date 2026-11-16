@@ -1,7 +1,13 @@
 //! The model names one provider's catalog publishes. They are unique within
 //! that provider and computed on every read, so nothing stores them.
-use crate::model_catalog::{ModelEntry, ModelMetadata};
+use crate::model_catalog::ModelEntry;
 use std::collections::{HashMap, HashSet};
+
+pub(crate) struct Name {
+    pub model_id: String,
+    pub display_name: String,
+    pub label: Option<String>,
+}
 
 /// What a renamed row puts between its own name and its qualifier.
 const SEPARATOR: &str = " · ";
@@ -10,21 +16,14 @@ const SEPARATOR: &str = " · ";
 /// reads them. Another gateway's label is added here.
 const LABELS: &[&str] = &["magpie_label"];
 
-/// Where a listing says one row comes from: the text after the last separator
-/// of the label it states for that row, which is the row's name followed by its
-/// origin. `None` when it states no label, or one that names no origin.
-fn label_qualifier(metadata: &ModelMetadata) -> Option<&str> {
-    LABELS.iter().find_map(|label| {
-        let value = metadata.raw.get(*label)?.as_str()?;
-        let (_, qualifier) = value.rsplit_once(SEPARATOR)?;
-        Some(qualifier.trim()).filter(|qualifier| !qualifier.is_empty())
-    })
-}
-
 /// The name a row publishes when it keeps the origin its listing states for it:
 /// its own name, trimmed, followed by that origin.
-fn label_candidate(entry: &ModelEntry) -> Option<String> {
-    let qualifier = entry.metadata.as_ref().and_then(label_qualifier)?;
+fn label_candidate(entry: &Name) -> Option<String> {
+    let (_, qualifier) = entry.label.as_deref()?.rsplit_once(SEPARATOR)?;
+    let qualifier = qualifier.trim();
+    if qualifier.is_empty() {
+        return None;
+    }
     Some(format!(
         "{}{SEPARATOR}{qualifier}",
         entry.display_name.trim()
@@ -51,7 +50,23 @@ fn label_candidate(entry: &ModelEntry) -> Option<String> {
 /// stated name. Everything else is read off the whole set before any name is
 /// assigned, so listing the same rows in another order names each row the same.
 pub(crate) fn unique<'a>(entries: impl IntoIterator<Item = &'a ModelEntry>) -> Vec<String> {
-    let entries: Vec<&ModelEntry> = entries.into_iter().collect();
+    let entries: Vec<_> = entries
+        .into_iter()
+        .map(|entry| Name {
+            model_id: entry.model_id.clone(),
+            display_name: entry.display_name.clone(),
+            label: entry
+                .metadata
+                .as_ref()
+                .and_then(|m| LABELS.iter().find_map(|label| m.raw.get(*label)?.as_str()))
+                .map(str::to_owned),
+        })
+        .collect();
+    unique_names(&entries)
+}
+
+pub(crate) fn unique_names(entries: &[Name]) -> Vec<String> {
+    let entries: Vec<&Name> = entries.iter().collect();
     let mut stated: HashMap<&str, usize> = HashMap::new();
     for entry in &entries {
         *stated.entry(entry.display_name.trim()).or_default() += 1;
@@ -145,7 +160,7 @@ pub(crate) fn unique<'a>(entries: impl IntoIterator<Item = &'a ModelEntry>) -> V
 
 /// The name a shared row publishes when its label names no other row: its own
 /// name, trimmed, then its id, trimmed.
-fn id_fallback(entry: &ModelEntry) -> String {
+fn id_fallback(entry: &Name) -> String {
     format!(
         "{}{SEPARATOR}{}",
         entry.display_name.trim(),
@@ -495,23 +510,6 @@ mod tests {
             unique(&entries),
             ["GLM-5.3 · b", "GLM-5.3 · b 2", "GLM-5.3 · b 3"],
             "ids name one row each, so only a repeated id needs the counter"
-        );
-    }
-
-    #[test]
-    fn a_label_is_read_as_the_text_after_its_last_separator() {
-        let labelled: ModelMetadata = serde_json::from_value(json!({
-            "raw": {"magpie_label": "GLM-5.3 · SiliconFlow · Extra"}
-        }))
-        .unwrap();
-        assert_eq!(label_qualifier(&labelled), Some("Extra"));
-        let bare: ModelMetadata =
-            serde_json::from_value(json!({"raw": {"magpie_label": "GLM-5.3"}})).unwrap();
-        assert_eq!(label_qualifier(&bare), None, "a bare name states no origin");
-        assert_eq!(
-            label_qualifier(&ModelMetadata::default()),
-            None,
-            "a listing with no label states no origin"
         );
     }
 }

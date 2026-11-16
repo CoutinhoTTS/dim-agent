@@ -5,7 +5,7 @@ import { useI18n } from "vue-i18n"
 import type { DraftAttachments, FileCandidate, ModelId, PermissionPreset, PermissionPolicy } from "../../rpc/protocol"
 import { linkMentions, mentionTrigger, type FileMention, type MentionTrigger } from "../../mentions"
 import { SKILL_TOKEN_PREFIX, namesSkillToken, skillCommandQuery, skillSegments, startsWithSkillToken } from "../../skill-token"
-import { useModelsStore } from "../../stores/models"
+import { useModels } from "../../stores/models"
 import { useSessionsStore } from "../../stores/sessions"
 import { useConnectionStore } from "../../stores/connection"
 import ComposerModelMenu from "./ComposerModelMenu.vue"
@@ -62,7 +62,7 @@ const { t } = useI18n()
 const route = useRoute()
 const router = useRouter()
 
-const models = useModelsStore()
+const models = useModels()
 const sessions = useSessionsStore()
 const connection = useConnectionStore()
 const field = ref<HTMLTextAreaElement>()

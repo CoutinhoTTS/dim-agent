@@ -3,7 +3,7 @@ import { computed, onMounted, ref } from "vue"
 import { useSettingsText } from "../../i18n/settings-general"
 import { readDefaultSelection, readExecShell, readModelPolicy, readRevision, readSelectedModel, type DefaultSelection, type ExecShellView, type ModelPolicyView } from "../../rpc/general-settings"
 import { useConnectionStore } from "../../stores/connection"
-import { useModelsStore } from "../../stores/models"
+import { useModels } from "../../stores/models"
 import { useSessionsStore } from "../../stores/sessions"
 import GeneralSettingsStatus from "./GeneralSettingsStatus.vue"
 import { bindSettingsDirty, messageFrom, reloadSettingsOnReconnect } from "./context"
@@ -12,7 +12,7 @@ const USER_SCOPE = "__user__"
 const AUTO_SHELL = "__auto__"
 const s = useSettingsText()
 const connection = useConnectionStore()
-const models = useModelsStore()
+const models = useModels()
 const sessions = useSessionsStore()
 const snapshot = ref<DefaultSelection>()
 const policy = ref<ModelPolicyView>()
@@ -127,6 +127,8 @@ onMounted(() => load())
         <UFormField :label="s('Model', '模型')">
           <USelect :model-value="selected || undefined" :items="modelItems" :placeholder="s('Automatic fallback — choose a model to pin a default', '自动回退 — 选择模型以固定默认值')" :disabled="busy || !connection.supports('provider.select')" class="w-full" @update:model-value="selected = String($event)" />
         </UFormField>
+        <UInput :placeholder="s('Search models', '搜索模型')" @update:model-value="models.load({ query: String($event) })" />
+        <UButton v-if="models.next" :loading="models.loading" @click="models.loadMore()">{{ s('Load more models', '加载更多模型') }}</UButton>
         <p v-if="!options.length">{{ s('No selectable models. Configure a provider and its model limits first.', '没有可选模型。请先配置提供商和模型限制。') }}</p>
       </section>
       <section v-if="policy" class="settings-card">

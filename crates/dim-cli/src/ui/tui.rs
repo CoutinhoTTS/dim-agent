@@ -2817,11 +2817,6 @@ impl App {
                     prompt.set_choices(result);
                 }
             }
-            Update::ModelsRefilled => {
-                if matches!(self.prompt, Some(Prompt::Models(_))) {
-                    self.host.send(Command::ListModels);
-                }
-            }
             Update::Isolation(result) => {
                 if let Some(Prompt::Isolation(panel)) = &mut self.prompt {
                     panel.set_snapshot(result);
@@ -3048,7 +3043,10 @@ impl App {
                     Some(Prompt::Sessions(panel)) => panel.paste(&text),
                     Some(Prompt::Tasks(panel)) => panel.paste(&text),
                     Some(Prompt::Lines(panel)) => panel.paste(&text),
-                    Some(Prompt::Models(panel)) => panel.paste(&text),
+                    Some(Prompt::Models(panel)) => {
+                        let effect = panel.paste(&text);
+                        self.apply_effect(effect);
+                    }
                     Some(Prompt::Theme(panel)) => panel.paste(&text),
                     Some(Prompt::Language(panel)) => panel.paste(&text),
                     Some(Prompt::Settings(panel)) => panel.paste(&text),
@@ -4239,12 +4237,19 @@ impl App {
                     t("The browser could not be opened. Open the link manually, then return here.")
                 });
             }
+            Effect::QueryModels { query, after } => {
+                self.host.send(Command::QueryModels { query, after })
+            }
             Effect::ClearModelPreferences {
+                query,
+                after,
                 provider_id,
                 model_id,
                 expected_version,
             } => {
                 self.host.send(Command::ClearModelPreferences {
+                    query,
+                    after,
                     provider_id,
                     model_id,
                     expected_version,

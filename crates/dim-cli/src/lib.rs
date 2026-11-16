@@ -407,7 +407,7 @@ async fn declaration_hint(
     let snapshot: wire::ProviderCatalogSnapshot = client
         .typed(
             "provider.catalog",
-            serde_json::json!({"providerId": provider_id}),
+            serde_json::json!({"providerId": provider_id,"modelId":model_id}),
         )
         .await
         .ok()?;

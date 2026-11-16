@@ -34,7 +34,7 @@ registerHooks({
 
 const { default: AccountSettings } = await import("../src/features/settings/AccountSettings.vue")
 const { default: ProviderSettings } = await import("../src/features/settings/ProviderSettings.vue")
-const { useModelsStore } = await import("../src/stores/models.ts")
+const { useModels } = await import("../src/stores/models.ts")
 const { settingsDirtyKey } = await import("../src/features/settings/context.ts")
 const node = (type, text = "") => ({
   type, text, children: [], props: {}, parent: undefined, value: "", options: [], selectedIndex: -1,
@@ -196,7 +196,7 @@ test("Dim device sign-in fetches models and the signed-in account can retry a fa
     assert.equal(refreshes, 2)
     assert.match(text(root), /modelListRefreshed/)
     assert.doesNotMatch(text(root), /Relay timeout/)
-    assert.equal(useModelsStore(pinia).providers[0].models[0].id, "relay-model")
+    assert.equal(useModels().providers, undefined)
   } finally { app.unmount(); delete globalThis.settingsConnection }
 })
 

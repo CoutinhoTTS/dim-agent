@@ -1,5 +1,22 @@
 # Rust 会话存储格式
 
+## v51: Provider query indexes and bundled revision
+
+Adds `provider_query_records` with indexed enablement, credential configuration
+and provider kind, plus the provider header with model arrays removed.
+`provider_models` stores one default, user or override model entry per
+`(provider_id, model_id, source)` and indexes model IDs. Provider record
+insert/update triggers maintain both projections in the same transaction;
+provider deletion cascades to both. The upgrade backfills existing records.
+Malformed records remain available for owner diagnostics and produce no model
+entries. These tables are derived query projections of the Provider-owned record.
+
+`provider_bundle` records the bundled source fingerprint, expected semantic
+definition fingerprint and pending conflicts. `provider_catalog_revision` records
+the applied catalog revision. Existing provider payloads and versions retain
+their format. Schema and backfill commit in the native upgrade transaction; an
+error rolls back the upgrade. Older daemons reject v51 at admission.
+
 ## v50: native image migration
 
 Startup converts retained inline images in adopted inputs, tool results, compaction

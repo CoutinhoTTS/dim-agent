@@ -202,6 +202,7 @@ pub const WEB_MANAGEMENT_METHODS: &[&str] = &[
     "report.cancel",
     "ui.extensions.list",
     "provider.management",
+    "provider.models.query",
     "provider.management.list",
     "provider.create",
     "provider.update",

@@ -14,17 +14,15 @@ fn models_reports_account_discovery_failure_instead_of_an_empty_list() {
         wire.no_context();
         let providers = wire.read("account.providers");
         wire.reply(&providers, json!([]));
-        let providers = wire.read("provider.list");
-        wire.reply(&providers, json!({"providers":[]}));
-        let accounts = wire.read("account.providers");
-        wire.send(json!({"jsonrpc":"2.0","id":accounts["id"],"error":{
+        let models = wire.read("provider.models.query");
+        wire.send(json!({"jsonrpc":"2.0","id":models["id"],"error":{
             "code":-32000,"message":"Account discovery is unavailable","data":{"appError":"account_unavailable"}}}));
         wire.hold();
     });
     let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("test / model");
     terminal.write(b"/models\r");
-    terminal.until("account.providers: Account discovery is unavailable");
+    terminal.until("Account discovery is unavailable");
     home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
@@ -677,21 +675,14 @@ fn tui_models_area_keeps_a_refresh_whose_read_fails() {
             }
         }
         wait_shown.recv_timeout(PATIENCE).unwrap();
-        let request = wire.read("provider.list");
+        let request = wire.read("provider.models.query");
         wire.reply(
             &request,
-            json!({"providers":[{"providerId":"test","displayName":"Test","enabled":true}]}),
-        );
-        let request = wire.read("account.providers");
-        wire.reply(&request, json!([]));
-        let request = wire.read("provider.catalog");
-        wire.reply(
-            &request,
-            json!({"catalog":{"version":3,"disabledModelIds":[],"models":[{
+            picker_page("test", "Test", json!({"catalog":{"version":3,"disabledModelIds":[],"models":[{
                 "id":"flash","name":"Flash","capabilities":{
                     "modalities":["text"],"toolCalling":true,"streaming":true,
                     "structuredOutput":true,"vision":false,"audio":false,
-                    "reasoning":false,"contextWindow":128000,"maxOutputTokens":16384}}]}}),
+                    "reasoning":false,"contextWindow":128000,"maxOutputTokens":16384}}]}})),
         );
         let area = json!({"providers": [{
             "providerId": "test",
@@ -717,11 +708,8 @@ fn tui_models_area_keeps_a_refresh_whose_read_fails() {
                 "actions": ["set_enabled", "edit"]
             }]
         }]});
-        // The picker's load, then the panel's own read.
-        for _ in 0..2 {
-            let request = wire.read("provider.management");
-            wire.reply(&request, area.clone());
-        }
+        let request = wire.read("provider.management");
+        wire.reply(&request, area.clone());
         // Ctrl+R reads, refreshes, then the read that reports the new
         // catalog fails.
         let request = wire.read("provider.management");
@@ -767,6 +755,23 @@ fn capabilities() -> Value {
     })
 }
 
+pub(super) fn picker_page(provider_id: &str, provider_name: &str, snapshot: Value) -> Value {
+    let catalog = &snapshot["catalog"];
+    let models: Vec<_> = catalog["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|model| {
+            json!({
+                "providerId":provider_id,"providerName":provider_name,"model":model,
+                "version":catalog["version"],"preferences":{},
+                "disabled":catalog["disabledModelIds"].as_array().unwrap().contains(&model["id"])
+            })
+        })
+        .collect();
+    json!({"models":models,"next":null,"empty":[]})
+}
+
 /// `provider.catalog` as the picker reads it.
 fn picker_catalog() -> Value {
     json!({"catalog": {"version": 3, "disabledModelIds": [], "models": [
@@ -804,18 +809,23 @@ fn picker_and_limit_declaration_read_the_same_catalog() {
                 wire.no_context();
                 let accounts = wire.read("account.providers");
                 wire.reply(&accounts, json!([]));
-                let providers = wire.read("provider.list");
-                wire.reply(
-                    &providers,
-                    json!({"providers":[{
-                    "providerId":"fixture","displayName":"Fixture","enabled":true}]}),
-                );
-                let accounts = wire.read("account.providers");
-                wire.reply(&accounts, json!([]));
             }
-            let catalog = wire.read("provider.catalog");
-            assert_eq!(catalog["params"], json!({"providerId":"fixture"}));
-            wire.reply(&catalog, snapshot.clone());
+            let catalog = wire.read(if tui {
+                "provider.models.query"
+            } else {
+                "provider.catalog"
+            });
+            if !tui {
+                assert_eq!(catalog["params"], json!({"providerId":"fixture"}));
+            }
+            wire.reply(
+                &catalog,
+                if tui {
+                    picker_page("fixture", "Fixture", snapshot.clone())
+                } else {
+                    snapshot.clone()
+                },
+            );
             if tui {
                 wire.hold();
             } else {
@@ -968,17 +978,8 @@ fn tui_models_area_opens_and_toggles_a_model() {
         }
         wait_shown.recv_timeout(PATIENCE).unwrap();
         // The picker's own load.
-        let request = wire.read("provider.list");
-        wire.reply(
-            &request,
-            json!({"providers":[{"providerId":"test","displayName":"Test","enabled":true}]}),
-        );
-        let request = wire.read("account.providers");
-        wire.reply(&request, json!([]));
-        let request = wire.read("provider.catalog");
-        wire.reply(&request, picker_catalog());
-        let request = wire.read("provider.management");
-        wire.reply(&request, test_provider(area_models(true), 3));
+        let request = wire.read("provider.models.query");
+        wire.reply(&request, picker_page("test", "Test", picker_catalog()));
         // Edit models opens the Provider's area.
         let request = wire.read("provider.management");
         wire.reply(&request, test_provider(area_models(true), 3));
@@ -1058,17 +1059,8 @@ fn tui_models_area_offers_no_toggle_for_an_unavailable_model() {
             }
         }
         wait_shown.recv_timeout(PATIENCE).unwrap();
-        let request = wire.read("provider.list");
-        wire.reply(
-            &request,
-            json!({"providers":[{"providerId":"test","displayName":"Test","enabled":true}]}),
-        );
-        let request = wire.read("account.providers");
-        wire.reply(&request, json!([]));
-        let request = wire.read("provider.catalog");
-        wire.reply(&request, picker_catalog());
-        let request = wire.read("provider.management");
-        wire.reply(&request, test_provider(area_models_unavailable(), 3));
+        let request = wire.read("provider.models.query");
+        wire.reply(&request, picker_page("test", "Test", picker_catalog()));
         // Edit models opens the Provider's area.
         let request = wire.read("provider.management");
         wire.reply(&request, test_provider(area_models_unavailable(), 3));
@@ -1149,17 +1141,8 @@ fn tui_models_area_keeps_the_panel_on_a_refused_write() {
             }
         }
         wait_shown.recv_timeout(PATIENCE).unwrap();
-        let request = wire.read("provider.list");
-        wire.reply(
-            &request,
-            json!({"providers":[{"providerId":"test","displayName":"Test","enabled":true}]}),
-        );
-        let request = wire.read("account.providers");
-        wire.reply(&request, json!([]));
-        let request = wire.read("provider.catalog");
-        wire.reply(&request, picker_catalog());
-        let request = wire.read("provider.management");
-        wire.reply(&request, test_provider(area_models(true), 3));
+        let request = wire.read("provider.models.query");
+        wire.reply(&request, picker_page("test", "Test", picker_catalog()));
         let request = wire.read("provider.management");
         wire.reply(&request, test_provider(area_models(true), 3));
         // Enter on the user model: its delete is refused, nothing is read
@@ -1256,17 +1239,8 @@ fn tui_models_area_rereads_after_a_conflict() {
             }
         }
         wait_shown.recv_timeout(PATIENCE).unwrap();
-        let request = wire.read("provider.list");
-        wire.reply(
-            &request,
-            json!({"providers":[{"providerId":"test","displayName":"Test","enabled":true}]}),
-        );
-        let request = wire.read("account.providers");
-        wire.reply(&request, json!([]));
-        let request = wire.read("provider.catalog");
-        wire.reply(&request, picker_catalog());
-        let request = wire.read("provider.management");
-        wire.reply(&request, test_provider(area_models(true), 3));
+        let request = wire.read("provider.models.query");
+        wire.reply(&request, picker_page("test", "Test", picker_catalog()));
         // Edit models opens the Provider's area.
         let request = wire.read("provider.management");
         wire.reply(&request, test_provider(area_models(true), 3));
@@ -1381,17 +1355,8 @@ fn tui_models_area_reports_a_conflict_whose_reread_fails() {
             }
         }
         wait_shown.recv_timeout(PATIENCE).unwrap();
-        let request = wire.read("provider.list");
-        wire.reply(
-            &request,
-            json!({"providers":[{"providerId":"test","displayName":"Test","enabled":true}]}),
-        );
-        let request = wire.read("account.providers");
-        wire.reply(&request, json!([]));
-        let request = wire.read("provider.catalog");
-        wire.reply(&request, picker_catalog());
-        let request = wire.read("provider.management");
-        wire.reply(&request, test_provider(area_models(true), 3));
+        let request = wire.read("provider.models.query");
+        wire.reply(&request, picker_page("test", "Test", picker_catalog()));
         // Edit models opens the Provider's area.
         let request = wire.read("provider.management");
         wire.reply(&request, test_provider(area_models(true), 3));

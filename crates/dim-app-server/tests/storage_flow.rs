@@ -441,7 +441,29 @@ const V40_ADDITIONS: &[&str] = &[
     "CREATE INDEX timeline_events_scopes ON timeline_events(session_id,branch_id,kind,json_extract(body,'$.record.event.data.scope.kind'),json_extract(body,'$.record.event.data.scope.timeline'),json_extract(body,'$.record.event.data.scope.id'),json_extract(body,'$.record.event.data.status'),sequence) WHERE kind='context/scope'",
     "CREATE INDEX timeline_events_source_positions ON timeline_events(session_id,branch_id,kind,json_extract(body,'$.record.event.data.epoch'),json_extract(body,'$.record.event.data.current.at.branch'),json_extract(body,'$.record.event.data.current.at.sequence'),sequence) WHERE kind='context-usage/recovered'",
 ];
+const V51_ADDITIONS: &[&str] = &[
+    "CREATE TABLE provider_bundle (provider_id TEXT PRIMARY KEY, fingerprint TEXT, definition_fingerprint TEXT, pending INTEGER NOT NULL CHECK(pending IN (0,1)))",
+    "CREATE TABLE provider_catalog_revision (id INTEGER PRIMARY KEY CHECK(id=1), revision TEXT NOT NULL)",
+    "CREATE TABLE provider_query_records (provider_id TEXT PRIMARY KEY REFERENCES providers(provider_id) ON DELETE CASCADE, enabled INTEGER NOT NULL, kind TEXT, credential_configured INTEGER NOT NULL, record TEXT NOT NULL)",
+    "CREATE INDEX provider_query_records_by_state ON provider_query_records(enabled,credential_configured,provider_id)",
+    "CREATE INDEX provider_query_records_by_kind ON provider_query_records(kind,provider_id)",
+    "CREATE TABLE provider_models (provider_id TEXT NOT NULL REFERENCES providers(provider_id) ON DELETE CASCADE, model_id TEXT NOT NULL, source TEXT NOT NULL, entry TEXT NOT NULL, PRIMARY KEY(provider_id,model_id,source))",
+    "CREATE INDEX provider_models_by_model ON provider_models(model_id,provider_id)",
+    "CREATE TRIGGER provider_models_insert AFTER INSERT ON providers BEGIN DELETE FROM provider_query_records WHERE provider_id=NEW.provider_id; INSERT INTO provider_query_records SELECT NEW.provider_id,coalesce(json_extract(record,'$.enabled'),0),json_extract(record,'$.kind'),coalesce(json_extract(record,'$.credential') IS NOT NULL OR json_extract(record,'$.auth.type')='anonymous' OR coalesce(json_extract(record,'$.credentialAuthority'),'static')!='static',0),json_remove(record,'$.models','$.userModels','$.modelConfigOverrides') FROM (SELECT CASE WHEN json_valid(NEW.record) THEN NEW.record ELSE '{}' END AS record); DELETE FROM provider_models WHERE provider_id=NEW.provider_id; INSERT OR IGNORE INTO provider_models SELECT NEW.provider_id,coalesce(json_extract(CASE WHEN type='object' THEN value ELSE '{}' END,'$.modelId'),json_extract(CASE WHEN type='object' THEN value ELSE '{}' END,'$.entry.modelId')),'default',value FROM json_each(CASE WHEN json_valid(NEW.record) THEN NEW.record ELSE '{}' END,'$.models') WHERE coalesce(json_extract(CASE WHEN type='object' THEN value ELSE '{}' END,'$.modelId'),json_extract(CASE WHEN type='object' THEN value ELSE '{}' END,'$.entry.modelId')) IS NOT NULL; INSERT OR IGNORE INTO provider_models SELECT NEW.provider_id,json_extract(CASE WHEN type='object' THEN value ELSE '{}' END,'$.modelId'),'user',value FROM json_each(CASE WHEN json_valid(NEW.record) THEN NEW.record ELSE '{}' END,'$.userModels') WHERE json_extract(CASE WHEN type='object' THEN value ELSE '{}' END,'$.modelId') IS NOT NULL; INSERT OR IGNORE INTO provider_models SELECT NEW.provider_id,json_extract(CASE WHEN type='object' THEN value ELSE '{}' END,'$.modelId'),'override',value FROM json_each(CASE WHEN json_valid(NEW.record) THEN NEW.record ELSE '{}' END,'$.modelConfigOverrides') WHERE json_extract(CASE WHEN type='object' THEN value ELSE '{}' END,'$.modelId') IS NOT NULL; END",
+    "CREATE TRIGGER provider_models_update AFTER UPDATE ON providers BEGIN DELETE FROM provider_query_records WHERE provider_id=NEW.provider_id; INSERT INTO provider_query_records SELECT NEW.provider_id,coalesce(json_extract(record,'$.enabled'),0),json_extract(record,'$.kind'),coalesce(json_extract(record,'$.credential') IS NOT NULL OR json_extract(record,'$.auth.type')='anonymous' OR coalesce(json_extract(record,'$.credentialAuthority'),'static')!='static',0),json_remove(record,'$.models','$.userModels','$.modelConfigOverrides') FROM (SELECT CASE WHEN json_valid(NEW.record) THEN NEW.record ELSE '{}' END AS record); DELETE FROM provider_models WHERE provider_id=NEW.provider_id; INSERT OR IGNORE INTO provider_models SELECT NEW.provider_id,coalesce(json_extract(CASE WHEN type='object' THEN value ELSE '{}' END,'$.modelId'),json_extract(CASE WHEN type='object' THEN value ELSE '{}' END,'$.entry.modelId')),'default',value FROM json_each(CASE WHEN json_valid(NEW.record) THEN NEW.record ELSE '{}' END,'$.models') WHERE coalesce(json_extract(CASE WHEN type='object' THEN value ELSE '{}' END,'$.modelId'),json_extract(CASE WHEN type='object' THEN value ELSE '{}' END,'$.entry.modelId')) IS NOT NULL; INSERT OR IGNORE INTO provider_models SELECT NEW.provider_id,json_extract(CASE WHEN type='object' THEN value ELSE '{}' END,'$.modelId'),'user',value FROM json_each(CASE WHEN json_valid(NEW.record) THEN NEW.record ELSE '{}' END,'$.userModels') WHERE json_extract(CASE WHEN type='object' THEN value ELSE '{}' END,'$.modelId') IS NOT NULL; INSERT OR IGNORE INTO provider_models SELECT NEW.provider_id,json_extract(CASE WHEN type='object' THEN value ELSE '{}' END,'$.modelId'),'override',value FROM json_each(CASE WHEN json_valid(NEW.record) THEN NEW.record ELSE '{}' END,'$.modelConfigOverrides') WHERE json_extract(CASE WHEN type='object' THEN value ELSE '{}' END,'$.modelId') IS NOT NULL; END",
+];
+
+fn drop_v51(connection: &Connection) {
+    for sql in V51_ADDITIONS.iter().rev() {
+        let words: Vec<_> = sql.split_whitespace().collect();
+        connection
+            .execute_batch(&format!("DROP {} IF EXISTS {}", words[1], words[2]))
+            .unwrap();
+    }
+}
+
 fn drop_v40(connection: &Connection) {
+    drop_v51(connection);
     connection
         .execute_batch("DROP INDEX IF EXISTS timeline_events_branch_interrupts")
         .unwrap();
@@ -469,6 +491,7 @@ const SESSION_OWNERS_V38: &str = "CREATE TABLE session_owners(session_id TEXT PR
 /// they take a live store back to an earlier format: #1421 widened the
 /// column's CHECK, and the format gate compares the statement verbatim.
 fn without_automation_origin(connection: &Connection) {
+    drop_v51(connection);
     connection
         .execute_batch(&format!(
             "PRAGMA foreign_keys=OFF;
@@ -501,6 +524,7 @@ fn schema_of(version: u32) -> Vec<String> {
         .chain(V37_ADDITIONS.iter().filter(|_| version >= 37))
         .chain(V39_ADDITIONS.iter().filter(|_| version >= 39))
         .chain(V40_ADDITIONS.iter().filter(|_| version >= 40))
+        .chain(V51_ADDITIONS.iter().filter(|_| version >= 51))
         .chain(["CREATE INDEX timeline_events_branch_interrupts ON timeline_events(session_id, branch_id, sequence) WHERE kind = 'stop/interrupt' AND json_extract(body, '$.record.event.data.scope') = 'branch'"].iter().filter(|_| version >= 47))
         .filter(|sql| version <= 24 || !sql.starts_with("CREATE INDEX timeline_events_by_end "))
         .map(|sql| sql.replace("(version = 13)", &format!("(version = {version})")))
@@ -9036,4 +9060,90 @@ fn a_failed_main_format_upgrade_rolls_back_all_added_structures_and_the_marker()
             version
         );
     }
+}
+
+#[tokio::test]
+async fn v50_provider_projection_upgrade_preserves_records_and_tracks_atomic_writes() {
+    let database = Database::new();
+    let storage = SqliteStorage::open(database.0.clone()).unwrap();
+    storage.close().await.unwrap();
+    let mut connection = Connection::open(&database.0).unwrap();
+    drop_v51(&connection);
+    connection.execute_batch("DROP TABLE agent_store_format; CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 50)); INSERT INTO agent_store_format VALUES (50)").unwrap();
+    let body = serde_json::json!({"kind":"custom","enabled":true,"credential":"fixture","models":[{"modelId":"base"}],"userModels":[{"modelId":"user"}],"modelConfigOverrides":[{"modelId":"base"}]}).to_string();
+    connection
+        .execute("INSERT INTO providers VALUES ('fixture',7,?1)", [&body])
+        .unwrap();
+    connection
+        .execute("INSERT INTO providers VALUES ('broken',1,'{broken')", [])
+        .unwrap();
+    drop(connection);
+    let storage = SqliteStorage::open(database.0.clone()).unwrap();
+    assert_eq!(storage.upgraded_from(), Some(50));
+    storage.close().await.unwrap();
+    connection = Connection::open(&database.0).unwrap();
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT record FROM providers WHERE provider_id='fixture'",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+        body
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT count(*) FROM provider_models WHERE provider_id='fixture'",
+                [],
+                |row| row.get::<_, u32>(0)
+            )
+            .unwrap(),
+        3
+    );
+    assert_eq!(connection.query_row("SELECT json_type(record,'$.models') FROM provider_query_records WHERE provider_id='fixture'",[],|row| row.get::<_,Option<String>>(0)).unwrap(),None);
+    let tx = connection.transaction().unwrap();
+    tx.execute("UPDATE providers SET record=json_set(record,'$.models',json('[]')) WHERE provider_id='fixture'",[]).unwrap();
+    tx.rollback().unwrap();
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT count(*) FROM provider_models WHERE source='default'",
+                [],
+                |row| row.get::<_, u32>(0)
+            )
+            .unwrap(),
+        1
+    );
+    connection
+        .execute_batch("PRAGMA foreign_keys=ON; DELETE FROM providers WHERE provider_id='fixture'")
+        .unwrap();
+    assert_eq!(
+        connection
+            .query_row("SELECT count(*) FROM provider_models", [], |row| row
+                .get::<_, u32>(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT count(*) FROM provider_query_records WHERE provider_id='fixture'",
+                [],
+                |row| row.get::<_, u32>(0)
+            )
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT record FROM providers WHERE provider_id='broken'",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+        "{broken"
+    );
 }

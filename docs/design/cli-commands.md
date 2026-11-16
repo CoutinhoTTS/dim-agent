@@ -1260,6 +1260,24 @@ with its reason, for a launch target — and Tab shows the job's history in plac
 history ID` prints the lines the detail shows, and `dimcode scheduled remove ID` deletes without
 the panel's confirmation.
 
+### Model picker reads
+
+Opening `/models` requests one page from
+[`provider.models.query`](appserver/provider-management.md#model-display-queries).
+Typing searches on the server and resets the page cursor. Next/Previous replace
+the displayed page; closing the picker releases its results. Capability reads for
+the adopted model pass its provider and model ID. Catalog refresh is the explicit
+management action in the provider/account panel. Counts in picker diagnostics
+refer to the displayed page.
+
+```text
+/models -> first page -> Next page -> next page
+               ^                         |
+               +------ Previous page ----+
+Type query -> first matching page
+Esc        -> clear query; when empty, close and release results
+```
+
 ### The Models area
 
 The models area (#818): `Edit models` in `/models` opens one Provider's panel, and `dimcode

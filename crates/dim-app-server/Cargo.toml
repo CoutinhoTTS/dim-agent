@@ -85,5 +85,7 @@ rusqlite = { version = "0.41.1", features = ["bundled", "backup"] }
 tokio-tungstenite.workspace = true
 
 [build-dependencies]
+serde_json.workspace = true
+sha2 = "0.10.9"
 flate2 = "1.1"
 

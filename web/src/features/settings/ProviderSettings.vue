@@ -7,7 +7,7 @@ import { settingsMessages } from "../../i18n/settings"
 import { readManagement, readManagementPage, type ManagementProvider, type ManagementInfo, type ManagementPage } from "../../rpc/management"
 import { readAck } from "../../rpc/read"
 import { useConnectionStore } from "../../stores/connection"
-import { useModelsStore } from "../../stores/models"
+import { useModels } from "../../stores/models"
 import ProviderAuthFlow from "./ProviderAuthFlow.vue"
 import ProviderConnectionForm from "./ProviderConnectionForm.vue"
 import ProviderModels from "./ProviderModels.vue"
@@ -17,7 +17,7 @@ const { t } = useI18n({ messages: settingsMessages })
 const route = useRoute()
 const router = useRouter()
 const connection = useConnectionStore()
-const models = useModelsStore()
+const models = useModels()
 const view = ref<ManagementPage>()
 const detail = ref<ManagementProvider>()
 const loading = ref(true)
@@ -99,7 +99,6 @@ async function saved(provider: ManagementProvider): Promise<void> {
   updated(provider)
   savedProvider.value = provider.displayName
   await router.replace({ name: "settings-providers" })
-  await models.load()
 }
 async function changeTab(next: string): Promise<void> {
   if (tab.value === next) return
@@ -143,7 +142,7 @@ async function remove(logout = false): Promise<void> {
     await connection.client.call(logout ? `${current.account!.namespace}.logout` : "provider.delete", logout ? (current.account!.namespace === "account" ? { providerId: current.providerId } : {}) : { providerId: current.providerId, expectedVersion: current.version }, readAck)
     if (logout) await loadDetail()
     else close()
-    await Promise.all([load(), models.load()])
+    await load()
   } catch (cause) { detailError.value = messageFrom(cause) }
   finally { busy.value = false }
 }

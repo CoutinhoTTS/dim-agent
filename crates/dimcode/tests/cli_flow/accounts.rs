@@ -220,15 +220,8 @@ fn dim_device_login_can_retry_the_model_refresh_from_the_account_panel() {
                 "vision":false,"audio":false,"reasoning":false,"contextWindow":128000,"maxOutputTokens":16384}
         }]});
         wire.reply(&retry, catalog.clone());
-        let providers = wire.read("provider.list");
-        wire.reply(&providers, json!({"providers":[]}));
-        let providers = wire.read("account.providers");
-        wire.reply(&providers, listed);
-        let status = wire.read("account.status");
-        wire.reply(&status, signed_in);
-        let models = wire.read("provider.catalog");
-        assert_eq!(models["params"], json!({"providerId":PROVIDER}));
-        wire.reply(&models, json!({"catalog":catalog}));
+        let models = wire.read("provider.models.query");
+        wire.reply(&models, super::models::picker_page(PROVIDER, "DimAgent", json!({"catalog":catalog})));
         wire.hold();
     });
     let mut command = home.command();

@@ -108,6 +108,7 @@ const en = {
   "composer.noModels": "No models available",
   "composer.providers": "Providers",
   "composer.notConfigured": "Default model",
+  "composer.loadMoreModels": "Load more models",
   "composer.searchModels": "Search models...",
   "composer.send": "Send",
   "composer.sendMessage": "Send a message...",

@@ -116,6 +116,7 @@ pub(super) fn provide(
             "provider.models.delete",
             "provider.preferences.update",
             "provider.catalog",
+            "provider.models.query",
             "provider.refresh",
             "provider.models.set_enabled",
             "provider.models.edit",
@@ -133,6 +134,7 @@ pub(super) fn provide(
                 !matches!(
                     name,
                     "provider.catalog"
+                        | "provider.models.query"
                         | "provider.selection"
                         | "provider.list"
                         | "provider.management"
@@ -153,6 +155,12 @@ pub(super) fn provide(
             Box::pin(async move {
                 let cancel = &stopping;
                 match method.as_str() {
+                    "provider.models.query" => reply(
+                        provider
+                            .query_models(params(value)?, cancel)
+                            .await
+                            .map_err(error)?,
+                    ),
                     "provider.management.list" => {
                         let p: super::ManagementPageRequest = params(value)?;
                         reply(provider.management_page(p, cancel).await.map_err(error)?)
@@ -217,13 +225,27 @@ pub(super) fn provide(
                         )
                     }
                     "provider.catalog" => {
-                        let p: ProviderTarget = params(value)?;
-                        reply(CatalogResult {
-                            catalog: provider
-                                .catalog_for(p.provider_id, cancel)
-                                .await
-                                .map_err(error)?,
-                        })
+                        let p: ManagementScope = params(value)?;
+                        let catalog = match p.model_id {
+                            Some(model_id) => {
+                                let mut catalog = provider
+                                    .catalog_target(p.provider_id.clone(), model_id.clone(), cancel)
+                                    .await
+                                    .map_err(error)?;
+                                if let Some(model) = catalog.as_mut().and_then(|catalog| {
+                                    catalog.models.iter_mut().find(|model| model.id == model_id)
+                                }) {
+                                    model.name = provider
+                                        .model_name(p.provider_id, model_id, cancel)
+                                        .await
+                                        .map_err(error)?;
+                                }
+                                Ok(catalog)
+                            }
+                            None => provider.catalog_for(p.provider_id, cancel).await,
+                        }
+                        .map_err(error)?;
+                        reply(CatalogResult { catalog })
                     }
                     "provider.refresh" => {
                         let p: ProviderTarget = params(value)?;

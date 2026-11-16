@@ -3324,6 +3324,8 @@ async fn remote_catalog_refresh_preserves_edits_and_rejects_stale_or_partial_res
     root.shutdown().await.unwrap();
     {
         let db = rusqlite::Connection::open(home.join("native.sqlite")).unwrap();
+        db.execute_batch("DELETE FROM provider_catalog_revision; DELETE FROM provider_bundle")
+            .unwrap();
         db.execute("UPDATE providers SET record=json_set(record,'$.definitionFingerprint','previous-bundle') WHERE provider_id='openai'", []).unwrap();
         db.execute("UPDATE providers SET record=json_set(record,'$.modelPreferences',json(?1)) WHERE provider_id='openai'",
             [json!({"gpt-5-nano":{"reasoningEffort":"high"}}).to_string()]).unwrap();
@@ -6431,6 +6433,9 @@ async fn public_static_provider_selection_resolution_execution_and_lifecycle_flo
 
     let collision = {
         let database = rusqlite::Connection::open(home.join("native.sqlite")).unwrap();
+        database
+            .execute_batch("DELETE FROM provider_catalog_revision; DELETE FROM provider_bundle")
+            .unwrap();
         let body: String = database
             .query_row(
                 "SELECT record FROM providers WHERE provider_id='openai'",
@@ -8288,7 +8293,7 @@ async fn a_bundled_entry_without_limits_takes_the_identified_numbers_or_reports_
     let supplier = bundled
         .bundled_models(SUPPLIER.0)
         .unwrap()
-        .iter()
+        .into_iter()
         .find(|row| row.model_id == SUPPLIER.1)
         .expect("the catalog holds the entry that identifies it");
     let numbers = (
@@ -9029,6 +9034,12 @@ async fn a_v25_seed_upgrades_to_the_fresh_bundle_record() {
         native
             .execute_batch(
                 "PRAGMA foreign_keys=OFF;
+                 DROP TRIGGER provider_models_insert;
+                 DROP TRIGGER provider_models_update;
+                 DROP TABLE provider_models;
+                 DROP TABLE provider_query_records;
+                 DROP TABLE provider_bundle;
+                 DROP TABLE provider_catalog_revision;
                  CREATE TEMP TABLE agents_rows AS SELECT * FROM agents;
                  DROP TABLE agents;
                  CREATE TABLE agents(agent_id TEXT PRIMARY KEY, profile TEXT NOT NULL, is_default INTEGER NOT NULL CHECK(is_default IN (0, 1)));
@@ -10226,6 +10237,128 @@ async fn management_pages_read_overviews_and_reread_a_changed_provider() {
         provider
             .management_page(
                 ManagementPageRequest {
+                    limit: Some(0),
+                    ..Default::default()
+                },
+                &cancel
+            )
+            .await
+            .is_err()
+    );
+    root.shutdown().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test]
+async fn model_pages_follow_committed_edits_and_selection_uses_exact_targets() {
+    use dim_app_server::provider::ModelQuery;
+    let home = temp_home("provider-model-pages");
+    let (root, provider) = provider_root(&home).await;
+    let cancel = CancellationToken::new();
+    let id = "00000000-0000-4000-8000-000000001352";
+    let mut config = input(
+        id,
+        "http://127.0.0.1:1/v1",
+        StaticAuth::Bearer,
+        Some("fixture-key"),
+        "alpha",
+        43,
+    );
+    config.models = vec![model("alpha", 43)];
+    let created = provider.create(config, &cancel).await.unwrap();
+    let created = provider
+        .create_model(
+            id.into(),
+            created.info.version.unwrap(),
+            model("beta", 43),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let first = provider
+        .query_models(
+            ModelQuery {
+                provider_id: Some(id.into()),
+                limit: Some(1),
+                ..Default::default()
+            },
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert_eq!(first.models.len(), 1);
+    assert_eq!(first.models[0].model.id, "alpha");
+    let second = provider
+        .query_models(
+            ModelQuery {
+                provider_id: Some(id.into()),
+                after: first.next,
+                limit: Some(1),
+                ..Default::default()
+            },
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert_eq!(second.models[0].model.id, "beta");
+    assert!(second.next.is_none());
+    let edited = provider
+        .update_model_config(
+            id.into(),
+            created.version,
+            "beta".into(),
+            Some(serde_json::from_value(json!({"displayName":"Renamed model"})).unwrap()),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let found = provider
+        .query_models(
+            ModelQuery {
+                provider_id: Some(id.into()),
+                query: Some("Renamed".into()),
+                ..Default::default()
+            },
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert_eq!(found.models.len(), 1);
+    assert_eq!(found.models[0].model.name, "Renamed model");
+    let target = ModelId {
+        provider_id: id.into(),
+        model_id: "beta".into(),
+    };
+    provider
+        .select(None, target.clone(), None, &cancel)
+        .await
+        .unwrap();
+    let selected = provider
+        .configuration(None, None, ModelPreferences::default(), &cancel)
+        .await
+        .unwrap();
+    assert_eq!(selected.provider_id, target.provider_id);
+    assert_eq!(selected.model_id, target.model_id);
+    provider
+        .delete_model(id.into(), edited.version, "beta".into(), &cancel)
+        .await
+        .unwrap();
+    let removed = provider
+        .query_models(
+            ModelQuery {
+                provider_id: Some(id.into()),
+                model_id: Some("beta".into()),
+                ..Default::default()
+            },
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert!(removed.models.is_empty());
+    assert!(
+        provider
+            .query_models(
+                ModelQuery {
                     limit: Some(0),
                     ..Default::default()
                 },

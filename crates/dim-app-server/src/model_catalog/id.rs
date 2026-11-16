@@ -5,6 +5,7 @@
 //! or by the name it displays. Only when no step names one model do the
 //! aggregator rows that name it merge, in the safe direction.
 
+use super::tokens::{split_display, split_id, split_tokens};
 use super::*;
 
 /// Which step of the pipeline named the model.
@@ -469,7 +470,8 @@ impl BundledCatalog {
         let Some(namespace) = namespace else {
             return Outcome::None;
         };
-        let rows = self.rows_in(self.ids.qualified_rows(id));
+        let owned = self.rows_in(&self.qualified_rows(id));
+        let rows = row_refs(&owned);
         let answering: Vec<Row<'_>> = rows
             .into_iter()
             .filter(|row| row.provider_id == namespace)
@@ -507,17 +509,13 @@ impl BundledCatalog {
         // The bundled entry is the declaration for a builtin provider's model,
         // so the model the user added to it is read through the bundle when the
         // two name the same id.
-        let entry = self
-            .bundled_models(&provider.provider_id)
-            .and_then(|models| models.iter().find(|bundled| bundled.model_id == id))
-            .cloned()
-            .or_else(|| {
-                provider
-                    .models
-                    .iter()
-                    .find(|model| model.model_id == id)
-                    .cloned()
-            })?;
+        let entry = self.model(&provider.provider_id, id).or_else(|| {
+            provider
+                .models
+                .iter()
+                .find(|model| model.model_id == id)
+                .cloned()
+        })?;
         Some((provider.provider_id.clone(), entry))
     }
 
@@ -535,18 +533,90 @@ impl BundledCatalog {
         )))
     }
 
-    fn rows_in(&self, positions: &[usize]) -> Vec<Row<'_>> {
+    fn rows_in(&self, positions: &[usize]) -> Vec<OwnedRow> {
         positions
             .iter()
             .map(|&position| {
-                let row = &self.ids.rows[position];
-                Row {
-                    provider_id: self.providers[row.provider].provider_id.as_str(),
-                    entry: &self.providers[row.provider].models[row.model],
-                    tokens: &row.tokens,
+                if let Some(data) = self.data {
+                    let row = &data.models[position];
+                    let mut entry: ModelEntry = bundled_record(row.bytes);
+                    drop_undeclared_limits(&mut entry);
+                    OwnedRow {
+                        provider_id: data.providers[row.provider].id.to_owned(),
+                        entry,
+                        tokens: row.tokens.iter().map(|token| (*token).to_owned()).collect(),
+                    }
+                } else {
+                    let row = &self.ids.rows[position];
+                    OwnedRow {
+                        provider_id: self.providers[row.provider].provider_id.clone(),
+                        entry: self.providers[row.provider].models[row.model].clone(),
+                        tokens: row.tokens.clone(),
+                    }
                 }
             })
             .collect()
+    }
+
+    fn qualified_rows(&self, id: &str) -> Vec<usize> {
+        let Some(data) = self.data else {
+            return self.ids.qualified_rows(id).to_vec();
+        };
+        let id = id.trim();
+        data.models
+            .iter()
+            .enumerate()
+            .filter_map(|(i, row)| row.id.eq_ignore_ascii_case(id).then_some(i))
+            .collect()
+    }
+
+    fn token_rows(&self, index: Index, query: &[String]) -> Option<(usize, Vec<usize>)> {
+        let Some(data) = self.data else {
+            return self
+                .ids
+                .token_rows(index, query)
+                .map(|(n, rows)| (n, rows.to_vec()));
+        };
+        for longest in (1..=query.len()).rev() {
+            let rows: Vec<_> = data
+                .models
+                .iter()
+                .enumerate()
+                .filter_map(|(i, row)| {
+                    (row.index == Some(index) && tokens_equal(row.tokens, &query[..longest]))
+                        .then_some(i)
+                })
+                .collect();
+            if !rows.is_empty() {
+                return Some((longest, rows));
+            }
+        }
+        None
+    }
+
+    fn name_rows(&self, index: Index, query: &[String]) -> (Vec<usize>, Vec<usize>) {
+        let Some(data) = self.data else {
+            return self.ids.name_rows(index, query);
+        };
+        let mut canonical = Vec::new();
+        let mut display = Vec::new();
+        for (i, row) in data
+            .models
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| row.index == Some(index))
+        {
+            if row
+                .canonical
+                .is_some_and(|tokens| names_tokens(tokens, query))
+            {
+                canonical.push(i);
+            }
+            if names_tokens(row.display, query) {
+                display.push(i);
+            }
+        }
+        (canonical, display)
     }
 
     /// Steps 2 and 4: a row whose own tokens are the input's head, with the
@@ -560,7 +630,7 @@ impl BundledCatalog {
         rule: Rule,
         input: &str,
     ) -> Outcome {
-        let Some((longest, rows)) = self.ids.token_rows(index, &query.tokens) else {
+        let Some((longest, rows)) = self.token_rows(index, &query.tokens) else {
             return Outcome::None;
         };
         // A tail the closed set does not allow is not this step's answer, so
@@ -568,7 +638,8 @@ impl BundledCatalog {
         if !tail_allowed(&query.tokens[longest..]) {
             return Outcome::None;
         }
-        let rows = self.rows_in(rows);
+        let owned = self.rows_in(&rows);
+        let rows = row_refs(&owned);
         self.settle(rows, provider, namespace, rule, query, input)
     }
 
@@ -595,9 +666,11 @@ impl BundledCatalog {
         namespace: Option<&str>,
         input: &str,
     ) -> Outcome {
-        let (canonical, display) = self.ids.name_rows(index, &query.tokens);
-        let canonical = self.rows_in(&canonical);
-        let display = self.rows_in(&display);
+        let (canonical, display) = self.name_rows(index, &query.tokens);
+        let canonical_owned = self.rows_in(&canonical);
+        let display_owned = self.rows_in(&display);
+        let canonical = row_refs(&canonical_owned);
+        let display = row_refs(&display_owned);
         let display_groups = collapse(display.clone());
         if display_groups.len() == 1 && !display.is_empty() {
             let group = &display_groups[0];
@@ -675,7 +748,8 @@ impl BundledCatalog {
         if rows.is_empty() {
             return Outcome::None;
         }
-        let known_namespace = namespace.filter(|namespace| self.provider(namespace).is_some());
+        let known_namespace =
+            namespace.filter(|namespace| self.provider_ids().any(|id| id == *namespace));
         if let Some(namespace) = known_namespace
             && !rows.iter().any(|row| row.provider_id == namespace)
         {
@@ -784,7 +858,7 @@ impl BundledCatalog {
 fn row_is_vendor(catalog: &BundledCatalog, row: &Row<'_>) -> bool {
     is_declaration(
         catalog.role(row.provider_id),
-        catalog.vendor_namespace(row.provider_id),
+        catalog.vendor_namespace(row.provider_id).as_deref(),
         row.entry,
     )
 }
@@ -879,58 +953,39 @@ fn namespace_of(id: &str) -> Option<&str> {
     (segments.len() > 1).then(|| segments[segments.len() - 2])
 }
 
-/// A model id without its namespace segment and tag, lowercased and split.
-fn split_id(id: &str) -> Vec<String> {
-    let lower = id.to_lowercase();
-    let name = lower.rsplit('/').next().unwrap_or(&lower);
-    let name = name.rsplit_once(':').map_or(name, |(head, _)| head);
-    split_tokens(name)
-}
-
-/// A display name, lowercased and split.
-fn split_display(display: &str) -> Vec<String> {
-    split_tokens(&display.to_lowercase())
-}
-
-fn split_tokens(name: &str) -> Vec<String> {
-    name.split(['-', '_', '.', ' '])
-        .filter(|token| !token.is_empty())
-        .map(str::to_owned)
-        .collect()
-}
-
 /// Whether a catalog name names this input: equal, or one a head of the other
 /// with a tail the closed set allows.
-fn names_tokens(tokens: &[String], input: &[String]) -> bool {
+fn names_tokens<T: AsRef<str>>(tokens: &[T], input: &[String]) -> bool {
     if tokens.is_empty() {
         return false;
     }
-    if tokens == input {
+    if tokens_equal(tokens, input) {
         return true;
     }
-    if tokens.len() > input.len() && tokens[..input.len()] == *input {
+    if tokens.len() > input.len() && tokens_equal(&tokens[..input.len()], input) {
         return tail_allowed(&tokens[input.len()..]);
     }
     input.len() > tokens.len()
-        && input[..tokens.len()] == tokens[..]
+        && tokens_equal(tokens, &input[..tokens.len()])
         && tail_allowed(&input[tokens.len()..])
 }
 
 /// The only tails a longer name may carry: `latest`, a date, a tag or a
 /// modifier. Nothing else means the name is a different model.
-fn tail_allowed(tail: &[String]) -> bool {
+fn tail_allowed<T: AsRef<str>>(tail: &[T]) -> bool {
     if tail.is_empty() {
         return true;
     }
     if tail.len() == 3
-        && tail[0].len() == 4
+        && tail[0].as_ref().len() == 4
         && tail
             .iter()
-            .all(|token| token.chars().all(|c| c.is_ascii_digit()))
+            .all(|token| token.as_ref().chars().all(|c| c.is_ascii_digit()))
     {
         return true;
     }
     tail.iter().all(|token| {
+        let token = token.as_ref();
         token == "latest"
             || matches!(token.len(), 4 | 6 | 8) && token.chars().all(|c| c.is_ascii_digit())
     })
@@ -976,24 +1031,33 @@ impl BundledCatalog {
     /// media row from answering a chat id.
     fn merge_rows(&self, id: &str, query: &Query, kind: Option<&str>) -> Outcome {
         let input_tag = id.rsplit_once(':').map(|(_, tag)| tag.to_lowercase());
-        let mut named: Vec<Row<'_>> = Vec::new();
-        for row in &self.ids.rows {
-            let provider_id = self.providers[row.provider].provider_id.as_str();
-            let entry = &self.providers[row.provider].models[row.model];
-            if !same_model_with_tag(
-                &row.tokens,
-                row.tag.as_deref(),
-                &query.tokens,
-                input_tag.as_deref(),
-            ) {
-                continue;
-            }
-            named.push(Row {
-                provider_id,
-                entry,
-                tokens: &row.tokens,
-            });
-        }
+        let positions: Vec<_> = if let Some(data) = self.data {
+            data.models
+                .iter()
+                .enumerate()
+                .filter_map(|(i, row)| {
+                    same_model_with_tag(row.tokens, row.tag, &query.tokens, input_tag.as_deref())
+                        .then_some(i)
+                })
+                .collect()
+        } else {
+            self.ids
+                .rows
+                .iter()
+                .enumerate()
+                .filter_map(|(i, row)| {
+                    same_model_with_tag(
+                        &row.tokens,
+                        row.tag.as_deref(),
+                        &query.tokens,
+                        input_tag.as_deref(),
+                    )
+                    .then_some(i)
+                })
+                .collect()
+        };
+        let owned = self.rows_in(&positions);
+        let named = row_refs(&owned);
         let (joining, declaring) = joinable(named, kind);
         if joining.is_empty() {
             return Outcome::None;
@@ -1058,8 +1122,8 @@ fn minimum<'a>(
 /// Whether an aggregator row's tokens name the same model as the input, with
 /// the same tag. A `:batch` row joins only a `:batch` input, and a `-fast` or
 /// `-highspeed` row joins nothing because the tail check rejects both sides.
-fn same_model_with_tag(
-    row_tokens: &[String],
+fn same_model_with_tag<T: AsRef<str>>(
+    row_tokens: &[T],
     row_tag: Option<&str>,
     input: &[String],
     input_tag: Option<&str>,
@@ -1067,11 +1131,11 @@ fn same_model_with_tag(
     if row_tag != input_tag {
         return false;
     }
-    if row_tokens == input {
+    if tokens_equal(row_tokens, input) {
         return true;
     }
     row_tokens.len() < input.len()
-        && input[..row_tokens.len()] == *row_tokens
+        && tokens_equal(row_tokens, &input[..row_tokens.len()])
         && tail_allowed(&input[row_tokens.len()..])
 }
 
@@ -1163,4 +1227,24 @@ pub(super) fn canonical(s: &str) -> String {
         }
     }
     result
+}
+
+struct OwnedRow {
+    provider_id: String,
+    entry: ModelEntry,
+    tokens: Vec<String>,
+}
+
+fn row_refs(rows: &[OwnedRow]) -> Vec<Row<'_>> {
+    rows.iter()
+        .map(|row| Row {
+            provider_id: &row.provider_id,
+            entry: &row.entry,
+            tokens: &row.tokens,
+        })
+        .collect()
+}
+
+fn tokens_equal<T: AsRef<str>>(left: &[T], right: &[String]) -> bool {
+    left.len() == right.len() && left.iter().zip(right).all(|(a, b)| a.as_ref() == b)
 }

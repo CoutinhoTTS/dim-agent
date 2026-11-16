@@ -338,7 +338,7 @@ pub fn convert_legacy_provider(
         None => None,
     };
     let kind = match source_kind.as_str() {
-        "custom" if bundled.provider(&source.id).is_some() => {
+        "custom" if bundled.provider_ids().any(|id| id == source.id) => {
             return Err("Builtin identity cannot be imported as custom".into());
         }
         "custom" if previous.is_some() => {

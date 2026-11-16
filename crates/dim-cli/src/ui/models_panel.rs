@@ -9,6 +9,7 @@
 //!   Other provider / model    low
 //!   Third provider / model    —
 //!   Edit models
+//!   Previous page / Next page
 //!   Subagent models: Agent choice
 //! Enter select + default · ←/→ effort · Ctrl+B/F cursor · Ctrl+X clear saved · Esc clear/close
 //!
@@ -52,6 +53,8 @@ use dim_agent_types::ModelId;
 const HINT: &str =
     "Enter select + default · ←/→ effort · Ctrl+B/F cursor · Ctrl+X clear saved · Esc clear/close";
 const POLICY_HINT: &str = "Enter select · Esc back";
+const PREVIOUS_MODELS: &str = "__previous_models__";
+const NEXT_MODELS: &str = "__next_models__";
 const EDIT_MODELS: &str = "__edit_models__";
 const SUBAGENT_MODELS: &str = "__subagent_models__";
 const SECTION: &str = "Models";
@@ -83,6 +86,8 @@ pub struct ModelsPanel {
     /// Effort ←/→ chose for `provider::model`, kept across list replacements
     /// while the row is listed and advertises it.
     chosen: BTreeMap<String, String>,
+    pages: Vec<Option<ModelId>>,
+    requesting: bool,
 }
 
 impl ModelsPanel {
@@ -93,13 +98,22 @@ impl ModelsPanel {
             listed: None,
             policy: None,
             chosen: BTreeMap::new(),
+            pages: vec![None],
+            requesting: false,
         }
     }
 
     pub fn set_models(&mut self, models: Result<ModelList, String>) {
-        if models.is_err() && self.listed.as_ref().is_some_and(Result::is_ok) {
+        if models
+            .as_ref()
+            .is_ok_and(|page| page.query != self.list.query())
+        {
             return;
         }
+        if !self.requesting && models.is_err() && self.listed.as_ref().is_some_and(Result::is_ok) {
+            return;
+        }
+        self.requesting = false;
         // A replaced list keeps the choices its rows still offer: a cycled
         // effort survives a later read, while a row that is gone, or no longer
         // advertises it, drops it.
@@ -159,6 +173,11 @@ impl ModelsPanel {
     fn open(&mut self, view: View, preselect: Option<&str>) {
         self.view = view;
         self.list = list(view);
+        if view != View::Policy
+            && let Some(Ok(page)) = &self.listed
+        {
+            self.list.paste(&page.query);
+        }
         self.rebuild(preselect);
     }
 
@@ -218,6 +237,12 @@ impl ModelsPanel {
                         .cloned()
                         .collect();
                     items.extend(empty_rows(&empty, manage, &listed));
+                    if self.pages.len() > 1 {
+                        items.push(Item::new(PREVIOUS_MODELS, t("Previous page"), ""));
+                    }
+                    if list.next.is_some() {
+                        items.push(Item::new(NEXT_MODELS, t("Next page"), ""));
+                    }
                     if self.view == View::Models
                         && let Some(policy) = &self.policy
                     {
@@ -291,8 +316,15 @@ impl ModelsPanel {
     }
 
     /// A paste goes into the filter.
-    pub fn paste(&mut self, text: &str) {
+    pub fn paste(&mut self, text: &str) -> Effect {
         self.list.paste(text);
+        self.pages = vec![None];
+        self.list.loading();
+        self.requesting = true;
+        Effect::QueryModels {
+            query: self.list.query().to_owned(),
+            after: None,
+        }
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Effect {
@@ -319,6 +351,8 @@ impl ModelsPanel {
                 .iter()
                 .find(|model| id == self::key(&model.provider_id, &model.model_id))
                 .map(|model| Effect::ClearModelPreferences {
+                    query: self.list.query().to_owned(),
+                    after: self.pages.last().cloned().flatten(),
                     provider_id: model.provider_id.clone(),
                     model_id: model.model_id.clone(),
                     expected_version: model.provider_version,
@@ -326,12 +360,54 @@ impl ModelsPanel {
                 .unwrap_or(Effect::None);
         }
         let before = self.list.selected_id();
+        let query = self.list.query().to_owned();
         let event = self.list.handle_key(key);
+        if self.view != View::Policy && query != self.list.query() {
+            self.pages = vec![None];
+            self.list.loading();
+            self.requesting = true;
+            return Effect::QueryModels {
+                query: self.list.query().to_owned(),
+                after: None,
+            };
+        }
         if self.view == View::Models && event == Event::None && self.list.selected_id() != before {
             self.rebuild(None);
         }
         match (self.view, event) {
-            (_, Event::None | Event::Refresh) => Effect::None,
+            (_, Event::Refresh) => {
+                self.pages = vec![None];
+                self.list.loading();
+                self.requesting = true;
+                Effect::QueryModels {
+                    query: self.list.query().to_owned(),
+                    after: None,
+                }
+            }
+            (_, Event::None) => Effect::None,
+            (_, Event::Pick { id, .. }) if id == NEXT_MODELS => {
+                let after = self
+                    .listed
+                    .as_ref()
+                    .and_then(|v| v.as_ref().ok())
+                    .and_then(|v| v.next.clone());
+                self.pages.push(after.clone());
+                self.list.loading();
+                self.requesting = true;
+                Effect::QueryModels {
+                    query: self.list.query().to_owned(),
+                    after,
+                }
+            }
+            (_, Event::Pick { id, .. }) if id == PREVIOUS_MODELS => {
+                self.pages.pop();
+                self.list.loading();
+                self.requesting = true;
+                Effect::QueryModels {
+                    query: self.list.query().to_owned(),
+                    after: self.pages.last().cloned().flatten(),
+                }
+            }
             (View::Models, Event::Close) => Effect::Close,
             (View::Policy, Event::Close) => {
                 self.open(View::Models, Some(SUBAGENT_MODELS));
@@ -434,14 +510,16 @@ impl ModelsPanel {
 
 fn list(view: View) -> ListPanel {
     let models = |title, hint| {
-        ListPanel::new(
+        let mut panel = ListPanel::new(
             title,
             t(hint),
             "Loading models...",
             "No models available. Connect a provider first.",
             "No matching models.",
             false,
-        )
+        );
+        panel.remote_filter(true);
+        panel
     };
     match view {
         View::Models => models("Select a model", HINT),
@@ -741,6 +819,8 @@ mod tests {
     fn panel() -> ModelsPanel {
         let mut panel = ModelsPanel::new();
         panel.set_models(Ok(ModelList {
+            query: String::new(),
+            next: None,
             manage: false,
             models: vec![
                 item("flash", &["low", "high"], Some("low"), Some("low")),
@@ -772,6 +852,8 @@ mod tests {
         let mut models = panel.models().to_vec();
         models[0].zdr = true;
         panel.set_models(Ok(ModelList {
+            query: String::new(),
+            next: None,
             manage: false,
             models: models.clone(),
             current: Some(("dim".into(), "flash".into())),
@@ -780,7 +862,18 @@ mod tests {
         }));
         let screen = drawn(&panel);
         assert!(screen.contains("ZDR  ‹ low ›"), "{screen}");
-        panel.paste("zdr");
+        assert_eq!(
+            panel.paste("zdr"),
+            Effect::QueryModels {
+                query: "zdr".into(),
+                after: None
+            }
+        );
+        panel.set_models(Ok(ModelList {
+            query: "zdr".into(),
+            models: vec![models[0].clone()],
+            ..Default::default()
+        }));
         let screen = drawn(&panel);
         assert!(screen.contains("flash"), "{screen}");
         assert!(!screen.contains("plain"), "{screen}");
@@ -788,10 +881,11 @@ mod tests {
             panel.handle_key(key_of(KeyCode::Enter)),
             Effect::SelectModel { ref model_id, .. } if model_id == "flash"
         ));
-        models[0].zdr = false;
         panel.set_models(Ok(ModelList {
+            query: "zdr".into(),
+            next: None,
             manage: false,
-            models,
+            models: Vec::new(),
             current: None,
             empty: Vec::new(),
             limits: Vec::new(),
@@ -819,6 +913,8 @@ mod tests {
             outcome,
         };
         panel.set_models(Ok(ModelList {
+            query: String::new(),
+            next: None,
             manage: false,
             models: vec![
                 outcome(ModelOutcome::Identified {
@@ -877,6 +973,8 @@ mod tests {
     fn an_unfocused_row_that_offers_efforts_and_has_none_selected_says_so() {
         let mut panel = ModelsPanel::new();
         panel.set_models(Ok(ModelList {
+            query: String::new(),
+            next: None,
             manage: false,
             models: vec![
                 item("plain", &[], None, None),
@@ -906,6 +1004,8 @@ mod tests {
     fn a_focused_row_that_offers_efforts_and_has_none_selected_brackets_it() {
         let mut panel = ModelsPanel::new();
         panel.set_models(Ok(ModelList {
+            query: String::new(),
+            next: None,
             manage: false,
             models: vec![
                 item("plain", &[], None, None),
@@ -930,6 +1030,8 @@ mod tests {
     fn a_declared_default_effort_stands_in_for_the_placeholder() {
         let mut panel = ModelsPanel::new();
         panel.set_models(Ok(ModelList {
+            query: String::new(),
+            next: None,
             manage: false,
             models: vec![
                 item("plain", &[], None, None),
@@ -959,13 +1061,32 @@ mod tests {
         let mut other = item("volcengine/glm-5.3", &[], None, None);
         other.display_name = "GLM-5.3 · Volcengine Ark".into();
         panel.set_models(Ok(ModelList {
+            query: String::new(),
+            next: None,
             manage: false,
             models: vec![models, other],
             current: None,
             empty: Vec::new(),
             limits: Vec::new(),
         }));
-        panel.paste("volcengine");
+        assert_eq!(
+            panel.paste("volcengine"),
+            Effect::QueryModels {
+                query: "volcengine".into(),
+                after: None
+            }
+        );
+        let models = panel
+            .models()
+            .iter()
+            .filter(|model| model.model_id.starts_with("volcengine"))
+            .cloned()
+            .collect();
+        panel.set_models(Ok(ModelList {
+            query: "volcengine".into(),
+            models,
+            ..Default::default()
+        }));
         let screen = drawn(&panel);
         assert!(screen.contains("volcengine/glm-5.3"), "{screen}");
         assert!(!screen.contains("siliconflow"), "{screen}");
@@ -1024,6 +1145,8 @@ mod tests {
         let mut models = panel.models().to_vec();
         models[0].efforts = vec!["low".into(), "medium".into(), "high".into()];
         panel.set_models(Ok(ModelList {
+            query: String::new(),
+            next: None,
             manage: false,
             models,
             current: Some(("dim".into(), "flash".into())),
@@ -1033,7 +1156,20 @@ mod tests {
         panel.paste("flsh");
         panel.handle_key(KeyEvent::new(KeyCode::Char('b'), Modifiers::CTRL));
         panel.handle_key(KeyEvent::new(KeyCode::Char('b'), Modifiers::CTRL));
-        panel.handle_key(key_of(KeyCode::Char('a')));
+        assert_eq!(
+            panel.handle_key(key_of(KeyCode::Char('a'))),
+            Effect::QueryModels {
+                query: "flash".into(),
+                after: None
+            }
+        );
+        let models = vec![panel.models()[0].clone()];
+        panel.set_models(Ok(ModelList {
+            query: "flash".into(),
+            models,
+            current: Some(("dim".into(), "flash".into())),
+            ..Default::default()
+        }));
         panel.handle_key(KeyEvent::new(KeyCode::Char('f'), Modifiers::CTRL));
         let screen = drawn(&panel);
         assert!(screen.contains("> flash"), "{screen}");
@@ -1051,7 +1187,19 @@ mod tests {
             assert!(screen.contains("> flash"), "{screen}");
             assert_eq!(panel.cursor(80), Some(cursor));
         }
-        panel.handle_key(key_of(KeyCode::Delete));
+        assert_eq!(
+            panel.handle_key(key_of(KeyCode::Delete)),
+            Effect::QueryModels {
+                query: "flas".into(),
+                after: None
+            }
+        );
+        let models = panel.models().to_vec();
+        panel.set_models(Ok(ModelList {
+            query: "flas".into(),
+            models,
+            ..Default::default()
+        }));
         let screen = drawn(&panel);
         assert!(screen.contains("> flas"), "{screen}");
         assert!(matches!(
@@ -1085,6 +1233,8 @@ mod tests {
         assert_eq!(panel.handle_key(key_of(KeyCode::Right)), Effect::None);
         assert!(drawn(&panel).contains("‹ high ›"));
         panel.set_models(Ok(ModelList {
+            query: String::new(),
+            next: None,
             manage: false,
             models: vec![
                 item("flash", &["low", "high"], Some("low"), Some("low")),
@@ -1120,6 +1270,8 @@ mod tests {
         assert_eq!(panel.handle_key(key_of(KeyCode::Right)), Effect::None);
         assert!(drawn(&panel).contains("‹ high ›"));
         panel.set_models(Ok(ModelList {
+            query: String::new(),
+            next: None,
             manage: false,
             models: vec![item("flash", &["low"], Some("low"), Some("low"))],
             current: Some(("dim".into(), "flash".into())),
@@ -1149,6 +1301,8 @@ mod tests {
         ));
         assert!(drawn(&panel).contains("‹ low ›"), "{}", drawn(&panel));
         panel.set_models(Ok(ModelList {
+            query: String::new(),
+            next: None,
             manage: false,
             models: vec![
                 item("flash", &["low", "high"], None, Some("low")),
@@ -1174,6 +1328,8 @@ mod tests {
     fn a_provider_whose_models_need_a_window_keeps_one_counted_row() {
         let mut panel = panel();
         panel.set_models(Ok(ModelList {
+            query: String::new(),
+            next: None,
             manage: false,
             models: vec![
                 item("flash", &[], None, None),
@@ -1199,6 +1355,8 @@ mod tests {
         assert!(models < row, "{screen}");
 
         panel.set_models(Ok(ModelList {
+            query: String::new(),
+            next: None,
             manage: false,
             models: vec![item("flash", &[], None, None)],
             current: None,
@@ -1223,6 +1381,8 @@ mod tests {
     fn a_limits_row_replaces_the_providers_empty_row() {
         let mut panel = panel();
         panel.set_models(Ok(ModelList {
+            query: String::new(),
+            next: None,
             manage: false,
             models: Vec::new(),
             current: None,
@@ -1254,6 +1414,8 @@ mod tests {
     fn each_provider_offers_edit_models_with_its_own_row() {
         let mut panel = ModelsPanel::new();
         panel.set_models(Ok(ModelList {
+            query: String::new(),
+            next: None,
             manage: true,
             models: vec![
                 item_for("dim", "Dim OAuth", "flash", &[], None, None),
@@ -1288,6 +1450,8 @@ mod tests {
         // Without `provider.management`, no Provider offers the row.
         let mut panel = ModelsPanel::new();
         panel.set_models(Ok(ModelList {
+            query: String::new(),
+            next: None,
             manage: false,
             models: vec![item_for("dim", "Dim OAuth", "flash", &[], None, None)],
             current: None,

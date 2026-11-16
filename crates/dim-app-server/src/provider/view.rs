@@ -426,10 +426,14 @@ impl ProviderService {
     ) -> Result<ManagementView, ProviderError> {
         let db = self.db.clone();
         let id = provider_id.clone();
+        let target = model_id.clone();
         let record = self
             .owned(cancel, move |_| {
                 Box::pin(async move {
                     db.run_read(move |connection| {
+                        if let Some(target) = target {
+                            return read_model_record(connection, &id, &target);
+                        }
                         let row: Option<(u32, String)> = connection
                             .query_row(
                                 "SELECT version,record FROM providers WHERE provider_id=?1",
@@ -449,10 +453,16 @@ impl ProviderService {
                 })
             })
             .await?;
+        let db = self.db.clone();
+        let id = provider_id.clone();
+        let expected=self.owned(cancel,move |_| Box::pin(async move {
+            db.run_read(move |c| c.query_row("SELECT definition_fingerprint FROM provider_bundle WHERE provider_id=?1",[id],|row| row.get::<_,Option<String>>(0)).optional().map(Option::flatten).map_err(storage)).await.map_err(ProviderError::from)
+        })).await?;
         let mut errors = Vec::new();
         let mut provider = match record {
             Some(PersistedProviderRecord::Static(record)) => {
                 if record.kind == StaticRecordKind::Builtin
+                    && record.definition_fingerprint != expected
                     && let Some(definition) = bundled_seed_for(&self.bundled, &provider_id)?
                     && record.definition_fingerprint != definition.definition_fingerprint
                 {
@@ -499,6 +509,12 @@ impl ProviderService {
             models.retain(|model| model.model.model_id == model_id);
             if models.is_empty() {
                 return Err(ProviderError::NotFound);
+            }
+            let name = self
+                .model_name(provider.info.provider_id.clone(), model_id.clone(), cancel)
+                .await?;
+            for model in models {
+                model.catalog_name = (model.model.display_name != name).then(|| name.clone());
             }
             provider.preferences.retain(|id, _| id == &model_id);
         }
@@ -598,7 +614,7 @@ impl ProviderService {
                 Box::pin(async move {
                     db.run_read(move |connection| {
                         let mut query = connection
-                            .prepare("SELECT version,record FROM providers WHERE provider_id=?1")
+                            .prepare("SELECT p.version,json_set(q.record,'$.models',json('[]'),'$.userModels',json('[]'),'$.modelConfigOverrides',json('[]')) FROM providers p JOIN provider_query_records q ON q.provider_id=p.provider_id WHERE p.provider_id=?1")
                             .map_err(storage)?;
                         records
                             .into_iter()

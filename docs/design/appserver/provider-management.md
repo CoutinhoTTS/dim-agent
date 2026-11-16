@@ -121,7 +121,7 @@ preference, workspace selection, account lease or secret file is created.
 | `provider.management` | `{providerId, modelId?}` | `{drivers: ManagementDriver[], providers: ManagementProvider[], errors: ProviderRecordError[]}`; each connection adds `gluedPrefix`, the prefix its record states, and each model adds `alias`, the catalog id the listed id stands for, and `catalogName`, the name `provider.catalog` publishes for the row; each is omitted when unset | false | `Drain` |
 | `provider.list` | `{}` | Existing `{providers, errors}` summary; each provider adds `remoteModelList`, whether `provider.refresh` can list its models, which clients use to offer or withhold that command in a row naming an empty catalog, and `gluedPrefix`, the prefix its record states, omitted when unset | false | `Drain` |
 | `provider.selection` | `{cwd?}` | Existing `{selection}` and its separate scope/version. A `cwd` reads only that scope's row and answers `null` when the folder has none; the workspace-over-global precedence is a `configuration` rule, not this read's | false | `Drain` |
-| `provider.catalog` | `{providerId}` | Existing `{catalog}` with `ProviderModel`; each model's `name` is unique within its provider (§3.1 below) | false | `Drain` |
+| `provider.catalog` | `{providerId, modelId?}` | Existing `{catalog}` with `ProviderModel`; each model's `name` is unique within its provider (§3.1 below) | false | `Drain` |
 
 `provider.catalog` publishes a `name` unique within its provider. Duplicates are
 found among all of that catalog's rows, a disabled or an unavailable one included,
@@ -198,6 +198,75 @@ or changed; its models are unavailable and model writes wait for a current refre
 A disappeared default's override cannot become a user-added model.
 `source:"override"` means a default model with a stored descriptor override;
 an edited user model remains `source:"user"`.
+
+### Startup, selection and memory
+
+Provider reads are predicates over persisted state, not client-side catalog scans.
+Explicit selection reads the named provider and model. Default selection tries the
+workspace selection, then the global selection, returning immediately on the first
+usable target. Only after both fail does it query enabled, configured candidates
+in the existing account-first and provider-ID order. Account availability is read
+from its owner; persisted credentials and flags do not assert a live login.
+The execution predicate remains authoritative for routes, capabilities and limits.
+Business selection has no page cursor. A model-only startup queries the exact model
+ID, prefers the effective provider, and rejects more than one usable provider.
+See [Model startup](../model-startup.md) for input precedence.
+
+The shipped catalog is compiled into independently readable records and lookup
+keys. Provider does not materialize the complete catalog at activation or retain parsed
+catalogs, identification results or query results. Model identification reads only
+matching descriptors and preserves namespace, alias, canonical-name and ambiguity
+rules. Building the shipped lookup data happens before distribution.
+
+Provider synchronizes bundled definitions by catalog revision. An unchanged
+revision reads only the revision and pending provider IDs. An initial installation or changed
+revision reconciles definitions individually, preserving connection settings,
+credentials, user models, overrides and enablement. Conflicting updates remain
+pending and are retried on the next activation even when the catalog revision is
+unchanged. Revision and successful record changes commit atomically. Synchronization
+releases its temporary SQLite page-cache allocation after commit; an unchanged
+revision without pending work performs no write. Removal retires the builtin; a user-disabled provider is never re-enabled by an upgrade.
+
+Display lists use bounded pages and server-side search. Opening a conversation
+reads its adopted model; it does not enumerate candidate catalogs. Web and CLI
+model pickers query when opened, discard their results when closed, and refresh
+only the affected query after a write. Agent and modality selection consume the
+Provider-owned predicates through the existing service faces, not a separately
+maintained availability table in the client.
+
+Provider retains no parsed catalog or completed query results while idle.
+Retained memory should approach the cost of its I/O handles and lifecycle state.
+Verification reports retained and peak allocated bytes
+separately, plus shipped read-only catalog bytes; it must not substitute whole
+process RSS or omit a retained catalog index. Display and update flows must also
+report their peak and bound the amount of data admitted per request. Measurements
+use disposable homes and include repeated activation and reads, so released
+results cannot conceal an accumulating cache.
+
+### Model display queries
+
+`provider.models.query` is a read-only operation of the process `managementMethods`
+face. It accepts `{providerId?, modelId?, query?, after?, limit?}`. The limit defaults
+to 32 and accepts 1–128. Search matches model ID, display name and provider name; `zdr` also matches the account-owned ZDR flag.
+`after` and reply `next` are exclusive ordered `{providerId, modelId}` cursors;
+they are traversal positions, not selectable targets. An empty model ID represents
+an enabled provider without a model row. Clients pass the returned cursor unchanged.
+
+The reply is `{models, empty, next}`. Each model row contains `providerId`,
+`providerName`, `model` (the published `ProviderModel`), `version`, `preferences`
+and `disabled`. Disabled and unavailable models remain visible for diagnostics.
+`empty` entries contain `providerId`, `providerName` and a tagged `reason`:
+`{kind:"no_models", listable}` or `{kind:"unreadable"}`. Each page admits at most
+`limit` model or empty-provider candidates, so a page containing errors can have
+fewer models. `next:null` ends traversal. Invalid limits fail with
+`provider_invalid_config`; cancellation and storage errors follow the Provider
+operation contract. Reads perform no remote catalog refresh. Refresh is an
+explicit management operation.
+
+`provider.catalog` accepts an optional `modelId` for the adopted model's capability
+read. It returns the same catalog envelope with only that model and preserves the
+name computed against the provider's naming fields. Known-target consumers use
+this form, including CLI session opening, model changes and adoption diagnostics.
 
 ### On-demand management reads
 
@@ -291,8 +360,8 @@ anything is listed, as `provider_invalid_config` with its reason. A failed
 listing fails the update and writes nothing, so re-pointing never leaves the old
 endpoint's models on the new one. A disabled record whose models are its own
 drops them in the same write, without a request: they are the old endpoint's,
-and the empty, listable catalog is what the picker's refill fills after the
-record is enabled. A `network`-only change — a proxy or a timeout
+the empty, listable catalog is filled by the explicit refresh operation after
+the record is enabled. A `network`-only change — a proxy or a timeout
 — saves alone and lists nothing: it changes how the endpoint is reached, not
 what it serves, and requiring a listing would make those settings unsavable
 whenever listing fails. A driver that cannot list saves the connection alone. A
