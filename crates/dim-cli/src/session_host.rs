@@ -286,7 +286,7 @@ struct Worker {
     output: Option<OutputWatch>,
     /// The admitted read can outlive its detail; false discards that old reply.
     output_request: Option<(u64, bool)>,
-    catalog_request: Option<(u64, String, bool, SessionsScope)>,
+    catalog_request: Option<(u64, String, bool, SessionsScope, bool)>,
     /// When the next snapshot goes out; set by the first unpublished change.
     publish_at: Option<tokio::time::Instant>,
     /// The `shell.run` in flight: its request id and run id.
@@ -735,7 +735,7 @@ impl Worker {
     }
 
     async fn cancel_catalog(&mut self) -> crate::Result<()> {
-        if let Some((request, _, _, _)) = self.catalog_request.take()
+        if let Some((request, ..)) = self.catalog_request.take()
             && self.client.offers("session.catalog.cancel")
         {
             self.client
@@ -1550,6 +1550,9 @@ impl Worker {
                     let mut params = json!({"limit":50,"query":query,"withPreview":true});
                     if show_acp && self.client.offers("session.catalog.origins") {
                         params["withAcpSessions"] = json!(true);
+                        if self.client.offers("session.catalog.acpHistory") {
+                            params["withAcpHistory"] = json!(true);
+                        }
                     }
                     if let Some(cwd) = self.scope_cwd(&scope) {
                         params["cwd"] = cwd;
@@ -1562,7 +1565,9 @@ impl Worker {
                     ("session.summaries", json!({}))
                 };
                 match self.client.send(method, params).await {
-                    Ok(request) => self.catalog_request = Some((request, id, paged, scope)),
+                    Ok(request) => {
+                        self.catalog_request = Some((request, id, paged, scope, show_acp))
+                    }
                     Err(error) => self.send(Update::Sessions {
                         id,
                         paged,
@@ -4513,7 +4518,7 @@ impl Worker {
             .as_ref()
             .is_some_and(|(request, ..)| *request == id)
         {
-            let (_, id, paged, scope) = self
+            let (_, id, paged, scope, show_acp) = self
                 .catalog_request
                 .take()
                 .expect("matched catalog request");
@@ -4541,11 +4546,17 @@ impl Worker {
                         SessionsScope::Local(Some(workspaces)) => workspaces.contains(&session.cwd),
                         SessionsScope::All => true,
                     });
+                    sessions.retain(|session| {
+                        if session.origin.as_deref() == Some("acp") {
+                            show_acp
+                        } else {
+                            session.preview.is_some()
+                        }
+                    });
                 }
                 Ok((
                     sessions
                         .into_iter()
-                        .filter(|session| session.preview.is_some())
                         .map(|session| SessionItem {
                             id: session.session_id,
                             title: session.title,
@@ -4554,6 +4565,7 @@ impl Worker {
                             updated_at: session.updated_at,
                             model: session.model.model_id,
                             origin: session.origin,
+                            closed: session.closed,
                         })
                         .collect(),
                     next_cursor,
@@ -5383,6 +5395,8 @@ struct SessionSummary {
     /// The creation origin, from a daemon that reports one (#557).
     #[serde(default)]
     origin: Option<String>,
+    #[serde(default)]
+    closed: bool,
 }
 
 fn execution_snapshot(value: serde_json::Value) -> Result<ExecutionSnapshot, String> {
