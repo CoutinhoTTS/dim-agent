@@ -3595,6 +3595,12 @@
         "removing": false
       },
       {
+        "service": "dyn rutis_bridge::session::services::HostDispatch#basePromptSettingsHost",
+        "provider": 28,
+        "generation": 1,
+        "removing": false
+      },
+      {
         "service": "dyn rutis_bridge::session::services::HostDispatch#callChannel",
         "provider": 12,
         "generation": 1,
@@ -3741,6 +3747,18 @@
       {
         "service": "dyn rutis_bridge::session::services::HostDispatch#settings",
         "provider": 19,
+        "generation": 1,
+        "removing": false
+      },
+      {
+        "service": "dyn rutis_bridge::session::services::HostDispatch#skillsInstructionsSettingsHost",
+        "provider": 28,
+        "generation": 1,
+        "removing": false
+      },
+      {
+        "service": "dyn rutis_bridge::session::services::HostDispatch#summaryPromptSettingsHost",
+        "provider": 28,
         "generation": 1,
         "removing": false
       },

@@ -1093,6 +1093,7 @@
       "unexpandedMacros": [
         "format",
         "matches",
+        "serde_json::json",
         "tokio::select",
         "tracing::warn",
         "vec"
@@ -15211,6 +15212,7 @@
         "path HostFuture",
         "path LoadPrompt",
         "path PromptHost",
+        "path crate::host::ModelPortError::from",
         "use crate::host::HostError",
         "use crate::host::HostFuture",
         "use crate::host::LoadPrompt",
@@ -15247,6 +15249,16 @@
         "use crate::host_platform::OutputEncoding",
         "use crate::host_platform::ShellEdition",
         "use crate::host_platform::ShellStatus"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::prompt_sources",
+      "to": "dim_agent_capabilities::port_faces",
+      "references": [
+        "path crate::port_faces::Empty",
+        "path crate::port_faces::request",
+        "path crate::port_faces::serving",
+        "path crate::port_faces::unknown_method"
       ]
     },
     {
@@ -16547,7 +16559,18 @@
       "to": "dim_agent_capabilities::host",
       "references": [
         "path HostFuture",
+        "path crate::host::ModelPortError::from",
         "use crate::host::HostFuture"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::skills",
+      "to": "dim_agent_capabilities::port_faces",
+      "references": [
+        "path crate::port_faces::Empty",
+        "path crate::port_faces::request",
+        "path crate::port_faces::serving",
+        "path crate::port_faces::unknown_method"
       ]
     },
     {
@@ -17138,6 +17161,7 @@
         "path StrategyOutcome::Failed",
         "path StrategyOutcome::Skipped",
         "path add_usage",
+        "path crate::host::ModelPortError::from",
         "path reasoning_config"
       ]
     },
@@ -17148,6 +17172,16 @@
         "path crate::model_provider::RetryObserver",
         "path invoke_with_recovery",
         "use crate::model_provider::invoke_with_recovery"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::summary_strategy",
+      "to": "dim_agent_capabilities::port_faces",
+      "references": [
+        "path crate::port_faces::Empty",
+        "path crate::port_faces::request",
+        "path crate::port_faces::serving",
+        "path crate::port_faces::unknown_method"
       ]
     },
     {
@@ -23351,13 +23385,6 @@
     },
     {
       "from": "dim_app_server",
-      "to": "dim_agent_capabilities::prompt_sources",
-      "references": [
-        "path dim_agent_capabilities::prompt_sources::BasePromptSettingsHost"
-      ]
-    },
-    {
-      "from": "dim_app_server",
       "to": "dim_agent_capabilities::prompt_suggestion",
       "references": [
         "path dim_agent_capabilities::prompt_suggestion::PromptSuggestionSettingsHost"
@@ -23369,20 +23396,6 @@
       "references": [
         "path dim_agent_capabilities::session_broadcast::SessionNotice",
         "path dim_agent_capabilities::session_broadcast::notify"
-      ]
-    },
-    {
-      "from": "dim_app_server",
-      "to": "dim_agent_capabilities::skills",
-      "references": [
-        "path dim_agent_capabilities::skills::SkillsInstructionsSettingsHost"
-      ]
-    },
-    {
-      "from": "dim_app_server",
-      "to": "dim_agent_capabilities::summary_strategy",
-      "references": [
-        "path dim_agent_capabilities::summary_strategy::SummaryPromptSettingsHost"
       ]
     },
     {
@@ -23437,8 +23450,7 @@
       "to": "dim_agent_runtime::names",
       "references": [
         "path dim_agent_runtime::Names::copy",
-        "path dim_agent_runtime::names::name_of",
-        "path dim_agent_runtime::names::register"
+        "path dim_agent_runtime::names::name_of"
       ]
     },
     {

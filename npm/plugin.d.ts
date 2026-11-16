@@ -503,3 +503,14 @@ export interface SessionFiles {
   owned_paths(request: { sessionId: string }): Promise<{ paths: string[] }>;
 }
 export interface StoredSessionFile { fileId: string; path: string; bytes: number }
+
+/** The existing user override; null keeps the consumer's factory or built-in text. */
+export interface BasePromptSettingsHost {
+  base(request: Record<string, never>): Promise<string | null>;
+}
+export interface SkillsInstructionsSettingsHost {
+  instructions(request: Record<string, never>): Promise<string | null>;
+}
+export interface SummaryPromptSettingsHost {
+  systemPrompt(request: Record<string, never>): Promise<string | null>;
+}

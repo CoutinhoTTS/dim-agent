@@ -109,9 +109,6 @@ Rust 产品装配的现状以 [生成的 catalog](../architecture/rust-agent/gen
 | `settingsService` | `settings` | GoalBranch 的取消契约见 §4.1。 |
 | `modelHost` | `auxiliaryModel` | PromptSuggestion 的请求与流式语义见 §4.2。 |
 | `loader` | `rutis/loader` | 插件管理走数据面 |
-| `basePromptSettingsHost` | — | 宿主 prompt settings 端口；`owner-api` |
-| `skillsInstructionsSettingsHost` | — | 宿主 skills settings 端口；`owner-api` |
-| `summaryPromptSettingsHost` | — | 宿主 summary settings 端口；`owner-api` |
 | `sessionStore` | `sessionMetadata`、`sessionFiles` | 行与文件分开 |
 | `timelineTree`、`timelineTreeControl` | `treeCommands` | 建/读分支走 `treeCommands` |
 | `toolSourcesView` | `toolRegistry` | 工具贡献走注册表 |
@@ -230,6 +227,11 @@ Rust 产品装配的现状以 [生成的 catalog](../architecture/rust-agent/gen
 ## 4. 批次契约（#1292）
 
 每批处理同一个 owner 的相关操作。
+
+PromptSettings 的三个只读端口按 [prompt overrides §3.1](appserver/prompt-overrides.md#31-data-operations)
+提供 `basePromptSettingsHost.base({})`、`skillsInstructionsSettingsHost.instructions({})` 和
+`summaryPromptSettingsHost.systemPrompt({})`，回复为字符串或 `null`。它们共享现有 owner，
+原生与跨语言入口调用同一读取方法；配置优先级、读取时机和失败回退保持 owner 契约。
 
 ### 4.1 `settingsService`：保留调用取消
 
