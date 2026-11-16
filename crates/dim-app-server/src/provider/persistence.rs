@@ -373,7 +373,7 @@ pub(super) fn write_header(
     id: &str,
     version: u32,
     body: &str,
-) -> Result<usize> {
+) -> Result<bool> {
     let mut body: Value = serde_json::from_str(body).map_err(storage)?;
     for field in ["models", "userModels", "modelConfigOverrides"]
         .iter()
@@ -383,8 +383,15 @@ pub(super) fn write_header(
             .ok_or_else(|| storage("Invalid provider header"))?
             .remove(*field);
     }
-    let changed = connection.execute("INSERT INTO providers VALUES (?1,?2,?3) ON CONFLICT(provider_id) DO UPDATE SET version=excluded.version,record=excluded.record", params![id, version, body.to_string()]).map_err(storage)?;
-    Ok(changed)
+    let inserted = connection
+        .query_row(
+            "SELECT NOT EXISTS(SELECT 1 FROM providers WHERE provider_id=?1)",
+            [id],
+            |row| row.get(0),
+        )
+        .map_err(storage)?;
+    connection.execute("INSERT INTO providers VALUES (?1,?2,?3) ON CONFLICT(provider_id) DO UPDATE SET version=excluded.version,record=excluded.record", params![id, version, body.to_string()]).map_err(storage)?;
+    Ok(inserted)
 }
 
 pub(super) fn admit_base(
@@ -395,7 +402,9 @@ pub(super) fn admit_base(
 ) -> Result<()> {
     if record.kind == StaticRecordKind::Builtin
         && !record.remote_models
-        && record.definition_fingerprint.as_deref() == bundled.fingerprint(id)
+        && bundled.fingerprint(id).is_some_and(|fingerprint| {
+            record.definition_fingerprint.as_deref() == Some(fingerprint)
+        })
     {
         connection.execute("INSERT OR IGNORE INTO provider_bases SELECT ?1,revision FROM provider_sources WHERE revision=?2", params![id, bundled.revision()]).map_err(storage)?;
     }
@@ -408,8 +417,17 @@ pub(super) fn write(
     id: &str,
     version: u32,
     body: &str,
-) -> Result<usize> {
+) -> Result<()> {
     write_inner(connection, id, version, body, false)
+}
+
+pub(super) fn write_pinned(
+    connection: &rusqlite::Connection,
+    id: &str,
+    version: u32,
+    body: &str,
+) -> Result<()> {
+    write_inner(connection, id, version, body, true)
 }
 
 fn write_inner(
@@ -417,22 +435,23 @@ fn write_inner(
     id: &str,
     version: u32,
     body: &str,
-    migrating: bool,
-) -> Result<usize> {
+    preserve_history: bool,
+) -> Result<()> {
     let record = match parse_provider_row(id, version, body) {
         Ok(record) => record,
         Err(_) => {
-            return connection.execute("INSERT INTO providers VALUES (?1,?2,?3) ON CONFLICT(provider_id) DO UPDATE SET version=excluded.version,record=excluded.record", params![id,version,body]).map_err(storage);
+            connection.execute("INSERT INTO providers VALUES (?1,?2,?3) ON CONFLICT(provider_id) DO UPDATE SET version=excluded.version,record=excluded.record", params![id,version,body]).map_err(storage)?;
+            return Ok(());
         }
     };
     let bundled = BundledCatalog::load().map_err(storage)?;
-    let changed = write_header(connection, id, version, body)?;
+    let first_configuration = write_header(connection, id, version, body)?;
     if let PersistedProviderRecord::Static(record) = &record {
         if record.remote_models {
             connection
                 .execute("DELETE FROM provider_bases WHERE provider_id=?1", [id])
                 .map_err(storage)?;
-        } else if !migrating {
+        } else if first_configuration && !preserve_history {
             admit_base(connection, id, record, &bundled)?;
         }
     }
@@ -519,7 +538,7 @@ fn write_inner(
     if !matches!(&record,PersistedProviderRecord::Static(r) if r.kind==StaticRecordKind::Builtin) {
         connection.execute("INSERT INTO provider_bundle VALUES (?1,?2,NULL,0,0,?2) ON CONFLICT(provider_id) DO UPDATE SET fingerprint=excluded.fingerprint,naming_revision=excluded.naming_revision",params![id,bundled.revision()]).map_err(storage)?;
     }
-    Ok(changed)
+    Ok(())
 }
 
 fn write_names(
@@ -583,17 +602,6 @@ fn write_names(
     Ok(())
 }
 
-#[cfg(feature = "testing")]
-pub(super) fn write_pinned(
-    connection: &rusqlite::Connection,
-    id: &str,
-    version: u32,
-    body: &str,
-) -> Result<()> {
-    write_inner(connection, id, version, body, true)?;
-    Ok(())
-}
-
 pub(crate) fn migrate(connection: &rusqlite::Connection) -> Result<()> {
     let mut after = String::new();
     loop {
@@ -601,7 +609,7 @@ pub(crate) fn migrate(connection: &rusqlite::Connection) -> Result<()> {
         let Some((id, version, body)) = row else {
             break;
         };
-        write_inner(connection, &id, version, &body, true)?;
+        write_pinned(connection, &id, version, &body)?;
         after = id;
     }
     Ok(())
@@ -1016,6 +1024,7 @@ pub(super) fn adopt(
             connection
                 .execute("DELETE FROM provider_bases WHERE provider_id=?1", [id])
                 .map_err(storage)?;
+            admit_base(connection, id, &record, bundled)?;
             persistence::write(
                 connection,
                 id,

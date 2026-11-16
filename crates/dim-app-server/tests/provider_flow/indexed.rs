@@ -401,5 +401,113 @@ async fn archived_source_bases_keep_exact_names_through_native_backup_restore() 
     assert_eq!(exact.work.source_payloads, 1);
     assert_eq!(exact.work.stored_payloads, 1);
     root.shutdown().await.unwrap();
+    {
+        let db = rusqlite::Connection::open(restored.join("native.sqlite")).unwrap();
+        let mut body: Value =
+            serde_json::from_str(&provider_body(&db, "deepseek").unwrap()).unwrap();
+        let mut historical = body["models"][0].clone();
+        historical["modelId"] = json!("admitted-history");
+        historical["displayName"] = json!("Admitted history");
+        body["models"].as_array_mut().unwrap().push(historical);
+        dim_app_server::provider::testing::replace_provider(
+            &db,
+            "deepseek",
+            exact.models[0].version,
+            &body.to_string(),
+        )
+        .unwrap();
+        body["definitionFingerprint"] = Value::Null;
+        body["version"] = json!(1);
+        dim_app_server::provider::testing::replace_provider(
+            &db,
+            "retired-history",
+            1,
+            &body.to_string(),
+        )
+        .unwrap();
+    }
+    let (root, provider) = provider_root(&restored).await;
+    let retired = provider
+        .catalog_for("retired-history".into(), &cancel)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        retired
+            .models
+            .iter()
+            .any(|model| model.id == "admitted-history")
+    );
+    let mut expected = expected;
+    for reply in [UpdateReplyKind::Summary, UpdateReplyKind::Full] {
+        let version = expected["version"].as_u64().unwrap() as u32;
+        provider
+            .update_reply(
+                "deepseek".into(),
+                version,
+                serde_json::from_value(json!({"enabled":true})).unwrap(),
+                reply,
+                &cancel,
+            )
+            .await
+            .unwrap();
+        expected["version"] = json!(version + 1);
+        let exact = provider
+            .query_models(
+                ModelQuery {
+                    provider_id: Some("deepseek".into()),
+                    model_id: Some(expected["model"]["id"].as_str().unwrap().into()),
+                    ..Default::default()
+                },
+                &cancel,
+            )
+            .await
+            .unwrap();
+        assert_eq!(serde_json::to_value(&exact.models[0]).unwrap(), expected);
+        assert_eq!(exact.work.source_payloads, 0);
+        assert_eq!(exact.work.stored_payloads, 2);
+    }
+    let version = expected["version"].as_u64().unwrap() as u32;
+    provider
+        .delete_static("deepseek".into(), version, &cancel)
+        .await
+        .unwrap();
+    provider
+        .update_model_config(
+            "deepseek".into(),
+            version + 1,
+            "admitted-history".into(),
+            serde_json::from_value(json!({"displayName":"Edited admitted history"})).unwrap(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let catalog = provider
+        .catalog_for("deepseek".into(), &cancel)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        catalog
+            .models
+            .iter()
+            .find(|model| model.id == "admitted-history")
+            .unwrap()
+            .name,
+        "Edited admitted history"
+    );
+    let db = rusqlite::Connection::open(restored.join("native.sqlite")).unwrap();
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM provider_bases WHERE provider_id='deepseek'",
+            [],
+            |row| row.get::<_, u32>(0)
+        )
+        .unwrap(),
+        0,
+        "ordinary edits preserve admitted history without guessing its source"
+    );
+    drop(db);
+    root.shutdown().await.unwrap();
     std::fs::remove_dir_all(home).unwrap();
 }

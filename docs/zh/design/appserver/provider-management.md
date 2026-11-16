@@ -137,6 +137,10 @@ actions 只说明当前可用性，
 激活只公布可用源代次，不展开 Provider。逐 Provider 接纳、退役和 pending 冲突
 遵循下文“索引源与稀疏接纳”合同。
 
+普通连接和模型编辑保留已接纳的模型基线，包括没有已知源代次的历史行。定义指纹
+相同不表示已有历史行可以改为隐式默认值；只有首次配置尚未保存的内置 Provider，
+或执行下述明确的源接纳流程时，才建立新基线。
+
 Web 与 CLI 模型选择器打开时查询、关闭时释放结果。已采用模型的能力读取携带
 Provider 和模型 ID，不枚举候选目录。具体选择、同步、保留量和峰值验证合同见
 [英文对应章节](../../../design/appserver/provider-management.md#startup-selection-and-memory)。

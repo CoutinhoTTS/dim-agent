@@ -224,6 +224,12 @@ Source activation publishes the available generation without expanding providers
 Per-provider adoption, retirement and pending conflicts follow
 [Indexed source and sparse adoption](#indexed-source-and-sparse-adoption).
 
+Ordinary connection and model edits preserve the admitted model base, including
+historical rows without a known source generation. A matching definition
+fingerprint alone does not turn existing historical rows into implicit defaults.
+A base is established by the first configuration of an untouched builtin or by
+the explicit source-adoption flow below.
+
 The shared default HTTP client for remote model listings is created by the first
 listing request. Local reads, selection and bundled connection configuration do
 not create it. Construction failure fails that operation with the existing

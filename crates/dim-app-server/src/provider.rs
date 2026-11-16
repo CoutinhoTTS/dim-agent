@@ -808,12 +808,13 @@ pub fn read_stored_static(
 }
 
 /// Writes an admitted native Provider record and its indexes in the caller's transaction.
+/// Without an existing source base, supplied model history remains authoritative.
 pub fn write_stored_static(
     connection: &rusqlite::Connection,
     provider_id: &str,
     record: &StaticProviderRecord,
 ) -> dim_agent_runtime::Result<()> {
-    persistence::write(
+    persistence::write_pinned(
         connection,
         provider_id,
         record.version,
@@ -1971,13 +1972,15 @@ impl ProviderService {
                             record.enabled = false;
                             record.version =
                                 record.version.checked_add(1).ok_or(ProviderError::Failed)?;
-                            persistence::write_header(
+                            let first_configuration = persistence::write_header(
                                 &tx,
                                 &provider_id,
                                 record.version,
                                 &serde_json::to_string(&record)?,
                             )?;
-                            persistence::admit_base(&tx, &provider_id, &record, &bundled)?;
+                            if first_configuration {
+                                persistence::admit_base(&tx, &provider_id, &record, &bundled)?;
+                            }
                         } else {
                             tx.execute(
                                 "DELETE FROM provider_selections WHERE provider_id=?1",

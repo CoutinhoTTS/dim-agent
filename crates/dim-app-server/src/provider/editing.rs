@@ -556,13 +556,15 @@ impl ProviderService {
                                 if cancel.is_cancelled() {
                                     return Err(ProviderError::Cancelled);
                                 }
-                                persistence::write_header(
+                                let first_configuration = persistence::write_header(
                                     &tx,
                                     &id,
                                     record.version,
                                     &serde_json::to_string(&record)?,
                                 )?;
-                                persistence::admit_base(&tx, &id, &record, &bundled)?;
+                                if first_configuration {
+                                    persistence::admit_base(&tx, &id, &record, &bundled)?;
+                                }
                                 if reply == UpdateReplyKind::Full {
                                     record = read_stored_static(&tx, &id)?
                                         .ok_or(ProviderError::NotFound)?;
