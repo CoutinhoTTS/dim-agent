@@ -2410,18 +2410,10 @@ impl Worker {
     /// `requireInactive`: the issue asks the picker to delete a Session a
     /// turn is running in, which the close in the delete settles.
     ///
-    /// The reply alone decides. `-32603` is a storage failure anywhere in the
-    /// removal (session-deletion-and-fork §3.5): the command-output or row
-    /// removal after the close, and also the store reads and deletes that
-    /// precede it for a Session's Team. It removes no rows either way, so the
-    /// picker keeps the row; whether a Session was closed first depends on
-    /// which read failed, and the reply does not distinguish them. A close's
-    /// own cleanup errors are logged rather than returned (§3.2 step 2), so
-    /// they never arrive as one. Every other refusal is a direct `AgentError`
-    /// that `RpcError::from` maps to its own code before any storage step, so
-    /// it means nothing ran. The RPC mapping's `PluginFailed` unwrapping does
-    /// not apply here: no refusal on this path is built inside a capability,
-    /// so `-32603` keeps the meaning of a storage failure.
+    /// A `-32603` does not confirm deletion or whether the Session closed:
+    /// storage operations can fail before or after close. The picker keeps
+    /// the row for reconciliation and leaves an affected current Session
+    /// (session-deletion-and-fork §3.5).
     async fn delete_session(&mut self, session_id: &str) -> DeleteOutcome {
         if !self.client.supports(&["session.delete"]) {
             return DeleteOutcome::Unsupported;

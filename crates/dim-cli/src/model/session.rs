@@ -1205,17 +1205,15 @@ pub enum DeleteOutcome {
     NothingRemoved,
     /// The daemon offers no `session.delete`.
     Unsupported,
-    /// The removal failed after admission: no rows were removed. A loaded
-    /// Session was closed first, so this daemon neither lists nor loads it
-    /// again; the reply does not say which step failed.
+    /// The removal failed and the reply does not say whether close ran.
+    /// The picker keeps the row and leaves an affected current Session.
     ClosedNotRemoved(String),
     /// The call failed before the removal: the row and the attachment stand.
     Failed(String),
 }
 
 impl DeleteOutcome {
-    /// Whether the call ended the Session in this daemon, so a picker showing
-    /// that Session leaves for Home.
+    /// Whether a picker showing the affected Session leaves for Home.
     pub fn ends_session(&self) -> bool {
         matches!(self, Self::Deleted | Self::ClosedNotRemoved(_))
     }

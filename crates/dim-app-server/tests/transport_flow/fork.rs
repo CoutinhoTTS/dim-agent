@@ -1368,12 +1368,8 @@ async fn a_fork_opening_reaches_v3_clients_after_the_copied_facts() {
     server.join().await.unwrap();
 }
 
-/// A fork builds its Session through the same prepared creation every other
-/// creation uses, so a source whose `main` still needs the explicit prompt
-/// migration is refused on this method too: the client gets the producer's
-/// `session_invalid_input` and the command that repairs the branch, not the
-/// generic `-32603` that used to replace the message (`methods.rs`
-/// `From<AgentError> for RpcError`).
+/// `session.fork` restores an unloaded source before copying it. A source
+/// awaiting prompt migration returns its actionable refusal (#1666).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_fork_of_a_branch_awaiting_prompt_migration_answers_its_instruction() {
     use dim_agent_capabilities::prompt::Prompt;
