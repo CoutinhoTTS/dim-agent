@@ -124,7 +124,7 @@ Rust 产品装配的现状以 [生成的 catalog](../architecture/rust-agent/gen
 | `hostPlatform` | `ProcessTree`、`PtyProcessTree`、临时目录 | 数据面 `execHost`：`start`/`wait`/`kill`/`settle`/`output`/`tail`/`removeOutputDirectory`/`shell`/`write`/`resize`/`info`/`confined`/`configured`（[resource and store data faces](resource-faces.md) §3，#1295）；`hostPlatform` 是提供方和它的 Rust binding |
 | `fileStorage` | `FilePath`、根与代次 | 数据面 `fsHost`：工具部分 `resolve`/`read`/`write`/`edit`/`glob`/`grep`/`mentions`，存储部分 `stat`/`readBytes`/`openRead`/`readAt`/`closeRead`/`lock`/`unlock`/`backup`/`createDirectory`/`replace`/`list`/`remove`（§4，#1297）；`fileStorage` 是提供方和 binding |
 | `sqliteStorage` | 连接与事务 | 数据面 `store` 的 Session 行部分（§5）；`sqliteStorage` 是提供方内部的 SQL 引擎（#1298） |
-| `timelineStore` | 连接与批次 | Session 作用域的 `timelineStore` 数据面（resource-faces §9 允许与仓储族分名）：`append`（同步受理）/`commits`、`closeCommits`（按分支序的完成通知）/`head`/`branches`/`readPage`/`readSegments`/`query`/`trace`/`batchEnd`/`batchEndAt`/`saveSnapshot`/`latestSnapshot`；`TimelineStore` trait 是 binding（#1298） |
+| `timelineStore` | 连接与批次 | Session 作用域的 `timelineStore` 数据面（resource-faces §9 允许与仓储族分名）：`createSession`/`sessionConfig`/`releaseSession`/`rollbackSession`/`append`（同步受理）/`commits`、`closeCommits`（按分支序的完成通知）/`head`/`branches`/`readPage`/`readSegments`/`query`/`trace`/`batchEnd`/`batchEndAt`/`saveSnapshot`/`latestSnapshot`；`TimelineStore` trait 是 binding（#1298） |
 | `promptSourcesBranch` | 分支 prompt 装配 | 按 #1292 确认公共操作与装配内部职责。 |
 
 这些行按当前对象形状分组。前四行的数据契约由 [resource and store data faces](resource-faces.md) 定义（#1295/#1297/#1298）。其余行按 #1292 逐批确定操作面。
