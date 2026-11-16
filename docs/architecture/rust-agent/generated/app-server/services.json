@@ -112,7 +112,7 @@
             "status": "Ready"
           },
           {
-            "service": "dim_app_server::settings::SettingsService",
+            "service": "dim_app_server::settings::declared::Settings",
             "scope": null,
             "status": "Ready"
           }
@@ -125,7 +125,7 @@
             "generation": 1
           },
           {
-            "service": "dim_app_server::settings::SettingsService",
+            "service": "dim_app_server::settings::declared::Settings",
             "scope": null,
             "provider": 19,
             "generation": 1
@@ -139,7 +139,7 @@
             "external": true
           },
           {
-            "service": "dim_app_server::settings::SettingsService",
+            "service": "dim_app_server::settings::declared::Settings",
             "provider": 19,
             "declared": true,
             "external": true
@@ -245,7 +245,7 @@
         ]
       },
       {
-        "id": 76,
+        "id": 79,
         "parent": 72,
         "name": "eventhub-ready",
         "state": "Active",
@@ -1153,7 +1153,7 @@
             "status": "Ready"
           },
           {
-            "service": "dim_app_server::settings::SettingsService",
+            "service": "dim_app_server::settings::declared::Settings",
             "scope": null,
             "status": "Ready"
           }
@@ -1166,7 +1166,7 @@
             "generation": 1
           },
           {
-            "service": "dim_app_server::settings::SettingsService",
+            "service": "dim_app_server::settings::declared::Settings",
             "scope": null,
             "provider": 19,
             "generation": 1
@@ -1180,7 +1180,7 @@
             "external": true
           },
           {
-            "service": "dim_app_server::settings::SettingsService",
+            "service": "dim_app_server::settings::declared::Settings",
             "provider": 19,
             "declared": true,
             "external": true
@@ -2221,14 +2221,14 @@
         "generation": 1,
         "injects": [
           {
-            "service": "dim_app_server::settings::SettingsService",
+            "service": "dim_app_server::settings::declared::Settings",
             "scope": null,
             "status": "Ready"
           }
         ],
         "resolved": [
           {
-            "service": "dim_app_server::settings::SettingsService",
+            "service": "dim_app_server::settings::declared::Settings",
             "scope": null,
             "provider": 19,
             "generation": 1
@@ -2236,7 +2236,7 @@
         ],
         "reads": [
           {
-            "service": "dim_app_server::settings::SettingsService",
+            "service": "dim_app_server::settings::declared::Settings",
             "provider": 19,
             "declared": true,
             "external": true
@@ -2251,14 +2251,14 @@
         "generation": 1,
         "injects": [
           {
-            "service": "dim_app_server::settings::SettingsService",
+            "service": "dim_app_server::settings::declared::Settings",
             "scope": null,
             "status": "Ready"
           }
         ],
         "resolved": [
           {
-            "service": "dim_app_server::settings::SettingsService",
+            "service": "dim_app_server::settings::declared::Settings",
             "scope": null,
             "provider": 19,
             "generation": 1
@@ -2266,7 +2266,7 @@
         ],
         "reads": [
           {
-            "service": "dim_app_server::settings::SettingsService",
+            "service": "dim_app_server::settings::declared::Settings",
             "provider": 19,
             "declared": true,
             "external": true
@@ -2296,7 +2296,7 @@
             "status": "Ready"
           },
           {
-            "service": "dim_app_server::settings::SettingsService",
+            "service": "dim_app_server::settings::declared::Settings",
             "scope": null,
             "status": "Ready"
           }
@@ -2309,7 +2309,7 @@
             "generation": 1
           },
           {
-            "service": "dim_app_server::settings::SettingsService",
+            "service": "dim_app_server::settings::declared::Settings",
             "scope": null,
             "provider": 19,
             "generation": 1
@@ -2323,7 +2323,7 @@
             "external": true
           },
           {
-            "service": "dim_app_server::settings::SettingsService",
+            "service": "dim_app_server::settings::declared::Settings",
             "provider": 19,
             "declared": true,
             "external": true
@@ -2505,7 +2505,7 @@
             "status": "Ready"
           },
           {
-            "service": "dim_app_server::settings::SettingsService",
+            "service": "dim_app_server::settings::declared::Settings",
             "scope": null,
             "status": "Ready"
           }
@@ -2518,7 +2518,7 @@
             "generation": 1
           },
           {
-            "service": "dim_app_server::settings::SettingsService",
+            "service": "dim_app_server::settings::declared::Settings",
             "scope": null,
             "provider": 19,
             "generation": 1
@@ -2532,7 +2532,7 @@
             "external": true
           },
           {
-            "service": "dim_app_server::settings::SettingsService",
+            "service": "dim_app_server::settings::declared::Settings",
             "provider": 19,
             "declared": true,
             "external": true
@@ -2552,7 +2552,7 @@
             "status": "Ready"
           },
           {
-            "service": "dim_app_server::settings::SettingsService",
+            "service": "dim_app_server::settings::declared::Settings",
             "scope": null,
             "status": "Ready"
           }
@@ -2565,7 +2565,7 @@
             "generation": 1
           },
           {
-            "service": "dim_app_server::settings::SettingsService",
+            "service": "dim_app_server::settings::declared::Settings",
             "scope": null,
             "provider": 19,
             "generation": 1
@@ -2579,7 +2579,7 @@
             "external": true
           },
           {
-            "service": "dim_app_server::settings::SettingsService",
+            "service": "dim_app_server::settings::declared::Settings",
             "provider": 19,
             "declared": true,
             "external": true
@@ -3512,6 +3512,12 @@
       },
       {
         "service": "dim_app_server::settings::SettingsService",
+        "provider": 19,
+        "generation": 1,
+        "removing": false
+      },
+      {
+        "service": "dim_app_server::settings::declared::Settings",
         "provider": 19,
         "generation": 1,
         "removing": false

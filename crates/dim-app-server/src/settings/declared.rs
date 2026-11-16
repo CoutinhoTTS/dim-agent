@@ -6,7 +6,7 @@ use rutis_bridge::session::{Error, HostDispatch, Reply, Value as RpcValue, host_
 use serde_json::{Value, json};
 
 /// A JSON Schema source an owner registers (§3.1).
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SourceDeclaration {
     pub source: String,
@@ -309,13 +309,56 @@ fn request<T: DeserializeOwned>(args: RpcValue) -> std::result::Result<T, Error>
 /// The owner path: `settings` by name for every language (§4.2). Only
 /// `register` uses the caller's identity, to withdraw its sources when the
 /// calling row unloads; each source has one owner (AGENTS.md rule 11).
-struct Dispatch(Arc<SettingsService>);
-impl HostDispatch for Dispatch {
+pub struct Settings(Arc<SettingsService>);
+impl Settings {
+    /// Registers a declared source until the calling owner unloads.
+    pub fn register(&self, owner: &Ctx, declaration: SourceDeclaration) -> rutis::Result<()> {
+        self.0.register_declared(owner, declaration)
+    }
+
+    /// Reads a declared source, using its defaults when no document exists.
+    pub async fn read(
+        &self,
+        source: &str,
+        scope: SettingsScope,
+        cancel: &CancellationToken,
+    ) -> Result<SettingsSnapshot<Value>> {
+        self.0.read_declared(source, scope, cancel).await
+    }
+
+    /// Replaces a declared source at its expected revision without changing user-only fields.
+    pub async fn update(
+        &self,
+        source: &str,
+        scope: SettingsScope,
+        expected: &str,
+        document: Value,
+        cancel: &CancellationToken,
+    ) -> Result<SettingsSnapshot<Value>> {
+        self.0
+            .update_declared(source, scope, expected, document, Writer::Owner, cancel)
+            .await
+    }
+
+    /// Lists authorized project scopes.
+    pub fn projects(&self) -> Vec<ProjectAuthorized> {
+        self.0
+            .project_sources()
+            .into_iter()
+            .map(|(root, cwd)| ProjectAuthorized {
+                name: project_authorizations(),
+                root,
+                cwd,
+            })
+            .collect()
+    }
+}
+impl HostDispatch for Settings {
     fn methods(&self) -> Option<Value> {
         Some(json!({"register": "async", "read": "async", "update": "async", "projects": "sync"}))
     }
     fn invoke(&self, method: &str, args: RpcValue) -> Reply {
-        let service = self.0.clone();
+        let service = Self(self.0.clone());
         let cancel = CancellationToken::new();
         match method {
             "register" => {
@@ -329,7 +372,7 @@ impl HostDispatch for Dispatch {
                     })?;
                 let registered = request(args).and_then(|declaration| {
                     service
-                        .register_declared(&caller, declaration)
+                        .register(&caller, declaration)
                         .map(|()| RpcValue::Undefined)
                         .map_err(|error| Error::Value(error.to_string()))
                 });
@@ -337,24 +380,14 @@ impl HostDispatch for Dispatch {
             }
             "projects" => {
                 let Projects {} = request(args)?;
-                let projects: Vec<_> = service
-                    .project_sources()
-                    .into_iter()
-                    .map(|(root, cwd)| ProjectAuthorized {
-                        name: project_authorizations(),
-                        root,
-                        cwd,
-                    })
-                    .collect();
+                let projects = service.projects();
                 Ok(envelope(Ok(json!({ "projects": projects }))))
             }
             "read" => {
                 let Read { source, scope } = request(args)?;
                 Ok(RpcValue::future(async move {
                     let _cancel = cancel.clone().drop_guard();
-                    Ok(envelope(
-                        service.read_declared(&source, scope, &cancel).await,
-                    ))
+                    Ok(envelope(service.read(&source, scope, &cancel).await))
                 }))
             }
             "update" => {
@@ -363,12 +396,11 @@ impl HostDispatch for Dispatch {
                     let _cancel = cancel.clone().drop_guard();
                     Ok(envelope(
                         service
-                            .update_declared(
+                            .update(
                                 &update.source,
                                 update.scope,
                                 &update.expected_revision,
                                 update.document,
-                                Writer::Owner,
                                 &cancel,
                             )
                             .await,
@@ -382,9 +414,8 @@ impl HostDispatch for Dispatch {
 
 /// Provides the owner service `settings`.
 pub(super) fn provide(ctx: &Ctx, service: &Arc<SettingsService>) -> rutis::Result<()> {
-    ctx.provide_at(
-        host_key("settings"),
-        Arc::new(Dispatch(service.clone())) as Arc<dyn HostDispatch>,
-    )?;
+    let binding = Arc::new(Settings(service.clone()));
+    ctx.provide_as::<Settings>(binding.clone())?;
+    ctx.provide_at(host_key("settings"), binding as Arc<dyn HostDispatch>)?;
     Ok(())
 }

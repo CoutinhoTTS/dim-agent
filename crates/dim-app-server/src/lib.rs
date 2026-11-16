@@ -1352,6 +1352,7 @@ pub(crate) fn register_names(catalog: &mut dim_agent_runtime::names::ServiceCata
     register::<ui_extensions::UiExtensions>(catalog, None);
     register::<ui_extensions::UiResources>(catalog, Some(SESSION_GROUP));
     register::<settings::SettingsService>(catalog, None);
+    register::<settings::Settings>(catalog, None);
     register::<managed_provider::ManagedProviders>(catalog, None);
     register::<dyn managed_provider::ManagedProvider>(catalog, None);
     register::<codex_oauth::OpenAICodexOAuthService>(catalog, None);
