@@ -1348,6 +1348,64 @@ async fn node_store_preserves_repository_results_and_worktree_removal_exclusion(
         cwd: workspace.to_string_lossy().into_owned(),
         ..Default::default()
     };
+    let protected = server
+        .service::<dim_agent_capabilities::host_platform::HostPlatform>()
+        .unwrap()
+        .exec_root()
+        .join("store-face-protected");
+    std::fs::create_dir_all(&protected).unwrap();
+    let marker = protected.join("keep");
+    std::fs::write(&marker, "untouched").unwrap();
+    for id in [
+        protected.to_str().unwrap(),
+        "../escape",
+        "nested/id",
+        "",
+        ".",
+        "..",
+    ] {
+        let refused = client
+            .rpc(
+                "storefixture.invalid_id",
+                json!({"create": {
+                    "sessionId":id, "config":config, "agentId":agent_id, "protocolVersion":3,
+                    "leaderSessionId":null, "origin":"client", "worktree":null
+                }}),
+            )
+            .await;
+        assert_ok(&refused);
+        assert_eq!(refused["result"]["errors"].as_array().unwrap().len(), 3);
+        assert!(!store.has_records(id).await.unwrap());
+        assert!(matches!(
+            store.delete_session(id).await,
+            Err(AgentError::InvalidInput(_))
+        ));
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), "untouched");
+    }
+    let raw = store.timeline_store();
+    raw.create_session(protected.to_str().unwrap(), &config)
+        .await
+        .unwrap();
+    let refused = client
+        .rpc(
+            "storefixture.invalid_id",
+            json!({"create": {
+                "sessionId":protected, "config":config, "agentId":agent_id, "protocolVersion":3,
+                "leaderSessionId":null, "origin":"client", "worktree":null
+            }}),
+        )
+        .await;
+    assert_ok(&refused);
+    assert!(
+        store
+            .has_records(protected.to_str().unwrap())
+            .await
+            .unwrap()
+    );
+    assert_eq!(std::fs::read_to_string(&marker).unwrap(), "untouched");
+    raw.rollback_session(protected.to_str().unwrap())
+        .await
+        .unwrap();
     let created = client.rpc("storefixture.create", json!({"create": {
         "sessionId":"wire-source", "config":config, "agentId":agent_id, "protocolVersion":3,
         "leaderSessionId":null, "origin":"client",
