@@ -412,6 +412,29 @@ Plugin documents are kept in the Settings source `hooks-plugins`, one `{dir, hoo
 
 `HookSources.read(cwd, cancel)` returns, per source, its id, path, enabled state and document or error. The workspace is the project root Settings authorizes for `cwd`, as `mcp.catalog` resolves it; a `cwd` with no project has no project source. Catalog order is the table order, then document order. Handlers at one hook point with the same `command` string and the same plugin directory run once; a plugin's commands are never merged with another plugin's, because `DIM_PLUGIN_ROOT` gives them different meanings (A.3). Documents are read at each hook point; a missing project file is empty, an unreadable or invalid one is listed `invalid` with a diagnostic and none of its hooks run.
 
+### A.2.1 Plugin content data face
+
+`hooksService` is the process data face for the existing plugin-content operations.
+It is separate from the local client management entry in A.7.
+
+| Operation | Request | Reply |
+| --- | --- | --- |
+| `register` (async) | `{plugin, dir, document}`; plugin id and directory are strings | `null` |
+| `withdraw` (async) | `{plugin}` | `null` |
+| `plugins` (async) | `{}` | array of plugin ids |
+| `refusal` (sync) | `{plugin}` | `[error, reason]` or `null`; `reason` is a string or `null` |
+
+Registration, replacement, invalid-document removal, persistence and enablement follow A.2.
+`refusal` reads the same atomic error/reason pair as PluginManager; it adds no source read.
+Errors retain the [Settings owner codes](../appserver/settings-service.md#6-errors) and
+message. Where the existing cause carries a credential-safe static reason, the wire error's
+`data.reason` carries it. Malformed requests are `invalid_request`.
+
+The typed binding and dispatcher invoke the same Hooks owner operations. Explicit native
+cancellation retains the existing token checks. Giving up a wire wait does not roll back or
+interrupt an accepted registration: its Settings write and refusal bookkeeping settle with
+the owner. No separate state, registry, source scan or retry policy is introduced.
+
 ### A.3 Command protocol
 
 | Channel | Content |

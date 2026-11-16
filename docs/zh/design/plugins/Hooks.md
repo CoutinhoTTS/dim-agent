@@ -412,6 +412,26 @@ AcpGateway 自己的设计把 Hooks 对 `session.submit` 的 `input_blocked` 拒
 
 `HookSources.read(cwd, cancel)` 按来源返回其 id、路径、启用状态与文档或错误。工作区是 Settings 为 `cwd` 授权的项目根，如同 `mcp.catalog` 的解析方式；没有项目的 `cwd` 没有项目来源。目录顺序为表中顺序，再按文档顺序。同一 Hook 点上 `command` 字符串与插件目录都相同的处理器只运行一次；插件之间的命令从不合并，因为 `DIM_PLUGIN_ROOT` 赋予它们不同的含义（A.3）。文档在每个 Hook 点读取；缺失的项目文件视为空，无法读取或无效的文件列为 `invalid` 并记诊断，其中的 Hook 都不运行。
 
+### A.2.1 插件内容数据面
+
+`hooksService` 是现有插件内容操作的进程数据面，与 A.7 的本地客户端管理入口分开。
+
+| 操作 | 请求 | 回复 |
+| --- | --- | --- |
+| `register`（异步） | `{plugin, dir, document}`；插件 ID 和目录为字符串 | `null` |
+| `withdraw`（异步） | `{plugin}` | `null` |
+| `plugins`（异步） | `{}` | 插件 ID 数组 |
+| `refusal`（同步） | `{plugin}` | `[error, reason]` 或 `null`；`reason` 为字符串或 `null` |
+
+登记、替换、无效文档移除、持久化及启用规则沿用 A.2。`refusal` 读取 PluginManager 使用的同一份
+原子 error/reason 对，不新增来源读取。错误保留 [Settings owner 错误码](../appserver/settings-service.md#6-错误)
+及消息；原始原因带有凭据安全的静态 reason 时，wire 错误的 `data.reason` 携带该值。请求形状错误为
+`invalid_request`。
+
+原生绑定与 dispatcher 调用同一个 Hooks owner 操作。原生显式取消保留已有 token 检查。
+放弃 wire 等待不会回滚或中断已经接纳的登记：Settings 写入及拒绝信息更新仍由 owner 完成。
+不增加状态副本、注册表、来源扫描或重试策略。
+
 ### A.3 命令协议
 
 | 通道 | 内容 |

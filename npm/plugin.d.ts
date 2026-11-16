@@ -514,3 +514,11 @@ export interface SkillsInstructionsSettingsHost {
 export interface SummaryPromptSettingsHost {
   systemPrompt(request: Record<string, never>): Promise<string | null>;
 }
+
+/** Hooks-owned plugin content registration; see Hooks A.2. */
+export interface HooksService {
+  register(request: { plugin: string; dir: string; document: JsonValue }): Promise<void>;
+  withdraw(request: { plugin: string }): Promise<void>;
+  plugins(request: Record<string, never>): Promise<string[]>;
+  refusal(request: { plugin: string }): [error: string, reason: string | null] | null;
+}
