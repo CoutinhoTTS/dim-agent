@@ -6,7 +6,7 @@ Generated from the real assembly: the App Server product profile (`serve` with a
 
 ## Services
 
-Each catalog name a part of the assembly provides or injects. `data` means shared with a dispatcher; `internal(reason)` means the face cannot cross; `shared-no-dispatcher` is shared but a leaf cannot call it. Methods are `sync` or `async` (callers in other languages always get a Promise). A non-data name is reached by Rust parts at its type's key.
+Each catalog name a part of the assembly provides or injects. `data` means shared with a dispatcher; `internal(reason)` means the face cannot cross; `shared-no-dispatcher` is shared but a leaf cannot call it. Methods are `sync` or `async`: synchronous methods return a value directly; asynchronous methods return a Promise to TypeScript callers. A non-data name is reached by Rust parts at its type's key.
 
 | Name | Group | Provider | Face | Methods |
 | --- | --- | --- | --- | --- |
@@ -98,7 +98,7 @@ Each catalog name a part of the assembly provides or injects. `data` means share
 | `skillsConfig` | session | SessionScope | data | `get` async |
 | `submitChecks` | session | InputMethods | internal(hot-path) | — |
 | `timelineFactory` | session | SessionScope | internal(control) | — |
-| `timelineStore` | session | SessionScope | internal(object) | — |
+| `timelineStore` | session | SessionScope | data | `append` sync, `batchEnd` async, `batchEndAt` async, `branches` async, `closeCommits` async, `commits` async, `createSession` async, `head` async, `latestSnapshot` async, `query` async, `readPage` async, `readSegments` async, `releaseSession` async, `rollbackSession` async, `saveSnapshot` async, `sessionConfig` async, `trace` async |
 | `timelineTree` | session | TimelineTree | internal(owner-api) | — |
 | `timelineTreeControl` | session | TimelineTree | internal(owner-api) | — |
 | `toolHost` | session | WorkspaceTools | data | `execute` async |

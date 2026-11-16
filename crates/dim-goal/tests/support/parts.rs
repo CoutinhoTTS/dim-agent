@@ -950,13 +950,13 @@ impl Env {
             Arc::new(dim_agent_capabilities::adapters::MockTools),
         );
         if let Some(store) = store {
-            builder.timeline_store(store);
+            builder.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(store));
         }
         if let Some(store) = &refusing {
-            builder.timeline_store(store.clone());
+            builder.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(store.clone()));
         }
         if let Some(store) = &gated {
-            builder.timeline_store(store.clone());
+            builder.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(store.clone()));
         }
         let catalog = builder.catalog().clone();
         let build = Build::default();

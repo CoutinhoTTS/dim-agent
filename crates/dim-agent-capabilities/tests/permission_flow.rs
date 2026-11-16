@@ -205,7 +205,9 @@ fn rule(command: &str, matching: CommandMatch, decision: CommandRuleDecision) ->
 
 async fn agent(tools: Arc<RiskTools>) -> MinimalHost {
     let mut builder = AgentBuilder::new(AgentConfig::default());
-    builder.timeline_store(Arc::new(MemoryTimelineStore::default()));
+    builder.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(Arc::new(
+        MemoryTimelineStore::default(),
+    )));
     defaults::install(&mut builder);
     defaults::mock_model_hosts(&mut builder);
     defaults::tool_host(&mut builder, tools);
@@ -267,7 +269,7 @@ async fn restore_cancels_only_unsettled_approvals_across_pages_without_running_t
     drop(timeline);
     let tools = Arc::new(RiskTools::default());
     let mut builder = AgentBuilder::new(AgentConfig::default());
-    builder.timeline_store(store);
+    builder.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(store));
     defaults::install(&mut builder);
     defaults::mock_model_hosts(&mut builder);
     defaults::tool_host(&mut builder, tools.clone());
@@ -304,7 +306,9 @@ async fn restore_cancels_only_unsettled_approvals_across_pages_without_running_t
 async fn ruled_agent(tools: Arc<RiskTools>, rules: Arc<dyn ReadCommandRules>) -> MinimalHost {
     let mut builder = AgentBuilder::new(AgentConfig::default());
     builder
-        .timeline_store(Arc::new(MemoryTimelineStore::default()))
+        .timeline_store(dim_agent_runtime::TimelineStoreBinding::new(Arc::new(
+            MemoryTimelineStore::default(),
+        )))
         .session_value(Arc::new(PromptHost(Arc::new(EmptyPromptHost))))
         .session_value(Arc::new(InitialPromptConfiguration::fixed(None)))
         .session_value(Arc::new(CommandRulesHost(rules)));
@@ -342,7 +346,9 @@ async fn granted_agent_with(
 ) -> MinimalHost {
     let mut builder = AgentBuilder::new(AgentConfig::default());
     builder
-        .timeline_store(Arc::new(MemoryTimelineStore::default()))
+        .timeline_store(dim_agent_runtime::TimelineStoreBinding::new(Arc::new(
+            MemoryTimelineStore::default(),
+        )))
         .session_value(Arc::new(PromptHost(Arc::new(EmptyPromptHost))))
         .session_value(Arc::new(InitialPromptConfiguration::fixed(None)))
         .session_value(Arc::new(CommandRulesHost(Arc::new(NoCommandRules))))
@@ -1420,7 +1426,9 @@ async fn a_response_that_finds_its_batch_stopped_ends_as_an_interrupt() {
     tokio::time::timeout(Duration::from_secs(10), async {
         let tools = Arc::new(RiskTools::default());
         let mut builder = AgentBuilder::new(AgentConfig::default());
-        builder.timeline_store(Arc::new(MemoryTimelineStore::default()));
+        builder.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(Arc::new(
+            MemoryTimelineStore::default(),
+        )));
         defaults::install(&mut builder);
         defaults::mock_model_hosts(&mut builder);
         defaults::tool_host(&mut builder, tools.clone());
@@ -1908,7 +1916,9 @@ async fn advised_agent(
 ) -> (MinimalHost, Advised) {
     let mut builder = AgentBuilder::new(AgentConfig::default());
     builder
-        .timeline_store(Arc::new(MemoryTimelineStore::default()))
+        .timeline_store(dim_agent_runtime::TimelineStoreBinding::new(Arc::new(
+            MemoryTimelineStore::default(),
+        )))
         .session_value(Arc::new(PromptHost(Arc::new(EmptyPromptHost))))
         .session_value(Arc::new(InitialPromptConfiguration::fixed(None)))
         .session_value(Arc::new(CommandRulesHost(rules)));

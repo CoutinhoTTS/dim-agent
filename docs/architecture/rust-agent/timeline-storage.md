@@ -9,7 +9,7 @@
 SessionStore 在进程名 `store` 下提供[仓储数据接口](../../design/resource-faces.md#52-session-rows)。
 Rust named binding 与 HostDispatch 持有同一个 owner；grant、语言、创建、分叉、删除、目录查询及
 worktree 清理都调用原实现。AgentBuilder 使用的 TimelineStore 端口仍由该 owner 提供，
-其写入队列、发布回调与关闭排空没有增加第二套实现。`sessionFiles`、`sessionMetadata` 和
+同一 backend 在其 provider 创建时绑定 Session 数据面 `timelineStore`：Rust 端口与 HostDispatch 共用该 binding，读操作直接委托后端；完成观察由原 publish callback 接入 rutis 的异步事件队列。原生发布仍同步，writer 与关闭排空没有增加第二套实现。`sessionFiles`、`sessionMetadata` 和
 `worktreeAssociations` 保持各自的现有接口。
 
 `store` 是受信任插件的进程仓储接口，不按调用插件限制 Session id；它不是客户端删除或分叉工作流。
@@ -43,7 +43,13 @@ worktree 清理都调用原实现。AgentBuilder 使用的 TimelineStore 端口�
 | `SessionStorePlugin` | SQLite 实现的 `TimelineStore` | — |
 | `MemoryTimelineStore`（runtime） | 内存实现，供独立 `AgentBuilder`、测试与开发 profile 使用；保存全部事件，追加即发布 | 持久化 |
 
-每个 Agent 装配一个 `TimelineStore`：App Server 的各 Agent 共用 `SessionStorePlugin` 提供的实例，独立 `AgentBuilder` 未传入时自建 `MemoryTimelineStore`。Session 创建时由 SessionScope 以 Session 名字 `timelineStore` 提供它，各分支的 Timeline 从中读写。祖先链描述为 `[(branch_id, cut)]`，由 TimelineTree 在建分支时给出；子分支不持有父分支事件。本文的内存驻留约定针对 SQLite 实现。
+每个 Agent 装配一个 `TimelineStoreBinding`：App Server 的各 Agent 共用 `SessionStorePlugin` 创建的同一 binding；自定义后端的调用方创建一次 binding 并传给各 builder。独立 `AgentBuilder` 未传入时仍在 build 时自建 `MemoryTimelineStore` 和 binding。
+
+provider 已有 ctx 时绑定到该 owner；自定义后端在首次 build 时取得现有 runtime root ctx，后续 Agent 不替换它，关闭首个 Agent 不会结束其他 Agent 的观察。这里的共享是同一 provider/runtime 内的多个 Agent；另一个独立 runtime 通过 provider 的现有 bridge 观察，不添加多 bus 注册或限制原生 backend 的使用。
+
+Session 创建时由 SessionScope 以 Session 名字 `timelineStore` 同时提供 native binding 与 dispatcher，各分支的 Timeline 从同一 binding 读写；接口及通知生命周期见 [resource faces §5](../../design/resource-faces.md#5-store-and-timelinestore)。
+
+祖先链描述为 `[(branch_id, cut)]`，由 TimelineTree 在建分支时给出；子分支不持有父分支事件。本文的内存驻留约定针对 SQLite 实现。
 
 ## 2. 存储编码
 

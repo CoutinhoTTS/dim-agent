@@ -2034,6 +2034,18 @@
       ]
     },
     {
+      "id": "dim_agent_runtime::timeline_store_face",
+      "crate": "dim_agent_runtime",
+      "parent": "dim_agent_runtime",
+      "file": "crates/dim-agent-runtime/src/timeline_store_face.rs",
+      "unexpandedMacros": [
+        "format",
+        "json",
+        "tracing::warn",
+        "vec"
+      ]
+    },
+    {
       "id": "dim_agent_scheduler",
       "crate": "dim_agent_scheduler",
       "parent": null,
@@ -20248,6 +20260,14 @@
     },
     {
       "from": "dim_agent_runtime",
+      "to": "dim_agent_runtime::timeline_store_face",
+      "references": [
+        "mod timeline_store_face",
+        "use timeline_store_face::TimelineStoreBinding"
+      ]
+    },
+    {
+      "from": "dim_agent_runtime",
       "to": "dim_agent_types::permission",
       "references": [
         "use dim_agent_types::PermissionPolicy",
@@ -20585,6 +20605,14 @@
         "path StoredBranch",
         "path TimelineKey",
         "path TimelineStore"
+      ]
+    },
+    {
+      "from": "dim_agent_runtime::assembly",
+      "to": "dim_agent_runtime::timeline_store_face",
+      "references": [
+        "path TimelineStoreBinding",
+        "path TimelineStoreBinding::new"
       ]
     },
     {
@@ -21299,13 +21327,6 @@
       ]
     },
     {
-      "from": "dim_agent_runtime::names",
-      "to": "dim_agent_runtime::timeline_store",
-      "references": [
-        "path TimelineStore"
-      ]
-    },
-    {
       "from": "dim_agent_runtime::parts",
       "to": "dim_agent_runtime::config",
       "references": [
@@ -21743,6 +21764,72 @@
       "references": [
         "path AgentEvent",
         "use dim_agent_types::AgentEvent"
+      ]
+    },
+    {
+      "from": "dim_agent_runtime::timeline_store_face",
+      "to": "dim_agent_runtime::config",
+      "references": [
+        "path SessionConfig",
+        "use crate::SessionConfig"
+      ]
+    },
+    {
+      "from": "dim_agent_runtime::timeline_store_face",
+      "to": "dim_agent_runtime::core::timeline",
+      "references": [
+        "path TimelineTrace",
+        "use crate::TimelineTrace"
+      ]
+    },
+    {
+      "from": "dim_agent_runtime::timeline_store_face",
+      "to": "dim_agent_runtime::error",
+      "references": [
+        "path AgentError",
+        "path AgentError::Cancelled",
+        "path AgentError::Closed",
+        "path AgentError::InvalidInput",
+        "path AgentError::Storage",
+        "path crate::Result",
+        "use crate::AgentError"
+      ]
+    },
+    {
+      "from": "dim_agent_runtime::timeline_store_face",
+      "to": "dim_agent_runtime::timeline_query::properties",
+      "references": [
+        "path QueryPage",
+        "path QuerySpec",
+        "path crate::QueryResult",
+        "use crate::QueryPage",
+        "use crate::QuerySpec"
+      ]
+    },
+    {
+      "from": "dim_agent_runtime::timeline_store_face",
+      "to": "dim_agent_runtime::timeline_store",
+      "references": [
+        "path PublishCallback",
+        "path StoredBranch",
+        "path StoredEvent",
+        "path TimelineKey",
+        "path TimelineReadScope",
+        "path TimelineStore",
+        "use crate::PublishCallback",
+        "use crate::StoredBranch",
+        "use crate::StoredEvent",
+        "use crate::TimelineKey",
+        "use crate::TimelineReadScope",
+        "use crate::TimelineStore"
+      ]
+    },
+    {
+      "from": "dim_agent_runtime::timeline_store_face",
+      "to": "dim_agent_types::checkpoint",
+      "references": [
+        "path RecoverySnapshot",
+        "use dim_agent_types::RecoverySnapshot"
       ]
     },
     {
@@ -24656,6 +24743,13 @@
       "references": [
         "path branch_events",
         "use dim_agent_runtime::testing::branch_events"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents::sessions::tests",
+      "to": "dim_agent_runtime::timeline_store_face",
+      "references": [
+        "path dim_agent_runtime::TimelineStoreBinding::new"
       ]
     },
     {
@@ -34163,6 +34257,15 @@
         "use dim_agent_runtime::StoredEvent",
         "use dim_agent_runtime::TimelineKey",
         "use dim_agent_runtime::TimelineStore"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::timeline",
+      "to": "dim_agent_runtime::timeline_store_face",
+      "references": [
+        "path TimelineStoreBinding",
+        "path TimelineStoreBinding::new",
+        "use dim_agent_runtime::TimelineStoreBinding"
       ]
     },
     {

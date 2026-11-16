@@ -157,7 +157,7 @@ name-bound (#391, #392, #396–#398, #400).
 
 | Element | Form |
 | --- | --- |
-| Methods | A name, `sync` or `async`. Callers in other languages always get a Promise |
+| Methods | A name, `sync` or `async`. TypeScript callers receive a direct value for `sync` and a Promise for `async` |
 | Requests and replies | serde data, described as field tables or JSON shapes |
 | Errors | Data, `{code, message}`, with the codes documented by the service. A forwarding part rethrows the error it received, and the wire boundary maps it ([plugin contract](plugin-contract.md#9-requirements-raised-to-mechanism-owners) R3) |
 | Cancellation | A protocol action: a cancel callback or promise in the request, or the consumer dropping the call |

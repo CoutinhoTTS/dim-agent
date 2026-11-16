@@ -470,7 +470,7 @@ pub async fn env(dirs: &Dirs, options: Options) -> Env {
     let gate = Arc::new(Gate::default());
     let mut builder = AgentBuilder::new(AgentConfig::default());
     if let Some(store) = options.store {
-        builder.timeline_store(store);
+        builder.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(store));
     }
     if options.missing_settings_hosts {
         dim_agent_runtime::names::register::<

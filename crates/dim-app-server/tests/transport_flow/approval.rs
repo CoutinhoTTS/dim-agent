@@ -182,7 +182,7 @@ async fn setup_store(
 ) -> (RunningServer, Session, Client, Arc<AtomicUsize>) {
     let calls = Arc::new(AtomicUsize::new(0));
     let mut builder = AgentBuilder::new(AgentConfig::default());
-    builder.timeline_store(store);
+    builder.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(store));
     builder
         .session_value(Arc::new(dim_agent_capabilities::host::PromptHost(
             Arc::new(dim_agent_capabilities::host::EmptyPromptHost),

@@ -595,16 +595,18 @@ and is read through `execHost.output` and `execHost.tail` (§3.4–§3.5).
 Operation refusals are not in this table: they arrive as the tool result's own `isError` with the
 code the operation already uses, so one code vocabulary serves the local and the remote path.
 
-## 5. `store`
+## 5. `store` and `timelineStore`
 
-`store` is the Session state face. It is one name with two operation families and one
-notification, provided by the daemon that owns the Session:
+The Session state operations have two names on the daemon that owns the state: process
+`store` provides the repository operations (§5.2), and Session-scoped `timelineStore` provides
+the Timeline operations and completion notifications below. Both use the existing state owner;
+the split follows §9(6), without changing Session placement or the storage engine.
 
 | Family | Operations |
 | --- | --- |
-| Timeline | `append` (sync), `head`, `branches`, `readPage`, `readSegments`, `query`, `trace`, `batchEnd`, `saveSnapshot`, `latestSnapshot` |
-| Timeline completion | `commits`, `closeCommits`; notifications `{subscriptionId, batchId, branchId, through, result}` |
-| Session rows | `createSession`, `sessionConfig`, `releaseSession`, `rollbackSession`, `associateWorktree`, the row-set operations for sessions, owners, branches, content, snapshots, grants, metadata, settings, providers, agents and Session-file rows, and `fork` and `delete` |
+| Timeline (`timelineStore`) | `createSession`, `sessionConfig`, `releaseSession`, `rollbackSession`, `append` (sync), `head`, `branches`, `readPage`, `readSegments`, `query`, `trace`, `batchEnd`, `batchEndAt`, `saveSnapshot`, `latestSnapshot` |
+| Timeline completion (`timelineStore`) | `commits`, `closeCommits`; notifications `{subscriptionId, batchId, branchId, through, result}` |
+| Session rows (`store`) | `createSession`, `sessionConfig`, `releaseSession`, `rollbackSession`, `associateWorktree`, the row-set operations for sessions, owners, branches, content, snapshots, grants, metadata, settings, providers, agents and Session-file rows, and `fork` and `delete` |
 
 ### 5.1 Ordered admission and durable completion
 
@@ -639,6 +641,51 @@ notification {subscriptionId, batchId, branchId, through, result: "committed" | 
   a synchronous call across a link would block the caller inside its lock. Reading history
   (`readPage`, `query`, `trace`, and the completion notifications) is the part a remote consumer
   may use.
+
+#### Binding shapes and lifecycle
+
+The Timeline methods take one request object. Keys are `{sessionId, branchId}`;
+`head` returns `{sequence}`, `branches {sessionId}` returns `{branches:[{info,sequence}]}`.
+`readPage {sessionId,branchId,after,limit,through}` returns `{events}`. `limit` is a target event
+count: the final complete atomic batch may exceed it. `readSegments {sessionId,segments:
+[{branchId,from,through}]}` returns `{segments}` in request order, using the existing shared read
+scope. Each stored record is `{event,trace,batchEnd}` using the canonical event and trace data.
+`batchEnd {sessionId,branchId,sequence}` validates the boundary and returns `{}`;
+`batchEndAt` returns `{sequence}` for the containing batch's end through the backend's existing
+operation, without repeated remote probes. `trace` takes the same position and returns `{trace}`.
+`query` takes the scope, query and optional page described in §5.2 and keeps that canonical reply.
+
+`createSession {sessionId,config}`, `releaseSession {sessionId}`, `rollbackSession {sessionId}`
+and `saveSnapshot {sessionId,branchId,snapshot}` return `{}`. `sessionConfig {sessionId}` returns
+`{config}`. `latestSnapshot {sessionId,branchId,through,interpreter}` returns `{snapshot}`.
+These are storage lifecycle steps. `createSession` prepares the backend record; it does not
+initialize or publish an Agent Session. `rollbackSession` undoes a successfully prepared creation
+whose initialization failed, after its producers have stopped; it is not the general deletion
+workflow. `releaseSession` drains accepted backend writes and releases their resources without
+closing the Agent Session or its admission. App Server creation/deletion retain the repository
+and lifecycle obligations in §5.2.
+
+Snapshots retain their canonical fields (`sequence`, `event_id`, `interpreter`, `state`), optional
+acceleration semantics and owner validation. Domain errors preserve `{code,message}` using
+`invalid`, `closed`, `cancelled` or `storage`; parsing rejects malformed requests at the boundary.
+
+The bridge binding of `commits` is `commits({sessionId}, listener) -> {subscriptionId}`. The caller
+must declare `timelineStore`; the owner registers the listener with that calling row before
+returning, and the row's unload withdraws it. Register before the batches to observe are admitted;
+there is no replay of earlier admissions. `closeCommits` withdraws it explicitly and is
+idempotent. Each listener receives only its requested Session's completions, tagged with its own
+subscription id. A slow or failed observer does not delay durable completion or release, and
+ending observation never cancels a write or the native publication callback.
+
+The native binding retains synchronous `append` admission and its existing publish callback.
+Its notification `batchId` is the JSON encoding of `[branchId, through]`, the batch identity
+already known at admission; local data calls preserve their supplied `batchId`. This identifier
+is notification correlation only, with no additional durable fact or lookup. A synchronous
+admission refusal produces no completion notification. The one backend callback keeps native
+publication synchronous, then enqueues observation on rutis's existing ordered asynchronous
+bus. Release drains that backend's writes and callbacks; it does not wait for observers to finish.
+Foreign callers may observe and read, but synchronous append across a link is rejected as stated
+in §5.1.
 
 ### 5.2 Session rows
 
@@ -762,7 +809,7 @@ today, with the same ordering and the same draining.
 | `hostPlatform` | `execHost` | The provider and its Rust binding: `ProcessTree`, `PtyProcessTree`, temporary directories and shell preparation are its internals, reached through the operations |
 | `fileStorage` | `fsHost` | The provider and its binding: roots, leases, generations and one validated path component per open are its internals |
 | `sqliteStorage` | `store` | The SQL engine inside the provider |
-| `timelineStore` | `store` | The Timeline half of the face; the `TimelineStore` trait is its binding |
+| `timelineStore` | `timelineStore` | Session-scoped Timeline operations; the `TimelineStore` trait is its native binding |
 
 For the owners below, Rust callers use a thin binding over the operations — a direct
 in-process call rather than JSON — and none of them publishes a second API: there is no owner
@@ -792,7 +839,7 @@ The owners that read node files or start node processes, and the operations they
 | §1, ADR 002 D1 | Each face belongs to the part that owns the resource or the state; consumers stay in their own scope. No new Capability on the control side |
 | §4 rule 1 | Command events are not added. A background command's fact is still `exec/started`/`exec/ended` on its branch, written by its owner |
 | §4 rule 2 | A handoff keeps its fact on the branch and its process with the provider; nothing is handed to a second owner |
-| §4 rule 3 | No before callback and no commit-time I/O. `store.append` is the one operation allowed inside the caller's commit lock because it queues without I/O and does not wait; completion arrives through `commits`, after the commit and outside every lock. Every other face operation is outside the lock |
+| §4 rule 3 | No before callback and no commit-time I/O. `timelineStore.append` is the one operation allowed inside the caller's commit lock because it queues without I/O and does not wait; completion arrives through `commits`, after the commit and outside every lock. Every other face operation is outside the lock |
 | §4 rule 4 | Core, assembly and the Timeline carry no remote-execution or engine branch; the provider is chosen by deployment |
 | §4 rule 5 | No batch semantics change: `append` admits one atomic batch, and the completion notification carries the same commit and publish boundary the callback does today |
 | §4 rule 6 | File content and command output reach the model only through tool results, as they do today |

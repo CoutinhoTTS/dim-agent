@@ -114,7 +114,7 @@ builder 在两个宿主里建出的两个 Agent 不会挂上彼此的部件。
 
 | 要素 | 形式 |
 | --- | --- |
-| 方法 | 名称，`sync` 或 `async`。其他语言的调用方总是得到 Promise |
+| 方法 | 名称，`sync` 或 `async`。TypeScript 调用方在 `sync` 时直接得到值，在 `async` 时得到 Promise |
 | 请求与回复 | serde 数据，以字段表或 JSON 结构描述 |
 | 错误 | 数据，`{code, message}`，错误码由服务写明。转发的部件重新抛出它收到的错误，由 wire 边界映射（[插件契约](plugin-contract.md#9-向机制所有者提出的需求) R3） |
 | 取消 | 一个协议动作：请求中的取消回调或 promise，或消费方丢弃该调用 |

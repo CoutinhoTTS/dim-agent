@@ -520,7 +520,7 @@ async fn launch_held_team(
         uuid::Uuid::new_v4()
     )));
     let mut builder = AgentBuilder::new(AgentConfig::default());
-    builder.timeline_store(store);
+    builder.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(store));
     defaults::install(&mut builder);
     defaults::mock_model_hosts(&mut builder);
     dim_agent_capabilities::defaults::tool_host(&mut builder, Arc::new(GateTools(gate.clone())));
@@ -814,7 +814,7 @@ async fn large_report_readback_survives_member_close_and_is_branch_local() {
     tokio::time::timeout(Duration::from_secs(20), async {
         let mut builder = AgentBuilder::new(AgentConfig::default());
         let store = Arc::new(CountingTimelineStore::default());
-        builder.timeline_store(store.clone());
+        builder.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(store.clone()));
         defaults::install(&mut builder);
         builder
             .session_value(Arc::new(HistoryRenderer::default()))
@@ -5445,7 +5445,9 @@ async fn undispatched_results_name_calls_from_their_starts() {
         ..Default::default()
     };
     let mut builder = AgentBuilder::new(AgentConfig::default());
-    builder.timeline_store(Arc::new(dim_agent_runtime::MemoryTimelineStore::default()));
+    builder.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(Arc::new(
+        dim_agent_runtime::MemoryTimelineStore::default(),
+    )));
     defaults::install(&mut builder);
     builder
         .session_value(Arc::new(HistoryRenderer::default()))
@@ -6197,7 +6199,9 @@ async fn launch_gated_tools(
         uuid::Uuid::new_v4()
     )));
     let mut builder = AgentBuilder::new(AgentConfig::default());
-    builder.timeline_store(Arc::new(dim_agent_runtime::MemoryTimelineStore::default()));
+    builder.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(Arc::new(
+        dim_agent_runtime::MemoryTimelineStore::default(),
+    )));
     defaults::install(&mut builder);
     defaults::mock_model_hosts(&mut builder);
     dim_agent_capabilities::defaults::tool_host(&mut builder, tools);
