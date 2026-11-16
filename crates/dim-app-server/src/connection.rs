@@ -2509,7 +2509,7 @@ impl RpcPlugin {
             control: names.key()?,
             loader: names.key()?,
             management: names.key()?,
-            callers: names.key()?,
+            callers: Key::of(),
         })
     }
 }
@@ -2588,16 +2588,7 @@ fn session_candidate(rpc: &RpcService, method: &str, params: &Value) -> bool {
 /// (methods contract A.2) and the caller index Rpc records into. It depends
 /// on no other row, so a row that names `callChannel` does not reload when
 /// Rpc or the Agent index reloads.
-pub(crate) struct CallChannelPlugin {
-    callers: Key<Callers>,
-}
-impl CallChannelPlugin {
-    pub fn new(names: &Names<'_>) -> rutis::Result<Self> {
-        Ok(Self {
-            callers: names.key()?,
-        })
-    }
-}
+pub(crate) struct CallChannelPlugin;
 impl DynPlugin for CallChannelPlugin {
     fn name(&self) -> &str {
         "CallChannel"
@@ -2614,7 +2605,7 @@ impl DynPlugin for CallChannelPlugin {
                     callers: callers.clone(),
                 }),
             )?;
-            ctx.provide_at(self.callers.clone(), callers)?;
+            ctx.provide_as::<Callers>(callers)?;
             Ok(Effect::Done)
         })
     }
