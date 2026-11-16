@@ -1,6 +1,6 @@
 //! Session file facts and on-demand worktree membership.
 use crate::{
-    host::{HostError, HostFuture, SessionFilesHost},
+    host::{HostError, HostFuture, SessionFiles},
     host_platform::{HostPlatform, ProcessSpec},
     session_grants::SessionGrantsHost,
     workspace_tools::files::canonical_prefix,
@@ -141,7 +141,7 @@ pub fn install(builder: &mut AgentBuilder) {
 struct Facts {
     config: Arc<SessionConfig>,
     platform: Arc<HostPlatform>,
-    files: Arc<SessionFilesHost>,
+    files: Arc<SessionFiles>,
     grants: Arc<SessionGrantsHost>,
     worktrees: Arc<Worktrees>,
 }
@@ -215,7 +215,7 @@ impl ReadFileAccessFacts for Facts {
 struct FileAccessFactsPlugin {
     config: Key<SessionConfig>,
     platform: Key<HostPlatform>,
-    files: Key<SessionFilesHost>,
+    files: Key<SessionFiles>,
     grants: Key<SessionGrantsHost>,
     identity: Key<SessionIdentity>,
     lifecycle: Key<SessionLifecycle>,

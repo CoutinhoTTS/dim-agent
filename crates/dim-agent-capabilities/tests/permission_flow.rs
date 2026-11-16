@@ -347,7 +347,7 @@ async fn granted_agent_with(
         .session_value(Arc::new(InitialPromptConfiguration::fixed(None)))
         .session_value(Arc::new(CommandRulesHost(Arc::new(NoCommandRules))))
         .session_value(Arc::new(SessionGrantsHost(grants)))
-        .process_value(Arc::new(SessionFilesHost(files)))
+        .process_value(Arc::new(SessionFiles(files)))
         .process_value(Arc::new(platform));
     if let Some(associations) = associations {
         builder.process_value(Arc::new(associations));

@@ -10,10 +10,10 @@ use tokio_util::sync::CancellationToken;
 /// Process-owned request execution; configured file references gate on their owner.
 #[derive(Default)]
 pub struct AimuxPlugin {
-    files: Option<Key<SessionFilesHost>>,
+    files: Option<Key<SessionFiles>>,
 }
 impl AimuxPlugin {
-    pub fn with_files(files: Key<SessionFilesHost>) -> Self {
+    pub fn with_files(files: Key<SessionFiles>) -> Self {
         Self { files: Some(files) }
     }
 }

@@ -1,6 +1,6 @@
 use super::*;
 use axum::extract::{Multipart, Path, Query};
-use dim_agent_capabilities::{host::SessionFilesHost, methods::SessionMethods};
+use dim_agent_capabilities::{host::SessionFiles, methods::SessionMethods};
 use serde_json::json;
 use tokio::io::AsyncWriteExt;
 
@@ -216,7 +216,7 @@ pub(super) async fn download(
             "Origin is not allowed",
         );
     }
-    let files = match site.hub.with_rpc(|rpc| rpc.ctx.get::<SessionFilesHost>()) {
+    let files = match site.hub.with_rpc(|rpc| rpc.ctx.get::<SessionFiles>()) {
         Ok(Some(files)) => files,
         _ => {
             return error(

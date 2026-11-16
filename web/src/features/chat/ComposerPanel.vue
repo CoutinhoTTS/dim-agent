@@ -4,6 +4,7 @@ import { useRoute, useRouter } from "vue-router"
 import { useI18n } from "vue-i18n"
 import type { DraftAttachments, FileCandidate, ModelId, PermissionPreset, PermissionPolicy } from "../../rpc/protocol"
 import { linkMentions, mentionTrigger, type FileMention, type MentionTrigger } from "../../mentions"
+import { SKILL_TOKEN_PREFIX, namesSkillToken, skillCommandQuery, skillSegments, startsWithSkillToken } from "../../skill-token"
 import { useModelsStore } from "../../stores/models"
 import { useSessionsStore } from "../../stores/sessions"
 import { useConnectionStore } from "../../stores/connection"
@@ -54,6 +55,8 @@ const props = withDefaults(defineProps<{
   openLines?: () => void
   /** Session commands the menu lists, each only when given. */
   sessionCommands?: SessionCommands
+  /** The Skills the menu offers by `/skill:<name>`, from `session.skills`; absent where the Session serves none. */
+  skills?: ReadonlyArray<{ name: string; description: string }>
 }>(), { attachments: true })
 const { t } = useI18n()
 const route = useRoute()
@@ -63,6 +66,7 @@ const models = useModelsStore()
 const sessions = useSessionsStore()
 const connection = useConnectionStore()
 const field = ref<HTMLTextAreaElement>()
+const highlightBody = ref<HTMLElement>()
 const modelMenu = ref<InstanceType<typeof ComposerModelMenu>>()
 const permissionMenu = ref<InstanceType<typeof ComposerPermissionMenu>>()
 const menuId = useId()
@@ -74,6 +78,8 @@ const error = ref("")
 const composing = ref(false)
 const focused = ref(false)
 const dismissed = ref(false)
+/** The draft's words, with each `/skill:<name>` token marked for the highlight layer. */
+const highlight = computed(() => skillSegments(text.value))
 /** The files inserted into the draft; each sends as a Markdown link to its path. */
 const fileMentions = ref<FileMention[]>([])
 const mention = ref<MentionTrigger | undefined>()
@@ -81,6 +87,8 @@ const mentionDismissed = ref<string | undefined>()
 const candidates = ref<FileCandidate[]>([])
 const candidateActive = ref(0)
 let searchSeq = 0
+/** Keeps the chip layer on the field when the window or the panel changes its width. */
+let observer: ResizeObserver | undefined
 let searchTimer: ReturnType<typeof setTimeout> | undefined
 const mentionKey = computed(() => mention.value === undefined ? undefined : `${mention.value.start}:${mention.value.query}`)
 const mentionOpen = computed(() => focused.value && props.searchFiles !== undefined && mention.value !== undefined && mentionKey.value !== mentionDismissed.value)
@@ -109,12 +117,32 @@ const availableCommands = computed(() => ([
   { category: "session", name: "new", available: true },
   { category: "session", name: "scheduled", available: connection.supports("schedule.list") },
 ] as const).filter((command) => command.available))
-const commandPrefix = computed(() => /^\/[a-z]*$/i.test(text.value) ? text.value.slice(1).toLowerCase() : undefined)
+const commandPrefix = computed(() => /^\/[a-z]*(?::[A-Za-z0-9_.-]*)?$/i.test(text.value) ? text.value.slice(1) : undefined)
+/** The Skills the menu offers: enabled, unshadowed and user-invocable is the caller's filter; a name the token cannot carry is left out here. */
+const offeredSkills = computed(() => (props.skills ?? []).filter((skill) => namesSkillToken(skill.name)))
+const skillMatches = computed(() => {
+  const prefix = commandPrefix.value
+  if (prefix === undefined) return []
+  const { name, skillsOnly } = skillCommandQuery(`/${prefix}`)
+  return offeredSkills.value.filter((skill) => skill.name.toLowerCase().startsWith(name) && (skillsOnly || name.length > 0))
+})
 const matches = computed(() => {
   const prefix = commandPrefix.value
-  return prefix === undefined ? [] : availableCommands.value.filter((command) => command.name.startsWith(prefix))
+  if (prefix === undefined) return []
+  const { name, skillsOnly } = skillCommandQuery(`/${prefix}`)
+  if (skillsOnly) return []
+  return availableCommands.value.filter((command) => command.name.startsWith(name))
 })
-const commandMode = computed(() => !composing.value && !dismissed.value && matches.value.length > 0)
+type MenuRow =
+  | { kind: "command"; key: string; category: string; name: string; description: string; command: (typeof availableCommands.value)[number] }
+  | { kind: "skill"; key: string; category: "skill"; name: string; description: string }
+
+/** One list the menu draws: commands first, then Skills, as the TUI orders them. */
+const menuRows = computed<MenuRow[]>(() => [
+  ...matches.value.map((command) => ({ kind: "command" as const, key: `/command/${command.name}`, category: command.category, name: `/${command.name}`, description: t(`composer.command.${command.name}`), command })),
+  ...skillMatches.value.map((skill) => ({ kind: "skill" as const, key: `/skill/${skill.name}`, category: "skill" as const, name: `${SKILL_TOKEN_PREFIX}${skill.name}`, description: skill.description })),
+])
+const commandMode = computed(() => !composing.value && !dismissed.value && menuRows.value.length > 0)
 const menuOpen = computed(() => focused.value && commandMode.value)
 
 watch(text, () => {
@@ -130,13 +158,31 @@ function resize(): void {
   if (element === undefined) return
   element.style.height = "auto"
   element.style.height = `${Math.min(element.scrollHeight, 300)}px`
+  followScroll()
+}
+
+/**
+ * Keeps the highlight layer on the draft while the textarea scrolls or resizes:
+ * its body takes the textarea's content width, so both wrap at the same column
+ * whether or not a scrollbar is shown, and moves by the textarea's own scroll
+ * offset. The font comes from the same custom properties, so nothing drifts.
+ */
+function followScroll(): void {
+  const element = field.value
+  const body = highlightBody.value
+  if (element === undefined || body === undefined) return
+  body.style.width = `${element.clientWidth}px`
+  body.style.transform = `translateY(${-element.scrollTop}px)`
 }
 
 function readImage(file: File): { url: string; file: File } {
   return { url: URL.createObjectURL(file), file }
 }
 
-onUnmounted(() => images.value.forEach((image) => URL.revokeObjectURL(image.url)))
+onUnmounted(() => {
+  observer?.disconnect()
+  images.value.forEach((image) => URL.revokeObjectURL(image.url))
+})
 
 async function addImages(files: File[]): Promise<void> {
   for (const file of files) {
@@ -242,8 +288,9 @@ function acceptCandidate(candidate: FileCandidate): void {
 async function submit(): Promise<void> {
   if (!canSend.value || composing.value) return
   if (commandMode.value) {
-    const command = matches.value[activeIndex.value]
-    if (command !== undefined) await runCommand(command.name)
+    const row = menuRows.value[activeIndex.value]
+    if (row?.kind === "skill") completeSkill(row.name.slice(SKILL_TOKEN_PREFIX.length))
+    else if (row !== undefined) await runCommand(row.command.name)
     return
   }
   const message = text.value
@@ -331,6 +378,18 @@ async function onModel(model: ModelId): Promise<void> {
   }
 }
 
+/** Fills `/skill:<name> ` into the draft and sends nothing; the token is part of the message. */
+function completeSkill(name: string): void {
+  text.value = `${SKILL_TOKEN_PREFIX}${name} `
+  dismissed.value = true
+  void nextTick(() => {
+    resize()
+    const element = field.value
+    element?.focus()
+    element?.setSelectionRange(text.value.length, text.value.length)
+  })
+}
+
 async function runCommand(name: typeof availableCommands.value[number]["name"]): Promise<void> {
   if (composing.value) return
   error.value = ""
@@ -383,7 +442,7 @@ function onKeydown(event: KeyboardEvent): void {
   }
   if (menuOpen.value && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
     event.preventDefault()
-    activeIndex.value = (activeIndex.value + (event.key === "ArrowDown" ? 1 : -1) + matches.value.length) % matches.value.length
+    activeIndex.value = (activeIndex.value + (event.key === "ArrowDown" ? 1 : -1) + menuRows.value.length) % menuRows.value.length
     return
   }
   if (event.key === "Enter" && !event.shiftKey && !event.altKey) {
@@ -402,7 +461,14 @@ async function quote(message: string): Promise<void> {
   element?.setSelectionRange(text.value.length, text.value.length)
 }
 
-onMounted(() => field.value?.focus())
+onMounted(() => {
+  const element = field.value
+  element?.focus()
+  if (element !== undefined) {
+    observer = new ResizeObserver(() => followScroll())
+    observer.observe(element)
+  }
+})
 defineExpose({ focus: () => field.value?.focus(), quote })
 </script>
 
@@ -422,9 +488,9 @@ defineExpose({ focus: () => field.value?.focus(), quote })
       </div>
       <div v-if="menuOpen" :id="menuId" class="command-menu" role="listbox" :aria-label="t('composer.commands')">
         <button
-          v-for="(command, index) in matches"
+          v-for="(row, index) in menuRows"
           :id="`${menuId}-${index}`"
-          :key="command.name"
+          :key="row.key"
           type="button"
           role="option"
           class="command-menu-item command-item"
@@ -432,11 +498,11 @@ defineExpose({ focus: () => field.value?.focus(), quote })
           :data-highlighted="index === activeIndex ? '' : undefined"
           @mousedown.prevent
           @mouseenter="activeIndex = index"
-          @click.stop="runCommand(command.name)"
+          @click.stop="row.kind === 'skill' ? completeSkill(row.name.slice(SKILL_TOKEN_PREFIX.length)) : runCommand(row.command.name)"
         >
-          <span class="command-category">{{ index === 0 || matches[index - 1]?.category !== command.category ? t(`composer.category.${command.category}`) : '' }}</span>
-          <span class="command-name">/{{ command.name }}<span v-if="command.name === 'branch'" class="command-argument"> &lt;prompt&gt;</span><span v-else-if="command.name === 'goal' || command.name === 'loop' || command.name === 'effort'" class="command-argument"> [args]</span></span>
-          <span class="command-description">{{ t(`composer.command.${command.name}`) }}</span>
+          <span class="command-category">{{ index === 0 || menuRows[index - 1]?.category !== row.category ? t(`composer.category.${row.category}`) : '' }}</span>
+          <span class="command-name">{{ row.name }}<template v-if="row.kind === 'command'"><span v-if="row.command.name === 'branch'" class="command-argument"> &lt;prompt&gt;</span><span v-else-if="row.command.name === 'goal' || row.command.name === 'loop' || row.command.name === 'effort'" class="command-argument"> [args]</span></template></span>
+          <span class="command-description">{{ row.description }}</span>
         </button>
         <p class="command-keys">{{ t("composer.commandKeys") }}</p>
       </div>
@@ -457,26 +523,30 @@ defineExpose({ focus: () => field.value?.focus(), quote })
         </button>
         <p class="command-keys">{{ t("composer.mentionKeys") }}</p>
       </div>
-      <textarea
-        ref="field"
-        v-model="text"
-        class="composer-input"
-        rows="2"
-        :placeholder="placeholder ?? t('composer.sendMessage')"
-        :aria-label="placeholder ?? t('composer.sendMessage')"
-        :aria-controls="menuOpen ? menuId : mentionShown ? mentionMenuId : undefined"
-        :aria-expanded="menuOpen || mentionShown"
-        :aria-activedescendant="menuOpen ? `${menuId}-${activeIndex}` : undefined"
-        @input="resize(); updateMention()"
-        @keydown="onKeydown"
-        @keyup="updateMention"
-        @click="updateMention"
-        @paste="onPaste"
-        @focus="focused = true"
-        @blur="focused = false"
-        @compositionstart="composing = true"
-        @compositionend="composing = false"
-      />
+      <div class="composer-field">
+        <div class="composer-highlight" aria-hidden="true"><div ref="highlightBody" class="composer-highlight-body"><span v-for="(part, index) in highlight" :key="index" :class="{ 'skill-chip': part.skill }">{{ part.text }}</span></div></div>
+        <textarea
+          ref="field"
+          v-model="text"
+          class="composer-input"
+          rows="2"
+          :placeholder="placeholder ?? t('composer.sendMessage')"
+          :aria-label="placeholder ?? t('composer.sendMessage')"
+          :aria-controls="menuOpen ? menuId : mentionShown ? mentionMenuId : undefined"
+          :aria-expanded="menuOpen || mentionShown"
+          :aria-activedescendant="menuOpen ? `${menuId}-${activeIndex}` : undefined"
+          @input="resize(); updateMention()"
+          @keydown="onKeydown"
+          @keyup="updateMention"
+          @click="updateMention"
+          @scroll="followScroll"
+          @paste="onPaste"
+          @focus="focused = true"
+          @blur="focused = false"
+          @compositionstart="composing = true"
+          @compositionend="composing = false"
+        />
+      </div>
       <footer class="composer-toolbar">
         <div class="composer-tool-group">
           <ComposerPermissionMenu v-if="permission && variant !== 'panel'" ref="permissionMenu" :policy="permission.policy" @select="permission.select" />
@@ -506,7 +576,13 @@ defineExpose({ focus: () => field.value?.focus(), quote })
 </template>
 
 <style scoped>
-.composer-input { display: block; width: 100%; min-height: 60px; max-height: 300px; resize: none; padding: 0; border: 0; background: transparent; color: var(--foreground); font: var(--text-base)/var(--leading-relaxed) var(--font-sans); outline: none; }
+.composer-field { position: relative; }
+/* The layer behind the field paints only the chip backgrounds: its text is transparent and keeps the field's font, size, line height, wrapping, content width and scroll offset, so a chip's box lands under the characters the field itself draws. The field's own text stays above it, so the caret, the selection, the placeholder and IME pre-edit are the browser's. */
+.composer-highlight { position: absolute; inset: 0; overflow: hidden; font: var(--text-base)/var(--leading-relaxed) var(--font-sans); white-space: pre-wrap; overflow-wrap: break-word; color: transparent; pointer-events: none; }
+.composer-highlight .skill-chip { border-radius: var(--radius-sm); background: var(--skill-chip); }
+.composer-highlight-body { transform: translateY(0); }
+/* The field paints the draft in its own colour over a transparent background, so the chip fill shows through under the glyphs. It never changes weight or padding: either would move the glyphs off the chips behind them. */
+.composer-input { display: block; position: relative; width: 100%; min-height: 60px; max-height: 300px; resize: none; padding: 0; border: 0; background: transparent; color: var(--foreground); font: var(--text-base)/var(--leading-relaxed) var(--font-sans); outline: none; overflow-y: auto; }
 .composer-input::placeholder { color: var(--muted-foreground); }
 .composer-panel[data-variant="panel"] { padding: var(--space-2) var(--space-3) var(--space-3); }
 .composer-panel[data-variant="panel"] .composer-input { min-height: 48px; }

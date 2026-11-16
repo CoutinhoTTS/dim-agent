@@ -1942,11 +1942,16 @@ fn inline_file(name: &str, media_type: &str, bytes: &[u8]) -> Value {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_provider_copy_serves_its_provider_and_the_family_copy_takes_over() {
     let family = Arc::new(FixtureAdapter::default());
+    family.serve(&[("alpha", &["generate"])]);
     let provider = Arc::new(FixtureAdapter::default());
     let home = home("dm-copies");
     let server = start_with_copies(home.clone(), family.clone(), provider.clone()).await;
     let mut client = Client::new_version(&server, false, 3).await;
     create_task_provider(&mut client).await;
+
+    let capabilities = client.rpc("modality.capabilities", json!({})).await;
+    assert_ok(&capabilities);
+    assert_eq!(operation(&capabilities, "edit")["available"], true);
 
     let submitted = submit_task(
         &mut client,
@@ -1968,6 +1973,14 @@ async fn a_provider_copy_serves_its_provider_and_the_family_copy_takes_over() {
     assert_eq!(family.submits(), 0, "the family copy is not asked");
 
     provider.remove().await;
+    let capabilities = client.rpc("modality.capabilities", json!({})).await;
+    assert_ok(&capabilities);
+    assert_eq!(operation(&capabilities, "edit")["available"], false);
+    assert_eq!(
+        operation(&capabilities, "generate")["options"],
+        json!([{"providerId": PROVIDER, "modelId": "alpha", "available": true}]),
+        "the next snapshot uses the family copy's narrower operation support"
+    );
     let submitted = submit_task(
         &mut client,
         json!({
@@ -2029,33 +2042,18 @@ async fn recovery_asks_the_adapter_the_task_recorded() {
         running["result"]["task"]["executor"]["adapter"], "modalityAdapter",
         "the record names the family copy that issued the handle"
     );
-    drop(gate);
     server.shutdown();
     server.join().await.unwrap();
 
-    // The restarted process installs a provider copy this task never used; it
-    // serves nothing, so resolving by provider would interrupt a task whose
-    // recorded copy is still there.
-    let family = Arc::new(FixtureAdapter::default());
     let provider = Arc::new(FixtureAdapter::default());
     provider.serve(&[]);
     let server = start_with_copies(home.clone(), family, provider).await;
     let mut client = Client::new_version(&server, false, 3).await;
-    let mut finished = Value::Null;
-    for _ in 0..200 {
-        let reply = client
-            .rpc("modality.task.status", json!({"task_id": task_id}))
-            .await;
-        let task = reply["result"]["task"].clone();
-        if task["state"] != "running" {
-            finished = task;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    assert!(!finished.is_null(), "the task settled after recovery");
-    assert_ne!(
-        finished["error"]["message"], "did not survive recovery",
+    gate.cancel();
+    let finished = wait_terminal(&mut client, &task_id).await;
+    assert_eq!(
+        state_of(&finished),
+        "succeeded",
         "recovery asked the recorded copy, not the newly installed one: {finished}"
     );
 

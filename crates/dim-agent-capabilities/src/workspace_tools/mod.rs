@@ -18,7 +18,7 @@ mod pending;
 pub use pending::call_positions;
 
 use crate::{
-    host::{HostError, HostFuture, SessionFilesHost, ToolDriver, ToolExecutionContext, ToolHost},
+    host::{HostError, HostFuture, SessionFiles, ToolDriver, ToolExecutionContext, ToolHost},
     host_platform::HostPlatform,
     methods::{Interruption, MethodCall, MethodDecl, RpcError, SessionMethods, params, reply},
     timeline_tree::TreeCommands,
@@ -149,7 +149,7 @@ pub(crate) struct WorkspaceTools {
     output_dir: PathBuf,
     /// SessionStore's output ownership (ADR 013); absent in hosts without
     /// native storage, where no output has an owner.
-    owner: Option<Arc<SessionFilesHost>>,
+    owner: Option<Arc<SessionFiles>>,
     session_id: String,
     /// Collaboration members keep commands in the foreground: the leader
     /// treats member idle as the end of a request, so a backgrounded command
@@ -402,7 +402,7 @@ impl DynPlugin for WorkspaceToolsPlugin {
                     self.config.boundary.clone(),
                 ),
                 output_dir,
-                owner: ctx.get::<SessionFilesHost>(),
+                owner: ctx.get::<SessionFiles>(),
                 session_id: identity.session_id.clone(),
                 member: config.collaboration_role == CollaborationRole::Member,
                 cwd,

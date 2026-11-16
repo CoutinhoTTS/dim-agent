@@ -70,8 +70,7 @@ pub const PROGRESS_INTERVAL: Duration = Duration::from_secs(1);
 /// `fiber.rs:1193`), leaving room for the cancel's own write and the rest of
 /// an unload; past it a stuck adapter holds up neither.
 pub const SUBMIT_CANCEL_GRACE: Duration = Duration::from_secs(3);
-/// The name this build records for its single process adapter; the per-task
-/// lookup (#861) will record the resolved adapter's name instead.
+/// The persisted executor name for the family adapter copy (A.4).
 pub const ADAPTER_NAME: &str = "modalityAdapter";
 /// The time one OCR helper call may take (decision 7): a 500-page PDF at
 /// 200 dpi is the slowest input the contract accepts.

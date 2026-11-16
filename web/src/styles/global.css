@@ -174,6 +174,9 @@
   --warning-soft: color-mix(in oklab, var(--warning) 12%, transparent);
   --success-soft: color-mix(in oklab, var(--success) 12%, transparent);
   --info-soft: color-mix(in oklab, var(--info) 11%, transparent);
+  /* A `/skill:<name>` token: one fill for the chip the input paints behind its own
+     text and the chip the timeline draws, so both surfaces read the same. */
+  --skill-chip: color-mix(in oklab, var(--primary) 22%, transparent);
   /* Focus rings for bordered/transparent controls; solid fills use a 2px gap + 2px ring instead. */
   --focus-ring: 0 0 0 3px color-mix(in oklab, var(--primary) 22%, transparent);
   --focus-ring-danger: 0 0 0 3px color-mix(in oklab, var(--danger) 20%, transparent);

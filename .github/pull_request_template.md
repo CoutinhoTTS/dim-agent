@@ -1,6 +1,6 @@
 ## Summary
 
-<!-- What changes and why. Link the design document. -->
+<!-- What changes and why. Link existing design material for the affected public promises; explain any changes to them. -->
 
 ## Design rule checklist
 

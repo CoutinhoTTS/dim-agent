@@ -1,19 +1,19 @@
 //! Persistent shell execution capability: one long-lived PTY shell per branch.
 //!
 //! Every command runs in the same interactive shell, wrapped with runtime
-//! marker pairs (see docs/design/appserver/persistent-shell.md §4): the
+//! marker pairs: the
 //! command text carries the fragments only, so echoes cannot forge a full
 //! marker. A dedicated OS thread owns the blocking PTY reader and forwards
 //! chunks to an async consumer through a channel; no lock is held across a
 //! blocking read. Commands are serialized through a queue; a foreground
 //! timeout converts the call into an occupying task, and explicit
 //! background jobs report completion through their own markers, ending in
-//! `exec/ended` plus a wake input.
+//! `exec/ended`. BackgroundExec consumes terminals and owns their notices and recovery.
 
-use crate::workspace_tools::background::{wake_input, wakes};
+use crate::workspace_tools::background::BackgroundExec;
 use crate::{
     exec_stop::{ExecStop, TaskError},
-    host::{HostError, SessionFilesHost},
+    host::{HostError, SessionFiles},
     host_platform::{
         HostPlatform, PtyProcessTree, PtySize, ShellEdition, ShellStatus, kill_job, stop_job,
     },
@@ -239,7 +239,6 @@ impl Capture {
 struct OccupyingTask {
     task_id: String,
     output_path: PathBuf,
-    description: String,
     ended: Arc<Notify>,
 }
 
@@ -259,7 +258,6 @@ struct BackgroundTask {
     end_marker: String,
     pid: std::io::Result<u32>,
     kind: BackgroundKind,
-    description: String,
 }
 
 struct Inner {
@@ -293,10 +291,9 @@ enum Liveness {
     Replaced,
 }
 
-/// A settlement produced by the reader: an `exec/ended` plus its wake.
+/// A terminal produced by the reader and its waiting caller.
 struct Settlement {
     data: ExecEndedData,
-    description: String,
     ended: Option<Arc<Notify>>,
 }
 
@@ -312,18 +309,19 @@ pub struct ShellSession {
     dispatcher: Arc<Dispatcher>,
     /// SessionStore's output ownership (ADR 013); absent in hosts without
     /// native storage, where shell output has no owner.
-    owner: Option<Arc<SessionFilesHost>>,
+    owner: Option<Arc<SessionFiles>>,
     session_id: String,
     tasks: Arc<tokio::sync::Mutex<TaskTracker>>,
 }
 
 impl ShellSession {
+    /// The branch must mount BackgroundExec to recover exec facts and publish completion notices.
     pub fn new(
         config: ShellSessionConfig,
         host: Arc<HostPlatform>,
         timeline: Arc<Timeline>,
         dispatcher: Arc<Dispatcher>,
-        owner: Option<Arc<SessionFilesHost>>,
+        owner: Option<Arc<SessionFiles>>,
         session_id: String,
     ) -> Self {
         Self {
@@ -775,11 +773,7 @@ impl ShellSession {
                     status: exit_status(&code),
                     result: ended_result(&task.task_id, &task.output_path, &preview, &code),
                 };
-                settled.push(Settlement {
-                    data,
-                    description: task.description,
-                    ended: None,
-                });
+                settled.push(Settlement { data, ended: None });
             }
             if inner.retained.len() > RETAINED_BUFFER_TRIM {
                 inner.retained = tail_bytes(&inner.retained, RETAINED_BUFFER_LIMIT).to_owned();
@@ -790,7 +784,7 @@ impl ShellSession {
             settled.extend(advance_occupying(&mut inner));
         }
         for settlement in settled {
-            self.settle(settlement.data, &settlement.description);
+            self.settle(settlement.data);
             if let Some(notify) = settlement.ended {
                 notify.notify_waiters();
             }
@@ -854,7 +848,6 @@ impl ShellSession {
                 inner.occupy_exit = None;
                 settled.push(Settlement {
                     data,
-                    description: occ.description,
                     ended: Some(occ.ended),
                 });
             }
@@ -883,30 +876,19 @@ impl ShellSession {
                     status: ExecStatus::Failed,
                     result,
                 },
-                description: task.description,
                 ended: None,
             });
         }
         for settlement in settled {
-            self.settle(settlement.data, &settlement.description);
+            self.settle(settlement.data);
             if let Some(notify) = settlement.ended {
                 notify.notify_waiters();
             }
         }
     }
 
-    /// Appends `exec/ended` and, for results the model should see, the wake
-    /// input that carries it.
-    fn settle(&self, data: ExecEndedData, description: &str) {
-        if let Ok(event) = self
-            .timeline
-            .append(EventKind::ExecEnded(data.clone()).into())
-            && wakes(&data)
-        {
-            let _ = self
-                .timeline
-                .append(wake_input(&event.id, &data, description.to_owned()));
-        }
+    fn settle(&self, data: ExecEndedData) {
+        let _ = self.timeline.append(EventKind::ExecEnded(data).into());
     }
 
     /// One foreground call: install its capture, send the wrapped command,
@@ -1114,13 +1096,12 @@ impl ShellSession {
             inner.occupying = Some(OccupyingTask {
                 task_id: task_id.clone(),
                 output_path: output_path.clone(),
-                description: description.clone(),
                 ended: Arc::new(Notify::new()),
             });
             (preview, omitted, advance_occupying(&mut inner))
         };
         if let Some(settled) = settled {
-            self.settle(settled.data, &settled.description);
+            self.settle(settled.data);
         }
         let mut text = String::new();
         push_output(&mut text, &preview);
@@ -1220,21 +1201,17 @@ impl ShellSession {
                     end_marker: completion.full(),
                     pid: Err(std::io::Error::other("the job pid was not reported")),
                     kind,
-                    description: description.clone(),
                 },
             );
         }
         if let Err(error) = self.write_line(&wrapped).await {
             let task = self.inner.lock().await.background.remove(&task_id);
-            if let Some(task) = task {
-                self.settle(
-                    ExecEndedData {
-                        task_id: task_id.clone(),
-                        status: ExecStatus::Failed,
-                        result: ToolResult::error(error.to_string()),
-                    },
-                    &task.description,
-                );
+            if task.is_some() {
+                self.settle(ExecEndedData {
+                    task_id: task_id.clone(),
+                    status: ExecStatus::Failed,
+                    result: ToolResult::error(error.to_string()),
+                });
             }
             return Err(error.to_string());
         }
@@ -1283,13 +1260,12 @@ impl ShellSession {
                         let inner = this.inner.lock().await;
                         match inner.background.get(&watched) {
                             None => return,
-                            Some(task) => std::fs::read_to_string(&result_path)
+                            Some(_) => std::fs::read_to_string(&result_path)
                                 .ok()
-                                .and_then(|text| marker_code(&text, &marker))
-                                .map(|code| (code, task.description.clone())),
+                                .and_then(|text| marker_code(&text, &marker)),
                         }
                     };
-                    if let Some((code, task_description)) = finished {
+                    if let Some(code) = finished {
                         let task_id = watched.clone();
                         let mut inner = this.inner.lock().await;
                         inner.background.remove(&task_id);
@@ -1304,7 +1280,7 @@ impl ShellSession {
                             status: exit_status(&code),
                             result,
                         };
-                        this.settle(data, &task_description);
+                        this.settle(data);
                         return;
                     }
                 }
@@ -1386,7 +1362,7 @@ impl ShellSession {
                 status: ExecStatus::Cancelled,
                 result: ToolResult::text("Command interrupted."),
             };
-            self.settle(data.clone(), &occ.description);
+            self.settle(data.clone());
             occ.ended.notify_waiters();
             return Ok(data);
         }
@@ -1422,7 +1398,7 @@ impl ShellSession {
                     }
                 }
             };
-            self.settle(data.clone(), &task.description);
+            self.settle(data.clone());
             return Ok(data);
         }
         Err(TaskError::Unknown)
@@ -1464,13 +1440,13 @@ fn advance_occupying(inner: &mut Inner) -> Option<Settlement> {
             status: exit_status(&code),
             result: ended_result(&occ.task_id, &occ.output_path, &preview, &code),
         },
-        description: occ.description,
         ended: Some(occ.ended),
     })
 }
 
 /// The plugin.
 pub struct ShellSessionPlugin {
+    recovery: Key<BackgroundExec>,
     facts: Key<crate::file_access::FileAccessFacts>,
     session: Key<ShellSession>,
     stop: Key<dyn ExecStop>,
@@ -1494,6 +1470,7 @@ impl ShellSessionPlugin {
     /// Derive execution settings from the owning Session.
     pub fn session(names: &Names<'_>) -> rutis::Result<Self> {
         Ok(Self {
+            recovery: names.key()?,
             facts: names.key()?,
             session: names.key()?,
             stop: names.key()?,
@@ -1514,6 +1491,7 @@ impl DynPlugin for ShellSessionPlugin {
     }
     fn injects(&self) -> Vec<TypeKey> {
         vec![
+            self.recovery.erase(),
             self.timeline.erase(),
             self.dispatcher.erase(),
             self.host.erase(),
@@ -1529,7 +1507,7 @@ impl DynPlugin for ShellSessionPlugin {
             let host = ctx.require_at(&self.host)?;
             let config = ctx.require_at(&self.session_config)?;
             let identity = ctx.require_at(&self.identity)?;
-            let owner = ctx.get::<SessionFilesHost>();
+            let owner = ctx.get::<SessionFiles>();
             let mut session = ShellSession::new(
                 self.config.clone().unwrap_or_else(|| ShellSessionConfig {
                     cwd: PathBuf::from(&config.cwd),

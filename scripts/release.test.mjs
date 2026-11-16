@@ -853,6 +853,19 @@ test('stages public native payload, packs it and rejects modified content', {ski
   assert.equal(existsSync(path.join(temporary,'tampered')),false);
 });
 
+test('reads the native store formats from a CRLF checkout', async ()=>{
+  const {readStoreFormats}=await import(pathToFileURL(path.join(root,'scripts/store-formats.mjs')).href);
+  const source=readFileSync(path.join(root,'crates/dim-app-server/src/storage/sqlite.rs'),'utf8');
+  assert.deepEqual(readStoreFormats(source.replace(/\n/g,'\r\n')),readStoreFormats(source));
+});
+
+test('names a storage source whose upgrade table cannot be read', async ()=>{
+  const {readStoreFormats}=await import(pathToFileURL(path.join(root,'scripts/store-formats.mjs')).href);
+  assert.throws(()=>readStoreFormats('pub const FORMAT: u32 = 1;\n'),/Could not read the native store upgrade table/);
+  assert.throws(()=>readStoreFormats('const UPGRADES: [(u32, &[&str]); 1] = [\n    (1, &[]),\n];\n'),
+    /Could not read the native store format/);
+});
+
 test('stages the default plugins beside bin/ in the native archive and the npm package', {skip:process.platform==='win32'}, (t)=>{
   const temporary=fixture(t);
   const bin=path.join(temporary,'bin');
