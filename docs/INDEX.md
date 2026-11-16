@@ -2,6 +2,9 @@
 
 This index is navigation. Delivery status lives in issues, not here.
 
+- [Timeline 关联部件逐项分析](design/examples/timeline-capability-analysis.md)（中文）：22 个候选部件、55 个事件的状态、恢复、交接与模型边界
+- [Timeline 承诺的有限模型检查](design/examples/capability-models/README.md)（中文）：逐项承诺、TLA+ 模型、恢复反例与可复现的 TLC 运行记录
+- [审批交接分析](design/examples/approval-handoff-analysis.md)（中文）：Permission、Approval 与 ToolExecutor 的准入边界和有限模型
 - [已知 Capability 与 Timeline 事件表](architecture/rust-agent/capability-event-inventory.md)（中文）：候选部件与事件导航，含作用域、职责、事件 key 和已知读写路径
 - [CLI feature list](feature-list.md)
 - [Model preferences and Agent configuration](design/model-configuration.md)
