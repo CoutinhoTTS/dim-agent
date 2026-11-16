@@ -20,7 +20,7 @@ scrollback 与 fullscreen TUI 都按同一个固定的、经过整理的顺序�
 /tasks /rename /web /connect /login
 /skills /reload-skills /mcp /plugins /runtime
 /hooks /scheduled /workflow /workflow:save
-/tools /tui /theme /language /keys /report /exit
+/tools /tui /theme /language /keys /update /report /exit
 ```
 
 `/fast` 仅在模型声明支持服务层级时列出。搜索时匹配程度优先，同等匹配保持上述顺序。
@@ -1476,6 +1476,16 @@ Esc 关闭。宽屏空间足够时保留确认布局。
 | > Close 2/2              |
 | Left/Right Tab Enter Esc |
 +----------- Up/Down 1-2/7-+
+```
+
+`/update` 就是那条命令在两种终端 UI 模式下的客户端侧报告。它不执行任何安装：更新命令持有
+安装的排他租约，而界面本身就是持有该租约共享锁的客户端，服务操作者期间无法释放。因此
+`/update` 只给出对话框会给的命令：可识别的安装给出该命令，其他布局给出[手动与重建
+说明](#更新对话框)，并且不查询渠道——自动启动检查仍独占对话框与跳过列表。
+
+```text
+> /update
+要升级，请退出所有客户端并停止服务器，然后运行 dima update
 ```
 
 ### 客户端／服务器协调升级
