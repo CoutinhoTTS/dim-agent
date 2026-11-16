@@ -1299,7 +1299,19 @@ async fn shell_exit_kills_background_jobs() {
         "{}",
         text(&end.result)
     );
-    assert!(gone(&pid).await);
+    assert!(
+        gone(&pid).await,
+        "background process {pid} survived the shell reset: result={:?}, process={:?}",
+        end.result,
+        std::process::Command::new("ps")
+            .args(["-o", "pid=,ppid=,pgid=,stat=,comm=", "-p", &pid])
+            .output()
+            .map(|output| (
+                output.status,
+                String::from_utf8_lossy(&output.stdout).into_owned(),
+                String::from_utf8_lossy(&output.stderr).into_owned(),
+            ))
+    );
     session.close().await.unwrap();
     harness.shutdown().await;
 }
