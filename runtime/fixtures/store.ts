@@ -79,6 +79,12 @@ export default definePlugin({
           (error: unknown) => error instanceof Error && 'code' in error && error.code === 'invalid')
         assert.deepEqual(await store.removeWorktreeDirectory({ repository: directory.repository, root: `${directory.root}/absent` }), { removed: false })
         await assert.rejects(() => Reflect.apply(store.worktreeDirectories, store, [{ unexpected: true }]))
+        await assert.rejects(() => Reflect.apply(store.sessionConfig, store, [[sessionId]]), /request must be an object/)
+        await assert.rejects(() => Reflect.apply(store.worktreeDirectories, store, [[]]), /request must be an object/)
+        await assert.rejects(() => Reflect.apply(store.catalog, store, [[{}, null, 3, [], []]]), /request must be an object/)
+        await assert.rejects(() => Reflect.apply(store.removeWorktree, store, [
+          [directory.repository, directory.root], () => { throw new Error('invalid request ran its callback') },
+        ]), /request must be an object/)
         await store.setSessionLanguage({ sessionId, language: 'zh-CN' })
         const config = await store.sessionConfigText({ sessionId })
         if (config.configText === null) throw new Error('missing source')
