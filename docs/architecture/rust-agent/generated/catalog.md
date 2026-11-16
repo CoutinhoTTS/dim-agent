@@ -13,7 +13,6 @@ Each catalog name a part of the assembly provides or injects. `data` means share
 | `agentDirectory` | process | AgentDirectory | internal(owner-api) | — |
 | `agentIndex` | process | Agents | internal(owner-api) | — |
 | `auxiliaryModel` | process | Provider | data | `complete` async |
-| `auxiliaryModelHost` | process | Provider | internal(owner-api) | — |
 | `basePromptSettingsHost` | process | PromptSettings | internal(owner-api) | — |
 | `callChannel` | process | CallChannel | data | `closed` async, `notify` async |
 | `callers` | process | CallChannel | internal(owner-api) | — |

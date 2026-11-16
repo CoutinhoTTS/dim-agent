@@ -245,7 +245,7 @@
         ]
       },
       {
-        "id": 79,
+        "id": 76,
         "parent": 72,
         "name": "eventhub-ready",
         "state": "Active",
@@ -3271,7 +3271,7 @@
         "removing": false
       },
       {
-        "service": "dim_agent_capabilities::host::AuxiliaryModelHost",
+        "service": "dim_agent_capabilities::host::AuxiliaryModel",
         "provider": 18,
         "generation": 1,
         "removing": false

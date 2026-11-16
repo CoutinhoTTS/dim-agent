@@ -1060,7 +1060,7 @@ pub trait CompleteAuxiliary: Send + Sync + 'static {
         cancel: CancellationToken,
     ) -> Pin<Box<dyn Future<Output = Result<AuxiliaryReply, AuxiliaryError>> + Send + '_>>;
 }
-pub struct AuxiliaryModelHost(pub Arc<dyn CompleteAuxiliary>);
+pub struct AuxiliaryModel(pub Arc<dyn CompleteAuxiliary>);
 
 pub trait ModelDriver: Send + Sync + 'static {
     fn invoke(
