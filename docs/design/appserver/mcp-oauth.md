@@ -185,7 +185,8 @@ The client is an owner resource built by the first operation that contacts an au
 server, not by Mcp's assembly: a process whose MCP entries never sign in or refresh holds no
 OAuth HTTP client. Concurrent first operations share that one build. If building the client
 fails, the operation reports `mcp_auth_unavailable` like a network failure; assembly still
-succeeds, so unrelated MCP entries keep working.
+succeeds, so unrelated MCP entries keep working. Only a successful build is retained; a later
+operation retries a failed build.
 
 ### 5.2 Discovery rules
 

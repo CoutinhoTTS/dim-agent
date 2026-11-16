@@ -11,7 +11,7 @@ use reqwest_mcp::Url;
 use std::{
     collections::HashMap,
     future::Future,
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Arc, Mutex},
     time::Instant,
 };
 #[cfg(feature = "testing")]
@@ -201,7 +201,7 @@ impl Default for KeyState {
 
 pub struct McpAuth {
     store: Store,
-    http: OnceLock<Option<reqwest_mcp::Client>>,
+    http: tokio::sync::OnceCell<reqwest_mcp::Client>,
     keys: Mutex<HashMap<CredentialKey, KeyState>>,
     /// Each key's attempts. This lock orders attempt state (design §7):
     /// every change to it holds the lock, and an exchange holds it from its
@@ -221,7 +221,7 @@ impl McpAuth {
     ) -> Result<Arc<Self>, Box<dyn std::error::Error + Send + Sync>> {
         Ok(Arc::new(Self {
             store: Store::new(files, root)?,
-            http: OnceLock::new(),
+            http: tokio::sync::OnceCell::new(),
             keys: Mutex::default(),
             attempts: tokio::sync::Mutex::default(),
             stopping: CancellationToken::new(),
@@ -230,21 +230,14 @@ impl McpAuth {
         }))
     }
 
-    /// The OAuth HTTP client, built by the first operation that talks to an
-    /// authorization server. A fresh process with no OAuth request keeps no
-    /// TLS client; build failure is reported by that operation as
-    /// [`McpAuthError::Unavailable`].
-    fn http(&self) -> Result<&reqwest_mcp::Client, McpAuthError> {
-        self.http
-            .get_or_init(|| oauth::http().ok())
-            .as_ref()
-            .ok_or(McpAuthError::Unavailable)
+    async fn http(&self) -> Result<&reqwest_mcp::Client, McpAuthError> {
+        self.http.get_or_try_init(|| async { oauth::http() }).await
     }
 
     /// Feature `testing` only: whether an OAuth request has built the client.
     #[cfg(feature = "testing")]
     pub fn oauth_client_initialized(&self) -> bool {
-        self.http.get().is_some_and(Option::is_some)
+        self.http.initialized()
     }
 
     /// Drops pending attempts and waits for token requests already sent.
@@ -365,7 +358,7 @@ impl McpAuth {
                 previous: previous.as_ref(),
                 missing_scopes: &missing_scopes,
             };
-            let http = self.http()?;
+            let http = self.http().await?;
             let authorization = tokio::select! {
                 biased;
                 _ = self.stopping.cancelled() => return Err(McpAuthError::Closed),
@@ -510,7 +503,7 @@ impl McpAuth {
         let Some((verifier, client, binding)) = current else {
             return Err(McpAuthError::AttemptClosed);
         };
-        let response = match self.http() {
+        let response = match self.http().await {
             Ok(http) => {
                 oauth::token(
                     http,
@@ -596,7 +589,7 @@ impl McpAuth {
         let Some(endpoint) = oauth::stored_endpoint(endpoint, resource) else {
             return false;
         };
-        let Ok(http) = self.http() else {
+        let Ok(http) = self.http().await else {
             return false;
         };
         let mut revoked = true;
@@ -697,7 +690,7 @@ impl McpAuth {
         if self.stopping.is_cancelled() {
             return Err(Refusal::Unavailable);
         }
-        let response = match self.http() {
+        let response = match self.http().await {
             Ok(http) => {
                 oauth::token(
                     http,

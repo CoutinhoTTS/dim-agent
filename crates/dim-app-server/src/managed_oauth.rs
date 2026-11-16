@@ -8,10 +8,10 @@ use std::{
     collections::HashMap,
     future::Future,
     io,
-    sync::{Arc, OnceLock},
+    sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OnceCell};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 use url::Url;
 use uuid::Uuid;
@@ -232,7 +232,7 @@ pub struct Service {
     key: &'static str,
     state_key: &'static str,
     config: Config,
-    client: OnceLock<Option<Client>>,
+    client: OnceCell<Client>,
     stopping: CancellationToken,
     attempts: Mutex<HashMap<Uuid, Attempt>>,
     tasks: TaskTracker,
@@ -366,32 +366,28 @@ impl Service {
             key,
             state_key,
             config,
-            client: OnceLock::new(),
+            client: OnceCell::new(),
             stopping: CancellationToken::new(),
             attempts: Mutex::new(HashMap::new()),
             tasks: TaskTracker::new(),
             admission: std::sync::Mutex::new(()),
         }))
     }
-    /// The account's HTTP client, built by the first token operation. A
-    /// process that never signs in or refreshes keeps no TLS client; build
-    /// failure is reported by that operation as transient unavailability.
-    fn client(&self) -> Result<&Client> {
+    async fn client(&self) -> Result<&Client> {
         self.client
-            .get_or_init(|| {
+            .get_or_try_init(|| async {
                 Client::builder()
                     .timeout(Duration::from_secs(15))
                     .redirect(reqwest::redirect::Policy::none())
                     .build()
-                    .ok()
+                    .map_err(|_| OAuthError::Transient(None))
             })
-            .as_ref()
-            .ok_or(OAuthError::Transient(None))
+            .await
     }
     /// Feature `testing` only: whether a token operation has built the client.
     #[cfg(feature = "testing")]
     pub(crate) fn client_initialized(&self) -> bool {
-        self.client.get().is_some_and(Option::is_some)
+        self.client.initialized()
     }
     fn now() -> u64 {
         SystemTime::now()
@@ -701,7 +697,8 @@ impl Service {
         let exchange = async {
             let redirect = self.config.redirect.as_ref().unwrap().as_str();
             let response = self
-                .token_request()?
+                .token_request()
+                .await?
                 .form(&[
                     ("grant_type", "authorization_code"),
                     ("code", code),
@@ -774,7 +771,8 @@ impl Service {
         let result = async {
             let request = async {
                 let response = self
-                    .client()?
+                    .client()
+                    .await?
                     .post(endpoint)
                     .form(&[
                         ("client_id", self.config.client_id.as_str()),
@@ -874,7 +872,8 @@ impl Service {
                 let poll = async {
                     tokio::time::sleep(Duration::from_secs(interval)).await;
                     let response = self
-                        .token_request()?
+                        .token_request()
+                        .await?
                         .form(&[
                             ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
                             ("device_code", code.as_str()),
@@ -1043,7 +1042,8 @@ impl Service {
         }
         let tokens = record.tokens.take().ok_or(OAuthError::Missing)?;
         let response = self
-            .token_request()?
+            .token_request()
+            .await?
             .form(&[
                 ("grant_type", "refresh_token"),
                 ("refresh_token", tokens.refresh.as_str()),
@@ -1108,9 +1108,10 @@ impl Service {
         }
         Ok(())
     }
-    fn token_request(&self) -> Result<reqwest::RequestBuilder> {
+    async fn token_request(&self) -> Result<reqwest::RequestBuilder> {
         let request = self
-            .client()?
+            .client()
+            .await?
             .post(self.config.token.clone())
             .header("Accept", "application/json");
         Ok(if self.key == "openaiCodex" {
