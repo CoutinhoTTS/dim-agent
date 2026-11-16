@@ -783,7 +783,7 @@ catalog 条目带 `zdr: true` 的模型在推理强度前显示 `ZDR` 标签，�
 ```text
 Select a model
 > Provider / model          ZDR  ‹ high ›
-Enter select + default · ←/→ effort · Ctrl+B/F cursor · Ctrl+X clear saved · Esc clear/close
+Enter 选择并设为默认 · ←/→ 推理强度 · Tab 切换分区 · Esc 清除/关闭
 ```
 
 ```text

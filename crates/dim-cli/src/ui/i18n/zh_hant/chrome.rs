@@ -329,9 +329,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "exit" => "離開",
 
         // composer/palette.rs
-        "Enter select + default · ←/→ effort · Ctrl+B/F cursor · Ctrl+X clear saved · Esc clear/close" => {
-            "Enter 選擇並設為預設 · ←/→ 推理強度 · Ctrl+B/F 移動游標 · Ctrl+X 清除已儲存 · Esc 清除/關閉"
-        }
         "Default for new sessions in {folder}: {model}" => {
             "新工作階段在 {folder} 的預設模型：{model}"
         }
@@ -470,6 +467,33 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Fixed model" => "固定模型",
         "Applies to new members, including named Agents." => "適用於新成員，包括具名 Agent。",
         "Existing members keep their models." => "既有成員保留原模型。",
+        "Conversation model" => "對話模型",
+        "Selected: {model}" => "已選擇：{model}",
+        "Model management" => "模型管理",
+        "Manage models" => "管理模型",
+        "1 provider" => "1 個 Provider",
+        "{count} providers" => "{count} 個 Provider",
+        "ready" => "就緒",
+        "no models" => "沒有模型",
+        "catalog unreadable" => "無法讀取 catalog",
+        "{count} with missing limits" => "{count} 個缺少上限",
+        "{count} unavailable" => "{count} 個不可用",
+        "{count} disabled" => "{count} 個已停用",
+        "{count} without models" => "{count} 個沒有模型",
+        "{count} unreadable" => "{count} 個無法讀取",
+        "{unavailable} unavailable, {disabled} disabled" => {
+            "{unavailable} 個不可用、{disabled} 個已停用"
+        }
+        "Enter select + default · ←/→ effort · Tab section · Esc clear/close" => {
+            "Enter 選擇並設為預設 · ←/→ 推理強度 · Tab 切換區段 · Esc 清除/關閉"
+        }
+        "Enter change · Tab section · Esc clear/close" => {
+            "Enter 變更 · Tab 切換區段 · Esc 清除/關閉"
+        }
+        "Enter manage · Tab section · Esc clear/close" => {
+            "Enter 管理 · Tab 切換區段 · Esc 清除/關閉"
+        }
+        "Enter manage · Esc back" => "Enter 管理 · Esc 返回",
         "unknown" => "不明",
         "Subagent model policy saved" => "已儲存子代理模型原則",
         "Subagent model policy changed elsewhere; choose again to reread it" => {

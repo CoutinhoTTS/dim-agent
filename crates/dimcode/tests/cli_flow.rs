@@ -12131,8 +12131,10 @@ fn tui_models_picker_edits_only_the_subagent_model_policy() {
     let mut terminal = Terminal::resume_tui(command);
     terminal.until("test / model");
     terminal.write(b"/models\r");
-    terminal.until("Subagent models: Agent choice");
-    terminal.write(b"Subagent\r");
+    terminal.until("Subagent models");
+    terminal.until("Agent choice");
+    // Tab focuses the policy section; Enter opens its page.
+    terminal.raw(b"\t\r");
     terminal.until("Inherit requesting branch");
     terminal.until("Existing members keep their models.");
     terminal.raw(b"\x1b[B\r");
@@ -12140,7 +12142,8 @@ fn tui_models_picker_edits_only_the_subagent_model_policy() {
     terminal.write(b"\r");
     thread::sleep(Duration::from_millis(300));
     terminal.write(b"\r");
-    terminal.until("Subagent models: Inherit requesting branch");
+    terminal.until("Subagent models");
+    terminal.until("Inherit requesting branch");
     terminal.until("Subagent model policy saved");
     terminal.write(b"\r");
     terminal.until("Fixed model");
@@ -12151,7 +12154,8 @@ fn tui_models_picker_edits_only_the_subagent_model_policy() {
     terminal.raw(b"\x1b[B\r");
     terminal.until("Fixed subagent model");
     terminal.write(b"other\r");
-    terminal.until("Subagent models: Test / other");
+    terminal.until("Subagent model policy saved");
+    terminal.until("Test / other");
     home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
