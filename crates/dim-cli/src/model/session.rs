@@ -1205,10 +1205,11 @@ pub enum DeleteOutcome {
     NothingRemoved,
     /// The daemon offers no `session.delete`.
     Unsupported,
-    /// The close ran but the removal failed: the rows stay, and this daemon
-    /// neither lists nor loads the Session again.
+    /// The removal failed after admission: no rows were removed. A loaded
+    /// Session was closed first, so this daemon neither lists nor loads it
+    /// again; the reply does not say which step failed.
     ClosedNotRemoved(String),
-    /// The call failed before any close: the row and the attachment stand.
+    /// The call failed before the removal: the row and the attachment stand.
     Failed(String),
 }
 

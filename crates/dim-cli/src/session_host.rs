@@ -2410,9 +2410,18 @@ impl Worker {
     /// `requireInactive`: the issue asks the picker to delete a Session a
     /// turn is running in, which the close in the delete settles.
     ///
-    /// The reply alone decides, because an attached Session is loaded and
-    /// so a `-32603` can only follow a close: every other error comes before
-    /// it and changes nothing.
+    /// The reply alone decides. `-32603` is a storage failure anywhere in the
+    /// removal (session-deletion-and-fork §3.5): the command-output or row
+    /// removal after the close, and also the store reads and deletes that
+    /// precede it for a Session's Team. It removes no rows either way, so the
+    /// picker keeps the row; whether a Session was closed first depends on
+    /// which read failed, and the reply does not distinguish them. A close's
+    /// own cleanup errors are logged rather than returned (§3.2 step 2), so
+    /// they never arrive as one. Every other refusal is a direct `AgentError`
+    /// that `RpcError::from` maps to its own code before any storage step, so
+    /// it means nothing ran. The RPC mapping's `PluginFailed` unwrapping does
+    /// not apply here: no refusal on this path is built inside a capability,
+    /// so `-32603` keeps the meaning of a storage failure.
     async fn delete_session(&mut self, session_id: &str) -> DeleteOutcome {
         if !self.client.supports(&["session.delete"]) {
             return DeleteOutcome::Unsupported;
@@ -2428,11 +2437,11 @@ impl Worker {
             Ok(reply) if reply.deleted == Some(false) => DeleteOutcome::NothingRemoved,
             Ok(_) => DeleteOutcome::Deleted,
             Err(error) => {
-                let close_ran = error
+                let removal_failed = error
                     .downcast_ref::<client::RpcError>()
                     .is_some_and(|rpc| rpc.code == -32603);
                 let reason = crate::session_command::reason(&error);
-                if close_ran {
+                if removal_failed {
                     DeleteOutcome::ClosedNotRemoved(reason)
                 } else {
                     DeleteOutcome::Failed(reason)
