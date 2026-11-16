@@ -121,7 +121,6 @@ Each catalog name a part of the assembly provides or injects. `data` means share
 | `fileReads` | branch | FileReads | internal(hot-path) | — |
 | `inputQueue` | branch | InputQueue | data | `submit` async, `withdraw` async |
 | `loopState` | branch | Loop | internal(hot-path) | — |
-| `modelProvider` | branch | ModelProvider | internal(hot-path) | — |
 | `permission` | branch | Permission | data | `check` async |
 | `prompt` | branch | Prompt | internal(hot-path) | — |
 | `promptSourcesBranch` | branch | PromptSourcesBranch | internal(hot-path) | — |

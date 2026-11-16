@@ -9351,8 +9351,7 @@
       "from": "dim_agent_capabilities",
       "to": "dim_agent_capabilities::model_provider",
       "references": [
-        "mod model_provider",
-        "path model_provider::ModelProvider"
+        "mod model_provider"
       ]
     },
     {
