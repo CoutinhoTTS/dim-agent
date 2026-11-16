@@ -1,0 +1,35 @@
+{
+  "source": {
+    "corpus": "dim-badcase-usercases",
+    "data_branch": "eval-badcase",
+    "notes": "P0 2026-11-16: 2 primary tasks + 2 paired controls from public GitHub issues",
+    "upstream": "arcships/dim issues"
+  },
+  "tasks": {
+    "uc-001-compaction-constraint-retention": {
+      "digest": "e1e2fe5f42d8c54d5b15de7301fd38d4b3f9288f75e185067b5483326d55a391",
+      "kind": "primary",
+      "source_issue": "arcships/dim#169",
+      "upstream": "dim-issues"
+    },
+    "uc-002-compaction-constraint-control": {
+      "digest": "dc0b05806b8a24f4bb1872773bdc0cee5f8e9e90a573ad2c20f564535d4800eb",
+      "kind": "control",
+      "source_issue": "arcships/dim#169",
+      "upstream": "dim-issues"
+    },
+    "uc-003-worktree-outside-workspace": {
+      "digest": "234e3eb03570f9c5fd869ccaab8e435de893413490331a5e308a742a9c81e95a",
+      "kind": "primary",
+      "source_issue": "arcships/dim#911",
+      "upstream": "dim-issues"
+    },
+    "uc-004-worktree-in-workspace-control": {
+      "digest": "be828b901db059a06a2d821da19078f2ba59bcd5395e76306d7cd1e2538b34a0",
+      "kind": "control",
+      "source_issue": "arcships/dim#911",
+      "upstream": "dim-issues"
+    }
+  },
+  "tree_digest": "053996e50a0b8d669a575f331ce4f9bf4e8f0b9638910f3b69a4bbd308a8a44d"
+}
