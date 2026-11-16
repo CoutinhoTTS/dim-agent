@@ -1386,11 +1386,13 @@ credential state, connection handles and application watches are not operations 
 MCP's Session parts reach those internal resources through their declared owner-private binding.
 
 Native and wire operations use the same owner state, admission gate, task set and publication
-coordinator. Dropping a foreign wait cancels its call token; accepted owner tasks still settle
-through the existing cancellation path. Owner closing stops admission, cancels accepted work and
-awaits its settlement. A cancellation or interrupted reply is not proof that a configuration
-write did not commit. Synchronous refusal reads start no task and retain no wait to cancel.
-There is no new registry, cache, query, retry policy or resource lifetime.
+coordinator. Native callers retain the existing explicit cancellation-token checks. The wire
+request has no cancel argument or cancel operation. Once an asynchronous wire operation starts,
+giving up its wait does not cancel or roll it back; the owner operation and refusal bookkeeping
+continue. Owner closing stops admission, cancels work through its existing owner token and waits
+for its owned tasks to settle. An interrupted reply is not proof that a configuration write did
+not commit. Synchronous refusal reads start no task and retain no wait to cancel. There is no new
+registry, cache, query, retry policy or resource lifetime.
 
 ## 9. Cross-module requirements
 
