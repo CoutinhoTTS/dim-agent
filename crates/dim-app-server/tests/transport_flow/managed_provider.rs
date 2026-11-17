@@ -161,7 +161,9 @@ impl ManagedProvider for Provider {
             "displayName":"Fixture model","status":"active",
             "metadata":{"reasoning":{"supported":true,"effortOptions":["low","high"]}},
             "capabilities":dim_agent_types::CatalogCapabilities {
-                reasoning: true, ..dim_agent_types::CatalogCapabilities::with_limits(32_000, 128) }}))
+                reasoning: true,
+                ..dim_agent_types::CatalogCapabilities::with_limits(32_000, 128)
+            }}))
         .unwrap();
         let mut models = vec![ManagedModel {
             entry,

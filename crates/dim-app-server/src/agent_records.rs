@@ -90,10 +90,20 @@ impl AgentRecords {
         let profile = serde_json::to_string(profile)
             .map_err(|error| AgentError::Storage(error.to_string()))?;
         self.0.run(move |connection| {
-            let existing = connection.query_row(
-                "SELECT profile, is_default, owner_session_id FROM agents WHERE agent_id = ?1", [&id],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, Option<String>>(2)?)),
-            ).optional().map_err(storage_error)?;
+            let existing = connection
+                .query_row(
+                    "SELECT profile, is_default, owner_session_id FROM agents WHERE agent_id = ?1",
+                    [&id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                        ))
+                    },
+                )
+                .optional()
+                .map_err(storage_error)?;
             match existing {
                 Some((stored, is_default, stored_owner)) => {
                     let stored: AgentProfile = serde_json::from_str(&stored)
@@ -254,7 +264,9 @@ impl AgentRecords {
                 let rows = query
                     .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?)))
                     .map_err(storage_error)?;
-                let rows: Vec<_> = rows.collect::<rusqlite::Result<Vec<_>>>().map_err(storage_error)?;
+                let rows: Vec<_> = rows
+                    .collect::<rusqlite::Result<Vec<_>>>()
+                    .map_err(storage_error)?;
                 let (orphaned, incomplete): (Vec<_>, Vec<_>) =
                     rows.into_iter().partition(|(_, owner_exists)| !owner_exists);
                 Ok((
@@ -279,13 +291,18 @@ impl AgentRecords {
                 Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?, row.get::<_, Value>(2)?,
                     row.get::<_, Value>(3)?, row.get::<_, bool>(4)?))
             }).map_err(storage_error)?.map(|row| {
-                let (session_id, has_session, agent, version, has_agent) = row.map_err(storage_error)?;
+                let (session_id, has_session, agent, version, has_agent) =
+                    row.map_err(storage_error)?;
                 let agent_id = match agent {
                     Value::Text(id) => Some(id),
                     _ => None,
                 };
                 let protocol_version = match version {
-                    Value::Integer(version) if (1..=crate::protocol::PROTOCOL_VERSION as i64).contains(&version) => Some(version as u32),
+                    Value::Integer(version)
+                        if (1..=crate::protocol::PROTOCOL_VERSION as i64).contains(&version) =>
+                    {
+                        Some(version as u32)
+                    }
                     _ => None,
                 };
                 let error = if !has_session {

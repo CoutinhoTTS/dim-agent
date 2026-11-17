@@ -800,7 +800,9 @@ impl SqliteTimelineStore {
                 let found: Option<(u64, String)> = connection
                     .prepare_cached("SELECT sequence, body FROM timeline_events WHERE session_id = ?1 AND branch_id = ?2 AND sequence <= ?3 AND kind IN ('context/prepare', 'model/call') ORDER BY sequence DESC LIMIT 1")
                     .map_err(error)?
-                    .query_row(params![session, branch, sql_sequence(through)?], |row| Ok((read_sequence(row, 0)?, row.get(1)?)))
+                    .query_row(params![session, branch, sql_sequence(through)?], |row| {
+                        Ok((read_sequence(row, 0)?, row.get(1)?))
+                    })
                     .optional()
                     .map_err(error)?;
                 if found.is_some() {
@@ -1778,10 +1780,12 @@ fn transaction<'a>(
     mut sessions: impl Iterator<Item = (&'a [Pending], &'a Prepared)>,
 ) -> Result<()> {
     writer_operation(|| {
-        let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|failure| {
-        tracing::error!(db_path = %path.display(), adapter = "rust", phase = "BEGIN", pid = std::process::id(), sqlite_code = ?failure.sqlite_error_code(), %failure, "storage.transaction");
-        error(failure)
-    })?;
+        let tx = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|failure| {
+                tracing::error!(db_path = %path.display(), adapter = "rust", phase = "BEGIN", pid = std::process::id(), sqlite_code = ?failure.sqlite_error_code(), %failure, "storage.transaction");
+                error(failure)
+            })?;
         let written = sessions.try_for_each(|(batches, prepared)| {
             let mut insert = tx
                 .prepare_cached("INSERT OR IGNORE INTO timeline_content VALUES (?1, ?2, ?3, ?4)")
@@ -2810,10 +2814,20 @@ async fn fork_references(
         while after < *length {
             let end = after.saturating_add(COPY_CONTENT as u64).min(*length);
             let (session, id) = (source.to_owned(), id.clone());
-            let hashes=db.run_read(move |connection| {
-                connection.prepare_cached("SELECT content_ref FROM timeline_array_elements WHERE session_id=?1 AND array_id=?2 AND element_index>=?3 AND element_index<?4 ORDER BY element_index").map_err(error)?
-                    .query_map(params![session,id,sql_sequence(after)?,sql_sequence(end)?],|row|row.get::<_,String>(0)).map_err(error)?.collect::<rusqlite::Result<Vec<_>>>().map_err(error)
-            }).await?;
+            let hashes = db
+                .run_read(move |connection| {
+                    let mut statement = connection
+                        .prepare_cached("SELECT content_ref FROM timeline_array_elements WHERE session_id=?1 AND array_id=?2 AND element_index>=?3 AND element_index<?4 ORDER BY element_index")
+                        .map_err(error)?;
+                    let rows = statement.query_map(
+                        params![session, id, sql_sequence(after)?, sql_sequence(end)?],
+                        |row| row.get::<_, String>(0),
+                    );
+                    rows.map_err(error)?
+                        .collect::<rusqlite::Result<Vec<_>>>()
+                        .map_err(error)
+                })
+                .await?;
             if u64::try_from(hashes.len()).map_err(error)? != end - after {
                 return Err(error("incomplete array during fork"));
             }
@@ -3106,27 +3120,43 @@ impl TimelineStore for SqliteTimelineStore {
             let key = key.clone();
             let mut reader = self.reader(RequestBodies::Rebuild);
             let sequence = snapshot.sequence;
-            holds_writing(&self.db, &mut reader, None, move |connection, reader, rows: &mut Option<Rows>| {
-                let rows = match rows {
-                    Some(rows) => rows,
-                    None => rows.insert(Rows::fetch(connection, &key, &(sequence..=sequence))?),
-                };
-                if !rows.advance(connection, &key.session_id, reader)? {
-                    return Ok(false);
-                }
-                let anchor = rows
-                    .records(&(sequence..=sequence), false)?
-                    .pop()
-                    .ok_or_else(|| error("snapshot anchor is missing"))?;
-                if anchor.event.id != snapshot.event_id {
-                    return Err(error("snapshot anchor is not the identified event"));
-                }
-                connection.execute(
-                    "INSERT OR REPLACE INTO timeline_snapshots VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                    params![key.session_id, key.branch_id, sql_sequence(snapshot.sequence)?, snapshot.interpreter, snapshot.event_id, snapshot.state],
-                ).map_err(error)?;
-                Ok(true)
-            })
+            holds_writing(
+                &self.db,
+                &mut reader,
+                None,
+                move |connection, reader, rows: &mut Option<Rows>| {
+                    let rows = match rows {
+                        Some(rows) => rows,
+                        None => {
+                            rows.insert(Rows::fetch(connection, &key, &(sequence..=sequence))?)
+                        }
+                    };
+                    if !rows.advance(connection, &key.session_id, reader)? {
+                        return Ok(false);
+                    }
+                    let anchor = rows
+                        .records(&(sequence..=sequence), false)?
+                        .pop()
+                        .ok_or_else(|| error("snapshot anchor is missing"))?;
+                    if anchor.event.id != snapshot.event_id {
+                        return Err(error("snapshot anchor is not the identified event"));
+                    }
+                    connection
+                        .execute(
+                            "INSERT OR REPLACE INTO timeline_snapshots VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                            params![
+                                key.session_id,
+                                key.branch_id,
+                                sql_sequence(snapshot.sequence)?,
+                                snapshot.interpreter,
+                                snapshot.event_id,
+                                snapshot.state
+                            ],
+                        )
+                        .map_err(error)?;
+                    Ok(true)
+                },
+            )
             .await?;
             self.finish(reader);
             Ok(())
@@ -3145,8 +3175,17 @@ impl TimelineStore for SqliteTimelineStore {
                 connection.query_row(
                     "SELECT s.sequence, s.event_id, s.interpreter, s.state FROM timeline_snapshots s JOIN timeline_events e ON e.session_id=s.session_id AND e.branch_id=s.branch_id AND e.sequence=s.sequence AND e.event_id=s.event_id WHERE s.session_id=?1 AND s.branch_id=?2 AND s.sequence<=?3 AND s.interpreter=?4 AND typeof(s.sequence)='integer' AND s.sequence>0 AND typeof(s.event_id)='text' AND typeof(s.state)='text' AND json_valid(e.body) AND json_extract(e.body, '$.record.event.id')=s.event_id AND json_extract(e.body, '$.record.event.sequence')=s.sequence ORDER BY s.sequence DESC LIMIT 1",
                     params![key.session_id, key.branch_id, sql_sequence(through)?, interpreter],
-                    |row| Ok(RecoverySnapshot { sequence: read_sequence(row, 0)?, event_id: row.get(1)?, interpreter: row.get(2)?, state: row.get(3)? }),
-                ).optional().map_err(error)
+                    |row| {
+                        Ok(RecoverySnapshot {
+                            sequence: read_sequence(row, 0)?,
+                            event_id: row.get(1)?,
+                            interpreter: row.get(2)?,
+                            state: row.get(3)?,
+                        })
+                    },
+                )
+                .optional()
+                .map_err(error)
             }).await
         })
     }
@@ -3440,7 +3479,10 @@ async fn storage_panic_flow_preserves_connection_and_settles_accepted_batches() 
             assert_eq!(store.head(&key(phase)).await.unwrap(), 0, "a panicking write must leave no durable prefix");
             assert_eq!(store.head(&key("healthy")).await.unwrap(), index as u64 + 3);
             let (unexpected, unaccepted) = tokio::sync::oneshot::channel();
-            assert!(store.append(key(phase), vec![record(1)], Box::new(move |_| { let _ = unexpected.send(()); })).is_err());
+            let callback = Box::new(move |_| {
+                let _ = unexpected.send(());
+            });
+            assert!(store.append(key(phase), vec![record(1)], callback).is_err());
             assert!(unaccepted.await.is_err(), "a rejected append must not invoke its callback");
         }
         let (done, rollback) = tokio::sync::oneshot::channel();
@@ -3476,8 +3518,14 @@ async fn storage_panic_flow_preserves_connection_and_settles_accepted_batches() 
         let (first, committed) = tokio::sync::oneshot::channel();
         let (queued, rejected) = tokio::sync::oneshot::channel();
         {
-            let _connection = db.connection.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            store.append(key("first"), vec![record(1)], Box::new(move |result| { let _ = first.send(result); })).unwrap();
+            let _connection = db
+                .connection
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let callback = Box::new(move |result| {
+                let _ = first.send(result);
+            });
+            store.append(key("first"), vec![record(1)], callback).unwrap();
             assert!(store.admission.lock().unwrap().sender.send(Command::Panic).is_ok());
             timeline.append(EventDraft::new(EventKind::InputMessage(InputMessageData::text("pending", None)))).unwrap();
             store.append(key("queued"), vec![record(1)], Box::new(move |result| { let _ = queued.send(result); })).unwrap();

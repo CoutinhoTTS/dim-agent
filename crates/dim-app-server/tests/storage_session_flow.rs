@@ -227,10 +227,29 @@ async fn sqlite_session_failure_rejects_writes_on_an_idle_sibling_timeline() {
                 Err(AgentError::Storage(message)) if message.contains("injected sibling output failure")));
         }
         assert_eq!(session.sequence(idle).unwrap(), idle_through);
-        assert!(!branch_events(&session, failed, (failed_through + 1)..).await.unwrap().iter().any(|event|
-            matches!(event.kind, EventKind::Text(_) | EventKind::ModelOutputEnd(_) | EventKind::TurnEnd(_))));
-        assert!(!branch_events(&session, idle, (idle_through + 1)..).await.unwrap().iter().any(|event|
-            matches!(event.kind, EventKind::ModelOutputEnd(_) | EventKind::TurnEnd(_))));
+        let late = branch_events(&session, failed, (failed_through + 1)..)
+            .await
+            .unwrap();
+        let late: Vec<_> = late
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event.kind,
+                    EventKind::Text(_) | EventKind::ModelOutputEnd(_) | EventKind::TurnEnd(_)
+                )
+            })
+            .collect();
+        assert!(late.is_empty());
+        let trailing = branch_events(&session, idle, (idle_through + 1)..)
+            .await
+            .unwrap();
+        let trailing: Vec<_> = trailing
+            .iter()
+            .filter(|event| {
+                matches!(event.kind, EventKind::ModelOutputEnd(_) | EventKind::TurnEnd(_))
+            })
+            .collect();
+        assert!(trailing.is_empty());
         let _ = agent.close().await;
         drop(connection);
         drop(session);

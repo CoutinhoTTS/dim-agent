@@ -677,7 +677,9 @@ impl AgentIndex {
                     dispatch.wait_for(|state| state.sequence >= through || state.failure.is_some())
                         .await.map(|state| state.failure.clone())
                 } => {
-                    if let Some(error) = result.map_err(|_| AgentError::Closed(request.branch_id.clone()))? {
+                    let failure = result
+                        .map_err(|_| AgentError::Closed(request.branch_id.clone()))?;
+                    if let Some(error) = failure {
                         return Err(settlement(error));
                     }
                 }

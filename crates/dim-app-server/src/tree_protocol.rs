@@ -129,7 +129,10 @@ impl ProductEvent {
         }
         let visible = PRODUCT_EVENT_KINDS.contains(&event.kind.key())
             || (version >= 3 && V3_EVENT_KINDS.contains(&event.kind.key()))
-            || matches!(&event.kind, EventKind::ToolResult(data) if version >= 3 || data.call_event_id.is_some());
+            || matches!(
+                &event.kind,
+                EventKind::ToolResult(data) if version >= 3 || data.call_event_id.is_some()
+            );
         visible.then_some(Self { event })
     }
 

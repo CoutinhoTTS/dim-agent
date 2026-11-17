@@ -347,12 +347,15 @@ impl rutis::host::DynPlugin for DrainLoadingBroadcast {
                 let drained = drained.clone();
                 Box::pin(async move {
                     if lifecycle.phase() == dim_agent_runtime::SessionPhase::Loading {
-                        emitter.emit(dim_agent_capabilities::session_broadcast::SessionBroadcast::new(
-                            &session_id,
-                            dim_agent_capabilities::session_broadcast::SessionBroadcastEvent::Fence {
-                                recipient: "test.loading".into(), token: 0,
-                            },
-                        )).map_err(|error| dim_agent_runtime::AgentError::fault("bootstrap fence", error.to_string()))?;
+                        use dim_agent_capabilities::session_broadcast as broadcast;
+                        let fence = broadcast::SessionBroadcastEvent::Fence {
+                            recipient: "test.loading".into(),
+                            token: 0,
+                        };
+                        let event = broadcast::SessionBroadcast::new(&session_id, fence);
+                        emitter.emit(event).map_err(|error| {
+                            dim_agent_runtime::AgentError::fault("bootstrap fence", error.to_string())
+                        })?;
                         drained.notified().await;
                     }
                     Ok(())

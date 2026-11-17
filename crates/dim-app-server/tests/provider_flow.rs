@@ -5129,13 +5129,21 @@ async fn new_api_metadata_routes_and_builtin_routes_survive_restart() {
                 };
                 assert!(
                     provider
-                        .apply_preferences(&current, &dim_app_server::protocol::ModelPreferenceUpdate::default(), &cancel)
+                        .apply_preferences(
+                            &current,
+                            &dim_app_server::protocol::ModelPreferenceUpdate::default(),
+                            &cancel,
+                        )
                         .await
                         .is_err()
                 );
                 current.metadata = None;
                 let unstamped = provider
-                    .apply_preferences(&current, &dim_app_server::protocol::ModelPreferenceUpdate::default(), &cancel)
+                    .apply_preferences(
+                        &current,
+                        &dim_app_server::protocol::ModelPreferenceUpdate::default(),
+                        &cancel,
+                    )
                     .await
                     .unwrap();
                 assert!(
@@ -5179,7 +5187,11 @@ async fn new_api_metadata_routes_and_builtin_routes_survive_restart() {
                 current.metadata = selected.metadata;
                 assert!(
                     provider
-                        .apply_preferences(&current, &dim_app_server::protocol::ModelPreferenceUpdate::default(), &cancel)
+                        .apply_preferences(
+                            &current,
+                            &dim_app_server::protocol::ModelPreferenceUpdate::default(),
+                            &cancel,
+                        )
                         .await
                         .is_ok()
                 );

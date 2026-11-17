@@ -368,12 +368,22 @@ fn wake_eligible(
     }
     let mut opening = 0i64;
     for kind in ["branch/start", "branch/resume", "session/forked"] {
-        let position: Option<i64> = connection.prepare_cached("SELECT sequence FROM timeline_events WHERE session_id=?1 AND branch_id=?2 AND kind=?3 AND sequence<=?4 ORDER BY sequence DESC LIMIT 1")
-            .map_err(error)?.query_row(params![session,branch,kind,sequence as i64], |row| row.get(0)).optional().map_err(error)?;
+        let mut statement = connection
+            .prepare_cached("SELECT sequence FROM timeline_events WHERE session_id=?1 AND branch_id=?2 AND kind=?3 AND sequence<=?4 ORDER BY sequence DESC LIMIT 1")
+            .map_err(error)?;
+        let position: Option<i64> = statement
+            .query_row(params![session, branch, kind, sequence as i64], |row| {
+                row.get(0)
+            })
+            .optional()
+            .map_err(error)?;
         opening = opening.max(position.unwrap_or(0));
     }
-    let mut closing: i64 = connection.prepare_cached("SELECT coalesce(max(sequence),0) FROM timeline_events WHERE session_id=?1 AND branch_id=?2 AND kind='stop/interrupt' AND json_extract(body,'$.record.event.data.scope')='branch' AND sequence<=?3")
-        .map_err(error)?.query_row(params![session,branch,sequence as i64], |row| row.get(0)).map_err(error)?;
+    let mut statement = connection.prepare_cached("SELECT coalesce(max(sequence),0) FROM timeline_events WHERE session_id=?1 AND branch_id=?2 AND kind='stop/interrupt' AND json_extract(body,'$.record.event.data.scope')='branch' AND sequence<=?3")
+        .map_err(error)?;
+    let mut closing: i64 = statement
+        .query_row(params![session, branch, sequence as i64], |row| row.get(0))
+        .map_err(error)?;
     for event in tail.iter().filter(|event| event.sequence <= sequence) {
         match &event.kind {
             dim_agent_types::EventKind::BranchStart(_)
@@ -553,8 +563,11 @@ fn save_root(
     sequence: i64,
     root: Option<i64>,
 ) -> Result<()> {
-    connection.prepare_cached("INSERT INTO timeline_member_roots VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(session_id,branch_id,index_id,group_key,sequence) DO UPDATE SET root_id=excluded.root_id")
-        .map_err(error)?.execute(params![session, branch, profile.id, group, sequence, root]).map_err(error)?;
+    let mut statement = connection.prepare_cached("INSERT INTO timeline_member_roots VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(session_id,branch_id,index_id,group_key,sequence) DO UPDATE SET root_id=excluded.root_id")
+        .map_err(error)?;
+    statement
+        .execute(params![session, branch, profile.id, group, sequence, root])
+        .map_err(error)?;
     Ok(())
 }
 
@@ -672,11 +685,20 @@ fn event_profiles(
                 continue;
             }
             for key in terminal_keys(terminal, profile.tuple, value)? {
-                connection.prepare_cached("INSERT INTO timeline_member_terminals VALUES(?1,?2,?3,?4,?5) ON CONFLICT DO NOTHING")
-                .map_err(error)?.execute(params![session, branch, profile.id, key, sequence]).map_err(error)?;
-                let origins = connection.prepare_cached("SELECT sequence,group_key FROM timeline_member_origins WHERE session_id=?1 AND branch_id=?2 AND index_id=?3 AND match_key=?4")
-                .map_err(error)?.query_map(params![session, branch, profile.id, key], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?)))
-                .map_err(error)?.collect::<rusqlite::Result<Vec<_>>>().map_err(error)?;
+                let mut terminal = connection.prepare_cached("INSERT INTO timeline_member_terminals VALUES(?1,?2,?3,?4,?5) ON CONFLICT DO NOTHING")
+                    .map_err(error)?;
+                terminal
+                    .execute(params![session, branch, profile.id, key, sequence])
+                    .map_err(error)?;
+                let mut origins = connection.prepare_cached("SELECT sequence,group_key FROM timeline_member_origins WHERE session_id=?1 AND branch_id=?2 AND index_id=?3 AND match_key=?4")
+                    .map_err(error)?;
+                let origins = origins
+                    .query_map(params![session, branch, profile.id, key], |row| {
+                        Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
+                    })
+                    .map_err(error)?
+                    .collect::<rusqlite::Result<Vec<_>>>()
+                    .map_err(error)?;
                 let mut changes = BTreeMap::new();
                 for (origin, group) in origins {
                     let previous = root(
@@ -700,8 +722,12 @@ fn event_profiles(
                     save_root(connection, session, branch, profile, &group, sequence, next)?;
                 }
                 if profile.id != "exec/v1" {
-                    connection.prepare_cached("DELETE FROM timeline_member_origins WHERE session_id=?1 AND branch_id=?2 AND index_id=?3 AND match_key=?4")
-                    .map_err(error)?.execute(params![session, branch, profile.id, key]).map_err(error)?;
+                    let mut statement = connection
+                        .prepare_cached("DELETE FROM timeline_member_origins WHERE session_id=?1 AND branch_id=?2 AND index_id=?3 AND match_key=?4")
+                        .map_err(error)?;
+                    statement
+                        .execute(params![session, branch, profile.id, key])
+                        .map_err(error)?;
                 }
             }
         }
