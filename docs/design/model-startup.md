@@ -83,7 +83,11 @@ Direct startup has a Session-owned connection binding. The CLI validates its
 external input and passes it through the protected-local Session boundary to
 Provider; it does not mutate the daemon's environment or generate a plaintext
 configuration file containing secrets. An already running daemon accepts the
-same boundary, so the current invocation's configuration is not lost.
+same boundary, so the current invocation's configuration is not lost. The
+preview read reaches the same resolver, so it takes the same boundary: a
+`session.model.preview` carrying `startup` from the authenticated Web entry is
+refused `local_transport_required`, because a browser holds no launch input and
+opening the admission is not part of what its Session creation states.
 
 Daemon spawning always strips the ten Session startup environment variables,
 including for management invocations that do not parse them. This changes only

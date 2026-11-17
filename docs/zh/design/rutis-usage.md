@@ -165,7 +165,8 @@ loader 为每个副本解析每个名字，各运行时落实结果。部件代�
   只属于该实例的名字要以其组登记，这样每个实例各有一份；部件私有的名字由它的行隔离。否则其他实例也能看到该服务，
   第二个提供它的副本会因 rutis 的重复提供者错误而失败。
 - **必需与可选。** 必需的依赖要注入，并对部件门控。可选的依赖在使用时读取，不注入：Cordis 的 `ctx.get(name)`、
-  rutis 的 `ctx.get_at(&key)`。由配置选择的依赖，是否包含在副本的名字中由配置决定。
+  rutis 的 `ctx.get_at(&key)`。必需的依赖绝不用这种方式读：可选读取不门控、不随提供者重载，也不核对声明。
+  由配置选择的依赖，是否包含在副本的名字中由配置决定。
 - **Cordis。** 未经修改的 rutis Cordis 4（`@deepseek-ai/cordis`）插件作为 Node 行运行，得到同样的解析。
   Cordis 3 插件不在目标内。
 
@@ -300,9 +301,9 @@ P3 删除了旧形式（[#375](https://github.com/arcships/dim/issues/375)）；
 
 没有名字依赖的 Rust 部件就是普通的 rutis `Plugin`（`type Deps` 按类型）。依赖名字的部件是 rutis
 `host::DynPlugin`，也就是 rutis 给出的按 key 依赖的写法：部件保存这个副本的 key（由工厂从 `Names` 取得），
-在 `injects` 中列出，在 `apply` 中用 `require_at` 读取（只在存在时才用的依赖用 `get_at`，不列出）。
-Dim 不另加 trait 或适配层。列出的 key 在严格读取时发现提供者已消失，会返回它自己的错误，rutis 把部件退回
-Pending（A.3）。绑定在 Rust 中落实 §3.5：
+在 `injects` 中列出，在 `apply` 中用 `require_at` 读取。`get_at` 只读部件缺少它也能工作的服务，这种 key 不列出
+（§3.5）。Dim 不另加 trait 或适配层。列出的 key 在严格读取时发现提供者已消失，会返回它自己的错误，
+rutis 把部件退回 Pending（A.3）。绑定在 Rust 中落实 §3.5：
 
 - 按 `#[rutis::service]` 的规则给类型命名：`Timeline` 是 `timeline`，`dyn LoopState` 是 `loopState`
   （`names::name_of`）。一个 Rust 类型就是一个名字，所以在两个组提供的类型要拆成两个类型，或归到一个组。
@@ -389,7 +390,7 @@ Agent（`AgentBuilder::build`），宿主以 `partRegistry` 把它提供给自�
 - **依赖消失。** 某个名称的提供者消失时，rutis 把依赖它的部件退回 Pending，提供者回来后再次加载。新的一代
   按能力重载协议从 Timeline 重新开始（[插件契约 §7.2](plugin-contract.md#72-代次重载与重建)），不再增加任何东西。
 - **可选依赖与由配置选择的依赖。** 同 §3.5：由配置选择的依赖在被选中时门控（工厂填的 `Option<Key<T>>`），
-  组合检查此时也覆盖它；只在存在时才用的依赖用 `get_at` 读取，不列在 `injects` 中。它的名称仍须登记。
+  组合检查此时也覆盖它；缺少它也能工作的依赖用 `get_at` 读取，不列在 `injects` 中。它的名称仍须登记。
 - **启动进展。** `startup_timeout` 限制 loader 启动、reconcile、必需行就绪和打开重放期间连续没有进展的时间。本次打开中一行的首次激活、分支派发序号前进或一份打开回执完成会重置间隔；同一行反复重启不算新的进展。
   `apply` 运行较久的插件可用 `opening_advanced(ctx)`（`dim_agent_runtime::assembly`）报告真实进展，同样重置该间隔；工作在阻塞线程上运行的插件从那里报告。
   只计本次打开范围内的进展，其他 Session 的活动不算；不设固定总时限。
