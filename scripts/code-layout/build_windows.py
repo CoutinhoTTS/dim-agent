@@ -242,13 +242,12 @@ def main():
             DIM_LAYOUT_LINKER=linker,
             DIM_LAYOUT_PYTHON=sys.executable,
             DIM_LAYOUT_SCRIPT=str(HERE / "build_windows.py"),
+            **{"CARGO_TARGET_" + host.upper().replace("-", "_") + "_LINKER": host_linker},
         )
         command = [
             "cargo", "rustc", "--release", "--locked", "-p", "dimcode", "--bin", "dimcode",
-            "--jobs", str(args.jobs),
+            "--jobs", str(args.jobs), "--target", args.target or host,
         ]
-        if args.target:
-            command.extend(["--target", args.target])
         command.extend(["--", f"-Clinker={wrapper}"])
         subprocess.run(command, cwd=REPO, env=env, check=True)
         record = json.loads((work / "link.json").read_text())

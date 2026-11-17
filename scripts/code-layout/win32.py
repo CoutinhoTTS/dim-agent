@@ -14,6 +14,7 @@ ntdll = ctypes.WinDLL("ntdll", use_last_error=True)
 PROCESS_QUERY_INFORMATION = 0x0400
 PROCESS_SET_QUOTA = 0x0100
 PROCESS_VM_READ = 0x0010
+PROCESS_SUSPEND_RESUME = 0x0800
 LIST_MODULES_ALL = 0x03
 EXTENDED_STARTUPINFO_PRESENT = 0x00080000
 CREATE_SUSPENDED = 0x00000004
@@ -148,7 +149,7 @@ def page_size():
     return info.dwPageSize
 
 
-def open_process(pid, access=PROCESS_QUERY_INFORMATION | PROCESS_SET_QUOTA | PROCESS_VM_READ):
+def open_process(pid, access=PROCESS_QUERY_INFORMATION | PROCESS_SET_QUOTA | PROCESS_VM_READ | PROCESS_SUSPEND_RESUME):
     handle = kernel32.OpenProcess(access, False, pid)
     if not handle:
         raise ctypes.WinError(ctypes.get_last_error())
@@ -212,7 +213,8 @@ def module(handle):
     count = needed.value // ctypes.sizeof(wintypes.HMODULE)
     modules = (wintypes.HMODULE * count)()
     if not psapi.EnumProcessModulesEx(
-        handle, modules, ctypes.sizeof(modules), ctypes.byref(needed), LIST_MODULES_ALL
+        handle, ctypes.cast(modules, ctypes.c_void_p), ctypes.sizeof(modules),
+        ctypes.byref(needed), LIST_MODULES_ALL
     ):
         raise ctypes.WinError(ctypes.get_last_error())
     info = MODULEINFO()
@@ -229,7 +231,9 @@ def working_set_pages(handle, base, rva, size):
     entries = (WORKING_SET_EX * count)()
     for index in range(count):
         entries[index].VirtualAddress = base + rva + index * step
-    if not psapi.QueryWorkingSetEx(handle, entries, ctypes.sizeof(entries)):
+    if not psapi.QueryWorkingSetEx(
+        handle, ctypes.cast(entries, ctypes.c_void_p), ctypes.sizeof(entries)
+    ):
         raise ctypes.WinError(ctypes.get_last_error())
     return step, [index for index in range(count) if entries[index].Flags & 1]
 
@@ -301,13 +305,14 @@ class Console:
         size = ctypes.c_size_t()
         kernel32.InitializeProcThreadAttributeList(None, 1, 0, ctypes.byref(size))
         self._attributes = ctypes.create_string_buffer(size.value)
+        attributes = ctypes.cast(self._attributes, ctypes.c_void_p)
         if not kernel32.InitializeProcThreadAttributeList(
-            self._attributes, 1, 0, ctypes.byref(size)
+            attributes, 1, 0, ctypes.byref(size)
         ):
             self.close()
             raise ctypes.WinError(ctypes.get_last_error())
         if not kernel32.UpdateProcThreadAttribute(
-            self._attributes, 0, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
+            attributes, 0, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
             ctypes.byref(self._console), ctypes.sizeof(HPCON), None, None,
         ):
             self.close()
@@ -321,8 +326,8 @@ class Console:
         if not kernel32.CreateProcessW(
             None, command, None, None, False,
             EXTENDED_STARTUPINFO_PRESENT | CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT,
-            _environment_block(environment), str(cwd), ctypes.byref(startup),
-            ctypes.byref(process),
+            ctypes.cast(_environment_block(environment), ctypes.c_void_p),
+            str(cwd), ctypes.byref(startup), ctypes.byref(process),
         ):
             self.close()
             raise ctypes.WinError(ctypes.get_last_error())
@@ -419,7 +424,7 @@ def open_pipe(name, timeout=10):
         handle = kernel32.CreateFileW(
             name, GENERIC_READ | GENERIC_WRITE, 0, None, OPEN_EXISTING, 0, None
         )
-        if handle and handle != INVALID_HANDLE_VALUE:
+        if handle not in (None, 0, INVALID_HANDLE_VALUE):
             break
         error = ctypes.get_last_error()
         if error not in (2, 231) or time.monotonic() >= deadline:

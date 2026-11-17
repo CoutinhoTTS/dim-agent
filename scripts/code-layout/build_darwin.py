@@ -43,10 +43,8 @@ def cargo_link(work, compiler, jobs, target=None):
     env = dict(os.environ, DIM_LAYOUT_CAPTURE=str(work), DIM_LAYOUT_CC=compiler)
     command = [
         "cargo", "rustc", "--release", "--locked", "-p", "dimcode", "--bin", "dimcode",
-        "--jobs", str(jobs),
+        "--jobs", str(jobs), "--target", target or TARGETS[platform.machine()],
     ]
-    if target:
-        command.extend(["--target", target])
     command.extend(["--", f"-Clinker={wrapper}"])
     subprocess.run(command, cwd=REPO, env=env, check=True)
     return json.loads((work / "link.json").read_text())
