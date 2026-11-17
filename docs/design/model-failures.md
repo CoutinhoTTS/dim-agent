@@ -5,9 +5,10 @@ What a failed model request reports, and how the retry policy reads it (issue
 
 ## 1. One closed kind, decided where the provider error is read
 
-The aimux bridge is the only place that holds the provider's structured error,
-so it decides `ModelFailureKind`. It uses only the origin, the HTTP status, the
-normalized codes and the `AiMuxError` variant. It never matches message text.
+The aimux bridge is the only place that holds the provider's structured error
+and sees the whole response, so it decides `ModelFailureKind`. It uses the
+origin, the HTTP status, the normalized codes, the `AiMuxError` variant, the
+finish reason and the reply's shape. It never matches message text.
 
 | kind | decided from | retried | meaning | action |
 | --- | --- | --- | --- | --- |
@@ -116,6 +117,8 @@ ModelFailure {
   continuation declines it, so the prohibition covers the continuation.
 - `reason` is the provider's error message for a response or stream-event
   failure, and the innermost frame of the cause chain for a transport failure.
+  A reply that completed with no answer has no provider error behind it, so its
+  reason is the fixed sentence its rule states and quotes no response content.
   A JSON parse message embeds the body text it could not read, so its `reason`
   is the parse diagnosis from the error's structure, and is absent when the
   error carries no cause. A tool failure is named from its `tool_name` field:

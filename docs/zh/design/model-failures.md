@@ -4,7 +4,7 @@
 
 ## 1. 一个封闭的 kind，在读取提供方错误的地方决定
 
-aimux 桥接层是唯一持有提供方结构化错误的地方，因此由它决定 `ModelFailureKind`。它只使用 origin、HTTP 状态、归一化后的 code 和 `AiMuxError` 变体，从不用消息文本做匹配。
+aimux 桥接层是唯一持有提供方结构化错误、并看得到完整响应的地方，因此由它决定 `ModelFailureKind`。它使用 origin、HTTP 状态、归一化后的 code、`AiMuxError` 变体、结束原因和回复的形态，从不用消息文本做匹配。
 
 | kind | 依据 | 是否重试 | 含义 | 动作 |
 | --- | --- | --- | --- | --- |
@@ -71,7 +71,7 @@ ModelFailure {
 
 - `failure` 可选。旧事件里不存在；不属于模型提供方调用的失败也没有：agent loop 在重载时对未结算调用的失败（`agent_loop.rs`）和上下文准备失败（`context_preparation.rs`）。字段的大小写和 `optional_non_null` 处理与 `presentation` 一致。
 - `retryForbidden` 仅在为 true 时存在。ModelProvider 在失败策略禁止重试结束该请求的失败时写入它；续接会拒绝它，因此该禁止覆盖续接。
-- `reason`：响应或流事件失败取提供方的错误消息；传输失败取原因链最内层。JSON 解析的消息内嵌了它读不懂的响应体文本，因此其 `reason` 取错误结构中的解析诊断；错误没有 cause 时为空。工具失败从 `tool_name` 字段命名：`invalid arguments for tool '<tool_name>'` 或 `the model called an unknown tool '<tool_name>'`。`TypeValidation` 不带 reason，因为它的消息内嵌了被校验的值。工具输入、可用工具列表和被校验的值从不存储。
+- `reason`：响应或流事件失败取提供方的错误消息；传输失败取原因链最内层。以空回复完成的请求背后没有提供方错误，其 `reason` 是该规则写明的固定句子，不引用任何响应内容。JSON 解析的消息内嵌了它读不懂的响应体文本，因此其 `reason` 取错误结构中的解析诊断；错误没有 cause 时为空。工具失败从 `tool_name` 字段命名：`invalid arguments for tool '<tool_name>'` 或 `the model called an unknown tool '<tool_name>'`。`TypeValidation` 不带 reason，因为它的消息内嵌了被校验的值。工具输入、可用工具列表和被校验的值从不存储。
 - `cause`：来自 `ApiCallError.message` 和 `ErrorCause` 的链，由外到内，每帧一行。`providerCode` 和 `requestId` 是单行且有界，最多 200 字符；为空则不存在。
 - 从不存储：请求 URL、请求头、请求值、响应体或任何凭据。aimux 已丢弃 URL；桥接层不得复制 `url`、`request_body_values` 或 `response_body`，`reason` 和原因帧只是去除了控制字符的文本。
 - 旧客户端读取的 `error` 是默认英文行 `<meaning>: <reason>. <action>`，没有 reason 时省略 `: <reason>`。不再有 `ApiCall:` 前缀。当该失败使其 turn 结算为 Failed 时，该回合在 `TurnOutcome::Failed.error` 中携带同一字符串，客户端据此可以区分两者并去掉重复。不使 turn 失败的失败（例如输出上限停止）不在 turn 的结果中携带任何内容。
