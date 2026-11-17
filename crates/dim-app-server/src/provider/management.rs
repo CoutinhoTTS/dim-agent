@@ -20,8 +20,9 @@ pub struct ImportLegacyProviders {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ManagementScope {
+    pub provider_id: String,
     #[serde(default, deserialize_with = "optional_non_null")]
-    pub provider_id: Option<String>,
+    pub model_id: Option<String>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -29,6 +30,8 @@ pub struct UpdateProvider {
     pub provider_id: String,
     pub expected_version: u32,
     pub patch: super::ProviderPatch,
+    #[serde(default)]
+    pub reply: super::UpdateReplyKind,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -107,6 +110,7 @@ pub(super) fn provide(
         "provider",
         [
             "provider.management",
+            "provider.management.list",
             "provider.create",
             "provider.update",
             "provider.probe",
@@ -114,6 +118,7 @@ pub(super) fn provide(
             "provider.models.delete",
             "provider.preferences.update",
             "provider.catalog",
+            "provider.models.query",
             "provider.refresh",
             "provider.models.set_enabled",
             "provider.models.edit",
@@ -131,9 +136,11 @@ pub(super) fn provide(
                 !matches!(
                     name,
                     "provider.catalog"
+                        | "provider.models.query"
                         | "provider.selection"
                         | "provider.list"
                         | "provider.management"
+                        | "provider.management.list"
                         | "provider.probe"
                 ),
                 Interruption::Drain,
@@ -150,11 +157,21 @@ pub(super) fn provide(
             Box::pin(async move {
                 let cancel = &stopping;
                 match method.as_str() {
+                    "provider.models.query" => reply(
+                        provider
+                            .query_models(params(value)?, cancel)
+                            .await
+                            .map_err(error)?,
+                    ),
+                    "provider.management.list" => {
+                        let p: super::ManagementPageRequest = params(value)?;
+                        reply(provider.management_page(p, cancel).await.map_err(error)?)
+                    }
                     "provider.management" => {
                         let p: ManagementScope = params(value)?;
                         reply(
                             provider
-                                .management(p.provider_id, cancel)
+                                .management(p.provider_id, p.model_id, cancel)
                                 .await
                                 .map_err(error)?,
                         )
@@ -171,7 +188,13 @@ pub(super) fn provide(
                         let p: UpdateProvider = params(value)?;
                         reply(
                             provider
-                                .update(p.provider_id, p.expected_version, p.patch, cancel)
+                                .update_reply(
+                                    p.provider_id,
+                                    p.expected_version,
+                                    p.patch,
+                                    p.reply,
+                                    cancel,
+                                )
                                 .await
                                 .map_err(error)?,
                         )
@@ -210,13 +233,17 @@ pub(super) fn provide(
                         )
                     }
                     "provider.catalog" => {
-                        let p: ProviderTarget = params(value)?;
-                        reply(CatalogResult {
-                            catalog: provider
-                                .catalog_for(p.provider_id, cancel)
-                                .await
-                                .map_err(error)?,
-                        })
+                        let p: ManagementScope = params(value)?;
+                        let catalog = match p.model_id {
+                            Some(model_id) => {
+                                provider
+                                    .catalog_target(p.provider_id, model_id, cancel)
+                                    .await
+                            }
+                            None => provider.catalog_for(p.provider_id, cancel).await,
+                        }
+                        .map_err(error)?;
+                        reply(CatalogResult { catalog })
                     }
                     "provider.refresh" => {
                         let p: ProviderTarget = params(value)?;

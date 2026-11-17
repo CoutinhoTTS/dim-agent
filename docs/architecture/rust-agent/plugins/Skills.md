@@ -298,7 +298,8 @@ their existing lifetimes below.
 key in the Session instance; it has no public catalog name. Its content, prompt loader and change
 watch remain with Skills. The public face returns data without exposing that owner object.
 
-TypeScript callers import the `SkillsBranch` binding from `npm/plugin.js`. This manually
+TypeScript callers import the `SkillsBranch` binding from `dimcode/plugin` (declared in
+`npm/plugin.d.ts`). This manually
 dispatched face is not an entry in the generated `Services` map.
 
 ### Dependencies
