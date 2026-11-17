@@ -720,7 +720,9 @@ async fn optional_title_generation_routes_falls_back_and_cancels_without_gating_
         .await
         .unwrap()
         .unwrap();
-    release.send("   ".into()).unwrap();
+    // Punctuation only, so the reply carries text and still normalizes to no
+    // title (SessionTitle §3.3).
+    release.send("???".into()).unwrap();
     titled(
         &mut client,
         &failed,
