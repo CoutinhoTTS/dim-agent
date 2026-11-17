@@ -187,7 +187,7 @@ pub(crate) struct Assembly {
     pub config: AgentConfig,
     /// Maximum inactivity interval while opening a Session or branch.
     pub startup_timeout: Duration,
-    pub store: Arc<dyn TimelineStore>,
+    pub store: Arc<TimelineStoreBinding>,
     pub ephemeral_store: Option<Arc<MemoryTimelineStore>>,
     /// Shutdowns of instances whose creation was abandoned before the
     /// instance could be found; the Agent's close waits for them.
@@ -265,7 +265,7 @@ impl AgentBuilder {
             assembly: Assembly {
                 config,
                 startup_timeout: Duration::from_secs(10),
-                store: Arc::new(MemoryTimelineStore::default()),
+                store: TimelineStoreBinding::new(Arc::new(MemoryTimelineStore::default())),
                 ephemeral_store: None,
                 abandoned: tokio_util::task::TaskTracker::new(),
                 values: vec![],
@@ -283,7 +283,8 @@ impl AgentBuilder {
         }
     }
     /// Uses one store for every Session built by this Agent.
-    pub fn timeline_store(&mut self, store: Arc<dyn TimelineStore>) -> &mut Self {
+    /// Agents sharing a backend must receive clones of the same binding.
+    pub fn timeline_store(&mut self, store: Arc<TimelineStoreBinding>) -> &mut Self {
         self.assembly.store = store;
         self.custom_store = true;
         self
@@ -706,7 +707,7 @@ impl AgentBuilder {
     pub fn build(&self, loader: Loader, anchor: &Ctx) -> Agent {
         Agent::new(
             self.clone(),
-            self.finished(),
+            self.finished(anchor),
             Placement {
                 loader,
                 anchor: anchor.clone(),
@@ -733,15 +734,16 @@ impl AgentBuilder {
     pub(crate) fn opening_timeout(&self) -> Duration {
         self.assembly.startup_timeout
     }
-    fn finished(&self) -> Assembly {
+    fn finished(&self, anchor: &Ctx) -> Assembly {
         let mut assembly = self.assembly.clone();
         assembly.abandoned = tokio_util::task::TaskTracker::new();
         assembly.catalog = Arc::new(self.catalog.clone());
         if !self.custom_store {
             let store = Arc::new(MemoryTimelineStore::default());
-            assembly.store = store.clone();
+            assembly.store = TimelineStoreBinding::new(store.clone());
             assembly.ephemeral_store = Some(store);
         }
+        assembly.store.install(&anchor.root_ctx());
         assembly
     }
 }
@@ -1099,6 +1101,10 @@ impl DynPlugin for SessionScopePlugin {
             )?;
             ctx.provide_at::<dyn TimelineStore>(
                 scope.key::<dyn TimelineStore>(),
+                owner.assembly.store.clone(),
+            )?;
+            ctx.provide_at::<dyn rutis_bridge::session::HostDispatch>(
+                rutis_bridge::session::host_key("timelineStore").instance(scope.instance),
                 owner.assembly.store.clone(),
             )?;
             ctx.provide_at(scope.key::<FaultReporter>(), Arc::new(owner.faults.clone()))?;

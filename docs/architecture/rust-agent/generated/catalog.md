@@ -92,7 +92,7 @@ Each catalog name a part of the assembly provides or injects. `data` means share
 | `skillsConfig` | session | SessionScope | data | `get` async |
 | `submitChecks` | session | InputMethods | internal(hot-path) | — |
 | `timelineFactory` | session | SessionScope | internal(control) | — |
-| `timelineStore` | session | SessionScope | internal(object) | — |
+| `timelineStore` | session | SessionScope | data | `append` sync, `batchEnd` async, `batchEndAt` async, `branches` async, `closeCommits` async, `commits` async, `createSession` async, `head` async, `latestSnapshot` async, `query` async, `readPage` async, `readSegments` async, `releaseSession` async, `rollbackSession` async, `saveSnapshot` async, `sessionConfig` async, `trace` async |
 | `timelineTree` | session | TimelineTree | internal(owner-api) | — |
 | `timelineTreeControl` | session | TimelineTree | internal(owner-api) | — |
 | `toolHost` | session | WorkspaceTools | data | `execute` async |

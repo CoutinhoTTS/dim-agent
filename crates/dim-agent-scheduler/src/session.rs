@@ -15,6 +15,7 @@ use dim_agent_capabilities::{
 };
 use dim_agent_runtime::{CollaborationRole, Names, SessionConfig, SessionIdentity};
 use dim_agent_types::{ToolCall, ToolDefinition, ToolResult, ToolSource};
+use jiff::Timestamp;
 use rutis::Ctx;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use serde::Deserialize;
@@ -321,9 +322,8 @@ fn prompt_size(prompt: &str) -> Result<(), String> {
 
 /// Parses the RFC 3339 `at` instant; the canonical UTC millisecond form is
 /// stored (A.1's timestamp form).
-fn parse_at(at: &str) -> Result<chrono::DateTime<chrono::Utc>, RpcError> {
-    chrono::DateTime::parse_from_rfc3339(at)
-        .map(|instant| instant.with_timezone(&chrono::Utc))
+fn parse_at(at: &str) -> Result<Timestamp, RpcError> {
+    at.parse::<Timestamp>()
         .map_err(|_| RpcError::invalid("at must be an RFC 3339 timestamp"))
 }
 
@@ -678,8 +678,8 @@ impl ToolHandler for WakeupTool {
                     "wakeup: invalid_params\n{message}"
                 )));
             }
-            let at = match chrono::DateTime::parse_from_rfc3339(&args.at) {
-                Ok(instant) => instant.with_timezone(&chrono::Utc),
+            let at = match args.at.parse::<Timestamp>() {
+                Ok(instant) => instant,
                 Err(_) => {
                     return Ok(ToolResult::error(
                         "wakeup: invalid_params\nat must be an RFC 3339 timestamp",

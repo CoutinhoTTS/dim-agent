@@ -52,14 +52,16 @@ pub struct TimelineReadSegment {
 }
 
 /// One stored event and its atomic publication boundary.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StoredEvent {
     pub event: Arc<AgentEvent>,
     pub trace: Option<TimelineTrace>,
     pub batch_end: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StoredBranch {
     pub info: BranchRecord,
     pub sequence: u64,
@@ -148,6 +150,7 @@ pub trait TimelineStore: Send + Sync + 'static {
             }
         })
     }
+    /// Reads one `read_segments` interval and returns that segment directly.
     /// Range starts may be inside a batch; the end must be a batch boundary.
     fn read<'a>(
         &'a self,

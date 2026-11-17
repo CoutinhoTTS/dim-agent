@@ -561,7 +561,7 @@ impl Env {
         let mut builder = AgentBuilder::new(AgentConfig::default());
         builder.startup_timeout(startup_timeout);
         let store = Arc::new(MemoryTimelineStore::default());
-        builder.timeline_store(store.clone());
+        builder.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(store.clone()));
         builder
             .session_value(Arc::new(HistoryRenderer::default()))
             .process_value(Arc::new(ModelHost(model.clone())))

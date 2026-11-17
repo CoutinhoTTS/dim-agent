@@ -16,7 +16,8 @@ use dim_agent_capabilities::{
 use dim_agent_runtime::Names;
 use dim_agent_runtime::{
     AgentError, BoxFuture, BranchRecord, PublishCallback, ReplyLanguage, Result, SessionConfig,
-    StoredBranch, StoredEvent, TimelineKey, TimelineStore, TimelineTrace, panic_message,
+    StoredBranch, StoredEvent, TimelineKey, TimelineStore, TimelineStoreBinding, TimelineTrace,
+    panic_message,
 };
 use dim_agent_types::{
     AgentEvent, BranchCreateAt, EventKind, ModelRequest, RecoverySnapshot, SessionForkedData,
@@ -965,6 +966,7 @@ pub struct TurnWindow {
 #[derive(Clone)]
 pub struct SessionStore {
     pub(super) timeline: Arc<SqliteTimelineStore>,
+    binding: Arc<TimelineStoreBinding>,
     /// The file steps on the Session's resource node: Session files and the
     /// command output a delete removes.
     files: files::SessionFiles,
@@ -1007,17 +1009,20 @@ impl SessionStore {
     /// database directory.
     pub fn new(db: Arc<SqliteStorage>, ctx: Ctx, files_root: usize) -> Self {
         let timeline = SqliteTimelineStore::new(db.clone());
+        let binding = TimelineStoreBinding::new(timeline.clone());
+        binding.install(&ctx);
         let titles = Titles::new(db.clone(), ctx.clone());
         let files = files::SessionFiles::new(db, ctx, files_root, timeline.sweep_files.clone());
         Self {
             timeline,
+            binding,
             files,
             titles,
             ownership: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
-    pub fn timeline_store(&self) -> Arc<dyn TimelineStore> {
-        self.timeline.clone()
+    pub fn timeline_store(&self) -> Arc<TimelineStoreBinding> {
+        self.binding.clone()
     }
 
     /// Native query counters for product-flow verification.
