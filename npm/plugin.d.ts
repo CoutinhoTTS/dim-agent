@@ -632,6 +632,18 @@ export interface SkillsBranch {
   list(request: Record<string, never>): SkillSummary[];
 }
 
+export type ApprovalDestination = {
+  branchId: string;
+  delegationId: string;
+  agentId: string;
+  interactive: boolean;
+  approvalTools: boolean;
+};
+/** Session service owned by Collaboration; reads an active delegation without changing it. */
+export interface CollaborationSession {
+  approvalDestination(request: { memberSessionId: string }): ApprovalDestination | null;
+}
+
 /** The existing user override; null keeps the consumer's factory or built-in text. */
 export interface BasePromptSettingsHost {
   base(request: Record<string, never>): Promise<string | null>;

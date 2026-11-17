@@ -1391,7 +1391,6 @@ pub(crate) fn register_names(catalog: &mut dim_agent_runtime::names::ServiceCata
     catalog.register_shared(dim_agent_runtime::names::name_of::<
         collaboration::CollaborationDirectory,
     >());
-    register::<collaboration::Collaboration>(catalog, None);
     register::<plugin_files::PluginFileTransactions>(catalog, None);
     register::<ConnectionHub>(catalog, None);
     catalog.register_shared(dim_agent_runtime::names::name_of::<ListenAddresses>());
@@ -1416,7 +1415,7 @@ pub(crate) fn register_names(catalog: &mut dim_agent_runtime::names::ServiceCata
         methods::ManagementMethods,
     >());
     register::<runtime_manager::RuntimeService>(catalog, None);
-    register::<collaboration::CollaborationSession>(catalog, Some(SESSION_GROUP));
+    catalog.register_shared_instance("collaborationSession", SESSION_GROUP);
     register::<mcp::McpSession>(catalog, Some(SESSION_GROUP));
     for name in [
         "callChannel",
@@ -1441,8 +1440,6 @@ pub fn register_faces(builder: &mut dim_agent_runtime::AgentBuilder) {
         ("agentIndex", "owner-api"),
         ("agentLoop", "hot-path"),
         ("branchOpening", "hot-path"),
-        ("collaboration", "host-resource"),
-        ("collaborationSession", "legacy-no-consumer"),
         ("compactionStrategyHost", "hot-path"),
         ("configurationPublisher", "hot-path"),
         ("configureControl", "hot-path"),

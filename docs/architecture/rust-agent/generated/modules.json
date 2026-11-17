@@ -23785,10 +23785,8 @@
       "references": [
         "mod collaboration",
         "path CollaborationPlugin::new",
-        "path collaboration::Collaboration",
         "path collaboration::CollaborationDirectory",
         "path collaboration::CollaborationDirectoryPlugin",
-        "path collaboration::CollaborationSession",
         "use collaboration::CollaborationPlugin"
       ]
     },
@@ -26095,7 +26093,8 @@
       "references": [
         "mod approvals",
         "path approvals::Route",
-        "path approvals::install"
+        "path approvals::install",
+        "use approvals::ApprovalDestination"
       ]
     },
     {
