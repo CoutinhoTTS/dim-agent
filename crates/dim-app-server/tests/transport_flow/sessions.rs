@@ -184,6 +184,53 @@ struct Setup {
     loads: Option<idle_unload::Loads>,
     /// The model instead of the echo model.
     model: Option<Arc<dyn dim_agent_capabilities::host::ModelDriver>>,
+    dispatch_gate: Option<Arc<PendingDispatchGate>>,
+}
+
+#[derive(Default)]
+struct PendingDispatchGate {
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+struct PendingDispatchPart {
+    gate: Arc<PendingDispatchGate>,
+    dispatcher: Key<dim_agent_runtime::Dispatcher>,
+}
+
+impl rutis::host::DynPlugin for PendingDispatchPart {
+    fn name(&self) -> &str {
+        "pending-dispatch-gate"
+    }
+    fn injects(&self) -> Vec<rutis::host::TypeKey> {
+        vec![self.dispatcher.erase()]
+    }
+    fn apply<'a>(
+        &'a self,
+        ctx: &'a rutis::Ctx,
+    ) -> rutis::host::BoxFuture<'a, rutis::Result<rutis::host::Effect>> {
+        Box::pin(async move {
+            let gate = self.gate.clone();
+            ctx.require_at(&self.dispatcher)?.subscribe(
+                ctx,
+                "pending-dispatch-gate",
+                &["input/message"],
+                move |event| {
+                    let gate = gate.clone();
+                    Box::pin(async move {
+                        if matches!(&event.kind, EventKind::InputMessage(data)
+                            if data.submission_id.as_deref() == Some("pending:dispatch-gate"))
+                        {
+                            gate.entered.notify_one();
+                            gate.release.notified().await;
+                        }
+                        Ok(())
+                    })
+                },
+            )?;
+            Ok(rutis::host::Effect::Done)
+        })
+    }
 }
 pub(super) async fn serve_sessions(database: Option<std::path::PathBuf>) -> Served {
     serve_with(Setup {
@@ -273,6 +320,17 @@ async fn serve_with(setup: Setup) -> Served {
         }),
     );
     sessions.install(&mut builder);
+    if let Some(gate) = setup.dispatch_gate {
+        builder.require_feature(Feature::new("pending-dispatch-gate").branch(
+            "pending-dispatch-gate",
+            move |names| {
+                Ok(Box::new(PendingDispatchPart {
+                    gate: gate.clone(),
+                    dispatcher: names.key()?,
+                }))
+            },
+        ));
+    }
     if let Some(loads) = setup.loads {
         loads.install(&mut builder);
     }
@@ -2202,6 +2260,102 @@ async fn node_crash_resubmission_gets_the_original_receipt() {
     let recovered = sessions.ok("lookup", json!({"sessionId":target.id(),"branchId":"main","submissionId":"settlement:crash:append"})).await;
     assert_eq!(recovered["inputId"], receipt["value"]["inputId"]);
     assert_eq!(branch_events(&target, "main", ..).await.unwrap().iter().filter(|event| matches!(&event.kind, EventKind::InputMessage(data) if data.submission_id.as_deref() == Some("settlement:crash:append"))).count(), 1);
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pending_waits_for_published_input_dispatch_and_abandonment_is_local() {
+    let gate = Arc::new(PendingDispatchGate::default());
+    let Served {
+        server,
+        agent,
+        sessions,
+        mut client,
+        ..
+    } = serve_with(Setup {
+        dispatch_gate: Some(gate.clone()),
+        ..Default::default()
+    })
+    .await;
+    client_session(&mut client, &agent, host_policy()).await;
+    let session = awaiting_approval(&sessions, &agent).await;
+    sessions
+        .ok(
+            "input",
+            input(
+                &session,
+                "pending:dispatch-gate",
+                json!([{"type":"text","text":"hold dispatch"}]),
+            ),
+        )
+        .await;
+    tokio::time::timeout(Duration::from_secs(5), gate.entered.notified())
+        .await
+        .unwrap();
+    let held = sessions
+        .ok(
+            "input",
+            input(
+                &session,
+                "pending:behind-dispatch",
+                json!([{"type":"text","text":"later"}]),
+            ),
+        )
+        .await;
+    let sequence = held["sequence"].as_u64().unwrap();
+    assert!(session.sequence("main").unwrap() >= sequence);
+    assert!(session.dispatch_watch("main").unwrap().borrow().sequence < sequence);
+    let request = json!({"sessionId":session.id(),"branchId":"main","inputId":held["inputId"]});
+    {
+        let waiting = sessions.ok("pending", request.clone());
+        tokio::pin!(waiting);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut waiting)
+                .await
+                .is_err(),
+            "pending must wait for the acknowledged input to reach InputQueue"
+        );
+    }
+    assert!(
+        !session.is_closing(),
+        "abandoning a read must not close its Session"
+    );
+    assert!(session.dispatch_watch("main").unwrap().borrow().sequence < sequence);
+    {
+        let waiting = sessions.call("pending", request.clone());
+        tokio::pin!(waiting);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut waiting)
+                .await
+                .is_err()
+        );
+        server.restart("Agents").await.unwrap();
+        let reply = tokio::time::timeout(Duration::from_secs(5), &mut waiting)
+            .await
+            .unwrap();
+        assert_eq!(reply["error"]["code"], "reloading", "{reply}");
+    }
+    let waiting = sessions.ok("pending", request.clone());
+    tokio::pin!(waiting);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut waiting)
+            .await
+            .is_err()
+    );
+    gate.release.notify_one();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(5), &mut waiting)
+            .await
+            .unwrap(),
+        json!({"pending":true})
+    );
+    assert!(
+        session.state("main").unwrap().running,
+        "pending does not wait for the approval-held turn to end"
+    );
+    session.close().await.unwrap();
+    assert_eq!(sessions.error("pending", request).await, "session_closed");
     server.shutdown();
     server.join().await.unwrap();
 }

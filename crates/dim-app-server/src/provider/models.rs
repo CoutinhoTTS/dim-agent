@@ -60,14 +60,15 @@ impl ProviderService {
         + 'static,
         cancel: &CancellationToken,
     ) -> Result<StaticProviderRecord, ProviderError> {
+        self.adopt_provider(&provider_id, cancel).await?;
         let db = self.db.clone();
         self.owned(cancel, move |_| {
             Box::pin(async move {
                 db.run(move |connection| {
                     Ok((|| -> Result<_, ProviderError> {
                         let tx = connection.transaction()?;
-                        let mut record =
-                            read_static(&tx, &provider_id)?.ok_or(ProviderError::NotFound)?;
+                        let mut record = read_stored_static(&tx, &provider_id)?
+                            .ok_or(ProviderError::NotFound)?;
                         if record.version != expected_version {
                             return Err(ProviderError::Conflict(
                                 "Provider version changed; reread before retrying".into(),
@@ -85,9 +86,11 @@ impl ProviderService {
                             record.version.checked_add(1).ok_or(ProviderError::Failed)?;
                         validate_static_record(&provider_id, &mut record)
                             .map_err(|error| ProviderError::InvalidConfig(error.to_string()))?;
-                        tx.execute(
-                            "UPDATE providers SET version=?2,record=?3 WHERE provider_id=?1",
-                            params![provider_id, record.version, serde_json::to_string(&record)?],
+                        persistence::write(
+                            &tx,
+                            &provider_id,
+                            record.version,
+                            &serde_json::to_string(&record)?,
                         )?;
                         tx.commit()?;
                         Ok(record)
