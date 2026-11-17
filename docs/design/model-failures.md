@@ -11,16 +11,16 @@ normalized codes and the `AiMuxError` variant. It never matches message text.
 
 | kind | decided from | retried | meaning | action |
 | --- | --- | --- | --- | --- |
-| `network` | `ApiCall`, origin Transport, no HTTP status | yes | could not reach the provider, or the connection dropped | check the network or proxy |
-| `rate_limited` | 429, rate-limit codes | yes; `Retry-After` is used while it fits the wait budget | the provider is rate limiting requests | wait and try again |
-| `server_error` | 408, 5xx except 501 and 505, server and overload codes, transient stream-event codes | yes | the provider reported a server error | try again later or choose another model |
+| `network` | the origin is Transport, once no condition code decides | yes | could not reach the provider, or the connection dropped | check the network or proxy |
+| `rate_limited` | 429; the conditions `rate_limit_exceeded`, `rate_limit_error` | yes; `Retry-After` is used while it fits the wait budget | the provider is rate limiting requests | wait and try again |
+| `server_error` | 408, 5xx except 501 and 505; the labels `api_error`, `server_error`, `service_unavailable`, `request_timeout`, `timeout`; the conditions `engine_overloaded`, `model_overloaded`, `server_busy`, `overloaded_error` | yes | the provider reported a server error | try again later or choose another model |
 | `malformed_response` | `InvalidResponseData`, `JsonParse`, `InvalidToolInput`, `NoSuchTool`, `TypeValidation`, an undecodable stream, tool arguments that never complete | once | the provider sent a response Dim could not use | try again; if it repeats, choose another model or check the proxy or gateway |
-| `auth_rejected` | 401, 403, invalid-key/auth codes | no (the existing one credential recovery stays) | the provider rejected the credentials | sign in again or check the API key |
-| `quota_exhausted` | 402, quota/billing codes | no | the account has no quota left | check the plan or billing |
+| `auth_rejected` | 401, 403; the condition `invalid_api_key`; the label `authentication_error` | no (the existing one credential recovery stays) | the provider rejected the credentials | sign in again or check the API key |
+| `quota_exhausted` | 402; the conditions `insufficient_quota`, `quota_exceeded`, `billing_error`, `credit_exhausted` | no | the account has no quota left | check the plan or billing |
 | `not_found` | 404 | no | the provider did not find the model or endpoint | check the model and the provider's base URL |
-| `context_too_long` | 413, context-length codes | no | the conversation is longer than the model accepts | compact the conversation or start a new session |
-| `content_filtered` | content-policy codes | no | the provider's content filter blocked the response | rephrase the request |
-| `invalid_request` | 400, 409, 422, 501, 505, other 4xx, invalid-request codes including `max_tokens_exceeded`, `InvalidArgument`, `InvalidPrompt`, `UnsupportedFunctionality` | no | the provider rejected the request | see the details |
+| `context_too_long` | 413; the conditions `context_length_exceeded`, `context_too_long` | no | the conversation is longer than the model accepts | compact the conversation or start a new session |
+| `content_filtered` | the conditions `content_policy_violation`, `safety_block`, `moderation_block` | no | the provider's content filter blocked the response | rephrase the request |
+| `invalid_request` | 400, 409, 422, 501, 505, other 4xx; the label `invalid_request_error`; the condition `max_tokens_exceeded`; `InvalidArgument`, `InvalidPrompt`, `UnsupportedFunctionality` | no | the provider rejected the request | see the details |
 | `output_limit` | the `max_tokens` stop | no | the model stopped at its output limit | increase the output token limit and retry |
 | `unknown` | anything else | no | the model request failed | see the details |
 
@@ -30,11 +30,52 @@ chat call; if it ever reaches the bridge it is `unknown` and is not retried.
 
 Codes are compared trimmed and ASCII-lowercased.
 
-- 409, 501 and 505 are `invalid_request` whatever transient code came with
-  them; a permanent code still decides its own kind.
-- A stream-event failure carries the response's status, not the event's, so only
-  its code may decide: a transient code maps to `rate_limited` or
-  `server_error`, a permanent code to its kind, anything else to `unknown`.
+### The two roles of a provider string
+
+The field a provider string arrives in does not decide what it says; the string
+does. Anthropic's `type` is often a condition and OpenAI's often a class, and a
+gateway forwards either under any status.
+
+- A **condition code** names a condition the status alone cannot express:
+  `insufficient_quota`, `context_length_exceeded`, `rate_limit_exceeded`,
+  `engine_overloaded`, `invalid_api_key`, `content_policy_violation`,
+  `max_tokens_exceeded`. It is information the status does not carry, so it
+  decides.
+- A **class label** only restates an HTTP class: `api_error`, `server_error`,
+  `invalid_request_error`, `authentication_error`. A gateway or a relay stamps
+  such a label on the errors it forwards, whatever their status. When the
+  response carries an error status, the label can only agree with it or
+  contradict it, and when it contradicts, the status is the fact.
+
+### The rule
+
+One rule decides every protocol's failure:
+
+1. a condition code decides, a condition that is not retried before one that
+   is, so `insufficient_quota` beside `rate_limit_error` is `quota_exhausted`;
+2. otherwise a Transport-origin failure is `network`;
+3. otherwise an error status, 4xx or 5xx, on the response decides, by the
+   table above;
+4. otherwise a class label decides, which in practice is a stream event;
+5. otherwise the kind is `unknown`.
+
+A status outside 4xx and 5xx is not an error status and says nothing about
+the failure's kind, so step 3 skips it and the class label decides. A 2xx one
+reaches the bridge when a successful body was too large or did not parse, or
+when the provider reported an error inside a 2xx body; a 3xx one when a
+redirect could not be followed.
+
+A stream event's status is the provider's own mapping of the event's strings,
+not a response status: aimux takes an explicit 4xx or 5xx when the event
+carries one and otherwise guesses from the event's code and type, where a
+provider that matches nothing gets 500. Dim cannot tell an explicit status
+from a guessed one, so a stream event skips step 3 and steps 1 and 4 decide
+it; reading that status would turn every unrecognized event into a retried
+`server_error`. 501 and 505 are `invalid_request` by step 3 because the status
+table says so, not by an exception to this rule, and a condition code beside
+them still decides. Two kinds change from the rule: a 4xx answer that carries
+only a server-class label is no longer retried, and a 5xx carrying
+`invalid_request_error` is a `server_error` and is retried.
 
 Every `HostError::Failed` the bridge produces carries facts, including
 `AiMuxError::Timeout`, `InvalidResponseData`/`JsonParse`, `InvalidArgument`/
