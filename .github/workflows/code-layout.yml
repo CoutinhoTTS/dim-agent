@@ -40,7 +40,7 @@ jobs:
             runner: macos-15-intel
             test: scripts/code-layout-darwin.test.mjs
           - platform: windows-x64
-            runner: windows-2022
+            runner: ["self-hosted", "windows", "x64"]
             test: scripts/code-layout-windows.test.mjs
           - platform: windows-arm64
             runner: windows-11-arm
