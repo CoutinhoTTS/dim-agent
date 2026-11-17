@@ -118,7 +118,7 @@ void entry(void) {
         win32.close(handle)
         process.kill(); process.wait()
 
-    (root / 'echoer.c').write_text('#include <stdio.h>\n#include <windows.h>\nint main(void) { printf("layout-conpty\\n"); fflush(stdout); Sleep(5000); return 0; }\n')
+    (root / 'echoer.c').write_text('#include <stdio.h>\nint main(void) { printf("layout-conpty\\n"); fflush(stdout); getchar(); return 0; }\n')
     subprocess.run(['cl','/nologo',str(root/'echoer.c'),'/Fe:'+str(root/'echoer.exe')],check=True)
     console = win32.Console([str(root/'echoer.exe')], root, dict(os.environ),
                             suspended=False, inherit_environment=True)
@@ -129,6 +129,7 @@ void entry(void) {
             capture.extend(console.take())
             time.sleep(.02)
         assert b'layout-conpty' in capture, (bytes(capture[-2000:]), console.error, console.poll())
+        console.write(b"\n")
         assert console.wait(timeout=20) == 0
     finally:
         console.close()`});
