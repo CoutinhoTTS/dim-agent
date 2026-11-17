@@ -213,13 +213,16 @@ pub struct EverySchedule {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AtSchedule {
+    #[serde(with = "dim_agent_capabilities::timestamp")]
     pub at: Timestamp,
 }
 
 /// The time of day a timestamp field holds: UTC with three fractional digits.
 pub fn canonical_instant(text: &str) -> Option<Timestamp> {
-    let instant = text.parse::<Timestamp>().ok()?;
-    (format_instant(instant) == text).then_some(instant)
+    let instant = dim_agent_capabilities::timestamp::parse(text).ok()?;
+    (format_instant(instant) == text
+        || dim_agent_capabilities::timestamp::leap_second_form(instant).as_deref() == Some(text))
+    .then_some(instant)
 }
 
 fn default_max_run_minutes() -> u32 {
@@ -380,16 +383,19 @@ impl Job {
                 if anchor > now {
                     return Ok(None);
                 }
-                let k =
-                    now.duration_since(anchor).as_secs() / (i64::from(every.every_minutes) * 60);
-                let step = SignedDuration::from_secs(i64::from(every.every_minutes) * 60);
-                Ok(Some(
-                    anchor + step * i32::try_from(k).map_err(|_| "window overflow")?,
-                ))
+                let step = i64::from(every.every_minutes) * 60;
+                let k = now.duration_since(anchor).as_secs() / step;
+                let offset = k.checked_mul(step).ok_or("window overflow")?;
+                anchor
+                    .checked_add(SignedDuration::from_secs(offset))
+                    .map(Some)
+                    .map_err(|_| "window overflow".to_owned())
             }
             Schedule::Cron(cron) => {
                 let parsed = cron_for(cron)?;
-                let mut cursor = now + SignedDuration::from_secs(1);
+                let mut cursor = now
+                    .checked_add(SignedDuration::from_secs(1))
+                    .map_err(|_| "window overflow".to_owned())?;
                 for _ in 0..MAX_CRON_SKIPS {
                     let previous = parsed
                         .cron
@@ -442,13 +448,16 @@ impl Schedule {
             Self::At(at) => Ok((at.at > after).then_some(at.at)),
             Self::Every(every) => {
                 let anchor = anchor.ok_or("an every schedule needs enabled_at")?;
-                let step = SignedDuration::from_secs(i64::from(every.every_minutes) * 60);
+                let step = i64::from(every.every_minutes) * 60;
                 let first = if anchor > after {
                     anchor
                 } else {
                     let elapsed = after.duration_since(anchor);
-                    let k = elapsed.as_secs() / (i64::from(every.every_minutes) * 60) + 1;
-                    anchor + step * i32::try_from(k).map_err(|_| "window overflow")?
+                    let k = elapsed.as_secs() / step + 1;
+                    let offset = k.checked_mul(step).ok_or("window overflow")?;
+                    anchor
+                        .checked_add(SignedDuration::from_secs(offset))
+                        .map_err(|_| "window overflow".to_owned())?
                 };
                 Ok(Some(first))
             }
@@ -523,4 +532,46 @@ fn cron_for(cron: &CronSchedule) -> Result<ParsedCron, &'static str> {
     let parsed = Cron::from_str(&cron.cron)
         .map_err(|_| "invalid cron expression, e.g. {\"cron\":\"*/30 * * * *\"}")?;
     Ok(ParsedCron { cron: parsed, zone })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn at_schedule_keeps_the_chrono_fraction_bytes() {
+        for text in [
+            "2030-01-01T00:00:00Z",
+            "2030-01-01T00:00:00.100Z",
+            "2030-01-01T00:00:00.123400Z",
+        ] {
+            let schedule: Schedule = serde_json::from_value(json!({ "at": text })).unwrap();
+            assert_eq!(
+                serde_json::to_value(&schedule).unwrap(),
+                json!({ "at": text })
+            );
+        }
+    }
+
+    #[test]
+    fn a_leap_second_schedule_normalizes_to_the_following_second() {
+        let schedule: Schedule =
+            serde_json::from_value(json!({ "at": "2016-12-31T23:59:60Z" })).unwrap();
+        assert_eq!(
+            serde_json::to_value(&schedule).unwrap(),
+            json!({ "at": "2017-01-01T00:00:00Z" })
+        );
+        let instant = canonical_instant("2016-12-31T23:59:60.000Z").unwrap();
+        assert_eq!(format_instant(instant), "2017-01-01T00:00:00.000Z");
+    }
+
+    #[test]
+    fn an_every_window_beyond_the_timestamp_range_is_an_error() {
+        let schedule = Schedule::Every(EverySchedule {
+            every_minutes: u32::MAX,
+        });
+        let anchor: Timestamp = "2026-11-17T00:00:00Z".parse().unwrap();
+        assert!(schedule.next_after(anchor, Some(anchor)).is_err());
+    }
 }

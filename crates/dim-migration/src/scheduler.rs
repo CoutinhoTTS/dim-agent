@@ -136,9 +136,7 @@ fn stamp(instant: Timestamp) -> String {
 fn recurrence(job: &ScheduledJob) -> Result<Value> {
     let invalid =
         || Error::Unsupported("Legacy recurrence has no exact native calendar equivalent".into());
-    let created: Zoned = job
-        .created_at
-        .parse::<Timestamp>()
+    let created: Zoned = dim_agent_capabilities::timestamp::parse_civil(&job.created_at)
         .map_err(|_| invalid())?
         .to_zoned(TimeZone::system());
     let mut fields = BTreeMap::new();
@@ -236,7 +234,7 @@ fn recurrence(job: &ScheduledJob) -> Result<Value> {
                 None
             })
             .ok_or_else(invalid)?;
-        let at = occurrence.parse::<Timestamp>().map_err(|_| invalid())?;
+        let at = dim_agent_capabilities::timestamp::parse(occurrence).map_err(|_| invalid())?;
         return Ok(json!({"at": stamp(at)}));
     }
     let slots = |first: u32, end: u32, step: u32| {

@@ -52,7 +52,7 @@ impl Captured {
         let observed = json!({
             "operation": self.operation,
             "code": self.code,
-            "observedAt": self.observed_at,
+            "observedAt": dim_agent_capabilities::timestamp::format(self.observed_at),
             "clientVersion": dim_agent_capabilities::build::current(),
         });
         json!({"error":{"kind":"observed","observed":observed}})
@@ -173,4 +173,23 @@ pub fn session_admission_failed(error: &crate::Error) -> bool {
     ) || error
         .downcast_ref::<dim_client::RpcError>()
         .is_some_and(|rpc| rpc.code == -32603 && rpc.data.is_none())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_observed_instant_keeps_the_stored_fraction_bytes() {
+        let captured = Captured {
+            message: "failed".into(),
+            operation: Operation::SessionRead,
+            code: None,
+            observed_at: "2030-01-01T00:00:00.100Z".parse().unwrap(),
+        };
+        assert_eq!(
+            captured.params()["error"]["observed"]["observedAt"],
+            json!("2030-01-01T00:00:00.100Z")
+        );
+    }
 }

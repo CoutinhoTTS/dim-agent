@@ -114,7 +114,9 @@ impl Cadence {
         let step_ms = i64::try_from(*every_seconds).ok()?.checked_mul(1_000)?;
         let elapsed_ms = i64::try_from(now.duration_since(anchor).as_millis()).ok()?;
         let windows = elapsed_ms.checked_div(step_ms)?.checked_add(1)?;
-        Some(anchor + SignedDuration::from_millis(step_ms.checked_mul(windows)?))
+        anchor
+            .checked_add(SignedDuration::from_millis(step_ms.checked_mul(windows)?))
+            .ok()
     }
 }
 

@@ -90,6 +90,7 @@ impl ErrorReference {
 pub(super) struct Observed {
     operation: Operation,
     code: Option<String>,
+    #[serde(with = "dim_agent_capabilities::timestamp")]
     observed_at: Timestamp,
     client_version: String,
 }
@@ -156,6 +157,7 @@ impl Operation {
 pub(super) struct CapturedError {
     operation: Operation,
     pub(super) summary: &'static str,
+    #[serde(with = "dim_agent_capabilities::timestamp")]
     pub(super) observed_at: Timestamp,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) code: Option<&'static str>,

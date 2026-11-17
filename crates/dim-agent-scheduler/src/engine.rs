@@ -165,9 +165,7 @@ async fn record(
                 Target::Launch {
                     max_run_minutes, ..
                 },
-            ) => Some(stamp(
-                now + SignedDuration::from_secs(i64::from(*max_run_minutes) * 60),
-            )),
+            ) => Some(stamp(launch_deadline(now, *max_run_minutes)?)),
             _ => None,
         };
         let run = Delivery {
@@ -503,6 +501,14 @@ async fn finish(
 /// Whether a launch record's stop time has passed, so its stop timer has
 /// finished and its record is eligible for cleanup (§3.2, A.7). A `session`
 /// delivery has no stop time and nothing to wait for.
+fn launch_deadline(now: Timestamp, max_run_minutes: u32) -> Result<Timestamp, SchedulerError> {
+    let seconds = i64::from(max_run_minutes).checked_mul(60).ok_or_else(|| {
+        SchedulerError::invalid_data("max_run_minutes is outside the supported range")
+    })?;
+    now.checked_add(SignedDuration::from_secs(seconds))
+        .map_err(|_| SchedulerError::invalid_data("max_run_minutes is outside the supported range"))
+}
+
 fn stop_time_passed(run: &Delivery, now: Timestamp) -> bool {
     match run.deadline_at.as_deref().and_then(canonical_instant) {
         Some(deadline) => now >= deadline,
@@ -1239,5 +1245,17 @@ async fn write_input(
 async fn lookup_now(shared: &Arc<Shared>, run_id: &str) {
     if let Err(error) = lookup_once(shared, run_id).await {
         tracing::warn!(%error, "scheduler lookup failed");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_launch_deadline_beyond_the_timestamp_range_is_an_error() {
+        assert!(launch_deadline(Timestamp::MAX, 1).is_err());
+        let now: Timestamp = "2026-11-17T00:00:00Z".parse().unwrap();
+        assert!(launch_deadline(now, u32::MAX).is_err());
     }
 }
