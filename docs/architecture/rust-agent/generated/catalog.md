@@ -13,7 +13,7 @@ Each catalog name a part of the assembly provides or injects. `data` means share
 | `agentDirectory` | process | AgentDirectory | internal(owner-api) | — |
 | `agentIndex` | process | Agents | internal(owner-api) | — |
 | `auxiliaryModel` | process | Provider | data | `complete` async |
-| `basePromptSettingsHost` | process | PromptSettings | internal(owner-api) | — |
+| `basePromptSettingsHost` | process | PromptSettings | data | `base` async |
 | `callChannel` | process | CallChannel | data | `closed` async, `notify` async |
 | `callers` | process | CallChannel | internal(owner-api) | — |
 | `collaboration` | process | Collaboration | internal(host-resource) | — |
@@ -62,10 +62,10 @@ Each catalog name a part of the assembly provides or injects. `data` means share
 | `settings` | process | Settings | data | `projects` sync, `read` async, `register` async, `update` async |
 | `settingsService` | process | Settings | internal(owner-api) | — |
 | `skillsCatalog` | process | SkillsCatalog | internal(host-resource) | — |
-| `skillsInstructionsSettingsHost` | process | PromptSettings | internal(owner-api) | — |
+| `skillsInstructionsSettingsHost` | process | PromptSettings | data | `instructions` async |
 | `sqliteStorage` | process | SqliteStorage | internal(object) | — |
 | `store` | process | SessionStore | data | `addGrant` async, `catalog` async, `createOwnedSession` async, `creationRecord` async, `delete` async, `fork` async, `grants` async, `hasRecords` async, `owner` async, `query` async, `removeGrant` async, `removeWorktree` async, `removeWorktreeDirectory` async, `sessionConfig` async, `sessionConfigText` async, `sessionsUnderWorkspace` async, `setSessionLanguage` async, `worktreeDirectories` async, `worktreeUsages` async |
-| `summaryPromptSettingsHost` | process | PromptSettings | internal(owner-api) | — |
+| `summaryPromptSettingsHost` | process | PromptSettings | data | `systemPrompt` async |
 | `toolchainSourceHost` | process | ToolchainSource | data | `list` sync |
 | `uiExtensions` | process | UiExtensions | internal(control) | — |
 | `uiHost` | process | UiHost | internal(control) | — |
@@ -119,7 +119,6 @@ Each catalog name a part of the assembly provides or injects. `data` means share
 | `fileReads` | branch | FileReads | internal(hot-path) | — |
 | `inputQueue` | branch | InputQueue | data | `submit` async, `withdraw` async |
 | `loopState` | branch | Loop | internal(hot-path) | — |
-| `modelProvider` | branch | ModelProvider | internal(hot-path) | — |
 | `permission` | branch | Permission | data | `check` async |
 | `prompt` | branch | Prompt | internal(hot-path) | — |
 | `promptSourcesBranch` | branch | PromptSourcesBranch | internal(hot-path) | — |

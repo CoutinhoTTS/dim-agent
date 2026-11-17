@@ -9,7 +9,9 @@ mod identities;
 mod image_upgrade;
 mod members;
 mod metadata;
+mod prompt_migration;
 mod query;
+mod reclaim;
 mod sqlite;
 mod text;
 mod timeline;
@@ -29,8 +31,10 @@ pub use metadata::testing;
 pub use metadata::{
     MetadataError, SessionMetadata, SessionMetadataService, Title, TitleFields, TitleSource,
 };
+pub use prompt_migration::{Migrated, migrate_prompt_references};
 #[cfg(feature = "testing")]
 pub use query::{QueryStatementStats, sqlite_memory};
+pub use reclaim::Reclaimed;
 #[cfg(feature = "testing")]
 pub use sqlite::set_upgrade_report_delay;
 pub use sqlite::{

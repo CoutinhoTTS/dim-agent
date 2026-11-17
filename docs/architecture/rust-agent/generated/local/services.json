@@ -2045,12 +2045,6 @@
         "removing": false
       },
       {
-        "service": "dim_agent_capabilities::model_provider::ModelProvider@main",
-        "provider": 72,
-        "generation": 1,
-        "removing": false
-      },
-      {
         "service": "dim_agent_capabilities::permission::Permission@main",
         "provider": 73,
         "generation": 1,
