@@ -40,19 +40,47 @@ def unique_functions(functions):
 
 def validate_sizes(functions_before, functions_after, sizes_before, sizes_after,
                    order_names, label="function"):
-    """Check parity using linker-reported body sizes, with ``None`` for ambiguous bodies.
+    """Check name/count parity and every reliable linker-reported body size.
 
     ``sizes_before`` and ``sizes_after`` carry one ``(name, size_or_None)`` per
-    function, in the same order as the function list, so duplicate names at
-    different addresses remain distinct.
+    function, aligned with the function list. ``None`` means the linker map
+    attributes the chunk to several symbols, so its size is genuinely ambiguous
+    for that symbol. A name with such an entry on either side is compared by
+    name and count only, and the number of skipped entries is recorded; every
+    name with known sizes on both sides is compared exactly.
     """
-    before = [(name, size) for (_, _, name), size in zip(functions_before, sizes_before)]
-    after = [(name, size) for (_, _, name), size in zip(functions_after, sizes_after)]
-    if len(before) != len(functions_before) or len(after) != len(functions_after):
+    if len(sizes_before) != len(functions_before) or len(sizes_after) != len(functions_after):
         raise RuntimeError(f"missing {label} sizes from the linker map")
-    if Counter(before) != Counter(after):
-        raise RuntimeError(f"relink changed the {label} set or sizes")
-    return _order(functions_before, functions_after, order_names, label)
+    before_by_name, after_by_name = {}, {}
+    for (_, _, name), size in zip(functions_before, sizes_before):
+        before_by_name.setdefault(name, []).append(size)
+    for (_, _, name), size in zip(functions_after, sizes_after):
+        after_by_name.setdefault(name, []).append(size)
+    before_names = Counter(name for _, _, name in functions_before)
+    after_names = Counter(name for _, _, name in functions_after)
+    if before_names != after_names:
+        before_only = list((before_names - after_names).items())[:20]
+        after_only = list((after_names - before_names).items())[:20]
+        raise RuntimeError(
+            f"relink changed the {label} names or counts: "
+            f"before-only {before_only}; after-only {after_only}")
+
+    ambiguous = 0
+    mismatches = []
+    for name, before in before_by_name.items():
+        after = after_by_name[name]
+        if None in before or None in after:
+            ambiguous += sum(1 for size in after if size is None)
+            continue
+        if Counter(before) != Counter(after):
+            mismatches.append((name, sorted(before), sorted(after)))
+    if mismatches:
+        raise RuntimeError(
+            f"relink changed {label} sizes for {len(mismatches)} symbol(s): "
+            f"{mismatches[:20]}")
+    measurement = _order(functions_before, functions_after, order_names, label)
+    measurement["ambiguousFunctionSymbols"] = ambiguous
+    return measurement
 
 
 def _order(functions_before, functions_after, order_names, label):
