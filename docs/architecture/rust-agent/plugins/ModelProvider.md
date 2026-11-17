@@ -41,6 +41,10 @@ owner shutdown releases the waiters. Provider-specific limits still apply.
 
 ## Events and lifetime
 
+ModelProvider is the private owner of its execution state, tasks and subscriptions;
+it publishes `StateCell<ModelProgress>` for observation, not its implementation object.
+Calls and interruption enter through the Timeline facts below.
+
 Consumes `model/call`, `stop/interrupt`, `step/model-start`, `input/applied`,
 `turn/start`, `turn/end`. Produces `step/text`, `step/thinking`,
 `step/tool-use-start`, `step/tool-use`, `step/model-content`, `model/usage`
@@ -146,7 +150,7 @@ a continuation declines it.
 | --- | --- |
 | 作用域 | 分支 |
 | 注入 | `B:ContextPreparation`、`B:Dispatcher`、`B:Timeline`、`B:TimelineIdentity`、`P:ModelHost` |
-| 提供 | `B:ModelProvider`、`B:StateCell<ModelProgress>` |
+| 提供 | `B:StateCell<ModelProgress>` |
 | 被注入于 | — |
 <!-- /generated -->
 
