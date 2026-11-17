@@ -386,7 +386,9 @@ impl HostDispatch for Store {
                             .map_err(|error| AgentError::Storage(error.to_string()))?
                     }
                     Request::AddGrant(p) => {
-                        owner.add_grant(&p.session_id, p.path.into(), p.kind, p.mode).await?;
+                        owner
+                            .add_grant(&p.session_id, p.path.into(), p.kind, p.mode)
+                            .await?;
                         json!({})
                     }
                     Request::RemoveGrant(p) => {
@@ -395,7 +397,9 @@ impl HostDispatch for Store {
                     }
                     Request::Grants(p) => json!({"grants":owner.grants(&p.session_id).await?}),
                     Request::SetSessionLanguage(p) => {
-                        owner.set_session_language(&p.session_id, p.language).await?;
+                        owner
+                            .set_session_language(&p.session_id, p.language)
+                            .await?;
                         json!({})
                     }
                     Request::CreationRecord(p) => {
@@ -403,16 +407,15 @@ impl HostDispatch for Store {
                         json!({"origin":origin,"leaderSessionId":leader})
                     }
                     Request::Owner(p) => json!({"agentId":owner.owner(&p.session_id).await?}),
-                    Request::HasRecords(p) => json!({"exists":owner.has_records(&p.session_id).await?}),
-                    Request::Delete(p) => json!({"removed":owner.delete_session(&p.session_id).await?}),
+                    Request::HasRecords(p) => {
+                        json!({"exists":owner.has_records(&p.session_id).await?})
+                    }
+                    Request::Delete(p) => {
+                        json!({"removed":owner.delete_session(&p.session_id).await?})
+                    }
                     Request::Fork(p) => {
                         owner
-                            .fork_session(
-                                &p.source_session_id,
-                                &p.session_id,
-                                p.at,
-                                &p.config_text,
-                            )
+                            .fork_session(&p.source_session_id, &p.session_id, p.at, &p.config_text)
                             .await?;
                         json!({})
                     }
@@ -485,7 +488,8 @@ impl HostDispatch for Store {
                         json!({"usages":usages})
                     }
                 })
-            }.await;
+            }
+            .await;
             result.map(Value::from).map_err(failure)
         }))
     }

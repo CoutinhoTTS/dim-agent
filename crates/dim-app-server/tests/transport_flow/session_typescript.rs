@@ -354,7 +354,10 @@ impl rutis::host::DynPlugin for DrainLoadingBroadcast {
                         };
                         let event = broadcast::SessionBroadcast::new(&session_id, fence);
                         emitter.emit(event).map_err(|error| {
-                            dim_agent_runtime::AgentError::fault("bootstrap fence", error.to_string())
+                            dim_agent_runtime::AgentError::fault(
+                                "bootstrap fence",
+                                error.to_string(),
+                            )
                         })?;
                         drained.notified().await;
                     }

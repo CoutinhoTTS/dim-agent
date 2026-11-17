@@ -416,7 +416,8 @@ impl DynPlugin for TransportPlugin {
                             Ok(accepted) => accepted,
                             Err(error) => {
                                 tracing::warn!(%error, "Unix accept failed; retrying");
-                                let retry = tokio::time::sleep(std::time::Duration::from_millis(100));
+                                let retry =
+                                    tokio::time::sleep(std::time::Duration::from_millis(100));
                                 tokio::select! {
                                     biased;
                                     _ = closing() => return Ok(()),
