@@ -894,15 +894,15 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             .register_shared(dim_agent_runtime::names::name_of::<
                 dim_agent_capabilities::prompt_suggestion::PromptSuggestionSettingsHost,
             >());
-        dim_agent_runtime::names::register::<
-            dim_agent_capabilities::prompt_sources::BasePromptSettingsHost,
-        >(builder.catalog_mut(), None);
-        dim_agent_runtime::names::register::<
-            dim_agent_capabilities::skills::SkillsInstructionsSettingsHost,
-        >(builder.catalog_mut(), None);
-        dim_agent_runtime::names::register::<
-            dim_agent_capabilities::summary_strategy::SummaryPromptSettingsHost,
-        >(builder.catalog_mut(), None);
+        builder
+            .catalog_mut()
+            .register_shared("basePromptSettingsHost");
+        builder
+            .catalog_mut()
+            .register_shared("skillsInstructionsSettingsHost");
+        builder
+            .catalog_mut()
+            .register_shared("summaryPromptSettingsHost");
         rows.push(register_part(&mut builtins, builder.catalog(), |names| {
             Ok(Box::new(
                 prompt_suggestion_settings::PromptSuggestionSettingsPlugin::new(names)?,
@@ -1419,10 +1419,7 @@ pub(crate) fn register_names(catalog: &mut dim_agent_runtime::names::ServiceCata
 /// The reasons for the product profile's internal names (#1300).
 pub fn register_faces(builder: &mut dim_agent_runtime::AgentBuilder) {
     for (name, reason) in [
-        ("basePromptSettingsHost", "owner-api"),
         ("promptSourcesBranch", "hot-path"),
-        ("skillsInstructionsSettingsHost", "owner-api"),
-        ("summaryPromptSettingsHost", "owner-api"),
         ("agentDirectory", "owner-api"),
         ("agentIndex", "owner-api"),
         ("agentLoop", "hot-path"),
@@ -1455,7 +1452,6 @@ pub fn register_faces(builder: &mut dim_agent_runtime::AgentBuilder) {
         ("mcpService", "host-resource"),
         ("mentionIndex", "host-resource"),
         ("modelHost", "owner-api"),
-        ("modelProvider", "hot-path"),
         ("openAICodexOAuthService", "secret"),
         ("pluginFileTransactions", "host-resource"),
         ("prepareContextHost", "hot-path"),
