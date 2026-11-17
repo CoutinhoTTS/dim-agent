@@ -281,6 +281,14 @@ export interface Permission {
 }
 
 /**
+ * What a branch adopts when it opens: the Session's prompt sources, and the
+ * model a new Session adopts. Read when the branch opens, so it holds the
+ * sources registered then.
+ */
+export interface InitialPromptConfiguration {
+}
+
+/**
  * The operator's reply-language choices, by their stable wire codes. The
  * names are the ones the operator selects, named in English for the prompt
  * text ([PromptSources §3]).
@@ -498,6 +506,20 @@ export interface TreeCommands {
    * @throws {AgentErrorThrown}
    */
   create(parent: string, at: number | bigint, options: BranchOptions, cancelled: () => void | Promise<void>): Promise<string>
+}
+
+export type LineRole = "main" | "tool" | "host"
+
+export interface BranchLine {
+  /** The line committed its own `branch/end`. */
+  ending(): Promise<boolean>
+  /**
+   * The `nextCursor` of the line's latest successful read of `target`.
+   * @throws {AgentErrorThrown}
+   */
+  cursor(target: string): Promise<number | bigint | null>
+  /** The line's role and parent, from its directory record. */
+  resolved(): Promise<[LineRole, string | null] | null>
 }
 
 export type WaitResult =
@@ -877,8 +899,16 @@ export interface CollaborationDirectory {
 /**
  * Admission for process-owned work, including work accepted before a Session
  * exists. A hold starts before acceptance and ends after the last owned effect.
+ * It also observes the host's initial publication.
  */
 export interface ProcessActivity {
+  /**
+   * Resolves once the host has opened after every required process row
+   * became Active. Resolves false when startup fails or shutdown begins
+   * before that observation. A row reload does not reset it.
+   * Calls after shutdown begins return false, even after an earlier true.
+   */
+  activated(): Promise<boolean>
   /**
    * Admits work unless admission is paused. Release the returned id after
    * settlement. A lost owner leaves admission busy until process shutdown;
@@ -1158,9 +1188,11 @@ export interface Services {
   inputQueue: InputQueue
   reservedMethods: ReservedMethods
   permission: Permission
+  initialPromptConfiguration: InitialPromptConfiguration
   sessionLanguage: SessionLanguage
   skillsConfig: SkillsConfig
   treeCommands: TreeCommands
+  branchLine: BranchLine
   wait: Wait
   backgroundExec: BackgroundExec
   agentConfig: AgentConfig
