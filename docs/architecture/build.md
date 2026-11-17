@@ -155,25 +155,26 @@ immediately afterwards, because the hosted console path does not combine a
 suspended start with pseudoconsole attachment; the startup profile covers the
 entry-time pages and the TUI profile covers pages faulted by the UI flow. Before
 exit or shutdown the trainer queries the executable's `.text` working-set pages
-with `QueryWorkingSetEx`. When the runner has no interactive console for ConPTY,
-`--ui models` drives the public `models PROVIDER` command instead of the TUI
-picker and samples the App Server after that model flow; the App Server, model
-selection and tool conversation remain real. The hosted Windows ARM64 job uses
-that mode because its session cannot host a console, and `manifest.json` records
-which UI flow it trained. This is genuine working-set residency after an entry-time
-trim, not a reference-bit trace: the operating system may prefetch neighboring
-pages and the result includes page-granularity rounding. App Server shutdown
+with `QueryWorkingSetEx`. Every Windows target runs the real TUI picker; a
+console-less runner is not accepted as native TUI evidence. The ConPTY fixture
+keeps its child alive until the expected text is drained, so initialization
+bytes or an early exit are not counted as success. This is genuine working-set
+residency after an entry-time trim, not a reference-bit trace: the operating
+system may prefetch neighboring pages and the result includes page-granularity
+rounding. App Server shutdown
 uses the public `daemon.shutdown` RPC with `force`; the TUI exits through
 `/exit`. Both must exit with status 0.
 
 The order file is passed to `lld-link` as `/order:@file`. The diagnostic link
 reports unmatched names as `missing symbol ... [LNK4037]`; only those names are
 removed, then `/WX` makes the strict relink fail on any remaining warning. The
-`/lldmap` output records all `.text` symbols, including static ones. Parity uses
-the COMDAT body size when a chunk has exactly one symbol; a chunk holding
-several symbols (for example an alias or folded body) is compared by name only
-and recorded as ambiguous. Selected addresses must follow the final order and
-at least one must move.
+`/lldmap` output records all `.text` symbols, including static ones. Parity
+always checks the symbol-name multiset. It compares the COMDAT body size for
+every name whose entries are unambiguous on both sides; a name with a chunk
+holding several symbols (for example an alias or folded body) on either side is
+compared by name and count only, and the skipped entries are counted in
+`manifest.json` as ambiguous. Selected addresses must follow the final order
+and at least one must move.
 
 Both current Windows release targets use fat LTO. The layout command preserves
 `CARGO_PROFILE_RELEASE_LTO` and never enables thin LTO implicitly.
@@ -193,8 +194,10 @@ or treated as interchangeable with Linux `/proc` numbers.
 
 `baseline`, `symbols.order`, the linker maps, native page samples and
 `manifest.json` record the comparison inputs, platform, target, page size, LTO
-choice, Windows UI mode, source state, Rust version, artifact hashes, training
-counts and alternating measurement samples. The probe
+choice, source state, Rust version, artifact hashes, training counts and
+alternating measurement samples. Linker maps and native fixture maps are
+uploaded on failure, and a size mismatch reports bounded before-only and
+after-only symbol/size entries. The probe
 and temporary homes are removed on completion or failure. Scheduling can change
 which neighboring pages a training run observes, so the optimized artifact is
 not promised to be byte-identical across training runs; each build regenerates
@@ -212,7 +215,7 @@ The root `./dev` entry performs incremental CLI/App Server builds without disabl
 
 The [Web workspace](../design/web-workspace.md) frontend in `web/` is a separate artifact (`scripts/stage-web.mjs` builds it; the CLI finds the installed `dimcode-web` package or a `web/` directory beside the executable or in the product home, or `DIMCODE_WEB_ASSETS` names one), so building `dim-app-server` and `dimcode` needs neither Node nor npm. Only `cargo build --features embedded-web` compiles the frontend in; then `build.rs` runs `npm ci` and `npm run build` when that frontend changed, and a host without npm fails the build. Otherwise Node is only needed for packaging, packaging checks and TypeScript plugin execution/development. `.node-version` pins the Node version bundled into account-enabled releases. The `runtime/package-lock.json` fixes the rutis Node runtime and its transitive dependencies; `npm ci --ignore-scripts --prefix runtime` installs them for local bridge testing.
 
-Full-workspace CI uses self-hosted macOS ARM64 runners; pull requests run only the check groups their paths need (see [GitHub workflows](../release/README.md#github-workflows)). The separate `windows-cli` job runs native boundary flows on a self-hosted Windows x64 runner, where its fixture writes to the clipboard. Release builds use GitHub-hosted VMs matching each target OS and CPU. See the [runner setup and release matrix](../release/README.md#runner-setup).
+Full-workspace CI uses self-hosted macOS ARM64 runners; pull requests run only the check groups their paths need (see [GitHub workflows](../release/README.md#github-workflows)). The separate `windows-cli` job runs native boundary flows on a self-hosted Windows x64 runner, where its fixture writes to the clipboard. The layout workflow runs the Windows x64 layout build on that self-hosted runner with Python 3.13 provisioned explicitly, and Windows ARM64 on the hosted `windows-11-arm` runner. Release builds use GitHub-hosted VMs matching each target OS and CPU. See the [runner setup and release matrix](../release/README.md#runner-setup).
 
 The macOS clipboard flows use private pasteboards and serialize access to the shared pasteboard server; other tests remain parallel.
 

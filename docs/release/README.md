@@ -145,12 +145,14 @@ The platform-independent `changes` and `ci-ok` jobs can run on any eligible self
 ## GitHub workflows
 
 `code-layout.yml` runs on changes to the layout tool, its tests/workflow,
-`rust-toolchain.toml` or `.node-version`, and on manual dispatch. Hosted Ubuntu,
-macOS arm64/x86-64 and Windows x86-64/ARM64 runners each run the native fixture
-test. The same matrix also builds, trains and validates a real `dimcode` with
-the release LTO choice (thin for macOS ARM64, fat otherwise): Cargo capture and
-replay, native page-residency or working-set sampling, function ordering,
-uninstrumented acceptance and alternating measurements. It does not build or
+`rust-toolchain.toml` or `.node-version`, and on manual dispatch. Hosted Ubuntu
+and macOS arm64/x86-64 runners run the native fixture test; Windows x64 uses the
+self-hosted Windows runner and Windows ARM64 uses the hosted `windows-11-arm`
+runner, each with Python 3.13 provisioned explicitly. The same matrix also
+builds, trains and validates a real `dimcode` with the release LTO choice (thin
+for macOS ARM64, fat otherwise): Cargo capture and replay, native
+page-residency or working-set sampling, the real TUI model picker, function
+ordering, uninstrumented acceptance and alternating measurements. It does not build or
 publish release packages; the opt-in command is documented in the
 [build environment](../architecture/build.md#native-executable-layout).
 
