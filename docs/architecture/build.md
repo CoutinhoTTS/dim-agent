@@ -31,7 +31,9 @@ hardware and rejects cross compilation:
 
 The command builds `dimcode` with the repository's release profile and
 preserves the build environment, including account build settings and the
-`CARGO_PROFILE_RELEASE_LTO` selection used by the release workflow. The output
+`CARGO_PROFILE_RELEASE_LTO` selection used by the release workflow. Every
+platform uses the same compiler selection: `RUSTC`, then `CARGO_BUILD_RUSTC`,
+then `rustc` from PATH; Cargo configuration's `build.rustc` is superseded. The output
 directory must be new. A failed build never produces its final executable.
 The release packaging workflow remains unchanged; this is opt-in build support.
 
@@ -168,14 +170,15 @@ Both current Windows release targets use fat LTO. The layout command preserves
 
 ### Measurements and artifacts
 
-After acceptance, the command alternates uninstrumented baseline and candidate
-samples from fresh disposable homes. It records wall time to App Server
-readiness, startup CPU, total resident memory, code-page residency and the wall
-time of a local-fixture tool conversation. On macOS, code pages come from the
-training probe's `mincore` sample at ready plus 100 ms and total resident memory
-from `ps`; on Windows they come from `QueryWorkingSetEx` and
-`GetProcessMemoryInfo`, with working set, private usage and pagefile usage kept
-distinct. These are OS-specific metrics and are never summed across platforms
+After uninstrumented acceptance, the command alternates baseline and candidate
+samples from fresh disposable homes under the same platform sampling mechanism.
+It records wall time to App Server readiness, startup CPU, total resident
+memory, code-page residency and the wall time of a local-fixture tool
+conversation. On macOS, code pages come from the training probe's `mincore`
+sample at ready plus 100 ms, total resident memory from `ps`, and physical
+footprint from `vmmap` when available; on Windows they come from
+`QueryWorkingSetEx` and `GetProcessMemoryInfo`, with working set, private usage
+and pagefile usage kept distinct. These are OS-specific metrics and are never summed across platforms
 or treated as interchangeable with Linux `/proc` numbers.
 
 `baseline`, `symbols.order`, the linker maps, native page samples and

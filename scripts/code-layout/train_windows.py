@@ -127,15 +127,21 @@ class Server:
 
     def close(self, profile=None):
         self.connect()
+        handle = None
+        if profile:
+            handle = win32.open_process(self.process.pid)
+            try:
+                base = win32.module(handle)[0]
+                rva, size = pe.text_range(self.binary)
+            except BaseException:
+                win32.close(handle)
+                raise
         self.sequence += 1
         self.wire.write({"jsonrpc": "2.0", "id": self.sequence,
                          "method": "daemon.shutdown", "params": {"force": True}})
         if profile:
-            handle = win32.open_process(self.process.pid)
             last = None
             try:
-                base = win32.module(handle)[0]
-                rva, size = pe.text_range(self.binary)
                 while self.process.poll() is None:
                     try:
                         _, pages = win32.working_set_pages(handle, base, rva, size)
@@ -154,6 +160,7 @@ class Server:
         else:
             if self.process.wait(timeout=60) != 0:
                 raise RuntimeError(f"training process failed: {self.process.returncode}")
+
 
 def tui(binary, home, stack, sampling, profile):
     console = win32.Console(
