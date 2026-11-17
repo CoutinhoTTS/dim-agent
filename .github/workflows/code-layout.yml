@@ -64,6 +64,7 @@ jobs:
         if: runner.os == 'Windows'
         with:
           python-version: '3.13'
+          architecture: ${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}
       - name: Configure Windows C/C++ toolchain
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
@@ -128,6 +129,7 @@ jobs:
         if: runner.os == 'Windows'
         with:
           python-version: '3.13'
+          architecture: ${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}
       - name: Configure Windows C/C++ toolchain
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
@@ -150,6 +152,8 @@ jobs:
           } else {
             Write-Output 'lld-link is not on PATH; the build will use the Rust toolchain rust-lld'
           }
+      - run: rustup show
+      - run: rustup target add ${{ matrix.target }}
       - name: Build, train and validate the native executable (Windows)
         if: runner.os == 'Windows'
         shell: powershell
