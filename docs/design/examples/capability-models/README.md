@@ -164,3 +164,7 @@ done
 并用 [InterruptHandoff](InterruptHandoff.tla) 和 [GenerationHandoff](GenerationHandoff.tla)
 检查中断后的迟到请求、旧工作终态与新代接续。范围和复现见
 [运行记录](owner-handoff-results.md)；这两个有限交接不代表全部 owner 组合已经验证。
+
+[RequestRecovery](RequestRecovery.tla)补充旧任务停止后的 Loop → ContextPreparation → ModelProvider
+结算责任，区分三个独立 cut、未发布终态和查询/写入失败；[运行记录](request-recovery-results.md)
+与 [owner 对应](../owner-handoff-verification.md#6-loop--preparation--model-的恢复结算责任)说明范围。

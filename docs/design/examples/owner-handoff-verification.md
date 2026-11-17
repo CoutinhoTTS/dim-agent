@@ -116,3 +116,48 @@ Timeline 已有存储故障时，纯查询仍可能成功；模型允许不需�
 保留各 owner 阶段、各自 cut、持久化/发布位置和清理失败，因为它们分别区分真实交接窗口。
 所有结果都是有限模型检查；D 的两组交接不等于所有 cap 的任意组合已证明。
 剩余工作包括其他 owner 的业务选择/终态义务组合、A/B/C 已列的模型边界及 facade 故障观察（#1718/#1719）。
+
+## 6. Loop → Preparation → Model 的恢复结算责任
+
+[RequestRecovery](capability-models/RequestRecovery.tla)补充另一个明确交接，
+不是把 Wait/Tool 的 GenerationHandoff 结果推广到所有请求。
+模型范围是**旧任务已经停止后的恢复**：持久历史固定在一个交接阶段，三个 owner
+可以独立捕获 committed cut、延后完成查询/补写，恢复产生的终态可以尚未发布。
+没有旧任务在查询期间继续交接、新请求或同一 owner 的两代同时写入；动态热重载中仍有旧任务运行的情况不由此模型证明。
+
+| owner | 对同一 `(turn_id, request_id)` 的恢复选择 | 前提提供者 / 实现 |
+| --- | --- | --- |
+| Loop | 有 model-start，无 context/prepare、无 output-end | Loop 产生 request 身份和 context/prepare；`agent_loop.rs::rebuild` 定位最新未结束 turn/request 后按序构造 handed_over / request。模型将这个投影作为已选当前 request，不证明其完整查询算法 |
+| ContextPreparation | 有 context/prepare，无 model/call、无 output-end | Loop 交接，Preparation 成功写 model/call 或失败写 output-end；`context_preparation.rs::rebuild` 用相关存在查询排除已交接/结束身份；[owner 合同](../../architecture/rust-agent/plugins/ContextPreparation.md#events-and-lifetime) |
+| ModelProvider | 有 model/call，无 output-end | Preparation 交接，ModelProvider 写输出终态；`model_provider.rs::rebuild` 按 turn/request 匹配 output-end；[owner 合同](../../architecture/rust-agent/plugins/ModelProvider.md#events-and-lifetime) |
+
+模型初态包含四个阶段（start、prepare、call、已结束），另有一个已结束身份作为干扰：
+可以同 turn 不同 request，或同 request 不同 turn。匹配必须同时使用两项；这描述契约，不是证明 SQL 实现了关联。
+它不生成非法的重复 start、倒序交接或多个未结束请求；这些有效历史前提由生产方和 Loop 单活动请求合同提供。
+查询取完整 committed 前缀，不能把只读 published 当作同一题设。
+
+推导：记 S/P/C/E 为该身份已有 start/prepare/call/end。合法交接满足 C ⇒ P ⇒ S；
+S 成立且 E 不成立时，`¬P`、`P ∧ ¬C`、`C` 恰有一个成立，分别对应三个 owner。
+恢复期间只新增 E、不新增 P/C，所以不同 cut 只会使原责任方看见“已结束”，不会把责任转给另一方。
+每个 owner 的本次恢复最多结算一次，因而不重复；若全部成功完成，原责任方补 E 或已经读到 E，因而不遗漏。
+这段论证依赖上文的有效历史、停止旧任务、完整 committed 查询和单次恢复前提；不扩展为任意热重载证明。
+
+`Capture` 保存各自选择，`Complete` 根据该选择补写，**没有在补写处加入全局去重检查**。
+`AtMostOneTerminal` 因而检查三个选择与交错是否允许重复，而非靠写入守卫直接保证答案。
+`CorrectSettlementOwner` 用初始交接阶段的独立责任表检查写入方；
+`AllSuccessfulMeansSettled` 检查三方恢复均完成时确有一个终态。不是“最终一定完成”的活性声明。
+`PublicationBound` 仅是模型自洽检查，不作为额外业务证明。
+
+失败配置保留查询失败和终态写入失败；失败不算成功恢复，没有承诺失败后一定有终态。
+它不模拟 required part 失败后的装配回滚，也不把其他 owner 还能转换解释为分支仍健康。
+模型不重新调用外部模型/准备工作；这是范围边界，不包装成一次独立的不重执行证明。
+
+实现对应复用 `context_flow::restoring_each_preparation_handoff_settles_without_replaying_work`：
+原九种持久化边界已有 ModelOutputEnd 总数唯一断言（不仅是前面的存在性检查）；
+本批保留该断言、“不重新准备/调用模型”和工具结算检查，仅增加当前 turn/request 的
+ModelOutputEnd 数量断言以确认终态身份：未创建 request 时为零，其他边界恰好一条，包含原本已完成的历史终态。
+该流程没有穷举模型调度，也没有覆盖任意业务 owner 的结算责任。
+
+模型配置、可达窗口和执行结果见[恢复结算运行记录](capability-models/request-recovery-results.md)。
+消融：不复制 A 的存储队列、B 的查询表达式或 C 的暂存算法；三个独立 cut/选择用于保留真实交错，
+初始阶段用于独立责任判定，干扰身份用于明确关联边界。未增加运行时抽象、规则或接口。
