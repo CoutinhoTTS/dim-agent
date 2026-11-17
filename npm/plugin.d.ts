@@ -365,6 +365,9 @@ export interface SessionConfig {
   readonly collaborationRole: 'leader' | 'member';
   /** Native serde omits true; absence means interactive. */
   readonly interactive?: false;
+  readonly excludedTools?: readonly string[];
+  readonly language?: import('./branch-services.js').ReplyLanguage;
+  readonly initialTitle?: string;
 }
 
 /**
@@ -585,6 +588,41 @@ export interface ManagedSearch {
   search(request: { query: string; count: number }): Promise<{
     results: { title: string; url: string; snippet: string; publishedAt?: string }[]
   }>
+}
+
+export interface WorktreeDirectory { repository: string; root: string }
+export interface TimelineReadScope {
+  key: { sessionId: string; branchId: string };
+  through: number;
+  segments: { branchId: string; from: number; through: number; storedThrough: number; tail: AgentEvent[] }[];
+}
+/** Process repository operations for trusted plugins; ids are not scoped to the caller. Create/fork/delete reject ids that are not one normal path component. */
+export interface Store {
+  query(request: { scope: TimelineReadScope; query: import('./branch-services.js').QuerySpec; page?: import('./branch-services.js').QueryPage | null }): Promise<{ result: import('./branch-services.js').QueryOutput; next: import('./branch-services.js').QueryCursor | null }>;
+  /** Stored page: database sequence and closed=false; the lifecycle owner supplies live enrichment. */
+  catalog(request: { request: { limit?: number; cursor?: string; query?: string; cwd?: string | string[]; withPreview?: boolean; withInternal?: boolean; withAcpSessions?: boolean; withAutomationSessions?: boolean; includeClosed?: boolean }; agent?: string | null; version: number; hosts: string[]; closed: string[] }): Promise<{ sessions: import('./client-protocol.js').SessionSummary[]; nextCursor?: string }>;
+
+  addGrant(request: { sessionId: string; path: string; kind: 'file' | 'dir'; mode: 'read' | 'write' }): Promise<{}>;
+  removeGrant(request: { sessionId: string; path: string }): Promise<{}>;
+  grants(request: { sessionId: string }): Promise<{ grants: { path: string; kind: 'file' | 'dir'; mode: 'read' | 'write' }[] }>;
+  setSessionLanguage(request: { sessionId: string; language: import('./branch-services.js').ReplyLanguage | null }): Promise<{}>;
+  creationRecord(request: { sessionId: string }): Promise<{ origin: 'client' | 'acp' | 'internal' | 'unknown' | 'automation'; leaderSessionId: string | null }>;
+  owner(request: { sessionId: string }): Promise<{ agentId: string | null }>;
+  hasRecords(request: { sessionId: string }): Promise<{ exists: boolean }>;
+  /** Storage removal after the lifecycle owner has closed the Session and settled its producers. */
+  delete(request: { sessionId: string }): Promise<{ removed: boolean }>;
+  /** Prepared row copy after role/cut/context/rest validation; configText is source text with initialTitle removed. */
+  fork(request: { sourceSessionId: string; sessionId: string; at: number; configText: string }): Promise<{}>;
+  sessionConfigText(request: { sessionId: string }): Promise<{ configText: string | null }>;
+  sessionConfig(request: { sessionId: string }): Promise<{ config: SessionConfig | null }>;
+  /** Prepare rows after admission, supported-version/configuration checks and protocol feature restrictions; caller initializes/publishes or rolls back. */
+  createOwnedSession(request: { sessionId: string; config: SessionConfig; agentId: string; protocolVersion: number; leaderSessionId: string | null; origin: 'client' | 'acp' | 'internal' | 'unknown' | 'automation'; worktree: (WorktreeDirectory & { subtree: string }) | null }): Promise<{}>;
+  worktreeDirectories(request: {}): Promise<{ directories: (WorktreeDirectory & { lastUsedAtMs: number | null })[] }>;
+  sessionsUnderWorkspace(request: { root: string }): Promise<{ sessionIds: string[] }>;
+  removeWorktreeDirectory(request: WorktreeDirectory): Promise<{ removed: boolean }>;
+  worktreeUsages(request: WorktreeDirectory): Promise<{ usages: { sessionId: string; subtree: string }[] }>;
+  /** Callback runs under the native ownership mutex: do not await createOwnedSession, fork, delete, removeWorktreeDirectory, removeWorktree or worktreeAssociations.associate from it. */
+  removeWorktree(request: WorktreeDirectory, remove: (path: string) => Promise<void>): Promise<{ removed: boolean }>;
 }
 
 /** The existing user override; null keeps the consumer's factory or built-in text. */

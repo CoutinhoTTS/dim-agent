@@ -171,6 +171,6 @@ BranchLine mounts at the committed Dispatcher cutoff without reading historical 
 | --- | --- |
 | 作用域 | 分支 |
 | 注入 | `B:BranchLifecycle`、`B:Dispatcher`、`B:Timeline`、`B:TimelineIdentity`、`S:GuideEntries`、`S:SessionLifecycle`、`S:TreeCommands` |
-| 提供 | `B:BranchLine`、`B:dyn HostDispatch#branchLine` |
+| 提供 | `B:BranchLine` |
 | 被注入于 | — |
 <!-- /generated -->

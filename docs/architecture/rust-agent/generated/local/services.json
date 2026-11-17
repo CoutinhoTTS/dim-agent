@@ -783,7 +783,7 @@
         "generation": 1,
         "injects": [
           {
-            "service": "dim_agent_capabilities::permission::CommandRules@session",
+            "service": "dim_agent_capabilities::permission::CommandRulesHost@session",
             "scope": null,
             "status": "Ready"
           },
@@ -810,7 +810,7 @@
         ],
         "resolved": [
           {
-            "service": "dim_agent_capabilities::permission::CommandRules@session",
+            "service": "dim_agent_capabilities::permission::CommandRulesHost@session",
             "scope": null,
             "provider": 33,
             "generation": 1
@@ -842,7 +842,7 @@
         ],
         "reads": [
           {
-            "service": "dim_agent_capabilities::permission::CommandRules@session",
+            "service": "dim_agent_capabilities::permission::CommandRulesHost@session",
             "provider": 33,
             "declared": true,
             "external": true
@@ -2197,12 +2197,6 @@
       {
         "service": "dyn rutis_bridge::session::services::HostDispatch#branchLifecycle@main",
         "provider": 60,
-        "generation": 1,
-        "removing": false
-      },
-      {
-        "service": "dyn rutis_bridge::session::services::HostDispatch#branchLine@main",
-        "provider": 65,
         "generation": 1,
         "removing": false
       },
@@ -3987,7 +3981,7 @@
         "removing": false
       },
       {
-        "service": "dim_agent_capabilities::permission::CommandRules@session",
+        "service": "dim_agent_capabilities::permission::CommandRulesHost@session",
         "provider": 33,
         "generation": 1,
         "removing": false
@@ -4119,32 +4113,8 @@
         "removing": false
       },
       {
-        "service": "dyn rutis_bridge::session::services::HostDispatch#commandRules@session",
-        "provider": 33,
-        "generation": 1,
-        "removing": false
-      },
-      {
         "service": "dyn rutis_bridge::session::services::HostDispatch#guideEntries@session",
         "provider": 42,
-        "generation": 1,
-        "removing": false
-      },
-      {
-        "service": "dyn rutis_bridge::session::services::HostDispatch#initialPromptConfiguration@session",
-        "provider": 43,
-        "generation": 1,
-        "removing": false
-      },
-      {
-        "service": "dyn rutis_bridge::session::services::HostDispatch#promptHost@session",
-        "provider": 43,
-        "generation": 1,
-        "removing": false
-      },
-      {
-        "service": "dyn rutis_bridge::session::services::HostDispatch#promptRegistry@session",
-        "provider": 43,
         "generation": 1,
         "removing": false
       },

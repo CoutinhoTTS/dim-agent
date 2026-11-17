@@ -6,7 +6,7 @@ Generated from the real assembly: the App Server product profile (`serve` with a
 
 ## Services
 
-Each catalog name a part of the assembly provides or injects. `data` means shared with a dispatcher; `internal(reason)` means the face cannot cross; `shared-no-dispatcher` is shared but a leaf cannot call it. Methods are `sync` or `async` (TypeScript callers receive a direct value for `sync` and a Promise for `async`). A non-data name is reached by Rust parts at its type's key.
+Each catalog name a part of the assembly provides or injects. `data` means shared with a dispatcher; `internal(reason)` means the face cannot cross; `shared-no-dispatcher` is shared but a leaf cannot call it. Methods are `sync` or `async` (callers in other languages always get a Promise). A non-data name is reached by Rust parts at its type's key.
 
 | Name | Group | Provider | Face | Methods |
 | --- | --- | --- | --- | --- |
@@ -15,6 +15,7 @@ Each catalog name a part of the assembly provides or injects. `data` means share
 | `auxiliaryModel` | process | Provider | data | `complete` async |
 | `basePromptSettingsHost` | process | PromptSettings | data | `base` async |
 | `callChannel` | process | CallChannel | data | `closed` async, `notify` async |
+| `callers` | process | CallChannel | internal(owner-api) | — |
 | `collaboration` | process | Collaboration | internal(host-resource) | — |
 | `collaborationDirectory` | process | CollaborationDirectory | data | `relations` async |
 | `connectionHub` | process | Connection | internal(control) | — |
@@ -24,7 +25,7 @@ Each catalog name a part of the assembly provides or injects. `data` means share
 | `executionSettingsHost` | process | ExecutionSettings | data | `read` async |
 | `fileStorage` | process | FileStorage | internal(object) | — |
 | `grokOAuthService` | process | GrokOAuth | internal(secret) | — |
-| `hooksService` | process | HooksSettings | data | `plugins` async, `refusal` sync, `register` async, `withdraw` async |
+| `hooksService` | process | HooksSettings | internal(host-resource) | — |
 | `hostPlatform` | process | HostPlatform | internal(object) | — |
 | `listenAddresses` | process | Transport | data | `read` async |
 | `loader` | process | rutis-loader | internal(owner-api) | — |
@@ -74,18 +75,18 @@ Each catalog name a part of the assembly provides or injects. `data` means share
 | `agentConfig` | session | SessionScope | data | `get` async |
 | `collaborationConfig` | session | SessionScope | data | `get` async |
 | `collaborationSession` | session | CollaborationSession | internal(legacy-no-consumer) | — |
-| `commandRules` | session | CommandRules | data | `read` async |
+| `commandRulesHost` | session | CommandRules | internal(hot-path) | — |
 | `compactionStrategyHost` | session | ProductSummaryStrategy | internal(hot-path) | — |
 | `contextModelHost` | session | SessionScope | internal(hot-path) | — |
 | `faultReporter` | session | SessionScope | internal(hot-path) | — |
 | `guideEntries` | session | PromptGuide | data | `register` async |
 | `historyRenderer` | session | SessionScope | internal(hot-path) | — |
-| `initialPromptConfiguration` | session | PromptRegistry | data | `get` async |
+| `initialPromptConfiguration` | session | PromptRegistry | internal(hot-path) | — |
 | `mcpSession` | session | McpSession | data | `call` async, `refresh` async, `state` async, `widget` async |
 | `prepareContextHost` | session | SessionScope | internal(hot-path) | — |
 | `prepareModelHost` | session | PrepareModelHost | internal(hot-path) | — |
-| `promptHost` | session | PromptRegistry | data | `load` async |
-| `promptRegistry` | session | PromptRegistry | data | `names` sync, `register` async |
+| `promptHost` | session | PromptRegistry | internal(hot-path) | — |
+| `promptRegistry` | session | PromptRegistry | internal(hot-path) | — |
 | `sessionConfig` | session | SessionScope | data | `get` async |
 | `sessionIdentity` | session | SessionScope | data | `get` async |
 | `sessionLanguage` | session | PromptSources | data | `get` async |
@@ -108,7 +109,7 @@ Each catalog name a part of the assembly provides or injects. `data` means share
 | `approval` | branch | Approval | data | `decide` async, `pending` async |
 | `backgroundExec` | branch | BackgroundExec | data | `output` async, `outputPage` async, `stop` async, `wait` async |
 | `branchLifecycle` | branch | BranchScope | data | `activated` async, `closing` async |
-| `branchLine` | branch | BranchLine | data | `cursor` async, `ending` async, `resolved` async |
+| `branchLine` | branch | BranchLine | internal(hot-path) | — |
 | `branchOpening` | branch | BranchScope | internal(hot-path) | — |
 | `configurationPublisher` | branch | ContextPreparation | internal(hot-path) | — |
 | `configureControl` | branch | Prompt | internal(hot-path) | — |
