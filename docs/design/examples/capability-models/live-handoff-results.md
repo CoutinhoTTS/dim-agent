@@ -44,3 +44,13 @@ cargo clippy --locked -p dim-agent-capabilities --test context_flow -p dim-agent
 
 上述 scoped Clippy 通过。使用独立 worktree target、隔离 DIMCODE_HOME、4 build jobs、
 CARGO_INCREMENTAL=0；没有重跑全部工作区，也没有改存储、恢复或重试策略。
+
+## main 集成复核
+
+合入 `543ae5204f94bc9bee73aacf27f2a3ea13840487`；README 保留 C/D 两个入口。
+ModelProvider 新增异步图片适配与可选 SessionFiles，rebuild/consume 未变。
+`context_flow model_` 过滤运行 7 passed，`local_execution recovery_wake` 1 passed（含同步/异步失败）；
+两测试 target 的 Clippy -D warnings 通过。JSON 的 main_integration 单独记录新源码哈希，
+不改写上一次实验的输入快照。模型/config 未变，复用 TLC；不称本轮重新执行。
+同时按 C 的非阻塞评审，将等待名称修正为实际调用的 Session::idle。
+消融：只保留两个原有目录入口和精确证据更新，未增模型、运行时抽象或业务规则。

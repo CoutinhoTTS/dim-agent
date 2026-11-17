@@ -94,5 +94,30 @@
       "log_sha256": "b2a9524dc4a81f52fac56c2278b15e05ec8b7d13434ec5a77ec37d1684b5b517"
     }
   ],
-  "clippy": "Scoped context_flow and local_execution targets passed with -D warnings"
+  "clippy": "Scoped context_flow and local_execution targets passed with -D warnings",
+  "main_integration": {
+    "main_commit": "543ae5204f94bc9bee73aacf27f2a3ea13840487",
+    "scope": "README conflict resolved by retaining both C and D entries. ModelProvider adds asynchronous image adaptation and optional SessionFiles; recovery and consume unchanged. No model/config changes.",
+    "source_sha256": {
+      "crates/dim-agent-capabilities/src/model_provider.rs": "9d457aed0ceda09d78b12397a5b41d59a002cd740a607b3653812b3d5b9a70a4",
+      "crates/dim-agent-capabilities/src/context_preparation.rs": "f1adaa6e43af9f7d3e0a39c808700dd8a11195e3d5b3437a699a6a2ece8b2d8e",
+      "crates/dim-agent-capabilities/src/workspace_tools/background.rs": "fb0de37ff868a04157e6741f69ac6e0eb53a0499a203c0d7d96f112c39a144aa",
+      "crates/dim-agent-capabilities/tests/context_flow/context_reads.rs": "a57f90036e61be1489fb4163e3dce166eebfcf2916796bb444ab6a565b2a2f10",
+      "tests/integration/tests/local_execution.rs": "b8e4345434cf50be93b5fb034d868198f82a55d03ae3fabfa883794382d611a7",
+      "tests/integration/tests/local_support/task_store.rs": "0ee1395d62783c9c5f2d826d2019b7116d44dbbadd5ac7925d872f36ccea0e87",
+      "crates/dim-agent-questions/src/lib.rs": "a80d5b9a21b5d485372cde0547321c59aaa7049277670fc6a2a7019e5ea575d0"
+    },
+    "tests": [
+      {
+        "command": "cargo test --locked -p dim-agent-capabilities --test context_flow model_",
+        "result": "7 passed; 0 failed"
+      },
+      {
+        "command": "cargo test --locked -p dim-agent-integration-tests --test local_execution recovery_wake",
+        "result": "1 passed; 0 failed; synchronous and asynchronous failures"
+      }
+    ],
+    "clippy": "context_flow and local_execution passed with -D warnings",
+    "tlc": "Unchanged models/configs: reuse recorded runs, not rerun."
+  }
 }

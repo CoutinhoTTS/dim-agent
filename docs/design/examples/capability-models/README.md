@@ -172,3 +172,8 @@ done
 [ModelReloadHandoff](ModelReloadHandoff.tla) 与 [ExecWakeRecovery](ExecWakeRecovery.tla)
 补充上游仍运行的独立重启、恢复查询失败，以及补通知失败后的持久义务。
 [运行记录](live-handoff-results.md)对应真实流程及明确的成功重试前提。
+
+## 动态消费交接补充实验
+
+#1732 C 的[合同与实现对应](../consumer-handoff-verification.md)及
+[运行记录](consumer-handoff-results.md)展开真实 consume 的注册、暂存、排空、失败和退出。
