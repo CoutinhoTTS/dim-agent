@@ -250,7 +250,7 @@ impl Agent {
     /// for every Session and branch this Agent hosts, that its profile's
     /// required rows and the required views its scope handed, with the plugins
     /// below them, are `Active`, that no plugin
-    /// requires an external service it does not declare (including reads rejected
+    /// requires a service it does not declare (including reads rejected
     /// before provider lookup), that every declared read
     /// is among the reader's resolved dependencies, and that no scoped service
     /// is provided without an instance key. Optional reads do not require a

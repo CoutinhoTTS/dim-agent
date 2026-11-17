@@ -2018,7 +2018,7 @@ fn timed_out(ctx: &Ctx, views: &[FiberView]) -> AgentError {
 pub enum AssemblyRule {
     /// A required row or view, or a plugin below one, is not `Active`.
     Ready,
-    /// A plugin requires an external service it does not declare.
+    /// A plugin requires a service it does not declare.
     UndeclaredRead,
     /// A plugin read a service generation its resolved dependencies lack.
     Generation,
@@ -2152,9 +2152,7 @@ pub(crate) fn check_scope(
             );
         }
         for access in &plugin.accesses {
-            if access.strict
-                && ((access.external && !access.declared)
-                    || access.failure == Some(rutis::host::ServiceReadFailure::Undeclared))
+            if access.strict && access.failure == Some(rutis::host::ServiceReadFailure::Undeclared)
             {
                 report(
                     plugin.name.clone(),
