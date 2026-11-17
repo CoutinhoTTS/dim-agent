@@ -76,6 +76,7 @@ struct ModelProvider {
     context: Arc<ContextPreparation>,
     host: Arc<ModelHost>,
     resolver: Option<Arc<ProviderConnectionResolver>>,
+    files: Option<Arc<SessionFiles>>,
     timeline: Arc<Timeline>,
     identity: Arc<TimelineIdentity>,
     progress: Arc<StateCell<ModelProgress>>,
@@ -481,7 +482,7 @@ impl ModelProvider {
         } else {
             let result = AssertUnwindSafe(async {
                 crate::context_policy::check_cancel(&cancel)?;
-                let request = images::adapt(&call.request);
+                let request = images::adapt(&call.request, self.files.as_deref(), &cancel).await?;
                 self.context
                     .validate(&call.request_id, request.clone(), cancel.clone())
                     .await?;
@@ -577,6 +578,8 @@ pub struct ModelProviderPlugin {
     /// Each request's connection comes from the process
     /// `ProviderConnectionResolver`; otherwise it is local.
     resolver: Option<Key<ProviderConnectionResolver>>,
+    /// Optional process service, read at load without gating standalone hosts.
+    files: Option<Key<SessionFiles>>,
     identity: Key<TimelineIdentity>,
 }
 impl ModelProviderPlugin {
@@ -597,6 +600,10 @@ impl ModelProviderPlugin {
             context: names.key()?,
             host: names.key()?,
             resolver: resolves.then(|| names.key()).transpose()?,
+            files: names
+                .registered::<SessionFiles>()
+                .then(|| names.key())
+                .transpose()?,
             identity: names.key()?,
         })
     }
@@ -626,6 +633,7 @@ impl DynPlugin for ModelProviderPlugin {
                 Some(key) => Some(ctx.require_at(key)?),
                 None => None,
             };
+            let files = self.files.as_ref().and_then(|key| ctx.get_at(key));
             let identity = ctx.require_at(&self.identity)?;
             let service = Arc::new(ModelProvider {
                 state: Mutex::new(ModelState::default()),
@@ -634,6 +642,7 @@ impl DynPlugin for ModelProviderPlugin {
                 context,
                 host,
                 resolver,
+                files,
                 timeline,
                 identity,
                 progress: Arc::new(StateCell::new(ModelProgress::default())),
