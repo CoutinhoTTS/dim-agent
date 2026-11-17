@@ -3643,17 +3643,25 @@ fn acp_stdio_correlates_the_consumed_input_and_deduplicates_unicode_progress() {
     );
     let response = peer.response(3);
     assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
-    let text: String = peer
+    let chunks: Vec<&Value> = peer
         .updates
         .iter()
-        .filter(|frame| frame["params"]["update"]["sessionUpdate"] == "agent_message_chunk")
-        .map(|frame| {
-            frame["params"]["update"]["content"]["text"]
-                .as_str()
-                .unwrap()
-        })
+        .map(|frame| &frame["params"]["update"])
+        .filter(|update| update["sessionUpdate"] == "agent_message_chunk")
+        .collect();
+    let text: String = chunks
+        .iter()
+        .map(|update| update["content"]["text"].as_str().unwrap())
         .collect();
     assert_eq!(text, "A🦀B");
+    assert_eq!(
+        chunks
+            .iter()
+            .map(|update| update["messageId"].clone())
+            .collect::<Vec<_>>(),
+        vec![json!("model"); chunks.len()],
+        "a committed delta and a replacing progress preview name the same message"
+    );
     assert!(
         !peer
             .updates
@@ -4245,7 +4253,7 @@ fn acp_load_materializes_user_and_tool_file_images_in_order() {
         let history = wire.read("session.history");
         let source = |id| json!({"type":"file","mediaType":"image/png","fileId":id});
         wire.reply(&history, json!({"events":[
-            event(1,"input","input","message",json!({"user":{"content":[{"type":"text","text":"before"},{"type":"image","source":source("user-image")},{"type":"text","text":"after"}]},"mode":"queue"})),
+            event(1,"input","input","message",json!({"user":{"content":[{"type":"text","text":"before"},{"type":"image","source":source("user-image")},{"type":"text","text":"<dim-skill name=\"commit\">\n# Commit\n</dim-skill>"},{"type":"text","text":"after"}]},"mode":"queue"})),
             event(2,"start","turn","start",json!({"turn_id":"turn"})),
             event(3,"consumed","input","consumed",json!({"input_id":"input"})),
             event(4,"result","step","tool-result",json!({"turn_id":"turn","request_id":"request","results":[{"call_id":"call","result":{"content":[{"type":"text","text":"caption"},{"type":"image","source":source("tool-image")}]}}]}))
@@ -4277,13 +4285,25 @@ fn acp_load_materializes_user_and_tool_file_images_in_order() {
         .iter()
         .filter(|update| update["sessionUpdate"] == "user_message_chunk")
         .collect();
-    assert_eq!(user.len(), 3);
+    assert_eq!(user.len(), 4);
     assert_eq!(user[0]["content"]["text"], "before");
     assert_eq!(
         user[1]["content"],
         json!({"type":"image","mimeType":"image/png","data":"aW1hZ2U="})
     );
-    assert_eq!(user[2]["content"]["text"], "after");
+    assert_eq!(
+        user[2]["content"]["text"], "\nSkill loaded: commit",
+        "a loaded Skill replays as one line of the operator's message"
+    );
+    assert_eq!(user[3]["content"]["text"], "after");
+    assert_eq!(
+        user.iter()
+            .map(|update| update["messageId"].clone())
+            .collect::<Vec<_>>(),
+        vec![json!("input"); 4],
+        "every block of the message, its image and its Skill line included, \
+         names the input it belongs to"
+    );
     let tool = updates
         .iter()
         .find(|update| update["sessionUpdate"] == "tool_call_update")
