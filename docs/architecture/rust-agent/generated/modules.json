@@ -2921,6 +2921,16 @@
       ]
     },
     {
+      "id": "dim_app_server::mcp::face",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::mcp",
+      "file": "crates/dim-app-server/src/mcp/face.rs",
+      "unexpandedMacros": [
+        "format",
+        "serde_json::json"
+      ]
+    },
+    {
       "id": "dim_app_server::mcp::import",
       "crate": "dim_app_server",
       "parent": "dim_app_server::mcp",
@@ -23890,8 +23900,7 @@
       "to": "dim_app_server::mcp",
       "references": [
         "mod mcp",
-        "path mcp::McpPlugin::new",
-        "path mcp::McpService"
+        "path mcp::McpPlugin::new"
       ]
     },
     {
@@ -28284,6 +28293,15 @@
     },
     {
       "from": "dim_app_server::mcp",
+      "to": "dim_app_server::mcp::face",
+      "references": [
+        "mod face",
+        "path McpServiceBinding",
+        "use face::McpService"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp",
       "to": "dim_app_server::mcp::import",
       "references": [
         "mod import",
@@ -28647,6 +28665,25 @@
         "path read_claude",
         "path read_json",
         "path sources"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::face",
+      "to": "dim_app_server::mcp",
+      "references": [
+        "path McpPluginRefusal",
+        "path Result",
+        "path super::McpService",
+        "use super::McpPluginRefusal",
+        "use super::Result"
+      ]
+    },
+    {
+      "from": "dim_app_server::mcp::face",
+      "to": "dim_app_server::mcp::management",
+      "references": [
+        "path management::error",
+        "use super::management"
       ]
     },
     {
@@ -29144,6 +29181,7 @@
         "path McpPlugin::new",
         "path McpService",
         "path McpSource::User",
+        "path crate::mcp::owner_key",
         "use crate::mcp::McpChange",
         "use crate::mcp::McpPlugin",
         "use crate::mcp::McpService"
@@ -29492,6 +29530,7 @@
         "path McpServerEntry::enabled",
         "path McpService",
         "path super::McpSource",
+        "path super::owner_key",
         "use super::McpConnection",
         "use super::McpError",
         "use super::McpServerEntry",
@@ -30173,9 +30212,15 @@
       "to": "dim_app_server::mcp",
       "references": [
         "path McpError::Settings",
-        "path McpService",
-        "use crate::mcp::McpError",
-        "use crate::mcp::McpService"
+        "use crate::mcp::McpError"
+      ]
+    },
+    {
+      "from": "dim_app_server::plugin_manager",
+      "to": "dim_app_server::mcp::face",
+      "references": [
+        "path McpServiceBinding",
+        "use crate::mcp::McpServiceBinding"
       ]
     },
     {

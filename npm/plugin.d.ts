@@ -644,6 +644,14 @@ export interface CollaborationSession {
   approvalDestination(request: { memberSessionId: string }): ApprovalDestination | null;
 }
 
+/** Process MCP owner operations for PluginManager content; credentials and connections stay private. */
+export interface McpService {
+  register(request: { plugin: string; dir: string; document: JsonValue }): Promise<null>;
+  withdraw(request: { plugin: string }): Promise<null>;
+  plugins(request: Record<string, never>): Promise<string[]>;
+  refusal(request: { plugin: string }): [string, string | null] | null;
+}
+
 /** The existing user override; null keeps the consumer's factory or built-in text. */
 export interface BasePromptSettingsHost {
   base(request: Record<string, never>): Promise<string | null>;
