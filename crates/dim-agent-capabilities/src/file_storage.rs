@@ -1957,7 +1957,10 @@ mod native {
     pub fn open_key(locks: &File, name: &OsStr) -> io::Result<File> {
         regular(open(locks, name, libc::O_RDWR, 0)?)
     }
-    #[allow(clippy::unnecessary_cast)]
+    #[expect(
+        clippy::unnecessary_cast,
+        reason = "`st_dev` and `st_ino` are 32-bit on macOS and 64-bit on Linux"
+    )]
     fn identity(stat: &libc::stat) -> Identity {
         (stat.st_dev as u64, stat.st_ino as u64)
     }
@@ -2037,7 +2040,6 @@ mod native {
     pub fn read_user_file(parent: &File, name: &OsString) -> io::Result<File> {
         let file = read_file(parent, name)?;
         let observed = file.metadata()?;
-        #[allow(clippy::unnecessary_cast)]
         if let Some(account_lock) = stat(parent, OsStr::new("auth.json.lock"))?
             && observed.dev() as libc::dev_t == account_lock.st_dev
             && observed.ino() == account_lock.st_ino
@@ -2104,7 +2106,6 @@ mod native {
                 "reserved storage lock",
             ));
         }
-        #[allow(clippy::unnecessary_cast)]
         let mode = stat.st_mode as u32 & 0o7777;
         Ok(Some(Permissions::from_mode(mode)))
     }

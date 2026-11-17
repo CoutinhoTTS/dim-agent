@@ -4,7 +4,10 @@
 //! (`packages/agent/src/tool/builtin/` and `packages/plugin/src/builtin/grep-glob/`).
 //! Workspace I/O runs on blocking threads with `std::fs`.
 
-#![allow(clippy::result_large_err)]
+#![expect(
+    clippy::result_large_err,
+    reason = "the `Err` variant is `ToolResult`, the model-facing failure reply; boxing it would change the tools' contract"
+)]
 
 mod codec;
 mod edit;
@@ -470,8 +473,11 @@ pub(crate) fn canonical_prefix(path: PathBuf) -> Result<PathBuf, String> {
 }
 
 /// Opens an existing target without following a final symlink.
+#[cfg_attr(
+    windows,
+    expect(unused_mut, reason = "only the unix branch sets the open flags")
+)]
 fn open_options() -> std::fs::OpenOptions {
-    #[allow(unused_mut)]
     let mut options = std::fs::OpenOptions::new();
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::custom_flags(&mut options, libc::O_NOFOLLOW);
@@ -485,7 +491,6 @@ pub(crate) struct NotRegular;
 /// without a writer would block it, uncancellably), and the type is checked
 /// on the opened handle, so a swap after a path check cannot slip through.
 fn open_regular(path: &Path) -> std::io::Result<Result<std::fs::File, NotRegular>> {
-    #[allow(unused_mut)]
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -760,7 +765,10 @@ impl Parent {
         // SAFETY: `fstatat` returned 0 (checked above), so it initialized
         // the struct.
         let stat = unsafe { stat.assume_init() };
-        #[allow(clippy::unnecessary_cast)]
+        #[expect(
+            clippy::unnecessary_cast,
+            reason = "`st_dev` and `st_ino` are 32-bit on macOS and 64-bit on Linux"
+        )]
         let (device, inode) = (stat.st_dev as u64, stat.st_ino as u64);
         stat.st_mode & libc::S_IFMT == libc::S_IFREG
             && (device, inode) == (metadata.dev(), metadata.ino())

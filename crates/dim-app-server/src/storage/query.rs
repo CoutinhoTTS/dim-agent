@@ -2678,7 +2678,6 @@ fn selected_properties(
         .collect()
 }
 
-#[cfg_attr(feature = "testing", allow(clippy::too_many_arguments))]
 fn kind_positions(
     connection: &Connection,
     scope: &TimelineReadScope,
@@ -2880,7 +2879,6 @@ fn kind_positions(
     }))
 }
 
-#[cfg_attr(feature = "testing", allow(clippy::too_many_arguments))]
 fn position_events(
     connection: &Connection,
     scope: &TimelineReadScope,
@@ -2958,7 +2956,6 @@ fn position_events(
     }))
 }
 
-#[cfg_attr(feature = "testing", allow(clippy::too_many_arguments))]
 pub(super) fn execute(
     connection: &mut Connection,
     scope: &TimelineReadScope,

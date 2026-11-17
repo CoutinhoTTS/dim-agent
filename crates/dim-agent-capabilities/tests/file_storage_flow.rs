@@ -1286,7 +1286,10 @@ fn assert_permissions(root: &std::path::Path) {
     );
 }
 #[cfg(windows)]
-#[allow(clippy::permissions_set_readonly_false)]
+#[expect(
+    clippy::permissions_set_readonly_false,
+    reason = "the test clears the read-only bit it just asserted"
+)]
 fn assert_permissions(root: &std::path::Path) {
     let path = root.join("auth.json");
     let mut permissions = fs::metadata(&path).unwrap().permissions();

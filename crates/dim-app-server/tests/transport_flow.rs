@@ -476,7 +476,6 @@ impl ToolReload {
     }
     /// The next restart keeps everything downstream unloaded until the
     /// returned gate is notified.
-    #[allow(dead_code)]
     fn hold_next(&self) -> Arc<tokio::sync::Notify> {
         let gate = Arc::new(tokio::sync::Notify::new());
         *self.1.lock().unwrap() = Some(gate.clone());

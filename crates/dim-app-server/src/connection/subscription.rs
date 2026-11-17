@@ -646,7 +646,10 @@ impl Connection {
 
     /// Branch states (v3: and model progress) until the Session channel
     /// ends, then `session.closed`.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one parameter per part of the follow loop's state"
+    )]
     async fn follow(
         &self,
         session: Session,
