@@ -38,6 +38,8 @@ mod modality;
 mod models;
 #[path = "cli_flow/permission.rs"]
 mod permission;
+#[path = "cli_flow/prompt_migration.rs"]
+mod prompt_migration;
 #[path = "cli_flow/prompt_suggestion.rs"]
 mod prompt_suggestion;
 #[path = "cli_flow/prompts.rs"]
@@ -66,10 +68,14 @@ mod startup;
 mod tasks;
 #[path = "cli_flow/title.rs"]
 mod title;
+#[path = "cli_flow/update_entry.rs"]
+mod update_entry;
 #[path = "cli_flow/windows.rs"]
 mod windows;
 #[path = "cli_flow/workflow.rs"]
 mod workflow;
+#[path = "cli_flow/worktrees.rs"]
+mod worktrees;
 
 #[path = "support/daemon.rs"]
 mod daemon_cleanup;
@@ -6669,12 +6675,12 @@ fn tui_skill_rows_come_from_the_catalog_and_complete_without_sending() {
         let mut terminal = Terminal::resume_tui(command);
         terminal.until("test / model");
 
-        // The enabled Skill is listed and its row completes the marker into
-        // the draft; no message is sent.
+        // The enabled Skill is listed and its row completes the reference into
+        // the draft, which draws the Skill's name; no message is sent.
         terminal.write(b"/comm");
         terminal.until("/skill:commit");
         terminal.raw(b"\r");
-        terminal.until_plain("/skill:commit ");
+        terminal.until_plain("/commit ");
         terminal.write(b"\x03");
 
         // A disabled or shadowed Skill is not offered: Tab completes nothing.
@@ -13178,8 +13184,9 @@ fn tui_default_theme_respects_background_and_saved_choice() {
     }
 }
 
-/// `dimcode daemon vacuum` rewrites an offline store through the sibling App
-/// Server and reports its size before and after (#600).
+/// `dimcode daemon vacuum` removes the content rows nothing references, rewrites
+/// an offline store through the sibling App Server, and reports its size before
+/// and after with what it removed (#600, #1697).
 #[test]
 fn daemon_vacuum_reclaims_an_offline_store() {
     use dim_app_server::storage::SqliteStorage;
@@ -13203,6 +13210,13 @@ fn daemon_vacuum_reclaims_an_offline_store() {
             )
             .unwrap();
     }
+    // A node content row nothing references: the maintenance entry removes it.
+    connection
+        .execute(
+            "INSERT INTO timeline_content(session_id, hash, kind, body) VALUES ('s', ?1, 'node', ?2)",
+            rusqlite::params!["unreferenced", json!({"parent":null,"message":{"role":"user","content":"gone"}}).to_string()],
+        )
+        .unwrap();
     connection
         .execute_batch("COMMIT; DELETE FROM timeline_events; PRAGMA wal_checkpoint(TRUNCATE)")
         .unwrap();
@@ -13216,6 +13230,18 @@ fn daemon_vacuum_reclaims_an_offline_store() {
     );
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.starts_with("Vacuumed "), "{stdout}");
+    assert!(
+        stdout.contains("Removed 1 unreachable content rows"),
+        "the command reports what it removed: {stdout}"
+    );
+    let connection = rusqlite::Connection::open(&database).unwrap();
+    let left: i64 = connection
+        .query_row("SELECT count(*) FROM timeline_content", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(left, 0, "the unreferenced row is gone");
+    drop(connection);
     let after = fs::metadata(&database).unwrap().len();
     assert!(
         after < before,
