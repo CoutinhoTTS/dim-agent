@@ -55744,6 +55744,10 @@
       "path": "char::is_ascii_alphanumeric"
     },
     {
+      "module": "dim_agent_capabilities::workspace_tools::files::write",
+      "path": "BTreeMap::new"
+    },
+    {
       "module": "dim_agent_runtime::assembly",
       "path": "F::Output"
     },
