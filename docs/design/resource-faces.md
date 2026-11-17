@@ -11,13 +11,15 @@ This is a design, not an implementation record. Every operation below is a targe
 
 ## 1. Scope
 
-Three faces, each a name whose public contract is data:
+Resource and state operations use these public data faces:
 
 | Face | Operations | Provided by | Issue |
 | --- | --- | --- | --- |
 | `execHost` | `start`, `wait`, `kill`, `settle`, `output`, `tail`, `removeOutputDirectory`, `shell`, `write`, `resize`, `info`, `confined`, `configured` | the process owner | #1295 |
 | `fsHost` | tool family: `resolve`, `read`, `write`, `edit`, `glob`, `grep`, `mentions`; storage family: `stat`, `readBytes`, `openRead`, `readAt`, `closeRead`, `lock`, `unlock`, `backup`, `createDirectory`, `replace`, `list`, `remove` | the file-operations owner | #1297 |
-| `store` | Timeline and Session-row repository operations, and the commit notification | the state owner | #1298 |
+| `store` | Session-row repository operations (§5.2) | the process state owner | #1298 |
+| `timelineStore` | Timeline operations and completion notifications (§5.1) | the Session state owner | #1298 |
+| `worktreeAssociations` | `associate` ([service faces](service-faces.md) §4.8) | the process state owner | #1298 |
 
 ```text
  control node                                        resource leaf (mounted per #1296)
@@ -25,15 +27,17 @@ Three faces, each a name whose public contract is data:
    exec, ShellSession      ── execHost ─ data ──────►  processes, PTY, output files
    settings, auth, Hooks   ── fsHost ─── data ──────►  the same face, answered locally
    Permission and Approval                            never asked, never decides
-   Timeline facts, task records, Session-file rows
-   Session state owner     ── store ──── data ──────►  the same face, answered locally
+   Session repository      ── store ───────────────►  the state owner, locally
+   Timeline facts          ── timelineStore ───────►  the same state owner, locally
+   Worktree associations   ── worktreeAssociations ►  the same state owner, locally
 ```
 
 **A face is a shape; the mount is a deployment.** `execHost` and `fsHost` are provided by the
 daemon that holds the process, the file or the session's own configuration — the control node's
 own plugins, or a resource leaf mounted per
-[#1296](https://github.com/arcships/dim/issues/1296). `store` is provided where the Session state
-is, always in the daemon that owns that Session
+[#1296](https://github.com/arcships/dim/issues/1296). `store`, `timelineStore` and
+`worktreeAssociations` are provided where the Session state is, always in the daemon that owns
+that Session
 ([#1298](https://github.com/arcships/dim/issues/1298)); it is the same face whether the rows live in
 SQLite or PostgreSQL. Whether a face is reachable over a link is decided by deployment, not by a
 classification on the name.
@@ -597,10 +601,12 @@ code the operation already uses, so one code vocabulary serves the local and the
 
 ## 5. `store` and `timelineStore`
 
-The Session state operations have two names on the daemon that owns the state: process
+The repository and Timeline operations use two names on the daemon that owns the state: process
 `store` provides the repository operations (§5.2), and Session-scoped `timelineStore` provides
 the Timeline operations and completion notifications below. Both use the existing state owner;
 the split follows §9(6), without changing Session placement or the storage engine.
+Worktree association uses the separate existing `worktreeAssociations` face
+([service faces](service-faces.md) §4.8), listed alongside them below.
 
 | Family | Operations |
 | --- | --- |
@@ -690,6 +696,11 @@ publication synchronous, then enqueues observation on rutis's existing ordered a
 bus. Release drains that backend's writes and callbacks; it does not wait for observers to finish.
 Foreign callers may observe and read, but synchronous append across a link is rejected as stated
 in §5.1.
+
+The Rust `TimelineStore` trait is the local binding of `timelineStore`, not a second contract
+(§6); the SQL engine remains the provider's implementation. The binding of `append` is
+synchronous admission, and the binding of `commits` is publish-callback registration,
+with the existing ordering and draining.
 
 ### 5.2 Session rows
 
@@ -809,11 +820,6 @@ original path argument and ownership exclusion.
 - One Session has one writer, and the store face carries no lease, takeover or second-writer
   operation: that rule belongs to the Session owner, above the store.
 
-The Rust `TimelineStore` trait and the SQL engine are the local binding and implementation of this
-face, not a second contract (§6). The binding of `append` is the synchronous admission and the
-binding of `commits` is the publish-callback registration: the same two things the runtime has
-today, with the same ordering and the same draining.
-
 ## 6. Provider, binding, and the owners that use each operation
 
 | Old name | Face | What the name is now |
@@ -882,7 +888,7 @@ instead of failing one call with `node_unavailable`.
 
 No other requirement is raised:
 
-- The store face keeps the existing Timeline admission and publish ordering; the only change is
+- The `timelineStore` face keeps the existing Timeline admission and publish ordering; the only change is
   that completion is delivered as a notification on the face instead of a Rust callback, which is
   a binding inside the provider, with no change to sequence, batches, interrupt handling or
   reload.
@@ -911,9 +917,9 @@ No other requirement is raised:
    the text is the file operation's own (line numbers, previews, image blocks). A command returns
    records, and the control side composes the tool result, because the task identity, the
    background policy and the output-path registration are its.
-6. **One `store` name or two.** The Timeline family and the Session-row family are one face with
-   two families here because one repository port serves both (#1298). If the implementation finds
-   two names clearer, the split is a naming decision on that PR, not a new contract.
+6. **Repository face names.** `store` names the Session-row repository operations, and
+   `timelineStore` names the Timeline operations and completion notifications. Both delegate
+   to the same state owner (#1298); the naming split changes neither placement nor ordering.
 7. **Root identity form.** The Session passes the opaque `rootIdentity` back to the provider.
    The provider owns its platform form and comparison.
 8. **Retained task records.** Settlement is explicit (§3.8). If a long-lived local provider wants a
@@ -931,9 +937,10 @@ registered output path reuses `output` after the provider releases its task reco
 `fsHost` adds no primitive file API and no per-file traversal: its storage family is the reads and
 leases the node's storage already offers, needed because a path's facts and its bytes cannot be
 read on a machine that does not hold the file; `resolve` is where resolution and the worktree
-probe belong. `store` publishes the repository operations the state owner already has, so the SQL
-engine and the `TimelineStore` trait stop being second contracts instead of gaining a wrapper;
-admission stays synchronous and completion keeps the callback's ordering as a notification.
+probe belong. `store` publishes the repository operations the state owner already has;
+`timelineStore` publishes its Timeline operations and completion notifications. The SQL engine
+remains private implementation, and `TimelineStore` is the native binding of `timelineStore`.
+Admission stays synchronous and completion keeps the callback's ordering as a notification.
 
 The `worktree` candidate carries the identity needed to recheck the mapping after the association
 commits. `retainedFrom` and `reset` let a caller resume a bounded capture after its cursor expires.
