@@ -4104,3 +4104,121 @@ fn acp_load_materializes_user_and_tool_file_images_in_order() {
     peer.close();
     daemon.join().unwrap();
 }
+
+#[test]
+fn acp_stdio_names_each_tool_call_with_its_object_kind_and_location() {
+    let home = Home::new();
+    let cwd = fs::canonicalize(&home.0).unwrap();
+    let daemon = home.daemon(move |wire| {
+        wire.hello(METHODS);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, json!({}));
+        let history = wire.read("session.history");
+        wire.reply(&history, json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+        let fact = |wire: &mut Wire, value: Value| {
+            wire.notice(
+                "session.event",
+                json!({"sessionId":"session","branchId":"main","event":value}),
+            )
+        };
+        let submit = wire.read("session.submit");
+        let input = event(
+            9,
+            "input",
+            "input",
+            "message",
+            json!({"submission_id":submit["params"]["submissionId"],"user":submit["params"]["user"],"mode":"queue"}),
+        );
+        wire.reply(&submit, json!({"event":input}));
+        fact(wire, input);
+        fact(wire, event(10, "start", "turn", "start", json!({"turn_id":"turn"})));
+        fact(wire, event(11, "consumed", "input", "consumed", json!({"input_id":"input"})));
+        // Dim announces a call as the model starts writing it, so the first
+        // message names only the tool; the arguments arrive with the next one.
+        fact(wire, event(12, "read-start", "step", "tool-use-start", json!({"turn_id":"turn","request_id":"model","call_id":"read","name":"read"})));
+        fact(wire, event(13, "read-use", "step", "tool-use", json!({"turn_id":"turn","request_id":"model","call":{"id":"read","name":"read","input":{"path":"src/parser.rs","offset":42,"limit":20}}})));
+        fact(wire, event(14, "edit", "step", "tool-use", json!({"turn_id":"turn","request_id":"model","call":{"id":"edit","name":"edit","input":{"path":"src/parser.rs","edits":[{"oldText":"let a = 1;","newText":"let a = 2;"}]}}})));
+        fact(wire, event(15, "write", "step", "tool-use", json!({"turn_id":"turn","request_id":"model","call":{"id":"write","name":"write","input":{"path":"notes.md","content":"new file\n"}}})));
+        fact(wire, event(16, "exec", "step", "tool-use", json!({"turn_id":"turn","request_id":"model","call":{"id":"exec","name":"exec","input":{"command":"cargo test --locked\n  -p dim-acp","title":"Run dim-acp tests"}}})));
+        fact(wire, event(17, "grep", "step", "tool-use", json!({"turn_id":"turn","request_id":"model","call":{"id":"grep","name":"grep","input":{"pattern":"Projection","path":"crates/dim-acp"}}})));
+        fact(wire, event(18, "fetch", "step", "tool-use", json!({"turn_id":"turn","request_id":"model","call":{"id":"fetch","name":"web_fetch","input":{"url":"https://example.com/doc"}}})));
+        fact(wire, event(19, "unknown", "step", "tool-use", json!({"turn_id":"turn","request_id":"model","call":{"id":"unknown","name":"image_understand","input":{"image":"x"}}})));
+        fact(wire, event(20, "huge", "step", "tool-use", json!({"turn_id":"turn","request_id":"model","call":{"id":"huge","name":"read","input":{"path":"src/parser.rs","offset":4294967296u64}}})));
+        fact(wire, event(21, "end", "turn", "end", json!({"turn_id":"turn","status":"completed","reason":"end_turn"})));
+        detached_eof(wire);
+    });
+    let mut peer = Peer::start(&home);
+    peer.initialize();
+    peer.send(2, "session/new", json!({"cwd":home.0,"mcpServers":[]}));
+    peer.response(2);
+    peer.send(
+        3,
+        "session/prompt",
+        json!({"sessionId":"session","prompt":[{"type":"text","text":"Read the parser"}]}),
+    );
+    let response = peer.response(3);
+    assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+    let updates: Vec<_> = peer
+        .updates
+        .iter()
+        .map(|frame| &frame["params"]["update"])
+        .filter(|update| update["toolCallId"].is_string())
+        .collect();
+    let id = |name: &str| json!(["main", "model", name]).to_string();
+    let last = |name: &str| {
+        updates
+            .iter()
+            .filter(|update| update["toolCallId"] == json!(id(name)))
+            .next_back()
+            .unwrap_or_else(|| panic!("no call for {name}: {updates:?}"))
+    };
+    let path = cwd.join("src/parser.rs").to_str().unwrap().to_owned();
+
+    let announced = updates
+        .iter()
+        .find(|update| update["toolCallId"] == json!(id("read")))
+        .unwrap();
+    assert_eq!(
+        announced["title"], "read",
+        "no call has its object yet: the arguments are still streaming"
+    );
+    let with_arguments = last("read");
+    assert_eq!(with_arguments["title"], "Read src/parser.rs:42-61");
+    assert_eq!(with_arguments["kind"], "read");
+    assert_eq!(
+        with_arguments["locations"],
+        json!([{"path":path,"line":42}]),
+        "a line range names the file at its first line"
+    );
+    assert_eq!(with_arguments["rawInput"]["offset"], 42);
+
+    assert_eq!(last("edit")["title"], "Edit src/parser.rs");
+    assert_eq!(last("edit")["kind"], "edit");
+    assert_eq!(last("edit")["locations"], json!([{"path":path}]));
+    assert_eq!(last("write")["title"], "Write notes.md");
+    assert_eq!(last("write")["kind"], "edit");
+    assert_eq!(last("exec")["title"], "Run dim-acp tests");
+    assert_eq!(last("exec")["kind"], "execute");
+    assert_eq!(
+        last("grep")["title"],
+        "Search Projection in crates/dim-acp",
+        "a search names its pattern and the place it searches"
+    );
+    assert_eq!(last("grep")["kind"], "search");
+    assert_eq!(
+        last("grep")["locations"],
+        json!([{"path":cwd.join("crates/dim-acp").to_str().unwrap()}])
+    );
+    assert_eq!(last("fetch")["title"], "https://example.com/doc");
+    assert_eq!(last("fetch")["kind"], "fetch");
+    assert_eq!(last("unknown")["title"], "image_understand");
+    assert_eq!(last("unknown")["kind"], "other");
+    assert_eq!(
+        last("huge")["locations"],
+        json!([{"path":path}]),
+        "a line ACP cannot carry as a u32 is left out, not truncated to another line"
+    );
+    peer.close();
+    daemon.join().unwrap();
+}

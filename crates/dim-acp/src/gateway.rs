@@ -1329,15 +1329,16 @@ impl Gateway {
                 if reply.cancellation().is_cancelled() {
                     return reply.respond_with_error(Error::request_cancelled());
                 }
-                if !matches!(self.sessions.get(&id), Some(Slot::Ready(_))) {
+                let Some(Slot::Ready(session)) = self.sessions.get(&id) else {
                     return reply.respond_with_error(Error::resource_not_found(Some(id)));
-                }
+                };
+                let cwd = session.cwd.clone();
                 match result {
                     Ok(page) => {
                         let next = page
                             .next(before, through)
                             .map_err(|_| Error::internal_error())?;
-                        let mut projection = Projection::default();
+                        let mut projection = Projection::new(cwd);
                         for event in page.events {
                             for update in projection.event(&decode_native(event)?) {
                                 self.update(&id, update).await?;
@@ -1377,8 +1378,8 @@ impl Gateway {
                                 && !waiter.reply.cancellation().is_cancelled()
                         });
                         let mut session = Session {
-                            cwd: loading.cwd,
-                            projection: Projection::default(),
+                            cwd: loading.cwd.clone(),
+                            projection: Projection::new(loading.cwd),
                             prompt: None,
                             command: None,
                             config: prepared.config,
@@ -1852,7 +1853,7 @@ impl Gateway {
                         prompt_turn,
                     }) => {
                         let previous_through = session.projection.through;
-                        session.projection = Projection::default();
+                        session.projection = Projection::new(session.cwd.clone());
                         session.questions = dim_client::question::Pending::default();
                         session.question_through.clear();
                         let title = prepared.title;

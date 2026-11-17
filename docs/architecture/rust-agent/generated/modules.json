@@ -8068,7 +8068,7 @@
       "to": "dim_acp::projection",
       "references": [
         "path Projection",
-        "path Projection::default",
+        "path Projection::new",
         "use crate::projection::Projection"
       ]
     },

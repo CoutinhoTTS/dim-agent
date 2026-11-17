@@ -7,7 +7,13 @@ use dim_agent_types::{
 };
 use dim_client::wire::{Event, EventContent, Progress};
 use serde_json::{Value, json};
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    path::{Path, PathBuf},
+};
+
+/// The longest title built from a model's own words before it is cut.
+const TITLE_MAX_CHARS: usize = 80;
 
 #[derive(Default)]
 struct TextCursor {
@@ -54,6 +60,7 @@ impl TextCursor {
 #[derive(Default)]
 pub(crate) struct Projection {
     pub(crate) through: u64,
+    cwd: PathBuf,
     pub(crate) turn: Option<String>,
     pub(crate) silent_inputs: HashSet<String>,
     inputs: HashMap<String, UserInput>,
@@ -275,7 +282,132 @@ fn call_message(call: acp::ToolCall) -> Value {
     message
 }
 
+/// A present, non-empty string field of a tool input.
+fn argument<'a>(input: &'a Value, field: &str) -> Option<&'a str> {
+    input
+        .get(field)
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+}
+
+fn number(input: &Value, field: &str) -> Option<u64> {
+    input.get(field).and_then(Value::as_u64)
+}
+
+/// The file an input names, as an absolute path. A home-relative path stays
+/// unnamed: the projection knows the session directory, not the home.
+fn absolute(cwd: &Path, path: &str) -> Option<PathBuf> {
+    if path.starts_with('~') {
+        return None;
+    }
+    let path = Path::new(path);
+    Some(if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
+    })
+}
+
+/// Model-supplied words as one line, cut when they run past a readable title.
+fn one_line(text: &str) -> String {
+    let joined = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut title: String = joined.chars().take(TITLE_MAX_CHARS).collect();
+    if title.chars().count() < joined.chars().count() {
+        title.push_str("...");
+    }
+    title
+}
+
+/// What a client shows for a tool call, derived from the tool and its input.
+struct Presentation {
+    title: String,
+    kind: acp::ToolKind,
+    locations: Vec<acp::ToolCallLocation>,
+}
+
+/// The title, kind and file locations a client shows for a tool call: every
+/// tool names the object it works on, whatever its own name is.
+fn presentation(cwd: &Path, name: &str, input: &Value) -> Presentation {
+    let path = argument(input, "path");
+    let file = |line: Option<u32>| {
+        path.and_then(|path| absolute(cwd, path))
+            .map(|path| vec![acp::ToolCallLocation::new(path).line(line)])
+            .unwrap_or_default()
+    };
+    let named = |verb: &str| match path {
+        Some(path) => format!("{verb} {path}"),
+        None => name.to_owned(),
+    };
+    let (title, kind, locations) = match name {
+        "read" => {
+            let offset = number(input, "offset");
+            let limit = number(input, "limit");
+            let mut title = named("Read");
+            if path.is_some() && (offset.is_some() || limit.is_some()) {
+                let start = offset.unwrap_or(1);
+                title.push_str(&format!(":{start}"));
+                if let Some(limit) = limit {
+                    title.push_str(&format!("-{}", start + limit.saturating_sub(1)));
+                }
+            }
+            (
+                title,
+                acp::ToolKind::Read,
+                file(offset.and_then(|offset| u32::try_from(offset).ok())),
+            )
+        }
+        "write" => (named("Write"), acp::ToolKind::Edit, file(None)),
+        "edit" => (named("Edit"), acp::ToolKind::Edit, file(None)),
+        "glob" | "grep" => (
+            match argument(input, "pattern") {
+                Some(pattern) => match path {
+                    Some(path) => format!("Search {pattern} in {path}"),
+                    None => format!("Search {pattern}"),
+                },
+                None => name.to_owned(),
+            },
+            acp::ToolKind::Search,
+            file(None),
+        ),
+        "web_search" => (
+            match argument(input, "query") {
+                Some(query) => format!("Search {query}"),
+                None => name.to_owned(),
+            },
+            acp::ToolKind::Search,
+            Vec::new(),
+        ),
+        "web_fetch" => (
+            argument(input, "url").unwrap_or(name).to_owned(),
+            acp::ToolKind::Fetch,
+            Vec::new(),
+        ),
+        "exec" | "execute" => (
+            argument(input, "title")
+                .or_else(|| argument(input, "command"))
+                .map(one_line)
+                .unwrap_or_else(|| name.to_owned()),
+            acp::ToolKind::Execute,
+            Vec::new(),
+        ),
+        _ => (name.to_owned(), acp::ToolKind::Other, Vec::new()),
+    };
+    Presentation {
+        title,
+        kind,
+        locations,
+    }
+}
+
 impl Projection {
+    /// `cwd` is the session directory a relative tool path resolves against.
+    pub(crate) fn new(cwd: impl Into<PathBuf>) -> Self {
+        Self {
+            cwd: cwd.into(),
+            ..Self::default()
+        }
+    }
+
     pub(crate) fn active_output(&mut self, output: &dim_agent_types::ActiveOutput) {
         for (cursors, count) in [
             (&mut self.texts, output.text_characters),
@@ -310,6 +442,9 @@ impl Projection {
     }
 
     /// Announces `id`, or updates it when it was already announced.
+    /// `Value::Null` is a call whose arguments are not known yet: Dim announces
+    /// a call as the model starts writing it, so the message that carries the
+    /// arguments is the one that can name the object.
     fn tool(
         &mut self,
         id: String,
@@ -319,29 +454,35 @@ impl Projection {
         fields: ToolFields,
         messages: &mut Messages,
     ) {
+        let presentation = presentation(&self.cwd, name, &input);
         let meta = messages.meta(fields.lody);
         if self.tools.insert(id.clone()) {
             messages.push_call(
-                acp::ToolCall::new(id, name)
+                acp::ToolCall::new(id, presentation.title)
                     .name(name)
+                    .kind(presentation.kind)
                     .status(status)
                     .content(fields.content.unwrap_or_default())
+                    .locations(presentation.locations)
                     .raw_input(input)
                     .raw_output(fields.raw_output)
                     .meta(meta),
             );
             return;
         }
+        let mut update = acp::ToolCallUpdateFields::new()
+            .status(status)
+            .raw_input(input.clone())
+            .content(fields.content)
+            .raw_output(fields.raw_output);
+        if !input.is_null() {
+            update = update.title(presentation.title).kind(presentation.kind);
+            if !presentation.locations.is_empty() {
+                update = update.locations(presentation.locations);
+            }
+        }
         messages.push(acp::SessionUpdate::ToolCallUpdate(
-            acp::ToolCallUpdate::new(
-                id,
-                acp::ToolCallUpdateFields::new()
-                    .status(status)
-                    .raw_input(input)
-                    .content(fields.content)
-                    .raw_output(fields.raw_output),
-            )
-            .meta(meta),
+            acp::ToolCallUpdate::new(id, update).meta(meta),
         ));
     }
 
