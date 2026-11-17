@@ -1093,6 +1093,7 @@
       "unexpandedMacros": [
         "format",
         "matches",
+        "serde_json::json",
         "tokio::select",
         "tracing::warn",
         "vec"
@@ -3740,6 +3741,15 @@
       "unexpandedMacros": []
     },
     {
+      "id": "dim_app_server::storage::prompt_migration",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::storage",
+      "file": "crates/dim-app-server/src/storage/prompt_migration.rs",
+      "unexpandedMacros": [
+        "format"
+      ]
+    },
+    {
       "id": "dim_app_server::storage::query",
       "crate": "dim_app_server",
       "parent": "dim_app_server::storage",
@@ -3753,6 +3763,16 @@
         "tracing::error",
         "unreachable",
         "vec"
+      ]
+    },
+    {
+      "id": "dim_app_server::storage::reclaim",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::storage",
+      "file": "crates/dim-app-server/src/storage/reclaim.rs",
+      "unexpandedMacros": [
+        "format",
+        "params"
       ]
     },
     {
@@ -9416,8 +9436,7 @@
       "from": "dim_agent_capabilities",
       "to": "dim_agent_capabilities::model_provider",
       "references": [
-        "mod model_provider",
-        "path model_provider::ModelProvider"
+        "mod model_provider"
       ]
     },
     {
@@ -14057,6 +14076,7 @@
         "path AgentError::BranchEnded",
         "path AgentError::Build",
         "path AgentError::Closed",
+        "path AgentError::Framework",
         "path AgentError::InvalidInput",
         "path AgentError::PublicationUnknown",
         "path AgentError::Reloading",
@@ -15275,6 +15295,7 @@
         "path HostFuture",
         "path LoadPrompt",
         "path PromptHost",
+        "path crate::host::ModelPortError::from",
         "use crate::host::HostError",
         "use crate::host::HostFuture",
         "use crate::host::LoadPrompt",
@@ -15311,6 +15332,16 @@
         "use crate::host_platform::OutputEncoding",
         "use crate::host_platform::ShellEdition",
         "use crate::host_platform::ShellStatus"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::prompt_sources",
+      "to": "dim_agent_capabilities::port_faces",
+      "references": [
+        "path crate::port_faces::Empty",
+        "path crate::port_faces::request",
+        "path crate::port_faces::serving",
+        "path crate::port_faces::unknown_method"
       ]
     },
     {
@@ -16611,7 +16642,18 @@
       "to": "dim_agent_capabilities::host",
       "references": [
         "path HostFuture",
+        "path crate::host::ModelPortError::from",
         "use crate::host::HostFuture"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::skills",
+      "to": "dim_agent_capabilities::port_faces",
+      "references": [
+        "path crate::port_faces::Empty",
+        "path crate::port_faces::request",
+        "path crate::port_faces::serving",
+        "path crate::port_faces::unknown_method"
       ]
     },
     {
@@ -17212,6 +17254,7 @@
         "path StrategyOutcome::Failed",
         "path StrategyOutcome::Skipped",
         "path add_usage",
+        "path crate::host::ModelPortError::from",
         "path reasoning_config"
       ]
     },
@@ -17222,6 +17265,16 @@
         "path crate::model_provider::RetryObserver",
         "path invoke_with_recovery",
         "use crate::model_provider::invoke_with_recovery"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::summary_strategy",
+      "to": "dim_agent_capabilities::port_faces",
+      "references": [
+        "path crate::port_faces::Empty",
+        "path crate::port_faces::request",
+        "path crate::port_faces::serving",
+        "path crate::port_faces::unknown_method"
       ]
     },
     {
@@ -23435,13 +23488,6 @@
     },
     {
       "from": "dim_app_server",
-      "to": "dim_agent_capabilities::prompt_sources",
-      "references": [
-        "path dim_agent_capabilities::prompt_sources::BasePromptSettingsHost"
-      ]
-    },
-    {
-      "from": "dim_app_server",
       "to": "dim_agent_capabilities::prompt_suggestion",
       "references": [
         "path dim_agent_capabilities::prompt_suggestion::PromptSuggestionSettingsHost"
@@ -23453,20 +23499,6 @@
       "references": [
         "path dim_agent_capabilities::session_broadcast::SessionNotice",
         "path dim_agent_capabilities::session_broadcast::notify"
-      ]
-    },
-    {
-      "from": "dim_app_server",
-      "to": "dim_agent_capabilities::skills",
-      "references": [
-        "path dim_agent_capabilities::skills::SkillsInstructionsSettingsHost"
-      ]
-    },
-    {
-      "from": "dim_app_server",
-      "to": "dim_agent_capabilities::summary_strategy",
-      "references": [
-        "path dim_agent_capabilities::summary_strategy::SummaryPromptSettingsHost"
       ]
     },
     {
@@ -23521,8 +23553,7 @@
       "to": "dim_agent_runtime::names",
       "references": [
         "path dim_agent_runtime::Names::copy",
-        "path dim_agent_runtime::names::name_of",
-        "path dim_agent_runtime::names::register"
+        "path dim_agent_runtime::names::name_of"
       ]
     },
     {
@@ -25348,6 +25379,13 @@
       "to": "dim_app_server::storage::export",
       "references": [
         "path crate::storage::export_timeline"
+      ]
+    },
+    {
+      "from": "dim_app_server::cli",
+      "to": "dim_app_server::storage::prompt_migration",
+      "references": [
+        "path crate::storage::migrate_prompt_references"
       ]
     },
     {
@@ -32882,11 +32920,28 @@
     },
     {
       "from": "dim_app_server::storage",
+      "to": "dim_app_server::storage::prompt_migration",
+      "references": [
+        "mod prompt_migration",
+        "use prompt_migration::Migrated",
+        "use prompt_migration::migrate_prompt_references"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage",
       "to": "dim_app_server::storage::query",
       "references": [
         "mod query",
         "use query::QueryStatementStats",
         "use query::sqlite_memory"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage",
+      "to": "dim_app_server::storage::reclaim",
+      "references": [
+        "mod reclaim",
+        "use reclaim::Reclaimed"
       ]
     },
     {
@@ -33685,6 +33740,14 @@
     },
     {
       "from": "dim_app_server::storage::image_upgrade",
+      "to": "dim_app_server::storage::reclaim",
+      "references": [
+        "path super::reclaim::remove",
+        "path super::reclaim::replaced"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::image_upgrade",
       "to": "dim_app_server::storage::sqlite",
       "references": [
         "path error",
@@ -33923,6 +33986,62 @@
       ]
     },
     {
+      "from": "dim_app_server::storage::prompt_migration",
+      "to": "dim_agent_capabilities::prompt",
+      "references": [
+        "path dim_agent_capabilities::prompt::migrate_prompt_references"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::prompt_migration",
+      "to": "dim_agent_runtime::core::timeline",
+      "references": [
+        "path Timeline::restore",
+        "path dim_agent_runtime::core::close_timeline",
+        "use dim_agent_runtime::Timeline"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::prompt_migration",
+      "to": "dim_agent_runtime::error",
+      "references": [
+        "path AgentError",
+        "path AgentError::Storage",
+        "path AgentError::UnknownBranch",
+        "path Result",
+        "use dim_agent_runtime::AgentError",
+        "use dim_agent_runtime::Result"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::prompt_migration",
+      "to": "dim_agent_runtime::timeline_store",
+      "references": [
+        "path TimelineKey",
+        "use dim_agent_runtime::TimelineKey",
+        "use dim_agent_runtime::TimelineStore"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::prompt_migration",
+      "to": "dim_app_server::storage::sqlite",
+      "references": [
+        "path SqliteStorage::open",
+        "path sqlite::is_current_format",
+        "use super::SqliteStorage",
+        "use super::sqlite"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::prompt_migration",
+      "to": "dim_app_server::storage::timeline",
+      "references": [
+        "path SqliteTimelineStore",
+        "path SqliteTimelineStore::new",
+        "use super::SqliteTimelineStore"
+      ]
+    },
+    {
       "from": "dim_app_server::storage::query",
       "to": "dim_agent_runtime::error",
       "references": [
@@ -34072,6 +34191,30 @@
       ]
     },
     {
+      "from": "dim_app_server::storage::reclaim",
+      "to": "dim_agent_runtime::error",
+      "references": [
+        "path Result",
+        "use dim_agent_runtime::Result"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::reclaim",
+      "to": "dim_app_server::storage::sqlite",
+      "references": [
+        "path error",
+        "use super::sqlite::error"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::reclaim",
+      "to": "dim_app_server::storage::timeline",
+      "references": [
+        "path Row",
+        "use super::timeline::Row"
+      ]
+    },
+    {
       "from": "dim_app_server::storage::sqlite",
       "to": "dim_agent_runtime::assembly",
       "references": [
@@ -34144,6 +34287,15 @@
       "to": "dim_app_server::storage::query",
       "references": [
         "path super::query::register"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::sqlite",
+      "to": "dim_app_server::storage::reclaim",
+      "references": [
+        "path Reclaimed",
+        "path super::reclaim::obsolete_content",
+        "use super::reclaim::Reclaimed"
       ]
     },
     {
@@ -49766,6 +49918,7 @@
       "from": "dim_cli::ui::tui",
       "to": "dim_cli::update",
       "references": [
+        "path crate::update::command",
         "path crate::update::skip"
       ]
     },

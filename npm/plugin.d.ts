@@ -577,6 +577,17 @@ export interface McpService {
   refusal(request: { plugin: string }): [string, string | null] | null;
 }
 
+/** The existing user override; null keeps the consumer's factory or built-in text. */
+export interface BasePromptSettingsHost {
+  base(request: Record<string, never>): Promise<string | null>;
+}
+export interface SkillsInstructionsSettingsHost {
+  instructions(request: Record<string, never>): Promise<string | null>;
+}
+export interface SummaryPromptSettingsHost {
+  systemPrompt(request: Record<string, never>): Promise<string | null>;
+}
+
 /** The ToolRegistry owner's read-only source status view. */
 export interface ToolSourceRejection { version: string; reason: string }
 export interface ToolSourceStatus { adopted: string | null; rejected: ToolSourceRejection | null }
