@@ -110,6 +110,19 @@ export interface AuxiliaryModel {
   /** Resolving or rejecting cancelled cancels and joins the original model call. */
   complete(call: { model: ModelId; request: AuxiliaryRequest }, cancelled?: () => Promise<void>): Promise<AuxiliaryReply>;
 }
+
+export type ModalityTargetReply =
+  { status: 'resolved'; target: ModelId } |
+  { status: 'unavailable'; reasons: { dimension: string; detail: string }[] };
+export interface ModalityTargetError extends Error {
+  code: 'invalid_params' | 'modality_unknown_operation' | 'modality_failed' |
+    'operation_interrupted' | 'service_reloading';
+}
+/** Process service `modalityTargets`; current operation selection, without credentials or execution. */
+export interface ModalityTargets {
+  resolve(request: { category: string; operation: string; model?: ModelId | null }): Promise<ModalityTargetReply>;
+}
+
 export type PermissionPreset = 'read-only' | 'workspace-write' | 'full-access';
 /** Session command-rule read; the owner checks the current user source on each call. */
 export type CommandRule = { command: string; match: 'exact' | 'prefix'; decision: 'allow' | 'deny' }

@@ -65,7 +65,10 @@ impl ProviderService {
             .await?;
         let (mut url, headers) = request(record, credential.as_ref())?;
         let client = if record.network.proxy.is_none() && record.network.timeout_ms.is_none() {
-            self.client.clone()
+            self.client
+                .get_or_try_init(|| async { client(&ModelNetwork::default()) })
+                .await?
+                .clone()
         } else {
             client(&record.network)?
         };
@@ -173,7 +176,7 @@ impl ProviderService {
                 let id = provider_id.clone();
                 let mut record = owner
                     .db
-                    .run_read(move |db| read_static(db, &id))
+                    .run_read(move |db| read_stored_static(db, &id))
                     .await
                     .map_err(ProviderError::from)?
                     .ok_or(ProviderError::NotFound)?;
@@ -194,7 +197,7 @@ impl ProviderService {
                     .run(move |db| {
                         Ok((|| -> Result<_, ProviderError> {
                             let tx = db.transaction()?;
-                            let current = read_static(&tx, &provider_id)?
+                            let current = read_stored_static(&tx, &provider_id)?
                                 .map(serde_json::to_value)
                                 .transpose()?;
                             if current.as_ref() != Some(&expected) {
@@ -202,13 +205,11 @@ impl ProviderService {
                                     "Provider version or admitted configuration changed".into(),
                                 ));
                             }
-                            tx.execute(
-                                "UPDATE providers SET version=?2,record=?3 WHERE provider_id=?1",
-                                params![
-                                    provider_id,
-                                    record.version,
-                                    serde_json::to_string(&record)?
-                                ],
+                            persistence::write(
+                                &tx,
+                                &provider_id,
+                                record.version,
+                                &serde_json::to_string(&record)?,
                             )?;
                             tx.commit()?;
                             Ok(static_catalog(&bundled, &provider_id, &record, true))
