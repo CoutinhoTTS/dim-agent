@@ -120,7 +120,7 @@ impl rutis_bridge::session::HostDispatch for CollaborationSession {
         let invalid = |message: String| {
             rutis_bridge::exports::failure("collaborationSession", "invalid_request", message, None)
         };
-        let Value::Array(args) = args.json()? else {
+        let Value::Array(args) = args.json().map_err(|error| invalid(error.to_string()))? else {
             return Err(invalid("expected one request object".into()));
         };
         let [request] = <[Value; 1]>::try_from(args)
