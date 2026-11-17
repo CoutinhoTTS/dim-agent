@@ -3055,6 +3055,61 @@ fn acp_stdio_sends_context_compaction_as_the_protocol_entity_only_when_declared(
 }
 
 #[test]
+fn acp_stdio_initialize_names_every_capability_it_reports() {
+    for mcp in [false, true] {
+        let home = Home::new();
+        let daemon = home.daemon(move |wire| {
+            let mut methods = METHODS.to_vec();
+            if mcp {
+                methods.push("mcp.temporary.capabilities");
+            }
+            wire.hello(&methods);
+            detached_eof(wire);
+        });
+        let mut peer = Peer::start(&home);
+        peer.send(
+            1,
+            "initialize",
+            json!({"protocolVersion":1,"clientCapabilities":{}}),
+        );
+        let result = peer.response(1)["result"].clone();
+        let version = result["agentInfo"]["version"].as_str().unwrap().to_owned();
+        assert!(
+            version.starts_with(env!("CARGO_PKG_VERSION")),
+            "the build reports its own version: {version}"
+        );
+        // Every field the protocol crate serializes into this result, including
+        // the ones the old literals omitted because they hold a default value:
+        // `promptCapabilities.audio`, `auth`, and the MCP pair when MCP is
+        // unavailable.
+        assert_eq!(
+            result,
+            json!({
+                "protocolVersion":1,
+                "agentInfo":{"name":"dimcode","version":version},
+                "authMethods":[],
+                "agentCapabilities":{
+                    "loadSession":true,
+                    "promptCapabilities":{"image":true,"audio":false,"embeddedContext":true},
+                    "mcpCapabilities":{"http":mcp,"sse":mcp},
+                    "sessionCapabilities":{"resume":{},"list":{},"close":{}},
+                    "auth":{},
+                    "_meta":{"lody":{
+                        "sessionHistory":{"version":2},
+                        "compaction":{"version":1},
+                        "tasks":{"version":1,"background":true},
+                        "subagentEvents":{"version":1}
+                    }}
+                }
+            }),
+            "mcp={mcp}: the whole initialize result, field presence included"
+        );
+        peer.close();
+        daemon.join().unwrap();
+    }
+}
+
+#[test]
 fn acp_stdio_lody_startup_config_is_applied_before_creation_without_shared_writes() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
