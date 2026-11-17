@@ -20,6 +20,7 @@ import tempfile
 from layout import select, unique_functions, validate_sizes
 import pe
 from samples import read as read_sample
+from toolchain import rustc as rustc_command
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent.parent
@@ -229,21 +230,26 @@ def main():
     with tempfile.TemporaryDirectory(prefix="dim-layout-") as temporary:
         work = Path(temporary)
         wrapper = work / "linker.exe"
+        rustc = rustc_command()
         host_linker = msvc_linker(host)
         if not host_linker:
             parser.error("the MSVC link.exe is required to compile the capture wrapper")
         subprocess.run(
-            ["rustc", "--edition", "2021", "-O", "-Clinker=" + host_linker,
+            [rustc, "--edition", "2021", "-O", "-Clinker=" + host_linker,
              str(HERE / "link_capture.rs"), "-o", str(wrapper)],
             check=True)
         env = dict(
             os.environ,
+            RUSTC=rustc,
             DIM_LAYOUT_CAPTURE=str(work),
             DIM_LAYOUT_LINKER=linker,
             DIM_LAYOUT_PYTHON=sys.executable,
             DIM_LAYOUT_SCRIPT=str(HERE / "build_windows.py"),
             **{"CARGO_TARGET_" + host.upper().replace("-", "_") + "_LINKER": host_linker},
         )
+        if host == "aarch64-pc-windows-msvc":
+            env.setdefault("CC_aarch64_pc_windows_msvc", "clang-cl")
+            env.setdefault("CXX_aarch64_pc_windows_msvc", "clang-cl")
         command = [
             "cargo", "rustc", "--release", "--locked", "-p", "dimcode", "--bin", "dimcode",
             "--jobs", str(args.jobs), "--target", args.target or host,
@@ -251,6 +257,7 @@ def main():
         command.extend(["--", f"-Clinker={wrapper}"])
         subprocess.run(command, cwd=REPO, env=env, check=True)
         record = json.loads((work / "link.json").read_text())
+        record["rustc"] = subprocess.check_output([rustc, "-vV"], cwd=REPO, text=True)
         output.mkdir(parents=True)
         baseline = output / "baseline.exe"
         baseline_map = output / "baseline.map"
@@ -291,7 +298,7 @@ def main():
                 ["git", "rev-parse", "HEAD"], cwd=REPO, text=True).strip(),
             "dirty": bool(subprocess.check_output(
                 ["git", "status", "--porcelain"], cwd=REPO)),
-            "rustc": subprocess.check_output(["rustc", "-vV"], text=True),
+            "rustc": record["rustc"],
             "baselineSha256": digest(baseline),
             "candidateSha256": digest(candidate),
             "orderSha256": digest(order_file),

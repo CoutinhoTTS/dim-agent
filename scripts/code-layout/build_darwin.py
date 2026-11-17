@@ -21,6 +21,7 @@ import tempfile
 from layout import select, unique_functions, validate_sizes
 import macho
 from samples import read as read_sample
+from toolchain import rustc as rustc_command
 from train_darwin import measure, train
 
 HERE = Path(__file__).resolve().parent
@@ -33,6 +34,7 @@ def digest(path):
 
 
 def cargo_link(work, compiler, jobs, target=None):
+    rustc = rustc_command()
     wrapper = work / "linker"
     wrapper.write_text(
         "#!/bin/sh\nexec "
@@ -40,14 +42,16 @@ def cargo_link(work, compiler, jobs, target=None):
         + ' "$@"\n'
     )
     wrapper.chmod(0o700)
-    env = dict(os.environ, DIM_LAYOUT_CAPTURE=str(work), DIM_LAYOUT_CC=compiler)
+    env = dict(os.environ, RUSTC=rustc, DIM_LAYOUT_CAPTURE=str(work), DIM_LAYOUT_CC=compiler)
     command = [
         "cargo", "rustc", "--release", "--locked", "-p", "dimcode", "--bin", "dimcode",
         "--jobs", str(jobs), "--target", target or TARGETS[platform.machine()],
     ]
     command.extend(["--", f"-Clinker={wrapper}"])
     subprocess.run(command, cwd=REPO, env=env, check=True)
-    return json.loads((work / "link.json").read_text())
+    record = json.loads((work / "link.json").read_text())
+    record["rustc"] = subprocess.check_output([rustc, "-vV"], cwd=REPO, text=True)
+    return record
 
 
 def capture(arguments):
@@ -220,7 +224,7 @@ def main():
                 ["git", "rev-parse", "HEAD"], cwd=REPO, text=True).strip(),
             "dirty": bool(subprocess.check_output(
                 ["git", "status", "--porcelain"], cwd=REPO)),
-            "rustc": subprocess.check_output(["rustc", "-vV"], text=True),
+            "rustc": record["rustc"],
             "baselineSha256": digest(baseline),
             "candidateSha256": digest(candidate),
             "orderSha256": digest(order_file),

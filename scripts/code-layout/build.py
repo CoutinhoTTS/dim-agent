@@ -21,6 +21,8 @@ import subprocess
 import sys
 import tempfile
 
+from toolchain import rustc as rustc_command
+
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent.parent
 
@@ -30,20 +32,23 @@ def digest(path):
 
 
 def cargo_link(work, compiler, jobs, target=None):
-    sysroot = Path(subprocess.check_output(["rustc", "--print", "sysroot"], cwd=REPO, text=True).strip())
+    rustc = rustc_command()
+    sysroot = Path(subprocess.check_output([rustc, "--print", "sysroot"], cwd=REPO, text=True).strip())
     linker_dir = sysroot / "lib/rustlib/x86_64-unknown-linux-gnu/bin/gcc-ld"
     if not (linker_dir / "ld.lld").is_file():
         raise RuntimeError(f"the selected Rust toolchain has no LLD at {linker_dir / 'ld.lld'}")
     wrapper = work / "linker"
     wrapper.write_text("#!/bin/sh\nexec " + shlex.join([sys.executable, str(HERE / "build.py"), "--capture"]) + ' "$@"\n')
     wrapper.chmod(0o700)
-    env = dict(os.environ, DIM_LAYOUT_CAPTURE=str(work), DIM_LAYOUT_CC=compiler)
+    env = dict(os.environ, RUSTC=rustc, DIM_LAYOUT_CAPTURE=str(work), DIM_LAYOUT_CC=compiler)
     command = ["cargo", "rustc", "--release", "--locked", "-p", "dimcode", "--bin", "dimcode", "--jobs", str(jobs)]
     if target:
         command.extend(["--target", target])
     command.extend(["--", f"-Clinker={wrapper}", f"-Clink-arg=-B{linker_dir}", "-Clink-arg=-fuse-ld=lld"])
     subprocess.run(command, cwd=REPO, env=env, check=True)
-    return json.loads((work / "link.json").read_text())
+    record = json.loads((work / "link.json").read_text())
+    record["rustc"] = subprocess.check_output([rustc, "-vV"], cwd=REPO, text=True)
+    return record
 
 
 def capture(arguments):
@@ -237,7 +242,7 @@ def main():
         train(candidate, work / "acceptance")
         manifest = {"source": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPO, text=True).strip(),
                     "dirty": bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=REPO)),
-                    "rustc": subprocess.check_output(["rustc", "-vV"], text=True),
+                    "rustc": record["rustc"],
                     "baselineSha256": digest(baseline), "candidateSha256": digest(candidate),
                     "orderSha256": digest(order_file), "inputs": record["inputs"],
                     "training": measurement}

@@ -52,8 +52,14 @@ Python 3.9 or later, `cc`, the pinned Rust toolchain's LLD and readable
 `/proc/<child>/smaps` / writable `clear_refs` are required. The tool selects
 that LLD explicitly for Cargo's original executable link; every replay retains
 the captured linker selection. A missing toolchain linker fails before the
-product build. An optional `--target x86_64-unknown-linux-gnu` selects Cargo's
-explicit native target path.
+product build. It selects `RUSTC`, then `CARGO_BUILD_RUSTC`, then `rustc` from
+PATH, and passes that selection to Cargo. Use one of those environment variables
+to override the compiler for this command; Cargo configuration's `build.rustc`
+is superseded. The compiler supplies both the LLD sysroot and the recorded
+version. The tool builds `dimcode` with the repository's release profile and
+preserves the build environment, including account build settings. An optional
+`--target x86_64-unknown-linux-gnu` selects Cargo's explicit native target path.
+Other targets and cross compilation are not supported by this command.
 
 The build captures the final native linker inputs, reproduces Cargo's binary
 byte for byte, and trains only that binary. A temporary preload probe prefaults
@@ -67,7 +73,8 @@ Whole functions intersecting referenced pages are grouped by shared usage:
 startup/shared functions first, then TUI, then conversation-only functions;
 original address order is retained within each group. Functions not selected
 retain the linker's default ordering. A diagnostic link identifies names LLD
-resolves to shared or discarded definitions, including duplicate C-local names.
+resolves to shared or discarded definitions. Duplicate local names are not
+independently detected.
 Only reported names are removed from the order; a strict relink runs when any
 were removed. Any other diagnostic fails the build. This is page-access
 profiling, including neighboring functions on each page, rather than an
