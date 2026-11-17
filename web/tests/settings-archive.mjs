@@ -123,6 +123,7 @@ test("archived headings prefer the stored title, then preview, with unnamed Sess
     "Investigate cache invalidation", "Review deployment changes", "Untitled session",
   ])
   assert.match(text(card(root, "Untitled session")), /empty-session/)
+  assert.doesNotMatch(text(card(root, "Review deployment changes")), /preview-only/, "a preview names the row, so the ID line stays hidden")
   search(root).props["onUpdate:modelValue"]("cache invalidation")
   await flush()
   assert.deepEqual(all(root).filter(element => element.type === "h3").map(text), ["Investigate cache invalidation"])
