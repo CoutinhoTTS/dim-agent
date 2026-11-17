@@ -66,7 +66,7 @@ jobs:
           arch: ${{ runner.arch == 'ARM64' && 'arm64' || 'amd64' }}
       - name: Locate lld-link
         if: runner.os == 'Windows'
-        shell: pwsh
+        shell: powershell
         run: |
           $linker = Get-Command lld-link -ErrorAction SilentlyContinue
           if (!$linker) {
@@ -122,7 +122,7 @@ jobs:
           arch: ${{ runner.arch == 'ARM64' && 'arm64' || 'amd64' }}
       - name: Locate lld-link
         if: runner.os == 'Windows'
-        shell: pwsh
+        shell: powershell
         run: |
           $linker = Get-Command lld-link -ErrorAction SilentlyContinue
           if (!$linker) {
