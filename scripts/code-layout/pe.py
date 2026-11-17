@@ -72,7 +72,7 @@ def symbols(map_path):
                             chunk_start + chunk_size))
         chunk_symbols = []
 
-    for line in map_path.read_text(encoding="utf-8").splitlines():
+    for line in map_path.read_text(encoding="utf-8", errors="surrogateescape").splitlines():
         match = _ENTRY.fullmatch(line)
         if not match:
             continue

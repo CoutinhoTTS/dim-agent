@@ -6,6 +6,94 @@ import test from 'node:test';
 const directory=fileURLToPath(new URL('./code-layout/',import.meta.url));
 const python=process.platform==='win32'?'python':'python3';
 
+test('native capture preserves the first link independently of saved inputs', {timeout:30_000},()=>{
+  const result=spawnSync(python,['-',directory],{encoding:'utf8',timeout:25_000,input:String.raw`
+import json
+import os
+from pathlib import Path
+import shutil
+import sys
+import tempfile
+from unittest.mock import patch
+sys.path.insert(0, sys.argv[1])
+import build_darwin
+import build_windows
+
+with tempfile.TemporaryDirectory(prefix='dim-layout-capture-') as temporary:
+    root = Path(temporary)
+    tool = root/'link.py'
+    tool.write_text('''from pathlib import Path
+import sys
+args = sys.argv[1:]
+if args[0].startswith('@'):
+    args = [line.removeprefix('"').removesuffix('"') for line in Path(args[0][1:]).read_text().splitlines()]
+source = Path(next(arg for arg in args if arg.endswith('.obj')))
+payload = str(source).encode() + b'\\n' + str(source.stat().st_mtime_ns).encode() + b'\\n' + source.read_bytes()
+if '-o' in args:
+    output = Path(args[args.index('-o')+1])
+    map_path = Path(next(arg for arg in args if arg.startswith('-Wl,-map,')).split(',',2)[2])
+else:
+    output = Path(next(arg[5:] for arg in args if arg.startswith('/OUT:')))
+    map_path = Path(next(arg[8:] for arg in args if arg.startswith('/lldmap:')))
+    Path(next(arg[5:] for arg in args if arg.startswith('/PDB:'))).write_bytes(payload)
+map_path.write_text('fixture map')
+output.write_bytes(payload)
+''')
+    for module in (build_darwin, build_windows):
+        for corrupt in (False, True):
+            case = root/(module.__name__+str(corrupt)); case.mkdir()
+            work = case/'work'; work.mkdir()
+            output = case/'out'; output.mkdir()
+            source = case/'rust-temp/input.obj'; source.parent.mkdir()
+            source.write_bytes(b'ORIGINAL INPUT')
+            os.utime(source, ns=(1000000000000000000, 1000000000000000000))
+            cargo = case/'cargo'; pdb = case/'cargo.pdb'
+            environment = dict(os.environ, DIM_LAYOUT_CAPTURE=str(work),
+                DIM_LAYOUT_CC=sys.executable, DIM_LAYOUT_LINKER=json.dumps([sys.executable,str(tool)]),
+                DIM_LAYOUT_STRIP='none', DIM_LAYOUT_DYLD_LIBRARY_PATH='')
+            source_argument = str(source) if os.name == 'nt' else os.path.relpath(source)
+            arguments = ([str(tool),source_argument,'-o',str(cargo)] if module == build_darwin
+                         else [source_argument,'/OUT:'+str(cargo),'/PDB:'+str(pdb)])
+            copyfile = shutil.copyfile
+            def save_input(src, dst, **kwargs):
+                result = copyfile(src, dst, **kwargs)
+                if corrupt and Path(src).samefile(source):
+                    Path(dst).write_bytes(b'WRONG SAVED INPUT')
+                return result
+            with patch.dict(os.environ, environment), patch.object(shutil, 'copyfile', side_effect=save_input):
+                module.capture(arguments)
+            original = cargo.read_bytes()
+            assert original.endswith(b'ORIGINAL INPUT'), 'the first link must use original inputs, even if capture is wrong'
+            original_pdb = pdb.read_bytes() if pdb.exists() else None
+            record = json.loads((work/'link.json').read_text())
+            shutil.rmtree(source.parent)
+            try:
+                baseline, _ = module.replay_baseline(record, work, output)
+            except RuntimeError as error:
+                assert corrupt and 'did not reproduce' in str(error), error
+                assert (output/('baseline-replay' if module == build_darwin else 'baseline-replay.exe')).read_bytes().endswith(b'WRONG SAVED INPUT')
+            else:
+                assert not corrupt, 'deterministically wrong capture must fail baseline validation'
+                assert baseline.read_bytes() == original
+            assert cargo.read_bytes() == original, 'baseline validation must restore the original executable'
+            if original_pdb is not None:
+                assert pdb.read_bytes() == original_pdb
+            assert not source.parent.exists(), 'replay must remove recreated Rust temporary inputs and directories'
+            if not corrupt:
+                source.parent.mkdir(); source.write_bytes(b'NEW BUILD INPUT')
+                try:
+                    module.replay_baseline(record, work, output)
+                except RuntimeError as error:
+                    assert 'input changed' in str(error), error
+                else:
+                    raise AssertionError('replay accepted an input from another build')
+                assert source.read_bytes() == b'NEW BUILD INPUT', 'replay must not overwrite existing input files'
+                assert cargo.read_bytes() == original
+`});
+  assert.equal(result.error,undefined);
+  assert.equal(result.status,0,result.stdout+result.stderr);
+});
+
 test('interrupted native replay restores Cargo files after stopping its tools', {timeout:60_000},()=>{
   const result=spawnSync(python,['-',directory],{encoding:'utf8',timeout:55_000,input:String.raw`
 import os
@@ -58,7 +146,9 @@ def cancel():
         os.kill(os.getpid(), number)
 threading.Thread(target=cancel, daemon=True).start()
 record = {'cwd':str(root), 'path':os.environ['PATH'], 'output':str(root/'cargo'),
-          'strip':'none', 'linkEnv':{}, 'pdb':str(root/'cargo.pdb')}
+          'strip':'none', 'linkEnv':{}, 'pdb':str(root/'cargo.pdb'),
+          'inputs':[{'source':str(root/'rust-temp/input.obj'), 'file':str(root/'work/input.obj'),
+                     'sha256':__import__('hashlib').sha256(b'INPUT').hexdigest()}]}
 if mode == 'windows':
     record.update(compiler=[sys.executable, sys.argv[4]], arguments=['/OUT:'+str(root/'cargo')])
     replay = build_windows.replay_baseline
@@ -92,6 +182,7 @@ raise AssertionError('interrupted replay returned a baseline')
             case = root/(mode+str(had_pdb)+str(number)); case.mkdir()
             (case/'work').mkdir(); (case/'out').mkdir()
             (case/'work/baseline.map').write_text('fixture map')
+            (case/'work/input.obj').write_bytes(b'INPUT')
             (case/'cargo').write_bytes(b'ORIGINAL')
             if had_pdb:
                 (case/'cargo.pdb').write_bytes(b'ORIGINAL PDB')
@@ -106,6 +197,7 @@ raise AssertionError('interrupted replay returned a baseline')
             assert process.returncode == 128+number, (mode, process.returncode, process.stderr)
             time.sleep(1.1)
             assert (case/'cargo').read_bytes() == b'ORIGINAL', mode
+            assert not (case/'rust-temp').exists(), 'interrupted replay must remove the temporary inputs it restored'
             if mode == 'windows':
                 if had_pdb:
                     assert (case/'cargo.pdb').read_bytes() == b'ORIGINAL PDB'

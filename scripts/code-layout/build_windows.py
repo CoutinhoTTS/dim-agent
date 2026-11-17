@@ -19,7 +19,7 @@ import tempfile
 
 from layout import select, unique_functions, validate_sizes
 import pe
-from replay import preserve_cargo, run_link
+from replay import original_inputs, preserve_cargo, run_link
 from samples import read as read_sample
 from toolchain import rustc as rustc_command
 
@@ -91,8 +91,10 @@ def quote(argument):
 
 def relink(record, output, order_file=None, map_path=None, strict=False, preserve_pdb=False):
     arguments = record["arguments"].copy()
-    if not option(arguments, "/OUT:", str(output)):
+    if not any(argument.lower().startswith("/out:") for argument in arguments):
         raise RuntimeError("the captured link has no /OUT option")
+    if output != Path(record["output"]):
+        option(arguments, "/OUT:", str(output))
     if record.get("pdb") and not preserve_pdb:
         option(arguments, "/PDB:", str(output.with_suffix(".pdb")))
     if map_path and not option(arguments, "/lldmap:", str(map_path)):
@@ -110,7 +112,8 @@ def relink(record, output, order_file=None, map_path=None, strict=False, preserv
         else:
             env[key] = value
     try:
-        result = run_link([*record["compiler"], "@" + str(response)], cwd=record["cwd"], env=env)
+        with original_inputs(record["inputs"]):
+            result = run_link([*record["compiler"], "@" + str(response)], cwd=record["cwd"], env=env)
     finally:
         response.unlink(missing_ok=True)
     if result.returncode:
@@ -124,9 +127,8 @@ def capture(arguments):
     arguments = list(arguments)
     if not any(argument.lower() == "/brepro" for argument in expand(arguments)):
         arguments.append("/Brepro")
-    arguments.append("/demangle:no")
+    arguments.extend(["/demangle:no", f"/lldmap:{root / 'baseline.map'}"])
     expanded = expand(arguments)
-    saved = []
     inputs = []
     output = None
     pdb = None
@@ -134,28 +136,22 @@ def capture(arguments):
         lower = argument.lower()
         if lower.startswith("/out:"):
             output = str(Path(argument[5:]).resolve())
-            saved.append("/OUT:" + output)
         elif lower.startswith("/pdb:"):
             pdb = str(Path(argument[5:]).resolve())
-            saved.append("/PDB:" + pdb)
         elif lower.startswith("/natvis:") or (
                 not argument.startswith(("/", "-")) and Path(argument).is_file()):
-            prefix, source = ("/NATVIS:", argument[8:]) if lower.startswith("/natvis:") else ("", argument)
+            source = argument[8:] if lower.startswith("/natvis:") else argument
             target = root / f"{index}-{Path(source).name}"
-            shutil.copyfile(source, target)
-            saved.append(prefix + str(target))
-            inputs.append({"file": target.name, "sha256": digest(target)})
-        else:
-            saved.append(argument)
+            shutil.copy2(source, target)
+            inputs.append({"file": str(target), "source": str(Path(source).absolute()),
+                           "sha256": digest(target)})
     if not output or (root / "link.json").exists():
         raise RuntimeError("expected exactly one final executable link")
-    if not option(saved, "/lldmap:", str(root / "baseline.map")):
-        saved.append(f"/lldmap:{root / 'baseline.map'}")
-    record = {"arguments": saved, "cwd": os.getcwd(), "compiler": linker,
+    record = {"arguments": expanded, "cwd": os.getcwd(), "compiler": linker,
               "output": output, "pdb": pdb, "inputs": inputs, "path": os.environ["PATH"],
               "linkEnv": {key: os.environ.get(key) for key in ("LIB", "INCLUDE")}}
     (root / "link.json").write_text(json.dumps(record, indent=2) + "\n")
-    relink(record, Path(output), preserve_pdb=True)
+    subprocess.run([*linker, *arguments], check=True)
 
 
 def replay_baseline(record, work, output):
@@ -185,7 +181,7 @@ def replay_baseline(record, work, output):
 
 def ordered_link(record, output, order_file, map_path):
     diagnostics = relink(record, output, order_file, map_path, strict=False)
-    names = order_file.read_text().splitlines()
+    names = order_file.read_text(encoding="utf-8", errors="surrogateescape").splitlines()
     omitted = set()
     for line in diagnostics.splitlines():
         if not line.strip():
@@ -195,7 +191,8 @@ def ordered_link(record, output, order_file, map_path):
             raise RuntimeError(f"unexpected native link diagnostic:\n{diagnostics}")
         omitted.add(match[1])
     if omitted:
-        order_file.write_text("\n".join(name for name in names if name not in omitted) + "\n")
+        order_file.write_text("\n".join(name for name in names if name not in omitted) + "\n",
+                              encoding="utf-8", errors="surrogateescape")
         relink(record, output, order_file, map_path, strict=True)
     return sorted(omitted)
 
@@ -211,7 +208,7 @@ def order(baseline_map, profiles, output):
             raise ValueError("training samples use different page sizes")
         footprints.append(pages)
     names = select(unique_functions(functions), footprints, page_size)
-    output.write_text("\n".join(names) + "\n")
+    output.write_text("\n".join(names) + "\n", encoding="utf-8", errors="surrogateescape")
     return {"pages": [len(pages) for pages in footprints], "pageSize": page_size,
             "orderedFunctions": len(names), "functionSymbols": len(functions)}
 
@@ -220,7 +217,8 @@ def validate(baseline_map, candidate_map, order_file):
     before, before_sizes = pe.symbols(baseline_map)
     after, after_sizes = pe.symbols(candidate_map)
     return validate_sizes(before, after, before_sizes, after_sizes,
-                          order_file.read_text().splitlines(), "PE function")
+                          order_file.read_text(encoding="utf-8", errors="surrogateescape").splitlines(),
+                          "PE function")
 
 
 def lld_linker(host):
@@ -331,7 +329,8 @@ def main():
         candidate_map = output / "candidate.map"
         measurement["unorderableSymbols"] = ordered_link(
             record, candidate, order_file, candidate_map)
-        measurement["orderedFunctions"] = len(order_file.read_text().splitlines())
+        measurement["orderedFunctions"] = len(order_file.read_text(
+            encoding="utf-8", errors="surrogateescape").splitlines())
         measurement.update(validate(baseline_map, candidate_map, order_file))
         train(candidate, work / "acceptance", sampling=False)
         measurements = measure(baseline, candidate, work / "measure", args.pairs)

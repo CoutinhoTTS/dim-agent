@@ -109,9 +109,11 @@ command checks that `rust-objcopy --version` runs before starting Cargo. This
 tool ships with the pinned Rust compiler; a missing or broken tool fails the
 build instead of silently skipping stripping.
 
-Capture and replay use the same saved linker inputs, output path and ld64 map
-argument, including the first Cargo link. A temporary compiler wrapper records
-the effective `-Cstrip` option and preserves any existing `RUSTC_WRAPPER`.
+The capture wrapper archives inputs and forwards Cargo's original arguments and
+input paths to the compiler, adding the ld64 map argument. It does not call the
+replay implementation to produce this first executable. A temporary compiler
+wrapper records the effective `-Cstrip` option and preserves any existing
+`RUSTC_WRAPPER`.
 Replays apply the same selected toolchain's `rust-objcopy` step that Rust runs
 after linking on macOS. The baseline must reproduce Cargo's executable byte for
 byte before any training, then restores Cargo's original file. The native
@@ -160,10 +162,13 @@ an opt-in artifact linked by `lld-link`, and the release workflow is unchanged.
 `--target` may name the host architecture explicitly; a different architecture
 is rejected.
 
-The captured link line may contain response files. They are expanded, input
-object/library files named by existing paths and `/NATVIS:` files are copied, and Cargo's final link and each replay use
-those saved paths through a response file. The capture adds `/Brepro` when it is
-absent and includes the same `/lldmap` argument from the first link. Input paths
+The captured link line may contain response files. The wrapper archives input
+object/library files named by existing paths and `/NATVIS:` files, and saves the
+expanded arguments for later replay. The first link directly forwards the
+original arguments, including response-file references and original input paths,
+to LLD; it does not use the saved argument vector or replay implementation.
+The capture adds `/Brepro` when absent, `/demangle:no` and the `/lldmap` argument
+to both the first link and the saved record. Input paths
 and [linker arguments](https://github.com/llvm/llvm-project/blob/main/lld/COFF/PDB.cpp)
 contribute to PDB identity even when release Rust code has no debug information,
 so adding the map only during replay would change the PE
@@ -183,10 +188,17 @@ must remain installed. The capture is not a portable archive of the SDK.
 On either platform, a baseline byte mismatch retains both executable files and
 the captured link record in the CI artifact; Windows also retains the PDB pair.
 The hash check remains mandatory before training or ordering.
-The wrapper performs Cargo's first link with the layout build's captured paths,
-map and deterministic-link options. The later replay compares against that
-completed Cargo artifact, including Rust's post-link work, at the same canonical
-path. It checks reproduction of this opt-in link, not equivalence to a release
+Before replay, saved inputs that Rust has removed are temporarily restored at
+their original paths; only files and directories created by that replay are
+removed afterwards. Existing inputs must match their captured hashes; replay
+fails instead of overwriting another build's files. This preserves path-dependent
+metadata while letting the first link remain independent of input capture and
+argument serialization. The completed first executable, including Rust's
+post-link work, is backed up before replay at the same canonical output path.
+Its bytes must match the replay before training, including when the saved input
+record was produced incorrectly. The artifact fixture injects a deterministic
+capture error to verify that the original executable survives and validation fails.
+The check covers reproduction of this opt-in link, not equivalence to a release
 built without the wrapper or proof of function semantics; native flow acceptance
 and symbol/size checks cover those separate boundaries.
 During baseline replay, handled interrupts (`SIGINT`/`SIGTERM`, plus Windows

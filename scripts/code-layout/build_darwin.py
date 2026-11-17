@@ -20,7 +20,7 @@ import tempfile
 
 from layout import select, unique_functions, validate_sizes
 import macho
-from replay import preserve_cargo, run_link
+from replay import original_inputs, preserve_cargo, run_link
 from samples import read as read_sample
 from toolchain import rustc as rustc_command
 from train_darwin import measure, train
@@ -85,28 +85,24 @@ def compile_rust(arguments):
 def capture(arguments):
     root = Path(os.environ["DIM_LAYOUT_CAPTURE"])
     compiler = os.environ["DIM_LAYOUT_CC"]
-    saved = []
+    arguments = [*arguments, f"-Wl,-map,{root / 'baseline.map'}"]
     inputs = []
     output = None
     for index, argument in enumerate(arguments):
         if index and arguments[index - 1] == "-o":
             output = str(Path(argument).resolve())
-            saved.append(output)
         elif argument.startswith(("@", "-Wl,@")):
             raise RuntimeError("response files are not supported by the layout build")
         elif not argument.startswith("-") and Path(argument).is_file():
             target = root / f"{index}-{Path(argument).name}"
             shutil.copy2(argument, target)
-            saved.append(str(target))
-            inputs.append({"file": target.name, "sha256": digest(target)})
-        else:
-            saved.append(argument)
+            inputs.append({"file": str(target), "source": str(Path(argument).absolute()),
+                           "sha256": digest(target)})
     if not output or (root / "link.json").exists():
         raise RuntimeError("expected exactly one final executable link")
-    saved.append(f"-Wl,-map,{root / 'baseline.map'}")
     strip = os.environ["DIM_LAYOUT_STRIP"]
     objcopy = os.environ["DIM_LAYOUT_OBJCOPY"] if strip != "none" else None
-    record = {"arguments": saved, "cwd": os.getcwd(), "compiler": compiler,
+    record = {"arguments": arguments, "cwd": os.getcwd(), "compiler": compiler,
               "output": output, "inputs": inputs, "path": os.environ["PATH"],
               "strip": strip, "objcopy": objcopy,
               "linkEnv": {key: os.environ.get(key) for key in (
@@ -115,12 +111,14 @@ def capture(arguments):
               )}}
     record["linkEnv"]["DYLD_LIBRARY_PATH"] = os.environ["DIM_LAYOUT_DYLD_LIBRARY_PATH"]
     (root / "link.json").write_text(json.dumps(record, indent=2) + "\n")
-    relink(record, Path(output), postprocess=False)
+    subprocess.run([compiler, *arguments], check=True, env=dict(os.environ,
+        DYLD_LIBRARY_PATH=os.environ["DIM_LAYOUT_DYLD_LIBRARY_PATH"]))
 
 
-def relink(record, output, order_file=None, map_path=None, strict=False, postprocess=True):
+def relink(record, output, order_file=None, map_path=None, strict=False):
     arguments = record["arguments"].copy()
-    arguments[arguments.index("-o") + 1] = str(output)
+    if output != Path(record["output"]):
+        arguments[arguments.index("-o") + 1] = str(output)
     if order_file:
         arguments.append(f"-Wl,-order_file,{order_file}")
         arguments.append("-Wl,-order_file_statistics")
@@ -135,10 +133,11 @@ def relink(record, output, order_file=None, map_path=None, strict=False, postpro
             env.pop(key, None)
         else:
             env[key] = value
-    result = run_link([record["compiler"], *arguments], cwd=record["cwd"], env=env)
+    with original_inputs(record["inputs"]):
+        result = run_link([record["compiler"], *arguments], cwd=record["cwd"], env=env)
     if result.returncode:
         raise RuntimeError(f"native link failed ({result.returncode}):\n{result.stderr}")
-    if postprocess and record["strip"] != "none":
+    if record["strip"] != "none":
         flag = {"debuginfo": "--strip-debug", "symbols": "--strip-all"}[record["strip"]]
         stripped = run_link([record["objcopy"], flag, str(output)], cwd=record["cwd"], env=env)
         if stripped.returncode:

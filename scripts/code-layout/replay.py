@@ -1,10 +1,38 @@
-"""Preserve Cargo artifacts while a native linker reuses their canonical paths."""
+"""Restore captured input paths and preserve Cargo artifacts during native replay."""
 
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
+import hashlib
 import os
+from pathlib import Path
 import shutil
 import signal
 import subprocess
+
+
+@contextmanager
+def original_inputs(inputs):
+    with ExitStack() as cleanup:
+        for item in inputs:
+            source = Path(item["source"])
+            if source.exists():
+                if hashlib.sha256(source.read_bytes()).hexdigest() != item["sha256"]:
+                    raise RuntimeError(f"captured linker input changed: {source}")
+                continue
+            missing = []
+            parent = source.parent
+            while not parent.exists():
+                missing.append(parent)
+                parent = parent.parent
+            for parent in reversed(missing):
+                parent.mkdir()
+                cleanup.callback(parent.rmdir)
+            with source.open("xb") as destination:
+                cleanup.callback(source.unlink)
+                with Path(item["file"]).open("rb") as saved:
+                    shutil.copyfileobj(saved, destination)
+            stamp = Path(item["file"]).stat()
+            os.utime(source, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+        yield
 
 
 @contextmanager

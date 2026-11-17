@@ -90,7 +90,8 @@ int main(void) { return first() + second(); }
     obj = root / 'fixture.o'
     subprocess.run(['cc','-O0','-c',str(root/'fixture.c'),'-o',str(obj)],check=True)
     record = {'compiler':'cc','arguments':['-o',str(root/'base'),str(obj)],
-              'cwd':str(root),'path':os.environ['PATH'], 'strip':'none', 'objcopy':None, 'linkEnv':{}}
+              'cwd':str(root),'path':os.environ['PATH'], 'strip':'none', 'objcopy':None, 'linkEnv':{},
+              'inputs':[], 'output':str(root/'base')}
     base = root/'base'; base_map = root/'base.map'
     build_darwin.relink(record, base, map_path=base_map)
     assert subprocess.run([str(base)]).returncode == 42

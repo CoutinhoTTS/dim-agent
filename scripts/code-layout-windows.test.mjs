@@ -14,6 +14,7 @@ import tempfile
 sys.path.insert(0, sys.argv[1])
 import build_windows
 import pe
+import samples
 
 with tempfile.TemporaryDirectory(prefix='dim-layout-coff-') as temporary:
     root = Path(temporary)
@@ -22,7 +23,7 @@ with tempfile.TemporaryDirectory(prefix='dim-layout-coff-') as temporary:
         for address, names in chunks:
             lines.append(f'{address:08x} 00000010    16         library.lib(member.obj):(.text)')
             lines.extend(f'{address:08x} 00000000     0                 {name}' for name in names)
-        path.write_text('\n'.join(lines)+'\n', encoding='utf-8')
+        path.write_text('\n'.join(lines)+'\n', encoding='utf-8', errors='surrogateescape')
     base, candidate, order = root/'base.map', root/'candidate.map', root/'symbols.order'
     write_map(base, [(0x1000, ['rust::first']), (0x1020, ['_Rrust_second','_Rrust_alias'])])
     write_map(candidate, [(0x1000, ['_Rrust_second','_Rrust_alias']), (0x1020, ['rust::first'])])
@@ -38,6 +39,14 @@ with tempfile.TemporaryDirectory(prefix='dim-layout-coff-') as temporary:
         assert 'do not follow' in str(error)
     else:
         raise AssertionError('different addresses still have to follow the order')
+    raw = b'_Rraw_\xc0'.decode('utf-8', errors='surrogateescape')
+    write_map(base, [(0x1000, [raw]), (0x1020, ['_Rsecond'])])
+    write_map(candidate, [(0x1010, [raw]), (0x1030, ['_Rsecond'])])
+    profile = root/'sample.pages'
+    samples.write(profile, 4096, [0])
+    build_windows.order(base, [profile], order)
+    assert order.read_bytes() == b'_Rraw_\xc0\n_Rsecond\n'
+    assert build_windows.validate(base,candidate,order)['movedFunctionSymbols'] == 2
 `});
   assert.equal(result.error,undefined);
   assert.equal(result.status,0,result.stdout+result.stderr);
@@ -101,7 +110,8 @@ void entry(void) {
               'arguments':['/entry:entry','/subsystem:console','/nodefaultlib',
                            str(root/'fixture.obj'),'kernel32.lib',
                            '/OUT:'+str(root/'base.exe')],
-              'cwd':str(root),'path':os.environ['PATH'],'pdb':None,'linkEnv':{}}
+              'cwd':str(root),'path':os.environ['PATH'],'pdb':None,'linkEnv':{},
+              'inputs':[], 'output':str(root/'base.exe')}
     base = root/'base.exe'; base_map = root/'base.map'
     build_windows.relink(record, base, map_path=base_map)
     assert subprocess.run([str(base)]).returncode == 42
@@ -152,6 +162,7 @@ void entry(void) {
     assert Path(recorded['pdb']).read_bytes() == original_pdb
     assert replayed.read_bytes() == original, ('captured inputs and map arguments must preserve the PE/PDB identity',
         recorded['output'], str(root/'captured.exe'), build_windows.digest(root/'captured-original.exe'), build_windows.digest(captured))
+    assert not (root/'fixture.obj').exists() and not natvis.exists(), 'replay removes only the inputs it restored'
     assert subprocess.run([str(captured)]).returncode == 42
 
     canonical = root/'canonical.rs'
