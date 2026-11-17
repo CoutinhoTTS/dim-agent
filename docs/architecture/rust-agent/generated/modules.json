@@ -13507,7 +13507,18 @@
       "from": "dim_agent_capabilities::host",
       "to": "dim_agent_runtime::error",
       "references": [
+        "path AgentError",
+        "path AgentError::Reloading",
+        "use dim_agent_runtime::AgentError",
         "use dim_agent_runtime::panic_message"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::host",
+      "to": "dim_agent_runtime::lifecycle",
+      "references": [
+        "path CAPABILITY_RELOADING",
+        "use dim_agent_runtime::CAPABILITY_RELOADING"
       ]
     },
     {
@@ -15958,8 +15969,7 @@
       "to": "dim_agent_capabilities::host",
       "references": [
         "path HostError",
-        "path HostError::Cancelled",
-        "path HostError::failed",
+        "path HostError::from_agent",
         "path HostFuture",
         "path ToolExecutionContext",
         "use crate::host::HostError",
@@ -16012,23 +16022,6 @@
       "references": [
         "path AgentBuilder",
         "use dim_agent_runtime::AgentBuilder"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::recall",
-      "to": "dim_agent_runtime::error",
-      "references": [
-        "path AgentError",
-        "path AgentError::Reloading",
-        "use dim_agent_runtime::AgentError"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::recall",
-      "to": "dim_agent_runtime::lifecycle",
-      "references": [
-        "path CAPABILITY_RELOADING",
-        "use dim_agent_runtime::CAPABILITY_RELOADING"
       ]
     },
     {
@@ -16189,7 +16182,8 @@
       "to": "dim_agent_capabilities::host",
       "references": [
         "path HostError",
-        "path HostError::failed"
+        "path HostError::failed",
+        "path HostError::from_agent"
       ]
     },
     {
@@ -16203,7 +16197,6 @@
         "path Narrative::fold",
         "path PAGE_ENTRIES",
         "path PAGE_EVENTS",
-        "path RecallTool::facade_error",
         "path date",
         "path line_write",
         "path page",
@@ -18672,7 +18665,7 @@
         "path CancelledFn",
         "path HostError",
         "path HostError::Cancelled",
-        "path HostError::failed",
+        "path HostError::from_agent",
         "path HostFuture",
         "path ToolExecutionContext",
         "path call_until_cancelled",
@@ -18746,9 +18739,7 @@
       "from": "dim_agent_capabilities::wait",
       "to": "dim_agent_runtime::error",
       "references": [
-        "path AgentError::Reloading",
-        "path dim_agent_runtime::Result",
-        "use dim_agent_runtime::AgentError"
+        "path dim_agent_runtime::Result"
       ]
     },
     {
@@ -18850,6 +18841,7 @@
         "path HostError",
         "path HostError::Cancelled",
         "path HostError::failed",
+        "path HostError::from_agent",
         "path HostFuture",
         "path SessionFiles",
         "path ToolDriver",
@@ -19021,15 +19013,6 @@
         "use dim_agent_runtime::CollaborationRole",
         "use dim_agent_runtime::SessionConfig",
         "use dim_agent_runtime::SessionIdentity"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities::workspace_tools",
-      "to": "dim_agent_runtime::error",
-      "references": [
-        "path AgentError",
-        "path AgentError::Reloading",
-        "use dim_agent_runtime::AgentError"
       ]
     },
     {
@@ -19266,6 +19249,7 @@
       "references": [
         "path HostError",
         "path HostError::Cancelled",
+        "path HostError::from_agent",
         "path ToolExecutionContext",
         "use crate::host::HostError",
         "use crate::host::ToolExecutionContext"
@@ -19317,7 +19301,6 @@
       "to": "dim_agent_capabilities::workspace_tools",
       "references": [
         "path WorkspaceTools",
-        "path super::host_error",
         "use super::WorkspaceTools"
       ]
     },
