@@ -3130,6 +3130,26 @@ async fn node_session_command_rules_share_the_native_owner_and_survive_another_s
         started,
     });
     let binding = Arc::new(CommandRules(owner.clone()));
+    let mut native_only = AgentBuilder::new(AgentConfig::default());
+    native_only
+        .catalog_mut()
+        .register_instance::<CommandRules>("commandRules", dim_agent_runtime::SESSION_GROUP);
+    native_only.session_value(binding.clone());
+    native_only
+        .install(&mut dim_agent_runtime::Modules::new(), [])
+        .await
+        .unwrap();
+    native_only.session_data_value(binding.clone());
+    let error = native_only
+        .install(&mut dim_agent_runtime::Modules::new(), [])
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("commandRules is not a shared Session service"),
+        "{error}"
+    );
     let mut builder = AgentBuilder::new(AgentConfig::default());
     defaults::install_with_prompt_capability(
         &mut builder,
