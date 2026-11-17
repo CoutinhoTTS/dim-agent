@@ -110,6 +110,7 @@ const zhCN: Messages = {
   "composer.noModels": "没有可用模型",
   "composer.providers": "服务商",
   "composer.notConfigured": "默认模型",
+  "composer.loadMoreModels": "加载更多模型",
   "composer.searchModels": "搜索模型...",
   "composer.send": "发送",
   "composer.sendMessage": "发送消息...",

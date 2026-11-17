@@ -173,6 +173,11 @@ done
 补充上游仍运行的独立重启、恢复查询失败，以及补通知失败后的持久义务。
 [运行记录](live-handoff-results.md)对应真实流程及明确的成功重试前提。
 
+## 查询范围补充实验
+
+#1732 的查询范围补充见[范围、实现和模型对应](../query-range-verification.md)与
+[独立运行记录](query-range-results.md)，不替代本页旧配置的证据。
+
 ## 动态消费交接补充实验
 
 #1732 C 的[合同与实现对应](../consumer-handoff-verification.md)及

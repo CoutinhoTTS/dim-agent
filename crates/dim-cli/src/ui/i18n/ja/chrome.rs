@@ -434,6 +434,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         // models_panel.rs
         "Select a model" => "モデルを選択",
         "Loading models..." => "モデルを読込中…",
+        "Previous page" => "前のページ",
+        "Next page" => "次のページ",
         "No models available. Connect a provider first." => {
             "利用可能なモデルなし。先にプロバイダーに接続"
         }

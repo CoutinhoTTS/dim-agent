@@ -414,6 +414,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         // models_panel.rs
         "Select a model" => "모델 선택",
         "Loading models..." => "모델 불러오는 중…",
+        "Previous page" => "이전 페이지",
+        "Next page" => "다음 페이지",
         "No models available. Connect a provider first." => {
             "사용 가능한 모델 없음. 먼저 프로바이더 연결"
         }

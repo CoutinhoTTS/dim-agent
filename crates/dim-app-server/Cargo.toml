@@ -26,7 +26,7 @@ thiserror.workspace = true
 uuid = { workspace = true, features = ["serde"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
-rusqlite = { version = "0.41.1", features = ["bundled", "functions", "hooks"] }
+rusqlite = { version = "0.41.1", features = ["bundled", "functions", "hooks", "blob"] }
 sha2 = "0.10.9"
 foldhash = "0.2"
 getrandom = "0.3"
@@ -85,5 +85,7 @@ rusqlite = { version = "0.41.1", features = ["bundled", "backup"] }
 tokio-tungstenite.workspace = true
 
 [build-dependencies]
+serde_json.workspace = true
+sha2 = "0.10.9"
 flate2 = "1.1"
 

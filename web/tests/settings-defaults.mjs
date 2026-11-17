@@ -12,7 +12,7 @@ registerHooks({
   resolve(specifier, context, next) {
     if (specifier === "../../stores/connection") return { url: "data:text/javascript,export const useConnectionStore=()=>globalThis.defaultsConnection", shortCircuit: true }
     if (specifier === "../../stores/sessions") return { url: "data:text/javascript,export const useSessionsStore=()=>({workspaces:[{cwd:'/project',name:'Project'}]})", shortCircuit: true }
-    if (specifier === "../../stores/models") return { url: "data:text/javascript,export const useModelsStore=()=>({providers:[{providerId:'fixture',name:'Fixture',models:[{id:'a',name:'A'},{id:'b',name:'B'}]}],load:async()=>{},error:''})", shortCircuit: true }
+    if (specifier === "../../stores/models") return { url: "data:text/javascript,export const useModels=()=>globalThis.defaultsModelsFactory?.()??({providers:[{providerId:'fixture',name:'Fixture',models:[{id:'a',name:'A'},{id:'b',name:'B'}]}],load:async()=>{},clear:()=>{},error:''})", shortCircuit: true }
     if (specifier === "vue-i18n") return { url: "data:text/javascript,export const useI18n=()=>({locale:{value:'en'}})", shortCircuit: true }
     try { return next(specifier, context) } catch (error) {
       if (specifier.startsWith(".") && !/\.(ts|vue)$/.test(specifier)) return next(`${specifier}.ts`, context)
@@ -191,4 +191,30 @@ test("default-model scope changes preserve cancelled or failed drafts and never 
   await submit(root, "Save defaults")
   assert.deepEqual(writes[1], ["provider.select", { cwd: "/project", providerId: "fixture", modelId: "b", expectedVersion: 7 }])
   assert.deepEqual(writes[2], ["collaboration.set_model_policy", { expectedRevision: "policy:1", policy: { mode: "inherit" } }])
+})
+
+test("saved models beyond the first page are resolved by exact target", async t => {
+  const queries = []
+  globalThis.defaultsModelsFactory = () => reactive({
+    providers: undefined, next: undefined, error: "",
+    clear() { this.providers = undefined },
+    async load(input = {}) {
+      queries.push(input)
+      this.next = input.modelId ? undefined : { providerId: "fixture", modelId: "page-one" }
+      this.providers = [{ providerId: "fixture", name: "Fixture", models: [{ id: input.modelId ?? "page-one", name: input.modelId ?? "Page one" }] }]
+    },
+  })
+  t.after(() => { delete globalThis.defaultsModelsFactory })
+  const root = mount(t, AgentSettings, async method => {
+    if (method === "provider.selection") return { selection: { provider_id: "fixture", model_id: "saved-later", version: 1 } }
+    if (method === "collaboration.model_policy") return { revision: "policy:1", policy: { mode: "fixed", model: { providerId: "fixture", modelId: "member-later" } } }
+    if (method === "host.exec_shell.get") return { revision: "shell:1", shells: [] }
+    throw new Error(`unexpected ${method}`)
+  })
+  await flush()
+  assert.ok(queries.some(query => query.modelId === "saved-later"))
+  assert.ok(queries.some(query => query.modelId === "member-later"))
+  assert.match(text(root), /Fixture \/ saved-later/)
+  assert.match(text(root), /Fixture \/ member-later/)
+  assert.doesNotMatch(text(root), /unavailable/)
 })

@@ -5,14 +5,14 @@ import { readModalitySnapshot, type ModalityOperation, type ModalitySnapshot } f
 import type { ModelId } from "../../rpc/protocol"
 import { RpcError } from "../../rpc/client"
 import { useConnectionStore } from "../../stores/connection"
-import { useModelsStore } from "../../stores/models"
+import { useModels } from "../../stores/models"
 import GeneralSettingsStatus from "./GeneralSettingsStatus.vue"
 import { bindSettingsDirty, messageFrom, reloadSettingsOnReconnect } from "./context"
 
 const AUTOMATIC = "__auto__"
 const s = useSettingsText()
 const connection = useConnectionStore()
-const models = useModelsStore()
+const models = useModels()
 const snapshot = ref<ModalitySnapshot>()
 const drafts = ref<Record<string, string>>({})
 const busy = ref(false)

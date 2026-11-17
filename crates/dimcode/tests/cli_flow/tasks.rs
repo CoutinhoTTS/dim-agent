@@ -1162,12 +1162,10 @@ fn tui_task_controls_queued_before_a_replacement_never_retarget_it() {
             "main",
             command("old", 1, 1000, "old attachment command"),
         );
-        let catalog = wire.read("provider.list");
+        let catalog = wire.read("provider.models.query");
         ready.send(()).unwrap();
         control.recv_timeout(Duration::from_secs(10)).unwrap();
-        wire.reply(&catalog, json!({"providers":[]}));
-        let providers = wire.read("account.providers");
-        wire.reply(&providers, json!([]));
+        wire.reply(&catalog, json!({"models":[],"next":null,"empty":[]}));
         // `/new` goes home without a Session; the queued stop reaches nothing.
         let mut line = String::new();
         assert_eq!(

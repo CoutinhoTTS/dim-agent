@@ -776,6 +776,18 @@ Ctrl+T 立即运行所选任务，并报告所有者为手动窗口记录的投�
 
 `dimcode scheduled add PATH`（`-` 表示 stdin）是不经编辑器的创建；`dimcode scheduled history ID` 打印详情显示的那些行；`dimcode scheduled remove ID` 不经面板的确认直接删除。
 
+### 模型选择读取
+
+打开 `/models` 时向 [`provider.models.query`](appserver/provider-management.md#模型显示查询) 请求一页。输入在服务器上搜索并重置页游标；Next/Previous 替换显示的页；关闭选择面板释放其结果。已采用模型的能力读取带上它的提供方与模型 ID。目录刷新是提供方/账号面板里显式的管理操作。选择面板诊断中的计数针对当前显示的页。
+
+```text
+/models -> 第一页 -> Next page -> 下一页
+               ^                         |
+               +------ Previous page ----+
+输入查询 -> 第一个匹配页
+Esc      -> 清除查询；查询为空时关闭并释放结果
+```
+
 ### Models 领域
 
 Models 领域（#818）：`/models` 里的 `Manage models` 先打开提供方列表，再打开单个提供方的面板，`dimcode models PROVIDER enable|disable|remove|inspect MODEL`、`edit MODEL`、`set MODEL PATH` 与 `add PATH` 是它在命令行上的同一领域，经 `provider.management` 与 `provider.models.*` 写入（[提供方管理](appserver/provider-management.md)）。提供方是领域的一部分，所以另一个提供方的回复不会落到面板里，面板标题也写明提供方（`Models · <name>`）。`dimcode models PROVIDER` 保持原有列表与四个标志；`--refresh` 就是该领域在命令行上的 reload。
