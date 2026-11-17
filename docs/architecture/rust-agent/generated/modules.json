@@ -31418,6 +31418,7 @@
       "references": [
         "mod view",
         "use view::ManagementInfo",
+        "use view::ManagementModelPage",
         "use view::ManagementPage",
         "use view::ManagementPageRequest",
         "use view::ManagementProvider",
@@ -31795,7 +31796,9 @@
         "path ProviderService",
         "path crate::provider::ProviderCatalog",
         "path crate::provider::ProviderSelection",
+        "path super::ProviderCatalog",
         "path super::ProviderError",
+        "path super::ProviderError::InvalidConfig",
         "use super::ProviderService"
       ]
     },
@@ -31806,7 +31809,9 @@
         "path super::CreateProvider",
         "path super::ProbeProvider",
         "path super::ProviderPatch",
-        "path super::UpdateReplyKind"
+        "path super::UpdateReplyKind",
+        "path super::UpdateReplyKind::Full",
+        "path super::UpdateReplyKind::Summary"
       ]
     },
     {
@@ -31820,7 +31825,8 @@
       "from": "dim_app_server::provider::management",
       "to": "dim_app_server::provider::view",
       "references": [
-        "path super::ManagementPageRequest"
+        "path super::ManagementPageRequest",
+        "path super::view::ManagementModelPage"
       ]
     },
     {
@@ -31858,6 +31864,8 @@
       "to": "dim_app_server::provider",
       "references": [
         "path CredentialAuthority::Static",
+        "path PersistedProviderRecord::Managed",
+        "path PersistedProviderRecord::Static",
         "path ProviderCatalog",
         "path ProviderError",
         "path ProviderError::AuthRequired",
@@ -31872,6 +31880,7 @@
         "path StaticProviderRecord",
         "path capability_snapshot",
         "path read_catalog",
+        "path read_model_record",
         "path read_stored_static",
         "path save_catalog",
         "path static_catalog",
@@ -31884,7 +31893,9 @@
       "from": "dim_app_server::provider::models",
       "to": "dim_app_server::provider::persistence",
       "references": [
-        "path persistence::write"
+        "path persistence::admit_base",
+        "path persistence::write",
+        "path persistence::write_header"
       ]
     },
     {
@@ -32516,9 +32527,12 @@
       "references": [
         "path persistence::Models::All",
         "path persistence::Models::Header",
+        "path persistence::Models::Selected",
         "path persistence::adopt",
         "path persistence::header",
         "path persistence::ids",
+        "path persistence::model_keys",
+        "path persistence::name",
         "path persistence::names",
         "path persistence::read"
       ]
@@ -32528,6 +32542,13 @@
       "to": "dim_app_server::provider::preferences",
       "references": [
         "path preferences"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::view",
+      "to": "dim_app_server::provider::query",
+      "references": [
+        "path query"
       ]
     },
     {
