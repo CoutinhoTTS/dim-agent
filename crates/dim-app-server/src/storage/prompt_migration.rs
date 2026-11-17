@@ -30,7 +30,8 @@ pub struct Migrated {
 ///
 /// A missing database, a store another process holds, an unknown Session or
 /// branch, and a store not at the current format all fail without changing the
-/// database; a repeated run reports `written: false`.
+/// database; a repeated run reports `written: false`. Completion closes the
+/// owned database and releases its exclusive lease.
 pub async fn migrate_prompt_references(
     path: PathBuf,
     session: String,
@@ -47,11 +48,14 @@ pub async fn migrate_prompt_references(
     // empty store and upgrades an older one, and this entry does neither.
     require_current_format(&path)?;
     require_unowned(&path)?;
-    let store = SqliteTimelineStore::new(SqliteStorage::open(path).map_err(storage)?);
+    let db = SqliteStorage::open(path).map_err(storage)?;
+    let store = SqliteTimelineStore::new(db.clone());
     let migrated = migrate(&store, &session, &branch).await;
     let closed = store.close().await;
+    let database_closed = db.close().await;
     let written = migrated?;
     closed.map_err(storage)?;
+    database_closed.map_err(storage)?;
     Ok(Migrated { written })
 }
 
