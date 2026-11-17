@@ -24047,6 +24047,13 @@
     },
     {
       "from": "dim_app_server",
+      "to": "dim_app_server::settings::declared",
+      "references": [
+        "path settings::Settings"
+      ]
+    },
+    {
+      "from": "dim_app_server",
       "to": "dim_app_server::settings_methods",
       "references": [
         "mod settings_methods",
@@ -27629,17 +27636,11 @@
     },
     {
       "from": "dim_app_server::execution_settings",
-      "to": "dim_app_server::settings",
-      "references": [
-        "path SettingsService",
-        "use crate::settings::SettingsService"
-      ]
-    },
-    {
-      "from": "dim_app_server::execution_settings",
       "to": "dim_app_server::settings::declared",
       "references": [
+        "path Settings",
         "path SourceDeclaration",
+        "use crate::settings::Settings",
         "use crate::settings::SourceDeclaration"
       ]
     },
@@ -29878,17 +29879,11 @@
     },
     {
       "from": "dim_app_server::model_log",
-      "to": "dim_app_server::settings",
-      "references": [
-        "path SettingsService",
-        "use crate::settings::SettingsService"
-      ]
-    },
-    {
-      "from": "dim_app_server::model_log",
       "to": "dim_app_server::settings::declared",
       "references": [
+        "path Settings",
         "path SourceDeclaration",
+        "use crate::settings::Settings",
         "use crate::settings::SourceDeclaration"
       ]
     },
@@ -30462,17 +30457,11 @@
     },
     {
       "from": "dim_app_server::prompt_settings",
-      "to": "dim_app_server::settings",
-      "references": [
-        "path SettingsService",
-        "use crate::settings::SettingsService"
-      ]
-    },
-    {
-      "from": "dim_app_server::prompt_settings",
       "to": "dim_app_server::settings::declared",
       "references": [
+        "path Settings",
         "path SourceDeclaration",
+        "use crate::settings::Settings",
         "use crate::settings::SourceDeclaration"
       ]
     },
@@ -30507,17 +30496,11 @@
     },
     {
       "from": "dim_app_server::prompt_suggestion_settings",
-      "to": "dim_app_server::settings",
-      "references": [
-        "path SettingsService",
-        "use crate::settings::SettingsService"
-      ]
-    },
-    {
-      "from": "dim_app_server::prompt_suggestion_settings",
       "to": "dim_app_server::settings::declared",
       "references": [
+        "path Settings",
         "path SourceDeclaration",
+        "use crate::settings::Settings",
         "use crate::settings::SourceDeclaration"
       ]
     },
@@ -32787,6 +32770,7 @@
         "path declared::provide",
         "use declared::Declared",
         "use declared::Read",
+        "use declared::Settings",
         "use declared::SourceDeclaration",
         "use declared::Update",
         "use declared::Writer",
@@ -35557,17 +35541,11 @@
     },
     {
       "from": "dim_app_server::web",
-      "to": "dim_app_server::settings",
-      "references": [
-        "path SettingsService",
-        "use crate::settings::SettingsService"
-      ]
-    },
-    {
-      "from": "dim_app_server::web",
       "to": "dim_app_server::settings::declared",
       "references": [
+        "path Settings",
         "path SourceDeclaration",
+        "use crate::settings::Settings",
         "use crate::settings::SourceDeclaration"
       ]
     },
@@ -51363,17 +51341,11 @@
     },
     {
       "from": "dim_goal",
-      "to": "dim_app_server::settings",
-      "references": [
-        "path SettingsService",
-        "use dim_app_server::settings::SettingsService"
-      ]
-    },
-    {
-      "from": "dim_goal",
       "to": "dim_app_server::settings::declared",
       "references": [
+        "path Settings",
         "path SourceDeclaration",
+        "use dim_app_server::settings::Settings",
         "use dim_app_server::settings::SourceDeclaration"
       ]
     },
@@ -51594,10 +51566,10 @@
     },
     {
       "from": "dim_goal::branch",
-      "to": "dim_app_server::settings",
+      "to": "dim_app_server::settings::declared",
       "references": [
-        "path SettingsService",
-        "use dim_app_server::settings::SettingsService"
+        "path Settings",
+        "use dim_app_server::settings::Settings"
       ]
     },
     {
@@ -54995,17 +54967,11 @@
     },
     {
       "from": "dim_session_title",
-      "to": "dim_app_server::settings",
-      "references": [
-        "path SettingsService",
-        "use dim_app_server::settings::SettingsService"
-      ]
-    },
-    {
-      "from": "dim_session_title",
       "to": "dim_app_server::settings::declared",
       "references": [
+        "path Settings",
         "path SourceDeclaration",
+        "use dim_app_server::settings::Settings",
         "use dim_app_server::settings::SourceDeclaration"
       ]
     },
