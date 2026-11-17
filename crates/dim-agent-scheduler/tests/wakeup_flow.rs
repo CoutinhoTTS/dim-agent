@@ -226,22 +226,23 @@ fn wakeup_inputs(events: &[Value]) -> Vec<&Value> {
         .collect()
 }
 
-/// Polls until the session's `main` branch has recorded a finished turn.
-async fn wait_turn_end(client: &mut Client, session_id: &str) {
+/// Waits for `count` completed turns in the Session's `main` branch.
+async fn wait_turn_ends(client: &mut Client, session_id: &str, count: usize) {
     tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             let ended = history(client, session_id)
                 .await
                 .iter()
-                .any(|event| event["type"] == "turn" && event["name"] == "end");
-            if ended {
+                .filter(|event| event["type"] == "turn" && event["name"] == "end")
+                .count();
+            if ended >= count {
                 return;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     })
     .await
-    .expect("the turn ends");
+    .unwrap_or_else(|_| panic!("session {session_id} did not finish {count} turns"));
 }
 
 /// The wakeup id a delivered input's marker names.
@@ -596,7 +597,7 @@ async fn a_delivered_wakeup_past_the_grace_is_fired_after_a_restart() {
     clock(home.path()).advance_to(at);
     step(home.path(), 1).await;
     wait_state(home.path(), &wakeup_id, "fired").await;
-    wait_turn_end(&mut client, &session).await;
+    wait_turn_ends(&mut client, &session, 1).await;
     let events = history(&mut client, &session).await;
     assert_eq!(wakeup_inputs(&events).len(), 1, "{events:?}");
 
@@ -1334,7 +1335,7 @@ async fn the_tool_schedules_a_wakeup_for_the_caller_and_refuses_elsewhere() {
     clock(home.path()).advance_to(at.parse::<jiff::Timestamp>().unwrap());
     step(home.path(), 1).await;
     wait_state(home.path(), &wakeup_id, "fired").await;
-    wait_for("the wakeup turn", || model.count() >= 2).await;
+    wait_turn_ends(&mut client, &session, 2).await;
 
     // A non-interactive Session gets the same refusal the `schedule` tool
     // gives; the member-role check is the same configuration test.
