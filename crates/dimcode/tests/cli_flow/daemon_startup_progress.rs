@@ -689,7 +689,9 @@ fn a_client_finding_another_daemons_upgrade_waits_for_it() {
             let _ = wait(client);
             reader.join().unwrap();
             let stderr = stderr_text.lock().unwrap().clone();
-            panic!("the client pid {client_pid} stopped ({status}) instead of waiting for the upgrade: {stderr}");
+            panic!(
+                "the client pid {client_pid} stopped ({status}) instead of waiting for the upgrade: {stderr}"
+            );
         }
         assert!(
             started.elapsed() < Duration::from_secs(30),
@@ -707,7 +709,9 @@ fn a_client_finding_another_daemons_upgrade_waits_for_it() {
             let _ = wait(client);
             reader.join().unwrap();
             let stderr = stderr_text.lock().unwrap().clone();
-            panic!("the client pid {client_pid} stopped ({status}) after one bound of progress: {stderr}");
+            panic!(
+                "the client pid {client_pid} stopped ({status}) after one bound of progress: {stderr}"
+            );
         }
         thread::sleep(Duration::from_millis(50));
     }
