@@ -12189,7 +12189,7 @@ fn tui_models_picker_edits_only_the_subagent_model_policy() {
     thread::sleep(Duration::from_millis(300));
     terminal.write(b"\r");
     terminal.until("Subagent model policy saved");
-    terminal.until("Test / other");
+    terminal.until_row("Test / other", "Enter");
     home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
@@ -12598,7 +12598,7 @@ fn tui_models_picker_reads_pages_on_demand_and_reopens_without_a_cache() {
     terminal.until("test / model");
     terminal.write(b"/models\r");
     terminal.until("Empty: no models");
-    terminal.until("Next page");
+    terminal.until_anywhere("Next page");
     terminal.write(b"\r");
     terminal.until("Test / second");
     terminal.raw(b"\x1b");

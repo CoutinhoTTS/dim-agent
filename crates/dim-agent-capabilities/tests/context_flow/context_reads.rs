@@ -520,7 +520,7 @@ async fn prepared_requests_use_saved_boundaries_and_growth_after_compaction_and_
             ..Context::default()
         },
     );
-    profile.timeline_store(store.clone());
+    profile.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(store.clone()));
     let agent = MinimalHost::start(&profile).await.unwrap();
     let session = agent
         .create_session(SessionConfig::default())
@@ -725,7 +725,7 @@ async fn growth_checks_seek_numeric_boundaries_across_larger_restored_histories(
                 ..Context::default()
             },
         );
-        profile.timeline_store(store.clone());
+        profile.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(store.clone()));
         let cell = Arc::new(std::sync::OnceLock::new());
         let capture = cell.clone();
         profile.require_feature(Feature::new("test.raw-timeline").branch(
@@ -867,7 +867,7 @@ async fn persisted_usage_reads_and_restores_without_projecting_history() {
                 ..Context::default()
             },
         );
-        builder.timeline_store(store.clone());
+        builder.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(store.clone()));
         let agent = MinimalHost::start(&builder).await.unwrap();
         let session = agent
             .create_session(SessionConfig::default())
@@ -950,7 +950,7 @@ async fn persisted_usage_reads_and_restores_without_projecting_history() {
                 ..Context::default()
             },
         );
-        resumed_builder.timeline_store(store.clone());
+        resumed_builder.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(store.clone()));
         let agent = MinimalHost::start(&resumed_builder).await.unwrap();
         let restored = agent.restore_session(session_id.clone()).await.unwrap();
         let usage = restored
@@ -1069,7 +1069,7 @@ async fn closing_during_usage_result_publication_is_not_a_statistics_fault() {
             ..Default::default()
         });
         let mut builder = builder(Arc::new(EchoModel));
-        builder.timeline_store(store);
+        builder.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(store));
         let agent = MinimalHost::start(&builder).await.unwrap();
         let session = agent
             .create_session(SessionConfig::default())
@@ -1160,7 +1160,7 @@ async fn unavailable_usage_counter_does_not_fault_resume_and_can_recover() {
     let resolver = Arc::new(AvailableCounter::default());
     resolver.0.store(true, Ordering::SeqCst);
     let mut builder = builder_with_usage_resolver(resolver.clone());
-    builder.timeline_store(store.clone());
+    builder.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(store.clone()));
     let agent = MinimalHost::start(&builder).await.unwrap();
     let session = agent
         .create_session(SessionConfig::default())
@@ -1245,7 +1245,7 @@ async fn unavailable_usage_counter_does_not_fault_resume_and_can_recover() {
 async fn unsupported_usage_counter_does_not_fall_back_to_history_projection() {
     let store = Arc::new(CountContextReads::default());
     let mut builder = builder_with_usage_resolver(Arc::new(CompleteRequestOnly));
-    builder.timeline_store(store.clone());
+    builder.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(store.clone()));
     let agent = MinimalHost::start(&builder).await.unwrap();
     let session = agent
         .create_session(SessionConfig::default())
@@ -1388,7 +1388,7 @@ async fn unconfigured_usage_does_not_project_legacy_messages() {
         HistoryRenderer::default(),
         Context::default(),
     );
-    builder.timeline_store(store.clone());
+    builder.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(store.clone()));
     let agent = MinimalHost::start(&builder).await.unwrap();
     let session = agent.restore_session("unconfigured".into()).await.unwrap();
     let preparation = session
@@ -1447,7 +1447,7 @@ async fn usage_reads_the_published_head_while_a_fact_is_in_flight() {
             ..Context::default()
         },
     );
-    builder.timeline_store(store.clone());
+    builder.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(store.clone()));
     let agent = MinimalHost::start(&builder).await.unwrap();
     let session = agent
         .create_session(SessionConfig::default())
@@ -1592,7 +1592,7 @@ async fn model_reload_recovers_the_old_terminal_before_its_publication() {
             );
         reload.install(&mut builder, model.clone());
         defaults::install(&mut builder);
-        builder.timeline_store(store);
+        builder.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(store));
         let agent = MinimalHost::start(&builder).await.unwrap();
         let session = agent
             .create_session(SessionConfig::default())
@@ -1709,10 +1709,10 @@ async fn stop_waits_for_an_unpublished_turn_end_seen_by_a_reloaded_loop() {
                     Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
                 }),
             )
-            .timeline_store(Arc::new(CountContextReads {
+            .timeline_store(dim_agent_runtime::TimelineStoreBinding::new(Arc::new(CountContextReads {
                 publication: Some(publication),
                 ..Default::default()
-            }));
+            })));
         reload.install(&mut builder, model.clone());
         defaults::install(&mut builder);
         let agent = MinimalHost::start(&builder).await.unwrap();
@@ -1763,7 +1763,7 @@ async fn either_context_read_failure_ends_the_turn_and_allows_the_next_input() {
             HistoryRenderer::default(),
             Context::default(),
         );
-        builder.timeline_store(store.clone());
+        builder.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(store.clone()));
         let agent = MinimalHost::start(&builder).await.unwrap();
         let session = agent
             .create_session(SessionConfig::default())
@@ -1838,7 +1838,7 @@ async fn each_model_step_reads_full_context_for_policy_and_streams_otherwise() {
             defaults::install(&mut builder);
             builder
         };
-        builder.timeline_store(store.clone());
+        builder.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(store.clone()));
         let agent = MinimalHost::start(&builder).await.unwrap();
         let session = agent
             .create_session(SessionConfig::default())
@@ -1986,7 +1986,7 @@ async fn a_second_compaction_saves_a_snapshot_that_decodes() {
             ..Context::default()
         },
     );
-    builder.timeline_store(store.clone());
+    builder.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(store.clone()));
     let agent = MinimalHost::start(&builder).await.unwrap();
     let session = agent
         .create_session(SessionConfig::default())
@@ -2106,7 +2106,7 @@ async fn stop_is_dispatched_while_either_context_read_is_waiting() {
             HistoryRenderer::default(),
             Context::default(),
         );
-        builder.timeline_store(store.clone());
+        builder.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(store.clone()));
         let agent = MinimalHost::start(&builder).await.unwrap();
         let session = agent
             .create_session(SessionConfig::default())
@@ -2197,7 +2197,7 @@ async fn configuration_reference_read_failure_aborts_resume_and_allows_retry() {
         Arc::new(SystemSources(AtomicUsize::new(1))),
         None,
     );
-    builder.timeline_store(store.clone());
+    builder.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(store.clone()));
     let agent = MinimalHost::start(&builder).await.unwrap();
     let session = agent
         .create_session(SessionConfig::default())
@@ -2297,7 +2297,7 @@ async fn concurrent_system_adoptions_include_previous_unpublished_updates() {
     let mut builder = AgentBuilder::new(AgentConfig::default());
     defaults::mock_hosts(&mut builder);
     defaults::install_with_prompt(&mut builder, host.clone(), None);
-    builder.timeline_store(store);
+    builder.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(store));
     let agent = MinimalHost::start(&builder).await.unwrap();
     let session = agent
         .create_session(SessionConfig::default())
@@ -2455,7 +2455,7 @@ async fn a_request_written_after_an_interrupt_loop_has_not_handled_does_not_run(
                 Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
             }),
         )
-        .timeline_store(store.clone());
+        .timeline_store(dim_agent_runtime::TimelineStoreBinding::new(store.clone()));
     let copy = gate.clone();
     builder.require_feature(
         Feature::new("test.interrupt-gate").branch("test.interrupt-gate", move |names| {
@@ -2617,7 +2617,7 @@ async fn progress_keeps_committed_output_until_it_is_published() {
                 }),
             );
         defaults::install(&mut builder);
-        builder.timeline_store(store);
+        builder.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(store));
         let agent = MinimalHost::start(&builder).await.unwrap();
         let session = agent
             .create_session(SessionConfig::default())
@@ -2673,7 +2673,7 @@ async fn progress_keeps_committed_output_until_it_is_published() {
 async fn a_steer_during_the_context_read_ends_the_request_before_it_is_handed_over() {
     let store = Arc::new(CountContextReads::default());
     let mut builder = builder(Arc::new(EchoModel));
-    builder.timeline_store(store.clone());
+    builder.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(store.clone()));
     let agent = MinimalHost::start(&builder).await.unwrap();
     let session = agent
         .create_session(SessionConfig::default())
@@ -2757,7 +2757,7 @@ async fn a_below_threshold_preparation_reads_no_growing_turn_order() {
             ..Context::default()
         },
     );
-    builder.timeline_store(store.clone());
+    builder.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(store.clone()));
     let agent = MinimalHost::start(&builder).await.unwrap();
     let session = agent
         .create_session(SessionConfig::default())
@@ -3387,7 +3387,7 @@ async fn usage_reuses_counted_messages_and_current_registry_tools_without_extra_
     let counter = Arc::new(ObservedCounter::default());
     let mut profile = builder_with_usage_resolver(counter.clone());
     let store = Arc::new(CountContextReads::default());
-    profile.timeline_store(store.clone());
+    profile.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(store.clone()));
     let cell = Arc::new(std::sync::OnceLock::new());
     let capture = cell.clone();
     profile.require_feature(Feature::new("test.raw-timeline").branch(
@@ -3556,7 +3556,7 @@ async fn resuming_a_replacement_only_context_defers_missing_usage_until_a_reques
     let source = Arc::new(MemoryTimelineStore::default());
     let counter = Arc::new(ObservedCounter::default());
     let mut profile = builder_with_usage_resolver(counter.clone());
-    profile.timeline_store(source.clone());
+    profile.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(source.clone()));
     let agent = MinimalHost::start(&profile).await.unwrap();
     let session = agent
         .create_session(SessionConfig::default())
@@ -3623,7 +3623,7 @@ async fn resuming_a_replacement_only_context_defers_missing_usage_until_a_reques
     let before = store.head(&key).await.unwrap();
     counter.messages.store(0, Ordering::SeqCst);
     let mut profile = builder_with_usage_resolver(counter.clone());
-    profile.timeline_store(store.clone());
+    profile.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(store.clone()));
     let agent = MinimalHost::start(&profile).await.unwrap();
     let session = agent.restore_session(id).await.unwrap();
     assert!(matches!(
@@ -3671,7 +3671,7 @@ async fn usage_upgrades_saved_numbers_or_initializes_once_without_historical_res
     let source = Arc::new(MemoryTimelineStore::default());
     let counter = Arc::new(ObservedCounter::default());
     let mut profile = builder_with_usage_resolver(counter.clone());
-    profile.timeline_store(source.clone());
+    profile.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(source.clone()));
     let agent = MinimalHost::start(&profile).await.unwrap();
     let session = agent
         .create_session(SessionConfig::default())
@@ -3863,7 +3863,7 @@ async fn usage_upgrades_saved_numbers_or_initializes_once_without_historical_res
         counter.fixed.store(0, Ordering::SeqCst);
         let before = store.head(&key).await.unwrap();
         let mut profile = builder_with_usage_resolver(counter.clone());
-        profile.timeline_store(store.clone());
+        profile.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(store.clone()));
         let agent = MinimalHost::start(&profile).await.unwrap();
         let session = agent.restore_session(id.clone()).await.unwrap();
         let value = session
@@ -4091,7 +4091,7 @@ async fn child_tool_results_do_not_change_usage_live_after_reload_or_compaction(
     let store = Arc::new(MemoryTimelineStore::default());
     let counter = Arc::new(ObservedCounter::default());
     let mut profile = builder_with_usage_resolver(counter.clone());
-    profile.timeline_store(store.clone());
+    profile.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(store.clone()));
     let cell = Arc::new(std::sync::OnceLock::new());
     let capture = cell.clone();
     profile.require_feature(Feature::new("test.raw-timeline").branch(
@@ -4352,7 +4352,7 @@ async fn legacy_prompt_references_migrate_explicitly_and_preserve_domain_task_st
         Arc::new(SystemSources(AtomicUsize::new(0))),
         None,
     );
-    builder.timeline_store(store.clone());
+    builder.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(store.clone()));
     let agent = MinimalHost::start(&builder).await.unwrap();
     let error = match agent.restore_session(key.session_id.clone()).await {
         Ok(_) => panic!("legacy prompt adoption must require migration"),
@@ -4447,7 +4447,7 @@ async fn a_restore_asks_for_consumptions_only_for_the_inputs_it_adopts() {
             HistoryRenderer::default(),
             Context::default(),
         );
-        profile.timeline_store(store.clone());
+        profile.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(store.clone()));
         let agent = MinimalHost::start(&profile).await.unwrap();
         let session = agent
             .create_session(SessionConfig::default())
@@ -4522,7 +4522,7 @@ async fn a_restore_asks_for_consumptions_only_for_the_inputs_it_adopts() {
             HistoryRenderer::default(),
             Context::default(),
         );
-        profile.timeline_store(store.clone());
+        profile.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(store.clone()));
         let agent = MinimalHost::start(&profile).await.unwrap();
         store.property_queries.lock().unwrap().clear();
         let session = agent.restore_session(id.clone()).await.unwrap();
@@ -4651,7 +4651,7 @@ async fn a_change_naming_two_inputs_waits_for_both() {
             HistoryRenderer::default(),
             Context::default(),
         );
-        profile.timeline_store(store.clone());
+        profile.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(store.clone()));
         let agent = MinimalHost::start(&profile).await.unwrap();
         let session = agent
             .create_session(SessionConfig::default())
@@ -4757,7 +4757,7 @@ async fn a_change_naming_two_inputs_waits_for_both() {
             HistoryRenderer::default(),
             Context::default(),
         );
-        profile.timeline_store(store.clone());
+        profile.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(store.clone()));
         let agent = MinimalHost::start(&profile).await.unwrap();
         if let Some(at) = hidden {
             *store.hidden_consumptions.lock().unwrap() = vec![change.inputs[at].clone()];
@@ -4799,7 +4799,7 @@ async fn a_restore_reads_a_v1_checkpoints_boundary_from_source_through() {
         HistoryRenderer::default(),
         Context::default(),
     );
-    profile.timeline_store(store.clone());
+    profile.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(store.clone()));
     let agent = MinimalHost::start(&profile).await.unwrap();
     let session = agent
         .create_session(SessionConfig::default())
@@ -4887,7 +4887,7 @@ async fn a_restore_reads_a_v1_checkpoints_boundary_from_source_through() {
         HistoryRenderer::default(),
         Context::default(),
     );
-    profile.timeline_store(store.clone());
+    profile.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(store.clone()));
     let agent = MinimalHost::start(&profile).await.unwrap();
     let session = agent
         .restore_session(id)
@@ -4922,7 +4922,7 @@ async fn a_line_starts_before_an_undelivered_removal_under_a_later_system_change
         HistoryRenderer::default(),
         Context::default(),
     );
-    profile.timeline_store(store.clone());
+    profile.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(store.clone()));
     let agent = MinimalHost::start(&profile).await.unwrap();
     let session = agent
         .create_session(SessionConfig::default())
@@ -5127,7 +5127,7 @@ async fn a_line_starts_before_an_undelivered_removal_under_a_later_system_change
         HistoryRenderer::default(),
         Context::default(),
     );
-    profile.timeline_store(store.clone());
+    profile.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(store.clone()));
     let agent = MinimalHost::start(&profile).await.unwrap();
     let session = agent.restore_session(id).await.unwrap();
     let child = session
@@ -5214,7 +5214,7 @@ async fn a_long_inherited_suffix_keeps_each_consumption_query_bounded() {
         HistoryRenderer::default(),
         Context::default(),
     );
-    profile.timeline_store(store.clone());
+    profile.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(store.clone()));
     let agent = MinimalHost::start(&profile).await.unwrap();
     let session = agent
         .create_session(SessionConfig::default())
@@ -5349,7 +5349,7 @@ async fn a_long_inherited_suffix_keeps_each_consumption_query_bounded() {
     // asserts the width of each consumption query, not how fast startup is;
     // 120 s is ten times the 12 s one local run spent paging the suffix.
     profile.startup_timeout(std::time::Duration::from_secs(120));
-    profile.timeline_store(store.clone());
+    profile.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(store.clone()));
     let agent = MinimalHost::start(&profile).await.unwrap();
     let session = agent
         .restore_session(id)
