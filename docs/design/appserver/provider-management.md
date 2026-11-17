@@ -1523,7 +1523,11 @@ A `builtin` row maps onto the builtin of its id. Without a target the import
 starts from that builtin's bundled definition, exactly as an import over a
 seeded target does, so a `builtin` row whose id has no bundled definition is
 rejected; over an existing target the target must be the pristine seeded
-record. A `custom` row whose id belongs to the bundled catalog is rejected.
+record. The converted record states the definition's name, not the source row's:
+a builtin's name is catalog data the user does not set, so a source row written
+before a catalog rename still imports and carries the current name. Its driver
+and auth must match, because those decide what the record reaches. A `custom`
+row whose id belongs to the bundled catalog is rejected.
 Both entries parse and validate an existing target record with the same
 parser, and a target that does not validate rejects the row. Migration
 classifies a non-pristine target as `Conflict` with no reason before the
