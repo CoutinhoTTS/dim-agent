@@ -42,7 +42,7 @@ jar SHA-256：`936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88`
 修改后的 timeline_tail 使用真正的 Dispatcher.consume，删除手写暂存/covered 交接实现。
 原有恰好一次、cut 和顺序断言保留；原未发布/无尾部场景均执行。
 
-- `cargo test --locked -p dim-agent-integration-tests --test timeline_tail`：5 passed，0 failed。
+- `cargo test --locked -p dim-agent-integration-tests --test timeline_tail`：8 passed，0 failed。
 - `cargo clippy --locked -p dim-agent-integration-tests --test timeline_tail -- -D warnings`：通过。
 - `cargo fmt --all --check`：通过。
 
@@ -72,5 +72,5 @@ done
 结果只用于这里声明的范围，查询正确性、owner cut 充分性、完整卸载协议及客户端错误观察仍有自己的验证责任。
 
 评审修正：Rust 流程增加 rebuild-start 信号和有界完成等待，确保发布前已注册。
-动态移除/重新注册仍仅由模型展开。RetainsFirstFault、RemovalPreservesHistory 是按定义成立的自洽检查，
+补充流程已执行真实注册撤销/重新注册、drain 等待中新到事件、恢复/drain 错误及双消费者普通实时错误。模型/config 未改，原 TLC 结果复用。RetainsFirstFault、RemovalPreservesHistory 是按定义成立的自洽检查，
 不按两项新增实现证明计数；模型/config 未修改，原 TLC 证据复用。

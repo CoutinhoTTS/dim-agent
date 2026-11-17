@@ -76,10 +76,19 @@ rebuild 入口先发注册完成信号，测试收到后才发布输入；无尾
 
 [dispatch_flow](../../../crates/dim-agent-capabilities/tests/dispatch_flow.rs)已有 panic 归属及游标冻结、domain wildcard 流程；
 动态工具装配、producer 卸载后历史读取沿用既有 tool_binding/storage_flow 证据。
-Rust 测试只覆盖一次注册；动态退出/重新注册属于模型范围。
+新增真实消费交接流程，直接使用 branch 的 Timeline、Dispatcher 和 rutis 注册生命周期：
+
+| 流程 | 对应模型窗口 | 实际断言 |
+| --- | --- | --- |
+| `consume_drains_new_arrivals_and_reregisters_without_repeating_history` | rebuild hold、drain await/new arrival、remove/register | 注册后查询取 cut；首个 held handler 等待时再次写入并确认 Dispatcher 已暂存；排空后再测 live；注销期间的事实由新注册精准查询恢复，旧注册不再处理，恢复与 live 合并序号无重复/遗漏 |
+| `consume_rebuild_and_drain_failures_stay_local_until_the_owner_is_removed` | rebuild error、drain error | 两种失败返回调用方，后续事实不放行给失败消费者；Dispatcher 无全局 fault 且继续推进；owner 注销后仍无回调 |
+| `consume_live_error_finishes_the_current_fact_and_stops_its_suffix` | ordinary handler Err、current serial completion | 同批两事实的第一项报错，另一个健康 consumer 仍收到当前事实；cursor 停在第一项，两者都不处理后缀 |
+
+等待由注册、handler 入口与 Dispatcher 位置握手驱动，均设十秒上限。实时错误用原子批次固定已有后缀，避免错误与第二次 append 竞争。
+这些测试覆盖真实注册作用域的撤销/重建，不等于 PartRegistry 全套动态安装或业务 owner 的恢复算法已验证。
 `RetainsFirstFault` 和 `RemovalPreservesHistory` 直接来自动作定义，属于自洽检查/边界声明，
 不当作额外实现证明。
-本批没有新增普通 Err/双消费者/长 handler 排空的 Rust 场景：这些只有模型与源码对应，不能把它们记成实现流程已重跑。
+新增流程不改变模型动作或前提，复用原三组 TLC 结果；并不声称所有模型交错都已在 Rust 中穷举。
 
 ## 消融与结果
 
@@ -89,3 +98,5 @@ Rust 测试只覆盖一次注册；动态退出/重新注册属于模型范围�
 
 运行结果、关键可达窗口、源码哈希和复现命令见[本批记录](capability-models/consumer-handoff-results.md)。
 #1732 的 D、完整 runtime 精化及 facade 故障传播不因本批通过而完成。
+
+补充流程的消融审查：复用现有测试文件和真实服务，不增加生产抽象；保留注册作用域、通知握手与有界等待，分别用于验证注销效果、强制交错窗口和避免故障悬挂。未增加重复暂存队列或恢复算法。
