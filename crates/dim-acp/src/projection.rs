@@ -593,10 +593,11 @@ impl Projection {
     }
 
     /// A compaction as the protocol's own entity, keyed by the start it belongs
-    /// to; the client declared `session.compaction`. It does not send the
-    /// summary, because Dim keeps the retained summary in the compaction record
-    /// and reading it for every completion is the history read this projection
-    /// must not make.
+    /// to; the client declared `session.compaction`. It sends no `summary` by
+    /// choice: the replacement the completed fact carries is the model's new
+    /// context, stored exactly as produced, with `replacement_parts` locating
+    /// its strategy text, digest and pinned parts; it is not a summary written
+    /// for a user. The display compaction carries no text at all.
     fn compaction(
         &mut self,
         start: u64,
