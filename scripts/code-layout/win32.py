@@ -20,6 +20,7 @@ LIST_MODULES_ALL = 0x03
 EXTENDED_STARTUPINFO_PRESENT = 0x00080000
 CREATE_SUSPENDED = 0x00000004
 CREATE_UNICODE_ENVIRONMENT = 0x00000400
+STARTF_USESTDHANDLES = 0x00000100
 PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE = 0x00020016
 HPCON = ctypes.c_void_p
 
@@ -288,8 +289,7 @@ def _environment_block(environment):
 class Console:
     """A ConPTY child with a synchronous write side and a reader thread."""
 
-    def __init__(self, arguments, cwd, environment, columns=120, rows=30,
-                 inherit_environment=False):
+    def __init__(self, arguments, cwd, environment, columns=120, rows=30):
         import msvcrt
         self._child_in, self._master_in = os.pipe()
         self._master_out, self._child_out = os.pipe()
@@ -323,15 +323,13 @@ class Console:
 
         startup = STARTUPINFOEXW()
         startup.StartupInfo.cb = ctypes.sizeof(STARTUPINFOEXW)
+        # https://github.com/microsoft/terminal/discussions/15814
+        startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES
         startup.lpAttributeList = ctypes.cast(self._attributes, ctypes.c_void_p)
         process = PROCESS_INFORMATION()
         command = ctypes.create_unicode_buffer(subprocess.list2cmdline([str(item) for item in arguments]))
-        flags = EXTENDED_STARTUPINFO_PRESENT
-        environment_block = None
-        if not inherit_environment:
-            flags |= CREATE_UNICODE_ENVIRONMENT
-            environment_block = ctypes.cast(
-                _environment_block(environment), ctypes.c_void_p)
+        flags = EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT
+        environment_block = _environment_block(environment)
         if not kernel32.CreateProcessW(
             None, command, None, None, False, flags, environment_block,
             str(cwd), ctypes.byref(startup), ctypes.byref(process),

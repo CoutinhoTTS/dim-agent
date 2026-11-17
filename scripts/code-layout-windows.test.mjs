@@ -118,18 +118,32 @@ void entry(void) {
         win32.close(handle)
         process.kill(); process.wait()
 
-    (root / 'echoer.c').write_text('#include <stdio.h>\nint main(void) { printf("layout-conpty\\n"); fflush(stdout); getchar(); return 0; }\n')
+    (root / 'echoer.c').write_text('''#include <windows.h>
+#include <stdio.h>
+int main(void) {
+    DWORD mode;
+    if (!GetConsoleMode(GetStdHandle(STD_INPUT_HANDLE), &mode)) return 10;
+    if (!GetConsoleMode(GetStdHandle(STD_OUTPUT_HANDLE), &mode)) return 11;
+    if (!GetConsoleMode(GetStdHandle(STD_ERROR_HANDLE), &mode)) return 12;
+    printf("layout-conpty-out\\n");
+    fprintf(stderr, "layout-conpty-err\\n");
+    fflush(stdout);
+    fflush(stderr);
+    return getchar() == '\\n' ? 0 : 13;
+}
+''')
     subprocess.run(['cl','/nologo',str(root/'echoer.c'),'/Fe:'+str(root/'echoer.exe')],check=True)
-    console = win32.Console([str(root/'echoer.exe')], root, dict(os.environ),
-                            inherit_environment=True)
+    console = win32.Console([str(root/'echoer.exe')], root, dict(os.environ))
     try:
         capture = bytearray()
         deadline = time.monotonic() + 20
-        while time.monotonic() < deadline and b'layout-conpty' not in capture:
+        markers = (b'layout-conpty-out', b'layout-conpty-err')
+        while time.monotonic() < deadline and not all(marker in capture for marker in markers):
             capture.extend(console.take())
             time.sleep(.02)
-        assert b'layout-conpty' in capture, (bytes(capture[-2000:]), console.error, console.poll())
-        console.write(b"\n")
+        assert all(marker in capture for marker in markers), (bytes(capture[-2000:]), console.error, console.poll())
+        assert console.poll() is None, 'the child must wait for input through ConPTY'
+        console.write(b"\r")
         assert console.wait(timeout=20) == 0
     finally:
         console.close()`});

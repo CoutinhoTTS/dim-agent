@@ -159,9 +159,13 @@ suspended start with pseudoconsole attachment; the startup profile covers the
 entry-time pages and the TUI profile covers pages faulted by the UI flow. Before
 exit or shutdown the trainer queries the executable's `.text` working-set pages
 with `QueryWorkingSetEx`. Every Windows target runs the real TUI picker; a
-console-less runner is not accepted as native TUI evidence. The ConPTY fixture
-keeps its child alive until the expected text is drained, so initialization
-bytes or an early exit are not counted as success. This is genuine working-set
+console-less runner is not accepted as native TUI evidence. The ConPTY launcher
+uses explicit null standard handles with `STARTF_USESTDHANDLES` so a redirected
+parent does not pass its pipes to the child ([Windows console guidance](https://github.com/microsoft/terminal/discussions/15814)).
+The fixture checks that all three standard handles are console handles, captures
+both output streams through ConPTY, and keeps the child alive until it receives
+the input handshake. It uses the same explicit environment path as TUI training;
+initialization bytes or an early exit are not counted as success. This is genuine working-set
 residency after an entry-time trim, not a reference-bit trace: the operating
 system may prefetch neighboring pages and the result includes page-granularity
 rounding. App Server shutdown
