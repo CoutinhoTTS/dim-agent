@@ -241,6 +241,10 @@ reports unmatched names as `missing symbol ... [LNK4037]`; only those names are
 removed, then `/WX` makes the strict relink fail on any remaining warning. The
 `/lldmap` output uses `/demangle:no` so its raw COFF names also match `/order`.
 Its output-section, input-chunk and symbol columns are parsed structurally.
+COFF input subsections such as `.text`, `.text$mn` and `.text$unlikely` retain
+their lexicographic placement. The order file groups names by that input
+subsection, preserving the training priority inside each group, because
+[`lld-link` sorts each partial section independently](https://github.com/llvm/llvm-project/blob/llvmorg-21.1.8/lld/COFF/Writer.cpp#L964-L975).
 It records all `.text` symbols, including static ones. Only
 symbols inside their input chunk's half-open address range describe code;
 end labels are excluded even when another function follows that chunk, and

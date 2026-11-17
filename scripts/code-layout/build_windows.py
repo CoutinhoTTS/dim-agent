@@ -198,7 +198,7 @@ def ordered_link(record, output, order_file, map_path):
 
 
 def order(baseline_map, profiles, output):
-    functions, _ = pe.symbols(baseline_map)
+    functions, _, input_sections = pe.symbols(baseline_map)
     page_size, footprints = None, []
     for profile in profiles:
         observed, pages = read_sample(profile)
@@ -208,14 +208,16 @@ def order(baseline_map, profiles, output):
             raise ValueError("training samples use different page sizes")
         footprints.append(pages)
     names = select(unique_functions(functions), footprints, page_size)
+    sections = {name: section for (_, _, name), section in zip(functions, input_sections)}
+    names.sort(key=sections.__getitem__)
     output.write_text("\n".join(names) + "\n", encoding="utf-8", errors="surrogateescape")
     return {"pages": [len(pages) for pages in footprints], "pageSize": page_size,
             "orderedFunctions": len(names), "functionSymbols": len(functions)}
 
 
 def validate(baseline_map, candidate_map, order_file):
-    before, before_sizes = pe.symbols(baseline_map)
-    after, after_sizes = pe.symbols(candidate_map)
+    before, before_sizes, _ = pe.symbols(baseline_map)
+    after, after_sizes, _ = pe.symbols(candidate_map)
     return validate_sizes(before, after, before_sizes, after_sizes,
                           order_file.read_text(encoding="utf-8", errors="surrogateescape").splitlines(),
                           "PE function")

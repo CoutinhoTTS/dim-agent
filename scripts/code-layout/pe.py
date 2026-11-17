@@ -44,18 +44,21 @@ def text_range(binary):
 
 
 def symbols(map_path):
-    """Return ``(functions, sizes)`` from an lld-link map.
+    """Return ``(functions, sizes, input_sections)`` from an lld-link map.
 
     ``functions`` are ``(start, end, name)`` relative to the ``.text`` RVA;
     ``sizes`` carries the COMDAT body size when the map attributes exactly one
     symbol to a chunk. A chunk holding several symbols gets ``None`` and is
     compared by name only. Labels at a chunk's exclusive end have no body and
     are excluded regardless of where the chunk is placed in ``.text``.
+    ``input_sections`` aligns with the functions and retains COFF subsection
+    names, within which the linker applies the symbol order.
     """
     text_start = text_size = None
     section = None
     entries = []
     chunk_start = chunk_size = None
+    chunk_section = None
     chunk_symbols = []
 
     def finish():
@@ -69,7 +72,7 @@ def symbols(map_path):
                          if chunk_start <= address < chunk_start + chunk_size]
         for address, name in chunk_symbols:
             entries.append((address, name, chunk_size if len(chunk_symbols) == 1 else None,
-                            chunk_start + chunk_size))
+                            chunk_start + chunk_size, chunk_section))
         chunk_symbols = []
 
     for line in map_path.read_text(encoding="utf-8", errors="surrogateescape").splitlines():
@@ -89,6 +92,10 @@ def symbols(map_path):
         if indent == 9:
             if section == ".text":
                 finish()
+                _, separator, suffix = name.rpartition(":(")
+                if not separator or not suffix.endswith(")"):
+                    raise ValueError(f"the lld map input chunk has no section name: {line}")
+                chunk_section = suffix[:-1]
             chunk_start, chunk_size = address, size
         elif indent == 17 and section == ".text":
             chunk_symbols.append((address, name))
@@ -103,12 +110,12 @@ def symbols(map_path):
     )
     if not entries:
         raise ValueError("the lld map has no .text function symbols")
-    starts = sorted(set(address for address, _, _, _ in entries))
+    starts = sorted(set(address for address, _, _, _, _ in entries))
     end_by_start = {address: text_start + text_size for address in starts}
     for current, following in zip(starts, starts[1:]):
         end_by_start[current] = following
     functions = [
         (address - text_start, min(end_by_start[address], chunk_end) - text_start, name)
-        for address, name, _, chunk_end in entries
+        for address, name, _, chunk_end, _ in entries
     ]
-    return functions, [size for _, _, size, _ in entries]
+    return functions, [size for _, _, size, _, _ in entries], [section for _, _, _, _, section in entries]

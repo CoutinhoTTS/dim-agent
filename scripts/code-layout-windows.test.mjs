@@ -27,7 +27,7 @@ with tempfile.TemporaryDirectory(prefix='dim-layout-coff-') as temporary:
     base, candidate, order = root/'base.map', root/'candidate.map', root/'symbols.order'
     write_map(base, [(0x1000, ['rust::first']), (0x1020, ['_Rrust_second','_Rrust_alias'])])
     write_map(candidate, [(0x1000, ['_Rrust_second','_Rrust_alias']), (0x1020, ['rust::first'])])
-    functions, sizes = pe.symbols(base)
+    functions, sizes, _ = pe.symbols(base)
     assert functions[0] == (0,16,'rust::first'), 'padding before the next chunk is not function code'
     assert sorted(s for s in sizes if s is not None) == [16]
     order.write_text('_Rrust_alias\n_Rrust_second\nrust::first\n')
@@ -47,6 +47,30 @@ with tempfile.TemporaryDirectory(prefix='dim-layout-coff-') as temporary:
     build_windows.order(base, [profile], order)
     assert order.read_bytes().splitlines() == [b'_Rraw_\xc0', b'_Rsecond']
     assert build_windows.validate(base,candidate,order)['movedFunctionSymbols'] == 2
+
+    def section_map(path, entries):
+        lines = ['Address  Size     Align Out     In      Symbol', '00001000 00004000  4096 .text']
+        for address, section, name in entries:
+            lines.append(f'{address:08x} 00000010    16         library.lib(member.obj):({section})')
+            lines.append(f'{address:08x} 00000000     0                 {name}')
+        path.write_text('\n'.join(lines)+'\n')
+    section_map(base, [(0x1000, '.text', 'normal_first'), (0x2000, '.text', 'normal_second'),
+                       (0x3000, '.text$mn', 'msvc'), (0x4000, '.text$unlikely', 'cold')])
+    section_map(candidate, [(0x1000, '.text', 'normal_second'), (0x1010, '.text', 'normal_first'),
+                            (0x2000, '.text$mn', 'msvc'), (0x3000, '.text$unlikely', 'cold')])
+    startup, tui, conversation = [root/f'{flow}.pages' for flow in ('startup', 'tui', 'conversation')]
+    samples.write(startup, 4096, [0, 1, 2, 3])
+    samples.write(tui, 4096, [1, 3])
+    samples.write(conversation, 4096, [3])
+    build_windows.order(base, [startup, tui, conversation], order)
+    assert order.read_text().splitlines() == ['normal_second', 'normal_first', 'msvc', 'cold']
+    assert build_windows.validate(base,candidate,order)['movedFunctionSymbols'] == 4
+    try:
+        build_windows.validate(base,base,order)
+    except RuntimeError as error:
+        assert 'do not follow' in str(error)
+    else:
+        raise AssertionError('ignoring the order inside a COFF subsection must fail')
 `});
   assert.equal(result.error,undefined);
   assert.equal(result.status,0,result.stdout+result.stderr);
@@ -91,7 +115,9 @@ with Keep(prefix='dim-layout-win-') as temporary:
     (root / 'fixture.c').write_text('''#include <windows.h>
 __declspec(dllexport) int public_func(int x) { return x + 3; }
 static __declspec(noinline) int internal_func(int x) { return x * 5; }
+#pragma code_seg(push, ".text$unlikely")
 static __declspec(noinline) int internal_two(int x) { return x - 7; }
+#pragma code_seg(pop)
 typedef int (*fn)(int);
 static fn volatile f1 = internal_func;
 static fn volatile f2 = internal_two;
@@ -115,15 +141,19 @@ void entry(void) {
     base = root/'base.exe'; base_map = root/'base.map'
     build_windows.relink(record, base, map_path=base_map)
     assert subprocess.run([str(base)]).returncode == 42
+    functions, _, input_sections = pe.symbols(base_map)
+    assert len(set(input_sections)) > 1, 'native fixture must exercise separate COFF subsections'
+    assert next(section for (_, _, name), section in zip(functions, input_sections)
+                if name == 'internal_two') == '.text$unlikely'
     order = root/'order'
-    order.write_text('internal_two\ninternal_func\nentry\npublic_func\n')
+    order.write_text('internal_func\nentry\npublic_func\ninternal_two\n')
     candidate = root/'candidate.exe'; candidate_map = root/'candidate.map'
     assert build_windows.ordered_link(record, candidate, order, candidate_map) == []
     assert subprocess.run([str(candidate)]).returncode == 42
     measurement = build_windows.validate(base_map, candidate_map, order)
     assert measurement['movedFunctionSymbols'] > 0
     missing = root/'missing.order'
-    missing.write_text('absent_symbol\ninternal_two\ninternal_func\nentry\npublic_func\n')
+    missing.write_text('absent_symbol\ninternal_func\nentry\npublic_func\ninternal_two\n')
     assert build_windows.ordered_link(record, root/'missing.exe', missing, root/'missing.map') == ['absent_symbol']
     assert 'absent_symbol' not in missing.read_text()
     samples = root/'samples.pages'
@@ -191,7 +221,7 @@ fn main() { assert_eq!(layout_first(layout_second(2)), 13); let p = std::env::ar
     assert executable.read_bytes() == original, 'replay must retain Rust temporary NatVis inputs'
     expected = subprocess.check_output([str(root/'canonical.exe'), str(root)], text=True).strip()
     assert win32.canonical_path(root) == expected, (win32.canonical_path(root), expected)
-    rust_symbols, _ = pe.symbols(rust_capture/'baseline.map')
+    rust_symbols, _, _ = pe.symbols(rust_capture/'baseline.map')
     selected = [name for _, _, name in rust_symbols if 'layout_first' in name or 'layout_second' in name]
     assert len(selected) == 2 and all('::' not in name for name in selected), selected
     rust_order = root/'rust.order'; rust_order.write_text('\n'.join(reversed(selected))+'\n')
