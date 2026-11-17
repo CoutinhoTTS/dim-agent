@@ -47,9 +47,10 @@ startup/shared functions first, then TUI, then conversation-only functions;
 original address order is retained within each group. Functions not selected
 retain the linker's default ordering. A diagnostic link identifies names LLD
 resolves to shared or discarded definitions, including duplicate C-local names.
-Those names alone are removed from the order before one strict relink; any other
-diagnostic fails the build. This is page-access profiling, including neighboring
-functions on each page, rather than an instruction trace or a call-count profile.
+Only reported names are removed from the order; a strict relink runs when any
+were removed. Any other diagnostic fails the build. This is page-access profiling,
+including neighboring functions on each page, rather than an instruction trace
+or a call-count profile.
 
 The same native objects are relinked with LLD's `--symbol-ordering-file`. The
 function-name/size multiset must remain equal. The candidate then runs all three
