@@ -456,6 +456,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
 
         "Select a model" => "选择模型",
         "Loading models..." => "正在加载模型...",
+        "Previous page" => "上一页",
+        "Next page" => "下一页",
         "No models available. Connect a provider first." => "无可用模型。请先连接 Provider。",
         "No matching models." => "无匹配的模型。",
         "current" => "当前",

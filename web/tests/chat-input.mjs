@@ -22,7 +22,7 @@ registerHooks({
   resolve(specifier, context, next) {
     if (specifier.startsWith("../../stores/") || (context.parentURL?.endsWith("/stores/chat.ts") && ["./connection", "./sessions", "./ui"].includes(specifier))) {
       const store = specifier.split("/").at(-1)
-      const name = `use${store[0].toUpperCase()}${store.slice(1)}Store`
+      const name = store === "models" ? "useModels" : `use${store[0].toUpperCase()}${store.slice(1)}Store`
       const source = `export const ${name}=()=>globalThis.chatInputStores.${store}; export const workspaceName=x=>x`
       return { url: `data:text/javascript,${encodeURIComponent(source)}`, shortCircuit: true }
     }
@@ -118,7 +118,7 @@ function mount(t, branchId, questions = [], component, stores = {}, props = {}, 
     },
     connection: { supports: () => false },
     composer: reactive({ sendMode: "steer", alternate() { return this.sendMode === "steer" ? "queue" : "steer" } }),
-    models: { available: false, load: async () => {} },
+    models: { available: false, load: async () => {}, clear: () => {} },
     sessions: { byId: new Map(), summaries: [] },
     toast: { push() {} },
     ui: { shellMode: "wide", approvalKeyboard: () => false },

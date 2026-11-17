@@ -7,7 +7,7 @@ import ComposerPanel from "./ComposerPanel.vue"
 import ExtensionMenu from "../extensions/ExtensionMenu.vue"
 import { MAIN_BRANCH, type ModelId } from "../../rpc/protocol"
 import { useChatStore } from "../../stores/chat"
-import { useModelsStore } from "../../stores/models"
+import { useModels } from "../../stores/models"
 import { useSessionsStore, workspaceName } from "../../stores/sessions"
 
 /**
@@ -20,7 +20,7 @@ const route = useRoute()
 const router = useRouter()
 const sessions = useSessionsStore()
 const chat = useChatStore()
-const models = useModelsStore()
+const models = useModels()
 const menuOpen = ref(false)
 
 /** The directory the session will run in, seeded from `?cwd=` or the latest workspace. */

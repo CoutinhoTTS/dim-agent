@@ -2,13 +2,13 @@
 import { computed, onBeforeUnmount, ref, watch } from "vue"
 import { useI18n } from "vue-i18n"
 import { settingsMessages } from "../../i18n/settings"
-import { readManagementProvider, readProbe, type ManagementProvider, type ManagementView, type ModelEntry } from "../../rpc/management"
+import { readManagementProvider, readManagementUpdateSummary, readProbe, type ManagementInfo, type ManagementView, type ModelEntry } from "../../rpc/management"
 import { RpcError } from "../../rpc/client"
 import { useConnectionStore } from "../../stores/connection"
 import { messageFrom } from "./context"
 
-const props = defineProps<{ provider?: ManagementProvider; drivers: ManagementView["drivers"] }>()
-const emit = defineEmits<{ saved: [provider: ManagementProvider]; reload: []; cancel: [] }>()
+const props = defineProps<{ provider?: ManagementInfo; drivers: ManagementView["drivers"] }>()
+const emit = defineEmits<{ saved: [provider: ManagementInfo]; reload: []; cancel: [] }>()
 const dirty = defineModel<boolean>("dirty", { default: false })
 const { t } = useI18n({ messages: settingsMessages })
 const connection = useConnectionStore()
@@ -124,7 +124,9 @@ async function save(): Promise<void> {
   error.value = ""
   try {
     const p = props.provider
-    const result = await connection.client.call(p ? "provider.update" : "provider.create", p ? { providerId: p.providerId, expectedVersion: version.value, patch: patch() } : createRequest(), readManagementProvider)
+    const result = p
+      ? await connection.client.call("provider.update", { providerId: p.providerId, expectedVersion: version.value, patch: patch(), reply: "summary" }, readManagementUpdateSummary)
+      : await connection.client.call("provider.create", createRequest(), readManagementProvider)
     key.value = ""
     accessKey.value = ""
     sessionToken.value = ""
