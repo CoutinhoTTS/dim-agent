@@ -25,9 +25,10 @@
   },
   "modified_flow_test": {
     "path": "tests/integration/tests/timeline_tail.rs",
-    "sha256": "ad365cd23baadef9fb0938ac85a9338067b2b2b93dd58d021af098c0942ec737",
+    "sha256": "eb314846bc2fb0b112891ca85ae62493f305f580df553ee62cfd1f9abcead896",
     "result": "5 passed; 0 failed",
-    "clippy": "passed (-D warnings)"
+    "clippy": "passed (-D warnings)",
+    "review_fix": "Rebuild-start handshake before input publication; bounded start/completion waits. Same 5 public-flow tests passed."
   },
   "scope": "Finite consume/serial handoff safety, not arbitrary generations, owner recovery correctness, rutis refinement or client error propagation. No liveness claim.",
   "runs": [

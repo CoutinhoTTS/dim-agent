@@ -70,3 +70,7 @@ done
 单注册加 `-dump "$run_dir/witness"` 导出 `witness.dump`，按上表字段核对可达窗口。
 使用 JSON 的 `-seed`、`-fp` 可复现记录中的随机参数；状态编号只对该运行有效。
 结果只用于这里声明的范围，查询正确性、owner cut 充分性、完整卸载协议及客户端错误观察仍有自己的验证责任。
+
+评审修正：Rust 流程增加 rebuild-start 信号和有界完成等待，确保发布前已注册。
+动态移除/重新注册仍仅由模型展开。RetainsFirstFault、RemovalPreservesHistory 是按定义成立的自洽检查，
+不按两项新增实现证明计数；模型/config 未修改，原 TLC 证据复用。

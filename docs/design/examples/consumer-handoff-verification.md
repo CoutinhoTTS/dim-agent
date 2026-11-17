@@ -70,10 +70,15 @@ cut 的充分性也属于 owner 前提：本模型只允许在注册之后捕获
 
 本 PR 将该流程改为实际 `consume`，删除测试自己的 staged/read 状态；rebuild callback 做原来的精准查询，
 live callback 只记录所处理序号。保留未发布尾部/无尾部两个场景及全部原有序号、cut 和恰好一次断言。
-不改运行时，不放宽断言，不重试失败或延长超时。
+rebuild 入口先发注册完成信号，测试收到后才发布输入；无尾部场景等待 Dispatcher idle 后才放行查询，
+因而确定覆盖已暂存事件的 cut 过滤。注册/完成信号等待都有十秒上限；任务 panic 不再留下无界等待。
+不改运行时，不放宽业务断言，不重试失败。
 
 [dispatch_flow](../../../crates/dim-agent-capabilities/tests/dispatch_flow.rs)已有 panic 归属及游标冻结、domain wildcard 流程；
 动态工具装配、producer 卸载后历史读取沿用既有 tool_binding/storage_flow 证据。
+Rust 测试只覆盖一次注册；动态退出/重新注册属于模型范围。
+`RetainsFirstFault` 和 `RemovalPreservesHistory` 直接来自动作定义，属于自洽检查/边界声明，
+不当作额外实现证明。
 本批没有新增普通 Err/双消费者/长 handler 排空的 Rust 场景：这些只有模型与源码对应，不能把它们记成实现流程已重跑。
 
 ## 消融与结果

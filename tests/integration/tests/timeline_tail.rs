@@ -161,6 +161,7 @@ struct TailPart {
     shared: Arc<Mutex<Rebuild>>,
     read_now: Arc<Mutex<Option<UnboundedReceiver<()>>>>,
     read_done: UnboundedSender<()>,
+    rebuild_started: UnboundedSender<()>,
 }
 impl TailPart {
     fn new(
@@ -168,6 +169,7 @@ impl TailPart {
         shared: Arc<Mutex<Rebuild>>,
         read_now: Arc<Mutex<Option<UnboundedReceiver<()>>>>,
         read_done: UnboundedSender<()>,
+        rebuild_started: UnboundedSender<()>,
     ) -> rutis::Result<Self> {
         Ok(Self {
             timeline: names.key()?,
@@ -176,6 +178,7 @@ impl TailPart {
             shared,
             read_now,
             read_done,
+            rebuild_started,
         })
     }
 }
@@ -198,6 +201,7 @@ impl DynPlugin for TailPart {
             let shared = self.shared.clone();
             let read_now = self.read_now.clone();
             let done = self.read_done.clone();
+            let started = self.rebuild_started.clone();
             let task_ctx = ctx.clone();
             let task = tokio::spawn(async move {
                 let restored = shared.clone();
@@ -211,7 +215,9 @@ impl DynPlugin for TailPart {
                             let lifecycle = lifecycle.clone();
                             let restored = restored.clone();
                             let read_now = read_now.lock().unwrap().take();
+                            let started = started.clone();
                             Box::pin(async move {
+                                started.send(()).expect("rebuild registration observer");
                                 let mut read_now = read_now.expect("one rebuild per registration");
                                 assert!(lifecycle.activated().await);
                                 read_now.recv().await.expect("rebuild trigger");
@@ -257,6 +263,7 @@ async fn handover(tail: bool) -> (u64, u64) {
     let shared = Arc::new(Mutex::new(Rebuild::default()));
     let (now_tx, now_rx) = unbounded_channel();
     let (done_tx, mut done_rx) = unbounded_channel();
+    let (started_tx, mut started_rx) = unbounded_channel();
     let read_now = Arc::new(Mutex::new(Some(now_rx)));
     let mut builder = AgentBuilder::new(AgentConfig::default());
     dim_agent_capabilities::defaults::mock_hosts(&mut builder);
@@ -269,6 +276,7 @@ async fn handover(tail: bool) -> (u64, u64) {
                 part.clone(),
                 read_now.clone(),
                 done_tx.clone(),
+                started_tx.clone(),
             )?))
         }),
     );
@@ -277,6 +285,10 @@ async fn handover(tail: bool) -> (u64, u64) {
         .create_session(SessionConfig::default())
         .await
         .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), started_rx.recv())
+        .await
+        .expect("consume must register before the test publishes input")
+        .expect("rebuild registration signal");
     store.hold();
     let pending = session
         .submit("first turn".into(), InputMode::Queue, "main")
@@ -287,7 +299,10 @@ async fn handover(tail: bool) -> (u64, u64) {
         session.idle("main").await.unwrap();
     }
     now_tx.send(()).unwrap();
-    done_rx.recv().await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), done_rx.recv())
+        .await
+        .expect("consume rebuild and held-event drain must finish")
+        .expect("consume completion signal");
     let (published, covered) = {
         let rebuild = shared.lock().unwrap();
         (rebuild.published, rebuild.covered)
