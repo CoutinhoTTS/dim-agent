@@ -1317,6 +1317,15 @@
       ]
     },
     {
+      "id": "dim_agent_capabilities::skills::face",
+      "crate": "dim_agent_capabilities",
+      "parent": "dim_agent_capabilities::skills",
+      "file": "crates/dim-agent-capabilities/src/skills/face.rs",
+      "unexpandedMacros": [
+        "serde_json::json"
+      ]
+    },
+    {
       "id": "dim_agent_capabilities::skills::install",
       "crate": "dim_agent_capabilities",
       "parent": "dim_agent_capabilities::skills",
@@ -9694,13 +9703,6 @@
     },
     {
       "from": "dim_agent_capabilities",
-      "to": "dim_agent_capabilities::skills::catalog",
-      "references": [
-        "path skills::SkillsCatalog"
-      ]
-    },
-    {
-      "from": "dim_agent_capabilities",
       "to": "dim_agent_capabilities::skills::session",
       "references": [
         "path skills::SkillsBranch"
@@ -16852,7 +16854,8 @@
         "use catalog::MemorySkillSettings",
         "use catalog::SkillsCatalog",
         "use catalog::SkillsCatalogPlugin",
-        "use catalog::catalog_changes"
+        "use catalog::catalog_changes",
+        "use catalog::owner_key"
       ]
     },
     {
@@ -16870,6 +16873,14 @@
       "to": "dim_agent_capabilities::skills::discovery",
       "references": [
         "mod discovery"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::skills",
+      "to": "dim_agent_capabilities::skills::face",
+      "references": [
+        "mod face",
+        "use face::SkillsCatalog"
       ]
     },
     {
@@ -17045,6 +17056,14 @@
     },
     {
       "from": "dim_agent_capabilities::skills::catalog",
+      "to": "dim_agent_capabilities::skills::face",
+      "references": [
+        "path super::SkillsCatalogBinding",
+        "path super::SkillsCatalogBinding::new"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::skills::catalog",
       "to": "dim_agent_runtime::names",
       "references": [
         "path Names",
@@ -17097,6 +17116,35 @@
         "path SkillIssue::Unreadable",
         "use super::SkillDefinition",
         "use super::SkillIssue"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::skills::face",
+      "to": "dim_agent_capabilities::port_faces",
+      "references": [
+        "path Empty",
+        "path request",
+        "path unknown_method",
+        "use crate::port_faces::Empty",
+        "use crate::port_faces::request",
+        "use crate::port_faces::unknown_method"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::skills::face",
+      "to": "dim_agent_capabilities::skills",
+      "references": [
+        "path SkillIssue",
+        "path SkillsError",
+        "use super::SkillIssue",
+        "use super::SkillsError"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::skills::face",
+      "to": "dim_agent_capabilities::skills::catalog",
+      "references": [
+        "path super::SkillsCatalog"
       ]
     },
     {
@@ -17202,6 +17250,7 @@
         "path CatalogChanged",
         "path SkillsCatalog",
         "path super::catalog_changes",
+        "path super::owner_key",
         "use super::CatalogChanged",
         "use super::SkillsCatalog"
       ]
@@ -30174,10 +30223,10 @@
     },
     {
       "from": "dim_app_server::plugin_manager",
-      "to": "dim_agent_capabilities::skills::catalog",
+      "to": "dim_agent_capabilities::skills::face",
       "references": [
-        "path SkillsCatalog",
-        "use dim_agent_capabilities::skills::SkillsCatalog"
+        "path SkillsCatalogBinding",
+        "use dim_agent_capabilities::skills::SkillsCatalogBinding"
       ]
     },
     {
@@ -33193,9 +33242,17 @@
       "from": "dim_app_server::skills_management",
       "to": "dim_agent_capabilities::skills::catalog",
       "references": [
-        "path SkillsCatalog",
         "path dim_agent_capabilities::skills::SkillsCatalogPlugin::mount",
-        "use dim_agent_capabilities::skills::SkillsCatalog"
+        "path dim_agent_capabilities::skills::owner_key"
+      ]
+    },
+    {
+      "from": "dim_app_server::skills_management",
+      "to": "dim_agent_capabilities::skills::face",
+      "references": [
+        "path SkillsCatalogBinding",
+        "path SkillsCatalogBinding::new",
+        "use dim_agent_capabilities::skills::SkillsCatalogBinding"
       ]
     },
     {
@@ -55382,6 +55439,14 @@
     {
       "module": "dim_agent_capabilities::session_files",
       "path": "Value::from"
+    },
+    {
+      "module": "dim_agent_capabilities::skills",
+      "path": "S::Error"
+    },
+    {
+      "module": "dim_agent_capabilities::skills",
+      "path": "S::Ok"
     },
     {
       "module": "dim_agent_capabilities::skills::catalog",

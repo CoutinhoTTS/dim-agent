@@ -4,11 +4,14 @@
 mod catalog;
 pub(crate) mod content;
 mod discovery;
+mod face;
+pub use face::SkillsCatalog as SkillsCatalogBinding;
 mod install;
 mod session;
 
 pub use catalog::{
     CatalogChanged, MemorySkillSettings, SkillsCatalog, SkillsCatalogPlugin, catalog_changes,
+    owner_key,
 };
 pub use install::selection_path;
 pub use session::{SkillsBranch, SkillsBranchPlugin, SkillsPlugin};
@@ -182,12 +185,35 @@ pub struct CatalogEntry {
     pub status: SkillStatus,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
 pub enum SkillIssue {
-    InvalidManifest { path: PathBuf, reason: String },
-    Unreadable { path: PathBuf, reason: String },
-    RootUnreadable { root: PathBuf, reason: String },
-    ScanLimitReached { root: PathBuf },
+    InvalidManifest {
+        #[serde(serialize_with = "issue_path")]
+        path: PathBuf,
+        reason: String,
+    },
+    Unreadable {
+        #[serde(serialize_with = "issue_path")]
+        path: PathBuf,
+        reason: String,
+    },
+    RootUnreadable {
+        #[serde(serialize_with = "issue_path")]
+        root: PathBuf,
+        reason: String,
+    },
+    ScanLimitReached {
+        #[serde(serialize_with = "issue_path")]
+        root: PathBuf,
+    },
+}
+
+fn issue_path<S: serde::Serializer>(
+    path: &std::path::Path,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.collect_str(&path.display())
 }
 
 /// Monotonic within the process; changes when a snapshot is replaced or the

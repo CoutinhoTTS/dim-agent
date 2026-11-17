@@ -652,6 +652,19 @@ export interface McpService {
   refusal(request: { plugin: string }): [string, string | null] | null;
 }
 
+export type SkillIssue =
+  | { kind: 'invalidManifest'; path: string; reason: string }
+  | { kind: 'unreadable'; path: string; reason: string }
+  | { kind: 'rootUnreadable'; root: string; reason: string }
+  | { kind: 'scanLimitReached'; root: string };
+/** Process Skills owner operations for plugin content; discovery state stays private. */
+export interface SkillsCatalog {
+  register(request: { plugin: string; root: string }): Promise<SkillIssue[]>;
+  withdraw(request: { plugin: string }): Promise<null>;
+  plugins(request: Record<string, never>): Promise<string[]>;
+  issues(request: { plugin: string }): Promise<SkillIssue[]>;
+}
+
 /** The existing user override; null keeps the consumer's factory or built-in text. */
 export interface BasePromptSettingsHost {
   base(request: Record<string, never>): Promise<string | null>;

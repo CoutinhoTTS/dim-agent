@@ -213,7 +213,14 @@ async fn the_selectable_models_answer_their_documented_empty_request() {
         modality
     );
     assert_eq!(modality.models, vec![declared()]);
-    // The request object is the contract: a wrong one is the caller's error.
+    let refused = call(
+        &face(&root, "selectableModelsHost"),
+        "selectableModels",
+        json!([]),
+    )
+    .await
+    .expect_err("a positional array is not the documented request object");
+    assert_eq!(refused.code(), Some("invalid_request"));
     let refused = call(
         &face(&root, "selectableModelsHost"),
         "selectableModels",

@@ -358,7 +358,9 @@ pub struct Env {
 }
 impl Env {
     pub fn catalog(&self) -> Arc<SkillsCatalog> {
-        self.root.get::<SkillsCatalog>().unwrap()
+        self.root
+            .get_at(&dim_agent_capabilities::skills::owner_key())
+            .unwrap()
     }
     pub async fn session(&self, cwd: &Path, system_prompt: &str) -> Result<Session> {
         self.agent
