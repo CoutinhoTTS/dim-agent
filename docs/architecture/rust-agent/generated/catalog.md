@@ -10,6 +10,7 @@ Each catalog name a part of the assembly provides or injects. `data` means share
 
 | Name | Group | Provider | Face | Methods |
 | --- | --- | --- | --- | --- |
+| `agentDirectory` | process | AgentDirectory | internal(owner-api) | — |
 | `agentIndex` | process | Agents | internal(owner-api) | — |
 | `auxiliaryModel` | process | Provider | data | `complete` async |
 | `basePromptSettingsHost` | process | PromptSettings | data | `base` async |
