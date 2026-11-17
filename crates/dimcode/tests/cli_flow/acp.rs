@@ -2719,6 +2719,127 @@ fn lody_projection(version: u32) {
     daemon.join().unwrap();
 }
 
+/// A client that declares `session.compaction` gets the protocol's compaction
+/// entity; one that does not keeps the tool call Dim sent before.
+#[test]
+fn acp_stdio_sends_context_compaction_as_the_protocol_entity_only_when_declared() {
+    for declared in [true, false] {
+        let home = Home::new();
+        let daemon = home.daemon(|wire| {
+            wire.hello(METHODS);
+            wire.created();
+            let attach = wire.read("session.attach");
+            wire.reply(&attach, json!({}));
+            let history = wire.read("session.history");
+            wire.reply(
+                &history,
+                json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+            );
+            let fact = |wire: &mut Wire, value: Value| {
+                wire.notice(
+                    "session.event",
+                    json!({"sessionId":"session","branchId":"main","event":value}),
+                )
+            };
+            let submit = wire.read("session.submit");
+            let input = event(
+                9,
+                "input",
+                "input",
+                "message",
+                json!({"submission_id":submit["params"]["submissionId"],"user":submit["params"]["user"],"mode":"queue"}),
+            );
+            wire.reply(&submit, json!({"event":input}));
+            fact(wire, input);
+            fact(wire, event(10, "start", "turn", "start", json!({"turn_id":"turn"})));
+            fact(wire, event(11, "consumed", "input", "consumed", json!({"input_id":"input"})));
+            fact(wire, event(12, "compacting", "context", "compaction-start", json!({"turn_id":"turn","through":11,"trigger":"manual","strategy":"summary"})));
+            fact(wire, event(13, "compacted", "context", "compaction", json!({"turn_id":"turn","through":11,"start":12,"status":"failed","error":"summary unavailable"})));
+            fact(wire, event(14, "end", "turn", "end", json!({"turn_id":"turn","status":"completed","reason":"end_turn"})));
+            detached_eof(wire);
+        });
+        let mut peer = Peer::start(&home);
+        let capabilities = if declared {
+            json!({"session":{"compaction":{}}})
+        } else {
+            json!({})
+        };
+        peer.send(
+            1,
+            "initialize",
+            json!({"protocolVersion":1,"clientCapabilities":capabilities}),
+        );
+        assert_eq!(peer.response(1)["result"]["protocolVersion"], 1);
+        peer.send(2, "session/new", json!({"cwd":home.0,"mcpServers":[]}));
+        peer.response(2);
+        peer.send(
+            3,
+            "session/prompt",
+            json!({"sessionId":"session","prompt":[{"type":"text","text":"Compact this"}]}),
+        );
+        assert_eq!(peer.response(3)["result"]["stopReason"], "end_turn");
+        let compactions: Vec<_> = peer
+            .updates
+            .iter()
+            .map(|frame| &frame["params"]["update"])
+            .filter(|update| {
+                update["sessionUpdate"] == "compaction_update"
+                    || update["_meta"]["lody"]["activity"]["kind"] == "context_compaction"
+            })
+            .collect();
+        let id = json!(["compaction", 12]).to_string();
+        if declared {
+            assert_eq!(
+                compactions
+                    .iter()
+                    .map(|update| (
+                        update["sessionUpdate"].clone(),
+                        update["compactionId"].clone(),
+                        update["status"].clone(),
+                    ))
+                    .collect::<Vec<_>>(),
+                vec![
+                    (json!("compaction_update"), json!(id), json!("in_progress")),
+                    (json!("compaction_update"), json!(id), json!("failed")),
+                ],
+                "the pair names one compaction entity: {compactions:?}"
+            );
+            assert_eq!(
+                compactions[1]["error"], "summary unavailable",
+                "the protocol's own error field carries the reason"
+            );
+            assert!(
+                !peer
+                    .updates
+                    .iter()
+                    .any(|frame| frame["params"]["update"]["title"] == "Context compaction"),
+                "a client that asked for the entity gets no compaction tool call"
+            );
+        } else {
+            assert_eq!(
+                compactions
+                    .iter()
+                    .map(|update| (update["toolCallId"].clone(), update["status"].clone(),))
+                    .collect::<Vec<_>>(),
+                vec![
+                    (json!(id), json!("in_progress")),
+                    (json!(id), json!("failed")),
+                ],
+                "without the capability the compaction stays the tool call it was"
+            );
+            assert!(
+                !peer
+                    .updates
+                    .iter()
+                    .any(|frame| frame["params"]["update"]["sessionUpdate"] == "compaction_update"),
+                "a client that declared nothing must not receive the entity"
+            );
+        }
+        peer.close();
+        daemon.join().unwrap();
+    }
+}
+
 #[test]
 fn acp_stdio_lody_startup_config_is_applied_before_creation_without_shared_writes() {
     let home = Home::new();

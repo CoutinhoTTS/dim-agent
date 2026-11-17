@@ -272,6 +272,7 @@ pub(crate) struct Gateway {
     auth_methods: Vec<crate::auth::Method>,
     authenticating: std::collections::HashSet<String>,
     subagent_events: bool,
+    compaction_updates: bool,
     recovering: bool,
     recovering_sessions: usize,
     outbox: Outbox,
@@ -332,6 +333,7 @@ impl Gateway {
             auth_methods: Vec::new(),
             authenticating: std::collections::HashSet::new(),
             subagent_events: false,
+            compaction_updates: false,
             recovering: false,
             recovering_sessions: 0,
             outbox,
@@ -479,6 +481,11 @@ impl Gateway {
                 .elicitation
                 .as_ref()
                 .is_some_and(|capabilities| capabilities.supports_form());
+            self.compaction_updates = initialize
+                .client_capabilities
+                .session
+                .as_ref()
+                .is_some_and(|capabilities| capabilities.compaction.is_some());
             if ![
                 "session.create",
                 "session.attach",
@@ -1338,7 +1345,7 @@ impl Gateway {
                         let next = page
                             .next(before, through)
                             .map_err(|_| Error::internal_error())?;
-                        let mut projection = Projection::new(cwd);
+                        let mut projection = Projection::new(cwd, self.compaction_updates);
                         for event in page.events {
                             for update in projection.event(&decode_native(event)?) {
                                 self.update(&id, update).await?;
@@ -1379,7 +1386,7 @@ impl Gateway {
                         });
                         let mut session = Session {
                             cwd: loading.cwd.clone(),
-                            projection: Projection::new(loading.cwd),
+                            projection: Projection::new(loading.cwd, self.compaction_updates),
                             prompt: None,
                             command: None,
                             config: prepared.config,
@@ -1853,7 +1860,8 @@ impl Gateway {
                         prompt_turn,
                     }) => {
                         let previous_through = session.projection.through;
-                        session.projection = Projection::new(session.cwd.clone());
+                        session.projection =
+                            Projection::new(session.cwd.clone(), self.compaction_updates);
                         session.questions = dim_client::question::Pending::default();
                         session.question_through.clear();
                         let title = prepared.title;
