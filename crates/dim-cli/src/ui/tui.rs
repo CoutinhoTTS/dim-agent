@@ -9328,6 +9328,7 @@ mod tests {
                     updated_at: u64::MAX,
                     model: "p/m".into(),
                     origin: None,
+                    closed: false,
                 })
                 .collect()));
             Prompt::Sessions(panel)
@@ -10600,7 +10601,7 @@ mod tests {
                 "-m",
                 "Initial",
             ]);
-            crate::ui::tilde(&path.to_string_lossy())
+            path.to_string_lossy().into_owned()
         };
 
         let theme = test_theme();
@@ -10654,13 +10655,21 @@ mod tests {
 
         // A branch wider than the path, so the path-alone rung is reachable:
         // it takes over once the tail beside the branch would be too short.
-        let path = root.path().join("checkout").to_string_lossy().into_owned();
-        let branch = format!("team/{}", "x".repeat(width_of(&crate::ui::tilde(&path))));
+        let checkout = root.path().join("checkout").to_string_lossy().into_owned();
+        let branch = format!(
+            "team/{}",
+            "x".repeat(width_of(&crate::ui::tilde(&checkout)))
+        );
+        // The attach carries the directory a daemon answers with. The border
+        // draws it through `tilde`, which shortens the temp root wherever the
+        // fixture lives below the home, so the label compares against the
+        // drawn form while the attach keeps the real path.
         let path = repository("checkout", &branch);
+        let shown = crate::ui::tilde(&path);
         let suffix = format!(" ({branch})");
-        let whole = format!("{path}{suffix}");
+        let whole = format!("{shown}{suffix}");
         assert!(
-            width_of(&suffix) + TAIL > width_of(&path),
+            width_of(&suffix) + TAIL > width_of(&shown),
             "this repository shows the path-alone rung"
         );
         attach(&mut app, "s-a", &path);
@@ -10685,13 +10694,13 @@ mod tests {
         );
         // The path alone, whole at its own width, then cut from the front.
         assert_eq!(
-            label(&mut app, width_of(&path)),
-            path,
+            label(&mut app, width_of(&shown)),
+            shown,
             "the whole path stays when the branch gives way"
         );
-        let cut = label(&mut app, width_of(&path) - 1);
+        let cut = label(&mut app, width_of(&shown) - 1);
         assert!(
-            cut.starts_with('…') && cut != path,
+            cut.starts_with('…') && cut != shown,
             "the path is cut: {cut:?}"
         );
         // No form fits: with a cell left the label is the cut mark alone,
@@ -13952,6 +13961,47 @@ mod tests {
             ),
             "the draft is a message, never a command"
         );
+    }
+
+    /// Both TUI modes draw a filled Skill by its name, and the message the same
+    /// draft sends still carries the canonical `/skill:<name>` token.
+    #[test]
+    fn a_filled_skill_draws_its_name_in_both_modes() {
+        use crate::management::skills::Entry;
+        for fullscreen in [false, true] {
+            let mut drawn = Drawn::new((100, 30), None, false);
+            drawn.app.fullscreen = fullscreen;
+            drawn.app.apply(Update::Skills(vec![Entry {
+                id: "user:status".into(),
+                source: Some("user".into()),
+                name: "status".into(),
+                description: "Show the status".into(),
+                file_path: "/home/.agents/skills/status/SKILL.md".into(),
+                enabled: true,
+                shadowed_by: None,
+                user_invocable: true,
+            }]));
+            drawn.app.composer.clear();
+            for ch in "/stat".chars() {
+                drawn.key(KeyCode::Char(ch));
+            }
+            drawn.key(KeyCode::Tab);
+
+            let screen = drawn.emu.rows_text().join("\n");
+            assert!(
+                screen.contains("/status"),
+                "the input draws the Skill's name in fullscreen={fullscreen}: {screen}"
+            );
+            assert!(
+                !screen.contains("skill:status"),
+                "the parser's namespace is not drawn in fullscreen={fullscreen}: {screen}"
+            );
+            assert_eq!(
+                drawn.app.composer.text(),
+                "/skill:status ",
+                "the draft still holds the canonical token in fullscreen={fullscreen}"
+            );
+        }
     }
 
     /// A resumed session of `count` user messages `ask N`, each cut at `N`.
@@ -19658,6 +19708,7 @@ mod tests {
             updated_at: u64::MAX,
             model: "p/m".into(),
             origin: None,
+            closed: false,
         };
         let here = item("s-here", "Fix the failing test", &launch);
         let also = item("s-also", "Retry the flaky test", &launch);

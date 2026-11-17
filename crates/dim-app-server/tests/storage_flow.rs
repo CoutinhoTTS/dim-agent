@@ -49,6 +49,9 @@ mod prompt_recovery;
 #[path = "storage_flow/image_migration.rs"]
 mod image_migration;
 
+#[path = "storage_flow/prompt_migration.rs"]
+mod prompt_migration;
+
 #[path = "storage_flow/reclaim.rs"]
 mod reclaim;
 

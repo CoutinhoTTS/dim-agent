@@ -1135,6 +1135,7 @@ pub struct SessionItem {
     /// The creation origin the daemon reports (`client`, `acp`, `internal`,
     /// `unknown`); absent from a daemon that does not report one.
     pub origin: Option<String>,
+    pub closed: bool,
 }
 
 /// The Session's stored title, unless it has none: empty, or the
@@ -1205,16 +1206,15 @@ pub enum DeleteOutcome {
     NothingRemoved,
     /// The daemon offers no `session.delete`.
     Unsupported,
-    /// The close ran but the removal failed: the rows stay, and this daemon
-    /// neither lists nor loads the Session again.
+    /// The removal failed and the reply does not say whether close ran.
+    /// The picker keeps the row and leaves an affected current Session.
     ClosedNotRemoved(String),
-    /// The call failed before any close: the row and the attachment stand.
+    /// The call failed before the removal: the row and the attachment stand.
     Failed(String),
 }
 
 impl DeleteOutcome {
-    /// Whether the call ended the Session in this daemon, so a picker showing
-    /// that Session leaves for Home.
+    /// Whether a picker showing the affected Session leaves for Home.
     pub fn ends_session(&self) -> bool {
         matches!(self, Self::Deleted | Self::ClosedNotRemoved(_))
     }

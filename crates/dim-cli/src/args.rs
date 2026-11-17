@@ -1660,6 +1660,11 @@ impl Options {
                             .into(),
                     );
                 }
+                _ if arg == "--migrate-prompt-references" => {
+                    return Err(
+                        "Use --migrate-prompt-references as dimcode's first argument".into(),
+                    );
+                }
                 _ => return Err(format!("Unknown argument: {arg}; use --help").into()),
             }
         }
