@@ -1,7 +1,7 @@
 //! The flow tests' seams (feature `testing`): holds that keep an operation at
 //! a known point, a clock a test can move, and the signals a pass emits.
 use crate::clock::Clock;
-use chrono::{DateTime, Utc};
+use jiff::{SignedDuration, Timestamp};
 use rutis::host::BoxFuture;
 use std::{
     collections::HashMap,
@@ -160,7 +160,7 @@ impl Holds {
 /// on a real tick and a real wait keep today's timing; a test that advances
 /// moves only this Scheduler's deadline, never another timer of the runtime.
 pub struct ManualClock {
-    offset: Mutex<chrono::Duration>,
+    offset: Mutex<SignedDuration>,
     /// Bumped by every advance, so a parked waiter re-reads `now`.
     moved: tokio::sync::watch::Sender<u64>,
 }
@@ -168,7 +168,7 @@ pub struct ManualClock {
 impl Default for ManualClock {
     fn default() -> Self {
         Self {
-            offset: Mutex::new(chrono::Duration::zero()),
+            offset: Mutex::new(SignedDuration::ZERO),
             moved: tokio::sync::watch::channel(0).0,
         }
     }
@@ -177,13 +177,13 @@ impl Default for ManualClock {
 impl ManualClock {
     /// The instant this clock reads. Concrete, so a test never names the
     /// crate's private `Clock` trait.
-    pub fn now(&self) -> DateTime<Utc> {
+    pub fn now(&self) -> Timestamp {
         Clock::now(self)
     }
 
     /// Moves this clock `by` forward (or back, for a negative span) and wakes
     /// every waiter the new instant has reached.
-    pub fn advance(&self, by: chrono::Duration) {
+    pub fn advance(&self, by: SignedDuration) {
         *self.offset.lock().unwrap() += by;
         self.moved.send_modify(|generation| *generation += 1);
     }
@@ -191,22 +191,22 @@ impl ManualClock {
     /// Moves this clock to `at` and wakes every waiter the instant reaches. An
     /// instant real time has already passed moves nothing, so racing a real
     /// second can never rewind the clock.
-    pub fn advance_to(&self, at: DateTime<Utc>) {
-        let by = at.signed_duration_since(self.now());
-        if by > chrono::Duration::zero() {
+    pub fn advance_to(&self, at: Timestamp) {
+        let by = at.duration_since(self.now());
+        if by > SignedDuration::ZERO {
             self.advance(by);
         }
     }
 }
 
 impl Clock for ManualClock {
-    fn now(&self) -> DateTime<Utc> {
-        Utc::now() + *self.offset.lock().unwrap()
+    fn now(&self) -> Timestamp {
+        Timestamp::now() + *self.offset.lock().unwrap()
     }
 
     fn wait_until<'a>(
         &'a self,
-        until: DateTime<Utc>,
+        until: Timestamp,
         stop: &'a CancellationToken,
     ) -> BoxFuture<'a, bool> {
         Box::pin(async move {
@@ -216,7 +216,7 @@ impl Clock for ManualClock {
                 if now >= until {
                     return true;
                 }
-                let sleep = (until - now).to_std().unwrap_or_default();
+                let sleep = Duration::try_from(until.duration_since(now)).unwrap_or_default();
                 tokio::select! {
                     _ = stop.cancelled() => return false,
                     _ = tokio::time::sleep(sleep) => return true,
@@ -230,13 +230,13 @@ impl Clock for ManualClock {
 /// A waiter's park: the ticks finished when it parked, and the instant it waits
 /// for. One value, because a reader that took the count and the instant apart
 /// could advance a wait the timer had already left.
-pub type TimerWait = (u64, DateTime<Utc>);
+pub type TimerWait = (u64, Timestamp);
 
 /// The signals a Scheduler pass emits for the flow tests.
 #[derive(Default)]
 pub struct Signals {
     /// `(stop timers that parked, the instant the newest one waits for)`.
-    stop_parks: watch::Sender<(u64, Option<DateTime<Utc>>)>,
+    stop_parks: watch::Sender<(u64, Option<Timestamp>)>,
     stopped: watch::Sender<u64>,
     retained: watch::Sender<u64>,
     ticked: watch::Sender<u64>,
@@ -248,7 +248,7 @@ pub struct Signals {
 impl Signals {
     /// Publishes the ticks finished and the instant the timer will wait for,
     /// before that wait.
-    pub(crate) fn timer_wait(&self, done: u64, until: DateTime<Utc>) {
+    pub(crate) fn timer_wait(&self, done: u64, until: Timestamp) {
         self.timer.send_replace(Some((done, until)));
     }
 
@@ -268,7 +268,7 @@ impl Signals {
     }
 
     /// Publishes the instant a stop timer is about to wait for.
-    pub(crate) fn stop_parked(&self, until: DateTime<Utc>) {
+    pub(crate) fn stop_parked(&self, until: Timestamp) {
         self.stop_parks.send_modify(|(parks, wait)| {
             *parks += 1;
             *wait = Some(until);

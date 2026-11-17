@@ -6,7 +6,6 @@ use crate::{
     loops::Lookup,
     runs::{self, Delivery, DeliveryState, SchedulerError, SessionOrigin, stamp},
 };
-use chrono::{DateTime, Duration, Utc};
 use dim_agent_capabilities::{
     methods::{
         Caller as MethodCaller, Handler, Interruption, MethodCall, MethodDecl, Progress, RpcError,
@@ -22,6 +21,7 @@ use dim_app_server::{
     plugin_files::PluginFileTransactions,
     settings::{BusinessDocument, SettingsError, SettingsService},
 };
+use jiff::{SignedDuration, Timestamp};
 use rutis::Ctx;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use rutis_bridge::session::{
@@ -425,17 +425,17 @@ impl Shared {
     /// stops and leaves an unsettled delivery to the next generation's
     /// recovery.
     pub(crate) async fn pause(&self, delay: std::time::Duration) -> bool {
-        self.pause_until(self.now() + Duration::from_std(delay).unwrap())
+        self.pause_until(self.now() + SignedDuration::try_from(delay).unwrap())
             .await
     }
 
     /// Waits until `until`, so a caller that holds a deadline waits for that
     /// deadline and no other; `false` once the owner is unloading.
-    pub(crate) async fn pause_until(&self, until: DateTime<Utc>) -> bool {
+    pub(crate) async fn pause_until(&self, until: Timestamp) -> bool {
         self.clock.wait_until(until, &self.stop).await
     }
 
-    pub(crate) fn now(&self) -> DateTime<Utc> {
+    pub(crate) fn now(&self) -> Timestamp {
         self.clock.now()
     }
 
@@ -656,20 +656,20 @@ fn not_found(job_id: &str) -> SchedulerError {
 /// first window: the first window after it is the job's next window. An `at`
 /// job with no delivery has an open start, so a past instant is recorded
 /// `missed`.
-pub(crate) fn window_after(shared: &Shared, job: &Job, runs: &[Delivery]) -> DateTime<Utc> {
+pub(crate) fn window_after(shared: &Shared, job: &Job, runs: &[Delivery]) -> Timestamp {
     let last = runs
         .iter()
         .filter(|run| run.job_id == job.id)
         .filter_map(|run| canonical_instant(&run.window))
         .max();
     if last.is_none() && matches!(job.schedule, Schedule::At(_)) {
-        return DateTime::<Utc>::MIN_UTC;
+        return Timestamp::MIN;
     }
     last.or_else(|| {
         job.enabled_at
             .as_deref()
             .and_then(canonical_instant)
-            .map(|anchor| anchor - Duration::milliseconds(1))
+            .map(|anchor| anchor - SignedDuration::from_millis(1))
     })
     .unwrap_or_else(|| shared.now())
 }
@@ -713,7 +713,7 @@ fn build_job(
     input: JobInput,
     previous: Option<&Job>,
     origin: Origin,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) -> Result<Job, SchedulerError> {
     let target = input
         .target

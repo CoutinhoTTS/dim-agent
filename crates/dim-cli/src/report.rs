@@ -1,7 +1,5 @@
-use std::time::SystemTime;
-
-use chrono::{DateTime, Utc};
 use dim_agent_types::{BranchCreateFailedData, ModelId, ModelOutputOutcome};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -23,7 +21,7 @@ pub struct Captured {
     pub message: String,
     pub operation: Operation,
     code: Option<String>,
-    observed_at: DateTime<Utc>,
+    observed_at: Timestamp,
 }
 
 impl Captured {
@@ -32,7 +30,7 @@ impl Captured {
             message,
             operation,
             code: code.map(str::to_owned),
-            observed_at: SystemTime::now().into(),
+            observed_at: Timestamp::now(),
         }
     }
 

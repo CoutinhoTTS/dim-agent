@@ -7,10 +7,10 @@ use crate::{
     runs,
     runs::{Delivery, DeliveryState, SchedulerError, SessionOrigin, stamp},
 };
-use chrono::{DateTime, Duration, Utc};
 use dim_agent_capabilities::settings::SettingsScope;
 use dim_agent_types::{InputMode, PermissionPolicy, PermissionPreset, markup::escaped};
 use dim_app_server::settings::SettingsError;
+use jiff::{SignedDuration, Timestamp};
 use rutis_bridge::session::{HostDispatch, settle};
 use serde_json::{Value, json};
 use std::{collections::HashSet, sync::Arc, time::Duration as StdDuration};
@@ -165,7 +165,9 @@ async fn record(
                 Target::Launch {
                     max_run_minutes, ..
                 },
-            ) => Some(stamp(now + Duration::minutes(i64::from(*max_run_minutes)))),
+            ) => Some(stamp(
+                now + SignedDuration::from_secs(i64::from(*max_run_minutes) * 60),
+            )),
             _ => None,
         };
         let run = Delivery {
@@ -277,7 +279,7 @@ pub async fn tick(shared: &Arc<Shared>) -> Result<(), SchedulerError> {
                 .flatten()
                 .unwrap_or(due)
                 .max(due);
-            let missed = now - latest >= Duration::seconds(GRACE_SECONDS);
+            let missed = now.duration_since(latest) >= SignedDuration::from_secs(GRACE_SECONDS);
             record(shared, job, stamp(latest), missed).await?;
             continue;
         }
@@ -501,7 +503,7 @@ async fn finish(
 /// Whether a launch record's stop time has passed, so its stop timer has
 /// finished and its record is eligible for cleanup (§3.2, A.7). A `session`
 /// delivery has no stop time and nothing to wait for.
-fn stop_time_passed(run: &Delivery, now: DateTime<Utc>) -> bool {
+fn stop_time_passed(run: &Delivery, now: Timestamp) -> bool {
     match run.deadline_at.as_deref().and_then(canonical_instant) {
         Some(deadline) => now >= deadline,
         None => true,
@@ -705,7 +707,7 @@ pub fn recover(shared: &Arc<Shared>, launches: Vec<Delivery>) {
 /// minute while the call fails and the record still exists (§3.2, A.7). The
 /// delivery's state is not touched: a stop is a bound on the launched work,
 /// not a run outcome.
-async fn stop_at(shared: Arc<Shared>, run_id: String, session_id: String, deadline: DateTime<Utc>) {
+async fn stop_at(shared: Arc<Shared>, run_id: String, session_id: String, deadline: Timestamp) {
     #[cfg(feature = "testing")]
     if let Some(signals) = &shared.signals {
         signals.startup_waiting();

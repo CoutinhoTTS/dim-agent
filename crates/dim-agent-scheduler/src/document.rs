@@ -1,10 +1,13 @@
 //! The `schedule` settings document: the jobs a user writes, and their
 //! validation at the document boundary ([design](../../../docs/design/plugins/Scheduler.md),
 //! A.1, A.4, §2.3, §7.1).
-use chrono::{DateTime, Local, SecondsFormat, Utc};
 use croner::Cron;
 use dim_agent_types::{InputMode, PermissionPolicy, PermissionPreset};
 use dim_app_server::settings::{BusinessDocument, SettingsError};
+use jiff::{
+    SignedDuration, Timestamp,
+    tz::{AmbiguousOffset, TimeZone},
+};
 use serde::{
     Deserialize, Deserializer, Serialize,
     de::{MapAccess, Visitor, value::MapAccessDeserializer},
@@ -210,21 +213,21 @@ pub struct EverySchedule {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AtSchedule {
-    pub at: DateTime<Utc>,
+    pub at: Timestamp,
 }
 
 /// The time of day a timestamp field holds: UTC with three fractional digits.
-pub fn canonical_instant(text: &str) -> Option<DateTime<Utc>> {
-    let instant = DateTime::parse_from_rfc3339(text).ok()?.with_timezone(&Utc);
-    (instant.to_rfc3339_opts(SecondsFormat::Millis, true) == text).then_some(instant)
+pub fn canonical_instant(text: &str) -> Option<Timestamp> {
+    let instant = text.parse::<Timestamp>().ok()?;
+    (format_instant(instant) == text).then_some(instant)
 }
 
 fn default_max_run_minutes() -> u32 {
     DEFAULT_MAX_RUN_MINUTES
 }
 
-pub fn format_instant(instant: DateTime<Utc>) -> String {
-    instant.to_rfc3339_opts(SecondsFormat::Millis, true)
+pub fn format_instant(instant: Timestamp) -> String {
+    instant.strftime("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
 }
 
 impl Job {
@@ -365,7 +368,7 @@ impl Job {
 
     /// The latest window at or before `now`, if any has come due (A.4): after
     /// a gap only this one is considered.
-    pub fn latest_window(&self, now: DateTime<Utc>) -> Result<Option<DateTime<Utc>>, String> {
+    pub fn latest_window(&self, now: Timestamp) -> Result<Option<Timestamp>, String> {
         if !self.enabled {
             return Ok(None);
         }
@@ -377,28 +380,23 @@ impl Job {
                 if anchor > now {
                     return Ok(None);
                 }
-                let k = (now - anchor).num_minutes() / i64::from(every.every_minutes);
-                let step = chrono::Duration::minutes(i64::from(every.every_minutes));
+                let k =
+                    now.duration_since(anchor).as_secs() / (i64::from(every.every_minutes) * 60);
+                let step = SignedDuration::from_secs(i64::from(every.every_minutes) * 60);
                 Ok(Some(
                     anchor + step * i32::try_from(k).map_err(|_| "window overflow")?,
                 ))
             }
             Schedule::Cron(cron) => {
                 let parsed = cron_for(cron)?;
-                let mut cursor = now + chrono::Duration::seconds(1);
+                let mut cursor = now + SignedDuration::from_secs(1);
                 for _ in 0..MAX_CRON_SKIPS {
-                    let previous = match &cron.tz {
-                        Some(_) => parsed
-                            .cron
-                            .find_previous_occurrence(&cursor.with_timezone(&parsed.zone), false)
-                            .map(|previous| previous.with_timezone(&Utc)),
-                        None => parsed
-                            .cron
-                            .find_previous_occurrence(&cursor.with_timezone(&Local), false)
-                            .map(|previous| previous.with_timezone(&Utc)),
-                    }
-                    .map_err(|error| error.to_string())?;
-                    if parsed.fires_at(previous, cron.tz.is_some()) {
+                    let previous = parsed
+                        .cron
+                        .find_previous_occurrence(&cursor.to_zoned(parsed.zone.clone()), false)
+                        .map(|previous| previous.timestamp())
+                        .map_err(|error| error.to_string())?;
+                    if parsed.fires_at(previous) {
                         return Ok(Some(previous));
                     }
                     cursor = previous;
@@ -410,7 +408,7 @@ impl Job {
 
     /// The first window after `after` (A.4). It is not capped by `now`: a
     /// window already due is still next until the timer runs it.
-    pub fn next_window(&self, after: DateTime<Utc>) -> Result<Option<DateTime<Utc>>, String> {
+    pub fn next_window(&self, after: Timestamp) -> Result<Option<Timestamp>, String> {
         if !self.enabled {
             return Ok(None);
         }
@@ -437,19 +435,19 @@ impl Schedule {
     /// enable time, and an `at` schedule is one instant.
     fn next_after(
         &self,
-        after: DateTime<Utc>,
-        anchor: Option<DateTime<Utc>>,
-    ) -> Result<Option<DateTime<Utc>>, String> {
+        after: Timestamp,
+        anchor: Option<Timestamp>,
+    ) -> Result<Option<Timestamp>, String> {
         match self {
             Self::At(at) => Ok((at.at > after).then_some(at.at)),
             Self::Every(every) => {
                 let anchor = anchor.ok_or("an every schedule needs enabled_at")?;
-                let step = chrono::Duration::minutes(i64::from(every.every_minutes));
+                let step = SignedDuration::from_secs(i64::from(every.every_minutes) * 60);
                 let first = if anchor > after {
                     anchor
                 } else {
-                    let elapsed = after - anchor;
-                    let k = elapsed.num_minutes() / i64::from(every.every_minutes) + 1;
+                    let elapsed = after.duration_since(anchor);
+                    let k = elapsed.as_secs() / (i64::from(every.every_minutes) * 60) + 1;
                     anchor + step * i32::try_from(k).map_err(|_| "window overflow")?
                 };
                 Ok(Some(first))
@@ -458,18 +456,12 @@ impl Schedule {
                 let parsed = cron_for(cron).map_err(|error| error.to_string())?;
                 let mut cursor = after;
                 for _ in 0..MAX_CRON_SKIPS {
-                    let next = match &cron.tz {
-                        Some(_) => parsed
-                            .cron
-                            .find_next_occurrence(&cursor.with_timezone(&parsed.zone), false)
-                            .map(|next| next.with_timezone(&Utc)),
-                        None => parsed
-                            .cron
-                            .find_next_occurrence(&cursor.with_timezone(&Local), false)
-                            .map(|next| next.with_timezone(&Utc)),
-                    }
-                    .map_err(|error| error.to_string())?;
-                    if parsed.fires_at(next, cron.tz.is_some()) {
+                    let next = parsed
+                        .cron
+                        .find_next_occurrence(&cursor.to_zoned(parsed.zone.clone()), false)
+                        .map(|next| next.timestamp())
+                        .map_err(|error| error.to_string())?;
+                    if parsed.fires_at(next) {
                         return Ok(Some(next));
                     }
                     cursor = next;
@@ -489,33 +481,32 @@ impl ParsedCron {
     /// matches the pattern (a time inside a DST gap does not exist, so the
     /// occurrence moved out of it is skipped), and it is the first instant
     /// with that wall time (a repeated fall-back time fires once).
-    fn fires_at(&self, instant: DateTime<Utc>, zoned: bool) -> bool {
-        if zoned {
-            first_of_wall_time(&self.cron, instant, &self.zone)
-        } else {
-            first_of_wall_time(&self.cron, instant, &Local)
-        }
+    fn fires_at(&self, instant: Timestamp) -> bool {
+        first_of_wall_time(&self.cron, instant, &self.zone)
     }
 }
 
 struct ParsedCron {
     cron: Cron,
-    zone: chrono_tz::Tz,
+    zone: TimeZone,
 }
 
 /// Whether the wall time of `instant` in `zone` matches `cron` and no earlier
 /// instant has that wall time: the zone resolves it to `instant` or, when the
 /// time repeats at a fall-back, to its earlier occurrence.
-fn first_of_wall_time<Z: chrono::TimeZone>(cron: &Cron, instant: DateTime<Utc>, zone: &Z) -> bool
-where
-    DateTime<Z>: croner::CronDateTime,
-{
-    let local = instant.with_timezone(zone);
-    cron.is_time_matching(&local).unwrap_or(false)
-        && zone
-            .from_local_datetime(&local.naive_local())
-            .earliest()
-            .is_some_and(|first| first.with_timezone(&Utc) == instant)
+fn first_of_wall_time(cron: &Cron, instant: Timestamp, zone: &TimeZone) -> bool {
+    let local = instant.to_zoned(zone.clone());
+    if !cron.is_time_matching(&local).unwrap_or(false) {
+        return false;
+    }
+    let ambiguous = zone.to_ambiguous_zoned(local.datetime());
+    match ambiguous.offset() {
+        AmbiguousOffset::Unambiguous { .. } => true,
+        AmbiguousOffset::Gap { .. } => false,
+        AmbiguousOffset::Fold { .. } => ambiguous
+            .earlier()
+            .is_ok_and(|earlier| earlier.timestamp() == instant),
+    }
 }
 
 /// Five-field cron with an optional IANA time zone (A.4).
@@ -524,10 +515,10 @@ fn cron_for(cron: &CronSchedule) -> Result<ParsedCron, &'static str> {
         return Err("cron needs five fields, e.g. {\"cron\":\"*/30 * * * *\"}");
     }
     let zone = match &cron.tz {
-        Some(name) => name.parse::<chrono_tz::Tz>().map_err(|_| {
+        Some(name) => TimeZone::get(name).map_err(|_| {
             "tz must be an IANA time zone, e.g. {\"cron\":\"*/30 * * * *\",\"tz\":\"Asia/Shanghai\"}, or omit tz for the host's local time zone"
         })?,
-        None => chrono_tz::UTC,
+        None => TimeZone::system(),
     };
     let parsed = Cron::from_str(&cron.cron)
         .map_err(|_| "invalid cron expression, e.g. {\"cron\":\"*/30 * * * *\"}")?;

@@ -644,12 +644,12 @@ pub(crate) fn history(data: &SessionData) -> Result<Vec<StoredEvent>> {
         let timestamp = record
             .created_at
             .as_deref()
-            .map(chrono::DateTime::parse_from_rfc3339)
+            .map(|text| text.parse::<jiff::Timestamp>())
             .transpose()
             .map_err(|_| Error::Object("Legacy message timestamp is invalid".into()))?;
         let now = timestamp
             .map(|time| {
-                u64::try_from(time.timestamp_millis()).map_err(|_| {
+                u64::try_from(time.as_millisecond()).map_err(|_| {
                     Error::Object("Legacy message timestamp is before the Unix epoch".into())
                 })
             })
