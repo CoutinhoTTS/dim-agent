@@ -1959,7 +1959,7 @@ mod native {
     }
     #[expect(
         clippy::unnecessary_cast,
-        reason = "`st_dev` and `st_ino` are 32-bit on macOS and 64-bit on Linux"
+        reason = "`st_dev` is 32-bit on macOS and 64-bit on Linux, so its cast is needed on one and lints on the other; `st_ino` is 64-bit on both"
     )]
     fn identity(stat: &libc::stat) -> Identity {
         (stat.st_dev as u64, stat.st_ino as u64)
@@ -2106,6 +2106,10 @@ mod native {
                 "reserved storage lock",
             ));
         }
+        #[allow(
+            clippy::unnecessary_cast,
+            reason = "`st_mode` is `u16` on macOS and `u32` on Linux: the cast is needed on one and lints on the other"
+        )]
         let mode = stat.st_mode as u32 & 0o7777;
         Ok(Some(Permissions::from_mode(mode)))
     }

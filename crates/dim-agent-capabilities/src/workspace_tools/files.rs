@@ -767,7 +767,7 @@ impl Parent {
         let stat = unsafe { stat.assume_init() };
         #[expect(
             clippy::unnecessary_cast,
-            reason = "`st_dev` and `st_ino` are 32-bit on macOS and 64-bit on Linux"
+            reason = "`st_dev` is 32-bit on macOS and 64-bit on Linux, so its cast is needed on one and lints on the other; `st_ino` is 64-bit on both"
         )]
         let (device, inode) = (stat.st_dev as u64, stat.st_ino as u64);
         stat.st_mode & libc::S_IFMT == libc::S_IFREG

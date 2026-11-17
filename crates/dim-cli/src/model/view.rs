@@ -37,7 +37,7 @@ pub enum RowKind {
     /// line.
     #[allow(
         dead_code,
-        reason = "the test target constructs it, so the lib target would find the expectation unfulfilled"
+        reason = "constructed only by the lib's test target, so an expectation would be unfulfilled there"
     )]
     Other,
 }
