@@ -142,7 +142,7 @@ settings mutation was durably saved.
 | --- | --- |
 | 作用域 | 进程 |
 | 注入 | `P:HostPlatform`、`P:PartRegistry`、`P:SkillSettingsHost` |
-| 提供 | `P:SkillsCatalog` |
+| 提供 | `P:SkillsCatalog`、`P:SkillsCatalog#dim/skills/catalog-owner`、`P:dyn HostDispatch#skillsCatalog` |
 | 被注入于 | `Skills` |
 <!-- /generated -->
 
@@ -181,7 +181,7 @@ protocol, and the loaded body is the skill author's own text.
 
 | Service | Purpose |
 | --- | --- |
-| `P:SkillsCatalog` | Query user/project skills; its `skills.catalog_changed` events drive replacement. |
+| `P:SkillsCatalog#dim/skills/catalog-owner` | Query user/project skills; its `skills.catalog_changed` events drive replacement. |
 | `S:SessionConfig` | Select the Session working directory. |
 | `S:SessionLoader` | Lock-free creation of Session-owned content instances. |
 | `S:SessionLifecycle` | Start catalog-driven replacement only after the Session is published. |
@@ -270,7 +270,7 @@ The `skills` check is covered by `crates/dim-app-server/tests/transport_flow/ski
 | 项 | 值 |
 | --- | --- |
 | 作用域 | Session |
-| 注入 | `P:SkillsCatalog`、`S:PromptRegistry`、`S:SessionConfig`、`S:SessionLifecycle`、`S:SessionLoader`、`S:SkillsConfig`、`S:SubmitChecks`、`S:ToolRegistry` |
+| 注入 | `P:SkillsCatalog#dim/skills/catalog-owner`、`S:PromptRegistry`、`S:SessionConfig`、`S:SessionLifecycle`、`S:SessionLoader`、`S:SkillsConfig`、`S:SubmitChecks`、`S:ToolRegistry` |
 | 提供 | `S:SessionSkills` |
 | 被注入于 | `SkillsBranch` |
 <!-- /generated -->
@@ -329,7 +329,7 @@ Failed adoption is logged; a later view change can retry.
 | --- | --- |
 | 作用域 | 分支 |
 | 注入 | `B:BranchLifecycle`、`B:dyn ConfigureControl`、`S:SessionSkills` |
-| 提供 | `B:SkillsBranch` |
+| 提供 | `B:SkillsBranch`、`B:dyn HostDispatch#skillsBranch` |
 | 被注入于 | — |
 <!-- /generated -->
 
