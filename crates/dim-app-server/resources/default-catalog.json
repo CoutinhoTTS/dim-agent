@@ -3873,7 +3873,7 @@
     },
     {
       "providerId": "aws-bedrock",
-      "displayName": "AWS Bedrock",
+      "displayName": "Amazon Bedrock",
       "driverKind": "amazon-bedrock",
       "defaultBaseUrl": "https://bedrock-runtime.us-east-1.amazonaws.com",
       "auth": {"type":"aws_bedrock"},
