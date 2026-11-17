@@ -11,7 +11,7 @@ pub use catalog::{
     CatalogChanged, MemorySkillSettings, SkillsCatalog, SkillsCatalogPlugin, catalog_changes,
 };
 pub use install::selection_path;
-pub use session::{SessionSkills, SkillsBranch, SkillsBranchPlugin, SkillsPlugin};
+pub use session::{SkillsBranch, SkillsBranchPlugin, SkillsPlugin};
 
 use crate::host::HostFuture;
 use crate::skill_settings::SkillInstallation;
@@ -311,6 +311,28 @@ pub enum SkillsError {
     SettingsSync(String),
     #[error("Skill root is unreadable: {reason}")]
     RootUnreadable { root: PathBuf, reason: String },
+}
+
+impl SkillsError {
+    /// Stable data-face error code; client management maps `closed` to its reload error.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Closed => "closed",
+            Self::UnknownSkill(_) => "skill_unknown",
+            Self::SettingsConflict => "skills_conflict",
+            Self::SettingsWrite(_) => "skills_write_failed",
+            Self::SettingsSync(_) => "skills_sync_failed",
+            Self::SettingsRead(_) | Self::RootUnreadable { .. } => "skills_unavailable",
+            Self::InstallationExists(_) => "skills_install_exists",
+            Self::UnknownInstallation(_) => "skills_install_unknown",
+            Self::UnmanagedDirectory(_) => "skills_install_unmanaged",
+            Self::StalePreview { .. } => "skills_preview_stale",
+            Self::SelectionInvalid(_) => "skills_selection_invalid",
+            Self::InstallConflict(_) => "skills_install_conflict",
+            Self::InstallIo(_) => "skills_install_failed",
+            Self::RemoveFailed(_) => "skills_remove_failed",
+        }
+    }
 }
 
 /// Which roots an explicit refresh rescans.

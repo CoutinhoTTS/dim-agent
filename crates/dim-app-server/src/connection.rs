@@ -1525,7 +1525,6 @@ impl Connection {
             Call::SessionSkills(p) => {
                 let skills = session
                     .service::<SkillsBranch>(&p.branch_id)?
-                    .session()
                     .list()
                     .map_err(skills_error)?;
                 Reply::SessionSkills(SessionSkillsResult { skills })

@@ -625,6 +625,13 @@ export interface Store {
   removeWorktree(request: WorktreeDirectory, remove: (path: string) => Promise<void>): Promise<{ removed: boolean }>;
 }
 
+/** One enabled Skill in the current Session view. */
+export type SkillSummary = { id: string; name: string; description: string; userInvocable: boolean };
+/** Branch service backed by its Session Skills owner. */
+export interface SkillsBranch {
+  list(request: Record<string, never>): SkillSummary[];
+}
+
 /** The existing user override; null keeps the consumer's factory or built-in text. */
 export interface BasePromptSettingsHost {
   base(request: Record<string, never>): Promise<string | null>;

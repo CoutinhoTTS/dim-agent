@@ -204,8 +204,6 @@ Rust 产品装配的现状以 [生成的 catalog](../architecture/rust-agent/gen
 | `collaboration` | process | Collaboration | host-resource |
 | `sessionLoader` | session | SessionScope | control |
 | `timelineFactory` | session | SessionScope | control |
-| `sessionSkills` | session | Skills | host-resource |
-| `skillsBranch` | branch | SkillsBranch | host-resource |
 
 ### 3.7 待迁移的数据内容
 原因 `legacy-no-consumer`：内容是数据，但还没有转成 data face。没有 leaf 消费者不是保留 internal 的理由；这些名字按批次迁移，`legacy-no-consumer` 只是迁移状态，不是永久分类。
@@ -381,6 +379,10 @@ modelSelectionHost.resolve({explicit?: ModelId, cwd?}) -> ModelSelection
 - 回复就是 owner 的类型：`ExecutionSettings`、`PromptSuggestionSettings`、`ModelCapabilitySnapshot`、`ModalityModelSnapshot`、`ModelSelection` 都是 serde camelCase 数据。`InstalledToolchain` 的 `PathBuf` 换成 UTF-8 字符串（`{bin, root}`）：某个 runtime 的目录不是 UTF-8 时只跳过那一项，其余照常给子进程用；`cwd` 的请求方向同理，`ModelSelectionRequest::at` 是 Rust 调用方换字段的唯一一处。
 - 提供方仍是原来的部件（App Server 的 `ExecutionSettings`、`ToolchainSource`、`PromptSuggestionSettings`、`Provider`，以及 aimux 的 `ConfiguredModels`）：`provide` 一次给出类型键上的绑定和 `host_key(name)` 上的 face；没有适配层，也没有第二份业务逻辑。
 - 测试：`host_port_faces.rs` 比对 Rust binding 与 wire 的结果、请求形状、错误与取消；`provider_flow.rs` 等既有流程验证真实 owner 的读取。
+
+### Skills Session 列表
+
+`skillsBranch` 的 `list({})` 与 Session 内部视图的边界由 [Skills owner](../architecture/rust-agent/plugins/Skills.md#data-face) 定义。Rust binding 与 wire 使用同一 owner；`SessionSkills` 保留为 Session 实例内的私有类型 key，不再有目录名字。
 
 ### 4.11 `hooksService`
 
