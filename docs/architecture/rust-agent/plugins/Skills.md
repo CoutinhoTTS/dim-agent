@@ -295,7 +295,7 @@ Failed adoption is logged; a later view change can retry.
 | --- | --- |
 | 作用域 | 分支 |
 | 注入 | `B:BranchLifecycle`、`B:dyn ConfigureControl`、`S:SessionSkills` |
-| 提供 | `B:SkillsBranch`、`B:dyn HostDispatch#skillsBranch` |
+| 提供 | `B:SkillsBranch` |
 | 被注入于 | — |
 <!-- /generated -->
 

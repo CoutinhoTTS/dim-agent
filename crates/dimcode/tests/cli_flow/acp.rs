@@ -3320,7 +3320,27 @@ fn acp_stdio_runs_against_the_production_daemon_and_a_local_model() {
     );
     manager.send(3, "session/delete", json!({"sessionId":id}));
     let deleted = manager.response(3);
-    assert_eq!(deleted["result"], json!({}), "{deleted}");
+    assert_eq!(
+        deleted["result"],
+        json!({}),
+        "{deleted}; persisted main tail read after delete rejection: {:?}",
+        (|| -> rusqlite::Result<Vec<(i64, i64, String, String)>> {
+            let database = rusqlite::Connection::open_with_flags(
+                home.0.join("rust/dimcode.sqlite"),
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )?;
+            database.busy_timeout(Duration::ZERO)?;
+            let mut statement = database.prepare(
+                "SELECT sequence, last_sequence, kind, body FROM timeline_events \
+                 WHERE session_id=?1 AND branch_id='main' ORDER BY sequence DESC LIMIT 32",
+            )?;
+            statement
+                .query_map([&id], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                })?
+                .collect()
+        })()
+    );
     manager.send(4, "session/list", json!({}));
     let listed = manager.response(4);
     let sessions = listed["result"]["sessions"].as_array().unwrap();
