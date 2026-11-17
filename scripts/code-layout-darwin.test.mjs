@@ -53,7 +53,7 @@ int main(void) { return first() + second(); }
     page_size = os.sysconf('SC_PAGESIZE')
     page_sample = root/'sample.pages'
     samples.write(page_sample, page_size, [0])
-    training = build_darwin.order(base, [page_sample], root/'trained.order')
+    training = build_darwin.order(base, base_map, [page_sample], root/'trained.order')
     assert training['orderedFunctions'] > 0
     assert '_main' in (root/'trained.order').read_text()
 

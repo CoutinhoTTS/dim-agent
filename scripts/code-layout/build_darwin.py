@@ -121,8 +121,10 @@ def ordered_link(record, output, order_file, map_path):
     return sorted(omitted)
 
 
-def order(baseline, profiles, output):
-    functions = macho.symbols(baseline)
+def order(baseline, baseline_map, profiles, output):
+    text_addr, text_size, _ = macho.text_range(baseline)
+    functions = macho.functions_from_sizes(
+        macho.map_symbols(baseline_map, text_addr, text_size))
     page_size, footprints = None, []
     for profile in profiles:
         observed, pages = read_sample(profile)
@@ -203,7 +205,7 @@ def main():
         for profile in profiles:
             shutil.copyfile(profile, output / profile.name)
         order_file = output / "symbols.order"
-        measurement = order(baseline, profiles, order_file)
+        measurement = order(baseline, baseline_map, profiles, order_file)
         candidate = output / "candidate"
         candidate_map = output / "candidate.map"
         measurement["unorderableSymbols"] = ordered_link(
