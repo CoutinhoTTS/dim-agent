@@ -169,7 +169,6 @@ def _footprint(pid):
 
 
 def _one(binary, root, probe):
-    root.mkdir(parents=True)
     started = time.monotonic()
     with ExitStack() as stack:
         server = Server(binary, root, stack, probe)
@@ -186,7 +185,6 @@ def _one(binary, root, probe):
 
 
 def _latency(binary, root, model):
-    root.mkdir(parents=True)
     with ExitStack() as stack:
         server = Server(binary, root, stack)
         configure(server, model.http.server_port)

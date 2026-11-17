@@ -245,7 +245,6 @@ def train(binary, root, sampling=False):
 
 
 def _one(binary, root):
-    root.mkdir(parents=True)
     started = time.monotonic()
     with ExitStack() as stack:
         server = Server(binary, root, stack, sampling=True)
@@ -274,7 +273,6 @@ def _one(binary, root):
 
 
 def _latency(binary, root, model):
-    root.mkdir(parents=True)
     with ExitStack() as stack:
         server = Server(binary, root, stack)
         configure(server, model.http.server_port)

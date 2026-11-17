@@ -214,6 +214,103 @@ raise AssertionError('interrupted replay returned a baseline')
   assert.equal(result.status,0,result.stdout+result.stderr);
 });
 
+test('native measurement records paired samples from separate disposable homes', {timeout:15_000},()=>{
+  const result=spawnSync(python,['-',directory],{encoding:'utf8',timeout:10_000,input:String.raw`
+from contextlib import ExitStack
+import json
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+from types import SimpleNamespace
+from unittest.mock import patch
+from urllib.request import Request, urlopen
+sys.path.insert(0, sys.argv[1])
+sys.modules['win32'] = SimpleNamespace()
+import train_windows
+import train_darwin
+from samples import write
+
+with tempfile.TemporaryDirectory(prefix='dim-layout-measure-') as temporary:
+    root = Path(temporary)
+    for trainer in (train_windows, train_darwin):
+        processes = []
+        class Process:
+            def __init__(self, args, **options):
+                self.home = Path(options['cwd'])
+                self.pid = len(processes) + 1
+                self.returncode = None
+                self.stdout = tempfile.TemporaryFile()
+                self.stdout.write(b'{"pipeName":"fixture","unixPath":"fixture"}\n')
+                self.stdout.seek(0)
+                processes.append(self)
+            def poll(self): return self.returncode
+            def send_signal(self, number): self.returncode = 0
+            def kill(self): self.returncode = -9
+            def wait(self, **options):
+                assert self.returncode is not None, 'measurement must request shutdown'
+                return self.returncode
+
+        def rpc(process, method, params):
+            if method == 'provider.create':
+                (process.home/'model.url').write_text(params['connection']['baseUrl'])
+            elif method == 'daemon.shutdown':
+                process.returncode = 0
+            return {}
+
+        class Wire:
+            def __init__(self, path, stack):
+                self.process = next(p for p in processes if p.home == Path(path).parent.parent)
+            def write(self, request):
+                self.reply = {'id':request['id'], 'result':rpc(self.process, request['method'], request['params'])}
+            def readline(self): return json.dumps(self.reply).encode() + b'\n'
+
+        def client(args, **options):
+            home = Path(options['cwd'])
+            marker = (home/'marker.txt').read_text()
+            data = json.dumps({'messages':[{'role':'tool','content':marker}]}).encode()
+            with urlopen(Request((home/'model.url').read_text()+'/chat/completions',data=data,
+                                 headers={'Content-Type':'application/json'})) as response:
+                assert b'layout-probe-complete' in response.read()
+            return subprocess.CompletedProcess(args,0,'layout-probe-complete','')
+
+        native = SimpleNamespace(CREATE_SUSPENDED=0, default_pipe=lambda home: str(home/'pipe'),
+            open_process=lambda pid: pid, empty_working_set=lambda handle: None,
+            suspend=lambda handle: None, resume=lambda handle: None, close=lambda handle: None,
+            module=lambda handle: (0,), working_set_pages=lambda *args: (4096,[0,1]),
+            memory=lambda handle: {'workingSet':12288,'private':4096,'pagefile':4096},
+            cpu=lambda handle: {'user':.01,'kernel':.02})
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(subprocess,'Popen',Process))
+            stack.enter_context(patch.object(subprocess,'run',client))
+            if trainer is train_windows:
+                stack.enter_context(patch.object(trainer,'win32',native))
+                stack.enter_context(patch.object(trainer,'Wire',Wire))
+                stack.enter_context(patch.object(trainer.pe,'text_range',return_value=(0,8192)))
+                measured = trainer.measure(root/'baseline',root/'candidate',root/'windows',pairs=2)
+            else:
+                stack.enter_context(patch.object(trainer.select,'select',side_effect=lambda reads,*args: (reads,[],[])))
+                stack.enter_context(patch.object(trainer.Server,'rpc',lambda self,method,params: rpc(self.process,method,params)))
+                stack.enter_context(patch.object(trainer,'sample',side_effect=lambda process,path: write(path,4096,[0,1])))
+                stack.enter_context(patch.object(trainer,'_ps',return_value={'resident':12288,'cpu':.03}))
+                stack.enter_context(patch.object(trainer,'_footprint',return_value=8192))
+                measured = trainer.measure(root/'baseline',root/'candidate',root/'darwin',root/'probe',pairs=2)
+        measured = json.loads(json.dumps(measured))
+        assert set(measured) == {'baseline','candidate'}
+        for observations in measured.values():
+            assert len(observations) == 2
+            for sample in observations:
+                assert sample['pageSize'] == 4096 and sample['codePages'] == 2
+                assert sample['codeResident'] == 8192 and sample['cpu'] == .03
+                assert sample['wall'] >= 0 and sample['conversationWall'] >= 0
+        assert len(processes) == len({p.home for p in processes}) == 8
+        assert all((p.home/'rust').is_dir() for p in processes)
+        assert all(p.returncode == 0 and p.stdout.closed for p in processes)
+`});
+  assert.equal(result.error,undefined);
+  assert.equal(result.status,0,result.stdout+result.stderr);
+});
+
 test('Windows shutdown sampling expires and releases the training process', {timeout:15_000},()=>{
   const result=spawnSync(python,['-',directory],{encoding:'utf8',timeout:10_000,input:String.raw`
 from contextlib import ExitStack
