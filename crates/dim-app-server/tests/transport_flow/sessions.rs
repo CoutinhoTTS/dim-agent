@@ -2,7 +2,7 @@
 //! name through its `dyn HostDispatch` key as a process plugin calls it.
 use super::*;
 use dim_agent_capabilities::permission::{
-    CommandRulesHost, NoCommandRules, Permission, PermissionState,
+    CommandRules, NoCommandRules, Permission, PermissionState,
 };
 use dim_agent_runtime::testing::{branch_events, chain_events};
 use dim_agent_runtime::{Agent, Session};
@@ -128,14 +128,14 @@ struct HeldRules {
 }
 struct HeldRulesPart(
     HeldRules,
-    Key<CommandRulesHost>,
+    Key<CommandRules>,
     rutis::host::Key<dim_app_server::collaboration::Collaboration>,
 );
 impl HeldRulesPart {
     fn new(
         names: &dim_agent_runtime::Names<'_>,
         a0: HeldRules,
-        a1: Key<CommandRulesHost>,
+        a1: Key<CommandRules>,
     ) -> rutis::Result<Self> {
         Ok(Self(a0, a1, names.key()?))
     }
@@ -159,7 +159,7 @@ impl rutis::host::DynPlugin for HeldRulesPart {
             }
             ctx.provide_at(
                 self.1.clone(),
-                Arc::new(CommandRulesHost(Arc::new(NoCommandRules))),
+                Arc::new(CommandRules(Arc::new(NoCommandRules))),
             )?;
             Ok(rutis::host::Effect::Done)
         })
@@ -279,7 +279,7 @@ async fn serve_with(setup: Setup) -> Served {
                 prompt::InitialPromptConfiguration,
             };
             builder
-                .session_value(Arc::new(PromptHost(Arc::new(EmptyPromptHost))))
+                .session_data_value(Arc::new(PromptHost(Arc::new(EmptyPromptHost))))
                 .session_value(Arc::new(InitialPromptConfiguration::fixed(None)))
                 .require_feature(
                     Feature::new("held-rules").session("held-rules", move |names| {

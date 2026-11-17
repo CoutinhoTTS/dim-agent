@@ -1000,6 +1000,7 @@
       "file": "crates/dim-agent-capabilities/src/permission.rs",
       "unexpandedMacros": [
         "format",
+        "serde_json::json",
         "tokio::select",
         "unreachable",
         "vec"
@@ -1083,6 +1084,7 @@
       "file": "crates/dim-agent-capabilities/src/prompt_registry.rs",
       "unexpandedMacros": [
         "format",
+        "serde_json::json",
         "vec"
       ]
     },
@@ -2057,7 +2059,6 @@
       "parent": "dim_agent_scheduler",
       "file": "crates/dim-agent-scheduler/src/document.rs",
       "unexpandedMacros": [
-        "format",
         "matches",
         "serde_json::json"
       ]
@@ -2763,6 +2764,7 @@
       "file": "crates/dim-app-server/src/hooks_settings.rs",
       "unexpandedMacros": [
         "format",
+        "serde_json::json",
         "unreachable",
         "vec"
       ]
@@ -9496,7 +9498,6 @@
         "path host::ModelSelectionHost",
         "path host::PrepareContextHost",
         "path host::PrepareModelHost",
-        "path host::PromptHost",
         "path host::ProviderConnectionResolver",
         "path host::ToolHost"
       ]
@@ -9552,7 +9553,6 @@
       "to": "dim_agent_capabilities::permission",
       "references": [
         "mod permission",
-        "path permission::CommandRulesHost",
         "path permission::Permission"
       ]
     },
@@ -9568,7 +9568,6 @@
       "to": "dim_agent_capabilities::prompt",
       "references": [
         "mod prompt",
-        "path prompt::InitialPromptConfiguration",
         "path prompt::Prompt"
       ]
     },
@@ -9584,8 +9583,7 @@
       "from": "dim_agent_capabilities",
       "to": "dim_agent_capabilities::prompt_registry",
       "references": [
-        "mod prompt_registry",
-        "path prompt_registry::PromptRegistry"
+        "mod prompt_registry"
       ]
     },
     {
@@ -11852,10 +11850,10 @@
       "from": "dim_agent_capabilities::defaults",
       "to": "dim_agent_capabilities::permission",
       "references": [
-        "path CommandRulesHost",
+        "path CommandRules",
         "path NoCommandRules",
         "path PermissionPlugin::new",
-        "use crate::permission::CommandRulesHost",
+        "use crate::permission::CommandRules",
         "use crate::permission::NoCommandRules",
         "use crate::permission::PermissionPlugin"
       ]
@@ -13405,6 +13403,7 @@
       "references": [
         "path crate::port_faces::Empty",
         "path crate::port_faces::face_key",
+        "path crate::port_faces::invalid",
         "path crate::port_faces::read",
         "path crate::port_faces::request",
         "path crate::port_faces::serving",
@@ -14721,6 +14720,7 @@
         "path CancelledFn",
         "path HostError",
         "path HostError::Cancelled",
+        "path HostError::Failed",
         "path HostFuture",
         "path call_until_cancelled",
         "use crate::host::CancelledFn",
@@ -14735,6 +14735,16 @@
       "references": [
         "path HostPlatform",
         "use crate::host_platform::HostPlatform"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::permission",
+      "to": "dim_agent_capabilities::port_faces",
+      "references": [
+        "path crate::port_faces::Empty",
+        "path crate::port_faces::read",
+        "path crate::port_faces::request",
+        "path crate::port_faces::unknown_method"
       ]
     },
     {
@@ -15359,6 +15369,7 @@
       "from": "dim_agent_capabilities::prompt_registry",
       "to": "dim_agent_capabilities::host",
       "references": [
+        "path HostError::Cancelled",
         "path HostError::failed",
         "path HostFuture",
         "path LoadPrompt",
@@ -15367,6 +15378,14 @@
         "use crate::host::HostFuture",
         "use crate::host::LoadPrompt",
         "use crate::host::PromptHost"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::prompt_registry",
+      "to": "dim_agent_capabilities::port_faces",
+      "references": [
+        "path crate::port_faces::invalid",
+        "path crate::port_faces::unknown_method"
       ]
     },
     {
@@ -22868,6 +22887,13 @@
     },
     {
       "from": "dim_agent_scheduler::support",
+      "to": "dim_app_server::control",
+      "references": [
+        "path dim_app_server::PublicationHold"
+      ]
+    },
+    {
+      "from": "dim_agent_scheduler::support",
       "to": "dim_client",
       "references": [
         "path Client",
@@ -23626,7 +23652,6 @@
       "from": "dim_app_server",
       "to": "dim_agent_capabilities::methods",
       "references": [
-        "path dim_agent_capabilities::methods::Callers",
         "path dim_agent_capabilities::methods::ReservedMethods"
       ]
     },
@@ -23783,7 +23808,7 @@
         "path ConnectionHub",
         "path ConnectionPlugin::new",
         "path RpcPlugin::new",
-        "path connection::CallChannelPlugin::new",
+        "path connection::CallChannelPlugin",
         "use connection::ConnectionHub",
         "use connection::ConnectionPlugin",
         "use connection::RpcPlugin"
@@ -23795,11 +23820,14 @@
       "references": [
         "mod control",
         "path ProcessActivity",
+        "path PublicationHold",
         "path ServerControl",
         "path ServerControlPlugin::new",
+        "path ServerControlPlugin::with_shutdown",
         "path control",
         "use control::ProcessActivity",
         "use control::ProcessHold",
+        "use control::PublicationHold",
         "use control::ServerControl",
         "use control::ServerControlPlugin"
       ]
@@ -24037,6 +24065,13 @@
         "path settings::SettingsPlugin::native",
         "path settings::SettingsPlugin::new",
         "path settings::SettingsService"
+      ]
+    },
+    {
+      "from": "dim_app_server",
+      "to": "dim_app_server::settings::declared",
+      "references": [
+        "path settings::Settings"
       ]
     },
     {
@@ -27654,17 +27689,11 @@
     },
     {
       "from": "dim_app_server::execution_settings",
-      "to": "dim_app_server::settings",
-      "references": [
-        "path SettingsService",
-        "use crate::settings::SettingsService"
-      ]
-    },
-    {
-      "from": "dim_app_server::execution_settings",
       "to": "dim_app_server::settings::declared",
       "references": [
+        "path Settings",
         "path SourceDeclaration",
+        "use crate::settings::Settings",
         "use crate::settings::SourceDeclaration"
       ]
     },
@@ -29902,17 +29931,11 @@
     },
     {
       "from": "dim_app_server::model_log",
-      "to": "dim_app_server::settings",
-      "references": [
-        "path SettingsService",
-        "use crate::settings::SettingsService"
-      ]
-    },
-    {
-      "from": "dim_app_server::model_log",
       "to": "dim_app_server::settings::declared",
       "references": [
+        "path Settings",
         "path SourceDeclaration",
+        "use crate::settings::Settings",
         "use crate::settings::SourceDeclaration"
       ]
     },
@@ -29960,9 +29983,9 @@
       "from": "dim_app_server::permission_rules",
       "to": "dim_agent_capabilities::permission",
       "references": [
-        "path CommandRulesHost",
+        "path CommandRules",
         "path ReadCommandRules",
-        "use dim_agent_capabilities::permission::CommandRulesHost",
+        "use dim_agent_capabilities::permission::CommandRules",
         "use dim_agent_capabilities::permission::ReadCommandRules"
       ]
     },
@@ -30486,17 +30509,11 @@
     },
     {
       "from": "dim_app_server::prompt_settings",
-      "to": "dim_app_server::settings",
-      "references": [
-        "path SettingsService",
-        "use crate::settings::SettingsService"
-      ]
-    },
-    {
-      "from": "dim_app_server::prompt_settings",
       "to": "dim_app_server::settings::declared",
       "references": [
+        "path Settings",
         "path SourceDeclaration",
+        "use crate::settings::Settings",
         "use crate::settings::SourceDeclaration"
       ]
     },
@@ -30531,17 +30548,11 @@
     },
     {
       "from": "dim_app_server::prompt_suggestion_settings",
-      "to": "dim_app_server::settings",
-      "references": [
-        "path SettingsService",
-        "use crate::settings::SettingsService"
-      ]
-    },
-    {
-      "from": "dim_app_server::prompt_suggestion_settings",
       "to": "dim_app_server::settings::declared",
       "references": [
+        "path Settings",
         "path SourceDeclaration",
+        "use crate::settings::Settings",
         "use crate::settings::SourceDeclaration"
       ]
     },
@@ -32819,6 +32830,7 @@
         "path declared::provide",
         "use declared::Declared",
         "use declared::Read",
+        "use declared::Settings",
         "use declared::SourceDeclaration",
         "use declared::Update",
         "use declared::Writer",
@@ -35725,17 +35737,11 @@
     },
     {
       "from": "dim_app_server::web",
-      "to": "dim_app_server::settings",
-      "references": [
-        "path SettingsService",
-        "use crate::settings::SettingsService"
-      ]
-    },
-    {
-      "from": "dim_app_server::web",
       "to": "dim_app_server::settings::declared",
       "references": [
+        "path Settings",
         "path SourceDeclaration",
+        "use crate::settings::Settings",
         "use crate::settings::SourceDeclaration"
       ]
     },
@@ -51537,17 +51543,11 @@
     },
     {
       "from": "dim_goal",
-      "to": "dim_app_server::settings",
-      "references": [
-        "path SettingsService",
-        "use dim_app_server::settings::SettingsService"
-      ]
-    },
-    {
-      "from": "dim_goal",
       "to": "dim_app_server::settings::declared",
       "references": [
+        "path Settings",
         "path SourceDeclaration",
+        "use dim_app_server::settings::Settings",
         "use dim_app_server::settings::SourceDeclaration"
       ]
     },
@@ -51768,10 +51768,10 @@
     },
     {
       "from": "dim_goal::branch",
-      "to": "dim_app_server::settings",
+      "to": "dim_app_server::settings::declared",
       "references": [
-        "path SettingsService",
-        "use dim_app_server::settings::SettingsService"
+        "path Settings",
+        "use dim_app_server::settings::Settings"
       ]
     },
     {
@@ -55169,17 +55169,11 @@
     },
     {
       "from": "dim_session_title",
-      "to": "dim_app_server::settings",
-      "references": [
-        "path SettingsService",
-        "use dim_app_server::settings::SettingsService"
-      ]
-    },
-    {
-      "from": "dim_session_title",
       "to": "dim_app_server::settings::declared",
       "references": [
+        "path Settings",
         "path SourceDeclaration",
+        "use dim_app_server::settings::Settings",
         "use dim_app_server::settings::SourceDeclaration"
       ]
     },
@@ -55400,6 +55394,18 @@
     {
       "module": "dim_agent_runtime::testing",
       "path": "Bound::Unbounded"
+    },
+    {
+      "module": "dim_agent_scheduler::document",
+      "path": "D::Error"
+    },
+    {
+      "module": "dim_agent_scheduler::document",
+      "path": "M::Error"
+    },
+    {
+      "module": "dim_agent_scheduler::document",
+      "path": "T::deserialize"
     },
     {
       "module": "dim_agent_scheduler::testing",
@@ -55632,6 +55638,10 @@
     {
       "module": "dim_app_server::connection::ui_extensions",
       "path": "Notification::UiExtensionsChanged"
+    },
+    {
+      "module": "dim_app_server::hooks_settings",
+      "path": "Value::future"
     },
     {
       "module": "dim_app_server::managed_oauth",
