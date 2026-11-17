@@ -198,7 +198,10 @@ fn bare_effort_at_home_lists_the_preview_models_choices() {
             let providers = wire.read("account.providers");
             wire.reply(&providers, json!([]));
             let catalog = wire.read("provider.catalog");
-            assert_eq!(catalog["params"], json!({"providerId":"preview-provider"}));
+            assert_eq!(
+                catalog["params"],
+                json!({"providerId":"preview-provider","modelId":"preview-model"})
+            );
             wire.reply(&catalog, preview_catalog());
             assert_eq!(
                 wire.trailing_request(),
@@ -339,8 +342,11 @@ fn a_model_picked_at_home_drops_the_effort_home_chose() {
     let daemon = home.daemon(move |wire| {
         wire.hello(&["session.model.preview"]);
         let preview = wire.read("session.model.preview");
-        wire.reply(&preview, json!({"model":{"providerId":"preview-provider","modelId":"preview-model"},
-            "modelPreferences":{"reasoningEffort":"high"}}));
+        wire.reply(
+            &preview,
+            json!({"model":{"providerId":"preview-provider","modelId":"preview-model"},
+            "modelPreferences":{"reasoningEffort":"high"}}),
+        );
         let mut picked = preview_catalog();
         picked["catalog"]["models"][0]["id"] = json!("other-model");
         picked["catalog"]["models"][0]["name"] = json!("Other model");
@@ -358,15 +364,19 @@ fn a_model_picked_at_home_drops_the_effort_home_chose() {
             }
             match request["method"].as_str().unwrap() {
                 "account.providers" => wire.reply(&request, json!([])),
-                "provider.list" => {
+                "provider.models.query" => {
                     picking = true;
                     wire.reply(
                         &request,
-                        json!({"providers":[{"providerId":"preview-provider","displayName":"Preview","enabled":true}]}),
+                        super::models::picker_page("preview-provider", "Preview", picked.clone()),
                     );
                 }
                 "provider.catalog" => {
-                    let listed = if picking { picked.clone() } else { previewed.clone() };
+                    let listed = if picking {
+                        picked.clone()
+                    } else {
+                        previewed.clone()
+                    };
                     wire.reply(&request, listed);
                 }
                 "provider.selection" => {
@@ -376,15 +386,21 @@ fn a_model_picked_at_home_drops_the_effort_home_chose() {
                         json!({"selection": if read { json!({"version":1}) } else { Value::Null }}),
                     );
                 }
-                "provider.select" | "provider.preferences.update" => wire.reply(&request, json!({})),
+                "provider.select" | "provider.preferences.update" => {
+                    wire.reply(&request, json!({}))
+                }
                 "session.create" => {
                     created.send(request["params"].clone()).unwrap();
-                    wire.reply(&request, json!({"sessionId":"session","sequence":8,
-                        "model":{"providerId":"preview-provider","modelId":"other-model"}}));
+                    wire.reply(
+                        &request,
+                        json!({"sessionId":"session","sequence":8,
+                        "model":{"providerId":"preview-provider","modelId":"other-model"}}),
+                    );
                 }
                 "session.attach" => {
                     let mut record = attach_record(&request);
-                    record["model"] = json!({"providerId":"preview-provider","modelId":"other-model"});
+                    record["model"] =
+                        json!({"providerId":"preview-provider","modelId":"other-model"});
                     wire.reply(&request, record);
                 }
                 "session.history" => wire.reply(
@@ -1605,7 +1621,7 @@ fn old_daemon_home_creation_rejects_temporary_sources_and_keeps_configured_fallb
                     "account.providers" => json!([]),
                     "provider.management" => {
                         assert!(management);
-                        assert_eq!(request["params"], json!({}), "Do not query a temporary identity as a saved Provider");
+                        assert_eq!(request["params"], json!({"providerId":provider}));
                         let providers = if configured { json!([{"providerId":provider,"source":"user",
                             "displayName":"Configured","preferences":{"model":{"reasoningEffort":"low","serviceTier":"priority"}}}]) } else { json!([]) };
                         json!({"providers":providers,"errors":[]})

@@ -6,18 +6,18 @@ import ConfirmDialog from "../../components/ConfirmDialog.vue"
 import { copyText } from "../../clipboard"
 import { settingsMessages } from "../../i18n/settings"
 import { useSettingsText } from "../../i18n/settings-general"
-import { readManagement, readReferral, readResetBatches, readUsage, type AccountReferral, type AccountUsage, type ManagementProvider } from "../../rpc/management"
+import { readManagementPage, readReferral, readResetBatches, readUsage, type AccountReferral, type AccountUsage, type ManagementInfo } from "../../rpc/management"
 import { readAck } from "../../rpc/read"
 import { useConnectionStore } from "../../stores/connection"
-import { useModelsStore } from "../../stores/models"
+import { useModels } from "../../stores/models"
 import ProviderAuthFlow from "./ProviderAuthFlow.vue"
 import { messageFrom } from "./context"
 
 const { t, locale } = useI18n({ messages: settingsMessages })
 const text = useSettingsText()
 const connection = useConnectionStore()
-const models = useModelsStore()
-const provider = ref<ManagementProvider>()
+const models = useModels()
+const provider = ref<ManagementInfo>()
 const usage = ref<AccountUsage>()
 const referral = ref<AccountReferral>()
 const batches = ref<ReturnType<typeof readResetBatches>>()
@@ -57,7 +57,7 @@ async function load(): Promise<void> {
   recoveryProvider.value = undefined
   usageError.value = ""
   try {
-    const view = await connection.client.call("provider.management", {}, readManagement)
+    const view = await connection.client.call("provider.management.list", { accountsOnly: true, limit: 128 }, readManagementPage)
     provider.value = view.providers.find((p) => p.credentialAuthority === "account")
     batches.value = undefined
     referralError.value = ""
@@ -81,7 +81,7 @@ async function recover(): Promise<void> {
   saving.value = true
   try {
     await connection.client.call("account.recover", { providerId: recoveryProvider.value }, readAck)
-    await Promise.all([load(), models.load()])
+    await load()
   } catch (cause) { error.value = messageFrom(cause) }
   finally { saving.value = false }
 }
@@ -108,7 +108,7 @@ async function logout(): Promise<void> {
   try {
     await connection.client.call("account.logout", { providerId: current.providerId }, readAck)
     pendingReset.value = undefined
-    await Promise.all([load(), models.load()])
+    await load()
   } catch (cause) { error.value = messageFrom(cause) }
   finally { saving.value = false }
 }

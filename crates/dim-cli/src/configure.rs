@@ -85,7 +85,10 @@ pub async fn preference(
             )
         } else {
             let snapshot: ProviderCatalogSnapshot = client
-                .typed("provider.catalog", json!({"providerId":model.provider_id}))
+                .typed(
+                    "provider.catalog",
+                    json!({"providerId":model.provider_id,"modelId":model.model_id}),
+                )
                 .await?;
             let catalog = snapshot
                 .catalog
