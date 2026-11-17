@@ -157,3 +157,10 @@ done
 消融复查：共享的查询选择和当前输入发布各保留一个模型，不为每个调用者复制；删除了恒为零的“恢复读取正文次数”
 及按有限 ID 集合自动成立的“压缩次数上限”，因为它们不能提供实现证据。保留分开的协议模型，是为了不把
 一个巨型模型的状态爆炸或一个小模型的通过误当成整个插件已验证。未增加运行时抽象、CI 门槛或证明平台。
+
+## Owner 交接
+
+[Owner 前提与交接对应表](../owner-handoff-verification.md)核对生产 `consume` 调用的 cut 来源，
+并用 [InterruptHandoff](InterruptHandoff.tla) 和 [GenerationHandoff](GenerationHandoff.tla)
+检查中断后的迟到请求、旧工作终态与新代接续。范围和复现见
+[运行记录](owner-handoff-results.md)；这两个有限交接不代表全部 owner 组合已经验证。
