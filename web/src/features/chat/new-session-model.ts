@@ -13,6 +13,8 @@ export type ModelResolution =
 export type ModelMenuPreview = {
   state: ModelResolution["state"]
   following: boolean
+  /** The model following defaults resolves to, named by the menu's own lookup. */
+  resolved?: ModelId
   message?: string
   retry: () => void
   follow: () => void
@@ -62,6 +64,7 @@ export function useNewSessionModel(resolve: (cwd: string) => Promise<ModelId | u
   const menu = computed<ModelMenuPreview>(() => ({
     state: resolution.value.state,
     following: following.value,
+    ...(resolution.value.state === "resolved" ? { resolved: resolution.value.model } : {}),
     ...(resolution.value.state === "failed" ? { message: resolution.value.message } : {}),
     retry: () => void refresh(directory),
     follow,

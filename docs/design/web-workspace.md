@@ -1050,10 +1050,11 @@ finds no name, the model ID itself is shown.
 
 Following defaults and choosing are separate. Following sends no `model` in
 `session.create`; a model chosen here is that new Session's `model` only and
-never writes `provider.select`. The menu offers the way back. The composer
+never writes `provider.select`. The menu offers the way back, and that row names
+the model following restores, not the choice it clears. The composer
 distinguishes a pending resolution, a retryable failure and no usable model
-instead of naming all of them the default model: only following defaults with a
-resolved model shows a name, and a failure keeps its own label and a Retry. The
+instead of naming all of them the default model, and a failure keeps its own
+label and a Retry. The
 preview is re-read when the directory changes and when the connection reattaches
 after a reconnect. A reply for an earlier directory is discarded, and a re-read
 never replaces a chosen model. After creation the attached Session's adopted

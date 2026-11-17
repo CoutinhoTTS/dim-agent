@@ -151,7 +151,7 @@ defineExpose({ open: () => {
         >
           <span class="model-check"><UIcon v-if="preview.following" name="i-lucide-check" class="size-3.5" aria-hidden="true" /></span>
           <span class="model-name">{{ t("composer.followDefaults") }}</span>
-          <span v-if="model" class="follow-name">— {{ triggerLabel }}</span>
+          <span v-if="preview.resolved" class="follow-name">— {{ models.nameOf(preview.resolved) }}</span>
         </UButton>
         <UInput
           ref="searchInput"

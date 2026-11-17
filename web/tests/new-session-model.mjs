@@ -140,6 +140,8 @@ test("a model chosen for one Session overrides the preview and following default
   await flush()
   assert.equal(label(root), "Beta")
   assert.equal(follow(root).props["aria-selected"], false)
+  assert.match(text(follow(root)), /Alpha$/, "the default row names the model it restores, not the choice")
+  assert.doesNotMatch(text(follow(root)), /Beta/)
   await click(workspace(root, "/two"))
   await flush()
   assert.equal(label(root), "Beta", "reading another directory does not overwrite the choice")
