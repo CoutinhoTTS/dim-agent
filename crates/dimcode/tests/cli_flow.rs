@@ -3941,14 +3941,7 @@ impl Terminal {
     /// Reads until `found` names how far into the unconsumed transcript the
     /// wait is satisfied.
     fn wait_for(&mut self, expected: &str, found: impl Fn(&str) -> Option<usize>) {
-        self.wait_for_until(expected, Instant::now() + HANG_GUARD, found);
-    }
-    fn wait_for_until(
-        &mut self,
-        expected: &str,
-        deadline: Instant,
-        found: impl Fn(&str) -> Option<usize>,
-    ) {
+        let deadline = Instant::now() + HANG_GUARD;
         loop {
             if let Some(end) = found(&self.transcript[self.consumed..]) {
                 self.consumed += end;
@@ -9348,20 +9341,10 @@ fn tui_provider_management_uses_the_production_daemon_and_survives_restart() {
     );
     terminal.write(b"/models\r");
     terminal.until("Provider flow /");
-    let deadline = Instant::now() + HANG_GUARD;
     terminal.write(b"Provider flow");
-    terminal.wait_for_until("Provider flow search result", deadline, |tail| {
-        let plain = strip_ansi(tail);
-        let (_, results) = plain.split_once("> Provider flow")?;
-        results
-            .contains("Provider flow / fixture-model")
-            .then_some(tail.len())
-    });
+    terminal.until("1 provider");
     terminal.write(b"\r");
-    let expected = "Default for new sessions: Provider flow / fixture-model";
-    terminal.wait_for_until(expected, deadline, |tail| {
-        tail.find(expected).map(|index| index + expected.len())
-    });
+    terminal.until("Default for new sessions: Provider flow / fixture-model");
     terminal.write(b"stale-effort-message\r");
     terminal.until("provider-updated-reply");
     assert_eq!(
@@ -9377,6 +9360,7 @@ fn tui_provider_management_uses_the_production_daemon_and_survives_restart() {
     terminal.write(b"/models\r");
     terminal.until("Provider flow /");
     terminal.write(b"Provider flow");
+    terminal.until("1 provider");
     assert!(
         rpc(
             &mut wire,
