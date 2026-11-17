@@ -529,8 +529,10 @@ async fn deleting_a_job_retires_its_history_and_launched_sessions() {
             .unwrap();
         run["deadline_at"] = json!("2020-01-01T00:00:00.000Z");
     });
+    let startup_retention = signals(home.path()).retention();
     let server = start(home.path(), Arc::new(Script::default())).await;
     let mut client = connect(&server).await;
+    retention(home.path(), startup_retention).await;
     let listed = client.rpc("session.summaries", json!({})).await.unwrap();
     assert!(listed.to_string().contains(&launched), "{listed}");
 

@@ -1347,6 +1347,13 @@ async fn the_tool_schedules_a_wakeup_for_the_caller_and_refuses_elsewhere() {
     step(home.path(), 1).await;
     wait_state(home.path(), &wakeup_id, "fired").await;
     wait_for("the wakeup turn", || model.count() >= 2).await;
+    client
+        .rpc(
+            "session.idle",
+            json!({"sessionId": session, "branchId": "main"}),
+        )
+        .await
+        .unwrap();
 
     // A non-interactive Session gets the same refusal the `schedule` tool
     // gives; the member-role check is the same configuration test.
