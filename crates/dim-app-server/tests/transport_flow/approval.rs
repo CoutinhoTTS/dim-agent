@@ -184,7 +184,7 @@ async fn setup_store(
     let mut builder = AgentBuilder::new(AgentConfig::default());
     builder.timeline_store(store);
     builder
-        .session_value(Arc::new(dim_agent_capabilities::host::PromptHost(
+        .session_data_value(Arc::new(dim_agent_capabilities::host::PromptHost(
             Arc::new(dim_agent_capabilities::host::EmptyPromptHost),
         )))
         .session_value(Arc::new(

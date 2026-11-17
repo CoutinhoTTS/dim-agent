@@ -2564,7 +2564,7 @@ async fn mcp_image_tool_results_reach_the_model_and_the_session_keeps_working() 
             dim_agent_capabilities::model_provider::ModelProviderPlugin::process,
         );
         builder
-            .session_value(Arc::new(PromptHost(Arc::new(EmptyPromptHost))))
+            .session_data_value(Arc::new(PromptHost(Arc::new(EmptyPromptHost))))
             .session_value(Arc::new(
                 dim_agent_capabilities::prompt::InitialPromptConfiguration::fixed(Some(
                     ConfigureUpdate {

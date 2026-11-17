@@ -279,7 +279,7 @@ async fn serve_with(setup: Setup) -> Served {
                 prompt::InitialPromptConfiguration,
             };
             builder
-                .session_value(Arc::new(PromptHost(Arc::new(EmptyPromptHost))))
+                .session_data_value(Arc::new(PromptHost(Arc::new(EmptyPromptHost))))
                 .session_value(Arc::new(InitialPromptConfiguration::fixed(None)))
                 .require_feature(
                     Feature::new("held-rules").session("held-rules", move |names| {

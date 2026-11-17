@@ -175,9 +175,6 @@ Rust 产品装配的现状以 [生成的 catalog](../architecture/rust-agent/gen
 | `fileReads` | branch | FileReads | hot-path | 待迁移；按 #1292 定义操作面 |
 | `branchLine` | branch | BranchLine | hot-path | 待迁移；按 #1292 定义操作面 |
 | `submitChecks` | session | InputMethods | hot-path | 待迁移；按 #1292 定义操作面 |
-| `promptHost` | session | PromptRegistry | hot-path | 待迁移；按 #1292 定义操作面 |
-| `promptRegistry` | session | PromptRegistry | hot-path | 待迁移；按 #1292 定义操作面 |
-| `initialPromptConfiguration` | session | PromptRegistry | hot-path | 待迁移；按 #1292 定义操作面 |
 | `historyRenderer` | session | SessionScope | hot-path | 待迁移；按 #1292 定义操作面 |
 | `contextModelHost` | session | SessionScope | hot-path | 待迁移；按 #1292 定义操作面 |
 | `prepareModelHost` | session | PrepareModelHost | hot-path | 待迁移；按 #1292 定义操作面 |
