@@ -253,11 +253,11 @@ async fn serve_with(setup: Setup) -> Served {
     config.session_defaults.tools = Some(vec!["confirm".into()]);
     config.session_defaults.permission_policy = serde_json::from_value(host_policy()).unwrap();
     let mut builder = AgentBuilder::new(AgentConfig::default());
-    builder.timeline_store(
+    builder.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(
         setup
             .store
             .unwrap_or_else(|| Arc::new(dim_agent_runtime::MemoryTimelineStore::default())),
-    );
+    ));
     if let Some(controls) = setup.controls {
         builder.require_feature(super::session_typescript::ControlledGate::feature(controls));
     }

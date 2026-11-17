@@ -625,6 +625,59 @@ export interface Store {
   removeWorktree(request: WorktreeDirectory, remove: (path: string) => Promise<void>): Promise<{ removed: boolean }>;
 }
 
+/** Session Timeline storage binding; resource-faces §5. Native append stays beside its state owner. */
+export interface StoredTimelineEvent {
+  event: import('./client-protocol.js').AgentEvent;
+  trace: TimelineTrace | null;
+  batchEnd: number;
+}
+export interface TimelineTrace {
+  event_id: string;
+  original: Omit<import('./client-protocol.js').AgentEvent, 'id' | 'sequence' | 'create_at'>;
+  steps: { handler: string; result?: Omit<import('./client-protocol.js').AgentEvent, 'id' | 'sequence' | 'create_at'> }[];
+}
+export interface StoredTimelineBranch {
+  info: { id: string; parent?: string; branch_point?: number; create_anchor?: number };
+  sequence: number;
+}
+export interface TimelineRecoverySnapshot {
+  sequence: number;
+  event_id: string;
+  interpreter: string;
+  state: string;
+}
+export interface TimelineStoreCompletion {
+  subscriptionId: string;
+  batchId: string;
+  branchId: string;
+  through: number;
+  result: 'committed' | { code: string; message: string };
+}
+export interface TimelineStore {
+  /** Synchronous admission is host-local; callers across a link are rejected. */
+  append(request: { sessionId: string; branchId: string; batchId: string; events: StoredTimelineEvent[] }): { accepted: true };
+  /** Registration completes before return; observe later admissions, without replay of earlier batches. */
+  commits(request: { sessionId: string }, listener: (completion: TimelineStoreCompletion) => void | Promise<void>): Promise<{ subscriptionId: string }>;
+  closeCommits(request: { subscriptionId: string }): Promise<{}>;
+  /** Prepare the backend record; the lifecycle owner initializes and publishes the Agent Session. */
+  createSession(request: { sessionId: string; config: SessionConfig }): Promise<{}>;
+  sessionConfig(request: { sessionId: string }): Promise<{ config: SessionConfig | null }>;
+  /** Drain accepted storage writes; does not close the Agent Session or its admission. */
+  releaseSession(request: { sessionId: string }): Promise<{}>;
+  /** Undo a prepared creation after failed initialization and stopped producers; not general Session deletion. */
+  rollbackSession(request: { sessionId: string }): Promise<{}>;
+  branches(request: { sessionId: string }): Promise<{ branches: StoredTimelineBranch[] }>;
+  head(request: { sessionId: string; branchId: string }): Promise<{ sequence: number }>;
+  readPage(request: { sessionId: string; branchId: string; after: number; limit: number; through: number }): Promise<{ events: StoredTimelineEvent[] }>;
+  readSegments(request: { sessionId: string; segments: { branchId: string; from: number; through: number }[] }): Promise<{ segments: StoredTimelineEvent[][] }>;
+  query: Store['query'];
+  trace(request: { sessionId: string; branchId: string; sequence: number }): Promise<{ trace: TimelineTrace | null }>;
+  batchEnd(request: { sessionId: string; branchId: string; sequence: number }): Promise<{}>;
+  batchEndAt(request: { sessionId: string; branchId: string; sequence: number }): Promise<{ sequence: number }>;
+  saveSnapshot(request: { sessionId: string; branchId: string; snapshot: TimelineRecoverySnapshot }): Promise<{}>;
+  latestSnapshot(request: { sessionId: string; branchId: string; through: number; interpreter: string }): Promise<{ snapshot: TimelineRecoverySnapshot | null }>;
+}
+
 /** One enabled Skill in the current Session view. */
 export type SkillSummary = { id: string; name: string; description: string; userInvocable: boolean };
 /** Branch service backed by its Session Skills owner. */

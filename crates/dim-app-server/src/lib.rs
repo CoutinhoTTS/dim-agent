@@ -1473,7 +1473,6 @@ pub fn register_faces(builder: &mut dim_agent_runtime::AgentBuilder) {
         ("sqliteStorage", "object"),
         ("submitChecks", "hot-path"),
         ("timelineFactory", "control"),
-        ("timelineStore", "object"),
         ("timelineTree", "owner-api"),
         ("timelineTreeControl", "owner-api"),
         ("toolBinding", "hot-path"),
