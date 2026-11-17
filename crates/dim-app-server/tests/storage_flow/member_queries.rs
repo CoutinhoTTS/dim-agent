@@ -809,6 +809,7 @@ async fn notifications_preserve_original_close_boundaries_tails_and_task_identit
         drop(db);
         {
             let connection = Connection::open(&database.0).unwrap();
+            drop_v51(&connection);
             if source < 45 {
                 connection
                     .execute_batch("ALTER TABLE worktree_directories DROP COLUMN last_used_at_ms")
