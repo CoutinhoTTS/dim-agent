@@ -184,6 +184,18 @@ def validate(baseline_map, candidate_map, order_file):
                           order_file.read_text().splitlines(), "PE function")
 
 
+def msvc_linker(host):
+    key = "CARGO_TARGET_" + host.upper().replace("-", "_") + "_LINKER"
+    if os.environ.get(key):
+        return os.environ[key]
+    compiler = shutil.which("cl")
+    if compiler:
+        candidate = Path(compiler).with_name("link.exe")
+        if candidate.is_file():
+            return str(candidate)
+    return None
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
@@ -217,9 +229,12 @@ def main():
     with tempfile.TemporaryDirectory(prefix="dim-layout-") as temporary:
         work = Path(temporary)
         wrapper = work / "linker.exe"
+        host_linker = msvc_linker(host)
+        if not host_linker:
+            parser.error("the MSVC link.exe is required to compile the capture wrapper")
         subprocess.run(
-            ["rustc", "--edition", "2021", "-O", str(HERE / "link_capture.rs"),
-             "-o", str(wrapper)],
+            ["rustc", "--edition", "2021", "-O", "-Clinker=" + host_linker,
+             str(HERE / "link_capture.rs"), "-o", str(wrapper)],
             check=True)
         env = dict(
             os.environ,

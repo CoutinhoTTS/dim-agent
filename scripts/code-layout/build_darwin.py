@@ -103,7 +103,8 @@ def ordered_link(record, output, order_file, map_path):
     omitted = set()
     for line in diagnostics.splitlines():
         match = re.fullmatch(
-            r"(?:ld|ld64): warning: can't find match for order_file entry: (\S+)", line
+            r"(?:ld|ld64): warning: can't find (?:match for|function/data for) "
+            r"order_file entry: (\S+)", line
         )
         if match and match[1] in names:
             omitted.add(match[1])

@@ -20,20 +20,23 @@ import tempfile
 import time
 sys.path.insert(0, sys.argv[1])
 import build_windows
-import layout
 import pe
 import win32
 from samples import write as write_sample
 
 with tempfile.TemporaryDirectory(prefix='dim-layout-win-') as temporary:
     root = Path(temporary)
-    (root / 'fixture.c').write_text('''__declspec(dllexport) int public_func(int x) { return x + 3; }
+    (root / 'fixture.c').write_text('''#include <windows.h>
+__declspec(dllexport) int public_func(int x) { return x + 3; }
 static __declspec(noinline) int internal_func(int x) { return x * 5; }
 static __declspec(noinline) int internal_two(int x) { return x - 7; }
 typedef int (*fn)(int);
 static fn volatile f1 = internal_func;
 static fn volatile f2 = internal_two;
-int entry(void) { return public_func(f1(2)) + f2(3); }
+void entry(void) {
+    volatile int value = public_func(f1(2)) + f2(3);
+    ExitProcess(value ? 42 : 1);
+}
 ''')
     subprocess.run(['cl','/nologo','/c','/Gy','/Od',str(root/'fixture.c'),
                     '/Fo:'+str(root/'fixture.obj')],check=True)
@@ -41,7 +44,8 @@ int entry(void) { return public_func(f1(2)) + f2(3); }
     assert linker, 'lld-link must be on PATH'
     record = {'compiler':linker,
               'arguments':['/entry:entry','/subsystem:console','/nodefaultlib',
-                           str(root/'fixture.obj'),'/OUT:'+str(root/'base.exe')],
+                           str(root/'fixture.obj'),'kernel32.lib',
+                           '/OUT:'+str(root/'base.exe')],
               'cwd':str(root),'path':os.environ['PATH'],'pdb':None}
     base = root/'base.exe'; base_map = root/'base.map'
     build_windows.relink(record, base, map_path=base_map)
@@ -66,7 +70,8 @@ int entry(void) { return public_func(f1(2)) + f2(3); }
     capture = root/'capture'; capture.mkdir()
     response = root/'link.rsp'
     response.write_text(' '.join(['/entry:entry','/subsystem:console','/nodefaultlib',
-                                  str(root/'fixture.obj'),'/OUT:'+str(root/'captured.exe')]))
+                                  str(root/'fixture.obj'),'kernel32.lib',
+                                  '/OUT:'+str(root/'captured.exe')]))
     os.environ['DIM_LAYOUT_CAPTURE'] = str(capture)
     os.environ['DIM_LAYOUT_LINKER'] = linker
     build_windows.capture(['@'+str(response)])
