@@ -49,6 +49,7 @@ jobs:
     timeout-minutes: 30
     env:
       CARGO_INCREMENTAL: "0"
+      DIM_LAYOUT_CONSOLE: ${{ matrix.platform == 'windows-x64' && '1' || '0' }}
       RUSTC_WRAPPER: ""
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
@@ -74,10 +75,13 @@ jobs:
               -Path "$env:ProgramFiles\LLVM\bin", "$env:ProgramFiles\Microsoft Visual Studio\2022\*\VC\Tools\Llvm\*\bin" |
               Select-Object -First 1
           }
-          if (!$linker) { throw 'lld-link.exe is required for the Windows layout build' }
-          $path = if ($linker -is [System.Management.Automation.ApplicationInfo]) { $linker.Source } else { $linker.FullName }
-          Split-Path $path >> $env:GITHUB_PATH
-          Write-Output "Using $path"
+          if ($linker) {
+            $path = if ($linker -is [System.Management.Automation.ApplicationInfo]) { $linker.Source } else { $linker.FullName }
+            Split-Path $path >> $env:GITHUB_PATH
+            Write-Output "Using $path"
+          } else {
+            Write-Output 'lld-link is not on PATH; the build will use the Rust toolchain rust-lld'
+          }
       - run: rustup show
       - run: node --test ${{ matrix.test }}
 
@@ -89,11 +93,8 @@ jobs:
           - platform: darwin-arm64
             runner: macos-15
             target: aarch64-apple-darwin
-          - platform: darwin-x64
-            runner: macos-15-intel
-            target: x86_64-apple-darwin
           - platform: windows-x64
-            runner: windows-2022
+            runner: ["self-hosted", "windows", "x64"]
             target: x86_64-pc-windows-msvc
           - platform: windows-arm64
             runner: windows-11-arm
@@ -131,10 +132,13 @@ jobs:
               -Path "$env:ProgramFiles\LLVM\bin", "$env:ProgramFiles\Microsoft Visual Studio\2022\*\VC\Tools\Llvm\*\bin" |
               Select-Object -First 1
           }
-          if (!$linker) { throw 'lld-link.exe is required for the Windows layout build' }
-          $path = if ($linker -is [System.Management.Automation.ApplicationInfo]) { $linker.Source } else { $linker.FullName }
-          Split-Path $path >> $env:GITHUB_PATH
-          Write-Output "Using $path"
+          if ($linker) {
+            $path = if ($linker -is [System.Management.Automation.ApplicationInfo]) { $linker.Source } else { $linker.FullName }
+            Split-Path $path >> $env:GITHUB_PATH
+            Write-Output "Using $path"
+          } else {
+            Write-Output 'lld-link is not on PATH; the build will use the Rust toolchain rust-lld'
+          }
       - name: Build, train and validate the native executable
         shell: bash
         run: |

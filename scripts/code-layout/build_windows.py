@@ -105,7 +105,7 @@ def relink(record, output, order_file=None, map_path=None, strict=False, preserv
     env = dict(os.environ, PATH=record["path"])
     try:
         result = subprocess.run(
-            [record["compiler"], "@" + str(response)], cwd=record["cwd"], env=env,
+            [*record["compiler"], "@" + str(response)], cwd=record["cwd"], env=env,
             capture_output=True, text=True)
     finally:
         response.unlink(missing_ok=True)
@@ -116,7 +116,7 @@ def relink(record, output, order_file=None, map_path=None, strict=False, preserv
 
 def capture(arguments):
     root = Path(os.environ["DIM_LAYOUT_CAPTURE"])
-    linker = os.environ["DIM_LAYOUT_LINKER"]
+    linker = json.loads(os.environ["DIM_LAYOUT_LINKER"])
     arguments = list(arguments)
     if not any(argument.lower() == "/brepro" for argument in expand(arguments)):
         arguments.append("/Brepro")
@@ -145,7 +145,7 @@ def capture(arguments):
     record = {"arguments": saved, "cwd": os.getcwd(), "compiler": linker,
               "output": output, "pdb": pdb, "inputs": inputs, "path": os.environ["PATH"]}
     (root / "link.json").write_text(json.dumps(record, indent=2) + "\n")
-    subprocess.run([linker, *arguments], check=True)
+    subprocess.run([*linker, *arguments], check=True)
 
 
 def ordered_link(record, output, order_file, map_path):
@@ -188,6 +188,30 @@ def validate(baseline_map, candidate_map, order_file):
                           order_file.read_text().splitlines(), "PE function")
 
 
+def lld_linker(host):
+    found = shutil.which("lld-link")
+    if found:
+        return [found]
+    for root in (
+        Path(os.environ.get("ProgramFiles", r"C:\Program Files")),
+        Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")),
+    ):
+        for candidate in root.glob("Microsoft Visual Studio/2022/*/VC/Tools/Llvm/*/bin/lld-link.exe"):
+            return [str(candidate)]
+        for candidate in root.glob("LLVM/bin/lld-link.exe"):
+            return [str(candidate)]
+    rustc = rustc_command()
+    sysroot = Path(subprocess.check_output(
+        [rustc, "--print", "sysroot"], cwd=REPO, text=True).strip())
+    for candidate in (
+        sysroot / "lib/rustlib" / host / "bin" / "rust-lld.exe",
+        sysroot / "bin" / "rust-lld.exe",
+    ):
+        if candidate.is_file():
+            return [str(candidate), "-flavor", "link"]
+    return None
+
+
 def msvc_linker(host):
     key = "CARGO_TARGET_" + host.upper().replace("-", "_") + "_LINKER"
     if os.environ.get(key):
@@ -220,12 +244,12 @@ def main():
         parser.error("pairs must be positive")
     if os.environ.get("CARGO_BUILD_TARGET") not in (None, host):
         parser.error("cross compilation is not supported")
-    linker = shutil.which("lld-link")
+    linker = lld_linker(host)
     if not linker:
-        parser.error("lld-link is required (install the LLVM tools or the Rust MSVC toolchain's LLD)")
-    version = subprocess.run([linker, "--version"], capture_output=True, text=True)
+        parser.error("lld-link or the Rust toolchain's rust-lld is required")
+    version = subprocess.run([*linker, "--version"], capture_output=True, text=True)
     if version.returncode or "LLD" not in version.stdout + version.stderr:
-        parser.error(f"cannot use lld-link at {linker}")
+        parser.error(f"cannot use the LLD linker at {linker[0]}")
     output = args.output.resolve()
     if output.exists():
         parser.error("the output directory must not exist")
@@ -246,7 +270,7 @@ def main():
             os.environ,
             RUSTC=rustc,
             DIM_LAYOUT_CAPTURE=str(work),
-            DIM_LAYOUT_LINKER=linker,
+            DIM_LAYOUT_LINKER=json.dumps(linker),
             DIM_LAYOUT_PYTHON=sys.executable,
             DIM_LAYOUT_SCRIPT=str(HERE / "build_windows.py"),
             **{"CARGO_TARGET_" + host.upper().replace("-", "_") + "_LINKER": host_linker},

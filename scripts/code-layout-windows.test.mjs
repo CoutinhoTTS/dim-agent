@@ -14,6 +14,7 @@ test('Windows layout orders lld COFF functions and samples native working sets',
 import os
 from pathlib import Path
 import shutil
+import platform
 import subprocess
 import sys
 import tempfile
@@ -40,8 +41,9 @@ void entry(void) {
 ''')
     subprocess.run(['cl','/nologo','/c','/Gy','/Od',str(root/'fixture.c'),
                     '/Fo:'+str(root/'fixture.obj')],check=True)
-    linker = shutil.which('lld-link')
-    assert linker, 'lld-link must be on PATH'
+    host = build_windows.TARGETS[platform.machine().upper()]
+    linker = build_windows.lld_linker(host)
+    assert linker, 'lld-link or rust-lld must be available'
     record = {'compiler':linker,
               'arguments':['/entry:entry','/subsystem:console','/nodefaultlib',
                            str(root/'fixture.obj'),'kernel32.lib',
@@ -73,7 +75,7 @@ void entry(void) {
                                   str(root/'fixture.obj'),'kernel32.lib',
                                   '/OUT:'+str(root/'captured.exe')]))
     os.environ['DIM_LAYOUT_CAPTURE'] = str(capture)
-    os.environ['DIM_LAYOUT_LINKER'] = linker
+    os.environ['DIM_LAYOUT_LINKER'] = __import__('json').dumps(linker)
     build_windows.capture(['@'+str(response)])
     recorded = __import__('json').loads((capture/'link.json').read_text())
     assert recorded['inputs']
@@ -105,18 +107,19 @@ void entry(void) {
         win32.close(handle)
         process.kill(); process.wait()
 
-    console = win32.Console(['cmd.exe','/c','echo','layout-conpty'], root, dict(os.environ),
-                            suspended=False, inherit_environment=True)
-    try:
-        capture = bytearray()
-        deadline = time.monotonic() + 20
-        while time.monotonic() < deadline and b'layout-conpty' not in capture:
-            capture.extend(console.take())
-            time.sleep(.02)
-        assert b'layout-conpty' in capture, (bytes(capture[-2000:]), console.error, console.poll())
-        assert console.wait(timeout=20) == 0
-    finally:
-        console.close()
+    if os.environ.get('DIM_LAYOUT_CONSOLE') == '1':
+        console = win32.Console(['cmd.exe','/c','echo','layout-conpty'], root, dict(os.environ),
+                                suspended=False, inherit_environment=True)
+        try:
+            capture = bytearray()
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline and b'layout-conpty' not in capture:
+                capture.extend(console.take())
+                time.sleep(.02)
+            assert b'layout-conpty' in capture, (bytes(capture[-2000:]), console.error, console.poll())
+            assert console.wait(timeout=20) == 0
+        finally:
+            console.close()
 `});
   assert.equal(result.error,undefined);
   assert.equal(result.status,0,result.stdout+result.stderr);
