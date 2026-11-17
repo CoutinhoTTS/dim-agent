@@ -146,9 +146,10 @@ The platform-independent `changes` and `ci-ok` jobs can run on any eligible self
 
 `code-layout.yml` runs on changes to the layout tool, its tests/workflow,
 `rust-toolchain.toml` or `.node-version`, and on manual dispatch. Hosted Ubuntu
-and macOS arm64/x86-64 runners run the native fixture test; Windows x64 uses the
-self-hosted Windows runner and Windows ARM64 uses the hosted `windows-11-arm`
-runner, each with Python 3.13 provisioned explicitly. The same matrix also
+and macOS arm64/x86-64 runners run the native fixture test; Windows uses hosted
+`windows-2022` (x64) and `windows-11-arm` (ARM64) runners, with Python 3.13
+provisioned explicitly. Both select the MSVC Rust host toolchain matching the
+runner architecture and the version in `rust-toolchain.toml`. The same matrix also
 builds, trains and validates a real `dimcode` with the release LTO choice (thin
 for macOS ARM64, fat otherwise): Cargo capture and replay, native
 page-residency or working-set sampling, the real TUI model picker, function

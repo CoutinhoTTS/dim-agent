@@ -40,10 +40,12 @@ jobs:
             runner: macos-15-intel
             test: scripts/code-layout-darwin.test.mjs
           - platform: windows-x64
-            runner: ["self-hosted", "windows", "x64"]
+            runner: windows-2022
+            target: x86_64-pc-windows-msvc
             test: scripts/code-layout-windows.test.mjs
           - platform: windows-arm64
             runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
             test: scripts/code-layout-windows.test.mjs
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
@@ -64,6 +66,16 @@ jobs:
         with:
           python-version: '3.13'
           architecture: ${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}
+      - name: Select native MSVC Rust toolchain
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $channel = python -c "import tomllib; print(tomllib.load(open('rust-toolchain.toml', 'rb'))['toolchain']['channel'])"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $toolchain = "$channel-${{ matrix.target }}"
+          rustup toolchain install $toolchain --profile minimal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "RUSTUP_TOOLCHAIN=$toolchain" >> $env:GITHUB_ENV
       - name: Configure Windows C/C++ toolchain
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
@@ -111,7 +123,7 @@ jobs:
             runner: macos-15-intel
             target: x86_64-apple-darwin
           - platform: windows-x64
-            runner: ["self-hosted", "windows", "x64"]
+            runner: windows-2022
             target: x86_64-pc-windows-msvc
           - platform: windows-arm64
             runner: windows-11-arm
@@ -138,6 +150,16 @@ jobs:
         with:
           python-version: '3.13'
           architecture: ${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}
+      - name: Select native MSVC Rust toolchain
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $channel = python -c "import tomllib; print(tomllib.load(open('rust-toolchain.toml', 'rb'))['toolchain']['channel'])"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $toolchain = "$channel-${{ matrix.target }}"
+          rustup toolchain install $toolchain --profile minimal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "RUSTUP_TOOLCHAIN=$toolchain" >> $env:GITHUB_ENV
       - name: Configure Windows C/C++ toolchain
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
@@ -161,7 +183,17 @@ jobs:
             Write-Output 'lld-link is not on PATH; the build will use the Rust toolchain rust-lld'
           }
       - run: rustup show
-      - run: rustup target add ${{ matrix.target }}
+      - name: Provision Windows native build dependencies
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          if ($env:RUNNER_ARCH -eq 'ARM64') {
+            Get-Command clang-cl -ErrorAction Stop
+          } elseif (!(Get-Command nasm -ErrorAction SilentlyContinue)) {
+            choco install nasm --version=2.16.03 -y --no-progress
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            "$env:ProgramFiles/NASM" >> $env:GITHUB_PATH
+          }
       - name: Build, train and validate the native executable (Windows)
         if: runner.os == 'Windows'
         shell: powershell

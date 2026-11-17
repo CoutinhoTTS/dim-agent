@@ -50,16 +50,24 @@ def symbols(map_path):
     ``functions`` are ``(start, end, name)`` relative to the ``.text`` RVA;
     ``sizes`` carries the COMDAT body size when the map attributes exactly one
     symbol to a chunk. A chunk holding several symbols gets ``None`` and is
-    compared by name only.
+    compared by name only. Labels at a chunk's exclusive end have no body and
+    are excluded regardless of where the chunk is placed in ``.text``.
     """
     text_start = text_size = None
     section = None
     entries = []
-    chunk_size = None
+    chunk_start = chunk_size = None
     chunk_symbols = []
 
     def finish():
         nonlocal chunk_symbols
+        if chunk_symbols and (chunk_start is None or chunk_size is None):
+            raise ValueError("the lld map has symbols without an input chunk")
+        if any(address < chunk_start or address > chunk_start + chunk_size
+               for address, _ in chunk_symbols):
+            raise ValueError("the lld map has symbols outside their input chunk")
+        chunk_symbols = [(address, name) for address, name in chunk_symbols
+                         if chunk_start <= address < chunk_start + chunk_size]
         for address, name in chunk_symbols:
             entries.append((address, name, chunk_size if len(chunk_symbols) == 1 else None))
         chunk_symbols = []
@@ -72,7 +80,7 @@ def symbols(map_path):
             section = header[3]
             if section == ".text":
                 text_start, text_size = int(header[1], 16), int(header[2], 16)
-            chunk_size = None
+            chunk_start = chunk_size = None
             continue
         match = _CHUNK.fullmatch(line)
         if not match:
@@ -83,7 +91,7 @@ def symbols(map_path):
         if ":" in rest:
             if section == ".text":
                 finish()
-            chunk_size = size
+            chunk_start, chunk_size = address, size
         elif section == ".text" and rest:
             chunk_symbols.append((address, rest))
     if section == ".text":

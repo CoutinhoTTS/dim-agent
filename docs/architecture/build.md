@@ -133,8 +133,11 @@ it does not override the release LTO policy.
 
 ### Windows
 
-Windows requires `lld-link.exe` from LLVM and a native x86-64 or ARM64 host.
-The command uses that linker for Cargo's original executable and every replay.
+Windows requires a native x86-64 or ARM64 MSVC Rust toolchain, the MSVC build
+tools, and either LLVM's `lld-link.exe` or the Rust toolchain's `rust-lld.exe`.
+Native dependency builds also use NASM on x64 and `clang-cl` on ARM64, matching
+the [release build environment](../release/README.md#runner-setup).
+The command uses that LLD linker for Cargo's original executable and every replay.
 Normal release builds still use the MSVC `link.exe`; the optimized candidate is
 an opt-in artifact linked by `lld-link`, and the release workflow is unchanged.
 `--target` may name the host architecture explicitly; a different architecture
@@ -168,8 +171,10 @@ uses the public `daemon.shutdown` RPC with `force`; the TUI exits through
 The order file is passed to `lld-link` as `/order:@file`. The diagnostic link
 reports unmatched names as `missing symbol ... [LNK4037]`; only those names are
 removed, then `/WX` makes the strict relink fail on any remaining warning. The
-`/lldmap` output records all `.text` symbols, including static ones. Parity
-always checks the symbol-name multiset. It compares the COMDAT body size for
+`/lldmap` output records all `.text` symbols, including static ones. Only
+symbols inside their input chunk's half-open address range describe code;
+end labels are excluded even when another function follows that chunk. Parity
+always checks the remaining symbol-name multiset. It compares the COMDAT body size for
 every name whose entries are unambiguous on both sides; a name with a chunk
 holding several symbols (for example an alias or folded body) on either side is
 compared by name and count only, and the skipped entries are counted in
@@ -215,7 +220,7 @@ The root `./dev` entry performs incremental CLI/App Server builds without disabl
 
 The [Web workspace](../design/web-workspace.md) frontend in `web/` is a separate artifact (`scripts/stage-web.mjs` builds it; the CLI finds the installed `dimcode-web` package or a `web/` directory beside the executable or in the product home, or `DIMCODE_WEB_ASSETS` names one), so building `dim-app-server` and `dimcode` needs neither Node nor npm. Only `cargo build --features embedded-web` compiles the frontend in; then `build.rs` runs `npm ci` and `npm run build` when that frontend changed, and a host without npm fails the build. Otherwise Node is only needed for packaging, packaging checks and TypeScript plugin execution/development. `.node-version` pins the Node version bundled into account-enabled releases. The `runtime/package-lock.json` fixes the rutis Node runtime and its transitive dependencies; `npm ci --ignore-scripts --prefix runtime` installs them for local bridge testing.
 
-Full-workspace CI uses self-hosted macOS ARM64 runners; pull requests run only the check groups their paths need (see [GitHub workflows](../release/README.md#github-workflows)). The separate `windows-cli` job runs native boundary flows on a self-hosted Windows x64 runner, where its fixture writes to the clipboard. The layout workflow runs the Windows x64 layout build on that self-hosted runner with Python 3.13 provisioned explicitly, and Windows ARM64 on the hosted `windows-11-arm` runner. Release builds use GitHub-hosted VMs matching each target OS and CPU. See the [runner setup and release matrix](../release/README.md#runner-setup).
+Full-workspace CI uses self-hosted macOS ARM64 runners; pull requests run only the check groups their paths need (see [GitHub workflows](../release/README.md#github-workflows)). The separate `windows-cli` job runs native boundary flows on a self-hosted Windows x64 runner, where its fixture writes to the clipboard. The layout workflow uses hosted `windows-2022` and `windows-11-arm` runners, with Python 3.13 and the pinned native MSVC Rust host toolchain provisioned explicitly. Release builds use GitHub-hosted VMs matching each target OS and CPU. See the [runner setup and release matrix](../release/README.md#runner-setup).
 
 The macOS clipboard flows use private pasteboards and serialize access to the shared pasteboard server; other tests remain parallel.
 
