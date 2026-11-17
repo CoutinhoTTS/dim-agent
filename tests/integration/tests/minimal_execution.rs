@@ -1650,6 +1650,10 @@ async fn restarting_exec_recovery_settles_the_live_shell_before_rebuilding() {
     let final_events = local_events(&session).await;
     assert_eq!(ended(&final_events).len(), 1);
     assert_eq!(notifications(&final_events), notifications(&after));
-    assert!(text(results(&final_events).last().unwrap()).contains("new-generation"));
+    assert!(
+        text(results(&final_events).last().unwrap()).contains("new-generation"),
+        "the new generation must execute: {:?}",
+        results(&final_events).last().unwrap()
+    );
     harness.shutdown().await;
 }
