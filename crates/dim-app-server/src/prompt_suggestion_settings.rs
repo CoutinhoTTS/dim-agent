@@ -3,7 +3,7 @@
 //! The source is a declared Settings document (`prompt-suggestion.json`, user
 //! scope only) with the feature's switch and its length limit. The App Server
 //! owns the source; PromptSuggestion's Session part reads the host port at
-//! each decision ([PromptSuggestion](../../docs/design/plugins/PromptSuggestion.md)).
+//! each decision ([PromptSuggestion](../../../docs/design/plugins/PromptSuggestion.md)).
 use crate::settings::{SettingsScope, SettingsService, SourceDeclaration};
 use dim_agent_capabilities::prompt_suggestion::{
     PromptSuggestionSettingsError, PromptSuggestionSettingsHost, SOURCE,

@@ -1,7 +1,7 @@
 //! A Skill installation is not a plugin: the `skills.*` methods preview a
 //! local directory or Git repository, install a selection into the user
 //! root, update it and remove it
-//! ([docs/design/plugins/Skills.md](../../docs/design/plugins/Skills.md)).
+//! ([docs/design/plugins/Skills.md](../../../../docs/design/plugins/Skills.md)).
 use super::plugin_manager::{config, git, home, product_builder, ssh_stand_in};
 use super::session_typescript::{start, when_served};
 use super::*;

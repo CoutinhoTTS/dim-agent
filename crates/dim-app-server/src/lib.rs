@@ -1482,7 +1482,7 @@ pub fn register_faces(builder: &mut dim_agent_runtime::AgentBuilder) {
 }
 
 /// The capabilities' catalog with the App Server's names, for mounting its
-/// parts outside [`serve`] ([`dim_agent_runtime::names::process_plugin`]).
+/// parts outside [`serve`].
 pub fn catalog() -> dim_agent_runtime::names::ServiceCatalog {
     let mut catalog = dim_agent_capabilities::catalog();
     register_names(&mut catalog);
