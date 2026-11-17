@@ -1160,8 +1160,8 @@ fn valid_task_id(task_id: &str) -> bool {
             .all(|part| matches!(part, Component::Normal(_)))
 }
 
-/// The `session.create` reply for a managed worktree: the task id, the
-/// management root, and the directory the Session starts in.
+/// The managed-worktree reply of `session.create` and `sessions.launch`: the
+/// task id, the management root, and the directory the Session starts in.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreatedWorktreeReply {

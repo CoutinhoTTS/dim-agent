@@ -134,6 +134,22 @@ export interface ImageSource {
 }
 export type ContentBlock = { type: 'text'; text: string } | { type: 'image'; source: ImageSource };
 export interface SessionRef { sessionId: string; branchId: string }
+/** A managed worktree to create with the Session (worktree management §3).
+ * Advertised as `sessions.launch.worktree`; absent: an ordinary Session. */
+export interface WorktreeRequest {
+  base?: string;
+  branch?: string;
+}
+/** The created worktree (worktree management §3): the task id, the management
+ * root and the directory the Session starts in. */
+export interface WorktreeReply {
+  taskId: string;
+  root: string;
+  cwd: string;
+  repository: string;
+  base: string;
+  branch: string;
+}
 export interface LaunchRequest {
   agent?: string | null;
   cwd: string;
@@ -144,8 +160,16 @@ export interface LaunchRequest {
   origin?: 'automation' | null;
   /** The label a picker shows before the first input; SessionTitle writes it. */
   title?: string | null;
+  /** Create the Session in a new managed worktree instead of `cwd`; requires
+   * `sessions.launch.worktree`. */
+  worktree?: WorktreeRequest;
 }
-export interface LaunchReply { sessionId: string; policy: PermissionPolicy }
+export interface LaunchReply {
+  sessionId: string;
+  policy: PermissionPolicy;
+  /** The created worktree; omitted when the request did not ask for one. */
+  worktree?: WorktreeReply;
+}
 export interface RawBlock {
   text: string;
   key?: { use: 'live' | 'retire'; name: string } | null;
