@@ -1,6 +1,7 @@
 export const settingsMessages = {
   en: {
     confirm: "Confirm",
+    loadMore: "Load more",
     providerName: "Provider name",
     apiProtocol: "API protocol",
     providerAuth: { bearer: "Bearer token", api_key: "API key header", custom_header: "Custom header", anonymous: "No authentication", aws_bedrock: "AWS credentials" },
@@ -34,6 +35,7 @@ export const settingsMessages = {
   },
   "zh-CN": {
     confirm: "确认",
+    loadMore: "加载更多",
     providerName: "提供商名称",
     apiProtocol: "API 协议",
     providerAuth: { bearer: "Bearer 令牌", api_key: "API 密钥请求头", custom_header: "自定义请求头", anonymous: "无需认证", aws_bedrock: "AWS 凭据" },

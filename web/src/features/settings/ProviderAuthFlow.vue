@@ -3,17 +3,17 @@ import { computed, onBeforeUnmount, onMounted, ref } from "vue"
 import { useI18n } from "vue-i18n"
 import { copyText } from "../../clipboard"
 import { settingsMessages } from "../../i18n/settings"
-import { readAccountDescriptors, readLoginAttempt, readLoginStatus, type LoginAttempt, type ManagementProvider } from "../../rpc/management"
+import { readAccountDescriptors, readLoginAttempt, readLoginStatus, type LoginAttempt, type ManagementInfo } from "../../rpc/management"
 import { readAck } from "../../rpc/read"
 import { useConnectionStore } from "../../stores/connection"
-import { useModelsStore } from "../../stores/models"
+import { useModels } from "../../stores/models"
 import { messageFrom, reloadSettingsOnReconnect } from "./context"
 
-const props = defineProps<{ provider: ManagementProvider }>()
+const props = defineProps<{ provider: ManagementInfo }>()
 const emit = defineEmits<{ finished: [modelRefreshError?: string] }>()
 const { t } = useI18n({ messages: settingsMessages })
 const connection = useConnectionStore()
-const models = useModelsStore()
+const models = useModels()
 const mode = ref(props.provider.account?.loginMethods.includes("browser") ? "browser" : "device")
 const directory = ref("")
 const enterprise = ref(false)
@@ -64,7 +64,7 @@ async function poll(): Promise<void> {
       if (status === "completed") {
         busy.value = true
         email.value = ""
-        const refreshError = await (namespace === "account" ? models.refresh(props.provider.providerId) : models.load())
+        const refreshError = await (namespace === "account" ? models.refresh(props.provider.providerId) : Promise.resolve())
           .then(() => undefined, messageFrom)
         if (mounted && generation === epoch) emit("finished", refreshError)
       } else error.value = t(status)
