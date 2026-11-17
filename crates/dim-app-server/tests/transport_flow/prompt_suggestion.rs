@@ -1280,6 +1280,7 @@ async fn dismissing_during_the_usage_check_starts_no_request() {
         serve_compaction_fixture_with(Reply::Text("run the tests".into()), held.clone()).await;
     let (mut client, id) = create(&fixture, true).await;
     let mut other = attach(&fixture, &id).await;
+    let mut sharing = attach(&fixture, &id).await;
     submit(&mut client, &id, "add a test").await;
     let turn = latest_turn(&mut client, &id).await;
     configure(&mut client, json!({"enabled":true})).await;
@@ -1288,10 +1289,16 @@ async fn dismissing_during_the_usage_check_starts_no_request() {
     let asked = (id.clone(), turn.clone());
     let request = tokio::spawn(async move { suggest(&mut client, &asked.0, &asked.1).await });
     held.entered().await;
+    let mut shared = Box::pin(suggest(&mut sharing, &id, &turn));
+    ordered_sharing(&id, shared.as_mut()).await;
     respond(&mut other, &id, &turn, "dismiss").await;
     held.release();
     assert_eq!(
         request.await.unwrap(),
+        json!({"accepted": false, "reason": "dismissed"})
+    );
+    assert_eq!(
+        shared.await,
         json!({"accepted": false, "reason": "dismissed"})
     );
     assert!(fixture.model.suggestions().is_empty(), "no model call");
