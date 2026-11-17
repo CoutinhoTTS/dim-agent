@@ -71,6 +71,8 @@ pub(crate) struct Projection {
     texts: HashMap<String, TextCursor>,
     thoughts: HashMap<String, TextCursor>,
     calls: HashMap<String, Call>,
+    /// Each open compaction start with the `automatic` flag its start carried:
+    /// the undeclared path writes that flag into `_meta.lody.activity`.
     compactions: HashMap<u64, bool>,
     closed_requests: HashSet<String>,
 }

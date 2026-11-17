@@ -2843,6 +2843,7 @@ fn acp_stdio_sends_context_compaction_as_the_protocol_entity_only_when_declared(
                     ],"through":71,"nextAfter":71,"done":true}),
                 );
                 fact(wire, event(72, "live-terminal", "context", "compaction", json!({"through":11,"start":60,"status":"cancelled","reason":"Stopped by user"})));
+                fact(wire, event(73, "after", "step", "text", json!({"turn_id":"turn","request_id":"later","delta":"after"})));
             }
             detached_eof(wire);
         });
@@ -2978,36 +2979,67 @@ fn acp_stdio_sends_context_compaction_as_the_protocol_entity_only_when_declared(
                 ],
                 "a loaded session replays the compaction it kept: {replayed:?}"
             );
-            let live = peer.frame()["params"]["update"].clone();
+            // Every frame between the reply and the marker that ends the live
+            // window is checked, so a duplicate or extra terminal cannot pass.
+            let mut after = Vec::new();
+            loop {
+                let update = peer.frame()["params"]["update"].clone();
+                if update["sessionUpdate"] == "agent_message_chunk" {
+                    break;
+                }
+                after.push(update);
+            }
             assert_eq!(
-                (
-                    live["sessionUpdate"].clone(),
-                    live["compactionId"].clone(),
-                    live["status"].clone(),
-                ),
-                (
+                after
+                    .iter()
+                    .map(|update| (
+                        update["sessionUpdate"].clone(),
+                        update["compactionId"].clone(),
+                        update["status"].clone(),
+                    ))
+                    .collect::<Vec<_>>(),
+                vec![(
                     json!("compaction_update"),
                     json!(id(60)),
                     json!("cancelled"),
-                ),
-                "a terminal fact after the replay patches the replayed start's entity: {live}"
+                )],
+                "a terminal fact after the replay patches the replayed start's entity, once: {after:?}"
             );
             assert_eq!(
-                live["error"], "Cancelled: Stopped by user",
+                after[0]["error"], "Cancelled: Stopped by user",
                 "the live terminal keeps its reason"
             );
         } else {
             assert_eq!(
                 compactions
                     .iter()
-                    .filter(|update| update["toolCallId"] == json!(id(12)))
                     .map(|update| (update["toolCallId"].clone(), update["status"].clone(),))
                     .collect::<Vec<_>>(),
                 vec![
                     (json!(id(12)), json!("in_progress")),
                     (json!(id(12)), json!("failed")),
+                    (json!(id(20)), json!("in_progress")),
+                    (json!(id(20)), json!("failed")),
+                    (json!(id(30)), json!("in_progress")),
+                    (json!(id(30)), json!("completed")),
+                    (json!(id(40)), json!("in_progress")),
+                    (json!(id(40)), json!("completed")),
                 ],
-                "without the capability the compaction stays the tool call it was"
+                "without the capability every compaction stays the tool call it was: {compactions:?}"
+            );
+            assert!(
+                compactions[1]["content"][0]["content"]["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains("summary unavailable")
+            );
+            assert_eq!(
+                compactions[3]["content"][0]["content"]["text"], "Cancelled: Stopped by user",
+                "a cancelled compaction keeps its own reason"
+            );
+            assert_eq!(
+                compactions[5]["content"][0]["content"]["text"], "Skipped: insufficient history",
+                "the skipped reason is the text an undeclared client reads"
             );
             assert!(
                 !peer
