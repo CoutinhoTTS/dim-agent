@@ -790,8 +790,8 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             Ok(Box::new(workspace_files::WorkspaceFilesPlugin::new(names)?))
         })?);
     }
-    rows.push(register_part(&mut builtins, builder.catalog(), |names| {
-        Ok(Box::new(connection::CallChannelPlugin::new(names)?))
+    rows.push(register_part(&mut builtins, builder.catalog(), |_| {
+        Ok(Box::new(connection::CallChannelPlugin))
     })?);
     let host_account_methods = product_root.is_some();
     rows.push(register_part(
@@ -1413,7 +1413,6 @@ pub(crate) fn register_names(catalog: &mut dim_agent_runtime::names::ServiceCata
     catalog.register_shared(dim_agent_runtime::names::name_of::<
         methods::ManagementMethods,
     >());
-    register::<dim_agent_capabilities::methods::Callers>(catalog, None);
     register::<runtime_manager::RuntimeService>(catalog, None);
     register::<collaboration::CollaborationSession>(catalog, Some(SESSION_GROUP));
     register::<mcp::McpSession>(catalog, Some(SESSION_GROUP));
@@ -1442,7 +1441,6 @@ pub fn register_faces(builder: &mut dim_agent_runtime::AgentBuilder) {
         ("agentLoop", "hot-path"),
         ("branchLine", "hot-path"),
         ("branchOpening", "hot-path"),
-        ("callers", "owner-api"),
         ("collaboration", "host-resource"),
         ("collaborationSession", "legacy-no-consumer"),
         ("commandRulesHost", "hot-path"),
