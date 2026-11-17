@@ -230,26 +230,17 @@ async fn sqlite_session_failure_rejects_writes_on_an_idle_sibling_timeline() {
         let late = branch_events(&session, failed, (failed_through + 1)..)
             .await
             .unwrap();
-        let late: Vec<_> = late
-            .iter()
-            .filter(|event| {
-                matches!(
-                    event.kind,
-                    EventKind::Text(_) | EventKind::ModelOutputEnd(_) | EventKind::TurnEnd(_)
-                )
-            })
-            .collect();
-        assert!(late.is_empty());
+        assert!(!late.iter().any(|event| matches!(
+            event.kind,
+            EventKind::Text(_) | EventKind::ModelOutputEnd(_) | EventKind::TurnEnd(_)
+        )));
         let trailing = branch_events(&session, idle, (idle_through + 1)..)
             .await
             .unwrap();
-        let trailing: Vec<_> = trailing
-            .iter()
-            .filter(|event| {
-                matches!(event.kind, EventKind::ModelOutputEnd(_) | EventKind::TurnEnd(_))
-            })
-            .collect();
-        assert!(trailing.is_empty());
+        assert!(!trailing.iter().any(|event| matches!(
+            event.kind,
+            EventKind::ModelOutputEnd(_) | EventKind::TurnEnd(_)
+        )));
         let _ = agent.close().await;
         drop(connection);
         drop(session);
