@@ -180,12 +180,10 @@ class Server:
 def tui(binary, home, stack, sampling, profile):
     console = win32.Console(
         [binary, "tui", "--home", home, "--cwd", home, "--fullscreen"],
-        home, environment(home))
+        home, environment(home), suspended=False)
     stack.callback(console.close)
     if sampling:
-        console.trim()
-    else:
-        console.resume()
+        console.trim_running()
     capture = bytearray()
 
     def drain(seconds):

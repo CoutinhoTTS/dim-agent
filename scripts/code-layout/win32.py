@@ -377,6 +377,9 @@ class Console:
         empty_working_set(self._process)
         resume(self._process)
 
+    def trim_running(self):
+        empty_working_set(self._process)
+
     def resume(self):
         resume(self._process)
 

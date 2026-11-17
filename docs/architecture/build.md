@@ -149,10 +149,13 @@ relink is produced at Cargo's original output path so an embedded PDB path stays
 identical, then Cargo's executable and PDB are restored. The lld map is written
 during that relink and must not change the binary.
 
-The trainer launches the App Server and the ConPTY-backed TUI suspended,
-empties the process working set at entry, then resumes it. Before exit or
-shutdown it queries the executable's `.text` working-set pages with
-`QueryWorkingSetEx`. When the runner has no interactive console for ConPTY,
+The trainer launches the App Server suspended and empties its working set at
+entry before resuming. The ConPTY-backed TUI is created running and trimmed
+immediately afterwards, because the hosted console path does not combine a
+suspended start with pseudoconsole attachment; the startup profile covers the
+entry-time pages and the TUI profile covers pages faulted by the UI flow. Before
+exit or shutdown the trainer queries the executable's `.text` working-set pages
+with `QueryWorkingSetEx`. When the runner has no interactive console for ConPTY,
 `--ui models` drives the public `models PROVIDER` command instead of the TUI
 picker and samples the App Server after that model flow; the App Server, model
 selection and tool conversation remain real. The hosted Windows ARM64 job uses
