@@ -216,7 +216,9 @@ raise AssertionError('interrupted replay returned a baseline')
 
 test('native measurement records paired samples from separate disposable homes', {timeout:15_000},()=>{
   const result=spawnSync(python,['-',directory],{encoding:'utf8',timeout:10_000,input:String.raw`
-from contextlib import ExitStack
+from contextlib import ExitStack, closing
+import faulthandler
+from http.client import HTTPConnection
 import json
 from pathlib import Path
 import subprocess
@@ -224,12 +226,13 @@ import sys
 import tempfile
 from types import SimpleNamespace
 from unittest.mock import patch
-from urllib.request import Request, urlopen
+from urllib.parse import urlsplit
 sys.path.insert(0, sys.argv[1])
 sys.modules['win32'] = SimpleNamespace()
 import train_windows
 import train_darwin
 from samples import write
+faulthandler.dump_traceback_later(8)
 
 with tempfile.TemporaryDirectory(prefix='dim-layout-measure-') as temporary:
     root = Path(temporary)
@@ -269,9 +272,10 @@ with tempfile.TemporaryDirectory(prefix='dim-layout-measure-') as temporary:
             home = Path(options['cwd'])
             marker = (home/'marker.txt').read_text()
             data = json.dumps({'messages':[{'role':'tool','content':marker}]}).encode()
-            with urlopen(Request((home/'model.url').read_text()+'/chat/completions',data=data,
-                                 headers={'Content-Type':'application/json'})) as response:
-                assert b'layout-probe-complete' in response.read()
+            url = urlsplit((home/'model.url').read_text())
+            with closing(HTTPConnection(url.hostname,url.port,timeout=3)) as connection:
+                connection.request('POST',url.path+'/chat/completions',data,{'Content-Type':'application/json'})
+                assert b'layout-probe-complete' in connection.getresponse().read()
             return subprocess.CompletedProcess(args,0,'layout-probe-complete','')
 
         native = SimpleNamespace(CREATE_SUSPENDED=0, default_pipe=lambda home: str(home/'pipe'),
@@ -281,15 +285,15 @@ with tempfile.TemporaryDirectory(prefix='dim-layout-measure-') as temporary:
             memory=lambda handle: {'workingSet':12288,'private':4096,'pagefile':4096},
             cpu=lambda handle: {'user':.01,'kernel':.02})
         with ExitStack() as stack:
-            stack.enter_context(patch.object(subprocess,'Popen',Process))
-            stack.enter_context(patch.object(subprocess,'run',client))
+            stack.enter_context(patch.object(trainer,'subprocess',SimpleNamespace(
+                Popen=Process,run=client,PIPE=subprocess.PIPE)))
             if trainer is train_windows:
                 stack.enter_context(patch.object(trainer,'win32',native))
                 stack.enter_context(patch.object(trainer,'Wire',Wire))
                 stack.enter_context(patch.object(trainer.pe,'text_range',return_value=(0,8192)))
                 measured = trainer.measure(root/'baseline',root/'candidate',root/'windows',pairs=2)
             else:
-                stack.enter_context(patch.object(trainer.select,'select',side_effect=lambda reads,*args: (reads,[],[])))
+                stack.enter_context(patch.object(trainer,'select',SimpleNamespace(select=lambda reads,*args: (reads,[],[]))))
                 stack.enter_context(patch.object(trainer.Server,'rpc',lambda self,method,params: rpc(self.process,method,params)))
                 stack.enter_context(patch.object(trainer,'sample',side_effect=lambda process,path: write(path,4096,[0,1])))
                 stack.enter_context(patch.object(trainer,'_ps',return_value={'resident':12288,'cpu':.03}))
@@ -306,8 +310,9 @@ with tempfile.TemporaryDirectory(prefix='dim-layout-measure-') as temporary:
         assert len(processes) == len({p.home for p in processes}) == 8
         assert all((p.home/'rust').is_dir() for p in processes)
         assert all(p.returncode == 0 and p.stdout.closed for p in processes)
+faulthandler.cancel_dump_traceback_later()
 `});
-  assert.equal(result.error,undefined);
+  assert.equal(result.error,undefined,result.stdout+result.stderr);
   assert.equal(result.status,0,result.stdout+result.stderr);
 });
 
