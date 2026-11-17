@@ -230,7 +230,6 @@ def main():
     parser.add_argument("--target", choices=sorted(TARGETS.values()))
     parser.add_argument("--jobs", type=int, default=2)
     parser.add_argument("--pairs", type=int, default=2)
-    parser.add_argument("--ui", choices=["tui", "models"], default="tui")
     args = parser.parse_args()
     machine = platform.machine().upper()
     if sys.platform != "win32" or machine not in TARGETS:
@@ -306,7 +305,7 @@ def main():
             shutil.copyfile(backup, cargo)
             if had_pdb:
                 shutil.copyfile(backup_pdb, pdb)
-        profiles = train(baseline, work / "training", sampling=True, tui=args.ui == "tui")
+        profiles = train(baseline, work / "training", sampling=True)
         for profile in profiles:
             shutil.copyfile(profile, output / profile.name)
         order_file = output / "symbols.order"
@@ -317,11 +316,10 @@ def main():
             record, candidate, order_file, candidate_map)
         measurement["orderedFunctions"] = len(order_file.read_text().splitlines())
         measurement.update(validate(baseline_map, candidate_map, order_file))
-        train(candidate, work / "acceptance", sampling=False, tui=args.ui == "tui")
+        train(candidate, work / "acceptance", sampling=False)
         measurements = measure(baseline, candidate, work / "measure", args.pairs)
         manifest = {
             "platform": "windows", "target": host, "pageSize": pe_page_size(),
-            "ui": args.ui,
             "lto": os.environ.get("CARGO_PROFILE_RELEASE_LTO", "profile"),
             "source": subprocess.check_output(
                 ["git", "rev-parse", "HEAD"], cwd=REPO, text=True).strip(),

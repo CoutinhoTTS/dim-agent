@@ -25,7 +25,18 @@ import pe
 import win32
 from samples import write as write_sample
 
-with tempfile.TemporaryDirectory(prefix='dim-layout-win-') as temporary:
+artifacts = os.environ.get('DIM_LAYOUT_ARTIFACTS')
+class Keep(tempfile.TemporaryDirectory):
+    def cleanup(self):
+        if artifacts:
+            target = Path(artifacts)
+            target.mkdir(parents=True, exist_ok=True)
+            for pattern in ('*.map', '*.order'):
+                for path in Path(self.name).glob(pattern):
+                    shutil.copy2(path, target / path.name)
+        super().cleanup()
+
+with Keep(prefix='dim-layout-win-') as temporary:
     root = Path(temporary)
     (root / 'fixture.c').write_text('''#include <windows.h>
 __declspec(dllexport) int public_func(int x) { return x + 3; }
@@ -107,20 +118,18 @@ void entry(void) {
         win32.close(handle)
         process.kill(); process.wait()
 
-    if os.environ.get('DIM_LAYOUT_CONSOLE') == '1':
-        console = win32.Console(['cmd.exe','/c','echo','layout-conpty'], root, dict(os.environ),
-                                suspended=False, inherit_environment=True)
-        try:
-            capture = bytearray()
-            deadline = time.monotonic() + 20
-            while time.monotonic() < deadline and b'layout-conpty' not in capture:
-                capture.extend(console.take())
-                time.sleep(.02)
-            assert b'layout-conpty' in capture, (bytes(capture[-2000:]), console.error, console.poll())
-            assert console.wait(timeout=20) == 0
-        finally:
-            console.close()
-`});
+    console = win32.Console(['cmd.exe','/c','echo layout-conpty & ping -n 6 127.0.0.1 >nul'], root, dict(os.environ),
+                            suspended=False, inherit_environment=True)
+    try:
+        capture = bytearray()
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline and b'layout-conpty' not in capture:
+            capture.extend(console.take())
+            time.sleep(.02)
+        assert b'layout-conpty' in capture, (bytes(capture[-2000:]), console.error, console.poll())
+        assert console.wait(timeout=20) == 0
+    finally:
+        console.close()`});
   assert.equal(result.error,undefined);
   assert.equal(result.status,0,result.stdout+result.stderr);
 });

@@ -13,6 +13,7 @@ test('macOS layout orders Mach-O functions and samples __text residency', {
   const result=spawnSync(python,['-',directory],{encoding:'utf8',timeout:115_000,input:String.raw`
 import os
 from pathlib import Path
+import shutil
 import signal
 import subprocess
 import sys
@@ -23,7 +24,18 @@ import build_darwin
 import macho
 import samples
 
-with tempfile.TemporaryDirectory(prefix='dim-layout-mac-') as temporary:
+artifacts = os.environ.get('DIM_LAYOUT_ARTIFACTS')
+class Keep(tempfile.TemporaryDirectory):
+    def cleanup(self):
+        if artifacts:
+            target = Path(artifacts)
+            target.mkdir(parents=True, exist_ok=True)
+            for pattern in ('*.map', '*.order'):
+                for path in Path(self.name).glob(pattern):
+                    shutil.copy2(path, target / path.name)
+        super().cleanup()
+
+with Keep(prefix='dim-layout-mac-') as temporary:
     root = Path(temporary)
     (root / 'fixture.c').write_text('''__attribute__((noinline)) int first(void) { return 17; }
 __attribute__((noinline)) int second(void) { return 25; }
