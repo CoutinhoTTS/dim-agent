@@ -245,12 +245,18 @@ pub enum Effect {
     LoginUsage(String),
     /// Open this page in the browser.
     OpenUrl(String),
-    /// Make this model the default and the session's model.
+    QueryModels {
+        query: String,
+        after: Option<dim_agent_types::ModelId>,
+    },
     ClearModelPreferences {
+        query: String,
+        after: Option<dim_agent_types::ModelId>,
         provider_id: String,
         model_id: String,
         expected_version: u32,
     },
+    /// Make this model the default and the session's model.
     SelectModel {
         provider_id: String,
         model_id: String,

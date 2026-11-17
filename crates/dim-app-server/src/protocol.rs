@@ -202,6 +202,8 @@ pub const WEB_MANAGEMENT_METHODS: &[&str] = &[
     "report.cancel",
     "ui.extensions.list",
     "provider.management",
+    "provider.models.query",
+    "provider.management.list",
     "provider.create",
     "provider.update",
     "provider.probe",
@@ -647,6 +649,9 @@ pub struct Catalog {
     /// Whether Sessions whose origin is `acp` are listed (#557).
     #[serde(default)]
     pub with_acp_sessions: bool,
+    /// Whether listed ACP Sessions bypass the preview and closed filters.
+    #[serde(default)]
+    pub with_acp_history: bool,
     /// Whether Sessions whose origin is `automation` are listed: work a saved
     /// configuration launched with no person present (#1421). Independent of
     /// both other class filters.

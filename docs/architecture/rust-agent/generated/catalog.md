@@ -34,6 +34,7 @@ Each catalog name a part of the assembly provides or injects. `data` means share
 | `managementMethods` | process | ManagementMethods | data | `register` async |
 | `mcpService` | process | Mcp | internal(host-resource) | — |
 | `mentionIndex` | process | WorkspaceToolsOwner | internal(host-resource) | — |
+| `modalityTargets` | process | Modality | data | `resolve` async |
 | `modelHost` | process | Aimux | internal(owner-api) | — |
 | `modelSelectionHost` | process | Provider | data | `resolve` async |
 | `openAICodexOAuthService` | process | OpenAICodexOAuth | internal(secret) | — |

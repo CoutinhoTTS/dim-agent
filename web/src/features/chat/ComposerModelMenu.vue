@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref, watch } from "vue"
+import { computed, nextTick, ref, watch } from "vue"
 import { useI18n } from "vue-i18n"
 import type { ModelId } from "../../rpc/protocol"
-import { useModelsStore } from "../../stores/models"
+import { useModels } from "../../stores/models"
 
 /**
  * Provider and model picker: a popover with search, a provider pane and a model
@@ -14,7 +14,12 @@ type Option = { providerId: string; providerName: string; modelId: string; name:
 const props = defineProps<{ model: ModelId | undefined; selectable: boolean; disabled: boolean }>()
 const emit = defineEmits<{ select: [model: ModelId] }>()
 const { t } = useI18n()
-const models = useModelsStore()
+const models = useModels()
+const adopted = useModels()
+watch(() => props.model, (model) => {
+  if (model && adopted.available) void adopted.load(model)
+  else adopted.clear()
+}, { immediate: true })
 const open = ref(false)
 const searchInput = ref<{ inputRef?: HTMLInputElement | null }>()
 const triggerRef = ref<{ $el?: HTMLElement | null }>()
@@ -35,15 +40,9 @@ const allOptions = computed<Option[]>(() => providers.value.flatMap((provider) =
 const searching = computed(() => query.value.trim() !== "")
 const paneOptions = computed(() => {
   if (!searching.value) return allOptions.value.filter((option) => option.providerId === currentProvider.value)
-  const needle = query.value.trim().toLocaleLowerCase()
-  return allOptions.value.filter((option) => [option.name, option.modelId, option.providerName].some((value) => value.toLocaleLowerCase().includes(needle)))
+  return allOptions.value
 })
-const triggerLabel = computed(() => props.model === undefined ? t("composer.notConfigured") : models.nameOf(props.model))
-
-// The trigger names the model from the catalog once it is loaded.
-onMounted(() => {
-  if (props.selectable && models.available && models.providers === undefined) void models.load()
-})
+const triggerLabel = computed(() => props.model === undefined ? t("composer.notConfigured") : adopted.nameOf(props.model))
 
 function isCurrent(option: Option): boolean {
   return option.providerId === props.model?.providerId && option.modelId === props.model.modelId
@@ -54,16 +53,19 @@ function initial(name: string): string {
 }
 
 watch(open, async (isOpen) => {
-  if (!isOpen) return
-  if (models.providers === undefined) await models.load()
+  if (!isOpen) { models.clear(); return }
   query.value = ""
+  await models.load()
   selectedProvider.value = props.model?.providerId ?? providers.value[0]?.providerId
   activeIndex.value = Math.max(0, paneOptions.value.findIndex(isCurrent))
   await nextTick()
   if (!matchMedia("(pointer: coarse)").matches) searchInput.value?.inputRef?.focus()
 })
 
+watch(query, (value) => { if (open.value) void models.load({ query: value }) })
+
 function select(option: Option): void {
+  if (models.loading) return
   open.value = false
   if (!isCurrent(option)) emit("select", { providerId: option.providerId, modelId: option.modelId })
 }
@@ -158,6 +160,7 @@ defineExpose({ open: () => {
               size="sm"
               block
               role="option"
+              :disabled="models.loading"
               class="menu-option"
               :aria-selected="isCurrent(option)"
               :title="`${option.name} · ${option.providerName}`"
@@ -170,6 +173,7 @@ defineExpose({ open: () => {
             </UButton>
           </div>
         </div>
+        <UButton v-if="models.next" :loading="models.loading" @click="models.loadMore()">{{ t("composer.loadMoreModels") }}</UButton>
       </div>
     </template>
   </UPopover>
