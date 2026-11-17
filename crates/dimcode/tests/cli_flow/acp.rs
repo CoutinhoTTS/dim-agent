@@ -3932,6 +3932,74 @@ fn acp_load_bounds_a_long_turn_and_marks_the_omitted_prefix() {
     daemon.join().unwrap();
 }
 
+/// #1792: every chunk of one message carries that message's id, and a message
+/// replayed from the store keeps the id it streamed with.
+#[test]
+fn acp_load_gives_a_message_the_same_id_on_replay_and_live_streaming() {
+    let home = Home::new();
+    let cwd = home.0.clone();
+    let daemon = home.daemon(move |wire| {
+        wire.hello(METHODS);
+        let attach = wire.read("session.attach");
+        assert_eq!(attach["params"]["expectedCwd"], json!(cwd));
+        wire.reply(&attach, json!({"sequence":1000}));
+        let read = wire.read("session.history");
+        assert_eq!(read["params"]["latestTurn"], true);
+        wire.notice("session.event", json!({"sessionId":"saved","branchId":"main","event":event(1001,"live","step","text",json!({"turn_id":"turn","request_id":"reply","delta":" live"}))}));
+        wire.reply(&read,json!({"events":[
+            event(1,"input","input","message",json!({"user":{"content":[{"type":"text","text":"question"}]},"mode":"queue"})),
+            event(2,"start","turn","start",json!({"turn_id":"turn"})),
+            event(3,"consumed","input","consumed",json!({"input_id":"input"})),
+            event(4,"thought","step","thinking",json!({"turn_id":"turn","request_id":"reply","delta":"replayed thought"})),
+            event(5,"text","step","text",json!({"turn_id":"turn","request_id":"reply","delta":"replayed answer"}))
+        ],"through":1000,"nextAfter":5,"done":true}));
+        detached_eof(wire);
+    });
+    let mut peer = Peer::start(&home);
+    peer.initialize();
+    peer.send(
+        2,
+        "session/load",
+        json!({"sessionId":"saved","cwd":home.0,"mcpServers":[]}),
+    );
+    let loaded = peer.response(2);
+    assert!(loaded.get("error").is_none(), "{loaded}");
+    let update = |kind: &str| {
+        peer.updates
+            .iter()
+            .map(|frame| frame["params"]["update"].clone())
+            .filter(|update| update["sessionUpdate"] == kind)
+            .collect::<Vec<_>>()
+    };
+    let user = update("user_message_chunk");
+    assert_eq!(user.len(), 1, "{user:?}");
+    assert_eq!(
+        user[0]["messageId"], "input",
+        "the operator's message is the input it came from"
+    );
+    let text = update("agent_message_chunk");
+    assert_eq!(text.len(), 1, "{text:?}");
+    assert_eq!(text[0]["content"]["text"], "replayed answer");
+    assert_eq!(
+        text[0]["messageId"], "reply",
+        "the answer is the request that produced it"
+    );
+    let thought = update("agent_thought_chunk");
+    assert_eq!(thought.len(), 1, "{thought:?}");
+    assert_eq!(
+        thought[0]["messageId"], "reply",
+        "reasoning belongs to the message it reasoned for"
+    );
+    let live = peer.frame();
+    assert_eq!(live["params"]["update"]["content"]["text"], " live");
+    assert_eq!(
+        live["params"]["update"]["messageId"], text[0]["messageId"],
+        "the live continuation of a replayed message keeps that message's id"
+    );
+    peer.close();
+    daemon.join().unwrap();
+}
+
 #[test]
 fn acp_load_keeps_an_orphan_result_without_reading_original_arguments() {
     let home = Home::new();

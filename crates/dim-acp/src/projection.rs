@@ -148,19 +148,34 @@ impl Messages {
         meta(lody, self.turn.as_deref())
     }
 
-    /// A streamed chunk of text: one of the three chunk variants.
-    fn chunk(&mut self, kind: fn(acp::ContentChunk) -> acp::SessionUpdate, text: String) {
+    /// A streamed chunk of text: one of the three chunk variants, each naming
+    /// the message it belongs to.
+    fn chunk(
+        &mut self,
+        kind: fn(acp::ContentChunk) -> acp::SessionUpdate,
+        message: &str,
+        text: String,
+    ) {
         if !text.is_empty() {
             let meta = self.meta(None);
             let block = acp::ContentBlock::Text(acp::TextContent::new(text));
-            self.push(kind(acp::ContentChunk::new(block).meta(meta)));
+            self.push(kind(
+                acp::ContentChunk::new(block).message_id(message).meta(meta),
+            ));
         }
     }
 
-    fn image(&mut self, kind: fn(acp::ContentChunk) -> acp::SessionUpdate, source: &ImageSource) {
+    fn image(
+        &mut self,
+        kind: fn(acp::ContentChunk) -> acp::SessionUpdate,
+        message: &str,
+        source: &ImageSource,
+    ) {
         if let Some(block) = image(source) {
             let meta = self.meta(None);
-            self.push(kind(acp::ContentChunk::new(block).meta(meta)));
+            self.push(kind(
+                acp::ContentChunk::new(block).message_id(message).meta(meta),
+            ));
         }
     }
 }
@@ -624,17 +639,21 @@ impl Projection {
                             ContentBlock::Text { text } => match loaded_skill(index, &text) {
                                 Some(name) => messages.chunk(
                                     acp::SessionUpdate::UserMessageChunk,
+                                    &data.input_id,
                                     format!("\nSkill loaded: {name}"),
                                 ),
                                 None if markup::runtime_context(index, &text) => {}
                                 None => messages.chunk(
                                     acp::SessionUpdate::UserMessageChunk,
+                                    &data.input_id,
                                     with_tokens(&text),
                                 ),
                             },
-                            ContentBlock::Image { source } => {
-                                messages.image(acp::SessionUpdate::UserMessageChunk, &source)
-                            }
+                            ContentBlock::Image { source } => messages.image(
+                                acp::SessionUpdate::UserMessageChunk,
+                                &data.input_id,
+                                &source,
+                            ),
                         }
                     }
                 }
@@ -645,6 +664,7 @@ impl Projection {
             }
             EventContent::Text(data) => messages.chunk(
                 acp::SessionUpdate::AgentMessageChunk,
+                &data.request_id,
                 self.texts
                     .entry(data.request_id.clone())
                     .or_default()
@@ -652,6 +672,7 @@ impl Projection {
             ),
             EventContent::Thinking(data) => messages.chunk(
                 acp::SessionUpdate::AgentThoughtChunk,
+                &data.request_id,
                 self.thoughts
                     .entry(data.request_id.clone())
                     .or_default()
@@ -859,6 +880,7 @@ impl Projection {
             }
             messages.chunk(
                 acp::SessionUpdate::AgentMessageChunk,
+                &id,
                 self.texts
                     .entry(id.clone())
                     .or_default()
@@ -866,8 +888,9 @@ impl Projection {
             );
             messages.chunk(
                 acp::SessionUpdate::AgentThoughtChunk,
+                &id,
                 self.thoughts
-                    .entry(id)
+                    .entry(id.clone())
                     .or_default()
                     .progress(progress.thinking_offset, progress.thinking),
             );
