@@ -824,6 +824,73 @@ fn acp_compact_commands_report_each_native_outcome_once_and_cancel_without_submi
 }
 
 #[test]
+fn acp_stdio_names_the_message_of_a_failed_command_after_its_operation() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&[METHODS, &["session.methods"]].concat());
+        wire.created();
+        command_session(
+            wire,
+            &[
+                "session.goal.get",
+                "session.goal.set",
+                "session.goal.edit",
+                "session.goal.pause",
+                "session.goal.resume",
+                "session.goal.clear",
+            ],
+        );
+        for message in ["Goal storage is unavailable", "Goal storage is full"] {
+            let read = wire.read("session.goal.get");
+            wire.send(
+                json!({"jsonrpc":"2.0","id":read["id"],"error":{"code":-32000,
+                "message":message,"data":{"appError":"storage_failed"}}}),
+            );
+        }
+        detached_eof(wire);
+    });
+    let mut peer = Peer::start(&home);
+    peer.initialize();
+    peer.send(2, "session/new", json!({"cwd":home.0,"mcpServers":[]}));
+    assert!(peer.response(2).get("error").is_none());
+    let mut ids = Vec::new();
+    for (request, message) in [
+        (3, "Command failed: Goal storage is unavailable"),
+        (4, "Command failed: Goal storage is full"),
+    ] {
+        peer.updates.clear();
+        peer.send(
+            request,
+            "session/prompt",
+            json!({"sessionId":"session","prompt":[{"type":"text","text":"/goal"}]}),
+        );
+        assert_eq!(
+            peer.response(request)["result"]["stopReason"],
+            "end_turn",
+            "{updates:?}",
+            updates = peer.updates
+        );
+        let chunk = peer
+            .updates
+            .iter()
+            .map(|frame| frame["params"]["update"].clone())
+            .find(|update| update["sessionUpdate"] == "agent_message_chunk")
+            .expect("a failed command states why");
+        assert_eq!(chunk["content"]["text"], message);
+        let id = chunk["messageId"]
+            .as_str()
+            .unwrap_or_else(|| panic!("the failure names its message: {chunk}"));
+        let parts: Vec<&str> = serde_json::from_str(id).unwrap();
+        assert_eq!(&parts[..2], ["gateway", "command"]);
+        assert!(uuid::Uuid::parse_str(parts[2]).is_ok(), "{id}");
+        ids.push(id.to_owned());
+    }
+    assert_ne!(ids[0], ids[1], "one failure message per command");
+    peer.close();
+    daemon.join().unwrap();
+}
+
+#[test]
 fn acp_stdio_distinguishes_rejected_and_uncertain_submissions_on_a_live_connection() {
     let cases = [
         Some("invalid_params"),
@@ -3839,11 +3906,14 @@ fn acp_stdio_member_approval_shows_the_original_action_and_rechecks_before_allow
 }
 
 /// Appendix D 7: a blocked prompt ends the ACP turn with `refusal`, and the check's
-/// message is the text the user sees.
+/// message is the text the user sees. The refusal is a message of its own, named
+/// by the submission of the prompt it refused, never by a model request or an
+/// input.
 #[test]
 fn acp_stdio_reports_a_blocked_prompt_as_refusal_with_the_reason() {
     let home = Home::new();
-    let daemon = home.daemon(|wire| {
+    let (submitted, received) = std::sync::mpsc::channel();
+    let daemon = home.daemon(move |wire| {
         wire.hello(METHODS);
         wire.created();
         let attach = wire.read("session.attach");
@@ -3853,11 +3923,29 @@ fn acp_stdio_reports_a_blocked_prompt_as_refusal_with_the_reason() {
             &history,
             json!({"events":[],"through":8,"nextAfter":8,"done":true}),
         );
+        let fact = |wire: &mut Wire, value: Value| {
+            wire.notice(
+                "session.event",
+                json!({"sessionId":"session","branchId":"main","event":value}),
+            )
+        };
         let submit = wire.read("session.submit");
-        wire.send(
-            json!({"jsonrpc":"2.0","id":submit["id"],"error":{"code":-32000,
-            "message":"Hook user: no prompts today","data":{"appError":"input_blocked"}}}),
-        );
+        let input = event(9, "input-1", "input", "message", json!({"submission_id":submit["params"]["submissionId"],"user":submit["params"]["user"],"mode":"queue"}));
+        wire.reply(&submit, json!({"event":input}));
+        fact(wire, input);
+        fact(wire, event(10, "turn-start", "turn", "start", json!({"turn_id":"turn"})));
+        fact(wire, event(11, "consumed", "input", "consumed", json!({"input_id":"input-1"})));
+        fact(wire, event(12, "model-start", "step", "model-start", json!({"turn_id":"turn","request_id":"model"})));
+        fact(wire, event(13, "text", "step", "text", json!({"turn_id":"turn","request_id":"model","delta":"Answer"})));
+        fact(wire, event(14, "turn-end", "turn", "end", json!({"turn_id":"turn","status":"completed","reason":"end_turn"})));
+        for message in ["Hook user: no prompts today", "Hook user: still no"] {
+            let submit = wire.read("session.submit");
+            submitted.send(submit["params"]["submissionId"].clone()).unwrap();
+            wire.send(
+                json!({"jsonrpc":"2.0","id":submit["id"],"error":{"code":-32000,
+                "message":message,"data":{"appError":"input_blocked"}}}),
+            );
+        }
         detached_eof(wire);
     });
     let mut peer = Peer::start(&home);
@@ -3869,22 +3957,55 @@ fn acp_stdio_reports_a_blocked_prompt_as_refusal_with_the_reason() {
         "session/prompt",
         json!({"sessionId":"session","prompt":[{"type":"text","text":"Prompt"}]}),
     );
-    let response = peer.response(3);
-    assert_eq!(
-        response["result"]["stopReason"],
-        "refusal",
-        "{response}: {updates:?}",
-        updates = peer.updates
-    );
-    assert!(
-        peer.updates.iter().any(|frame| {
-            frame["params"]["update"]["sessionUpdate"] == "agent_message_chunk"
-                && frame["params"]["update"]["content"]["text"]
-                    .as_str()
-                    .is_some_and(|text| text.contains("Hook user: no prompts today"))
-        }),
-        "the block's message is text: {:?}",
-        peer.updates
+    assert_eq!(peer.response(3)["result"]["stopReason"], "end_turn");
+    let answer = peer
+        .updates
+        .iter()
+        .map(|frame| frame["params"]["update"].clone())
+        .find(|update| update["sessionUpdate"] == "agent_message_chunk")
+        .unwrap();
+    assert_eq!(answer["messageId"], "model");
+    let mut refusals = Vec::new();
+    for (request, prompt) in [(4, "Prompt"), (5, "Another prompt")] {
+        peer.updates.clear();
+        peer.send(
+            request,
+            "session/prompt",
+            json!({"sessionId":"session","prompt":[{"type":"text","text":prompt}]}),
+        );
+        let response = peer.response(request);
+        assert_eq!(
+            response["result"]["stopReason"],
+            "refusal",
+            "{response}: {updates:?}",
+            updates = peer.updates
+        );
+        let submission = received.recv_timeout(PATIENCE).unwrap();
+        let chunk = peer
+            .updates
+            .iter()
+            .map(|frame| frame["params"]["update"].clone())
+            .find(|update| update["sessionUpdate"] == "agent_message_chunk")
+            .expect("the block's message is text");
+        assert_eq!(
+            chunk["messageId"],
+            json!(["gateway", "refusal", submission]).to_string(),
+            "the refusal is the message of the submission it refused"
+        );
+        assert_ne!(chunk["messageId"], answer["messageId"]);
+        assert_ne!(chunk["messageId"], "input-1");
+        assert!(
+            chunk["content"]["text"]
+                .as_str()
+                .unwrap()
+                .starts_with("Hook user:"),
+            "the refusal carries the block's message: {chunk}"
+        );
+        refusals.push(chunk["messageId"].clone());
+    }
+    assert_ne!(
+        refusals[0], refusals[1],
+        "one refusal per refused operation"
     );
     peer.close();
     daemon.join().unwrap();
