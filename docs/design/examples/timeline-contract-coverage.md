@@ -35,7 +35,7 @@
 | 存储故障不推进失败尾部，晚到回调不恢复发布 | `Timeline::publish` 的 failure guard | 本批 `FailureFreezesPublication`、`ClosedMeaning`；`storage_flow` | 允许较早批次已落盘、其回调晚于后一次同步拒绝；不假设已发布位置等于磁盘 head |
 | Timeline close 停止追加，排空发布或明确失败 | `Timeline::close`、`publish` | 本批 `NoAdmissionAfterClose`、`ClosingSettles` | 活性依赖 Store/Callback 弱公平；不是整个 Session 关闭或 OS 进程退出的证明 |
 | Dispatcher 仅按序交付发布事实 | `EventReader::next`、`Dispatcher::run` | 本批 `Fetch/Deliver`、`TypeOK/DeliveryIsOrdered` | 本批 handler 成功；允许已取出的事件与后来的存储故障交错。回调失败、stop、动态订阅归 C |
-| 插件 §5.2：key 过滤、注册后暂存、恢复后消费 cut 后缀 | `Dispatcher::subscribe/consume` | 已有 `RecoveryBoundary`；`timeline_tail` | C：注册/暂存/排空/失败、多消费者；旧模型直接给出正确历史，不证明注册协议 |
+| 插件 §5.2：key 过滤、注册后暂存、恢复后消费 cut 后缀 | `Dispatcher::subscribe/consume` | `RecoveryBoundary` 仅给定 cut/后缀；本批基线的 `timeline_tail` 仅作查询/尾部证据，手写暂存而未调用 consume | 注册/暂存/排空/失败及多消费者归 C；#1739 已另交付真实 consume 流程，不将后续证据算作本批基线覆盖 |
 | 插件 §5.4、查询 §2–3：固定祖先链和 cut，完整范围关联后分页 | `Timeline::query`、`TimelineReadScope::query_binding`、store query | 已有 `RecoverySelection`；`storage_flow/property_queries`、`timeline_tail` | B：祖先切点、落盘中的尾部、游标绑定与关联域组合；本批 ReadExternal 只有成功读取的发布上界 |
 | 查询错误不是空集合；字段、missing/null、group/pick 语义 | `query.validate`、memory query、SQLite query | 既有 property-query 对照流程 | B：列出实际恢复使用的逻辑子集及剩余语义；SQL 编码/解析由实现测试承担，不能假设整个查询引擎已证明 |
 | 总纲 §2、§4：决定依赖自身已消费状态；消费者处理迟到请求 | Loop、ModelProvider、ToolExecutor 的 consume/任务入口 | 已有 `LoopProtocol`、`UndispatchedTools`、tool-model/ToolSegments | D：生产者与消费者各自消费位置及中断交错；不以全局取消位代替 |
@@ -84,6 +84,8 @@
 由动作定义直接维持，是模型定义的自洽检查（self-consistent by definition），不作为独立的实现验证成果。
 它们不证明 Rust 的锁、waterfall 或存储实现。
 本批主要检验的是这些约定组合后，在轮提交、逐批回调、读取消费、关闭及同步/异步失败之间的交错。
+`Resolve` 要求上一轮回调全部完成（`resolved = callbacks`）才完成下一轮；
+不覆盖上一轮尚有回调时下一轮已经完成的流水交错，不能将本结果扩展到任意存储轮并行。
 
 `ClosingSettles` 只在存储完成和回调获得弱公平调度时成立：环境最终提供成功或失败，而不是永远悬挂。
 不要求写入一定成功，不假设 handler 最终完成，也不证明整个 Session 关闭。
