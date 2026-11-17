@@ -300,8 +300,9 @@ Dispatcher handlers can receive opening facts before activation.
 Process publication is host-wide, not a third per-part phase. The
 `processActivity` process data face exposes `activated()`: it resolves `true` once the
 host has opened after every required process row became Active, and `false` when
-startup fails or shutdown begins before that observation; a row reload does not reset
-it. The shared catalog name, its `HostDispatch` and the native binding are the same
+startup fails or shutdown begins before that call observes publication. A new call
+after shutdown begins returns `false`, even if an earlier call returned `true`;
+a row reload does not reset publication. The shared catalog name, its `HostDispatch` and the native binding are the same
 operation with the same cancellation. A process part that must not act before the
 initial assembly — for example, before another required row has published its owner
 state — awaits it in its own tasks; `apply` still completes assembly and does not block
