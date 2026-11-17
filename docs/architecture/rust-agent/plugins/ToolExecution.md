@@ -112,7 +112,6 @@ drops them with that snapshot, so a batch that never dispatches releases every
 claim without a separate step; a claim that reaches execution is taken from the
 binding and consumed by `ToolClaim::dispatch`, which runs the call as resolved
 and approved and keeps whatever the handler registered until it settles. A live call without a retained claim uses the handler's ordinary `execute` path.
-Recovery only settles unfinished batches; it never invokes their handlers.
 
 Before admitting a `write_filesystem` call, the pinned handler's `resolve_write`
 may resolve its target using metadata only. Approval and execution receive that

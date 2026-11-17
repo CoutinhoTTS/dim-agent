@@ -5,7 +5,7 @@
 四次最终运行摘要和 12 个可达窗口的状态摘录。
 
 基线：`c8e4edd5b6cf01936ec1478b8d000f5476da7a1f`。本批只改模型、文档和 ToolBinding rustdoc；
-源码哈希针对交付工作树，ToolBinding 和 ToolExecution 文档含本批措辞修正，其余所列输入未改。
+源码哈希针对交付工作树，ToolBinding、ToolExecution 和 Questions 文档含本批措辞修正，其余所列输入未改。
 未重跑 Rust 行为测试，不以源文件存在代替本次执行证据。
 
 | 配置 | 边界 | generated | distinct | 队列 | 深度 | exit |
@@ -19,8 +19,12 @@
 单 worker、2 GiB heap。使用状态指纹，碰撞概率估计见 JSON 中原始摘要，不称作无界数学证明。
 没有公平假设或活性性质；CHECK_DEADLOCK FALSE，因为有意允许完成、故障、等待外部工作的终止状态。
 
-InterruptHandoff 检查四个不变量、两个动作性质；GenerationHandoff 检查五个不变量、五个动作性质。
-具体公式由 `.cfg` 和 `.tla` 定义，报告不另立同名规范。
+具体启用的公式由 `.cfg` 和 `.tla` 定义，不以性质数量衡量证明力度。
+GenerationHandoff 的 PublicationPrefix、OneTerminalPerHistory、NoOldWorkReexecution、
+RebuildDoesNotInvoke、CrashDoesNotUndoEffects、WaitRemovalDrainsCall、FailedRebuildNotReady
+主要核对动作定义/前提的自洽性，不作为独立验证成果；取消不回滚、host 不重放等仍需实现证据。
+交接检查集中在 ReloadDoesNotContinue、失败终态的 EndAfterTerminal，以及结算与卸载组合；
+正常工具结果只走继续决定，最终正常 turn/end 不在这个模型内。
 
 ## 可达性，不是只看全绿
 
@@ -34,7 +38,7 @@ InterruptHandoff 检查四个不变量、两个动作性质；GenerationHandoff 
 6. Loop 恢复读到尚未发布的终态。
 7. Loop 已重建，仍等 ToolExecutor 的恢复结算。
 8. 工具 cleanup 返回错误且卸载结束，历史仍没有终态。
-9. 一个 owner 重建失败，另一个重建成功，分支没有因查询失败自动全局故障。
+9. 一个 owner 重建失败没有直接设置存储故障；模型不展开 required apply 失败后的装配回滚，不能推断真实分支会继续运行。
 10. 进程崩溃丢了未落盘结果，已发生的 host effect 仍存在。
 11. 崩溃后恢复补终态并失败结束 turn，没有重新调用 host。
 12. 持久化故障下，无需补写的只读重建仍可返回成功；故障并未被清除。
@@ -64,5 +68,5 @@ java -Xmx2g -cp "$TLA_JAR" tlc2.TLC -workers 1 \
   docs/design/examples/capability-models/GenerationHandoff.tla
 ```
 
-各次 fp、seed 和 log SHA 在 JSON 中；需要复现同一指纹选择时传 `-fp` / `-seed`。
+各次 fingerprint、seed 和 log SHA 在 JSON 中；需要复现同一指纹选择时传 `-fp` / `-seed`。
 每次使用新的 metadir。模型是有限例题，不需要新增 CI 平台或部署依赖。

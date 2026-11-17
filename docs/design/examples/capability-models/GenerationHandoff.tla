@@ -63,9 +63,9 @@ ConsumeLoop == /\ s.loop \in {"old","new"} /\ ~s.fault /\ s.loopAt<s.published
  !.loopFailed=@ \/ s.log[s.loopAt+1]="reload",
  !.loopView=CASE s.log[s.loopAt+1] \in {"normal","reload"} -> "terminal"
  [] s.log[s.loopAt+1]="end" -> "ended" [] OTHER -> @]
-EndTurn(ok) == /\ s.loop \in {"old","new"} /\ s.loopView="terminal" /\ ~s.fault
+DecideAfterResult(ok) == /\ s.loop \in {"old","new"} /\ s.loopView="terminal" /\ ~s.fault
  /\ s'=[s EXCEPT !.log=IF ok /\ s.loopFailed THEN Append(@,"end") ELSE @,
- !.loopView=IF ok THEN "ended" ELSE @,!.fault=~ok,
+ !.loopView=IF ok THEN IF s.loopFailed THEN "ended" ELSE "continued" ELSE @,!.fault=~ok,
  !.decision=IF ok THEN IF s.loopFailed THEN "failed" ELSE "continue" ELSE @]
 Crash == /\ AllowCrash /\ ~s.crashed
  /\ s'=[s EXCEPT !.log=SubSeq(@,1,s.durable),!.published=s.durable,
@@ -75,7 +75,7 @@ Crash == /\ AllowCrash /\ ~s.crashed
  !.fault=FALSE,!.crashed=TRUE,!.crashEffect=s.effect]
 Next == Persist \/ StorageFailure \/ Publish \/ Invoke \/ Effect \/ NormalReply \/ CloseWait \/ ReplyReload \/ RemoveWait
  \/ CloseTool \/ CancelToolCall \/ RemoveTool \/ ReloadLoop \/ CaptureTool \/ CaptureLoop
- \/ ConsumeLoop \/ Crash \/ (\E ok \in BOOLEAN: Settle(ok) \/ RebuildTool(ok) \/ RebuildLoop(ok) \/ EndTurn(ok))
+ \/ ConsumeLoop \/ Crash \/ (\E ok \in BOOLEAN: Settle(ok) \/ RebuildTool(ok) \/ RebuildLoop(ok) \/ DecideAfterResult(ok))
 Spec == Init /\ [][Next]_s
 OneTerminalPerHistory == Cardinality({i \in 1..Len(s.log):s.log[i] \in {"normal","reload"}}) <= 1
 EndAfterTerminal == \A i \in 1..Len(s.log): s.log[i]="end" => Terminal(SubSeq(s.log,1,i-1))

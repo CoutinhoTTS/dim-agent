@@ -13,7 +13,7 @@
 | [重载协议](../../architecture/rust-agent/single-tree.md#能力重载协议)：旧工作不重执行，各 owner 写自己的终态 | `WaitBranch` cleanup、ToolExecutor cleanup/rebuild、Loop rebuild/on_event；`GenerationHandoff` | 一个已持久化的 turn 和顶层 batch；一个调用、各 owner 最多一次正常换代，另允许一次进程崩溃 |
 | [Wait](../../architecture/rust-agent/plugins/Wait.md) 重载拒绝旧调用，并把 reload 交给工具结算 | `ReplyReload/Settle/ConsumeLoop`，`ReloadDoesNotContinue` | `Reloading` → HostError → result settlement 标记的转换来自代码；普通完成另有 `NormalReply`，不会预先假定所有结果都是重载失败 |
 | 新代读完整固定 cut 后再消费后缀 | ToolExecutor `rebuild`、Loop `rebuild`；`CaptureTool/CaptureLoop` 与后续处理 | C 的暂存/串行算法作为既有接口前提；本模型不复制队列，而让 Loop 在重建前后读到终态 |
-| 失败不能伪装成功接管 | `RebuildTool(FALSE)/RebuildLoop(FALSE)` 保留 failed；`Settle(FALSE)`、`StorageFailure` 保留写入故障 | 查询失败只影响当前重建；写入故障与发布分开。不能把所有错误变成全局停机来排除交错 |
+| 失败不能伪装成功接管 | `RebuildTool(FALSE)/RebuildLoop(FALSE)` 保留 failed；`Settle(FALSE)`、`StorageFailure` 保留写入故障 | 查询失败与存储故障分开；required apply 失败的装配回滚不在模型中，见第 4 节。不能据此宣称分支继续健康运行 |
 
 源码入口：
 [Loop](../../../crates/dim-agent-capabilities/src/agent_loop.rs)、
@@ -80,11 +80,15 @@
 - `ReloadLoop → CaptureLoop → RebuildLoop`：若已看到结果就结算旧 turn；否则等待其后实时结果。Loop 与 ToolExecutor 的读取顺序不限，旧终态可以仍未发布。
 - `NormalReply` 是正常 Wait 返回（如超时）的对照；旧 Loop 可决定继续。带 reload 标记的结果、或恢复出来的未结束 turn 则失败，不再继续旧 turn。
 - `Crash` 只保留 durable 前缀，丢失句柄与旧代调用；没有执行正常 unload。新 ToolExecutor 对持久化未结束 batch 补终态。已经发生的抽象 host effect 不因崩溃回滚。
-- query/rebuild 失败只置对应 owner failed；`Settle(FALSE)` 表示终态 append 失败，`StorageFailure` 表示尾部落盘失败。一个 owner 的查询失败不会自动停止另一个 owner。
+- 模型的 query/rebuild 失败只置对应 owner failed；`Settle(FALSE)` 表示终态 append 失败，`StorageFailure` 表示尾部落盘失败。这只表示查询失败没有直接设置存储故障；不表示实际装配继续健康运行。
+  required capability 的 apply 失败会使 branch build 失败并触发回滚（插件合同 §2–3）；
+  本模型没有装配/回滚动作，不能用另一个 owner 仍可转换来证明真实分支会继续运行。
 
 边界：只含一个已持久化顶层调用，不覆盖未持久化 call 的丢失、嵌套工具效果合并、任意多代、所有 host 的取消实现。
 `effect` 是普通工具可能产生的外部影响标志，不表示 Wait 自己修改外部系统，也不证明外部系统的行为。
-`EndTurn` 的正常分支只记录 continue 决定，不展开下一个请求；该决定之后不再模拟一次正常 Loop 换代。
+`DecideAfterResult` 的正常分支记录 continue 决定和 continued 阶段，不是 turn/end。
+正常工具结果通常令 Loop 发起下一个模型请求；本模型不展开该请求及最终正常 turn/end。
+`EndAfterTerminal` 因而只覆盖失败/恢复结束；该决定之后不再模拟一次正常 Loop 换代。
 仅在本次历史上检查结果不重复，**不承诺跨崩溃外部 exactly-once**。
 
 Timeline 已有存储故障时，纯查询仍可能成功；模型允许不需补写的 ToolExecutor 重建返回 new，
@@ -103,7 +107,7 @@ Timeline 已有存储故障时，纯查询仍可能成功；模型允许不需�
 | 同文件 `wait_service_reload_ends_native_and_face_calls_and_refuses_old_handles` | native/face 及旧句柄边界；模型不展开 wire |
 | [context_flow](../../../crates/dim-agent-capabilities/tests/context_flow.rs) `restore_preserves_each_parent_tools_own_confirmed_child_effects`、`restoring_each_preparation_handoff_settles_without_replaying_work` | 既有嵌套效果/准备交接证据，本批未扩展为组合证明 |
 
-发现并更正的文档问题：ToolExecution 的 claim 说明和 ToolBinding 的 rustdoc 把“重载恢复的 batch”
+发现并更正的文档问题：ToolExecution、Questions 的设计/架构页及中文翻译、ToolBinding 的 rustdoc 把“重载恢复的 batch”
 写成会重新执行，与当前 rebuild 和重载协议不符；同时把 Dispatcher 依赖的 “Replay batches” 改为恢复/live 交接。
 只修正文档和注释，不改变执行、事件或持久化格式。
 
