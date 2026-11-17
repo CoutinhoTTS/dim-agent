@@ -6,6 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { isDeepStrictEqual } from 'node:util';
+import { pollMilliseconds, settleMilliseconds } from './registry-wait.mjs';
 
 const [receipt, mode, flag, ...extra] = process.argv.slice(2);
 assert(receipt && ['source', 'snapshot', 'promote', 'npm', 'mirror'].includes(mode)
@@ -19,31 +20,6 @@ const names = state.npmPackages?.map(({ name }) => name)
 const upstream = 'https://registry.npmjs.org';
 const registry = mode === 'mirror' ? 'https://registry.npmmirror.com' : 'https://registry.npmjs.org';
 const alpha = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)-alpha\.(0|[1-9]\d*)$/;
-
-function milliseconds(name, fallback) {
-  const value = process.env[name];
-  if (value === undefined) return fallback;
-  const parsed = Number(value);
-  assert(Number.isFinite(parsed) && parsed >= 0, `${name} must be a non-negative number of milliseconds: ${value}`);
-  return parsed;
-}
-
-/**
- * How long a run keeps asking the registry, and how often. A publication is
- * accepted before it is served: its version document, its tarball and its
- * dist-tags become readable at different moments, and never at the instant a
- * write returns. Every wait below is bounded by these two, and a caller may
- * shorten them, which the flow tests do.
- */
-const settleMilliseconds = milliseconds('DIM_REGISTRY_SETTLE_MS', 600_000);
-const pollMilliseconds = milliseconds('DIM_REGISTRY_POLL_MS', 15_000);
-
-async function json(url, allowMissing = false) {
-  const response = await fetch(url, { signal: AbortSignal.timeout(30_000) });
-  if (allowMissing && response.status === 404) return {};
-  assert(response.ok, `${url}: HTTP ${response.status}`);
-  return response.json();
-}
 
 /**
  * A registry response whose body has already arrived, or null when the read
@@ -72,15 +48,40 @@ async function read(url, timeout, consume = response => response.text()) {
   }
 }
 
-async function tags(name) {
-  return json(`${upstream}/-/package/${name}/dist-tags`, true);
+/**
+ * A dist-tags document, read until the registry answers. A 429, a 5xx and a
+ * failed transfer say nothing about what the registry holds, so they are asked
+ * again inside `deadline`, the same window a publication is waited out; every
+ * other status is the registry's answer, and `allowMissing` turns a 404 into
+ * "no tags". A body that arrived is decoded here, so a malformed document stays
+ * an error of this run rather than a read that is worth repeating. Each attempt
+ * only gets the time left, so a registry that stops answering costs its caller
+ * one window rather than one per read.
+ */
+async function json(url, allowMissing = false, deadline = Date.now() + settleMilliseconds) {
+  for (;;) {
+    const document = await read(url, Math.min(30_000, Math.max(1, deadline - Date.now())));
+    if (document !== null) {
+      if (allowMissing && document.status === 404) return {};
+      assert(document.ok, `${url}: HTTP ${document.status}`);
+      return JSON.parse(document.body);
+    }
+    assert(Date.now() < deadline, `${url}: the registry did not answer within ${settleMilliseconds} ms`);
+    console.log(`${url}: reading again in ${pollMilliseconds} ms`);
+    await delay(Math.min(pollMilliseconds, deadline - Date.now()));
+  }
+}
+
+async function tags(name, deadline) {
+  return json(`${upstream}/-/package/${name}/dist-tags`, true, deadline);
 }
 
 const protectedTags = (name, values) => Object.fromEntries(Object.entries(values)
   .filter(([tag]) => name === 'dimcode' || (name === wrapper ? !['latest', 'alpha'].includes(tag) : tag !== 'alpha')));
 
 async function snapshot() {
-  const all = Object.fromEntries(await Promise.all(['dimcode', ...names].map(async name => [name, await tags(name)])));
+  const deadline = Date.now() + settleMilliseconds;
+  const all = Object.fromEntries(await Promise.all(['dimcode', ...names].map(async name => [name, await tags(name, deadline)])));
   state.npmPackages ??= names.map(name => ({ name }));
   state.protectedTags = Object.fromEntries(Object.entries(all).map(([name, values]) => [name, protectedTags(name, values)]));
   state.wrapperTags = all[wrapper];
@@ -89,8 +90,9 @@ async function snapshot() {
 
 async function checkProtectedTags() {
   assert(state.protectedTags, 'Missing pre-publication dist-tag snapshot');
+  const deadline = Date.now() + settleMilliseconds;
   for (const [name, expected] of Object.entries(state.protectedTags)) {
-    assert.deepEqual(protectedTags(name, await tags(name)), expected, `Protected dist-tags changed: ${name}`);
+    assert.deepEqual(protectedTags(name, await tags(name, deadline)), expected, `Protected dist-tags changed: ${name}`);
   }
 }
 

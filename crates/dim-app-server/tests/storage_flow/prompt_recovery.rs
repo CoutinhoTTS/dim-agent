@@ -150,7 +150,14 @@ async fn prompt_resume_reads_effective_elements_and_recovers_a_committed_adoptio
                 .configure_loaded(None, vec![(target, Some(updated.clone()))]),
         )
         .await;
-        assert!(result.is_err());
+        assert!(
+            result.is_err(),
+            "a failed recovery result must fail adoption: {result:?}"
+        );
+        assert!(
+            matches!(&result, Err(AgentError::Storage(message)) if message.contains("injected prompt result failure")),
+            "adoption must return the original storage error: {result:?}"
+        );
         let connection = Connection::open(&database.0).unwrap();
         assert_eq!(connection.query_row("SELECT count(*) FROM timeline_events WHERE session_id=?1 AND sequence>?2 AND kind='prompt/changed'",params![id,before],|row|row.get::<_,i64>(0)).unwrap(),1);
         assert_eq!(connection.query_row("SELECT count(*) FROM timeline_events WHERE session_id=?1 AND sequence>?2 AND kind='prompt-state/recovered'",params![id,before],|row|row.get::<_,i64>(0)).unwrap(),0);

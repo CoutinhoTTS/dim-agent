@@ -237,7 +237,7 @@ ModelRecovery 的计数、决定和结算属于本分支事实，内存只是其
 - **缺失与取消**：必须在交接前确定是否有可用的处置方；交接后失去处置方要有确定的终态。不能“广播后永远等回复”，也不能依赖订阅顺序让 Recovery 抢在 Loop 前面。
 - **序号、批次、中断、重载**：接收方按序检查 stop/steer 与工作身份；需要一起生效的事实由所有者原子提交；重载结算未完成交接，不重发请求。
 - **所有者与议题**：Loop 业务所有者。此项需要在 [#1210](https://github.com/arcships/dim/issues/1210) 中达成一致，再更新 Loop 自己的合同。不是要求 Timeline、Dispatcher、Session 门面或 rutis 增加基础设施特例。
-- **合同落点**：[Loop 的失败处置交接](../../architecture/rust-agent/plugins/Loop.md#a-failed-model-step-and-its-disposer)。
+- **提案落点**：[ModelRecovery 的待定交接要求](../plugins/ModelRecovery.md#7-requirements-raised-to-mechanism-owners)。这不是现有 Loop 接口；是否实施需另行决定。
 
 ### R2. 输出结算、安全续接与跨请求预算
 
