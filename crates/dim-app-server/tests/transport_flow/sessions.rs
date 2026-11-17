@@ -1174,20 +1174,17 @@ async fn history_pages_the_branch_through_a_fixed_sequence_on_batch_boundaries()
 
     let mut after = 0;
     let mut events = vec![];
-    let mut through = None;
-    while through != Some(after) {
-        let mut request = at(json!({"after":after,"limit":1}));
-        if let Some(through) = through {
-            request["through"] = json!(through);
-        }
+    let mut through = head;
+    while through != after {
+        let request = at(json!({"after":after,"through":through,"limit":1}));
         let page = sessions.ok("history", request).await;
-        through = Some(page["through"].as_u64().unwrap());
+        through = page["through"].as_u64().unwrap();
         let page = page["events"].as_array().unwrap().clone();
         assert!(!page.is_empty());
         after = page.last().unwrap()["sequence"].as_u64().unwrap();
         events.extend(page);
     }
-    assert_eq!(through, Some(head));
+    assert_eq!(through, head);
     assert_eq!(
         Value::Array(events),
         serde_json::to_value(branch_events(&session, "main", ..=head).await.unwrap()).unwrap()
@@ -1199,6 +1196,7 @@ async fn history_pages_the_branch_through_a_fixed_sequence_on_batch_boundaries()
         first
     );
 
+    let future = 1_000_000;
     for (request, code) in [
         (at(json!({"after":inside})), "rejected"),
         (at(json!({"through":inside})), "rejected"),
@@ -1206,8 +1204,8 @@ async fn history_pages_the_branch_through_a_fixed_sequence_on_batch_boundaries()
         (at(json!({"limit":0})), "rejected"),
         (at(json!({"limit":257})), "rejected"),
         (at(json!({"atLeast":first,"through":first})), "rejected"),
-        (at(json!({"atLeast":head + 1})), "future_sequence"),
-        (at(json!({"through":head + 1})), "future_sequence"),
+        (at(json!({"atLeast":future})), "future_sequence"),
+        (at(json!({"through":future})), "future_sequence"),
         (
             json!({"sessionId":session.id(),"branchId":"missing"}),
             "branch_missing",
