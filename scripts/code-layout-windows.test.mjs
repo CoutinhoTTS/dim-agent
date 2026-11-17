@@ -219,11 +219,31 @@ fn main() { assert_eq!(layout_first(layout_second(2)), 13); let p = std::env::ar
 
     (root / 'echoer.c').write_text('''#include <windows.h>
 #include <stdio.h>
-int main(void) {
+static int expect(const char *text) {
+    while (*text) {
+        char value;
+        DWORD count;
+        if (!ReadFile(GetStdHandle(STD_INPUT_HANDLE), &value, 1, &count, NULL)
+            || count != 1 || value != *text++) return 0;
+    }
+    return 1;
+}
+int main(int argc, char **argv) {
+    (void)argv;
     DWORD mode;
     if (!GetConsoleMode(GetStdHandle(STD_INPUT_HANDLE), &mode)) return 10;
     if (!GetConsoleMode(GetStdHandle(STD_OUTPUT_HANDLE), &mode)) return 11;
     if (!GetConsoleMode(GetStdHandle(STD_ERROR_HANDLE), &mode)) return 12;
+    if (argc > 1) {
+        if (!SetConsoleMode(GetStdHandle(STD_INPUT_HANDLE), ENABLE_VIRTUAL_TERMINAL_INPUT)) return 20;
+        for (int cycle = 0; cycle < 3; ++cycle) {
+            if (!expect("\\x1b[200~/models\\x1b[201~\\r")) return 21;
+            puts("Models  Enter select");
+            fflush(stdout);
+            if (!expect("\\x1b")) return 22;
+        }
+        return expect("\\x1b[200~/exit\\x1b[201~\\r") ? 0 : 23;
+    }
     printf("layout-conpty-out\\n");
     fprintf(stderr, "layout-conpty-err\\n");
     fflush(stdout);
@@ -290,6 +310,11 @@ int main(void) {
                     pass
 
     original_console = win32.Console
+    with patch.object(win32, 'Console', side_effect=lambda *args: original_console(
+            [str(root/'echoer.exe'), 'training'], root, dict(os.environ))):
+        with ExitStack() as stack:
+            train_windows.tui(root/'unused.exe', root, stack, False, None)
+
     handles = []
     clock = [0]
     def clock_now():

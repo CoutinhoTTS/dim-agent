@@ -220,9 +220,12 @@ with `QueryWorkingSetEx`. App Server shutdown sampling and the exit wait share a
 60-second deadline; expiry fails training and its owned process is terminated.
 A pre-shutdown sample is retained if shutdown finishes before another poll.
 Every Windows target runs the real TUI picker; a
-console-less runner is not accepted as native TUI evidence. The ConPTY launcher
-uses explicit null standard handles with `STARTF_USESTDHANDLES` so a redirected
-parent does not pass its pipes to the child ([Windows console guidance](https://github.com/microsoft/terminal/discussions/15814)).
+console-less runner is not accepted as native TUI evidence. The trainer
+frames command text as bracketed paste and leaves Enter outside the paste,
+preserving submission when the input reader coalesces fast key bursts.
+The ConPTY launcher uses explicit null standard handles with
+`STARTF_USESTDHANDLES` so a redirected parent does not pass its pipes to the child
+([Windows console guidance](https://github.com/microsoft/terminal/discussions/15814)).
 The fixture checks that all three standard handles are console handles, captures
 both output streams through ConPTY, and keeps the child alive until it receives
 the input handshake. It uses the same explicit environment path as TUI training;

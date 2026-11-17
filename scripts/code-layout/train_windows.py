@@ -189,7 +189,7 @@ def tui(binary, home, stack, sampling, profile):
     drain(2)
     for _ in range(3):
         start = len(capture)
-        console.write(b"/models\r")
+        console.write(b"\x1b[200~/models\x1b[201~\r")
         deadline = time.monotonic() + 60
         while time.monotonic() < deadline:
             drain(.05)
@@ -215,7 +215,7 @@ def tui(binary, home, stack, sampling, profile):
         finally:
             win32.close(handle)
         write_sample(profile, page_size, pages)
-    console.write(b"/exit\r")
+    console.write(b"\x1b[200~/exit\x1b[201~\r")
     code = console.wait(timeout=60)
     if code != 0:
         raise RuntimeError(f"TUI process failed: {code}")
