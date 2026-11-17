@@ -729,8 +729,7 @@ fn tui_models_area_keeps_a_refresh_whose_read_fails() {
     shown.send(()).unwrap();
     terminal.write(b"/models\r");
     terminal.until("Test / flash");
-    terminal.raw(b"\x1b[B");
-    terminal.raw(b"\r");
+    terminal.raw(b"\t\r\r");
     terminal.until("Models · Test");
     terminal.raw(b"\x12");
     terminal.until("Refreshed the models.");
@@ -950,10 +949,10 @@ fn area_models_unavailable_after_toggle() -> Value {
     models
 }
 
-/// `/models` → `Edit models` opens one Provider's area: the title names the
-/// Provider, rows are grouped by source, Enter toggles with the complete
-/// enabled set at the read's version, Tab shows the descriptor, and Esc
-/// closes back to the prompt.
+/// `/models` → `Manage models` → a Provider opens that Provider's area: the
+/// title names the Provider, rows are grouped by source, Enter toggles with
+/// the complete enabled set at the read's version, Tab shows the descriptor,
+/// and Esc closes back to the Provider list and then the picker.
 #[test]
 fn tui_models_area_opens_and_toggles_a_model() {
     let home = Home::new();
@@ -980,7 +979,7 @@ fn tui_models_area_opens_and_toggles_a_model() {
         // The picker's own load.
         let request = wire.read("provider.models.query");
         wire.reply(&request, picker_page("test", "Test", picker_catalog()));
-        // Edit models opens the Provider's area.
+        // Manage models, then the Provider, opens its area.
         let request = wire.read("provider.management");
         wire.reply(&request, test_provider(area_models(true), 3));
         // Enter: the toggle reads, writes the complete set, reads again.
@@ -998,6 +997,9 @@ fn tui_models_area_opens_and_toggles_a_model() {
         // Tab: the selected model's descriptor.
         let request = wire.read("provider.management");
         wire.reply(&request, test_provider(area_models(false), 4));
+        // Closing the area returns to the picker, which reads its page again.
+        let request = wire.read("provider.models.query");
+        wire.reply(&request, picker_page("test", "Test", picker_catalog()));
         let mut line = String::new();
         while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
             line.clear();
@@ -1012,11 +1014,9 @@ fn tui_models_area_opens_and_toggles_a_model() {
     shown.send(()).unwrap();
     terminal.write(b"/models\r");
     terminal.until("Test / flash");
-    terminal.until("Edit models");
-    // The edit row follows the Provider's model row.
-    terminal.raw(b"\x1b[B");
-    terminal.until("Edit models");
-    terminal.raw(b"\r");
+    terminal.until("Manage models");
+    // Tab to the management section, Enter on its entry, Enter on the Provider.
+    terminal.raw(b"\t\r\r");
     terminal.until("Models · Test");
     terminal.until("catalog");
     terminal.until("overrides");
@@ -1025,6 +1025,10 @@ fn tui_models_area_opens_and_toggles_a_model() {
     terminal.until("Disabled flash.");
     terminal.raw(b"\t");
     terminal.until("ID flash");
+    terminal.raw(b"\x1b");
+    terminal.raw(b"\x1b");
+    // The area closes to the Provider list, which closes to the picker, and
+    // the picker closes to the prompt.
     terminal.raw(b"\x1b");
     terminal.raw(b"\x1b");
     terminal.until("Ask anything...");
@@ -1061,7 +1065,7 @@ fn tui_models_area_offers_no_toggle_for_an_unavailable_model() {
         wait_shown.recv_timeout(PATIENCE).unwrap();
         let request = wire.read("provider.models.query");
         wire.reply(&request, picker_page("test", "Test", picker_catalog()));
-        // Edit models opens the Provider's area.
+        // Manage models, then the Provider, opens its area.
         let request = wire.read("provider.management");
         wire.reply(&request, test_provider(area_models_unavailable(), 3));
         // Tab on the unavailable model: an inspect reads the area. Had Enter
@@ -1083,6 +1087,9 @@ fn tui_models_area_offers_no_toggle_for_an_unavailable_model() {
             &request,
             test_provider(area_models_unavailable_after_toggle(), 4),
         );
+        // Closing the area returns to the picker, which reads its page again.
+        let request = wire.read("provider.models.query");
+        wire.reply(&request, picker_page("test", "Test", picker_catalog()));
         let mut line = String::new();
         while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
             line.clear();
@@ -1093,10 +1100,8 @@ fn tui_models_area_offers_no_toggle_for_an_unavailable_model() {
     shown.send(()).unwrap();
     terminal.write(b"/models\r");
     terminal.until("Test / flash");
-    terminal.until("Edit models");
-    terminal.raw(b"\x1b[B");
-    terminal.until("Edit models");
-    terminal.raw(b"\r");
+    terminal.until("Manage models");
+    terminal.raw(b"\t\r\r");
     terminal.until("Models · Test");
     terminal.until("unavailable");
     // The unavailable model is the row below the catalog's first one: Enter
@@ -1109,7 +1114,9 @@ fn tui_models_area_offers_no_toggle_for_an_unavailable_model() {
     // The available override model below it toggles.
     terminal.raw(b"\x1b[B\r");
     terminal.until("Disabled Tuned.");
-    terminal.raw(b"\x1b");
+    // The area closes to the Provider list, which closes to the picker, and
+    // the picker closes to the prompt.
+    terminal.raw(b"\x1b\x1b\x1b");
     terminal.until("Ask anything...");
     home.kill(&terminal);
     terminal.wait();
@@ -1168,8 +1175,7 @@ fn tui_models_area_keeps_the_panel_on_a_refused_write() {
     shown.send(()).unwrap();
     terminal.write(b"/models\r");
     terminal.until("Test / flash");
-    terminal.raw(b"\x1b[B");
-    terminal.raw(b"\r");
+    terminal.raw(b"\t\r\r");
     terminal.until("Models · Test");
     // Down to the user model, then Ctrl+X and Enter.
     terminal.raw(b"\x1b[B");
@@ -1241,7 +1247,7 @@ fn tui_models_area_rereads_after_a_conflict() {
         wait_shown.recv_timeout(PATIENCE).unwrap();
         let request = wire.read("provider.models.query");
         wire.reply(&request, picker_page("test", "Test", picker_catalog()));
-        // Edit models opens the Provider's area.
+        // Manage models, then the Provider, opens its area.
         let request = wire.read("provider.management");
         wire.reply(&request, test_provider(area_models(true), 3));
         // Ctrl+E reads the fresh template, then writes at the revision the
@@ -1286,8 +1292,7 @@ fn tui_models_area_rereads_after_a_conflict() {
     shown.send(()).unwrap();
     terminal.write(b"/models\r");
     terminal.until("Test / flash");
-    terminal.raw(b"\x1b[B");
-    terminal.raw(b"\r");
+    terminal.raw(b"\t\r\r");
     terminal.until("Models · Test");
     terminal.raw(b"\x05");
     // The fresh list is what the panel shows now, with the owner's sentence
@@ -1357,7 +1362,7 @@ fn tui_models_area_reports_a_conflict_whose_reread_fails() {
         wait_shown.recv_timeout(PATIENCE).unwrap();
         let request = wire.read("provider.models.query");
         wire.reply(&request, picker_page("test", "Test", picker_catalog()));
-        // Edit models opens the Provider's area.
+        // Manage models, then the Provider, opens its area.
         let request = wire.read("provider.management");
         wire.reply(&request, test_provider(area_models(true), 3));
         // Ctrl+E reads the fresh template, then writes at the revision the
@@ -1401,8 +1406,7 @@ fn tui_models_area_reports_a_conflict_whose_reread_fails() {
     shown.send(()).unwrap();
     terminal.write(b"/models\r");
     terminal.until("Test / flash");
-    terminal.raw(b"\x1b[B");
-    terminal.raw(b"\r");
+    terminal.raw(b"\t\r\r");
     terminal.until("Models · Test");
     terminal.raw(b"\x05");
     // The owner's sentence stands, the draft's link to the stale revision

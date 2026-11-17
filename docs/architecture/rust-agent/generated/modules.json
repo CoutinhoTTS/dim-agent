@@ -6087,6 +6087,7 @@
       "unexpandedMacros": [
         "assert",
         "assert_eq",
+        "format",
         "panic",
         "vec"
       ]
@@ -44867,6 +44868,7 @@
       "references": [
         "path Area::Models",
         "path EmptyProvider",
+        "path EmptyReason",
         "path EmptyReason::Disabled",
         "path EmptyReason::Mixed",
         "path EmptyReason::NoModels",
@@ -44912,12 +44914,12 @@
       "from": "dim_cli::ui::models_panel",
       "to": "dim_cli::ui::list_panel",
       "references": [
+        "path Event",
         "path Event::Close",
         "path Event::None",
         "path Event::Pick",
         "path Event::Refresh",
         "path Item",
-        "path Item::heading",
         "path Item::new",
         "path ListPanel",
         "path ListPanel::new",
@@ -44951,15 +44953,63 @@
     },
     {
       "from": "dim_cli::ui::models_panel",
+      "to": "dim_cli::ui::render::panel",
+      "references": [
+        "path IDLE_MARKER",
+        "path SELECTED_MARKER",
+        "path wrap_words",
+        "use crate::ui::render::panel::IDLE_MARKER",
+        "use crate::ui::render::panel::SELECTED_MARKER",
+        "use crate::ui::render::panel::wrap_words"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::models_panel",
+      "to": "dim_cli::ui::rows",
+      "references": [
+        "path title_plain",
+        "use crate::ui::rows::title_plain"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::models_panel",
       "to": "dim_cli::ui::terminal::input",
       "references": [
+        "path KeyCode::BackTab",
         "path KeyCode::Char",
+        "path KeyCode::Enter",
+        "path KeyCode::Esc",
+        "path KeyCode::Left",
         "path KeyCode::Right",
+        "path KeyCode::Tab",
         "path KeyEvent",
         "path Modifiers::CTRL",
         "use crate::ui::terminal::KeyCode",
         "use crate::ui::terminal::KeyEvent",
         "use crate::ui::terminal::Modifiers"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::models_panel",
+      "to": "dim_cli::ui::text",
+      "references": [
+        "path display_width",
+        "path truncate_cells",
+        "use crate::ui::text::display_width",
+        "use crate::ui::text::truncate_cells"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::models_panel",
+      "to": "dim_cli::ui::theme::ansi",
+      "references": [
+        "path Paint",
+        "path Paint::default",
+        "path fg",
+        "path paint",
+        "use crate::ui::theme::ansi::Paint",
+        "use crate::ui::theme::ansi::fg",
+        "use crate::ui::theme::ansi::paint"
       ]
     },
     {
@@ -44974,10 +45024,12 @@
       "from": "dim_cli::ui::models_panel::tests",
       "to": "dim_cli::model::session",
       "references": [
-        "path Area::Models",
         "path ModelItem",
         "path ModelList",
-        "path ModelOutcome::Identified"
+        "path ModelOutcome::Identified",
+        "path ModelPolicyUpdate::Read",
+        "path SubagentModelPolicy::Agent",
+        "path SubagentModelPolicy::Inherit"
       ]
     },
     {
@@ -44991,9 +45043,9 @@
     },
     {
       "from": "dim_cli::ui::models_panel::tests",
-      "to": "dim_cli::ui::prompts",
+      "to": "dim_cli::ui::render::panel",
       "references": [
-        "path Effect::OpenArea"
+        "path crate::ui::render::panel::strip_escapes"
       ]
     },
     {
@@ -45006,6 +45058,8 @@
         "path KeyCode::Enter",
         "path KeyCode::Left",
         "path KeyCode::Right",
+        "path KeyCode::Tab",
+        "path KeyCode::Up",
         "path KeyEvent",
         "path KeyEvent::new",
         "path Modifiers::CTRL",
@@ -45019,9 +45073,10 @@
       "references": [
         "path Appearance::Dark",
         "path ColorMode::TrueColor",
-        "path crate::ui::theme::palette::terminal_palette",
+        "path terminal_palette",
         "use crate::ui::theme::Appearance",
-        "use crate::ui::theme::ColorMode"
+        "use crate::ui::theme::ColorMode",
+        "use crate::ui::theme::palette::terminal_palette"
       ]
     },
     {
