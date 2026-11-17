@@ -69,7 +69,7 @@ fn model_failure(facts: ModelFailureFacts) -> ModelFailure {
     }
 }
 
-pub struct ModelProvider {
+struct ModelProvider {
     state: Mutex<ModelState>,
     tasks: TaskTracker,
     errors: Mutex<Vec<AgentError>>,
@@ -569,7 +569,6 @@ impl ModelProvider {
 }
 
 pub struct ModelProviderPlugin {
-    provider: Key<ModelProvider>,
     progress: Key<StateCell<ModelProgress>>,
     timeline: Key<Timeline>,
     dispatcher: Key<Dispatcher>,
@@ -592,7 +591,6 @@ impl ModelProviderPlugin {
     }
     fn with(names: &Names<'_>, resolves: bool) -> rutis::Result<Self> {
         Ok(Self {
-            provider: names.key()?,
             progress: names.state_cell()?,
             timeline: names.key()?,
             dispatcher: names.key()?,
@@ -772,7 +770,6 @@ impl DynPlugin for ModelProviderPlugin {
                 )
                 .await?;
             ctx.provide_at(self.progress.clone(), service.progress.clone())?;
-            ctx.provide_at(self.provider.clone(), service)?;
             Ok(Effect::Done)
         })
     }

@@ -73,6 +73,18 @@ fn main() {
             &mut stderr,
         ));
     }
+    // The offline store commands run without the `app-server` prefix: they
+    // touch a database no daemon serves and exit, so a bare `dimcode
+    // --migrate-prompt-references ...` is the whole invocation the guard's
+    // error asks for. It goes through the App Server's list, which keeps one
+    // implementation and one usage text for both entry points.
+    if std::env::args().nth(1).as_deref() == Some("--migrate-prompt-references") {
+        if let Err(error) = dim_app_server::cli::run(std::env::args().skip(1)) {
+            eprintln!("Error: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if std::env::args().nth(1).as_deref() == Some("app-server") {
         let provider = CLIENT_IDS.map(|(cn, global)| {
             dim_oauth::row(dim_oauth::ClientIds {
