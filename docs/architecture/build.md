@@ -11,9 +11,11 @@ cargo build --workspace --locked
 
 A normal Cargo installation is sufficient; compiler caching is optional. Each worktree keeps its own target directory. Existing source caches can be reused without sharing build outputs.
 
-The macOS `verify` job allows four concurrent Cargo build jobs. It builds all workspace targets once, checks the architecture, then runs up to two recorded test executables at a time with up to three test threads per executable. The workspace run starts `transport_flow` and `cli_flow` first. The separate CLI profile and Node- and Python-backed Rust suites use two test threads each. The `dependencies` job allows two Cargo build jobs when installing `cargo-deny`.
+The release profile uses full LTO (`lto = "fat"`) with one codegen unit to reduce binary size. Hosted release builds use two Cargo jobs. The macOS ARM64 release job overrides LTO to `thin` on its 7 GB runner; full LTO requires a release build and runtime smoke test within that runner's memory budget before enabling it there. The other release targets retain full LTO. [The resource investigation](https://github.com/arcships/dim/issues/1674) tracks measurements and build costs. Code residency depends on executable layout and file-cache mapping conditions as well as code size. Normal PR tests use the dev profile, so release builds and runtime smoke tests on each supported platform must validate this setting.
 
-CI sets `CARGO_TARGET_DIR` to the checkout's `target` directory so a compiler cache's managed-target collection cannot remove binaries between the build and their later execution. Each executable keeps its Cargo package working directory and streams output immediately, with target start/end markers and exit status. A target has a ten-minute deadline (`DIM_TEST_TIMEOUT_MS` overrides it), and timeout and cancellation terminate its process tree. Failures still allow the other targets to finish and fail the step. Cargo runs documentation tests separately with the same feature selection. Local `cargo test --workspace --locked` remains available without Node.
+The macOS `verify` job has a seventy-five-minute overall deadline and allows four concurrent Cargo build jobs. It builds all workspace targets once, checks the architecture, then runs up to two recorded test executables at a time with up to three test threads per executable. The workspace run starts `transport_flow` and `cli_flow` first. The separate CLI profile and Node- and Python-backed Rust suites use two test threads each. The `dependencies` job allows two Cargo build jobs when installing `cargo-deny`.
+
+CI sets `CARGO_TARGET_DIR` to the checkout's `target` directory so a compiler cache's managed-target collection cannot remove binaries between the build and their later execution. Each executable keeps its Cargo package working directory and streams output immediately, with target start/end markers and exit status. A target has a ten-minute default deadline (`DIM_TEST_TIMEOUT_MS` overrides it); the full workspace step sets fifteen minutes per executable for the large flow suites at three test threads. Timeout and cancellation terminate its process tree. Failures still allow the other targets to finish and fail the step. Cargo runs documentation tests separately with the same feature selection. Local `cargo test --workspace --locked` remains available without Node.
 
 `xtask measure` records per-Session close samples immediately. After closing the Agent and its host, it allows up to 30 seconds for remaining Tokio tasks to settle; `cleanupSettleMs` reports that wait, and `tasksAfterAgentClose` and `allocationBytesAfterAgentClose` report the remaining tasks and Rust allocations. These final samples distinguish asynchronous disposal from retained state.
 
@@ -41,7 +43,14 @@ Evaluation-tool tests are opt-in: `cargo test --locked -p xtask --features eval-
 
 ## Bundled provider catalog
 
-The App Server embeds the checked-in `crates/dim-app-server/resources/default-catalog.json`.
+The App Server build compiles `crates/dim-app-server/resources/default-catalog.json`
+into one embedded offset image: provider headers/fingerprints, original model order,
+sorted matching/target/naming keys and independently compressed model payloads.
+Integer offsets avoid a pointer relocation per record. No runtime catalog index or
+decoded catalog is retained. Packaging remains a single executable on every target;
+no new release sidecar or linker section policy is required. Native source archives
+use the [v52 image contract](../design/appserver/native-storage-format.md#v52-sparse-provider-state).
+Runtime reads decode only selected payloads and necessary match candidates.
 It also serves as the starting catalog for maintenance. Use the Node version in `.node-version`.
 
 ```sh
@@ -64,7 +73,7 @@ or declare its bundled rows authoritative. `model-overrides.json` holds field pa
 provider and model, re-applied after every sync. A patch merges key by key into the
 upstream row, so a `limit` patch keeps the output cap upstream states, and a patch that no
 longer matches a model fails the run instead of disappearing. Both tables are read by the
-sync alone: the binary embeds `default-catalog.json` and `reasoning-off-overrides.json`
+sync alone: the binary embeds the compiled catalog and `reasoning-off-overrides.json`
 and reads neither table.
 
 The offline validation checks the tables against the catalog: every provider has a policy,

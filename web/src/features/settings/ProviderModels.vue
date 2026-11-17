@@ -6,7 +6,6 @@ import { settingsMessages } from "../../i18n/settings"
 import { readManagement, type ManagementModel, type ManagementProvider } from "../../rpc/management"
 import { readAck } from "../../rpc/read"
 import { useConnectionStore } from "../../stores/connection"
-import { useModelsStore } from "../../stores/models"
 import { messageFrom } from "./context"
 
 const INHERIT = "__inherit__"
@@ -98,7 +97,6 @@ async function mutate(method: string, params: Record<string, unknown>, version =
   const updated = view.providers.find((p) => p.providerId === providerId)
   if (!updated) throw new Error(view.errors[0]?.message ?? t("unavailable"))
   emit("updated", updated)
-  await useModelsStore().load()
   return updated
 }
 async function toggle(model: ManagementModel): Promise<void> {
