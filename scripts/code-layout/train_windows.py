@@ -164,7 +164,7 @@ class Server:
 def tui(binary, home, stack, sampling, profile):
     console = win32.Console(
         [binary, "tui", "--home", home, "--cwd", home, "--fullscreen"],
-        home, environment(home), suspended=False)
+        home, environment(home))
     stack.callback(console.close)
     if sampling:
         console.trim_running()

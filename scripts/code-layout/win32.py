@@ -289,7 +289,7 @@ class Console:
     """A ConPTY child with a synchronous write side and a reader thread."""
 
     def __init__(self, arguments, cwd, environment, columns=120, rows=30,
-                 suspended=True, inherit_environment=False):
+                 inherit_environment=False):
         import msvcrt
         self._child_in, self._master_in = os.pipe()
         self._master_out, self._child_out = os.pipe()
@@ -327,8 +327,6 @@ class Console:
         process = PROCESS_INFORMATION()
         command = ctypes.create_unicode_buffer(subprocess.list2cmdline([str(item) for item in arguments]))
         flags = EXTENDED_STARTUPINFO_PRESENT
-        if suspended:
-            flags |= CREATE_SUSPENDED
         environment_block = None
         if not inherit_environment:
             flags |= CREATE_UNICODE_ENVIRONMENT
@@ -373,15 +371,8 @@ class Console:
     def write(self, data):
         os.write(self._master_in, data)
 
-    def trim(self):
-        empty_working_set(self._process)
-        resume(self._process)
-
     def trim_running(self):
         empty_working_set(self._process)
-
-    def resume(self):
-        resume(self._process)
 
     def poll(self):
         result = kernel32.WaitForSingleObject(self._process, 0)
@@ -492,18 +483,3 @@ def open_pipe(name, timeout=10):
         kernel32.CloseHandle(handle)
         raise OSError("cannot adopt the named-pipe handle")
     return descriptor
-
-
-def wait_for_exit(handle, timeout=30):
-    result = kernel32.WaitForSingleObject(handle, int(timeout * 1000))
-    if result == 0x102:
-        raise TimeoutError("process did not exit")
-    if result != 0:
-        raise ctypes.WinError(ctypes.get_last_error())
-
-
-def exit_code(handle):
-    code = wintypes.DWORD()
-    if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
-        raise ctypes.WinError(ctypes.get_last_error())
-    return code.value

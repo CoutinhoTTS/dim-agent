@@ -121,7 +121,7 @@ void entry(void) {
     (root / 'echoer.c').write_text('#include <stdio.h>\nint main(void) { printf("layout-conpty\\n"); fflush(stdout); getchar(); return 0; }\n')
     subprocess.run(['cl','/nologo',str(root/'echoer.c'),'/Fe:'+str(root/'echoer.exe')],check=True)
     console = win32.Console([str(root/'echoer.exe')], root, dict(os.environ),
-                            suspended=False, inherit_environment=True)
+                            inherit_environment=True)
     try:
         capture = bytearray()
         deadline = time.monotonic() + 20
