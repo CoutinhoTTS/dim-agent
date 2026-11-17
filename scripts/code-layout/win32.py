@@ -289,8 +289,8 @@ class Console:
 
     def __init__(self, arguments, cwd, environment, columns=120, rows=30):
         import msvcrt
-        self._master_in, self._child_in = os.pipe()
-        self._child_out, self._master_out = os.pipe()
+        self._child_in, self._master_in = os.pipe()
+        self._master_out, self._child_out = os.pipe()
         self._console = HPCON()
         status = kernel32.CreatePseudoConsole(
             COORD(columns, rows),

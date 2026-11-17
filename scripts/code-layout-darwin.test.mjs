@@ -72,15 +72,20 @@ int main(void) { return first() + second(); }
     sleeper = root/'sleeper'
     (root / 'sleeper.c').write_text('#include <unistd.h>\nint main(void) { sleep(5); return 0; }\n')
     subprocess.run(['cc','-O0','-o',str(sleeper),str(root/'sleeper.c')],check=True)
+    sleeper_error = root/'sleeper.stderr'
     process = subprocess.Popen([str(sleeper)], env=dict(os.environ,
-        DYLD_INSERT_LIBRARIES=str(probe), DIM_LAYOUT_SAMPLE=str(signal_sample)))
+        DYLD_INSERT_LIBRARIES=str(probe), DIM_LAYOUT_SAMPLE=str(signal_sample)),
+        stderr=sleeper_error.open('wb'))
     try:
         time.sleep(.5)
         process.send_signal(signal.SIGUSR1)
         deadline = time.monotonic() + 20
-        while time.monotonic() < deadline and not signal_sample.stat().st_size:
+        while time.monotonic() < deadline:
+            if signal_sample.exists() and signal_sample.stat().st_size:
+                break
             time.sleep(.02)
-        assert signal_sample.stat().st_size
+        assert signal_sample.exists() and signal_sample.stat().st_size, (
+            process.poll(), sleeper_error.read_text())
     finally:
         process.kill()
         process.wait()
