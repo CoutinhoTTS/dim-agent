@@ -123,12 +123,12 @@ fn image(source: &ImageSource) -> Option<acp::ContentBlock> {
     Some(acp::ContentBlock::Image(image))
 }
 
-/// The messages one fact produces, each serialized once with the turn that
-/// produced it already in `_meta`.
+/// The messages one fact produces, each carrying the turn that produced it in
+/// its `_meta`.
 #[derive(Default)]
 struct Messages {
     turn: Option<String>,
-    updates: Vec<Value>,
+    updates: Vec<acp::SessionUpdate>,
 }
 
 impl Messages {
@@ -140,15 +140,7 @@ impl Messages {
     }
 
     fn push(&mut self, update: acp::SessionUpdate) {
-        self.updates
-            .push(serde_json::to_value(update).expect("an ACP session update is JSON"));
-    }
-
-    /// A new tool call: the crate omits a field holding that field's own
-    /// default while the literal always wrote both, so `call_message` spells
-    /// them out. It is the only write a serialized message still takes.
-    fn push_call(&mut self, call: acp::ToolCall) {
-        self.updates.push(call_message(call));
+        self.updates.push(update);
     }
 
     fn meta(&self, lody: Option<Value>) -> Option<acp::Meta> {
@@ -266,20 +258,25 @@ fn preview(content: &ToolContent) -> String {
     result
 }
 
-/// A tool call message: the crate omits a field holding that field's own
-/// default, and the gateway spells out both so a client reads the same
-/// message it read before the projection was typed. A call always states both
-/// fields, so this is the one write a serialized message still takes.
-fn call_message(call: acp::ToolCall) -> Value {
-    let mut message = serde_json::to_value(acp::SessionUpdate::ToolCall(call))
-        .expect("an ACP session update is JSON");
-    if message.get("kind").is_none() {
-        message["kind"] = json!("other");
+/// A `session/update` notification: the one place a session update becomes
+/// wire JSON. The crate omits a field holding that field's own default while
+/// every client has always read a tool call's `kind` and `status`, so a tool
+/// call states both.
+pub(crate) fn notification(session: &str, update: acp::SessionUpdate) -> Value {
+    let call = matches!(update, acp::SessionUpdate::ToolCall(_));
+    let mut params =
+        serde_json::to_value(acp::SessionNotification::new(session.to_owned(), update))
+            .expect("an ACP session notification is JSON");
+    if call {
+        let update = &mut params["update"];
+        if update.get("kind").is_none() {
+            update["kind"] = json!(acp::ToolKind::Other);
+        }
+        if update.get("status").is_none() {
+            update["status"] = json!(acp::ToolCallStatus::Pending);
+        }
     }
-    if message.get("status").is_none() {
-        message["status"] = json!("pending");
-    }
-    message
+    params
 }
 
 /// What a tool message says besides its status: the content it produced, the
@@ -514,7 +511,10 @@ impl Projection {
         }
     }
 
-    pub(crate) fn pending_exec(&mut self, task: &dim_agent_types::PendingExec) -> Value {
+    pub(crate) fn pending_exec(
+        &mut self,
+        task: &dim_agent_types::PendingExec,
+    ) -> acp::SessionUpdate {
         let id = json!(["background", task.task_id]).to_string();
         let mut messages = Messages::default();
         self.tool(
@@ -554,7 +554,7 @@ impl Projection {
             )
             .is_some();
         if !announced {
-            messages.push_call(
+            messages.push(acp::SessionUpdate::ToolCall(
                 acp::ToolCall::new(id, presentation.title)
                     .name(name)
                     .kind(presentation.kind)
@@ -564,7 +564,7 @@ impl Projection {
                     .raw_input(input)
                     .raw_output(fields.raw_output)
                     .meta(meta),
-            );
+            ));
             return;
         }
         let mut update = acp::ToolCallUpdateFields::new()
@@ -634,7 +634,7 @@ impl Projection {
         content
     }
 
-    pub(crate) fn event(&mut self, event: &Event) -> Vec<Value> {
+    pub(crate) fn event(&mut self, event: &Event) -> Vec<acp::SessionUpdate> {
         let turn = match &event.content {
             EventContent::TurnStart(data) => Some(data.turn_id.clone()),
             EventContent::Text(data) => Some(data.turn_id.clone()),
@@ -932,7 +932,7 @@ impl Projection {
         messages.updates
     }
 
-    pub(crate) fn progress(&mut self, progress: Progress) -> Vec<Value> {
+    pub(crate) fn progress(&mut self, progress: Progress) -> Vec<acp::SessionUpdate> {
         let mut messages = Messages::new(self.turn.clone());
         if let Some(id) = progress.request_id {
             if self.closed_requests.contains(&id) {
@@ -967,6 +967,7 @@ mod tests {
         serde_json::from_value(value).unwrap()
     }
 
+    /// The messages an input replays, as the wire carries them.
     fn replay(blocks: Value) -> Vec<Value> {
         let mut projection = Projection::default();
         assert!(
@@ -978,11 +979,15 @@ mod tests {
                 })))
                 .is_empty()
         );
-        projection.event(&event(json!({
+        let updates = projection.event(&event(json!({
             "id":"consumed-1","sequence":10,"create_at":2,
             "type":"input","name":"consumed",
             "data":{"input_id":"input-1"},
-        })))
+        })));
+        updates
+            .into_iter()
+            .map(|update| serde_json::to_value(update).expect("an ACP session update is JSON"))
+            .collect()
     }
 
     #[test]

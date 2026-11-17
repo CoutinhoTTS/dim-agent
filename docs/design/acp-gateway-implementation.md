@@ -414,6 +414,8 @@ cancel 到达 submit reply 之前时保留 cancel 标志，等拿到 input id �
 
 ## 7. 输出投影
 
+出站 ACP 消息只用协议 crate 的类型（response 类型、`SessionUpdate`），字段在序列化前设好；不在序列化后再按 JSON Pointer 回读补字段。`_meta.lody` 走类型的 `meta`，`_meta["dim/history"]` 走 session response 的 `meta`。session update 只在 `projection::notification` 这一处变成 wire JSON：crate 会省略等于自身默认值的字段，而 tool call 的 `kind`/`status` 一直是客户端能读到的，所以这里把两者写全。
+
 | 原生数据 | ACP 输出 / 首版处理 |
 | --- | --- |
 | main `session.model.progress` 与 `step/text` / `step/thinking` | agent message/thought chunks；每 request 维护已发 Unicode scalar 区间。committed delta 是事实，progress 是可替换预览；重放、重连及 emoji 不重复、不截断。每个 chunk 带 `messageId`：assistant 文本/思考用产生它的 model request id，实时流与 `session/load` 重放同一条消息得到同一个 id |

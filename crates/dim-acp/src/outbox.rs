@@ -164,13 +164,18 @@ impl Reply {
     pub(crate) fn cancellation(&self) -> RequestCancellation {
         self.cancellation.clone()
     }
-    pub(crate) fn respond(self, value: Value) -> Result<(), Error> {
+    pub(crate) fn respond(self, value: impl serde::Serialize) -> Result<(), Error> {
         self.respond_with_result(Ok(value))
     }
     pub(crate) fn respond_with_error(self, error: Error) -> Result<(), Error> {
-        self.respond_with_result(Err(error))
+        self.respond_with_result(Err::<Value, Error>(error))
     }
-    pub(crate) fn respond_with_result(self, result: Result<Value, Error>) -> Result<(), Error> {
+    pub(crate) fn respond_with_result(
+        self,
+        result: Result<impl serde::Serialize, Error>,
+    ) -> Result<(), Error> {
+        let result = result
+            .and_then(|value| serde_json::to_value(value).map_err(|_| Error::internal_error()));
         let Some(responder) = self.responder.lock().unwrap().take() else {
             return Ok(());
         };
