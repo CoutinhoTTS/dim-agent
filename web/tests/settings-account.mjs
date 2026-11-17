@@ -10,7 +10,7 @@ import { nuxtUiTestPlugin } from "./helpers/nuxt-ui.mjs"
 globalThis.Document = class {}
 globalThis.ShadowRoot = class {}
 
-const settingsComponent = (url) => /\/(AccountSettings|ProviderAuthFlow|ProviderConnectionForm|ProviderSettings)\.vue$/.test(url)
+const settingsComponent = (url) => /\/(AccountSettings|ProviderAuthFlow|ProviderConnectionForm|ProviderModels|ProviderSettings)\.vue$/.test(url)
 registerHooks({
   resolve(specifier, context, next) {
     if (specifier === "../../stores/connection" || (specifier === "./connection" && context.parentURL?.endsWith("/stores/models.ts"))) {
@@ -409,5 +409,49 @@ test("connection configuration reads and writes summaries without requesting mod
     await flush()
     assert.equal(requests.filter(({ method }) => method === "provider.update").length, 1)
     assert.equal(route.name, "settings-providers")
+  } finally { app.unmount(); delete globalThis.settingsRoute; delete globalThis.settingsRouter; delete globalThis.settingsConnection }
+})
+
+test("a model search replaces a previous page cursor before load more can extend it", async () => {
+  const requests = []
+  const route = reactive({ name: "settings-provider-detail", params: { providerId: "relay" } })
+  const provider = { providerId: "relay", displayName: "Relay", source: "custom", credentialAuthority: "static", enabled: true, version: 1, actions: [],
+    connection: { driverKind: "openai-compatible", auth: { type: "bearer" }, baseUrl: "https://example.test/v1", credentialConfigured: true, headerNames: [], proxyUrl: null, proxyAuthConfigured: false, timeoutMs: null } }
+  const entry = (modelId) => ({ model: { modelId, displayName: modelId, status: "active",
+    capabilities: { modalities: ["text"], toolCalling: true, streaming: true, structuredOutput: false, vision: false, audio: false, reasoning: false }, metadata: undefined },
+    source: "default", enabled: true, endpoint: null, unavailableReason: null, missingLimits: [], actions: [] })
+  globalThis.settingsRoute = route
+  globalThis.settingsRouter = {}
+  globalThis.settingsConnection = { phase: "connected", client: { call: async (method, params, read) => {
+    requests.push({ method, params })
+    if (method === "provider.management.list") return read({ drivers: [], providers: [provider], errors: [], next: null })
+    assert.equal(method, "provider.management")
+    const query = params.page?.query ?? ""
+    return read({ drivers: [], errors: [], next: query ? "search-cursor" : "cursor-1",
+      providers: [{ ...provider, preferences: {}, models: [entry(query || "first")] }] })
+  } } }
+  const root = node("root")
+  const app = renderer.createApp(ProviderSettings).use(createPinia()).use(nuxtUiTestPlugin).provide(settingsDirtyKey, ref(false))
+  app.mount(root)
+  try {
+    await flush()
+    await all(root).find((element) => element.props.role === "tab" && text(element) === "models").props.onClick()
+    await flush()
+    const before = requests.filter(({ method }) => method === "provider.management")
+    assert.equal(before.length, 1)
+    assert.equal(before[0].params.page.after, undefined)
+    const search = all(root).filter((element) => element.type === "input" && element.props.type === "search").at(-1)
+    search.props["onUpdate:modelValue"]("later")
+    // The cursor above still names the previous query's rows: extending it
+    // would ask for a page of the new query after a foreign cursor.
+    await all(root).find((element) => element.type === "button" && text(element) === "loadMore").props.onClick()
+    await flush()
+    const searched = requests.filter(({ method, params }) => method === "provider.management" && params.page?.query === "later")
+    assert.ok(searched.length > 0)
+    assert.ok(searched.every(({ params }) => params.page.after === undefined), JSON.stringify(searched))
+    await all(root).find((element) => element.type === "button" && text(element) === "loadMore").props.onClick()
+    await flush()
+    assert.deepEqual(requests.at(-1).params.page, { query: "later", limit: 32, after: "search-cursor" })
+    assert.match(text(root), /later/)
   } finally { app.unmount(); delete globalThis.settingsRoute; delete globalThis.settingsRouter; delete globalThis.settingsConnection }
 })

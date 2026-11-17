@@ -5667,7 +5667,7 @@ fn home_after_new_drops_the_previous_sessions_effort() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
         wire.hello(&[
-            "provider.management",
+            "session.create.modelFromSession",
             "provider.management.list",
             "ui.open",
             "ui.close",
@@ -5713,16 +5713,10 @@ fn home_after_new_drops_the_previous_sessions_effort() {
         );
         wire.reply(&effort, json!({"outcome":"adopted"}));
 
-        // `/new` and its first message create the next Session, which has
-        // adopted no preference yet.
-        let providers = wire.read("provider.management");
-        assert_eq!(providers["params"], json!({"providerId":"test"}));
-        wire.reply(
-            &providers,
-            json!({"providers":[{"providerId":"test","source":"user",
-                "displayName":"Test","preferences":{}}],"errors":[]}),
-        );
+        // `/new` and its first message create the next Session, which
+        // inherits the model and has adopted no preference yet.
         let create = wire.read("session.create");
+        assert_eq!(create["params"]["modelFromSession"], "session");
         assert!(
             create["params"].get("modelPreferences").is_none(),
             "{create}"

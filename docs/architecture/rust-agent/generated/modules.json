@@ -31447,7 +31447,9 @@
         "path ProviderService",
         "path crate::provider::ProviderCatalog",
         "path crate::provider::ProviderSelection",
+        "path super::ProviderCatalog",
         "path super::ProviderError",
+        "path super::ProviderError::Failed",
         "path super::ProviderError::InvalidConfig",
         "use super::ProviderService"
       ]
@@ -31459,7 +31461,9 @@
         "path super::CreateProvider",
         "path super::ProbeProvider",
         "path super::ProviderPatch",
-        "path super::UpdateReplyKind"
+        "path super::UpdateReplyKind",
+        "path super::UpdateReplyKind::Full",
+        "path super::UpdateReplyKind::Summary"
       ]
     },
     {

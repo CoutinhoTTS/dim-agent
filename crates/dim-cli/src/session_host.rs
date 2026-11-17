@@ -831,7 +831,8 @@ impl Worker {
         // A choice made at Home came after the launch flag, so it replaces
         // that flag's member and leaves the rest of the creation's
         // preferences alone. `modelFromSession` denies the member entirely.
-        let from_session = self.model_session.is_some();
+        let from_session =
+            self.model_session.is_some() && self.client.offers("session.create.modelFromSession");
         if let (false, Some((_, pending))) = (from_session, &self.pending) {
             let mut preferences = params["modelPreferences"]
                 .as_object()
@@ -854,12 +855,16 @@ impl Worker {
             None
         };
         let result = async {
-            if let Some(source) = &self.model_session {
+            if let Some(source) = &self.model_session
+                && self.client.offers("session.create.modelFromSession")
+            {
                 params["modelFromSession"] = json!(source);
             } else if let Some(model) = &self.model {
                 let (provider, model) = (model.provider_id.clone(), model.model_id.clone());
                 params["model"] = json!({"provider": provider, "modelId": model});
                 target = Some((provider, model));
+            } else if self.model_session.is_some() {
+                return Err("This daemon cannot copy the adopted Session model. Restart the daemon with a version supporting session.create.modelFromSession, then rebind the temporary connection with DIM_BASE_URL and DIM_API_FORMAT".into());
             }
             match self.client.typed::<Created>("session.create", params).await {
                 Ok(created) => Ok(created),
@@ -3813,7 +3818,9 @@ impl Worker {
                 // `/new` after a Session inherits that Session's model
                 // through `modelFromSession`, which a creation's preferences
                 // cannot accompany: the choice would silently never arrive.
-                if self.model_session.is_some() {
+                if self.model_session.is_some()
+                    && self.client.offers("session.create.modelFromSession")
+                {
                     self.report(
                         "The next Session inherits its model; run the command there.".into(),
                         true,

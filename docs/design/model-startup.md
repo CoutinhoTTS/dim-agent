@@ -130,8 +130,10 @@ them through the existing configuration path before accepting the first input.
 It does not rewrite existing branch history or reconfigure existing members.
 
 New Sessions inheriting an adopted model use `session.create.modelFromSession`
-directly. The CLI and daemon use the current contract; there is no fallback to
-Provider membership reads or reconstruction from model IDs.
+only when the daemon advertises it, as [model configuration](model-configuration.md#temporary-startup-adoption)
+requires. Otherwise the CLI names the configured model shown at Home, and
+without one it refuses with the mismatch instead of creating a Session. There is
+no fallback to Provider membership reads or reconstruction from model IDs.
 
 Automatic title generation still uses the auxiliary model path's catalog
 `ModelId`, which carries no startup connection binding. A temporary direct

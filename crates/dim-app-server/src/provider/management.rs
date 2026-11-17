@@ -11,6 +11,19 @@ use rutis::{Ctx, Error};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+/// A model write's reply: the full catalog by default, the committed version
+/// alone for a caller that rereads only the rows it needs.
+fn model_catalog_reply(
+    catalog: super::ProviderCatalog,
+    kind: super::UpdateReplyKind,
+) -> Result<serde_json::Value, RpcError> {
+    let version = catalog.version;
+    match kind {
+        super::UpdateReplyKind::Full => reply(catalog),
+        super::UpdateReplyKind::Summary => reply(serde_json::json!({"version":version})),
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ImportLegacyProviders {
@@ -40,6 +53,8 @@ pub struct CreateModel {
     pub provider_id: String,
     pub expected_version: u32,
     pub model: crate::model_catalog::ModelEntry,
+    #[serde(default)]
+    pub reply: super::UpdateReplyKind,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -48,6 +63,8 @@ pub struct UpdatePreferences {
     pub expected_version: u32,
     pub model_id: String,
     pub patch: super::PreferencesPatch,
+    #[serde(default)]
+    pub reply: super::UpdateReplyKind,
 }
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -82,6 +99,8 @@ pub struct EditModel {
     pub expected_version: u32,
     pub model_id: String,
     pub edit: crate::model_catalog::ModelEdit,
+    #[serde(default)]
+    pub reply: super::UpdateReplyKind,
 }
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -89,6 +108,8 @@ pub struct ResetModel {
     pub provider_id: String,
     pub expected_version: u32,
     pub model_id: String,
+    #[serde(default)]
+    pub reply: super::UpdateReplyKind,
 }
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -211,36 +232,42 @@ pub(super) fn provide(
                     }
                     "provider.models.create" => {
                         let p: CreateModel = params(value)?;
-                        reply(
-                            provider
-                                .create_model(p.provider_id, p.expected_version, p.model, cancel)
-                                .await
-                                .map_err(error)?,
-                        )
+                        let catalog = provider
+                            .create_model(p.provider_id, p.expected_version, p.model, cancel)
+                            .await
+                            .map_err(error)?;
+                        model_catalog_reply(catalog, p.reply)
                     }
                     "provider.models.delete" => {
                         let p: ResetModel = params(value)?;
-                        reply(
-                            provider
-                                .delete_model(p.provider_id, p.expected_version, p.model_id, cancel)
-                                .await
-                                .map_err(error)?,
-                        )
+                        let catalog = provider
+                            .delete_model(p.provider_id, p.expected_version, p.model_id, cancel)
+                            .await
+                            .map_err(error)?;
+                        model_catalog_reply(catalog, p.reply)
                     }
                     "provider.preferences.update" => {
                         let p: UpdatePreferences = params(value)?;
-                        reply(
-                            provider
-                                .update_preferences(
-                                    p.provider_id,
-                                    p.expected_version,
-                                    p.model_id,
-                                    p.patch,
-                                    cancel,
-                                )
-                                .await
-                                .map_err(error)?,
-                        )
+                        let updated = provider
+                            .update_preferences(
+                                p.provider_id,
+                                p.expected_version,
+                                p.model_id,
+                                p.patch,
+                                cancel,
+                            )
+                            .await
+                            .map_err(error)?;
+                        let version = updated
+                            .info
+                            .version
+                            .ok_or_else(|| error(super::ProviderError::Failed))?;
+                        match p.reply {
+                            super::UpdateReplyKind::Full => reply(updated),
+                            super::UpdateReplyKind::Summary => {
+                                reply(serde_json::json!({"version":version}))
+                            }
+                        }
                     }
                     "provider.catalog" => {
                         let p: ManagementScope = params(value)?;
@@ -299,33 +326,31 @@ pub(super) fn provide(
                     }
                     "provider.models.edit" => {
                         let p: EditModel = params(value)?;
-                        reply(
-                            provider
-                                .update_model_config(
-                                    p.provider_id,
-                                    p.expected_version,
-                                    p.model_id,
-                                    Some(p.edit),
-                                    cancel,
-                                )
-                                .await
-                                .map_err(error)?,
-                        )
+                        let catalog = provider
+                            .update_model_config(
+                                p.provider_id,
+                                p.expected_version,
+                                p.model_id,
+                                Some(p.edit),
+                                cancel,
+                            )
+                            .await
+                            .map_err(error)?;
+                        model_catalog_reply(catalog, p.reply)
                     }
                     "provider.models.reset" => {
                         let p: ResetModel = params(value)?;
-                        reply(
-                            provider
-                                .update_model_config(
-                                    p.provider_id,
-                                    p.expected_version,
-                                    p.model_id,
-                                    None,
-                                    cancel,
-                                )
-                                .await
-                                .map_err(error)?,
-                        )
+                        let catalog = provider
+                            .update_model_config(
+                                p.provider_id,
+                                p.expected_version,
+                                p.model_id,
+                                None,
+                                cancel,
+                            )
+                            .await
+                            .map_err(error)?;
+                        model_catalog_reply(catalog, p.reply)
                     }
                     "provider.selection" => {
                         let p: SelectionScope = params(value)?;

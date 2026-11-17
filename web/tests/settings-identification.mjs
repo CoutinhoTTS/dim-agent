@@ -118,10 +118,11 @@ test("a model row says how its id was identified, and an ambiguous one names the
 
 test("model management searches on the server, loads more and rereads only a changed model", async t => {
   const calls = [], loads = [], updates = []
-  const shown = { ...provider, models: [entry("visible", undefined, { actions: ["set_enabled", "edit"] }), entry("other", undefined)] }
+  const shown = { ...provider, models: [entry("visible", undefined, { actions: ["set_enabled", "edit"] }), entry("other", undefined, { actions: ["delete"] })] }
   globalThis.modelsConnection = reactive({ phase: "connected", supports: () => true, client: { call: async (method, params, read) => {
     calls.push([method, params])
     if (method === "provider.model.set_enabled") return read({ version: 2 })
+    if (method === "provider.models.delete") return read({ version: 3 })
     if (method === "provider.management") return read({ drivers: [], errors: [], next: null, providers: [{ ...shown, version: 2, models: [entry("visible", undefined, { enabled: false, actions: ["set_enabled", "edit"] })] }] })
     throw new Error(`unexpected ${method}`)
   } } })
@@ -144,6 +145,9 @@ test("model management searches on the server, loads more and rereads only a cha
   assert.equal(updates[0].models.length, 2)
   assert.equal(updates[0].models.find(m => m.model.modelId === "visible").enabled, false)
   assert.equal(updates[0].models.find(m => m.model.modelId === "other").enabled, true)
+  all(root).find(n => n.type === "button" && text(n) === "remove").props.onClick()
+  await flush()
+  assert.deepEqual(calls.at(-1), ["provider.models.delete", { providerId: "relay", expectedVersion: 1, modelId: "other", reply: "summary" }])
   all(root).find(n => n.type === "button" && text(n) === "edit").props.onClick()
   await flush()
   assert.deepEqual(calls.at(-1), ["provider.management", { providerId: "relay", modelId: "visible" }])

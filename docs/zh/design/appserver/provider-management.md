@@ -218,9 +218,11 @@ Provider 列表 -> 连接配置 -> 保存（摘要与提交版本）
 | `provider.create` | `{providerId,displayName,connection,models:ModelEntry[],enabled,gluedPrefix?}` | `ManagementProvider`；只创建，客户端生成新 UUID，已存在 ID 冲突；`gluedPrefix` 按 patch 的规则：去空白，空值即未声明 | true | `Drain` |
 | `provider.update` | `{providerId,expectedVersion,patch}` | `ManagementProvider`；校验后单事务局部写入；patch 改动 `baseUrl`、`credential` 或 `headers` 时，同一次 CAS 写入还用新 endpoint 的列举结果替换记录自身的模型，`modelsListed` 说明结果；只改 `network` 时单独保存 | true | `Drain` |
 | `provider.probe` | `{providerId,connection}` | `{models:ModelEntry[]}`；只做 §3.3 网络探测，不写入或检查版本 | false | `Drain` |
-| `provider.models.create` | `{providerId,expectedVersion,model:ModelEntry}` | 既有 catalog；写独立用户新增列表，与默认/用户项重复的 ID 拒绝；以启用状态新增，同事务清掉该 ID 遗留的 modelConfigOverrides、disabledModelIds、modelPreferences 和 endpointOverrides 项 | true | `Drain` |
-| `provider.models.delete` | `{providerId,expectedVersion,modelId}` | 既有 catalog；仅删用户新增项，同事务移除该 ID 的 disabledModelIds 项并清理自有偏好/路由/选择 | true | `Drain` |
-| `provider.preferences.update` | `{providerId,expectedVersion,modelId,patch}` | `ManagementProvider`；effort/tier 分别 set/clear，按模型校验 | true | `Drain` |
+| `provider.models.create` | `{providerId,expectedVersion,model:ModelEntry,reply?:"full" \| "summary"}` | 默认返回既有 catalog，`reply:"summary"` 返回 `{version}`；写独立用户新增列表，与默认/用户项重复的 ID 拒绝；以启用状态新增，同事务清掉该 ID 遗留的 modelConfigOverrides、disabledModelIds、modelPreferences 和 endpointOverrides 项 | true | `Drain` |
+| `provider.models.delete` | `{providerId,expectedVersion,modelId,reply?:"full" \| "summary"}` | 默认返回既有 catalog，`reply:"summary"` 返回 `{version}`；仅删用户新增项，同事务移除该 ID 的 disabledModelIds 项并清理自有偏好/路由/选择 | true | `Drain` |
+| `provider.preferences.update` | `{providerId,expectedVersion,modelId,patch,reply?:"full" \| "summary"}` | 默认返回 `ManagementProvider`，`reply:"summary"` 返回 `{version}`；effort/tier 分别 set/clear，按模型校验 | true | `Drain` |
+
+`provider.models.edit` 与 `provider.models.reset` 接受同样的可选 `reply`，分别答复既有 catalog 或 `{version}`。只重读所改行的客户端请求 summary，提交后的版本即其下次写入的 CAS 令牌；省略 `reply` 时对既有调用方保留完整答复。
 
 客户端发送前生成并保留 UUID。create 只接受规范的小写、带连字符 UUID，其他值返回
 `provider_invalid_config`，不从名称生成 identity。已有内置/导入的非 UUID ID 对其他方法

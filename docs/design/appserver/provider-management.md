@@ -395,9 +395,14 @@ typed errors in §3.4. Existing writes retain `mutating:true`, `interruption:Dra
 | `provider.create`  | `{providerId, displayName, connection, models: ModelEntry[], enabled, gluedPrefix?}` | `ManagementProvider`; create-only, caller-generated fresh UUID, existing ID conflicts; `gluedPrefix` takes the patch's rule: trimmed, and an empty one states none | true | `Drain` |
 | `provider.update`  | `{providerId, expectedVersion, patch, reply?: "full" \| "summary"}` | `ManagementProvider` by default; `reply:"summary"` returns the committed safe `ManagementInfo` plus optional `modelsListed`; validate and commit one partial update transaction; a patch that changes `baseUrl`, `credential` or `headers` also replaces the record's own models with the new endpoint's listing in that same compare-and-set write, and `modelsListed` says what it did; a `network`-only change saves alone | true | `Drain` |
 | `provider.probe`  | `{providerId, connection}` | `{models: ModelEntry[]}`; §3.3, no record writes or version check | false | `Drain` |
-| `provider.models.create`  | `{providerId, expectedVersion, model: ModelEntry}` | Existing catalog; separate user-added list; duplicate default or user ID rejected; add enabled and remove any stale `modelConfigOverrides`, `disabledModelIds`, `modelPreferences` and `endpointOverrides` entries for that ID in the same transaction | true | `Drain` |
-| `provider.models.delete`  | `{providerId, expectedVersion, modelId}` | Existing catalog; only user-added items; remove that ID from `disabledModelIds` and clean owned preferences/routes/selections in the same transaction | true | `Drain` |
-| `provider.preferences.update`  | `{providerId, expectedVersion, modelId, patch}` | `ManagementProvider`; effort/tier independently set/clear, validated against the model | true | `Drain` |
+| `provider.models.create`  | `{providerId, expectedVersion, model: ModelEntry, reply?: "full" \| "summary"}` | Existing catalog by default, `{version}` for `reply:"summary"`; separate user-added list; duplicate default or user ID rejected; add enabled and remove any stale `modelConfigOverrides`, `disabledModelIds`, `modelPreferences` and `endpointOverrides` entries for that ID in the same transaction | true | `Drain` |
+| `provider.models.delete`  | `{providerId, expectedVersion, modelId, reply?: "full" \| "summary"}` | Existing catalog by default, `{version}` for `reply:"summary"`; only user-added items; remove that ID from `disabledModelIds` and clean owned preferences/routes/selections in the same transaction | true | `Drain` |
+| `provider.preferences.update`  | `{providerId, expectedVersion, modelId, patch, reply?: "full" \| "summary"}` | `ManagementProvider` by default, `{version}` for `reply:"summary"`; effort/tier independently set/clear, validated against the model | true | `Drain` |
+
+`provider.models.edit` and `provider.models.reset` take the same additive `reply`
+selection and answer the existing catalog or `{version}`. A client that rereads
+only the edited row requests the summary; the committed version is the CAS token
+for its next write. Absent `reply` keeps the full reply for existing callers.
 
 The client generates and retains the UUID before sending. `create` accepts only
 a canonical lowercase hyphenated UUID; another value returns

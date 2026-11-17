@@ -1604,7 +1604,7 @@ fn home_creation_inherits_adopted_models_without_provider_management() {
                 if wire.2 && wire.empty_state(&request) { continue; }
                 let result = match request["method"].as_str().unwrap() {
                     "hello" => {
-                        let mut features = vec!["session.create", "session.history", "session.history.latestTurn", "session.input.pending.blockPresence", "session.methods", "provider.list"];
+                        let mut features = vec!["session.create", "session.create.modelFromSession", "session.history", "session.history.latestTurn", "session.input.pending.blockPresence", "session.methods", "provider.list"];
                         if management {
                             features.push("provider.management");
                         }
