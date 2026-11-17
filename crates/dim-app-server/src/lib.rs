@@ -790,8 +790,8 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             Ok(Box::new(workspace_files::WorkspaceFilesPlugin::new(names)?))
         })?);
     }
-    rows.push(register_part(&mut builtins, builder.catalog(), |names| {
-        Ok(Box::new(connection::CallChannelPlugin::new(names)?))
+    rows.push(register_part(&mut builtins, builder.catalog(), |_| {
+        Ok(Box::new(connection::CallChannelPlugin))
     })?);
     let host_account_methods = product_root.is_some();
     rows.push(register_part(
@@ -1383,14 +1383,14 @@ pub(crate) fn register_names(catalog: &mut dim_agent_runtime::names::ServiceCata
     register::<ProcessActivity>(catalog, None);
     register::<storage::SqliteStorage>(catalog, None);
     register::<storage::SessionStore>(catalog, None);
+    register::<storage::Store>(catalog, None);
+    catalog.register_shared("store");
     register::<worktrees::ManagedWorktrees>(catalog, None);
-    register::<agents::AgentDirectory>(catalog, None);
     register::<AgentIndex>(catalog, None);
     register::<rutis_loader::Loader>(catalog, None);
     catalog.register_shared(dim_agent_runtime::names::name_of::<
         collaboration::CollaborationDirectory,
     >());
-    register::<collaboration::Collaboration>(catalog, None);
     register::<plugin_files::PluginFileTransactions>(catalog, None);
     register::<ConnectionHub>(catalog, None);
     catalog.register_shared(dim_agent_runtime::names::name_of::<ListenAddresses>());
@@ -1398,6 +1398,8 @@ pub(crate) fn register_names(catalog: &mut dim_agent_runtime::names::ServiceCata
     register::<ui_extensions::UiExtensions>(catalog, None);
     register::<ui_extensions::UiResources>(catalog, Some(SESSION_GROUP));
     register::<settings::SettingsService>(catalog, None);
+    register::<storage::SessionMetadataService>(catalog, None);
+    register::<settings::Settings>(catalog, None);
     register::<managed_provider::ManagedSearch>(catalog, None);
     register::<dyn managed_provider::ManagedProvider>(catalog, None);
     register::<codex_oauth::OpenAICodexOAuthService>(catalog, None);
@@ -1405,17 +1407,15 @@ pub(crate) fn register_names(catalog: &mut dim_agent_runtime::names::ServiceCata
     register::<provider::ProviderSecretHost>(catalog, None);
     register::<provider::ProviderService>(catalog, None);
     catalog.register_shared(dim_agent_runtime::names::name_of::<SelectableModelsHost>());
-    register::<mcp::McpService>(catalog, None);
-    register::<mcp::McpAuth>(catalog, None);
-    register::<mcp::Publication>(catalog, None);
+    catalog.register_shared("mcpService");
     register::<hooks_settings::HooksService>(catalog, None);
+    catalog.register_shared("hooksService");
     register::<methods::ManagementMethods>(catalog, None);
     catalog.register_shared(dim_agent_runtime::names::name_of::<
         methods::ManagementMethods,
     >());
-    register::<dim_agent_capabilities::methods::Callers>(catalog, None);
     register::<runtime_manager::RuntimeService>(catalog, None);
-    register::<collaboration::CollaborationSession>(catalog, Some(SESSION_GROUP));
+    catalog.register_shared_instance("collaborationSession", SESSION_GROUP);
     register::<mcp::McpSession>(catalog, Some(SESSION_GROUP));
     for name in [
         "callChannel",
@@ -1437,15 +1437,9 @@ pub(crate) fn register_names(catalog: &mut dim_agent_runtime::names::ServiceCata
 pub fn register_faces(builder: &mut dim_agent_runtime::AgentBuilder) {
     for (name, reason) in [
         ("promptSourcesBranch", "hot-path"),
-        ("agentDirectory", "owner-api"),
         ("agentIndex", "owner-api"),
         ("agentLoop", "hot-path"),
-        ("branchLine", "hot-path"),
         ("branchOpening", "hot-path"),
-        ("callers", "owner-api"),
-        ("collaboration", "host-resource"),
-        ("collaborationSession", "legacy-no-consumer"),
-        ("commandRulesHost", "hot-path"),
         ("compactionStrategyHost", "hot-path"),
         ("configurationPublisher", "hot-path"),
         ("configureControl", "hot-path"),
@@ -1458,15 +1452,11 @@ pub fn register_faces(builder: &mut dim_agent_runtime::AgentBuilder) {
         ("fileStorage", "object"),
         ("grokOAuthService", "secret"),
         ("historyRenderer", "hot-path"),
-        ("hooksService", "host-resource"),
         ("hostPlatform", "object"),
-        ("initialPromptConfiguration", "hot-path"),
         ("loader", "owner-api"),
         ("loopState", "hot-path"),
         // Session creation calls it directly; no leaf needs the service.
         ("managedWorktrees", "hot-path"),
-        ("mcpAuth", "secret"),
-        ("mcpService", "host-resource"),
         ("mentionIndex", "host-resource"),
         ("modelHost", "owner-api"),
         ("openAICodexOAuthService", "secret"),
@@ -1474,22 +1464,15 @@ pub fn register_faces(builder: &mut dim_agent_runtime::AgentBuilder) {
         ("prepareContextHost", "hot-path"),
         ("prepareModelHost", "hot-path"),
         ("prompt", "hot-path"),
-        ("promptHost", "hot-path"),
-        ("promptRegistry", "hot-path"),
         ("providerConnectionResolver", "host-resource"),
         ("providerService", "secret"),
-        ("publication", "host-resource"),
         ("serverControl", "control"),
         ("sessionLoader", "control"),
-        ("sessionSkills", "host-resource"),
         ("sessionStore", "owner-api"),
         ("settingsService", "owner-api"),
-        ("skillsBranch", "host-resource"),
-        ("skillsCatalog", "host-resource"),
         ("sqliteStorage", "object"),
         ("submitChecks", "hot-path"),
         ("timelineFactory", "control"),
-        ("timelineStore", "object"),
         ("timelineTree", "owner-api"),
         ("timelineTreeControl", "owner-api"),
         ("toolBinding", "hot-path"),
