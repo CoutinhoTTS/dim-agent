@@ -1994,6 +1994,7 @@ fn acp_terminal_auth_helper_rediscovers_the_method_and_uses_the_same_home() {
             methods.extend([
                 "account.providers",
                 "provider.management",
+                "provider.management.list",
                 "account.login.begin",
                 "provider.refresh",
             ]);
@@ -2006,7 +2007,7 @@ fn acp_terminal_auth_helper_rediscovers_the_method_and_uses_the_same_home() {
             let mut wire = accept_native(&listener);
             wire.hello(&methods);
             providers(&mut wire);
-            let listed = wire.read("provider.management");
+            let listed = wire.read("provider.management.list");
             wire.reply(
                 &listed,
                 json!({"providers":[{"providerId":"fixture","displayName":"Fixture","account":{"namespace":"account","loginMethods":["device"]}}]}),

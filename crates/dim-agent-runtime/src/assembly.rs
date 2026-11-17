@@ -193,8 +193,7 @@ pub(crate) struct Assembly {
     /// instance could be found; the Agent's close waits for them.
     pub abandoned: tokio_util::task::TaskTracker,
     values: Vec<Provide>,
-    /// The names of `values`, each a Session name.
-    value_names: Vec<String>,
+    value_names: Vec<(String, bool)>,
     process_values: Vec<ProcessValue>,
     /// The process plugins the builder adds ([`AgentBuilder::plugin`]).
     plugins: Vec<PartMake>,
@@ -495,7 +494,9 @@ impl AgentBuilder {
     /// catalog must register the name in the Session group; installing the
     /// assembly fails otherwise.
     pub fn session_value<T: ?Sized + Send + Sync + 'static>(&mut self, value: Arc<T>) -> &mut Self {
-        self.assembly.value_names.push(crate::names::name_of::<T>());
+        self.assembly
+            .value_names
+            .push((crate::names::name_of::<T>(), false));
         self.assembly.values.push(Arc::new(move |ctx, scope| {
             ctx.provide_at::<T>(scope.key::<T>(), value.clone())?;
             Ok(())
@@ -510,7 +511,7 @@ impl AgentBuilder {
         T: rutis_bridge::session::HostDispatch + 'static,
     {
         let name = crate::names::name_of::<T>();
-        self.assembly.value_names.push(name.clone());
+        self.assembly.value_names.push((name.clone(), true));
         self.assembly.values.push(Arc::new(move |ctx, scope| {
             ctx.provide_at::<T>(scope.key::<T>(), value.clone())?;
             ctx.provide_at(
@@ -608,9 +609,14 @@ impl AgentBuilder {
             let branch_scope_module = modules.name("BranchScope", builtins).await;
             let mut session = vec![row(&session_scope_module)];
             let catalog = Arc::new(self.catalog.clone());
-            for name in &assembly.value_names {
+            for (name, requires_shared) in &assembly.value_names {
                 crate::names::named_in_group(&catalog, name, SESSION_GROUP)
                     .map_err(|error| AgentError::Build(format!("a Session value: {error}")))?;
+                if *requires_shared && !catalog.is_shared(name) {
+                    return Err(AgentError::Build(format!(
+                        "a Session data value: {name} is not a shared Session service"
+                    )));
+                }
             }
             if !assembly.process_values.is_empty() {
                 register_process_values(&assembly.process_values, &catalog, builtins).await?;
