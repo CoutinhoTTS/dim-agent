@@ -118,7 +118,9 @@ void entry(void) {
         win32.close(handle)
         process.kill(); process.wait()
 
-    console = win32.Console(['cmd.exe','/c','echo layout-conpty & ping -n 6 127.0.0.1 >nul'], root, dict(os.environ),
+    (root / 'echoer.c').write_text('#include <stdio.h>\n#include <windows.h>\nint main(void) { printf("layout-conpty\\n"); fflush(stdout); Sleep(5000); return 0; }\n')
+    subprocess.run(['cl','/nologo',str(root/'echoer.c'),'/Fe:'+str(root/'echoer.exe')],check=True)
+    console = win32.Console([str(root/'echoer.exe')], root, dict(os.environ),
                             suspended=False, inherit_environment=True)
     try:
         capture = bytearray()
