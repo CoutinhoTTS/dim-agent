@@ -1,6 +1,6 @@
 {
   "parent_commit": "eb6d38c1ae31d208da47024e51a86c4d3655adfb",
-  "hash_scope": "Exact files of this experiment; parent_commit identifies the unchanged runtime baseline. No claim about later main.",
+  "hash_scope": "Every source_sha256 entry matches source_revision, including modified flow tests and Questions rustdoc. parent_commit is the experiment parent, not the revision for all hashes. main_integration is a separate later snapshot. No claim about later main.",
   "java": "OpenJDK 17.0.18",
   "tlc": "2.19 / tla2tools 1.7.4",
   "jar_sha256": "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88",
@@ -118,6 +118,8 @@
       }
     ],
     "clippy": "context_flow and local_execution passed with -D warnings",
-    "tlc": "Unchanged models/configs: reuse recorded runs, not rerun."
-  }
+    "tlc": "Unchanged models/configs: reuse recorded runs, not rerun.",
+    "source_revision": "4625f6aa3b27cd74508435838dfa23afb8cf76b7"
+  },
+  "source_revision": "e67db3d2c6017d1e47162c804445e57d840189f0"
 }

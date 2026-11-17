@@ -54,3 +54,8 @@ ModelProvider 新增异步图片适配与可选 SessionFiles，rebuild/consume �
 不改写上一次实验的输入快照。模型/config 未变，复用 TLC；不称本轮重新执行。
 同时按 C 的非阻塞评审，将等待名称修正为实际调用的 Session::idle。
 消融：只保留两个原有目录入口和精确证据更新，未增模型、运行时抽象或业务规则。
+
+后续 `fba809a6e` 合入 main `4cf76519d`，README 增加 B 的查询入口，保留 B/C/D 三项；
+上节 `main_integration` 保留先前实验快照，不代表这个后续合并。最新 CI 修复与验证在 #1732 / PR #1742 记录。
+JSON 的 `source_revision` 现在明确给出每组源码哈希可统一核对的提交，
+包含实验新增测试；`parent_commit` 不是测试文件的哈希版本。

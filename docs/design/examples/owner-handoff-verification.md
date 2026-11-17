@@ -64,7 +64,7 @@
 - interrupt 可以先提交，Loop 仍在处理更早的完成事件，因而写出排在 interrupt 后面的请求；`late` 记录这个窗口，**不阻止它发生**。
 - ToolExecutor 消费 interrupt 后取消当前工作；读到迟到请求时写未执行结果。已经开始的工作可晚于 interrupt 完成。
 - `Invoke` 代表取消检查之后进入工具；`Finish` 代表其任务退出和结果提交，外部资源释放是 host 的前提。
-- 一个 turn 一项顶层 batch；第二配置允许下一 turn，检查 turn 边界清除中断后新工作仍能运行。下一 turn 在前一 end 派发完后开始，省略同一 end 回调内提前追加 start 的窗口。
+- 本模型限定一个 turn 一项顶层 batch，不覆盖同一 turn 两个顶层 batch 之间的中断；生产实现可在工具结果后继续同 turn 的下一请求。第二配置允许下一 turn，检查 turn 边界清除中断后新工作仍能运行。下一 turn 在前一 end 派发完后开始，省略同一 end 回调内提前追加 start 的窗口。
 
 检查：迟到请求不启动、被拒请求已有结果、已交出 batch 的 turn 不先结束、消费位置保持前缀；
 动作性质检查生产方使用本地消费状态、工具不在本地已取消后启动。没有假设调度公平或声称最终终止。
@@ -81,7 +81,7 @@
 - `NormalReply` 是正常 Wait 返回（如超时）的对照；旧 Loop 可决定继续。带 reload 标记的结果、或恢复出来的未结束 turn 则失败，不再继续旧 turn。
 - `Crash` 只保留 durable 前缀，丢失句柄与旧代调用；没有执行正常 unload。新 ToolExecutor 对持久化未结束 batch 补终态。已经发生的抽象 host effect 不因崩溃回滚。
 - 模型的 query/rebuild 失败只置对应 owner failed；`Settle(FALSE)` 表示终态 append 失败，`StorageFailure` 表示尾部落盘失败。这只表示查询失败没有直接设置存储故障；不表示实际装配继续健康运行。
-  required capability 的 apply 失败会使 branch build 失败并触发回滚（插件合同 §2–3）；
+  required capability 的 apply 失败会使 branch build 失败并触发回滚（[实例创建合同](../../architecture/rust-agent/single-tree.md)；插件合同 §7.1 规定发布后的 activated）；
   本模型没有装配/回滚动作，不能用另一个 owner 仍可转换来证明真实分支会继续运行。
 
 边界：只含一个已持久化顶层调用，不覆盖未持久化 call 的丢失、嵌套工具效果合并、任意多代、所有 host 的取消实现。
