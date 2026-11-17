@@ -248,6 +248,47 @@ int main(void) {
         console.terminate()
         console.close()
 
+    pipe = os.pipe
+    for operation in ('CreatePseudoConsole', 'InitializeProcThreadAttributeList',
+                      'UpdateProcThreadAttribute', 'CreateProcessW'):
+        descriptors = []
+        native = getattr(win32.kernel32, operation)
+        def allocate_pipe():
+            pair = pipe()
+            descriptors.extend(pair)
+            return pair
+        def refuse(*args):
+            if operation == 'InitializeProcThreadAttributeList' and args[0] is None:
+                return native(*args)
+            win32.ctypes.set_last_error(5)
+            return -2147467259 if operation == 'CreatePseudoConsole' else False
+        try:
+            with patch.object(os, 'pipe', side_effect=allocate_pipe), \
+                 patch.object(win32.kernel32, operation, side_effect=refuse):
+                try:
+                    win32.Console([str(root/'echoer.exe')], root, dict(os.environ))
+                except OSError as error:
+                    if operation == 'CreatePseudoConsole':
+                        assert '0x80004005' in str(error), error
+                    else:
+                        assert error.winerror == 5, error
+                else:
+                    raise AssertionError(f'{operation} failure must reject console creation')
+            assert len(descriptors) == 4
+            for descriptor in descriptors:
+                try:
+                    os.fstat(descriptor)
+                except OSError as error:
+                    assert error.errno == __import__('errno').EBADF, error
+                else:
+                    raise AssertionError(f'{operation} left pipe {descriptor} open')
+        finally:
+            for descriptor in descriptors:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+
     original_console = win32.Console
     handles = []
     clock = [0]

@@ -112,6 +112,7 @@ def tui(binary, home, stack, probe, profile):
         env["DIM_LAYOUT_NO_EXIT_STOP"] = "1"
 
     def sample(client):
+        client.send_signal(signal.SIGSTOP)
         stopped(client)
         profile.write_text(Path(f"/proc/{client.pid}/smaps").read_text())
         client.send_signal(signal.SIGCONT)

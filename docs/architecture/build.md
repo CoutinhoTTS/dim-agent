@@ -68,8 +68,8 @@ byte for byte, and trains only that binary. A temporary preload probe prefaults
 its executable pages, separates their mappings, clears reference bits and resets
 code-page permissions to invalidate cached translations before `main`, and reads
 the App Server's referenced pages after normal shutdown. The TUI opens and
-closes its model picker three times, is sampled before its explicit exit, and
-must then exit successfully.
+closes its model picker three times, is paused with `SIGSTOP` for the sample,
+then resumes before its explicit exit and must exit successfully.
 
 Whole functions intersecting referenced pages are grouped by shared usage:
 startup/shared functions first, then TUI, then conversation-only functions;
@@ -272,6 +272,10 @@ and temporary homes are removed on completion or failure. Scheduling can change
 which neighboring pages a training run observes, so the optimized artifact is
 not promised to be byte-identical across training runs; each build regenerates
 its own order.
+
+On macOS and Windows, each manifest `inputs` entry records absolute `file`
+(archived copy) and `source` (original linker input) paths on the originating
+build host, plus the archived copy's `sha256`.
 
 ## Development and CI
 

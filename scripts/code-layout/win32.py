@@ -291,6 +291,7 @@ class Console:
 
     def __init__(self, arguments, cwd, environment, columns=120, rows=30):
         import msvcrt
+        self._stop = threading.Event()
         self._child_in, self._master_in = os.pipe()
         self._master_out, self._child_out = os.pipe()
         self._console = HPCON()
@@ -312,14 +313,16 @@ class Console:
         if not kernel32.InitializeProcThreadAttributeList(
             attributes, 1, 0, ctypes.byref(size)
         ):
+            error = ctypes.WinError(ctypes.get_last_error())
             self.close()
-            raise ctypes.WinError(ctypes.get_last_error())
+            raise error
         if not kernel32.UpdateProcThreadAttribute(
             attributes, 0, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
             self._console, ctypes.sizeof(HPCON), None, None,
         ):
+            error = ctypes.WinError(ctypes.get_last_error())
             self.close()
-            raise ctypes.WinError(ctypes.get_last_error())
+            raise error
 
         startup = STARTUPINFOEXW()
         startup.StartupInfo.cb = ctypes.sizeof(STARTUPINFOEXW)
@@ -334,8 +337,9 @@ class Console:
             None, command, None, None, False, flags, environment_block,
             str(cwd), ctypes.byref(startup), ctypes.byref(process),
         ):
+            error = ctypes.WinError(ctypes.get_last_error())
             self.close()
-            raise ctypes.WinError(ctypes.get_last_error())
+            raise error
         self._process = process.hProcess
         self._thread = process.hThread
         self.pid = process.dwProcessId
@@ -344,7 +348,6 @@ class Console:
         self._buffer = bytearray()
         self.error = None
         self._lock = threading.Lock()
-        self._stop = threading.Event()
         self._reader = threading.Thread(target=self._read, daemon=True)
         self._reader.start()
 
