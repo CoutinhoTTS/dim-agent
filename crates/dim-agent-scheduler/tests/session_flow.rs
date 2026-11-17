@@ -1899,6 +1899,7 @@ async fn a_failed_release_heals_at_the_next_retention_pass() {
     server.join().await.unwrap();
     seed_legacy_reuse_job(home.path(), &launched);
 
+    let startup_retention = signals(home.path()).retention();
     let server = start(home.path(), Arc::new(Script::default())).await;
     let mut client = support::connect(&server).await;
     // A second job whose deletion runs a retention pass later.
@@ -1910,6 +1911,7 @@ async fn a_failed_release_heals_at_the_next_retention_pass() {
         json!({"at": "2030-01-01T00:00:00Z"}),
     )
     .await;
+    retention(home.path(), startup_retention).await;
     // The release write cannot decode while the store is broken; the save
     // still lands and the reply reports it.
     let valid = std::fs::read(home.path().join("scheduler/runs.json")).unwrap();
@@ -1918,6 +1920,7 @@ async fn a_failed_release_heals_at_the_next_retention_pass() {
         br#"{"version":1,"text":"not json"}"#,
     )
     .unwrap();
+    let failed_save_retention = signals(home.path()).retention();
     client
         .typed::<Value>(
             "schedule.save",
@@ -1926,6 +1929,7 @@ async fn a_failed_release_heals_at_the_next_retention_pass() {
         )
         .await
         .unwrap();
+    retention(home.path(), failed_save_retention).await;
     std::fs::write(home.path().join("scheduler/runs.json"), &valid).unwrap();
     let runs = stored_runs(home.path());
     let still_owned = runs.iter().find(|run| run["run_id"] == "run-1").unwrap();
