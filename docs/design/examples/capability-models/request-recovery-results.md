@@ -1,7 +1,7 @@
 # 请求恢复结算：有限检查记录
 
 对应 #1732；[合同、代码及范围](../owner-handoff-verification.md#6-loop--preparation--model-的恢复结算责任)。
-代码基线 `c8e4edd5b6cf01936ec1478b8d000f5476da7a1f`。2026-11-17 使用 OpenJDK 17.0.18、
+记录版本及哈希范围见 JSON 的 `evidence_revision` 和 `hash_scope`。2026-11-17 使用 OpenJDK 17.0.18、
 tla2tools 1.7.4 / TLC 2.19，单 worker、2 GiB heap。
 
 | 配置 | generated | distinct | queue | depth | exit |
@@ -42,4 +42,4 @@ done
 1 passed，0 failed；一个流程内执行九种持久化边界，原测试已检查终态总数唯一；新增按 turn/request 计数，确认终态属于正确身份。
 对应 context_flow 的 Clippy（`-D warnings`）通过；没有重跑全部 context_flow 或工作区。
 使用独立 worktree target、隔离 DIMCODE_HOME、4 build jobs、CARGO_INCREMENTAL=0。
-修改后测试哈希另记于 JSON；既有 owner-handoff-results 的 context_flow 哈希仍是旧基线，不覆盖此次加强断言。
+本记录固定于该次实验版本；后续新增的测试及哈希见[交接补充记录](live-handoff-results.md)。

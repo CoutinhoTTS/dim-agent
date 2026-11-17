@@ -329,7 +329,7 @@
     "runtime/fixtures/python/python_branch_part.py": "71d2675084a334f404813194673fd01da5d50bc1f35c03fbfadd969fff1561f2",
     "crates/dim-agent-capabilities/tests/interrupt_flow.rs": "2a0aa56efa243ab182e0c86bcf9b0874afc29e4946590b003eb694c8633b51fd",
     "tests/integration/tests/local_execution.rs": "2f48ab984a61098cf199eed0bd59b0c411370396a6d24f904cb3126891510549",
-    "crates/dim-agent-capabilities/tests/context_flow.rs": "63e059fc0b4a4f50ef263aab29213a3a7840fce09bf8b5f9c70bfff6434584e7",
+    "crates/dim-agent-capabilities/tests/context_flow.rs": "cdd9cf1feb25902646b4c1f8b17ab903aaabe3d26d231b47637a62137177ffbd",
     "docs/architecture/rust-agent/time-bus.md": "be2e57f18089420719c6cf8a9eadbfe29b42a5b9eb8e8e0d860cf28bd4e61e27",
     "docs/architecture/rust-agent/single-tree.md": "d86c533fa7c87f056d92a7e64f6e01c09ba8345eb47bc55f69f77899e439929c",
     "docs/design/plugin-contract.md": "334911368d203a57ee516323e7e56e84b0155d863c5c3a5343e5179263db3656",
@@ -346,5 +346,7 @@
     "docs/design/examples/capability-models/GenerationHandoff-Crash.cfg": "bce0ee9efbab3f9811d65a8492b37b7479beec11c379df02f120b80c64f8982e",
     "docs/design/examples/capability-models/GenerationHandoff.cfg": "6565a2079d82081f8f6f292d0d27d178254baad9c2462a75e7aaf15834cddd21"
   },
-  "witness_scope": "Reachable local protocol windows; required-part assembly failure and rollback are outside this model."
+  "witness_scope": "Reachable local protocol windows; required-part assembly failure and rollback are outside this model.",
+  "evidence_revision": "eb6d38c1ae31d208da47024e51a86c4d3655adfb",
+  "hash_scope": "Source snapshot at evidence_revision, including the strengthened context_flow assertion. The four TLC run records are unchanged; Rust execution evidence is recorded separately in request-recovery-results and live-handoff-results."
 }

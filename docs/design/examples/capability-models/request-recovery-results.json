@@ -103,5 +103,7 @@
     "command": "cargo test --locked -p dim-agent-capabilities --test context_flow restoring_each_preparation_handoff_settles_without_replaying_work -- --exact",
     "result": "1 passed; 0 failed; nine persisted boundaries",
     "clippy": "passed: cargo clippy --locked -p dim-agent-capabilities --test context_flow -- -D warnings"
-  }
+  },
+  "evidence_revision": "eb6d38c1ae31d208da47024e51a86c4d3655adfb",
+  "hash_scope": "Historical experiment snapshot, not the latest PR tree. Source and test hashes identify the files inspected or run for this record; later runs have separate records."
 }

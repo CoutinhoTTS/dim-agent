@@ -168,3 +168,7 @@ done
 [RequestRecovery](RequestRecovery.tla)补充旧任务停止后的 Loop → ContextPreparation → ModelProvider
 结算责任，区分三个独立 cut、未发布终态和查询/写入失败；[运行记录](request-recovery-results.md)
 与 [owner 对应](../owner-handoff-verification.md#6-loop--preparation--model-的恢复结算责任)说明范围。
+
+[ModelReloadHandoff](ModelReloadHandoff.tla) 与 [ExecWakeRecovery](ExecWakeRecovery.tla)
+补充上游仍运行的独立重启、恢复查询失败，以及补通知失败后的持久义务。
+[运行记录](live-handoff-results.md)对应真实流程及明确的成功重试前提。

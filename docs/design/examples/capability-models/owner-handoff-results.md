@@ -4,9 +4,10 @@
 [owner-handoff-results.json](owner-handoff-results.json)，包含最终模型/config、源码、读取过的流程测试哈希，
 四次最终运行摘要和 12 个可达窗口的状态摘录。
 
-基线：`c8e4edd5b6cf01936ec1478b8d000f5476da7a1f`。本批只改模型、文档和 ToolBinding rustdoc；
-源码哈希针对交付工作树，ToolBinding、ToolExecution 和 Questions 文档含本批措辞修正，其余所列输入未改。
-未重跑 Rust 行为测试，不以源文件存在代替本次执行证据。
+记录版本及哈希范围见 JSON 的 `evidence_revision` 和 `hash_scope`。
+本记录仅包含 InterruptHandoff / GenerationHandoff 的四次运行，该阶段未重跑 Rust 行为测试。
+后续加强的请求恢复断言与运行结果见[请求恢复记录](request-recovery-results.md)，
+本次独立重启与通知故障见[交接补充记录](live-handoff-results.md)；不将旧哈希称为最终交付树。
 
 | 配置 | 边界 | generated | distinct | 队列 | 深度 | exit |
 | --- | --- | ---: | ---: | ---: | ---: | ---: |

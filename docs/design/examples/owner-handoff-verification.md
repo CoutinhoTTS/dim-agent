@@ -173,13 +173,13 @@ ModelOutputEnd 数量断言以确认终态身份：未创建 request 时为零�
 | --- | --- | --- | --- |
 | Loop | 重建当前 turn/request；未交接的 request 自己结算，已交接者等待 owner 终态；依赖 InputQueue、Preparation、ModelProvider、ToolExecutor 的事实 | §6 RequestRecovery + §3/4 组合；context_flow 九边界断言及终态总数已核对 | 停止旧任务的请求恢复已作有限组合；仍运行的上游/下游不能直接套用 |
 | ContextPreparation | prepare 无 call/end 则补失败；自动 compaction 无结果则补取消；依赖 Loop 的身份和 ModelProvider 的接管事实 | §6 + Preparation；rebuild 查询与九边界断言已读 | 请求责任已对应；compaction、steer 与新代的组合仍沿原局部证据，不称此次组合已证明 |
-| ModelProvider | call 无匹配 end 则补失败，不重新调用模型；依赖 Preparation 的 call 和本 owner 的输出结算 | §6 + 既有 ModelOutput/RetryChain；rebuild、cleanup、injects 已读 | **单独重启时上游 Preparation 可继续运行**，见下节；这是下一项具体组合对象 |
+| ModelProvider | call 无匹配 end 则补失败，不重新调用模型；依赖 Preparation 的 call 和本 owner 的输出结算 | §6 + 既有 ModelOutput/RetryChain；rebuild、cleanup、injects 已读 | **单独重启时上游 Preparation 可继续运行**，见下节；已由 §8 的独立重启模型和真实流程补齐 |
 | ToolExecutor | batch 无 result 则补失败，子结果效果归各自父调用；依赖 Loop 的 batch、工具 owner 的返回和释放 | §3/4 + NestedSettlement；原 local_execution/interrupt_flow 对应已在 §5 记录 | 不重复建同一模型；嵌套效果、不同 host 释放语义沿各 owner 证据，未推成外部 exactly-once |
 | Approval | request 无 respond/cancelled 则取消；依赖审批身份和调用方停止旧执行 | [Permission owner 合同](../../architecture/rust-agent/plugins/Permission.md)；ApprovalRequests；[permission_flow](../../../crates/dim-agent-capabilities/tests/permission_flow.rs) 的 `restore_cancels_only_unsettled_approvals_across_pages_without_running_tools` 断言已读：259 项、排除已响应项、取消总数与身份集合一致、工具零调用 | 复用既有选择/分页与执行证据；不再单独造一个“恢复取消”模型。不同 owner 仍在提交新审批时的交接不由这条测试穷举 |
 | Permission | 取 chain 最新 policy；仅本分支事实更新 version；依赖 Timeline 的祖先 cut | PermissionState/PermissionFacts；同文件 `updates_are_versioned_per_branch_take_effect_when_dispatched_and_survive_restore` 断言已读：版本冲突、并发更新一胜、子分支 version=0、恢复等值 | 归已有状态模型和真实接口流程；不增加跨效果结算模型，权限探测/host 执行仍有自己的范围 |
 | Wait | 重建 turn 是否 open；旧调用在卸载时结束，不恢复旧 future/通知 | WaitRuntime/WaitHandoff + §4；本 PR 原 local_execution 两个 Wait 重载流程 | 复用已交付证据；不把恢复 open 写成恢复调用。其他工具 owner 不自动获得 Wait 组合的证明 |
 | InputQueue | 固定发布 cut 重建未消费/删除身份、applied/withdraw 和 turn 状态；依赖 Loop 的 consumed 和终态 | [InputQueue 合同](../../architecture/rust-agent/plugins/InputQueue.md)；InputQueue/InputReceipts/PromptAdoption；recovery 查询及 context_flow 的 queued/handover 断言已读：撤回恰好一次、不再 applied、两 queued input 分属两 turn、二次恢复不再写删除 | 保留既有模型与流程；pending 外部可见性仍由 #1721 的独立屏障承担，不能用恢复表替代 |
-| BackgroundExec | orphan started 补 ended；已结束未通知者补 wake；依赖进程任务释放、input 身份关联 | ExecLifecycle/ExecStopHistory；[local_execution](../../../tests/integration/tests/local_execution.rs) 的 `idle_unload_waits_for_tasks_and_a_restart_wakes_for_every_unreported_end` 断言已读：任务阻止 idle unload、orphan 失败、丢失通知恢复 | 正常成功路径复用；repost append 失败目前记录 warning，不能拿条件活性模型宣称“任意失败下必有通知”；故障后重试/对外观察需单独跟踪 |
+| BackgroundExec | orphan started 补 ended；已结束未通知者补 wake；依赖进程任务释放、input 身份关联 | ExecLifecycle/ExecStopHistory；[local_execution](../../../tests/integration/tests/local_execution.rs) 的 `idle_unload_waits_for_tasks_and_a_restart_wakes_for_every_unreported_end` 断言已读：任务阻止 idle unload、orphan 失败、丢失通知恢复 | 正常成功路径复用；§8 补齐 append 同步拒绝、异步失败的故障观察及下次恢复补通知，不承诺任意失败下最终成功 |
 | Goal | 固定 cut 读取业务状态，pause_reloaded，不重启旧 continuation/evaluator；依赖 input/turn 和子分支目录 | [Goal 合同](../../design/plugins/Goal.md)；GoalLifecycle/GoalProgress；[goal_cases_flow](../../../crates/dim-goal/tests/goal_cases_flow.rs) 的 `d5_a_restored_line_repeats_no_decision` 断言已读：恢复暂停、旧 continuation 不重启、显式 resume 才继续 | 复用已有恢复语义；evaluator 子分支清理/输入撤回组合仍是业务范围，不因 cut 核对判定全覆盖 |
 | CollaborationTimeline | 未投递操作写关闭错误，已投递 delegation 恢复关联，后续撤回等待 publication；依赖 Session collaboration owner 和 input/tree | [Collaboration 合同](../../design/plugins/Collaboration.md)；CollaborationHandoff/Identity；restore 选择及 transport_flow 的 restart/private 与 orphan 清理断言已读：重启保留 delegation 与隔离、移除 orphan/incomplete 目录且保留合法 leader | 目录/投递/撤回并非一个 terminal；保留逐项核对，不用“delegation 可恢复”代表全部副作用已结算 |
 | HooksBranch | 从当前 cut 开始接收新触发，不重跑旧 hook；旧运行 handler 由自己卸载结算 | [Hooks 合同](../../architecture/rust-agent/plugins/Hooks.md)；HookScheduling/HookFollowups 等；`a_live_reload_resolves_the_tool_that_started_before_hooks_mounted` 断言已读：工具阻塞时重启 Hooks，释放后仍得到正确工具名/参数 | 真实跨 owner 热重载已有流程，直接复用；不要求补全量历史回放，不把旧请求身份查询误作重执行 |
@@ -199,14 +199,53 @@ Preparation/ModelProvider 还标记 closed、取消 current，错误按其清理
 Preparation 服务撤下会影响这些依赖方；ModelProvider 自己只提供 progress，
 Loop/Preparation 不依赖它，因此单独重启 ModelProvider **不能假设 Preparation 被同时停止**。
 
-下一项合法窗口已定位：Preparation 可能在 ModelProvider 注册前、恢复捕获 cut 前后写入 model/call。
+本次验证的合法窗口：Preparation 可能在 ModelProvider 注册前、恢复捕获 cut 前后写入 model/call。
 cut 内的未结束 call 走恢复结算；cut 外的 call 应经 C 的 held/live 交接进入新代处理。
 要验证的是这两条路径的责任分界、错误和终态唯一性，而不是人为让同一 owner 的旧新代并行运行。
-本轮确认了该窗口的依赖与生命周期依据，尚未将它计作 TLC 或真实流程覆盖。
+§8 给出该窗口的 TLC 与真实流程证据；不把现有 Session host 级联重启测试算作单独重启证据。
 
 ### 7.2 收口结论
 
 13 个 consume owner 均有责任与证据去向；这不是 13 个 owner 的全部业务承诺审计完成。
-优先剩余为上节 ModelProvider 热重载窗口；Collaboration/BranchLine 的上述恢复断言可复用，但不扩展为全部操作组合已验证。
-BackgroundExec 通知失败路径保留为明确的错误处理边界。InputQueue 对外屏障和故障保留继续由 #1721/#1719 负责。
+上节 ModelProvider 热重载窗口已在 §8 补齐；Collaboration/BranchLine 的上述恢复断言可复用，但不扩展为全部操作组合已验证。
+BackgroundExec 通知失败与下一次恢复见 §8。InputQueue 对外屏障和故障保留继续由 #1721/#1719 负责。
 不为已存在的 Approval/Permission/Goal/Hooks 恢复流程重复建模，也不把本轮读取的旧证据记作新运行通过。
+
+
+## 8. 上游仍运行的 ModelProvider 重启与 BackgroundExec 补通知失败
+
+| 合同与动作 | 模型 | 真实实现与流程 |
+| --- | --- | --- |
+| ModelProvider 读 committed cut 内未结束 call，补失败终态；cut 外经 Dispatcher 接收并执行 | ModelReloadHandoff 的 Capture / ReadOK / Deliver / Finish | `model_provider.rs` 的 rebuild / consume；`context_flow::context_reads::model_only_reload_hands_off_a_running_preparation_at_its_recovery_cut` 直接 restart ModelProvider fiber，断言 Preparation 和 Loop 代次不变 |
+| 恢复查询失败不能执行暂存 call；后续重新恢复重新取 cut | ReadFail / Retry | 同一流程阻塞真实存储查询并注入错误，确认该代 Failed、模型调用零次；再 restart，将已有 call 作为历史补一个终态 |
+| 已结束且无持久 wake 的执行仍欠通知；故障后在下一次恢复补发 | ExecWakeRecovery 的 Capture / Post / Fail / Reload | `workspace_tools/background.rs` 的 rebuild / repost 与 Timeline commit/publish 故障路径；`local_execution::a_failed_recovery_wake_faults_the_session_and_is_posted_once_on_retry` |
+
+ModelProvider 流程覆盖三个窗口：call 在 cut 内但尚未发布、在 cut 外且查询尚未完成、
+查询失败后再次重启。都检查同 turn/request 只有一个终态；仅第二种调用模型一次并正常结束，
+其余恢复补失败且不调用模型。旧的 `model_reload_recovers_the_old_terminal_before_its_publication`
+重启 Session context hosts，会级联影响 Preparation/Loop/ModelProvider，与这里的独立重启不同。
+本次一并重跑，保留原有发布延迟路径。
+
+模型只含一项 prepare→call、一次恢复查询失败和一次后续重试。WriteCall 可以在 Capture 前后发生；
+注册与 cut 间没有另造一个业务状态，Dispatcher 暂存/实时交接复用 C 的合同。
+ReadOK 将选中历史 call 的补终态视作成功原子动作，**不覆盖该补写本身失败**；
+旧代的任务释放、多个请求、流式输出、重试链沿各 owner 既有证据，不由本模型重新证明。
+活性依赖准备完成、查询/发布/执行最终推进，以及失败后确实重试并成功，不保证永久故障下结束。
+
+BackgroundExec 流程分别注入 store.append 同步拒绝与接受后异步 publish(error)。
+调用者在 restore 或 Session.idle 得到存储错误，持久历史没有假 wake；下一次恢复补发一次，
+第三次恢复不重复；原 exec/ended 保留且不再生成。repost 自身只记录 warning，
+但底层 Timeline 已记录共享故障，因此不能据此说错误被静默吞掉，也不需要新增原地重试。
+现有 `idle_unload_waits_for_tasks_and_a_restart_wakes_for_every_unreported_end` 也重跑通过。
+
+ExecWakeRecovery 用两个已满足通知条件的 ended 身份，初态允许其中一个已经通知。
+故障使未持久尾部不能继续提交，后续恢复仅取持久前缀；第二代假设存储成功并公平推进。
+同步拒绝和异步失败在模型中抽象为未持久尾部失败，由真实流程分别对应；
+候选 ended 的选择沿 ExecLifecycle/ExecStopHistory 和实现查询，不在这里重证查询语义。
+OnlyEligibleWakes 与 FailureStopsPersistence 主要检查模型前提自洽；主要结论是已提交通知不重复、
+在上述成功重试条件下缺失通知最终补齐，不涵盖任意进程副作用或永久存储故障。
+
+[运行记录](capability-models/live-handoff-results.md)保存配置、哈希、可达窗口和测试结果。
+没有发现新的运行时缺陷，没有改运行行为或设计合同。消融：复用现有存储 fixture，只增加
+查询门闩与两类 append 故障注入；保留直接重启、cut 两侧和二次恢复，分别区分真正的交接责任。
+不复制 Dispatcher 或 SQL，不新增运行时抽象和通用验证框架。
