@@ -62,8 +62,9 @@ continues to exclude private account implementations and credentials from this r
 ### Session-local startup connections
 
 [Model startup](../model-startup.md) adds a separate admission to the existing
-protected-local `session.create` and `session.model.update` entries, not a
-Provider-management write. `startup` contains optional `connection`,
+protected-local `session.create`, `session.model.update` and
+`session.model.preview` entries, not a Provider-management write. `startup`
+contains optional `connection`,
 `contextWindow`, `maxOutputTokens` and `autoCompactWindow`. Connection fields are
 `apiFormat`, `baseUrl`, optional `apiKey` or `authToken`, and optional `headers`
 (a name/value map). A compaction window is a positive integer or `"auto"`.
