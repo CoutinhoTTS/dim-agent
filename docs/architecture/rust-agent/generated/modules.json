@@ -141,6 +141,7 @@
         "format",
         "json",
         "matches",
+        "unreachable",
         "vec"
       ]
     },
@@ -8331,10 +8332,12 @@
       "references": [
         "path ContentBlock::Image",
         "path ContentBlock::Text",
+        "path ImageSource",
         "path ToolContent",
         "path ToolContent::Blocks",
         "path ToolContent::Text",
         "use dim_agent_types::ContentBlock",
+        "use dim_agent_types::ImageSource",
         "use dim_agent_types::ToolContent"
       ]
     },

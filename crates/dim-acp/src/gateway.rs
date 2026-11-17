@@ -368,7 +368,7 @@ impl Gateway {
         };
         for path in paths {
             if let Some(file_id) = update
-                .pointer(&format!("{path}/fileId"))
+                .pointer(&format!("{path}/_meta/fileId"))
                 .and_then(Value::as_str)
                 .map(str::to_owned)
             {
@@ -403,7 +403,14 @@ impl Gateway {
                     .pointer_mut(&path)
                     .and_then(Value::as_object_mut)
                     .ok_or_else(Error::internal_error)?;
-                content.remove("fileId");
+                let meta = content
+                    .get_mut("_meta")
+                    .and_then(Value::as_object_mut)
+                    .ok_or_else(Error::internal_error)?;
+                meta.remove("fileId");
+                if meta.is_empty() {
+                    content.remove("_meta");
+                }
                 content.insert("data".into(), Value::String(STANDARD.encode(bytes)));
             }
         }
