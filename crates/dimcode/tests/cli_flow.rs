@@ -9341,7 +9341,9 @@ fn tui_provider_management_uses_the_production_daemon_and_survives_restart() {
     );
     terminal.write(b"/models\r");
     terminal.until("Provider flow /");
-    terminal.write(b"Provider flow\r");
+    terminal.write(b"Provider flow");
+    terminal.until("1 provider");
+    terminal.write(b"\r");
     terminal.until("Default for new sessions: Provider flow / fixture-model");
     terminal.write(b"stale-effort-message\r");
     terminal.until("provider-updated-reply");
@@ -9358,6 +9360,7 @@ fn tui_provider_management_uses_the_production_daemon_and_survives_restart() {
     terminal.write(b"/models\r");
     terminal.until("Provider flow /");
     terminal.write(b"Provider flow");
+    terminal.until("1 provider");
     assert!(
         rpc(
             &mut wire,
