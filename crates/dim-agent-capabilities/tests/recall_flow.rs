@@ -595,7 +595,17 @@ async fn only_the_kinds_of_the_allowlist_are_told_and_nothing_in_context_is_miss
                     | EventKind::ContextCompaction(_)
                     | EventKind::SessionForked(_)
             );
-            if listed && !matches!(event.kind, EventKind::InputMessage(_) | EventKind::TurnStart(_) | EventKind::TurnEnd(_) | EventKind::BranchStart(_) | EventKind::ContextCompaction(_) | EventKind::ApprovalRequest(_)) {
+            if listed
+                && !matches!(
+                    event.kind,
+                    EventKind::InputMessage(_)
+                        | EventKind::TurnStart(_)
+                        | EventKind::TurnEnd(_)
+                        | EventKind::BranchStart(_)
+                        | EventKind::ContextCompaction(_)
+                        | EventKind::ApprovalRequest(_)
+                )
+            {
                 assert!(told, "{} is not told", event.kind.key());
             }
             if !listed {
