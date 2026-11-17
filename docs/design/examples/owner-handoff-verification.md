@@ -161,3 +161,52 @@ ModelOutputEnd 数量断言以确认终态身份：未创建 request 时为零�
 模型配置、可达窗口和执行结果见[恢复结算运行记录](capability-models/request-recovery-results.md)。
 消融：不复制 A 的存储队列、B 的查询表达式或 C 的暂存算法；三个独立 cut/选择用于保留真实交错，
 初始阶段用于独立责任判定，干扰身份用于明确关联边界。未增加运行时抽象、规则或接口。
+
+## 7. Owner 范围收口表
+
+本表核对的是上文 **13 个 consume owner 的恢复/交接责任**，不是所有 Capability 的完整业务规格，
+也不涵盖只使用 subscribe/listen、门面、存储等其他入口。代码基线仍为 `c8e4edd5b`，
+实验补充见本 PR；原有模型证据按各自记录版本复用，未默认为当前 main 全量通过。
+“断言已读”表示本轮读取具体断言；“入口已定位”不表示已完成该流程的全部断言审计。本轮不重跑未修改的测试。
+
+| Owner | 自己负责的恢复/交接；依赖谁 | 现有证据及本轮核对程度 | 处置 / 剩余范围 |
+| --- | --- | --- | --- |
+| Loop | 重建当前 turn/request；未交接的 request 自己结算，已交接者等待 owner 终态；依赖 InputQueue、Preparation、ModelProvider、ToolExecutor 的事实 | §6 RequestRecovery + §3/4 组合；context_flow 九边界断言及终态总数已核对 | 停止旧任务的请求恢复已作有限组合；仍运行的上游/下游不能直接套用 |
+| ContextPreparation | prepare 无 call/end 则补失败；自动 compaction 无结果则补取消；依赖 Loop 的身份和 ModelProvider 的接管事实 | §6 + Preparation；rebuild 查询与九边界断言已读 | 请求责任已对应；compaction、steer 与新代的组合仍沿原局部证据，不称此次组合已证明 |
+| ModelProvider | call 无匹配 end 则补失败，不重新调用模型；依赖 Preparation 的 call 和本 owner 的输出结算 | §6 + 既有 ModelOutput/RetryChain；rebuild、cleanup、injects 已读 | **单独重启时上游 Preparation 可继续运行**，见下节；这是下一项具体组合对象 |
+| ToolExecutor | batch 无 result 则补失败，子结果效果归各自父调用；依赖 Loop 的 batch、工具 owner 的返回和释放 | §3/4 + NestedSettlement；原 local_execution/interrupt_flow 对应已在 §5 记录 | 不重复建同一模型；嵌套效果、不同 host 释放语义沿各 owner 证据，未推成外部 exactly-once |
+| Approval | request 无 respond/cancelled 则取消；依赖审批身份和调用方停止旧执行 | [Permission owner 合同](../../architecture/rust-agent/plugins/Permission.md)；ApprovalRequests；[permission_flow](../../../crates/dim-agent-capabilities/tests/permission_flow.rs) 的 `restore_cancels_only_unsettled_approvals_across_pages_without_running_tools` 断言已读：259 项、排除已响应项、取消总数与身份集合一致、工具零调用 | 复用既有选择/分页与执行证据；不再单独造一个“恢复取消”模型。不同 owner 仍在提交新审批时的交接不由这条测试穷举 |
+| Permission | 取 chain 最新 policy；仅本分支事实更新 version；依赖 Timeline 的祖先 cut | PermissionState/PermissionFacts；同文件 `updates_are_versioned_per_branch_take_effect_when_dispatched_and_survive_restore` 断言已读：版本冲突、并发更新一胜、子分支 version=0、恢复等值 | 归已有状态模型和真实接口流程；不增加跨效果结算模型，权限探测/host 执行仍有自己的范围 |
+| Wait | 重建 turn 是否 open；旧调用在卸载时结束，不恢复旧 future/通知 | WaitRuntime/WaitHandoff + §4；本 PR 原 local_execution 两个 Wait 重载流程 | 复用已交付证据；不把恢复 open 写成恢复调用。其他工具 owner 不自动获得 Wait 组合的证明 |
+| InputQueue | 固定发布 cut 重建未消费/删除身份、applied/withdraw 和 turn 状态；依赖 Loop 的 consumed 和终态 | [InputQueue 合同](../../architecture/rust-agent/plugins/InputQueue.md)；InputQueue/InputReceipts/PromptAdoption；recovery 查询及 context_flow 的 queued/handover 断言已读：撤回恰好一次、不再 applied、两 queued input 分属两 turn、二次恢复不再写删除 | 保留既有模型与流程；pending 外部可见性仍由 #1721 的独立屏障承担，不能用恢复表替代 |
+| BackgroundExec | orphan started 补 ended；已结束未通知者补 wake；依赖进程任务释放、input 身份关联 | ExecLifecycle/ExecStopHistory；[local_execution](../../../tests/integration/tests/local_execution.rs) 的 `idle_unload_waits_for_tasks_and_a_restart_wakes_for_every_unreported_end` 断言已读：任务阻止 idle unload、orphan 失败、丢失通知恢复 | 正常成功路径复用；repost append 失败目前记录 warning，不能拿条件活性模型宣称“任意失败下必有通知”；故障后重试/对外观察需单独跟踪 |
+| Goal | 固定 cut 读取业务状态，pause_reloaded，不重启旧 continuation/evaluator；依赖 input/turn 和子分支目录 | [Goal 合同](../../design/plugins/Goal.md)；GoalLifecycle/GoalProgress；[goal_cases_flow](../../../crates/dim-goal/tests/goal_cases_flow.rs) 的 `d5_a_restored_line_repeats_no_decision` 断言已读：恢复暂停、旧 continuation 不重启、显式 resume 才继续 | 复用已有恢复语义；evaluator 子分支清理/输入撤回组合仍是业务范围，不因 cut 核对判定全覆盖 |
+| CollaborationTimeline | 未投递操作写关闭错误，已投递 delegation 恢复关联，后续撤回等待 publication；依赖 Session collaboration owner 和 input/tree | [Collaboration 合同](../../design/plugins/Collaboration.md)；CollaborationHandoff/Identity；restore 选择及 transport_flow 的 restart/private 与 orphan 清理断言已读：重启保留 delegation 与隔离、移除 orphan/incomplete 目录且保留合法 leader | 目录/投递/撤回并非一个 terminal；保留逐项核对，不用“delegation 可恢复”代表全部副作用已结算 |
+| HooksBranch | 从当前 cut 开始接收新触发，不重跑旧 hook；旧运行 handler 由自己卸载结算 | [Hooks 合同](../../architecture/rust-agent/plugins/Hooks.md)；HookScheduling/HookFollowups 等；`a_live_reload_resolves_the_tool_that_started_before_hooks_mounted` 断言已读：工具阻塞时重启 Hooks，释放后仍得到正确工具名/参数 | 真实跨 owner 热重载已有流程，直接复用；不要求补全量历史回放，不把旧请求身份查询误作重执行 |
+| BranchLine | 不回放旧触发；从当前目录、last roster/parent block 和目标 cursor 按需构造视图；依赖 TimelineTree/目录及 publication | [BranchTool 合同](../../architecture/rust-agent/plugins/BranchTool.md)；BranchLine；branch_flow 的 `a_restore_writes_a_due_parent_block_once_and_none_without_movement`、`a_read_cursor_survives_a_restore` 断言已读：只补应有 parent block、无新进展不补、cursor 后续读严格前进 | 归按需视图恢复，不能强加“所有历史事件消费一次”；目录重建/通知组合仍按对应 flow 进一步核对 |
+
+### 7.1 生命周期不是全局停机屏障
+
+[rutis 生命周期合同](../rutis-usage.md#4-lifecycle-rutis-provides)与固定依赖 rutis 0.19.3 的
+`src/fiber.rs` 相符：`Intent::Restart` await `unload(Pending)` 后才 refresh dependencies/load；
+unload 关闭 admission、取消代次、等待在途调用和 drain_effects。
+**它串行化同一 fiber 的代次，不保证所有 owner 同时静止，也不证明未登记或未协作的外部任务已经结束。**
+清理错误走 error sink 后仍可进入 Pending，不能把新代启动解释为旧代结算成功。
+
+Dim 的 Loop、Preparation、ModelProvider cleanup 都关闭 task tracker 并等待自己的任务；
+Preparation/ModelProvider 还标记 closed、取消 current，错误按其清理路径汇总。
+实际依赖区别也必须保留：Loop 和 ModelProvider 都 inject ContextPreparation，
+Preparation 服务撤下会影响这些依赖方；ModelProvider 自己只提供 progress，
+Loop/Preparation 不依赖它，因此单独重启 ModelProvider **不能假设 Preparation 被同时停止**。
+
+下一项合法窗口已定位：Preparation 可能在 ModelProvider 注册前、恢复捕获 cut 前后写入 model/call。
+cut 内的未结束 call 走恢复结算；cut 外的 call 应经 C 的 held/live 交接进入新代处理。
+要验证的是这两条路径的责任分界、错误和终态唯一性，而不是人为让同一 owner 的旧新代并行运行。
+本轮确认了该窗口的依赖与生命周期依据，尚未将它计作 TLC 或真实流程覆盖。
+
+### 7.2 收口结论
+
+13 个 consume owner 均有责任与证据去向；这不是 13 个 owner 的全部业务承诺审计完成。
+优先剩余为上节 ModelProvider 热重载窗口；Collaboration/BranchLine 的上述恢复断言可复用，但不扩展为全部操作组合已验证。
+BackgroundExec 通知失败路径保留为明确的错误处理边界。InputQueue 对外屏障和故障保留继续由 #1721/#1719 负责。
+不为已存在的 Approval/Permission/Goal/Hooks 恢复流程重复建模，也不把本轮读取的旧证据记作新运行通过。
