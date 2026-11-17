@@ -6,6 +6,29 @@ import test from 'node:test';
 const directory=fileURLToPath(new URL('./code-layout/',import.meta.url));
 const python=process.platform==='win32'?'python':'python3';
 
+test('Mach-O function counts ignore terminators and ULEB alignment padding',()=>{
+  const result=spawnSync(python,['-',directory],{encoding:'utf8',input:String.raw`
+from pathlib import Path
+import struct
+import sys
+import tempfile
+sys.path.insert(0, sys.argv[1])
+import macho
+
+with tempfile.TemporaryDirectory(prefix='dim-layout-starts-') as temporary:
+    binary = Path(temporary)/'fixture'
+    header = struct.pack('<IiiIIIII', macho.MH_MAGIC_64, 0x1000007, 3, 2, 1, 16, 0, 0)
+    for payload, expected in ((bytes.fromhex('01 01 00 00 00 00 00 00'), 2),
+                              (bytes.fromhex('81 01 01 00 00 00 00 00'), 2),
+                              (bytes.fromhex('81 81 01 81 01 00 00 00'), 2),
+                              (bytes(8), 0)):
+        binary.write_bytes(header + struct.pack('<IIII', macho.LC_FUNCTION_STARTS, 16, 48, len(payload)) + payload)
+        assert macho.function_start_count(binary) == expected, payload.hex()
+`});
+  assert.equal(result.error,undefined);
+  assert.equal(result.status,0,result.stdout+result.stderr);
+});
+
 test('macOS layout orders Mach-O functions and samples __text residency', {
   skip:process.platform!=='darwin',
   timeout:120_000,
@@ -50,6 +73,7 @@ int main(void) { return first() + second(); }
     assert subprocess.run([str(base)]).returncode == 42
     entries = macho.map_symbols(base_map, *macho.text_range(base)[:2])
     assert {name for _,_,name in entries} >= {'_first','_second','_main'}
+    assert macho.function_start_count(base) == len(entries), entries
     order = root/'order'
     order.write_text('_second\n_first\n_main\n')
     candidate = root/'candidate'; candidate_map = root/'candidate.map'

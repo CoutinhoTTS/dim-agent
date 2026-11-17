@@ -68,12 +68,11 @@ def function_start_count(binary):
         offset, size = struct.unpack_from("<II", data, at + 8)
         payload = data[offset:offset + size]
         count = 0
-        value = 0
         at = 0
         while at < len(payload):
             byte = payload[at]
             at += 1
-            value += byte & 0x7F
+            value = byte & 0x7F
             if byte & 0x80:
                 shift = 7
                 while at < len(payload):

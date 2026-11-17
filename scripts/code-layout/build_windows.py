@@ -19,6 +19,7 @@ import tempfile
 
 from layout import select, unique_functions, validate_sizes
 import pe
+from replay import preserve_cargo, run_link
 from samples import read as read_sample
 from toolchain import rustc as rustc_command
 
@@ -104,9 +105,7 @@ def relink(record, output, order_file=None, map_path=None, strict=False, preserv
     response.write_text("\n".join(quote(argument) for argument in arguments) + "\n")
     env = dict(os.environ, PATH=record["path"])
     try:
-        result = subprocess.run(
-            [*record["compiler"], "@" + str(response)], cwd=record["cwd"], env=env,
-            capture_output=True, text=True)
+        result = run_link([*record["compiler"], "@" + str(response)], cwd=record["cwd"], env=env)
     finally:
         response.unlink(missing_ok=True)
     if result.returncode:
@@ -150,6 +149,31 @@ def capture(arguments):
               "output": output, "pdb": pdb, "inputs": inputs, "path": os.environ["PATH"]}
     (root / "link.json").write_text(json.dumps(record, indent=2) + "\n")
     relink(record, Path(output), preserve_pdb=True)
+
+
+def replay_baseline(record, work, output):
+    baseline = output / "baseline.exe"
+    baseline_map = output / "baseline.map"
+    shutil.copyfile(work / "baseline.map", baseline_map)
+    cargo = Path(record["output"])
+    backup = work / "cargo.exe"
+    backup_pdb = work / "cargo.pdb"
+    pdb = Path(record["pdb"]) if record.get("pdb") else cargo.with_suffix(".pdb")
+    with preserve_cargo([(cargo, backup), (pdb, backup_pdb)]):
+        relink(record, cargo, preserve_pdb=True)
+        original_hash, replay_hash = digest(backup), digest(cargo)
+        if replay_hash != original_hash:
+            shutil.copyfile(backup, output / "cargo-original.exe")
+            shutil.copyfile(cargo, output / "baseline-replay.exe")
+            if backup_pdb.exists():
+                shutil.copyfile(backup_pdb, output / "cargo-original.pdb")
+                shutil.copyfile(pdb, output / "baseline-replay.pdb")
+            (output / "replay.json").write_text(json.dumps(record, indent=2) + "\n")
+            raise RuntimeError(
+                "captured inputs did not reproduce Cargo's executable: "
+                f"original={original_hash}, replay={replay_hash}")
+        shutil.copyfile(cargo, baseline)
+    return baseline, baseline_map
 
 
 def ordered_link(record, output, order_file, map_path):
@@ -290,35 +314,7 @@ def main():
         record = json.loads((work / "link.json").read_text())
         record["rustc"] = subprocess.check_output([rustc, "-vV"], cwd=REPO, text=True)
         output.mkdir(parents=True)
-        baseline = output / "baseline.exe"
-        baseline_map = output / "baseline.map"
-        shutil.copyfile(work / "baseline.map", baseline_map)
-        cargo = Path(record["output"])
-        backup = work / "cargo.exe"
-        backup_pdb = work / "cargo.pdb"
-        pdb = Path(record["pdb"]) if record.get("pdb") else cargo.with_suffix(".pdb")
-        had_pdb = pdb.exists()
-        shutil.copyfile(cargo, backup)
-        if had_pdb:
-            shutil.copyfile(pdb, backup_pdb)
-        try:
-            relink(record, cargo, preserve_pdb=True)
-            original_hash, replay_hash = digest(backup), digest(cargo)
-            if replay_hash != original_hash:
-                shutil.copyfile(backup, output / "cargo-original.exe")
-                shutil.copyfile(cargo, output / "baseline-replay.exe")
-                if had_pdb:
-                    shutil.copyfile(backup_pdb, output / "cargo-original.pdb")
-                    shutil.copyfile(pdb, output / "baseline-replay.pdb")
-                (output / "replay.json").write_text(json.dumps(record, indent=2) + "\n")
-                raise RuntimeError(
-                    "captured inputs did not reproduce Cargo's executable: "
-                    f"original={original_hash}, replay={replay_hash}")
-            shutil.copyfile(cargo, baseline)
-        finally:
-            shutil.copyfile(backup, cargo)
-            if had_pdb:
-                shutil.copyfile(backup_pdb, pdb)
+        baseline, baseline_map = replay_baseline(record, work, output)
         profiles = train(baseline, work / "training", sampling=True)
         for profile in profiles:
             shutil.copyfile(profile, output / profile.name)

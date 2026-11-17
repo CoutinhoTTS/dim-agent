@@ -136,12 +136,15 @@ class Server:
                 win32.close(handle)
                 raise
         self.sequence += 1
+        deadline = time.monotonic() + 60
         self.wire.write({"jsonrpc": "2.0", "id": self.sequence,
                          "method": "daemon.shutdown", "params": {"force": True}})
         if profile:
             last = None
             try:
                 while self.process.poll() is None:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError("training process did not shut down within 60 seconds")
                     try:
                         _, pages = win32.working_set_pages(handle, base, rva, size)
                     except OSError:
@@ -151,14 +154,12 @@ class Server:
                     time.sleep(.005)
             finally:
                 win32.close(handle)
-            if self.process.wait(timeout=60) != 0:
-                raise RuntimeError(f"training process failed: {self.process.returncode}")
+        if self.process.wait(timeout=max(0, deadline - time.monotonic())) != 0:
+            raise RuntimeError(f"training process failed: {self.process.returncode}")
+        if profile:
             if not last:
                 raise RuntimeError("the shutdown working-set sample was empty")
             write_sample(profile, win32.page_size(), last)
-        else:
-            if self.process.wait(timeout=60) != 0:
-                raise RuntimeError(f"training process failed: {self.process.returncode}")
 
 
 def tui(binary, home, stack, sampling, profile):

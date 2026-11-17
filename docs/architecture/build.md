@@ -168,6 +168,10 @@ the recorded path in the replay command.
 On either platform, a baseline byte mismatch retains both executable files and
 the captured link record in the CI artifact; Windows also retains the PDB pair.
 The hash check remains mandatory before training or ordering.
+During baseline replay, handled interrupts (`SIGINT`/`SIGTERM`, plus Windows
+`SIGBREAK`) stop and reap the active linker or stripping tool before restoring
+Cargo's files. A PDB created only by replay is removed. Forced process termination
+(`SIGKILL` or Windows `TerminateProcess`) does not run this cleanup.
 
 The trainer launches the App Server suspended and empties its working set at
 entry before resuming. The ConPTY-backed TUI is created running and trimmed
@@ -175,7 +179,9 @@ immediately afterwards, because the hosted console path does not combine a
 suspended start with pseudoconsole attachment; the startup profile covers the
 entry-time pages and the TUI profile covers pages faulted by the UI flow. Before
 exit or shutdown the trainer queries the executable's `.text` working-set pages
-with `QueryWorkingSetEx`. Every Windows target runs the real TUI picker; a
+with `QueryWorkingSetEx`. App Server shutdown sampling and the exit wait share a
+60-second deadline; expiry fails training and its owned process is terminated.
+Every Windows target runs the real TUI picker; a
 console-less runner is not accepted as native TUI evidence. The ConPTY launcher
 uses explicit null standard handles with `STARTF_USESTDHANDLES` so a redirected
 parent does not pass its pipes to the child ([Windows console guidance](https://github.com/microsoft/terminal/discussions/15814)).

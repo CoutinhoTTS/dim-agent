@@ -20,6 +20,7 @@ import tempfile
 
 from layout import select, unique_functions, validate_sizes
 import macho
+from replay import preserve_cargo, run_link
 from samples import read as read_sample
 from toolchain import rustc as rustc_command
 from train_darwin import measure, train
@@ -121,13 +122,14 @@ def relink(record, output, order_file=None, map_path=None, strict=False, postpro
         arguments.append("-Wl,-fatal_warnings")
     env = dict(os.environ, PATH=record["path"])
     env.update(record["linkEnv"])
-    result = subprocess.run([record["compiler"], *arguments], cwd=record["cwd"], env=env,
-                            capture_output=True, text=True)
+    result = run_link([record["compiler"], *arguments], cwd=record["cwd"], env=env)
     if result.returncode:
         raise RuntimeError(f"native link failed ({result.returncode}):\n{result.stderr}")
     if postprocess and record["strip"] != "none":
         flag = {"debuginfo": "--strip-debug", "symbols": "--strip-all"}[record["strip"]]
-        subprocess.run([record["objcopy"], flag, str(output)], cwd=record["cwd"], env=env, check=True)
+        stripped = run_link([record["objcopy"], flag, str(output)], cwd=record["cwd"], env=env)
+        if stripped.returncode:
+            raise RuntimeError(f"native stripping failed ({stripped.returncode}):\n{stripped.stderr}")
     return result.stderr
 
 
@@ -136,9 +138,8 @@ def replay_baseline(record, work, output):
     backup = work / "cargo-original"
     baseline = output / "baseline"
     baseline_map = output / "baseline.map"
-    shutil.copy2(cargo, backup)
     shutil.copyfile(work / "baseline.map", baseline_map)
-    try:
+    with preserve_cargo([(cargo, backup)]):
         relink(record, cargo)
         original_hash, replay_hash = digest(backup), digest(cargo)
         if replay_hash != original_hash:
@@ -149,8 +150,6 @@ def replay_baseline(record, work, output):
                 "captured inputs did not reproduce Cargo's executable: "
                 f"original={original_hash}, replay={replay_hash}")
         shutil.copy2(cargo, baseline)
-    finally:
-        shutil.copy2(backup, cargo)
     return baseline, baseline_map
 
 

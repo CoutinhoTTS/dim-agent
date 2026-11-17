@@ -26,7 +26,7 @@ jobs:
           node-version-file: .node-version
           package-manager-cache: false
       - run: rustup show
-      - run: node --test scripts/code-layout.test.mjs
+      - run: node --test scripts/code-layout.test.mjs scripts/code-layout-darwin.test.mjs scripts/code-layout-replay.test.mjs
 
   platform-artifact:
     strategy:
@@ -99,7 +99,7 @@ jobs:
             Write-Output 'lld-link is not on PATH; the build will use the Rust toolchain rust-lld'
           }
       - run: rustup show
-      - run: node --test ${{ matrix.test }}
+      - run: node --test ${{ matrix.test }} scripts/code-layout-replay.test.mjs
         env:
           DIM_LAYOUT_ARTIFACTS: ${{ runner.temp }}/layout-fixture-${{ matrix.platform }}
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

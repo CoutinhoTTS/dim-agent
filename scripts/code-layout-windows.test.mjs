@@ -105,8 +105,12 @@ void entry(void) {
     assert (capture/'baseline.map').is_file()
     (root/'fixture.obj').unlink()
     natvis.unlink()
-    build_windows.relink(recorded, captured, preserve_pdb=True)
-    assert captured.read_bytes() == original, ('captured inputs and map arguments must preserve the PE/PDB identity',
+    original_pdb = Path(recorded['pdb']).read_bytes()
+    replay = root/'replay'; replay.mkdir()
+    replayed, _ = build_windows.replay_baseline(recorded, capture, replay)
+    assert captured.read_bytes() == original
+    assert Path(recorded['pdb']).read_bytes() == original_pdb
+    assert replayed.read_bytes() == original, ('captured inputs and map arguments must preserve the PE/PDB identity',
         recorded['output'], str(root/'captured.exe'), build_windows.digest(root/'captured-original.exe'), build_windows.digest(captured))
     assert subprocess.run([str(captured)]).returncode == 42
 
