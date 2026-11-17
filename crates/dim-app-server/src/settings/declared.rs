@@ -270,20 +270,22 @@ pub(crate) struct Update {
 struct Projects {}
 
 /// The service error codes (§6).
-fn code(error: &SettingsError) -> &'static str {
-    match error {
-        SettingsError::UnknownSource => "unknown_source",
-        SettingsError::InvalidScope(_) => "invalid_scope",
-        SettingsError::Document(_)
-        | SettingsError::DocumentShape { .. }
-        | SettingsError::Invalid(_) => "invalid_document",
-        SettingsError::UserOnlyField(_) => "user_only_field",
-        SettingsError::Conflict => "conflict",
-        SettingsError::Storage(FileStorageError::Unsynced(_)) => "unsynced",
-        SettingsError::Closed => "closed",
-        SettingsError::Cancelled => "cancelled",
-        SettingsError::Storage(_) | SettingsError::Persistence | SettingsError::Worker(_) => {
-            "failed"
+impl SettingsError {
+    pub(crate) fn code(&self) -> &'static str {
+        match self {
+            SettingsError::UnknownSource => "unknown_source",
+            SettingsError::InvalidScope(_) => "invalid_scope",
+            SettingsError::Document(_)
+            | SettingsError::DocumentShape { .. }
+            | SettingsError::Invalid(_) => "invalid_document",
+            SettingsError::UserOnlyField(_) => "user_only_field",
+            SettingsError::Conflict => "conflict",
+            SettingsError::Storage(FileStorageError::Unsynced(_)) => "unsynced",
+            SettingsError::Closed => "closed",
+            SettingsError::Cancelled => "cancelled",
+            SettingsError::Storage(_) | SettingsError::Persistence | SettingsError::Worker(_) => {
+                "failed"
+            }
         }
     }
 }
@@ -292,7 +294,7 @@ fn envelope(result: Result<impl Serialize>) -> RpcValue {
     match result {
         Ok(value) => json!({"ok": true, "value": value}),
         Err(error) => {
-            json!({"ok": false, "error": {"code": code(&error), "message": error.to_string()}})
+            json!({"ok": false, "error": {"code": error.code(), "message": error.to_string()}})
         }
     }
     .into()

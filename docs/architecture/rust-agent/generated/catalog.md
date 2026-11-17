@@ -24,7 +24,7 @@ Each catalog name a part of the assembly provides or injects. `data` means share
 | `executionSettingsHost` | process | ExecutionSettings | data | `read` async |
 | `fileStorage` | process | FileStorage | internal(object) | — |
 | `grokOAuthService` | process | GrokOAuth | internal(secret) | — |
-| `hooksService` | process | HooksSettings | internal(host-resource) | — |
+| `hooksService` | process | HooksSettings | data | `plugins` async, `refusal` sync, `register` async, `withdraw` async |
 | `hostPlatform` | process | HostPlatform | internal(object) | — |
 | `listenAddresses` | process | Transport | data | `read` async |
 | `loader` | process | rutis-loader | internal(owner-api) | — |

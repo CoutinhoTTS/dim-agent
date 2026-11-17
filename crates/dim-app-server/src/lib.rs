@@ -1410,6 +1410,7 @@ pub(crate) fn register_names(catalog: &mut dim_agent_runtime::names::ServiceCata
     register::<mcp::McpAuth>(catalog, None);
     register::<mcp::Publication>(catalog, None);
     register::<hooks_settings::HooksService>(catalog, None);
+    catalog.register_shared("hooksService");
     register::<methods::ManagementMethods>(catalog, None);
     catalog.register_shared(dim_agent_runtime::names::name_of::<
         methods::ManagementMethods,
@@ -1455,7 +1456,6 @@ pub fn register_faces(builder: &mut dim_agent_runtime::AgentBuilder) {
         ("fileStorage", "object"),
         ("grokOAuthService", "secret"),
         ("historyRenderer", "hot-path"),
-        ("hooksService", "host-resource"),
         ("hostPlatform", "object"),
         ("loader", "owner-api"),
         ("loopState", "hot-path"),

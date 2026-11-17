@@ -2764,6 +2764,7 @@
       "file": "crates/dim-app-server/src/hooks_settings.rs",
       "unexpandedMacros": [
         "format",
+        "serde_json::json",
         "unreachable",
         "vec"
       ]
@@ -55436,6 +55437,10 @@
     {
       "module": "dim_app_server::connection::ui_extensions",
       "path": "Notification::UiExtensionsChanged"
+    },
+    {
+      "module": "dim_app_server::hooks_settings",
+      "path": "Value::future"
     },
     {
       "module": "dim_app_server::managed_oauth",

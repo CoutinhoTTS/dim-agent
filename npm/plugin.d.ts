@@ -598,6 +598,14 @@ export interface SummaryPromptSettingsHost {
   systemPrompt(request: Record<string, never>): Promise<string | null>;
 }
 
+/** Hooks-owned plugin content registration; see Hooks A.2. */
+export interface HooksService {
+  register(request: { plugin: string; dir: string; document: JsonValue }): Promise<null>;
+  withdraw(request: { plugin: string }): Promise<null>;
+  plugins(request: Record<string, never>): Promise<string[]>;
+  refusal(request: { plugin: string }): [error: string, reason: string | null] | null;
+}
+
 /** The ToolRegistry owner's read-only source status view. */
 export interface ToolSourceRejection { version: string; reason: string }
 export interface ToolSourceStatus { adopted: string | null; rejected: ToolSourceRejection | null }
