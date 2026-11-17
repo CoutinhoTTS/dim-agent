@@ -23898,17 +23898,9 @@
     },
     {
       "from": "dim_app_server",
-      "to": "dim_app_server::mcp::auth",
-      "references": [
-        "path mcp::McpAuth"
-      ]
-    },
-    {
-      "from": "dim_app_server",
       "to": "dim_app_server::mcp::publication",
       "references": [
-        "path mcp::McpPublication::register",
-        "path mcp::Publication"
+        "path mcp::McpPublication::register"
       ]
     },
     {
@@ -28329,8 +28321,7 @@
         "path publication::Publication",
         "use publication::McpApplication",
         "use publication::McpOwner",
-        "use publication::McpPublication",
-        "use publication::Publication"
+        "use publication::McpPublication"
       ]
     },
     {

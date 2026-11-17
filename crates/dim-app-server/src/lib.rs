@@ -1409,8 +1409,6 @@ pub(crate) fn register_names(catalog: &mut dim_agent_runtime::names::ServiceCata
     register::<provider::ProviderService>(catalog, None);
     catalog.register_shared(dim_agent_runtime::names::name_of::<SelectableModelsHost>());
     register::<mcp::McpService>(catalog, None);
-    register::<mcp::McpAuth>(catalog, None);
-    register::<mcp::Publication>(catalog, None);
     register::<hooks_settings::HooksService>(catalog, None);
     catalog.register_shared("hooksService");
     register::<methods::ManagementMethods>(catalog, None);
@@ -1462,7 +1460,6 @@ pub fn register_faces(builder: &mut dim_agent_runtime::AgentBuilder) {
         ("loopState", "hot-path"),
         // Session creation calls it directly; no leaf needs the service.
         ("managedWorktrees", "hot-path"),
-        ("mcpAuth", "secret"),
         ("mcpService", "host-resource"),
         ("mentionIndex", "host-resource"),
         ("modelHost", "owner-api"),
@@ -1473,7 +1470,6 @@ pub fn register_faces(builder: &mut dim_agent_runtime::AgentBuilder) {
         ("prompt", "hot-path"),
         ("providerConnectionResolver", "host-resource"),
         ("providerService", "secret"),
-        ("publication", "host-resource"),
         ("serverControl", "control"),
         ("sessionLoader", "control"),
         ("sessionStore", "owner-api"),

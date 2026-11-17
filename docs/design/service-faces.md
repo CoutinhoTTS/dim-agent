@@ -190,8 +190,6 @@ Rust 产品装配的现状以 [生成的 catalog](../architecture/rust-agent/gen
 | `serverControl` | process | ServerControl | control |
 | `connectionHub` | process | Connection | control |
 | `pluginFileTransactions` | process | PluginFiles | host-resource |
-| `publication` | process | McpPublication | host-resource |
-| `mcpAuth` | process | Mcp | secret |
 | `grokOAuthService` | process | GrokOAuth | secret |
 | `openAICodexOAuthService` | process | OpenAICodexOAuth | secret |
 | `uiHost` | process | UiHost | control |
