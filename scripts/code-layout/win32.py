@@ -339,6 +339,7 @@ class Console:
         kernel32.CloseHandle(self._thread)
         self._thread = None
         self._buffer = bytearray()
+        self.error = None
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._reader = threading.Thread(target=self._read, daemon=True)
@@ -348,7 +349,8 @@ class Console:
         while not self._stop.is_set():
             try:
                 chunk = os.read(self._master_out, 65536)
-            except OSError:
+            except OSError as error:
+                self.error = error
                 break
             if not chunk:
                 break
@@ -370,6 +372,17 @@ class Console:
 
     def resume(self):
         resume(self._process)
+
+    def poll(self):
+        result = kernel32.WaitForSingleObject(self._process, 0)
+        if result == 0x102:
+            return None
+        if result != 0:
+            raise ctypes.WinError(ctypes.get_last_error())
+        code = wintypes.DWORD()
+        if not kernel32.GetExitCodeProcess(self._process, ctypes.byref(code)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        return code.value
 
     def wait(self, timeout=30):
         result = kernel32.WaitForSingleObject(self._process, int(timeout * 1000))

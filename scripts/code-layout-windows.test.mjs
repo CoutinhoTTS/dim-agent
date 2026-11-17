@@ -99,12 +99,14 @@ void entry(void) {
     console = win32.Console(['cmd.exe','/c','echo','layout-conpty'], root, dict(os.environ))
     try:
         console.trim()
+        time.sleep(1)
+        assert console.poll() is None, (console.poll(), console.error)
         capture = bytearray()
         deadline = time.monotonic() + 20
         while time.monotonic() < deadline and b'layout-conpty' not in capture:
             capture.extend(console.take())
             time.sleep(.02)
-        assert b'layout-conpty' in capture, bytes(capture[-2000:])
+        assert b'layout-conpty' in capture, (bytes(capture[-2000:]), console.error, console.poll())
         assert console.wait(timeout=20) == 0
     finally:
         console.close()

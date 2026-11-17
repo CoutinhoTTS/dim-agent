@@ -117,6 +117,9 @@ def relink(record, output, order_file=None, map_path=None, strict=False, preserv
 def capture(arguments):
     root = Path(os.environ["DIM_LAYOUT_CAPTURE"])
     linker = os.environ["DIM_LAYOUT_LINKER"]
+    arguments = list(arguments)
+    if not any(argument.lower() == "/brepro" for argument in expand(arguments)):
+        arguments.append("/Brepro")
     expanded = expand(arguments)
     saved = []
     inputs = []

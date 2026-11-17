@@ -142,10 +142,12 @@ is rejected.
 
 The captured link line may contain response files. They are expanded, input
 object and library files are copied, and each replay is written to a fresh
-response file. The baseline relink is produced at Cargo's original output path
-so an embedded PDB path stays identical, then Cargo's executable and PDB are
-restored. The lld map is written during that relink and must not change the
-binary.
+response file. The captured final link adds `/Brepro` when it is absent so
+Cargo's `lld-link` output and every replay share deterministic timestamp and
+PDB metadata; this changes linker metadata only, not code layout. The baseline
+relink is produced at Cargo's original output path so an embedded PDB path stays
+identical, then Cargo's executable and PDB are restored. The lld map is written
+during that relink and must not change the binary.
 
 The trainer launches the App Server and the ConPTY-backed TUI suspended,
 empties the process working set at entry, then resumes it. Before exit or
