@@ -3357,7 +3357,26 @@ async fn node_prompt_sources_share_the_owner_and_settle_accepted_loads_after_wit
         plugin_active(&server, row).await;
     }
     let mut client = Client::new_version(&server, false, 3).await;
-    process_typescript::select_model(&mut client).await;
+    let wide_integer = u64::MAX;
+    let provider_state = json!({"nested": [{"integer": wide_integer, "nullable": null}]});
+    let mut capabilities = dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384);
+    capabilities.provider_state = Some(provider_state.as_object().unwrap().clone());
+    assert_ok(&client.rpc("provider.create", json!({
+        "providerId":"018ec73f-0000-7000-8000-000000000007", "displayName":"Fixture",
+        "connection":{"driverKind":"openai-compatible","baseUrl":"http://localhost/v1","auth":{"type":"anonymous"}},
+        "models":[{"modelId":"fixture","displayName":"Fixture","status":"active","capabilities":capabilities}],
+        "enabled":true
+    })).await);
+    assert_ok(
+        &client
+            .rpc(
+                "provider.select",
+                json!({
+                    "providerId":"018ec73f-0000-7000-8000-000000000007","modelId":"fixture"
+                }),
+            )
+            .await,
+    );
     let first = new_session(&mut client, json!([])).await;
     let (instance, ctx, native, initial) = probes.recv().await.unwrap();
     let second = new_session(&mut client, json!([])).await;
@@ -3400,6 +3419,13 @@ async fn node_prompt_sources_share_the_owner_and_settle_accepted_loads_after_wit
             .unwrap(),
             initial.get()
         );
+        let returned_capabilities =
+            &snapshot["result"]["initial"]["model"]["capabilitySnapshot"]["capabilities"];
+        assert_eq!(
+            returned_capabilities["providerState"]["nested"][0]["integer"].as_u64(),
+            Some(wide_integer)
+        );
+        assert_eq!(returned_capabilities["providerState"], provider_state);
         assert!(
             snapshot["result"]["initial"]["sources"]
                 .as_array()
