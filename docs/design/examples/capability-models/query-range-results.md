@@ -45,9 +45,21 @@ done
 上面的循环使用新的随机参数。若需复现记录的随机参数，须在每条命令显式传入对应运行的 `-seed <seed> -fp <fingerprint>`。计数对应最终文件，早期语法错误、
 范围构造拆分前的运行和被终止的开发运行不计为本批通过证据。
 
-本批不改运行时代码，未重跑 Rust 工作区；现有 SQL/memory 对照流程只作为引用的实现证据。
+本批不改运行时代码，未重跑 Rust 工作区；补充实现验证的范围见下节。
 文档链接、哈希、ADR freeze 和 diff 检查由本 PR 验证。没有引入通用验证平台、强制 CI 或新业务约定。
 
 评审修正后五配置全部重跑：first/last 同时比较 group 与位置，from 扩展为 0..6，
 覆盖当前分支 sequence 2/3。0 仍只是缺省哨兵，wire 显式零拒绝没有由模型验证。
 SourcePartition 只比较集合，不验证 tail 向量顺序及单来源重复行。
+
+
+## 游标绑定的实现验证补充
+
+新增表驱动的真实存储查询流程，覆盖 SQLite/Memory 的 Session、分支及范围、当前/祖先 cut、from，以及 filter/select/group/pick/order 变化。
+各变体独立执行成功后，再携原游标断言 binding 输入错误；页大小可改变。物理落盘的兼容正例复用既有 tail-after-commit 流程。
+
+`cargo test --locked -p dim-app-server --test storage_flow property_queries::`：28 passed，0 failed，137 filtered out。
+本轮执行该模块，未重跑全工作区。测试文件当前哈希见 JSON 的 modified_flow_test；source_sha256 保留原 code_base 的历史基线。
+使用隔离 DIMCODE_HOME、独立 worktree target、4 build jobs、CARGO_INCREMENTAL=0。模型与配置未变，以上五组 TLC 结果复用，没有声称重跑 TLC 或 Rust 精化证明。
+
+对应 storage_flow 的 Clippy（`-D warnings`）、格式、ADR freeze、diff 和模型/config/基线/修改后测试哈希检查通过。

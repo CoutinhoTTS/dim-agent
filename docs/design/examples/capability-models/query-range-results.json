@@ -92,5 +92,13 @@
       "finished": "Finished in 28s at (2026-11-17 13:51:02)",
       "initial_states": 1024
     }
-  ]
+  ],
+  "modified_flow_test": {
+    "path": "crates/dim-app-server/tests/storage_flow/property_queries.rs",
+    "sha256": "a5fa9691da6abfa0efee5cd19ec3e8b1163ccf1e3e49d619abf4dc1afda2f96f",
+    "command": "cargo test --locked -p dim-app-server --test storage_flow property_queries::",
+    "result": "28 passed; 0 failed; 137 filtered out",
+    "scope": "SQLite and Memory logical cursor rejection matrix; existing property query flows including physical tail persistence. Source hashes above retain the original code_base; this hash identifies the revised test. Unchanged TLC evidence reused.",
+    "clippy": "passed: cargo clippy --locked -p dim-app-server --test storage_flow -- -D warnings"
+  }
 }

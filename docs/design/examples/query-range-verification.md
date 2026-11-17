@@ -64,7 +64,17 @@ Refs #1732，第二批 B；独立基于 main `c8e4edd5b6cf01936ec1478b8d000f5476
 - `input_identity_relations_keep_the_full_ancestor_range_across_pages_and_tails`：真实祖先、分页及尾部关联。
 - [timeline_tail](../../../tests/integration/tests/timeline_tail.rs)：经 Timeline 入口跨页读取同 cut 的 publishing facts。
 
-这些是既有测试入口，本批不把它们计作重新执行通过。
+后续补充在同一 storage flow 中增加
+`query_cursors_reject_changed_logical_scope_and_queries_in_both_stores`，对 SQLite 和 Memory 分别取真实游标：
+
+- Session、分支及 branch-only 范围、当前 cut、祖先 interval、inclusive from 改变时拒绝旧游标。
+- filter、select、group_by、pick、order_by 改变时拒绝旧游标。
+- 每个变体先独立查询成功，再携旧游标确认是 binding 的 InvalidInput，不把非法表达式或不存在的目录当作游标校验。
+- 页大小从 1 改为 2 时仍可继续且返回两行；仅物理落盘分界改变的正例复用并重跑上述 tail-after-commit 流程。
+
+这直接验证存储接口的逻辑绑定，不证明 Timeline 门面的授权、全部参数组合或任意 SQL 表达式。
+分支用例同时改变 branch key 和合法分支范围，不声称单独隔离了二者的实现贡献。
+本轮执行 property_queries 模块；其他文件里的引用测试没有因此算作重跑。
 每个物理来源按位置唯一、记录内容不变是存储前提；模型检查磁盘/尾部集合不相交，
 也不检查 tail 向量顺序，不证明 SQL 解码不会在单一来源内重复产生同一行。续页调用者的权限/可见性重新校验也未展开。正文编码、missing/null、数值/数组语义、
 任意字段排序、任意深祖先链、取消/故障恢复、完整游标身份校验和 SQL 性能没有由本模型证明。
@@ -78,3 +88,5 @@ Refs #1732，第二批 B；独立基于 main `c8e4edd5b6cf01936ec1478b8d000f5476
 count/first/last 共用扫描循环，其他查询表达式不添作未经检查的伪接口。
 
 本批结果、配置/源码哈希及复现命令见[运行记录](capability-models/query-range-results.md)。
+
+补充流程的消融审查：只增加一个表驱动的存储公共接口流程，复用现有建库、事件和分页设施，不增加游标封装或模型状态。模型与配置未改，原五配置 TLC 结果复用。

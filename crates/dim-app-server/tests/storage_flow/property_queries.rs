@@ -3547,3 +3547,145 @@ async fn membership_lists_match_the_memory_store_for_every_value_type_and_size()
     store.close().await.unwrap();
     db.close().await.unwrap();
 }
+
+#[tokio::test]
+async fn query_cursors_reject_changed_logical_scope_and_queries_in_both_stores() {
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let sqlite = SqliteTimelineStore::new(db.clone());
+    let memory = MemoryTimelineStore::default();
+    for session in ["properties", "other"] {
+        let records = vec![
+            text(1, "a"),
+            text(2, "b"),
+            text(3, "c"),
+            record(
+                4,
+                EventKind::BranchCreate(BranchCreateData {
+                    at: BranchCreateAt::Sequence { sequence: 3 },
+                    source: BranchSource::Host {
+                        operation_id: "cursor-scope".into(),
+                    },
+                    branch: "child".into(),
+                    prompt: String::new(),
+                }),
+            ),
+        ];
+        for store in [&*sqlite as &dyn TimelineStore, &memory] {
+            store
+                .create_session(session, &SessionConfig::default())
+                .await
+                .unwrap();
+        }
+        append(&sqlite, key(session, "main"), records.clone())
+            .await
+            .unwrap();
+        memory
+            .append(key(session, "main"), records, Box::new(|r| r.unwrap()))
+            .unwrap();
+        let records = (1..=3)
+            .map(|n| text_with_id(n, &format!("child-{n}"), &format!("child-{n}")))
+            .collect::<Vec<_>>();
+        append(&sqlite, key(session, "child"), records.clone())
+            .await
+            .unwrap();
+        memory
+            .append(key(session, "child"), records, Box::new(|r| r.unwrap()))
+            .unwrap();
+    }
+    let mut original_scope = scope(3);
+    original_scope.key.branch_id = "child".into();
+    original_scope.segments.push(TimelineReadSegment {
+        branch_id: "child".into(),
+        from: 1,
+        through: 3,
+        stored_through: 3,
+        tail: vec![],
+    });
+    let mut original_query = fields(&["position"]);
+    original_query.group_by = vec!["data.delta".into()];
+    original_query.pick = Some(QueryPick::First);
+    let mut cases = Vec::new();
+    let mut changed = original_scope.clone();
+    changed.key.session_id = "other".into();
+    cases.push(("session", changed, original_query.clone()));
+    let mut changed = scope(3);
+    changed.key.branch_id = "main".into();
+    cases.push((
+        "branch and branch-only range",
+        changed,
+        original_query.clone(),
+    ));
+    let mut changed = original_scope.clone();
+    changed.through = 2;
+    changed.segments[1].through = 2;
+    cases.push(("current cut", changed, original_query.clone()));
+    let mut changed = original_scope.clone();
+    changed.segments[0].through = 2;
+    cases.push(("ancestor interval", changed, original_query.clone()));
+    let mut changed = original_scope.clone();
+    changed.segments[0].from = 2;
+    cases.push(("inclusive from", changed, original_query.clone()));
+    let mut changed = original_query.clone();
+    changed.filter = Some(eq("data.request_id", json!("request")));
+    cases.push(("filter", original_scope.clone(), changed));
+    let mut changed = original_query.clone();
+    changed.select = QuerySelect::Events;
+    cases.push(("selection", original_scope.clone(), changed));
+    let mut changed = original_query.clone();
+    changed.group_by = vec!["id".into()];
+    cases.push(("grouping", original_scope.clone(), changed));
+    let mut changed = original_query.clone();
+    changed.pick = Some(QueryPick::Last);
+    cases.push(("pick", original_scope.clone(), changed));
+    let mut changed = original_query.clone();
+    changed.order_by = vec![QueryOrder {
+        key: QueryOrderKey::Position,
+        direction: TimelineQueryDirection::Descending,
+    }];
+    cases.push(("order", original_scope.clone(), changed));
+    for (backend, store) in [
+        ("sqlite", &*sqlite as &dyn TimelineStore),
+        ("memory", &memory as &dyn TimelineStore),
+    ] {
+        let first = store
+            .query(&original_scope, &original_query, Some(&page(1)))
+            .await
+            .unwrap();
+        let cursor = first.next.expect("multiple groups require a continuation");
+        let continuation = QueryPage {
+            after: Some(cursor),
+            ..page(2)
+        };
+        let resumed = store
+            .query(&original_scope, &original_query, Some(&continuation))
+            .await
+            .unwrap();
+        let dim_agent_runtime::QueryOutput::Rows { rows } = resumed.result else {
+            panic!("grouped field rows");
+        };
+        assert_eq!(
+            rows.len(),
+            2,
+            "{backend}: changing page size preserves the binding and advances the page"
+        );
+        for (name, scope, query) in &cases {
+            store
+                .query(scope, query, Some(&page(1)))
+                .await
+                .unwrap_or_else(|error| {
+                    panic!("{backend} {name}: standalone query must be valid: {error}")
+                });
+            let error = store
+                .query(scope, query, Some(&continuation))
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(&error, AgentError::InvalidInput(message) if message.contains("cursor belongs to another query or scope")),
+                "{backend} {name}: expected cursor binding rejection, got {error}"
+            );
+        }
+    }
+    sqlite.close().await.unwrap();
+    db.close().await.unwrap();
+}
