@@ -37456,7 +37456,8 @@
         "path ContentBlock",
         "path ContentBlock::Image",
         "path ContentBlock::Text",
-        "use dim_agent_types::ContentBlock"
+        "use dim_agent_types::ContentBlock",
+        "use dim_agent_types::ImageSourceType"
       ]
     },
     {
@@ -50742,6 +50743,7 @@
         "path project_group",
         "path render_group",
         "use crate::ui::transcript::tool_group::Detail",
+        "use crate::ui::transcript::tool_group::State",
         "use crate::ui::transcript::tool_group::ToolGroup",
         "use crate::ui::transcript::tool_group::action_at",
         "use crate::ui::transcript::tool_group::card_actions",
@@ -50808,6 +50810,13 @@
       "to": "dim_agent_capabilities::prompt_suggestion",
       "references": [
         "path dim_agent_capabilities::prompt_suggestion::PromptSuggestionSettings"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tui::tests",
+      "to": "dim_agent_types::content",
+      "references": [
+        "use dim_agent_types::ContentBlock"
       ]
     },
     {
