@@ -463,7 +463,7 @@ async fn a_past_window_is_missed_and_a_gone_target_fails_and_disables() {
     // minute, so an advance of 60 s reaches its next window and the pass that
     // follows sees it due; the record count is the claim that the disabled
     // job wrote nothing at that window.
-    clock(home.path()).advance(chrono::Duration::seconds(60));
+    clock(home.path()).advance(jiff::SignedDuration::from_secs(60));
     step(home.path(), 1).await;
     let history: Value = client
         .typed("schedule.history", json!({"job_id": gone}))
