@@ -20,6 +20,7 @@ pub struct ImportLegacyProviders {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ManagementScope {
+    pub page: Option<super::view::ManagementModelPage>,
     pub provider_id: String,
     #[serde(default, deserialize_with = "optional_non_null")]
     pub model_id: Option<String>,
@@ -53,6 +54,14 @@ pub struct UpdatePreferences {
 pub struct DeleteProvider {
     pub provider_id: String,
     pub expected_version: u32,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SetModelEnabled {
+    provider_id: String,
+    expected_version: u32,
+    model_id: String,
+    enabled: bool,
 }
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -120,6 +129,7 @@ pub(super) fn provide(
             "provider.catalog",
             "provider.models.query",
             "provider.refresh",
+            "provider.model.set_enabled",
             "provider.models.set_enabled",
             "provider.models.edit",
             "provider.models.reset",
@@ -171,7 +181,7 @@ pub(super) fn provide(
                         let p: ManagementScope = params(value)?;
                         reply(
                             provider
-                                .management(p.provider_id, p.model_id, cancel)
+                                .management_window(p.provider_id, p.model_id, p.page, cancel)
                                 .await
                                 .map_err(error)?,
                         )
@@ -234,6 +244,11 @@ pub(super) fn provide(
                     }
                     "provider.catalog" => {
                         let p: ManagementScope = params(value)?;
+                        if p.page.is_some() {
+                            return Err(error(super::ProviderError::InvalidConfig(
+                                "Model pages use provider.management".into(),
+                            )));
+                        }
                         let catalog = match p.model_id {
                             Some(model_id) => {
                                 provider
@@ -253,6 +268,20 @@ pub(super) fn provide(
                                 .await
                                 .map_err(error)?,
                         )
+                    }
+                    "provider.model.set_enabled" => {
+                        let p: SetModelEnabled = params(value)?;
+                        let version = provider
+                            .set_model_enabled(
+                                p.provider_id,
+                                p.expected_version,
+                                p.model_id,
+                                p.enabled,
+                                cancel,
+                            )
+                            .await
+                            .map_err(error)?;
+                        reply(serde_json::json!({"version":version}))
                     }
                     "provider.models.set_enabled" => {
                         let p: SetEnabledModels = params(value)?;

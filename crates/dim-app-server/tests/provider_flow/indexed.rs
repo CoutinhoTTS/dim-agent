@@ -511,3 +511,121 @@ async fn archived_source_bases_keep_exact_names_through_native_backup_restore() 
     root.shutdown().await.unwrap();
     std::fs::remove_dir_all(home).unwrap();
 }
+
+#[tokio::test]
+async fn management_pages_keep_hidden_models_and_single_enablement_is_scoped() {
+    use dim_app_server::provider::ManagementModelPage;
+    let home = temp_home("management-pages");
+    let (root, provider) = provider_root(&home).await;
+    let cancel = CancellationToken::new();
+    let id = "00000000-0000-4000-8000-000000001744";
+    let mut config = input(
+        id,
+        "http://127.0.0.1:1/v1",
+        StaticAuth::Anonymous,
+        None,
+        "pages",
+        43,
+    );
+    config.models = (0..70)
+        .map(|i| model(&format!("model-{i:03}"), 43))
+        .collect();
+    config.models[69].status = ModelStatus::Unavailable;
+    let created = provider.create(config, &cancel).await.unwrap();
+    let version = created.info.version.unwrap();
+    let version = provider
+        .set_model_enabled(id.into(), version, "model-060".into(), false, &cancel)
+        .await
+        .unwrap();
+    let methods = root
+        .get::<dim_app_server::methods::ManagementMethods>()
+        .unwrap();
+    let owner = methods.provider("provider.model.set_enabled").unwrap();
+    let written = owner.accept(
+        "provider.model.set_enabled".into(),
+        json!({"providerId":id,"expectedVersion":version,"modelId":"model-001","enabled":false}),
+        None, cancel.clone(), |_| {},
+    ).unwrap().reply.await.unwrap().unwrap();
+    let version = serde_json::from_value::<u32>(written["version"].clone()).unwrap();
+    let mut after = None;
+    let mut seen = Vec::new();
+    loop {
+        let page = provider
+            .management_window(
+                id.into(),
+                None,
+                Some(ManagementModelPage {
+                    after: after.clone(),
+                    limit: Some(16),
+                    query: None,
+                }),
+                &cancel,
+            )
+            .await
+            .unwrap();
+        let wire = owner
+            .accept(
+                "provider.management".into(),
+                json!({"providerId":id,"page":{"after":after,"limit":16}}),
+                None,
+                cancel.clone(),
+                |_| {},
+            )
+            .unwrap()
+            .reply
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(wire, serde_json::to_value(&page).unwrap());
+        assert_eq!(page.providers[0].info.version, Some(version));
+        let models = page.providers[0].models.as_ref().unwrap();
+        assert!(models.len() <= 16);
+        seen.extend(models.iter().map(|m| (m.model.model_id.clone(), m.enabled)));
+        after = page.next;
+        if after.is_none() {
+            break;
+        }
+    }
+    assert_eq!(seen.len(), 70);
+    assert!(seen.contains(&("model-001".into(), false)));
+    assert!(
+        seen.contains(&("model-060".into(), false)),
+        "a write on the first page preserves a disabled model on another page"
+    );
+    let page = provider
+        .management_window(
+            id.into(),
+            None,
+            Some(ManagementModelPage {
+                query: Some("model-069".into()),
+                ..Default::default()
+            }),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert_eq!(page.providers[0].models.as_ref().unwrap().len(), 1);
+    assert_eq!(
+        page.providers[0].models.as_ref().unwrap()[0].model.model_id,
+        "model-069"
+    );
+    let page = provider
+        .query_models(
+            ModelQuery {
+                provider_id: Some(id.into()),
+                selectable_only: true,
+                limit: Some(128),
+                ..Default::default()
+            },
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert_eq!(page.models.len(), 67);
+    assert!(
+        page.models
+            .iter()
+            .all(|m| !m.disabled && m.model.unavailable_reason.is_none())
+    );
+    root.shutdown().await.unwrap();
+}

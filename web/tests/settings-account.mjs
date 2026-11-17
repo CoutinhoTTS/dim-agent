@@ -203,11 +203,13 @@ test("Dim device sign-in fetches models and the signed-in account can retry a fa
 test("disabled third-party Provider refresh retries and loads model detail only on its tab", async () => {
   const providerId = "relay"
   let refreshes = 0
+  const modelReads = []
   const provider = { providerId, displayName: "Relay", source: "custom", credentialAuthority: "static", version: 1, enabled: false, actions: ["refresh"], preferences: {},
     connection: { driverKind: "openai-compatible", auth: { type: "bearer" }, baseUrl: "https://example.test/v1", credentialConfigured: true, headerNames: [], proxyUrl: null, proxyAuthConfigured: false, timeoutMs: null },
   }
   globalThis.settingsRoute = { name: "settings-provider-detail", params: { providerId } }
   globalThis.settingsConnection = { phase: "connected", supports: () => false, client: { call: async (method, params, read) => {
+    if (method === "provider.management") modelReads.push(params)
     if (method === "provider.management" || method === "provider.management.list") return read({ next: null, drivers: [], errors: [], providers: [{
       ...provider, models: refreshes < 2 ? [] : [{
         model: { modelId: "relay-model", displayName: "Relay model", status: "active", capabilities: {
@@ -236,10 +238,10 @@ test("disabled third-party Provider refresh retries and loads model detail only 
     await flush()
     assert.equal(refreshes, 2)
     assert.doesNotMatch(text(root), /Relay timeout/)
-    assert.doesNotMatch(text(root), /models \(1\)/)
+    assert.deepEqual(modelReads, [])
     const modelsTab = all(root).find((element) => element.props.role === "tab" && text(element) === "models")
     await modelsTab.props.onClick(); await flush()
-    assert.match(text(root), /models \(1\)/)
+    assert.deepEqual(modelReads, [{ providerId, page: { query: "", limit: 32 } }])
   } finally { app.unmount(); delete globalThis.settingsConnection; delete globalThis.settingsRoute }
 })
 
@@ -352,7 +354,7 @@ test("provider overview follows pages on demand and opens only the selected deta
     if (method === "provider.management.list") return read({ drivers: [], errors: [], providers: [info(params.providerId ?? (params.after ? "second" : "first"))], next: params.providerId || params.after ? null : "first" })
     assert.equal(method, "provider.management")
     assert.deepEqual(params, { providerId: "second" })
-    return read({ drivers: [], errors: [], providers: [{ ...info("second"), models: [], preferences: {} }] })
+    return read({ next: null, drivers: [], errors: [], providers: [{ ...info("second"), models: [], preferences: {} }] })
   } } }
   const root = node("root")
   const app = renderer.createApp(ProviderSettings).use(createPinia()).use(nuxtUiTestPlugin).provide(settingsDirtyKey, ref(false))

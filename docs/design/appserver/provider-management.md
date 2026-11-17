@@ -118,9 +118,10 @@ preference, workspace selection, account lease or secret file is created.
 
 | Method | Request | Reply | mutating | interruption |
 | --- | --- | --- | --- | --- |
-| `provider.management` | `{providerId, modelId?}` | `{drivers: ManagementDriver[], providers: ManagementProvider[], errors: ProviderRecordError[]}`; each connection adds `gluedPrefix`, the prefix its record states, and each model adds `alias`, the catalog id the listed id stands for, and `catalogName`, the name `provider.catalog` publishes for the row; each is omitted when unset | false | `Drain` |
+| `provider.management` | `{providerId, modelId?, page?: {after?, limit?, query?}}` | `{drivers: ManagementDriver[], providers: ManagementProvider[], errors: ProviderRecordError[], next: string|null}`; each connection adds `gluedPrefix`, the prefix its record states, and each model adds `alias`, the catalog id the listed id stands for, and `catalogName`, the name `provider.catalog` publishes for the row; each is omitted when unset | false | `Drain` |
 | `provider.list` | `{}` | Existing `{providers, errors}` summary; each provider adds `remoteModelList`, whether `provider.refresh` can list its models, which clients use to offer or withhold that command in a row naming an empty catalog, and `gluedPrefix`, the prefix its record states, omitted when unset | false | `Drain` |
 | `provider.selection` | `{cwd?}` | Existing `{selection}` and its separate scope/version. A `cwd` reads only that scope's row and answers `null` when the folder has none; the workspace-over-global precedence is a `configuration` rule, not this read's | false | `Drain` |
+| `provider.model.set_enabled` | `{providerId, expectedVersion, modelId, enabled}` | `{version}` | true | `Drain` |
 | `provider.catalog` | `{providerId, modelId?}` | Existing `{catalog}` with `ProviderModel`; each model's `name` is unique within its provider (§3.1 below) | false | `Drain` |
 
 `provider.catalog` publishes a `name` unique within its provider. Duplicates are
@@ -1589,6 +1590,39 @@ disposable database; see [the storage contract](native-storage-format.md#329-格
   writes leave the record unchanged.
 - **Owner/issue:** method errors in `dim-agent-capabilities` and App Server;
   [#1495](https://github.com/arcships/dim/issues/1495).
+
+## Scoped downstream reads
+
+`provider.management` accepts `page: {after?, limit?, query?}` for a single
+Provider's model editor. `modelId` and `page` are mutually exclusive. Limits are
+1–128, default 32; `after` is the last returned model ID and `next:null` ends
+traversal. IDs sort lexically. Search matches model ID or display name separately,
+case-insensitively. Disabled and unavailable models remain editable and visible.
+A page's model rows, preferences and Provider version come from one committed
+snapshot; later pages may observe later versions. Page reads decode only the
+selected payloads and the naming information required for their labels.
+
+The Web model editor requests its first page on opening, sends searches to the
+owner, and loads further pages on demand. A single-model write is followed by an
+exact `modelId` read and replaces that displayed row. Opening an existing model
+for editing also reads its current row, preferences and version together. Deletion removes only that
+row. A record-version conflict requires rereading before another write.
+
+`provider.model.set_enabled` accepts `{providerId, expectedVersion, modelId,
+enabled}` and returns `{version}` through `managementMethods`. It checks the
+Provider version, managed-account identity and target availability, then updates
+only that model's disabled state in the same transaction as the version. Unknown
+targets return `provider_not_found`; unavailable targets cannot be toggled.
+This operation does not infer other models' enablement from a displayed page.
+
+`provider.models.query` accepts `selectableOnly: true` to return only targets
+accepted by the owner's existing execution predicate. The cursor still advances
+across examined candidates; a filtered page can be empty and carry `next`.
+ACP consumes these bounded pages to build its protocol's complete available-model
+response. Model IDs shared by multiple providers remain ambiguous and are omitted.
+CLI limit declarations naming one model pass `modelId` both for the version read and the
+post-write display. Bulk limit declarations enumerate the requested missing-limit
+set.
 
 ## 9. Ablation review
 

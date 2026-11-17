@@ -550,6 +550,57 @@ impl ProviderService {
         .await
     }
 
+    pub async fn set_model_enabled(
+        self: &Arc<Self>,
+        provider_id: String,
+        expected_version: u32,
+        model_id: String,
+        enabled: bool,
+        cancel: &CancellationToken,
+    ) -> Result<u32, ProviderError> {
+        self.adopt_provider(&provider_id, cancel).await?;
+        let account = if self.oauth.contains(&provider_id, cancel).await? {
+            Some(self.oauth.status(&provider_id, cancel).await?)
+        } else {
+            None
+        };
+        let available = self.account_available(&provider_id, cancel).await?;
+        let bundled = self.bundled.clone();
+        let db = self.db.clone();
+        self.owned(cancel, move |_| Box::pin(async move {
+            db.run(move |connection| {
+                Ok((|| -> Result<_, ProviderError> {
+                    let tx = connection.transaction()?;
+                    let record = read_model_record(&tx, &provider_id, &model_id)?.ok_or(ProviderError::NotFound)?;
+                    let (catalog, version, body) = match record {
+                        PersistedProviderRecord::Static(mut record) => {
+                            if record.version != expected_version { return Err(ProviderError::Conflict("Provider version changed; reread before retrying".into())); }
+                            let catalog = static_catalog(&bundled,&provider_id,&record,available);
+                            record.version = record.version.checked_add(1).ok_or(ProviderError::Failed)?;
+                            persistence::admit_base(&tx,&provider_id,&record,&bundled)?;
+                            (catalog,record.version,serde_json::to_string(&record)?)
+                        }
+                        PersistedProviderRecord::Managed(mut record) => {
+                            record.check_write(&provider_id,expected_version,account.as_ref().ok_or(ProviderError::AuthRequired)?)?;
+                            let catalog = record.catalog(&bundled);
+                            record.version = record.version.checked_add(1).ok_or(ProviderError::Failed)?;
+                            (catalog,record.version,serde_json::to_string(&record)?)
+                        }
+                    };
+                    let model = catalog.models.iter().find(|m|m.id==model_id).ok_or(ProviderError::NotFound)?;
+                    if model.unavailable_reason.is_some() { return Err(ProviderError::Unsupported("Unavailable model enablement cannot be changed".into())); }
+                    persistence::write_header(&tx,&provider_id,version,&body)?;
+                    tx.execute("DELETE FROM provider_model_state WHERE provider_id=?1 AND model_id=?2 AND field='disabledModelIds'",params![provider_id,model_id])?;
+                    if !enabled {
+                        tx.execute("INSERT INTO provider_model_state(provider_id,model_id,field,position,value) VALUES (?1,?2,'disabledModelIds',0,?3)",params![provider_id,model_id,serde_json::to_string(&model_id)?])?;
+                    }
+                    tx.commit()?;
+                    Ok(version)
+                })())
+            }).await?
+        })).await
+    }
+
     pub async fn set_enabled_models(
         self: &Arc<Self>,
         provider_id: String,

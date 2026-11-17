@@ -831,8 +831,7 @@ impl Worker {
         // A choice made at Home came after the launch flag, so it replaces
         // that flag's member and leaves the rest of the creation's
         // preferences alone. `modelFromSession` denies the member entirely.
-        let from_session =
-            self.model_session.is_some() && self.client.offers("session.create.modelFromSession");
+        let from_session = self.model_session.is_some();
         if let (false, Some((_, pending))) = (from_session, &self.pending) {
             let mut preferences = params["modelPreferences"]
                 .as_object()
@@ -855,28 +854,11 @@ impl Worker {
             None
         };
         let result = async {
-            if let Some(source) = &self.model_session
-                && self.client.offers("session.create.modelFromSession")
-            {
+            if let Some(source) = &self.model_session {
                 params["modelFromSession"] = json!(source);
             } else if let Some(model) = &self.model {
                 let (provider, model) = (model.provider_id.clone(), model.model_id.clone());
                 params["model"] = json!({"provider": provider, "modelId": model});
-                if self.model_session.is_some() && self.options.model_config.is_none() {
-                    let cannot_copy = "This daemon cannot copy the adopted Session model. Restart the daemon with a version supporting session.create.modelFromSession, then rebind the temporary connection with DIM_BASE_URL and DIM_API_FORMAT";
-                    if !self.client.offers("provider.management") {
-                        return Err(cannot_copy.into());
-                    }
-                    let snapshot: ProviderManagement = self
-                        .client
-                        .typed("provider.management", json!({"providerId": provider}))
-                        .await?;
-                    snapshot
-                        .providers
-                        .into_iter()
-                        .find(|entry| entry.info.provider_id == provider)
-                        .ok_or_else(|| format!("{cannot_copy}, or select a configured Provider model before starting a new Session"))?;
-                }
                 target = Some((provider, model));
             }
             match self.client.typed::<Created>("session.create", params).await {
@@ -3822,9 +3804,7 @@ impl Worker {
                 // `/new` after a Session inherits that Session's model
                 // through `modelFromSession`, which a creation's preferences
                 // cannot accompany: the choice would silently never arrive.
-                if self.model_session.is_some()
-                    && self.client.offers("session.create.modelFromSession")
-                {
+                if self.model_session.is_some() {
                     self.report(
                         "The next Session inherits its model; run the command there.".into(),
                         true,
@@ -5057,9 +5037,11 @@ pub(crate) async fn declare_model_limits(
     context_window: u64,
     max_output_tokens: u64,
 ) -> crate::Result<()> {
-    let snapshot: ProviderCatalogSnapshot = client
-        .typed("provider.catalog", json!({"providerId": provider_id}))
-        .await?;
+    let mut params = json!({"providerId": provider_id});
+    if let LimitTarget::Model(model_id) = &target {
+        params["modelId"] = json!(model_id);
+    }
+    let snapshot: ProviderCatalogSnapshot = client.typed("provider.catalog", params).await?;
     let catalog = snapshot
         .catalog
         .ok_or("Provider catalog must be refreshed before declaring model limits")?;

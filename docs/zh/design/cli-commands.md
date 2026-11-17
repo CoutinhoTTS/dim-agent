@@ -775,6 +775,12 @@ Ctrl+T 立即运行所选任务，并报告所有者为手动窗口记录的投�
 
 `dimcode scheduled add PATH`（`-` 表示 stdin）是不经编辑器的创建；`dimcode scheduled history ID` 打印详情显示的那些行；`dimcode scheduled remove ID` 不经面板的确认直接删除。
 
+`--set-limits` 指定单个模型时，写入前只读取该模型，写入后也只回读并展示该模型。
+
+```text
+read MODEL -> write MODEL -> display MODEL
+```
+
 ### Models 领域
 
 Models 领域（#818）：`/models` 里的 `Edit models` 打开单个提供方的面板，`dimcode models PROVIDER enable|disable|remove|inspect MODEL`、`edit MODEL`、`set MODEL PATH` 与 `add PATH` 是它在命令行上的同一领域，经 `provider.management` 与 `provider.models.*` 写入（[提供方管理](appserver/provider-management.md)）。提供方是领域的一部分，所以另一个提供方的回复不会落到面板里，面板标题也写明提供方（`Models · <name>`）。`dimcode models PROVIDER` 保持原有列表与四个标志；`--refresh` 就是该领域在命令行上的 reload。

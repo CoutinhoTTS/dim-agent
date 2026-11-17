@@ -1317,6 +1317,14 @@ Type query -> first matching page
 Esc        -> clear query; when empty, close and release results
 ```
 
+For `dimcode models PROVIDER --set-limits MODEL`, the version read and the
+post-write display address that model only:
+
+```text
+dimcode models PROVIDER --set-limits MODEL ...
+  -> read MODEL -> write MODEL -> display MODEL
+```
+
 ### The Models area
 
 The models area (#818): `Edit models` in `/models` opens one Provider's panel, and `dimcode

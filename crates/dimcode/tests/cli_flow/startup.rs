@@ -1587,7 +1587,7 @@ fn model_config_rejects_product_only_controls_before_starting_a_daemon() {
 }
 
 #[test]
-fn old_daemon_home_creation_rejects_temporary_sources_and_keeps_configured_fallback() {
+fn home_creation_inherits_adopted_models_without_provider_management() {
     for (configured, management) in [(false, false), (false, true), (true, true)] {
         let home = Home::new();
         let provider = if configured {
@@ -1619,23 +1619,11 @@ fn old_daemon_home_creation_rejects_temporary_sources_and_keeps_configured_fallb
                     "session.history" => json!({"events":[],"through":8,"nextAfter":8,"done":true}),
                     "session.idle" => json!({"sequence":8}),
                     "account.providers" => json!([]),
-                    "provider.management" => {
-                        assert!(management);
-                        assert_eq!(request["params"], json!({"providerId":provider}));
-                        let providers = if configured { json!([{"providerId":provider,"source":"user",
-                            "displayName":"Configured","preferences":{"model":{"reasoningEffort":"low","serviceTier":"priority"}}}]) } else { json!([]) };
-                        json!({"providers":providers,"errors":[]})
-                    }
+                    "provider.management" => panic!("Session inheritance must not read Provider management"),
                     "session.create" => {
-                        assert!(configured, "A temporary source must not reach legacy creation");
-                        assert_eq!(request["params"]["model"], json!({"provider":provider,"modelId":"model"}));
-                        assert!(
-                            request["params"].get("modelPreferences").is_none(),
-                            "Nothing is stated, so the server applies the saved pair: {}",
-                            request["params"]
-                        );
-                        assert!(request["params"].get("startup").is_none());
-                        assert!(request["params"].get("modelFromSession").is_none());
+                        assert_eq!(request["params"]["modelFromSession"], "session");
+                        assert!(request["params"].get("model").is_none());
+                        assert!(request["params"].get("modelPreferences").is_none());
                         reject(wire, &request);
                         continue;
                     }
@@ -1655,22 +1643,7 @@ fn old_daemon_home_creation_rejects_temporary_sources_and_keeps_configured_fallb
         // `/new` runs; the boundary rule follows the switch's composer clear.
         terminal.until("─ new session ─");
         terminal.write(b"hello\r");
-        if configured {
-            terminal.until("startup fixture rejection");
-        } else {
-            terminal.until("Restart the daemon");
-            terminal.until("DIM_BASE_URL and DIM_API_FORMAT");
-            if management {
-                terminal.until("before starting a new Session");
-            } else {
-                assert!(!terminal.transcript.contains("or select a configured"));
-            }
-            assert!(
-                !terminal
-                    .transcript
-                    .contains("Provider management entry is missing")
-            );
-        }
+        terminal.until("startup fixture rejection");
         terminal.signal(libc::SIGKILL);
         terminal.wait();
         daemon.join().unwrap();

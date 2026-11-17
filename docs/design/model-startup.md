@@ -129,13 +129,9 @@ connection requires explicit rebinding. Resuming with explicit overrides adopts
 them through the existing configuration path before accepting the first input.
 It does not rewrite existing branch history or reconfigure existing members.
 
-When a daemon does not advertise `session.create.modelFromSession`, a new
-Session may use the ordinary configured-model fallback only for a saved
-Provider. Read the public management listing to establish that membership;
-never infer a temporary source from the spelling of its identity or query that
-identity as a saved Provider. If it cannot be copied, explain how to restart a
-daemon supporting adopted-model copying and rebind the temporary connection,
-or select a configured Provider model when Provider management is available.
+New Sessions inheriting an adopted model use `session.create.modelFromSession`
+directly. The CLI and daemon use the current contract; there is no fallback to
+Provider membership reads or reconstruction from model IDs.
 
 Automatic title generation still uses the auxiliary model path's catalog
 `ModelId`, which carries no startup connection binding. A temporary direct
