@@ -3078,6 +3078,7 @@
       "file": "crates/dim-app-server/src/model_catalog.rs",
       "unexpandedMacros": [
         "b",
+        "format",
         "include",
         "include_str",
         "inherit",
@@ -3095,6 +3096,24 @@
         "format",
         "matches",
         "vec"
+      ]
+    },
+    {
+      "id": "dim_app_server::model_catalog::name_inputs",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::model_catalog",
+      "file": "crates/dim-app-server/src/model_catalog/name_inputs.rs",
+      "unexpandedMacros": [
+        "format"
+      ]
+    },
+    {
+      "id": "dim_app_server::model_catalog::source",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::model_catalog",
+      "file": "crates/dim-app-server/src/model_catalog/source.rs",
+      "unexpandedMacros": [
+        "format"
       ]
     },
     {
@@ -3284,7 +3303,7 @@
       "file": "crates/dim-app-server/src/provider/editing.rs",
       "unexpandedMacros": [
         "matches",
-        "params"
+        "unreachable"
       ]
     },
     {
@@ -3350,6 +3369,20 @@
       ]
     },
     {
+      "id": "dim_app_server::provider::persistence",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::provider",
+      "file": "crates/dim-app-server/src/provider/persistence.rs",
+      "unexpandedMacros": [
+        "format",
+        "matches",
+        "params",
+        "serde_json::json",
+        "unreachable",
+        "vec"
+      ]
+    },
+    {
       "id": "dim_app_server::provider::preferences",
       "crate": "dim_app_server",
       "parent": "dim_app_server::provider",
@@ -3364,7 +3397,17 @@
       "parent": "dim_app_server::provider",
       "file": "crates/dim-app-server/src/provider/query.rs",
       "unexpandedMacros": [
+        "matches",
         "params"
+      ]
+    },
+    {
+      "id": "dim_app_server::provider::read_work",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::provider",
+      "file": "crates/dim-app-server/src/provider/read_work.rs",
+      "unexpandedMacros": [
+        "thread_local"
       ]
     },
     {
@@ -3374,7 +3417,6 @@
       "file": "crates/dim-app-server/src/provider/remote.rs",
       "unexpandedMacros": [
         "format",
-        "params",
         "tokio::select"
       ]
     },
@@ -3402,13 +3444,20 @@
       ]
     },
     {
+      "id": "dim_app_server::provider::testing",
+      "crate": "dim_app_server",
+      "parent": "dim_app_server::provider",
+      "file": "crates/dim-app-server/src/provider.rs",
+      "unexpandedMacros": []
+    },
+    {
       "id": "dim_app_server::provider::view",
       "crate": "dim_app_server",
       "parent": "dim_app_server::provider",
       "file": "crates/dim-app-server/src/provider/view.rs",
       "unexpandedMacros": [
         "format",
-        "params",
+        "matches",
         "unreachable",
         "vec"
       ]
@@ -29602,9 +29651,9 @@
         "mod id",
         "path Lookup",
         "path id",
+        "path id::Candidate",
         "path id::IdIndex",
         "path id::IdIndex::new",
-        "path id::Index",
         "path id::is_placeholder",
         "path variants",
         "use self::id::Lookup",
@@ -29613,9 +29662,32 @@
     },
     {
       "from": "dim_app_server::model_catalog",
+      "to": "dim_app_server::model_catalog::name_inputs",
+      "references": [
+        "mod name_inputs"
+      ]
+    },
+    {
+      "from": "dim_app_server::model_catalog",
+      "to": "dim_app_server::model_catalog::source",
+      "references": [
+        "mod source",
+        "path CatalogData",
+        "use source::CatalogData"
+      ]
+    },
+    {
+      "from": "dim_app_server::model_catalog",
       "to": "dim_app_server::model_catalog::tokens",
       "references": [
         "mod tokens"
+      ]
+    },
+    {
+      "from": "dim_app_server::model_catalog",
+      "to": "dim_app_server::provider::read_work",
+      "references": [
+        "path crate::provider::read_work::update"
       ]
     },
     {
@@ -29637,7 +29709,7 @@
         "path ProviderProjection",
         "path ProviderRole",
         "path ProviderRole::Vendor",
-        "path bundled_record",
+        "path bundled_model",
         "path drop_undeclared_limits",
         "path entry_kind"
       ]
@@ -30751,9 +30823,12 @@
         "mod editing",
         "use editing::ConnectionInput",
         "use editing::CreateProvider",
+        "use editing::ManagementUpdateSummary",
         "use editing::ProbeProvider",
         "use editing::ProbeResult",
-        "use editing::ProviderPatch"
+        "use editing::ProviderPatch",
+        "use editing::UpdateReply",
+        "use editing::UpdateReplyKind"
       ]
     },
     {
@@ -30808,6 +30883,28 @@
     },
     {
       "from": "dim_app_server::provider",
+      "to": "dim_app_server::provider::persistence",
+      "references": [
+        "mod persistence",
+        "path persistence::Models::All",
+        "path persistence::Models::Header",
+        "path persistence::Models::One",
+        "path persistence::admit_base",
+        "path persistence::adopt",
+        "path persistence::header",
+        "path persistence::ids",
+        "path persistence::names",
+        "path persistence::ordered_models",
+        "path persistence::providers_for_model",
+        "path persistence::read",
+        "path persistence::static_read",
+        "path persistence::write",
+        "path persistence::write_header",
+        "path persistence::write_pinned"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider",
       "to": "dim_app_server::provider::preferences",
       "references": [
         "mod preferences",
@@ -30831,10 +30928,16 @@
     },
     {
       "from": "dim_app_server::provider",
+      "to": "dim_app_server::provider::read_work",
+      "references": [
+        "mod read_work"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider",
       "to": "dim_app_server::provider::remote",
       "references": [
-        "mod remote",
-        "path remote::client"
+        "mod remote"
       ]
     },
     {
@@ -30864,6 +30967,13 @@
         "path startup::StartupBindings::default",
         "use startup::StartupInput",
         "use startup::StartupSelection"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider",
+      "to": "dim_app_server::provider::testing",
+      "references": [
+        "mod testing"
       ]
     },
     {
@@ -31027,7 +31137,9 @@
         "path CredentialUpdate::SetRef",
         "path ProviderError",
         "path ProviderError::AuthRequired",
+        "path ProviderError::Cancelled",
         "path ProviderError::Conflict",
+        "path ProviderError::Failed",
         "path ProviderError::InvalidConfig",
         "path ProviderError::NotFound",
         "path ProviderError::Unsupported",
@@ -31039,7 +31151,7 @@
         "path StaticRecordKind::Custom",
         "path failure",
         "path optional_non_null",
-        "path read_static",
+        "path read_stored_static",
         "path reject_user_model_conflicts",
         "path validate_static_record"
       ]
@@ -31060,6 +31172,17 @@
     },
     {
       "from": "dim_app_server::provider::editing",
+      "to": "dim_app_server::provider::persistence",
+      "references": [
+        "path persistence::Models::Header",
+        "path persistence::admit_base",
+        "path persistence::static_read",
+        "path persistence::write",
+        "path persistence::write_header"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::editing",
       "to": "dim_app_server::provider::secrets",
       "references": [
         "path ProviderSecret::Aws",
@@ -31073,6 +31196,7 @@
       "from": "dim_app_server::provider::editing",
       "to": "dim_app_server::provider::view",
       "references": [
+        "path ManagementInfo",
         "path ManagementProvider",
         "path ModelsListed",
         "path ModelsListed::Bundled",
@@ -31140,7 +31264,7 @@
         "path bundled_seed_for",
         "path failure",
         "path managed_authority",
-        "path parse_static",
+        "path read_stored_static",
         "path selection_scope",
         "path storage",
         "path stored_selection",
@@ -31152,6 +31276,13 @@
       "to": "dim_app_server::provider::models",
       "references": [
         "path models"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::legacy",
+      "to": "dim_app_server::provider::persistence",
+      "references": [
+        "path persistence::write"
       ]
     },
     {
@@ -31238,7 +31369,8 @@
       "references": [
         "path super::CreateProvider",
         "path super::ProbeProvider",
-        "path super::ProviderPatch"
+        "path super::ProviderPatch",
+        "path super::UpdateReplyKind"
       ]
     },
     {
@@ -31304,12 +31436,19 @@
         "path StaticProviderRecord",
         "path capability_snapshot",
         "path read_catalog",
-        "path read_static",
+        "path read_stored_static",
         "path save_catalog",
         "path static_catalog",
         "path static_entries",
         "path static_models",
         "path validate_static_record"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::models",
+      "to": "dim_app_server::provider::persistence",
+      "references": [
+        "path persistence::write"
       ]
     },
     {
@@ -31333,6 +31472,20 @@
       "references": [
         "path ModelEntry",
         "use crate::model_catalog::ModelEntry"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::naming",
+      "to": "dim_app_server::model_catalog::name_inputs",
+      "references": [
+        "path Name",
+        "path Name::from",
+        "path id_fallback",
+        "path label_candidate",
+        "use crate::model_catalog::name_inputs::Name",
+        "use crate::model_catalog::name_inputs::id_fallback",
+        "use crate::model_catalog::name_inputs::keys",
+        "use crate::model_catalog::name_inputs::label_candidate"
       ]
     },
     {
@@ -31401,6 +31554,87 @@
       ]
     },
     {
+      "from": "dim_app_server::provider::persistence",
+      "to": "dim_agent_runtime::error",
+      "references": [
+        "path dim_agent_runtime::Result"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::persistence",
+      "to": "dim_agent_types::model",
+      "references": [
+        "path model"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::persistence",
+      "to": "dim_app_server::model_catalog",
+      "references": [
+        "path BundledCatalog",
+        "path BundledCatalog::load",
+        "path ModelEntry",
+        "path drop_undeclared_limits"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::persistence",
+      "to": "dim_app_server::model_catalog::name_inputs",
+      "references": [
+        "path naming::Name",
+        "path naming::Name::from",
+        "path naming::keys"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::persistence",
+      "to": "dim_app_server::provider",
+      "references": [
+        "path PersistedProviderRecord",
+        "path PersistedProviderRecord::Managed",
+        "path PersistedProviderRecord::Static",
+        "path StaticProviderRecord",
+        "path StaticRecordKind::Builtin",
+        "path bundled_seed",
+        "path bundled_seed_for",
+        "path parse_provider_row",
+        "path read_stored_static",
+        "path reseed_candidate",
+        "path seeded",
+        "path static_entries",
+        "path storage",
+        "path validate_static_record"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::persistence",
+      "to": "dim_app_server::provider::models",
+      "references": [
+        "path models"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::persistence",
+      "to": "dim_app_server::provider::naming",
+      "references": [
+        "path naming::unique_names"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::persistence",
+      "to": "dim_app_server::provider::query",
+      "references": [
+        "path query"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::persistence",
+      "to": "dim_app_server::provider::read_work",
+      "references": [
+        "path read_work::update"
+      ]
+    },
+    {
       "from": "dim_app_server::provider::preferences",
       "to": "dim_agent_capabilities::host",
       "references": [
@@ -31435,13 +31669,6 @@
     },
     {
       "from": "dim_app_server::provider::query",
-      "to": "dim_agent_capabilities::host",
-      "references": [
-        "path HostError::Cancelled"
-      ]
-    },
-    {
-      "from": "dim_app_server::provider::query",
       "to": "dim_agent_types::input",
       "references": [
         "path input"
@@ -31466,23 +31693,32 @@
       "from": "dim_app_server::provider::query",
       "to": "dim_app_server::provider",
       "references": [
+        "path PersistedProviderRecord::Managed",
         "path PersistedProviderRecord::Static",
         "path ProviderError",
-        "path ProviderError::Failed",
         "path ProviderError::InvalidConfig",
         "path ProviderError::from",
         "path ProviderModel",
         "path ProviderService",
-        "path read_model_record",
+        "path can_list_models",
+        "path same_account",
+        "path static_catalog",
         "path storage"
       ]
     },
     {
       "from": "dim_app_server::provider::query",
-      "to": "dim_app_server::provider::naming",
+      "to": "dim_app_server::provider::persistence",
       "references": [
-        "path naming::Name",
-        "path naming::unique_names"
+        "path persistence::Models::Header",
+        "path persistence::Models::One",
+        "path persistence::adopt",
+        "path persistence::ids",
+        "path persistence::model_keys",
+        "path persistence::name",
+        "path persistence::names",
+        "path persistence::providers_for_model",
+        "path persistence::read"
       ]
     },
     {
@@ -31493,13 +31729,23 @@
       ]
     },
     {
+      "from": "dim_app_server::provider::query",
+      "to": "dim_app_server::provider::read_work",
+      "references": [
+        "path read_work::get",
+        "path read_work::reset",
+        "path super::read_work::ReadWork"
+      ]
+    },
+    {
       "from": "dim_app_server::provider::remote",
       "to": "dim_agent_capabilities::host",
       "references": [
         "path HostError",
         "path HostError::classified",
         "path HostErrorKind::Http",
-        "path ModelNetwork"
+        "path ModelNetwork",
+        "path ModelNetwork::default"
       ]
     },
     {
@@ -31543,7 +31789,7 @@
         "path StaticProviderRecord",
         "path StaticRecordKind::Builtin",
         "path failure",
-        "path read_static",
+        "path read_stored_static",
         "path reject_user_model_conflicts",
         "path static_catalog",
         "path validate_static_record"
@@ -31561,6 +31807,13 @@
       "to": "dim_app_server::provider::new_api",
       "references": [
         "path super::new_api::base_url"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::remote",
+      "to": "dim_app_server::provider::persistence",
+      "references": [
+        "path persistence::write"
       ]
     },
     {
@@ -31713,10 +31966,27 @@
       ]
     },
     {
-      "from": "dim_app_server::provider::view",
+      "from": "dim_app_server::provider::testing",
       "to": "dim_agent_runtime::error",
       "references": [
         "path dim_agent_runtime::Result"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::testing",
+      "to": "dim_app_server::provider",
+      "references": [
+        "path ProviderService",
+        "path storage"
+      ]
+    },
+    {
+      "from": "dim_app_server::provider::testing",
+      "to": "dim_app_server::provider::persistence",
+      "references": [
+        "path persistence::Models::All",
+        "path persistence::read",
+        "path persistence::write_pinned"
       ]
     },
     {
@@ -31774,10 +32044,7 @@
         "path StaticAuth::Anonymous",
         "path StaticProviderRecord",
         "path StaticRecordKind::Builtin",
-        "path bundled_seed_for",
-        "path parse_provider_row",
         "path read_model_record",
-        "path reseed_candidate",
         "path same_account",
         "path static_entries",
         "path static_models_from_entries",
@@ -31809,16 +32076,22 @@
     },
     {
       "from": "dim_app_server::provider::view",
-      "to": "dim_app_server::provider::preferences",
+      "to": "dim_app_server::provider::persistence",
       "references": [
-        "path preferences"
+        "path persistence::Models::All",
+        "path persistence::Models::Header",
+        "path persistence::adopt",
+        "path persistence::header",
+        "path persistence::ids",
+        "path persistence::names",
+        "path persistence::read"
       ]
     },
     {
       "from": "dim_app_server::provider::view",
-      "to": "dim_app_server::provider::query",
+      "to": "dim_app_server::provider::preferences",
       "references": [
-        "path query"
+        "path preferences"
       ]
     },
     {
@@ -34140,6 +34413,13 @@
       "to": "dim_app_server::provider",
       "references": [
         "path crate::provider::rewrite_stored_limits"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::sqlite",
+      "to": "dim_app_server::provider::persistence",
+      "references": [
+        "path crate::provider::persistence::migrate"
       ]
     },
     {
@@ -52375,9 +52655,11 @@
       "to": "dim_app_server::provider",
       "references": [
         "path StaticProviderRecord",
-        "path parse_static",
+        "path read_stored_static",
+        "path write_stored_static",
         "use dim_app_server::provider::StaticProviderRecord",
-        "use dim_app_server::provider::parse_static"
+        "use dim_app_server::provider::read_stored_static",
+        "use dim_app_server::provider::write_stored_static"
       ]
     },
     {

@@ -149,7 +149,7 @@ Provider 和模型 ID，不枚举候选目录。具体选择、同步、保留�
 
 `provider.models.query` 是进程 `managementMethods` 的只读操作，请求为
 `{providerId?, modelId?, query?, after?, limit?}`。limit 默认 32，范围 1–128。
-query 匹配模型 ID、显示名和 Provider 名；`zdr` 也匹配账号 owner 声明的 ZDR 标志。
+query 分别匹配模型 ID、显示名和 Provider 名；`zdr` 也匹配账号 owner 声明的 ZDR 标志。
 after 和 next 是按序、排他的 `{providerId, modelId}` 游标，空模型 ID 表示没有模型行的
 启用 Provider；客户端原样传回游标，不把游标当作可选模型。
 

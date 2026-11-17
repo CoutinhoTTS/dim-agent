@@ -256,7 +256,8 @@ results cannot conceal an accumulating cache.
 
 `provider.models.query` is a read-only operation of the process `managementMethods`
 face. It accepts `{providerId?, modelId?, query?, after?, limit?}`. The limit defaults
-to 32 and accepts 1–128. Search matches model ID, display name and provider name; `zdr` also matches the account-owned ZDR flag.
+to 32 and accepts 1–128. Search matches model ID, display name and provider name
+independently; `zdr` also matches the account-owned ZDR flag.
 `after` and reply `next` are exclusive ordered `{providerId, modelId}` cursors;
 they are traversal positions, not selectable targets. An empty model ID represents
 an enabled provider without a model row. Clients pass the returned cursor unchanged.

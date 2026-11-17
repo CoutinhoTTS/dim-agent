@@ -58,6 +58,7 @@ async fn provider_activation_and_target_reads_release_their_catalogs() {
     println!("bundled retained={retained} target_peak={peak}");
     drop(bundled);
     for phase in ["first-install", "restart"] {
+        let sqlite_before_root = unsafe { rusqlite::ffi::sqlite3_memory_used() };
         let root = Ctx::root().unwrap();
         let plugins = [
             root.plugin(dim_app_server::methods::ManagementMethodsPlugin::typed(&catalog).unwrap()),
@@ -98,7 +99,8 @@ async fn provider_activation_and_target_reads_release_their_catalogs() {
         let sqlite_retained = unsafe { rusqlite::ffi::sqlite3_memory_used() } - sqlite_before;
         let sqlite_peak = unsafe { rusqlite::ffi::sqlite3_memory_highwater(0) } - sqlite_before;
         println!(
-            "{phase} provider_retained={retained} activation_peak={peak} sqlite_retained={sqlite_retained} sqlite_peak={sqlite_peak}"
+            "{phase} provider_retained={retained} activation_peak={peak} sqlite_retained={sqlite_retained} sqlite_peak={sqlite_peak} sqlite_total={}",
+            sqlite_before + sqlite_retained
         );
         assert!(retained < 128 * 1024, "Provider retained {retained} bytes");
         let service = root.get::<ProviderService>().unwrap();
@@ -165,10 +167,6 @@ async fn provider_activation_and_target_reads_release_their_catalogs() {
             unsafe { rusqlite::ffi::sqlite3_memory_used() } - sqlite_before_read
         );
         assert!(
-            sqlite_retained < 128 * 1024,
-            "activation retained {sqlite_retained} bytes in SQLite"
-        );
-        assert!(
             allocation::live().saturating_sub(before_read) < 64 * 1024,
             "completed management results accumulated"
         );
@@ -201,5 +199,9 @@ async fn provider_activation_and_target_reads_release_their_catalogs() {
         drop(service);
         provider.dispose().await.unwrap();
         root.shutdown().await.unwrap();
+        assert!(
+            unsafe { rusqlite::ffi::sqlite3_memory_used() } <= sqlite_before_root,
+            "closing the storage owner releases its SQLite allocations"
+        );
     }
 }

@@ -10273,6 +10273,21 @@ async fn model_pages_follow_committed_edits_and_selection_uses_exact_targets() {
         .unwrap();
     assert_eq!(found.models.len(), 1);
     assert_eq!(found.models[0].model.name, "Renamed model");
+    let cross_field = provider
+        .query_models(
+            ModelQuery {
+                provider_id: Some(id.into()),
+                query: Some("beta Renamed".into()),
+                ..Default::default()
+            },
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert!(
+        cross_field.models.is_empty(),
+        "search matches model ID and display name separately"
+    );
     let target = ModelId {
         provider_id: id.into(),
         model_id: "beta".into(),

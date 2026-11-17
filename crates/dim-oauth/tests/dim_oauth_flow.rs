@@ -1494,28 +1494,22 @@ async fn a_stored_unavailable_media_model_is_excluded_from_every_use() {
         .await
         .unwrap();
     let database = rusqlite::Connection::open(home.join("native.sqlite")).unwrap();
-    let (version, body): (u32, String) = database
+    let body: String = database
         .query_row(
-            "SELECT version,record FROM providers WHERE provider_id=?1",
+            "SELECT entry FROM provider_models WHERE provider_id=?1 AND model_id='fixture-image' AND source='default'",
             [PROVIDER],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| row.get(0),
         )
         .unwrap();
-    let mut body: Value = serde_json::from_str(&body).unwrap();
-    let model = body["models"]
-        .as_array_mut()
-        .unwrap()
-        .iter_mut()
-        .find(|model| model["entry"]["modelId"] == "fixture-image")
-        .unwrap();
+    let mut model: Value = serde_json::from_str(&body).unwrap();
     // The refresh wrote the kind reason; the status is the only unavailable
     // fact, exactly as a record from before the projection fix could hold it.
     assert_eq!(model["unavailableReason"], "unsupported_model_type");
     model["entry"]["status"] = json!("unavailable");
     database
         .execute(
-            "UPDATE providers SET version=?2,record=?3 WHERE provider_id=?1",
-            rusqlite::params![PROVIDER, version, body.to_string()],
+            "UPDATE provider_models SET entry=?2 WHERE provider_id=?1 AND model_id='fixture-image' AND source='default'",
+            rusqlite::params![PROVIDER, model.to_string()],
         )
         .unwrap();
     drop(database);

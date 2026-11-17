@@ -119,7 +119,7 @@ impl ProviderService {
                             after = model.clone();
                             if !provider_matches {
                                 let name = persistence::name(&tx,&bundled,&id,&model)?;
-                                let matches = name.is_some_and(|n| format!("{} {}",n.model_id,n.display_name).to_lowercase().contains(query.as_deref().unwrap_or_default()));
+                                let matches = name.is_some_and(|n| n.model_id.to_lowercase().contains(query.as_deref().unwrap_or_default()) || n.display_name.to_lowercase().contains(query.as_deref().unwrap_or_default()));
                                 let zdr = query.as_deref()==Some("zdr") && tx.query_row("SELECT zdr FROM provider_names WHERE provider_id=?1 AND model_id=?2",params![id,model],|r|r.get::<_,bool>(0)).optional().map_err(storage)?.unwrap_or(false);
                                 if !matches && !zdr { continue; }
                             }
@@ -147,16 +147,18 @@ impl ProviderService {
                     if cancel.is_cancelled() { return Err(storage("Provider query cancelled")); }
                     let record = persistence::read(&tx,&provider_id,if model_id.is_empty() { persistence::Models::Header } else { persistence::Models::One(&model_id) });
                     if model_id.is_empty() {
-                        let listable = match &record {
+                        let reason = match &record {
+                            Err(_) => EmptyModelReason::Unreadable,
                             Ok(Some(PersistedProviderRecord::Static(r))) => {
                                 if !native.get(&provider_id).copied().unwrap_or(true) { continue; }
-                                can_list_models(&bundled,&provider_id,r)
+                                EmptyModelReason::NoModels { listable: can_list_models(&bundled,&provider_id,r) }
                             }
-                            _ if accounts.get(&provider_id).is_some_and(|a|a.account.is_some()) => true,
+                            _ if accounts.get(&provider_id).is_some_and(|a|a.account.is_some()) => EmptyModelReason::NoModels { listable: true },
                             _ if accounts.contains_key(&provider_id) => continue,
-                            _ => false,
+                            Ok(None) => continue,
+                            _ => EmptyModelReason::Unreadable,
                         };
-                        page.empty.push(EmptyModelProvider { provider_id,provider_name,reason:if record.is_err() {EmptyModelReason::Unreadable} else {EmptyModelReason::NoModels {listable}} });
+                        page.empty.push(EmptyModelProvider { provider_id,provider_name,reason });
                         continue;
                     }
                     let (catalog,preferences) = match record {
