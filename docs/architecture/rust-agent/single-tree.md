@@ -246,9 +246,9 @@ Feature::new(name).session(..).branch(..)          不持有进程状态的插�
 
 门面（`Session::session_service::<T>()`、`Session::service::<T>(branch)`、`Branch::service::<T>()`）只读取 `PublicService` 类型，并拒绝未在对应组（`session` 或 `branch`）注册的名字。
 
-插件在 `apply` 中直接读取服务时使用 `Ctx::require` / `require_as` 的严格读取。`ServiceReadError` 保留服务键、插件、实例、调用位置和原因，包括 `Undeclared`、`OutOfScope`、`Inactive`、`TypeMismatch`、`Unavailable` 及拦截失败；不统一降为“服务不存在”。该检查在 debug 与 release 都执行。
+插件在 `apply` 中读取必需服务时使用 `Ctx::require` / `require_as` 的严格读取。`ServiceReadError` 保留服务键、插件、实例、调用位置和原因，包括 `Undeclared`、`OutOfScope`、`Inactive`、`TypeMismatch`、`Unavailable` 及拦截失败；不统一降为“服务不存在”。该检查在 debug 与 release 都执行。
 
-rutis 严格读取允许自身提供的服务，也允许可见范围相同的祖先声明；项目仍要求每个 Plugin 在自己的 `Deps` 列全必需外部依赖，以保证自身重载关系。插件外的门面查询和作用域发布使用 `get_as`，缺失按对应公开接口返回构建错误或 `service_reloading`；不能用它绕过插件内的依赖声明。`Agent::check_assembly()` 另在快照上报告插件内直接 `get_as` 的未声明外部访问、读取代次不在已解析依赖中和无实例键提供；创建不运行它，测试对每个装配在创建 Session 与分支后调用一次。
+rutis 严格读取允许自身提供的服务，也允许可见范围相同的祖先声明；项目仍要求每个 Plugin 在自己的 `Deps` 列全必需外部依赖，以保证自身重载关系。插件外的门面查询和作用域发布使用 `get_as`，缺失按对应公开接口返回构建错误或 `service_reloading`；不能用它绕过插件内的依赖声明。`Agent::check_assembly()` 另在快照上报告未声明的必需外部读取（包括查找提供者前以 `Undeclared` 拒绝的读取）、读取代次不在已解析依赖中和无实例键提供；[可选读取](../../design/rutis-usage.md#35-how-each-runtime-resolves-a-name)不要求依赖声明；创建不运行它，测试对每个装配在创建 Session 与分支后调用一次。
 
 ## 事件
 
