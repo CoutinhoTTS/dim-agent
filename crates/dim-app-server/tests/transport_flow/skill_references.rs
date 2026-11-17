@@ -140,11 +140,9 @@ fn build(
         &mut builder,
         dim_agent_capabilities::model_provider::ModelProviderPlugin::new,
     );
-    builder.session_value(Arc::new(
-        dim_agent_capabilities::permission::CommandRulesHost(Arc::new(
-            dim_agent_capabilities::permission::NoCommandRules,
-        )),
-    ));
+    builder.session_data_value(Arc::new(dim_agent_capabilities::permission::CommandRules(
+        Arc::new(dim_agent_capabilities::permission::NoCommandRules),
+    )));
     defaults::mock_model_hosts_with_model(&mut builder, HistoryRenderer::default(), model);
     dim_agent_capabilities::defaults::tool_host(&mut builder, Arc::new(MockTools));
     dim_app_server::collaboration::install(&mut builder);

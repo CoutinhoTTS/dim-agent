@@ -79,9 +79,9 @@ fn register_names_in(catalog: &mut dim_agent_runtime::names::ServiceCatalog) {
     register::<tool_registry::ToolRegistry>(catalog, session);
     catalog.register_shared_instance("toolSourcesView", SESSION_GROUP);
     register::<history::HistoryRenderer>(catalog, session);
-    register::<prompt::InitialPromptConfiguration>(catalog, session);
+    catalog.register_shared_instance("initialPromptConfiguration", SESSION_GROUP);
     register::<prompt_guide::GuideEntries>(catalog, session);
-    register::<prompt_registry::PromptRegistry>(catalog, session);
+    catalog.register_shared_instance("promptRegistry", SESSION_GROUP);
     catalog.register_shared_instance(
         dim_agent_runtime::names::name_of::<prompt_sources::SessionLanguage>(),
         SESSION_GROUP,
@@ -91,9 +91,9 @@ fn register_names_in(catalog: &mut dim_agent_runtime::names::ServiceCatalog) {
     register::<host::PrepareContextHost>(catalog, session);
     register::<host::ContextModelHost>(catalog, session);
     register::<host::CompactionStrategyHost>(catalog, session);
-    register::<host::PromptHost>(catalog, session);
+    catalog.register_shared_instance("promptHost", SESSION_GROUP);
     register::<host::ToolHost>(catalog, session);
-    register::<permission::CommandRulesHost>(catalog, session);
+    catalog.register_shared_instance("commandRules", SESSION_GROUP);
     register::<hooks::HookSourcesHost>(catalog, session);
     register::<hooks::HooksRuntime>(catalog, session);
     register::<input_queue::SubmitChecks>(catalog, session);
@@ -121,7 +121,7 @@ fn register_names_in(catalog: &mut dim_agent_runtime::names::ServiceCatalog) {
     register::<dyn exec_stop::ExecStop>(catalog, branch);
     register::<wait::Wait>(catalog, branch);
     register::<workspace_tools::file_reads::FileReads>(catalog, branch);
-    register::<timeline_tree::BranchLine>(catalog, branch);
+    catalog.register_shared_instance("branchLine", BRANCH_GROUP);
     register::<host_platform::HostPlatform>(catalog, None);
     register::<file_storage::FileStorage>(catalog, None);
     register::<host::ModelHost>(catalog, None);

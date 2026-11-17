@@ -50,6 +50,8 @@ use agents::{AgentIndex, AgentsPlugin};
 pub use agents::{SessionDeleted, SessionPermissions, SessionRef, SessionsError};
 use collaboration::CollaborationPlugin;
 use connection::{ConnectionHub, ConnectionPlugin, RpcPlugin};
+#[cfg(feature = "testing")]
+pub use control::PublicationHold;
 pub use control::{ProcessActivity, ProcessHold};
 use control::{ServerControl, ServerControlPlugin};
 use dim_agent_runtime::{
@@ -123,6 +125,10 @@ pub struct ServerConfig {
     /// evaluation serves with `false`, so the registered tools, not a
     /// Session's mount list, are the ceiling a run's Sessions can declare.
     pub plugin_tools: bool,
+    /// Feature `testing`: held between the required rows becoming Active and
+    /// opening publication. `None` opens as soon as the rows are ready.
+    #[cfg(feature = "testing")]
+    pub publication_hold: Option<Arc<PublicationHold>>,
 }
 impl Default for ServerConfig {
     fn default() -> Self {
@@ -150,6 +156,8 @@ impl Default for ServerConfig {
             plugin_configs: BTreeMap::new(),
             plugin_files: None,
             plugin_tools: true,
+            #[cfg(feature = "testing")]
+            publication_hold: None,
         }
     }
 }
@@ -653,7 +661,15 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         Arc::new(move || credential_variables.clone()),
     ))
     .map_err(|error| ServerError::Runtime(error.into()))?;
-    let control = ServerControlPlugin::new();
+    let control = {
+        #[cfg(feature = "testing")]
+        match &config.publication_hold {
+            Some(hold) => ServerControlPlugin::with_shutdown(hold.shutdown.clone()),
+            None => ServerControlPlugin::new(),
+        }
+        #[cfg(not(feature = "testing"))]
+        ServerControlPlugin::new()
+    };
     let handle = control.0.clone();
     let mut startup = Startup {
         root: root.clone(),
@@ -774,8 +790,8 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             Ok(Box::new(workspace_files::WorkspaceFilesPlugin::new(names)?))
         })?);
     }
-    rows.push(register_part(&mut builtins, builder.catalog(), |names| {
-        Ok(Box::new(connection::CallChannelPlugin::new(names)?))
+    rows.push(register_part(&mut builtins, builder.catalog(), |_| {
+        Ok(Box::new(connection::CallChannelPlugin))
     })?);
     let host_account_methods = product_root.is_some();
     rows.push(register_part(
@@ -1338,6 +1354,10 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     let addresses = root
         .get::<ListenAddresses>()
         .ok_or_else(|| ServerError::Configuration("listener addresses missing".into()))?;
+    #[cfg(feature = "testing")]
+    if let Some(hold) = &config.publication_hold {
+        hold.wait().await;
+    }
     handle.open();
     let task = tokio::spawn(coordinate(root.clone(), handle.clone()));
     startup.armed = false;
@@ -1381,6 +1401,7 @@ pub(crate) fn register_names(catalog: &mut dim_agent_runtime::names::ServiceCata
     register::<ui_extensions::UiResources>(catalog, Some(SESSION_GROUP));
     register::<settings::SettingsService>(catalog, None);
     register::<storage::SessionMetadataService>(catalog, None);
+    register::<settings::Settings>(catalog, None);
     register::<managed_provider::ManagedSearch>(catalog, None);
     register::<dyn managed_provider::ManagedProvider>(catalog, None);
     register::<codex_oauth::OpenAICodexOAuthService>(catalog, None);
@@ -1392,11 +1413,11 @@ pub(crate) fn register_names(catalog: &mut dim_agent_runtime::names::ServiceCata
     register::<mcp::McpAuth>(catalog, None);
     register::<mcp::Publication>(catalog, None);
     register::<hooks_settings::HooksService>(catalog, None);
+    catalog.register_shared("hooksService");
     register::<methods::ManagementMethods>(catalog, None);
     catalog.register_shared(dim_agent_runtime::names::name_of::<
         methods::ManagementMethods,
     >());
-    register::<dim_agent_capabilities::methods::Callers>(catalog, None);
     register::<runtime_manager::RuntimeService>(catalog, None);
     register::<collaboration::CollaborationSession>(catalog, Some(SESSION_GROUP));
     register::<mcp::McpSession>(catalog, Some(SESSION_GROUP));
@@ -1423,12 +1444,9 @@ pub fn register_faces(builder: &mut dim_agent_runtime::AgentBuilder) {
         ("agentDirectory", "owner-api"),
         ("agentIndex", "owner-api"),
         ("agentLoop", "hot-path"),
-        ("branchLine", "hot-path"),
         ("branchOpening", "hot-path"),
-        ("callers", "owner-api"),
         ("collaboration", "host-resource"),
         ("collaborationSession", "legacy-no-consumer"),
-        ("commandRulesHost", "hot-path"),
         ("compactionStrategyHost", "hot-path"),
         ("configurationPublisher", "hot-path"),
         ("configureControl", "hot-path"),
@@ -1441,9 +1459,7 @@ pub fn register_faces(builder: &mut dim_agent_runtime::AgentBuilder) {
         ("fileStorage", "object"),
         ("grokOAuthService", "secret"),
         ("historyRenderer", "hot-path"),
-        ("hooksService", "host-resource"),
         ("hostPlatform", "object"),
-        ("initialPromptConfiguration", "hot-path"),
         ("loader", "owner-api"),
         ("loopState", "hot-path"),
         // Session creation calls it directly; no leaf needs the service.
@@ -1457,8 +1473,6 @@ pub fn register_faces(builder: &mut dim_agent_runtime::AgentBuilder) {
         ("prepareContextHost", "hot-path"),
         ("prepareModelHost", "hot-path"),
         ("prompt", "hot-path"),
-        ("promptHost", "hot-path"),
-        ("promptRegistry", "hot-path"),
         ("providerConnectionResolver", "host-resource"),
         ("providerService", "secret"),
         ("publication", "host-resource"),
