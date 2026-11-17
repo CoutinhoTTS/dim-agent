@@ -8077,6 +8077,7 @@
       "references": [
         "path Projection",
         "path Projection::new",
+        "path crate::projection::notice_id",
         "path crate::projection::notification",
         "use crate::projection::Projection"
       ]

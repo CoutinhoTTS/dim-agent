@@ -1783,9 +1783,12 @@ impl Gateway {
                             {
                                 // A submit check's block is a refusal, and its
                                 // message is the reason the user sees.
+                                let message =
+                                    crate::projection::notice_id("refusal", &prompt.submission);
                                 let chunk = acp::ContentChunk::new(acp::ContentBlock::Text(
                                     acp::TextContent::new(error.message),
-                                ));
+                                ))
+                                .message_id(message.as_str());
                                 self.update(&id, acp::SessionUpdate::AgentMessageChunk(chunk))
                                     .await?;
                                 prompt
@@ -1981,9 +1984,11 @@ impl Gateway {
                     },
                 };
                 if let Some(text) = text {
+                    let message = crate::projection::notice_id("command", &command_id.to_string());
                     let chunk = acp::ContentChunk::new(acp::ContentBlock::Text(
                         acp::TextContent::new(text),
-                    ));
+                    ))
+                    .message_id(message.as_str());
                     self.update(&id, acp::SessionUpdate::AgentMessageChunk(chunk))
                         .await?;
                 }

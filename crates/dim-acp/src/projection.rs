@@ -71,6 +71,8 @@ pub(crate) struct Projection {
     texts: HashMap<String, TextCursor>,
     thoughts: HashMap<String, TextCursor>,
     calls: HashMap<String, Call>,
+    /// Each open compaction start with the `automatic` flag its start carried:
+    /// the undeclared path writes that flag into `_meta.lody.activity`.
     compactions: HashMap<u64, bool>,
     closed_requests: HashSet<String>,
 }
@@ -83,6 +85,13 @@ pub(crate) fn tool_id(branch: &str, request: &str, call: &str) -> String {
 /// which names it both when it starts and when it ends.
 fn compaction_id(start: u64) -> String {
     json!(["compaction", start]).to_string()
+}
+
+/// The message a gateway notice belongs to: the operation that produced it,
+/// under a namespace of its own, so it is never a model request id or an input
+/// event id. Those are bare UUIDs; this is an array.
+pub(crate) fn notice_id(kind: &str, operation: &str) -> String {
+    json!(["gateway", kind, operation]).to_string()
 }
 
 /// A message's `_meta`: the `lody` extension it carries, with the turn that
