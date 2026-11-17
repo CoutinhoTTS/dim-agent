@@ -221,8 +221,10 @@ writes names only.
   Otherwise other instances see the service, and a second copy that provides it fails with rutis's
   duplicate-provider error.
 - **Required and optional.** A required dependency is injected and gates the part. An optional one is
-  read when used, without injecting it: Cordis `ctx.get(name)`, rutis `ctx.get_at(&key)`. A dependency
-  the configuration chooses is included in the copy's names or not.
+  read when used, without injecting it: Cordis `ctx.get(name)`, rutis `ctx.get_at(&key)`. A required
+  service is never read that way: an optional read gates nothing, is not reloaded with its provider and
+  is not checked against the declaration. A dependency the configuration chooses is included in the
+  copy's names or not.
 - **Cordis.** An unmodified plugin for rutis's Cordis 4 (`@deepseek-ai/cordis`) runs as a Node row and
   gets the same resolution. Cordis 3 plugins are not a target.
 
@@ -393,10 +395,10 @@ P3 deleted the old forms ([#375](https://github.com/arcships/dim/issues/375)); t
 A Rust part with no named dependency is a plain rutis `Plugin` (`type Deps` by type). A part that
 depends on names is a rutis `host::DynPlugin`, the form rutis gives for dependencies by key: the part
 keeps the keys of its copy, which its factory takes from `Names`, lists them in `injects`, and reads
-them with `require_at` in `apply` (`get_at` for one read only when present, which is not listed).
-Dim adds no trait or adapter of its own. A strict read of a listed key that finds the provider gone
-returns its own error, and rutis puts the part back to Pending (A.3). The binding carries out §3.5
-for Rust:
+them with `require_at` in `apply`. `get_at` reads only a service the part works without, which is not
+listed (§3.5). Dim adds no trait or adapter of its own. A strict read of a listed key that finds the
+provider gone returns its own error, and rutis puts the part back to Pending (A.3). The binding carries
+out §3.5 for Rust:
 
 - It names a type as `#[rutis::service]` does: `Timeline` is `timeline`, `dyn LoopState`
   `loopState` (`names::name_of`). One Rust type is one name, so a type provided in two groups
@@ -498,7 +500,7 @@ Carried from [#6](https://github.com/arcships/dim/issues/6):
   Nothing is added.
 - **Optional and configuration-chosen dependencies.** As §3.5: a dependency the configuration chooses
   gates when chosen (an `Option<Key<T>>` the factory fills), and the composition check covers it then;
-  one used only if present is read with `get_at` and not listed in `injects`. Its name must still be
+  one the part works without is read with `get_at` and not listed in `injects`. Its name must still be
   registered.
 - **Startup progress.** `startup_timeout` bounds an interval without progress, across loader startup,
   reconcile, required rows becoming Active and opening replay. A row's first activation during the
