@@ -85,6 +85,13 @@ fn compaction_id(start: u64) -> String {
     json!(["compaction", start]).to_string()
 }
 
+/// The message a gateway notice belongs to: the operation that produced it,
+/// under a namespace of its own, so it is never a model request id or an input
+/// event id. Those are bare UUIDs; this is an array.
+pub(crate) fn notice_id(kind: &str, operation: &str) -> String {
+    json!(["gateway", kind, operation]).to_string()
+}
+
 /// A message's `_meta`: the `lody` extension it carries, with the turn that
 /// produced it.
 fn meta(lody: Option<Value>, turn: Option<&str>) -> Option<acp::Meta> {
