@@ -10,7 +10,7 @@ import subprocess
 import threading
 import time
 
-from flows import LocalModel, checks, configure, conversation, environment
+from flows import LocalModel, checks, configure, conversation, environment, model_list
 import pe
 from samples import write as write_sample
 import win32
@@ -124,6 +124,22 @@ class Server:
                     raise RuntimeError(f"{method}: {reply['error']}")
                 return reply["result"]
 
+    def sample_now(self, profile):
+        handle = win32.open_process(self.process.pid)
+        try:
+            win32.suspend(handle)
+            try:
+                base = win32.module(handle)[0]
+                rva, size = pe.text_range(self.binary)
+                page_size, pages = win32.working_set_pages(handle, base, rva, size)
+            finally:
+                win32.resume(handle)
+        finally:
+            win32.close(handle)
+        if not pages:
+            raise RuntimeError("the model-flow working set has no .text pages")
+        write_sample(profile, page_size, pages)
+
     def close(self, profile=None):
         self.connect()
         handle = None
@@ -219,7 +235,7 @@ def tui(binary, home, stack, sampling, profile):
         raise RuntimeError(f"TUI process failed: {code}")
 
 
-def train(binary, root, sampling=False):
+def train(binary, root, sampling=False, tui=True):
     root.mkdir()
     profiles = [root / f"{name}.pages" for name in ("startup-shutdown", "tui", "conversation")]
     print(f"Running {'training' if sampling else 'acceptance'} flows: {binary}", flush=True)
@@ -228,9 +244,14 @@ def train(binary, root, sampling=False):
         server.close(profiles[0] if sampling else None)
     with ExitStack() as stack:
         model = LocalModel(stack)
-        server = Server(binary, root / "interactive", stack)
-        configure(server, model.http.server_port)
-        tui(binary, server.home, stack, sampling, profiles[1])
+        server = Server(binary, root / "interactive", stack, sampling and not tui)
+        provider = configure(server, model.http.server_port)
+        if tui:
+            tui(binary, server.home, stack, sampling, profiles[1])
+        else:
+            model_list(binary, server.home, provider)
+            if sampling:
+                server.sample_now(profiles[1])
         server.close()
     with ExitStack() as stack:
         model = LocalModel(stack)

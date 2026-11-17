@@ -105,6 +105,7 @@ jobs:
       CARGO_INCREMENTAL: "0"
       CARGO_BUILD_JOBS: "2"
       CARGO_PROFILE_RELEASE_LTO: ${{ matrix.platform == 'darwin-arm64' && 'thin' || 'fat' }}
+      DIM_LAYOUT_WINDOWS_UI: ${{ matrix.platform == 'windows-arm64' && 'models' || 'tui' }}
       RUSTC_WRAPPER: ""
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
@@ -141,7 +142,11 @@ jobs:
           python="python3"
           if [[ "$RUNNER_OS" == Windows ]]; then python="python"; fi
           output="$RUNNER_TEMP/dim-layout-$DIM_LAYOUT_PLATFORM"
-          "$python" scripts/code-layout/build.py --output "$output" --jobs 2
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            "$python" scripts/code-layout/build.py --output "$output" --jobs 2 --ui "$DIM_LAYOUT_WINDOWS_UI"
+          else
+            "$python" scripts/code-layout/build.py --output "$output" --jobs 2
+          fi
           cat "$output/manifest.json"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()

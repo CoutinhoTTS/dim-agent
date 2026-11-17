@@ -152,7 +152,12 @@ during that relink and must not change the binary.
 The trainer launches the App Server and the ConPTY-backed TUI suspended,
 empties the process working set at entry, then resumes it. Before exit or
 shutdown it queries the executable's `.text` working-set pages with
-`QueryWorkingSetEx`. This is genuine working-set residency after an entry-time
+`QueryWorkingSetEx`. When the runner has no interactive console for ConPTY,
+`--ui models` drives the public `models PROVIDER` command instead of the TUI
+picker and samples the App Server after that model flow; the App Server, model
+selection and tool conversation remain real. The hosted Windows ARM64 job uses
+that mode because its session cannot host a console, and `manifest.json` records
+which UI flow it trained. This is genuine working-set residency after an entry-time
 trim, not a reference-bit trace: the operating system may prefetch neighboring
 pages and the result includes page-granularity rounding. App Server shutdown
 uses the public `daemon.shutdown` RPC with `force`; the TUI exits through
@@ -184,8 +189,9 @@ and pagefile usage kept distinct. These are OS-specific metrics and are never su
 or treated as interchangeable with Linux `/proc` numbers.
 
 `baseline`, `symbols.order`, the linker maps, native page samples and
-`manifest.json` record the comparison inputs, source state, Rust version,
-artifact hashes, training counts and alternating measurement samples. The probe
+`manifest.json` record the comparison inputs, platform, target, page size, LTO
+choice, Windows UI mode, source state, Rust version, artifact hashes, training
+counts and alternating measurement samples. The probe
 and temporary homes are removed on completion or failure. Scheduling can change
 which neighboring pages a training run observes, so the optimized artifact is
 not promised to be byte-identical across training runs; each build regenerates

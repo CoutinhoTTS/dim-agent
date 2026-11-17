@@ -134,6 +134,7 @@ def configure(server, port):
         },
     )
     server.rpc("provider.select", {"providerId": provider, "modelId": "fixture"})
+    return provider
 
 
 def conversation(binary, home, model):
@@ -237,6 +238,15 @@ def tui_pty(binary, home, stack, env, terminate, begin=None, sample=None):
     drain(.5)
     if client.wait(timeout=30) != 0:
         raise RuntimeError(f"TUI process failed: {client.returncode}")
+
+
+def model_list(binary, home, provider):
+    """Render one provider's model list through the CLI against a live daemon."""
+    result = subprocess.run(
+        [str(binary), "--home", str(home), "models", provider],
+        cwd=home, env=environment(home), capture_output=True, text=True, timeout=60)
+    if result.returncode or "fixture" not in result.stdout:
+        raise RuntimeError(f"model list flow failed: {result.stdout}\n{result.stderr}")
 
 
 def checks(binary, home):
