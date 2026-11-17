@@ -610,6 +610,47 @@ mod tests {
     }
 
     #[test]
+    fn a_link_one_level_short_is_refused_with_its_line() {
+        let root = tree(
+            "short",
+            "// a line of code\n/// [example](../../docs/design/example.md)\n",
+            Some(b"# Present\n"),
+        );
+        let error = refusal(&root);
+        assert!(
+            error.contains(
+                "crates/example/src/lib.rs:2: `../../docs/design/example.md`: no such file"
+            ),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_missing_anchor_is_refused_by_name() {
+        let root = tree(
+            "anchor",
+            "/// [example](../../../docs/design/example.md#absent-heading)\n",
+            Some(b"# Present\n"),
+        );
+        let error = refusal(&root);
+        assert!(
+            error.contains("no heading `#absent-heading` in the document"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_link_that_resolves_passes() {
+        let root = tree(
+            "clean",
+            "/// [example](../../../docs/design/example.md#present)\n",
+            Some(b"# Present\n"),
+        );
+        check(&root).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn a_link_to_a_directory_is_not_a_missing_document() {
         let root = tree(
             "directory",
@@ -630,5 +671,16 @@ mod tests {
         let error = refusal(&root);
         assert!(error.contains("cannot be read:"), "{error}");
         assert!(!error.contains("no such file"), "{error}");
+    }
+
+    #[test]
+    fn a_link_inside_a_code_span_does_not_fail_the_check() {
+        let root = tree(
+            "code-span",
+            "// Write `[example](../../../docs/design/absent.md)` as a link.\n",
+            None,
+        );
+        check(&root).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
