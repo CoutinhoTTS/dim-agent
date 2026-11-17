@@ -30,7 +30,7 @@ class Keep(tempfile.TemporaryDirectory):
         if artifacts:
             target = Path(artifacts)
             target.mkdir(parents=True, exist_ok=True)
-            for pattern in ('*.map', '*.order'):
+            for pattern in ('*.map', '*.order', 'replay/*', 'capture/link.json'):
                 for path in Path(self.name).glob(pattern):
                     shutil.copy2(path, target / path.name)
         super().cleanup()
@@ -44,7 +44,7 @@ int main(void) { return first() + second(); }
     obj = root / 'fixture.o'
     subprocess.run(['cc','-O0','-c',str(root/'fixture.c'),'-o',str(obj)],check=True)
     record = {'compiler':'cc','arguments':['-o',str(root/'base'),str(obj)],
-              'cwd':str(root),'path':os.environ['PATH']}
+              'cwd':str(root),'path':os.environ['PATH'], 'strip':'none', 'objcopy':None, 'linkEnv':{}}
     base = root/'base'; base_map = root/'base.map'
     build_darwin.relink(record, base, map_path=base_map)
     assert subprocess.run([str(base)]).returncode == 42
@@ -61,6 +61,34 @@ int main(void) { return first() + second(); }
     missing.write_text('_absent\n_second\n_first\n_main\n')
     assert build_darwin.ordered_link(record, root/'missing', missing, root/'missing.map') == ['_absent']
     assert '_absent' not in missing.read_text()
+
+    project = root/'rust-project'; (project/'src').mkdir(parents=True)
+    (project/'Cargo.toml').write_text('''[package]
+name = "dimcode"
+version = "0.0.0"
+edition = "2021"
+[profile.release]
+lto = "fat"
+codegen-units = 1
+debug = 1
+strip = "debuginfo"
+''')
+    (project/'src/main.rs').write_text('fn main() { println!("layout-rust"); }')
+    sysroot = subprocess.check_output([build_darwin.rustc_command(), '--print', 'sysroot'], text=True).strip()
+    os.environ['RUSTC'] = str(Path(sysroot)/'bin/rustc')
+    subprocess.run(['cargo','generate-lockfile','--offline'], cwd=project, check=True)
+    build_darwin.REPO = project
+    capture = root/'capture'; capture.mkdir()
+    recorded = build_darwin.cargo_link(capture, shutil.which('cc'), 1)
+    assert recorded['strip'] == 'debuginfo'
+    cargo = Path(recorded['output'])
+    original = cargo.read_bytes()
+    replay = root/'replay'; replay.mkdir()
+    replayed, replay_map = build_darwin.replay_baseline(recorded, capture, replay)
+    assert cargo.read_bytes() == original, 'replay must restore the original Cargo executable'
+    assert replayed.read_bytes() == original, 'replay must include Rust post-link stripping'
+    assert subprocess.check_output([str(replayed)], text=True).strip() == 'layout-rust'
+    assert macho.map_symbols(replay_map, *macho.text_range(replayed)[:2])
 
     page_size = os.sysconf('SC_PAGESIZE')
     page_sample = root/'sample.pages'

@@ -219,6 +219,9 @@ jobs:
             ${{ runner.temp }}/dim-layout-${{ matrix.platform }}/symbols.order
             ${{ runner.temp }}/dim-layout-${{ matrix.platform }}/*.pages
             ${{ runner.temp }}/dim-layout-${{ matrix.platform }}/*.map
+            ${{ runner.temp }}/dim-layout-${{ matrix.platform }}/cargo-original*
+            ${{ runner.temp }}/dim-layout-${{ matrix.platform }}/baseline-replay*
+            ${{ runner.temp }}/dim-layout-${{ matrix.platform }}/replay.json
           if-no-files-found: warn
           retention-days: 1
           overwrite: true

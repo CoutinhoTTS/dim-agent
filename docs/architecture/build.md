@@ -103,11 +103,15 @@ by `cc` (ld64) and does not change code signing or hardening of the Cargo
 output. The optimized candidate is an unsigned opt-in artifact, not a release
 artifact.
 
-Capture and replay use the same final linker inputs. A relink must reproduce
-Cargo's executable byte for byte before any training. The diagnostic link also
-writes an ld64 map; requiring that adding the map leaves the binary unchanged
-keeps the symbol source tied to the exact baseline. ld64's map records exact
-atom sizes, so function-name/size parity is checked directly.
+Capture and replay use the same saved linker inputs, output path and ld64 map
+argument, including the first Cargo link. A temporary compiler wrapper records
+the effective `-Cstrip` option and preserves any existing `RUSTC_WRAPPER`.
+Replays apply the same selected toolchain's `rust-objcopy` step that Rust runs
+after linking on macOS. The baseline must reproduce Cargo's executable byte for
+byte before any training, then restores Cargo's original file. The native
+fixture builds a Rust release executable with LTO and debug stripping through
+this same capture/replay path. ld64's map records exact atom sizes, so
+function-name/size parity is checked directly.
 
 The training probe is a temporary dylib loaded with `DYLD_INSERT_LIBRARIES`.
 Its constructor remaps the page-aligned `__TEXT,__text` range from the same
@@ -144,7 +148,7 @@ an opt-in artifact linked by `lld-link`, and the release workflow is unchanged.
 is rejected.
 
 The captured link line may contain response files. They are expanded, input
-object and library files are copied, and Cargo's final link and each replay use
+object, library and `/NATVIS:` files are copied, and Cargo's final link and each replay use
 those saved paths through a response file. The capture adds `/Brepro` when it is
 absent and includes the same `/lldmap` argument from the first link. Input paths
 and [linker arguments](https://github.com/llvm/llvm-project/blob/main/lld/COFF/PDB.cpp)
@@ -154,10 +158,16 @@ metadata. The baseline relink uses the same output, PDB and map paths and must
 reproduce the executable byte for byte; then Cargo's executable and PDB are
 restored. The map is copied to the artifact directory after the original link.
 The native fixture checks this replay at the captured output path with CodeView
-debug information and a PDB, after removing the original object to verify that
-the saved inputs suffice. It retains both fixture executables, their PDBs and
+debug information and a PDB, after removing the original object and NatVis file
+to verify that the saved inputs suffice. It also captures and replays a real
+Rust LTO executable after the compiler has removed its temporary NatVis files.
+It retains both fixture executables, their PDBs and
 the captured arguments on failure; Windows short-path aliases must not replace
 the recorded path in the replay command.
+
+On either platform, a baseline byte mismatch retains both executable files and
+the captured link record in the CI artifact; Windows also retains the PDB pair.
+The hash check remains mandatory before training or ordering.
 
 The trainer launches the App Server suspended and empties its working set at
 entry before resuming. The ConPTY-backed TUI is created running and trimmed

@@ -36,13 +36,17 @@ def digest(path):
 def cargo_link(work, compiler, jobs, target=None):
     rustc = rustc_command()
     wrapper = work / "linker"
-    wrapper.write_text(
-        "#!/bin/sh\nexec "
-        + shlex.join([sys.executable, str(HERE / "build_darwin.py"), "--capture"])
-        + ' "$@"\n'
-    )
-    wrapper.chmod(0o700)
-    env = dict(os.environ, RUSTC=rustc, DIM_LAYOUT_CAPTURE=str(work), DIM_LAYOUT_CC=compiler)
+    rustc_wrapper = work / "rustc-wrapper"
+    for path, mode in ((wrapper, "--capture"), (rustc_wrapper, "--rustc")):
+        path.write_text(
+            "#!/bin/sh\nexec "
+            + shlex.join([sys.executable, str(HERE / "build_darwin.py"), mode])
+            + ' "$@"\n'
+        )
+        path.chmod(0o700)
+    env = dict(os.environ, RUSTC=rustc, DIM_LAYOUT_CAPTURE=str(work), DIM_LAYOUT_CC=compiler,
+               RUSTC_WRAPPER=str(rustc_wrapper),
+               DIM_LAYOUT_RUSTC_WRAPPER=os.environ.get("RUSTC_WRAPPER", ""))
     command = [
         "cargo", "rustc", "--release", "--locked", "-p", "dimcode", "--bin", "dimcode",
         "--jobs", str(jobs), "--target", target or TARGETS[platform.machine()],
@@ -52,6 +56,20 @@ def cargo_link(work, compiler, jobs, target=None):
     record = json.loads((work / "link.json").read_text())
     record["rustc"] = subprocess.check_output([rustc, "-vV"], cwd=REPO, text=True)
     return record
+
+
+def compile_rust(arguments):
+    strip = "none"
+    for index, argument in enumerate(arguments):
+        codegen = arguments[index + 1] if argument == "-C" else argument.removeprefix("-C")
+        if (argument == "-C" or argument.startswith("-C")) and codegen.startswith("strip="):
+            strip = codegen.removeprefix("strip=")
+    if strip not in ("none", "debuginfo", "symbols"):
+        raise RuntimeError(f"unsupported Rust strip mode: {strip}")
+    command = arguments.copy()
+    if os.environ.get("DIM_LAYOUT_RUSTC_WRAPPER"):
+        command.insert(0, os.environ["DIM_LAYOUT_RUSTC_WRAPPER"])
+    os.execvpe(command[0], command, dict(os.environ, DIM_LAYOUT_STRIP=strip))
 
 
 def capture(arguments):
@@ -68,35 +86,72 @@ def capture(arguments):
             raise RuntimeError("response files are not supported by the layout build")
         elif not argument.startswith("-") and Path(argument).is_file():
             target = root / f"{index}-{Path(argument).name}"
-            shutil.copyfile(argument, target)
+            shutil.copy2(argument, target)
             saved.append(str(target))
             inputs.append({"file": target.name, "sha256": digest(target)})
         else:
             saved.append(argument)
     if not output or (root / "link.json").exists():
         raise RuntimeError("expected exactly one final executable link")
+    saved.append(f"-Wl,-map,{root / 'baseline.map'}")
+    strip = os.environ["DIM_LAYOUT_STRIP"]
+    objcopy = shutil.which("rust-objcopy") if strip != "none" else None
+    if strip != "none" and not objcopy:
+        raise RuntimeError("the selected Rust toolchain's rust-objcopy is required")
     record = {"arguments": saved, "cwd": os.getcwd(), "compiler": compiler,
-              "output": output, "inputs": inputs, "path": os.environ["PATH"]}
+              "output": output, "inputs": inputs, "path": os.environ["PATH"],
+              "strip": strip, "objcopy": objcopy,
+              "linkEnv": {key: os.environ[key] for key in (
+                  "ZERO_AR_DATE", "LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH"
+              ) if key in os.environ}}
     (root / "link.json").write_text(json.dumps(record, indent=2) + "\n")
-    subprocess.run([compiler, *arguments], check=True)
+    relink(record, Path(output), postprocess=False)
 
 
-def relink(record, output, order_file=None, map_path=None, strict=False):
+def relink(record, output, order_file=None, map_path=None, strict=False, postprocess=True):
     arguments = record["arguments"].copy()
     arguments[arguments.index("-o") + 1] = str(output)
     if order_file:
         arguments.append(f"-Wl,-order_file,{order_file}")
         arguments.append("-Wl,-order_file_statistics")
     if map_path:
+        arguments = [argument for argument in arguments if not argument.startswith("-Wl,-map,")]
         arguments.append(f"-Wl,-map,{map_path}")
     if strict:
         arguments.append("-Wl,-fatal_warnings")
     env = dict(os.environ, PATH=record["path"])
+    env.update(record["linkEnv"])
     result = subprocess.run([record["compiler"], *arguments], cwd=record["cwd"], env=env,
                             capture_output=True, text=True)
     if result.returncode:
         raise RuntimeError(f"native link failed ({result.returncode}):\n{result.stderr}")
+    if postprocess and record["strip"] != "none":
+        flag = {"debuginfo": "--strip-debug", "symbols": "--strip-all"}[record["strip"]]
+        subprocess.run([record["objcopy"], flag, str(output)], cwd=record["cwd"], env=env, check=True)
     return result.stderr
+
+
+def replay_baseline(record, work, output):
+    cargo = Path(record["output"])
+    backup = work / "cargo-original"
+    baseline = output / "baseline"
+    baseline_map = output / "baseline.map"
+    shutil.copy2(cargo, backup)
+    shutil.copyfile(work / "baseline.map", baseline_map)
+    try:
+        relink(record, cargo)
+        original_hash, replay_hash = digest(backup), digest(cargo)
+        if replay_hash != original_hash:
+            shutil.copy2(backup, output / "cargo-original")
+            shutil.copy2(cargo, output / "baseline-replay")
+            (output / "replay.json").write_text(json.dumps(record, indent=2) + "\n")
+            raise RuntimeError(
+                "captured inputs did not reproduce Cargo's executable: "
+                f"original={original_hash}, replay={replay_hash}")
+        shutil.copy2(cargo, baseline)
+    finally:
+        shutil.copy2(backup, cargo)
+    return baseline, baseline_map
 
 
 def ordered_link(record, output, order_file, map_path):
@@ -188,16 +243,8 @@ def main():
     with tempfile.TemporaryDirectory(prefix="dim-layout-", dir="/tmp") as temporary:
         work = Path(temporary)
         record = cargo_link(work, compiler, args.jobs, args.target or host)
-        baseline = output / "baseline"
         output.mkdir(parents=True)
-        relink(record, baseline)
-        cargo = Path(record["output"])
-        if digest(baseline) != digest(cargo):
-            raise RuntimeError("captured inputs did not reproduce Cargo's executable")
-        baseline_map = output / "baseline.map"
-        relink(record, baseline, map_path=baseline_map)
-        if digest(baseline) != digest(cargo):
-            raise RuntimeError("a diagnostic map changed the baseline executable")
+        baseline, baseline_map = replay_baseline(record, work, output)
         probe = work / "probe.dylib"
         subprocess.run(
             [compiler, "-dynamiclib", "-fPIC", "-O2", "-Wall", "-Wextra", "-Werror",
@@ -239,5 +286,7 @@ def main():
 if __name__ == "__main__":
     if sys.argv[1:2] == ["--capture"]:
         capture(sys.argv[2:])
+    elif sys.argv[1:2] == ["--rustc"]:
+        compile_rust(sys.argv[2:])
     else:
         main()

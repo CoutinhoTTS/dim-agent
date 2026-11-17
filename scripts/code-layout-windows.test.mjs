@@ -31,7 +31,8 @@ class Keep(tempfile.TemporaryDirectory):
         if artifacts:
             target = Path(artifacts)
             target.mkdir(parents=True, exist_ok=True)
-            for pattern in ('*.map', '*.order', 'captured*.exe', 'captured*.pdb', 'capture/link.json'):
+            for pattern in ('*.map', '*.order', 'captured*.exe', 'captured*.pdb', 'capture/link.json',
+                            'canonical*.exe', 'canonical*.pdb', 'rust-capture/*.map'):
                 for path in Path(self.name).glob(pattern):
                     shutil.copy2(path, target / path.name)
         super().cleanup()
@@ -82,10 +83,13 @@ void entry(void) {
     assert 'entry' in (root/'trained.order').read_text()
 
     capture = root/'capture'; capture.mkdir()
+    natvis = root/'temporary.natvis'
+    natvis.write_text('<AutoVisualizer xmlns="http://schemas.microsoft.com/vstudio/debugger/natvis/2010"><Type Name="LayoutValue"><DisplayString>layout</DisplayString></Type></AutoVisualizer>')
     response = root/'link.rsp'
     response.write_text(' '.join(build_windows.quote(argument) for argument in
         ['/entry:entry','/subsystem:console','/nodefaultlib','/DEBUG',
          '/PDBALTPATH:%_PDB%', '/PDB:'+str(root/'captured.pdb'),
+         '/NATVIS:'+str(natvis),
          str(root/'fixture.obj'),'kernel32.lib','/OUT:'+str(root/'captured.exe')]))
     os.environ['DIM_LAYOUT_CAPTURE'] = str(capture)
     os.environ['DIM_LAYOUT_LINKER'] = __import__('json').dumps(linker)
@@ -100,6 +104,7 @@ void entry(void) {
     assert (root/'captured.pdb').is_file()
     assert (capture/'baseline.map').is_file()
     (root/'fixture.obj').unlink()
+    natvis.unlink()
     build_windows.relink(recorded, captured, preserve_pdb=True)
     assert captured.read_bytes() == original, ('captured inputs and map arguments must preserve the PE/PDB identity',
         recorded['output'], str(root/'captured.exe'), build_windows.digest(root/'captured-original.exe'), build_windows.digest(captured))
@@ -110,7 +115,22 @@ void entry(void) {
     cl = shutil.which('cl')
     assert cl, 'cl must be on PATH'
     msvc = str(Path(cl).with_name('link.exe'))
-    subprocess.run(['rustc', '-Clinker='+msvc, str(canonical), '-o', str(root/'canonical.exe')], check=True)
+    wrapper = root/'linker.exe'
+    rustc = build_windows.rustc_command()
+    subprocess.run([rustc, '-Clinker='+msvc, str(build_windows.HERE/'link_capture.rs'),
+                    '-o', str(wrapper)], check=True)
+    rust_capture = root/'rust-capture'; rust_capture.mkdir()
+    environment = dict(os.environ, DIM_LAYOUT_CAPTURE=str(rust_capture),
+        DIM_LAYOUT_PYTHON=sys.executable, DIM_LAYOUT_SCRIPT=str(build_windows.HERE/'build_windows.py'))
+    subprocess.run([rustc, '-Clinker='+str(wrapper), '-Clto=fat', '-Ccodegen-units=1',
+                    '-Cstrip=debuginfo', str(canonical), '-o', str(root/'canonical.exe')],
+                   env=environment, check=True)
+    recorded = __import__('json').loads((rust_capture/'link.json').read_text())
+    executable = Path(recorded['output'])
+    original = executable.read_bytes()
+    (root/'canonical-original.exe').write_bytes(original)
+    build_windows.relink(recorded, executable, preserve_pdb=True)
+    assert executable.read_bytes() == original, 'replay must retain Rust temporary NatVis inputs'
     expected = subprocess.check_output([str(root/'canonical.exe'), str(root)], text=True).strip()
     assert win32.canonical_path(root) == expected, (win32.canonical_path(root), expected)
 

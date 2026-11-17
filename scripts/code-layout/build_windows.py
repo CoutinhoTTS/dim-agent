@@ -133,10 +133,12 @@ def capture(arguments):
         elif lower.startswith("/pdb:"):
             pdb = str(Path(argument[5:]).resolve())
             saved.append("/PDB:" + pdb)
-        elif not argument.startswith(("/", "-")) and Path(argument).is_file():
-            target = root / f"{index}-{Path(argument).name}"
-            shutil.copyfile(argument, target)
-            saved.append(str(target))
+        elif lower.startswith("/natvis:") or (
+                not argument.startswith(("/", "-")) and Path(argument).is_file()):
+            prefix, source = ("/NATVIS:", argument[8:]) if lower.startswith("/natvis:") else ("", argument)
+            target = root / f"{index}-{Path(source).name}"
+            shutil.copyfile(source, target)
+            saved.append(prefix + str(target))
             inputs.append({"file": target.name, "sha256": digest(target)})
         else:
             saved.append(argument)
@@ -303,6 +305,12 @@ def main():
             relink(record, cargo, preserve_pdb=True)
             original_hash, replay_hash = digest(backup), digest(cargo)
             if replay_hash != original_hash:
+                shutil.copyfile(backup, output / "cargo-original.exe")
+                shutil.copyfile(cargo, output / "baseline-replay.exe")
+                if had_pdb:
+                    shutil.copyfile(backup_pdb, output / "cargo-original.pdb")
+                    shutil.copyfile(pdb, output / "baseline-replay.pdb")
+                (output / "replay.json").write_text(json.dumps(record, indent=2) + "\n")
                 raise RuntimeError(
                     "captured inputs did not reproduce Cargo's executable: "
                     f"original={original_hash}, replay={replay_hash}")
