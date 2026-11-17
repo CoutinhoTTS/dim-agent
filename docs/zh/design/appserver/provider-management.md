@@ -164,7 +164,8 @@ Provider 根据持久状态查询。显式选择按 Provider ID 和模型 ID 点
 停用及不可用的模型仍用于展示诊断。`empty` 项包含 `providerId`、`providerName` 和
 带标签的 `reason`：`{kind:"no_models", listable}` 或 `{kind:"unreadable"}`。
 每页最多访问 `limit` 个模型或空 Provider 候选项，因此有错误时实际模型数可以更少。
-`next:null` 表示遍历结束。无效的 limit 返回 `provider_invalid_config`；取消与存储错误
+`next:null` 表示遍历结束。点查前已删除的候选跳过，之后不可读的行在 `empty` 中报告；
+没有账号描述的空托管 Provider 也报告为不可读。无效的 limit 返回 `provider_invalid_config`；取消与存储错误
 遵循 Provider 操作合同。远程目录刷新由显式管理操作发起。
 
 已知目标的 `provider.catalog` 请求携带 `modelId`，回复保留原 catalog 外层结构，
@@ -559,10 +560,9 @@ ModelCapabilities, reasoning?, serviceTier?}`——不是新的模型类型：�
 仍是候选；不可用状态、停用的 Provider 或模型、缺少路由、已登出的账号与缺少静态凭据仍会排除
 它们。它不携带原因字段：消费方从选项推导可用性，并用自己的快照解释不再可选的持久默认值。
 
-**Provider 应用的规则。** 候选 provider 与默认解析一致：托管包公布的每个账号 provider，以及
-`provider.list` 返回的每个静态 provider。每个模型来自与 `provider.catalog` 相同的单 provider
-目录读取（`catalog_for`），所以捆绑替换、descriptor 覆盖、用户模型、路由、禁用和账号状态
-都是执行时看到的那一份。模型只有在既有 `ProviderCatalog::selectable` 接受时才出现：
+**Provider 应用的规则。** 候选是按 Provider 启用状态、凭据配置和模型状态查询的持久模型目标。
+每个候选按 Provider ID 和模型 ID 点查，账号可用性由账号拥有方判断。捆绑替换、descriptor
+覆盖、用户模型、路由和禁用状态都按该目标的执行规则投影。模型只有在既有 `ProviderCatalog::selectable` 接受时才出现：
 `unavailableReason` 缺失，且 ID 不在 `disabledModelIds` 中。该原因已覆盖全部排除项：
 `ModelStatus::Unavailable` 的模型、未声明 `text` modality 的模型、在 `new-api-router`
 之外的 driver 上的非 chat 模型、禁用的 Provider 记录、没有路由的模型、已登出的账号、
@@ -582,9 +582,10 @@ ModelCapabilities, reasoning?, serviceTier?}`——不是新的模型类型：�
 §3.7：它接收已准入的持久化静态记录和显式模型 ID，回答该选择能否执行；本次读取没有输入，
 只枚举当前可用项。两者定义在同一目录和同一可选性谓词上，因此对同一个模型不会给出不同答案。
 
-**快照与一致性。** 一次调用对每个 provider 各读一次。没有跨 provider 事务、没有版本、
-没有缓存：并发的 `provider.*` 写入可能对部分 provider 可见、对另一部分不可见，下一次调用
-返回新状态。不发起实时请求：不 refresh、不列 provider 端点，也不写记录、选择或偏好；账号
+**快照与一致性。** 一次调用先枚举持久目标 ID，再分别点查。每个目标记录读取使用自己的
+已提交快照；并发的 `provider.*` 写入可能对部分目标可见、对其他目标不可见，同一 Provider
+内的模型也一样。读取前已删除的目标跳过。回复没有整体版本，不保留结果缓存；下次调用
+读取当前状态。不发起实时请求：不 refresh、不列 provider 端点，也不写记录、选择或偏好；账号
 状态沿用 `provider.catalog` 的同一读取。回复是派生数据，消费方不得持久化，也不得当作已
 采用的快照。采用仍走模型选择，后者只解析一次配置。
 
@@ -827,11 +828,8 @@ catalog 条目带 `zdr: true` 的模型在推理强度前显示 `ZDR` 标签，�
 搜索 `zdr` 会包含这些模型；字段缺失或为 false 时不显示标签。替换模型列表时，
 标签随服务端最新字段更新，不保留已撤销的标记。
 
-列表还会通过 `provider.refresh` 填充 catalog 无模型的静态 provider：`provider.list`
-说其模型可列举时，每个连接对 catalog 的每个版本只问一次，并显示刷新写入的 catalog。
-刷新成功时记录它写入的版本，因此列举为空的结果不会再次询问；记录被写入（启停用、
-改端点）后再问一次。读取或刷新失败时该 provider 的提示行保留；面板关闭后才到达的
-回复只记录这次填充，下次打开再读。
+模型列表通过 `provider.models.query` 按页读取和服务端搜索。远程目录刷新由 Provider 或
+账号管理面板中的显式操作发起；模型选择器关闭时释放结果，重新打开时重新查询。
 
 未声明的模型不是选择器行。每个至少有一个此类模型的 Provider 在模型行之后保留一行灰色提示：
 统计需要窗口的模型数量并给出声明命令；该 Provider 没有任何可选模型时，这条提示取代空 Provider
@@ -1022,13 +1020,14 @@ RPC 流程覆盖 CAS 与丢失 create 回复后的恢复。Desktop UI 验收归�
 
 ## 9. 消融检查
 
-管理读取只保留一份编辑快照；原 catalog 服务选择。create/update/probe 分别承担可恢复
+管理读取按范围提供编辑快照；已知目标的能力读取指定 Provider 和模型 ID，模型选择器使用
+`provider.models.query`。create/update/probe 分别承担可恢复
 identity、保留秘密的局部写和未保存网络探测；Disconnect 复用 update。独立用户模型列表
 用于区分默认覆盖并让新增项可执行；路由标记沿已有 metadata 保留采用时协议含义。
 声明的上限不需要新状态：目录已有的标记与匹配说明值是否存在，缺失由目录类型承载，原因在投影处
 推导，因此不增加平行模型列表、第二份目录或 `limits` 实体。
 可选模型读取不增加状态、缓存、事件或模型类型：它把既有 `ProviderCatalog::selectable`
-应用到同一份单 provider 目录，并返回既有 `ModelCapabilitySnapshot`，因此没有第二个可用性
+应用到每个目标的点查目录，并返回既有 `ModelCapabilitySnapshot`，因此没有第二个可用性
 谓词或平行目录。
 已存选择合同同样不增加状态、存储或账号读取、缓存或谓词：它构建既有目录、应用既有谓词，
 并返回既有已采用快照和执行已经派生的路由。需要一个命名的回复类型，因为路由与快照就是

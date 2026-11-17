@@ -13,6 +13,8 @@ const AUTO_SHELL = "__auto__"
 const s = useSettingsText()
 const connection = useConnectionStore()
 const models = useModels()
+const defaultModel = useModels()
+const policyModel = useModels()
 const sessions = useSessionsStore()
 const snapshot = ref<DefaultSelection>()
 const policy = ref<ModelPolicyView>()
@@ -25,7 +27,10 @@ const selected = ref("")
 const busy = ref(false)
 const error = ref("")
 const saved = ref(false)
-const options = computed(() => models.providers?.flatMap((provider) => provider.models.map((model) => ({ key: JSON.stringify([provider.providerId, model.id]), providerId: provider.providerId, modelId: model.id, label: `${provider.name} / ${model.name}` }))) ?? [])
+const options = computed(() => {
+  const rows = [defaultModel.providers, policyModel.providers, models.providers].flatMap(providers => providers?.flatMap(provider => provider.models.map(model => ({ key: JSON.stringify([provider.providerId, model.id]), providerId: provider.providerId, modelId: model.id, label: `${provider.name} / ${model.name}` }))) ?? [])
+  return [...new Map(rows.map(row => [row.key, row])).values()]
+})
 const current = computed(() => snapshot.value ? JSON.stringify([snapshot.value.providerId, snapshot.value.modelId]) : "")
 const currentPolicy = computed(() => policy.value?.policy.mode === "fixed" ? JSON.stringify([policy.value.policy.model.providerId, policy.value.policy.model.modelId]) : policy.value?.policy.mode ?? "agent")
 const scopeItems = computed(() => [
@@ -34,7 +39,7 @@ const scopeItems = computed(() => [
 ])
 const modelItems = computed(() => [
   ...(current.value && !options.value.some((option) => option.key === current.value)
-    ? [{ label: `${snapshot.value?.providerId} / ${snapshot.value?.modelId} (${s('unavailable', '不可用')})`, value: current.value, disabled: true }]
+    ? [{ label: `${snapshot.value?.providerId} / ${snapshot.value?.modelId} ${defaultModel.error ? '' : `(${s('unavailable', '不可用')})`}`, value: current.value, disabled: true }]
     : []),
   ...options.value.map((option) => ({ label: option.label, value: option.key })),
 ])
@@ -42,7 +47,7 @@ const policyItems = computed(() => [
   { label: s('Agent decides (profile / workspace defaults)', '由代理决定（配置 / 工作区默认值）'), value: "agent" },
   { label: s('Inherit requesting branch model', '继承请求分支的模型'), value: "inherit" },
   ...(currentPolicy.value !== "agent" && currentPolicy.value !== "inherit" && !options.value.some((option) => option.key === currentPolicy.value)
-    ? [{ label: s('Configured model unavailable', '已配置模型不可用'), value: currentPolicy.value, disabled: true }]
+    ? [{ label: policyModel.error ? s('Configured model', '已配置模型') : s('Configured model unavailable', '已配置模型不可用'), value: currentPolicy.value, disabled: true }]
     : []),
   ...options.value.map((option) => ({ label: option.label, value: option.key })),
 ])
@@ -64,6 +69,10 @@ async function load(path = loadedCwd.value): Promise<void> {
   try {
     if (!connection.supports("provider.selection")) throw new Error(s('Default model selection is not available on this server.', '此服务器不支持默认模型选择。'))
     const [next, nextPolicy, nextShell] = await Promise.all([connection.client.call("provider.selection", path ? { cwd: path } : {}, readDefaultSelection), connection.supports("collaboration.model_policy") ? connection.client.call("collaboration.model_policy", {}, readModelPolicy) : undefined, connection.supports("host.exec_shell.get") ? connection.client.call("host.exec_shell.get", {}, readExecShell) : undefined, models.load()])
+    await Promise.all([
+      next ? defaultModel.load({ providerId: next.providerId, modelId: next.modelId }) : defaultModel.clear(),
+      nextPolicy?.policy.mode === "fixed" ? policyModel.load(nextPolicy.policy.model) : policyModel.clear(),
+    ])
     snapshot.value = next
     policy.value = nextPolicy
     shell.value = nextShell
@@ -72,7 +81,7 @@ async function load(path = loadedCwd.value): Promise<void> {
     loadedCwd.value = path
     selected.value = current.value
     loaded.value = true
-    if (models.error) error.value = models.error
+    if (models.error || defaultModel.error || policyModel.error) error.value = models.error || defaultModel.error || policyModel.error
   } catch (cause) { error.value = messageFrom(cause) }
   finally { busy.value = false }
 }

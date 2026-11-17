@@ -152,8 +152,9 @@ An optional model ID restricts the reply to that model and its saved preferences
 an absent model is a typed not-found error. It is the sole edit-view read:
 its record version, model descriptors and annotations come from the same Provider record
 snapshot. Clients do not combine `provider.catalog` from another version with its
-`expectedVersion`. Selection and read-only web clients keep using the unchanged
-catalog. Aggregation does not promise an atomic snapshot across account owners.
+`expectedVersion`. Known-target capability reads pass the provider and model ID;
+model pickers use `provider.models.query`. Aggregation does not promise an atomic
+snapshot across account owners.
 
 | `ManagementProvider` field | Type and meaning |
 | --- | --- |
@@ -258,7 +259,9 @@ and `disabled`. Disabled and unavailable models remain visible for diagnostics.
 `empty` entries contain `providerId`, `providerName` and a tagged `reason`:
 `{kind:"no_models", listable}` or `{kind:"unreadable"}`. Each page admits at most
 `limit` model or empty-provider candidates, so a page containing errors can have
-fewer models. `next:null` ends traversal. Invalid limits fail with
+fewer models. `next:null` ends traversal. A candidate deleted before its target read
+is skipped; a later unreadable row is reported in `empty`. A stored empty managed provider
+without an account descriptor is reported as unreadable. Invalid limits fail with
 `provider_invalid_config`; cancellation and storage errors follow the Provider
 operation contract. Reads perform no remote catalog refresh. Refresh is an
 explicit management operation.
@@ -885,12 +888,12 @@ a missing static credential still exclude them. It carries no reason field: the
 consumer derives availability from the options and explains a persisted
 default that is no longer selectable from its own snapshot.
 
-**Rules Provider applies.** The candidates are the providers default resolution
-considers: every account provider the managed package advertises and every static
-provider `provider.list` returns. Each model comes from the same per-provider
-catalog read as `provider.catalog` (`catalog_for`), so bundled substitution,
-descriptor overrides, user models, routes, disables and account state are the ones
-execution sees. A model is included only when the existing
+**Rules Provider applies.** Candidates are persisted model targets queried by
+provider enablement, credential configuration and model status. Each candidate
+is read through the exact-target catalog read, with account availability checked
+by its owner. Bundled substitution, descriptor overrides, user models, routes
+and disables are projected for that target using the execution rules. A model is
+included only when the existing
 `ProviderCatalog::selectable` accepts it: `unavailableReason` is absent and its ID
 is not in `disabledModelIds`. That reason already covers every exclusion: a model
 with `ModelStatus::Unavailable`, a model that declares no `text` modality, a
@@ -920,10 +923,12 @@ model ID and answers whether that selection can execute; this read takes no inpu
 enumerates what is available now. Both are defined on the same catalog and selectability
 predicate, so they cannot disagree about a model.
 
-**Snapshot and consistency.** One call reads each provider once. No transaction
-spans providers, there is no version and no cache: a concurrent `provider.*` write
-may be visible for some providers and not others, and the next call returns the
-new state. It makes no live request: it never refreshes or lists a provider
+**Snapshot and consistency.** One call enumerates persisted target IDs, then
+reads each target separately. Each target record read has its own committed
+snapshot. A concurrent `provider.*` write can be visible for some targets and not
+others, including targets of the same provider; a deleted target is omitted.
+The reply has no aggregate version or retained cache. The next call reads the
+current state. It makes no live request: it never refreshes or lists a provider
 endpoint, and it writes no record, selection or preference. It uses the same
 account-status read as `provider.catalog`. The reply is derived; a consumer must
 not persist it or treat it as an adopted snapshot. Adoption stays with model
@@ -1524,8 +1529,9 @@ disposable database; see [the storage contract](native-storage-format.md#329-格
 
 ## 9. Ablation review
 
-The single management read supplies one edit snapshot; the unchanged catalog serves
-selection. Create, update and probe respectively handle recoverable identity, secret-
+The scoped management read supplies one edit snapshot. Known-target capability
+reads specify the provider and model ID; model pickers use `provider.models.query`.
+Create, update and probe respectively handle recoverable identity, secret-
 preserving writes and unsaved I/O. Disconnect reuses update. Separate user-model
 storage is required to distinguish it from an orphaned default override and make
 it executable. The route stamp preserves the adopted protocol meaning using
@@ -1534,7 +1540,7 @@ catalog already records say whether a value exists, an absent value carries its
 absence in the catalog type, and the reason is derived at the projection, so no
 parallel model list, no second catalog and no `limits` entity is added. The
 selectable-model read adds no state, cache, event or model type: it applies the
-existing `ProviderCatalog::selectable` to the same per-provider catalog and returns
+existing `ProviderCatalog::selectable` to each exact-target catalog and returns
 the existing `ModelCapabilitySnapshot`, so there is no second availability
 predicate or parallel catalog. The stored-selection contract likewise adds no
 state, store or account read, cache or predicate: it builds the existing catalog,

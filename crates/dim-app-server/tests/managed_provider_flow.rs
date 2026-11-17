@@ -49,6 +49,10 @@ struct Fixture {
     searches: Mutex<Vec<WebSearchRequest>>,
     search_entered: Notify,
     search_cancelled: Notify,
+    pause_status: AtomicBool,
+    status_entered: Notify,
+    status_resume: Notify,
+    empty_catalog: AtomicBool,
 }
 fn account(generation: u64) -> AccountSnapshot {
     AccountSnapshot {
@@ -125,7 +129,14 @@ impl ManagedProvider for Provider {
         }]
     }
     fn status(&self, _: &str) -> ManagedFuture<AccountSnapshot> {
-        unused()
+        let fixture = self.0.clone();
+        Box::pin(async move {
+            if fixture.pause_status.swap(false, Ordering::SeqCst) {
+                fixture.status_entered.notify_one();
+                fixture.status_resume.notified().await;
+            }
+            Ok(account(1))
+        })
     }
     fn recover(&self, _: &str) -> ManagedFuture<AccountSnapshot> {
         unused()
@@ -183,7 +194,26 @@ impl ManagedProvider for Provider {
         })
     }
     fn catalog(&self, _: &str, _: CancellationToken) -> ManagedFuture<ManagedCatalog> {
-        unused()
+        let empty = self.0.empty_catalog.load(Ordering::SeqCst);
+        Box::pin(async move {
+            let models = if empty {
+                vec![]
+            } else {
+                vec![dim_app_server::managed_provider::ManagedModel {
+                    entry: dim_app_server::model_catalog::BundledCatalog::load()
+                        .unwrap()
+                        .model("deepseek", "deepseek-v4-flash")
+                        .unwrap(),
+                    protocol: ModelProtocol::OpenaiCompatible,
+                    unavailable_reason: None,
+                    zdr: false,
+                }]
+            };
+            Ok(ManagedCatalog {
+                account: account(1),
+                models,
+            })
+        })
     }
     fn credential(&self, _: &str, _: &str) -> ManagedFuture<CredentialLease> {
         self.0.issue(1)
@@ -617,4 +647,76 @@ async fn cancelled_or_abandoned_search_settles_provider_work() {
     })
     .await
     .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn model_pages_survive_refresh_removal_and_an_unbound_empty_account() {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        use dim_app_server::provider::{ModelQuery, ProviderPlugin, ProviderService};
+        let directory = tempfile::tempdir().unwrap();
+        let home = directory.path().canonicalize().unwrap();
+        let (root, fixture, _, binding) = setup().await;
+        let catalog = dim_app_server::catalog();
+        let build = rutis_loader::resolve::Build::default();
+        let names = dim_agent_runtime::Names::copy(&catalog, &build);
+        let dependencies = [
+            root.plugin(
+                dim_agent_capabilities::file_storage::FileStoragePlugin::new(vec![home.clone()]),
+            ),
+            root.plugin(dim_app_server::storage::SqliteStoragePlugin::new(
+                home.join("native.sqlite"),
+            )),
+            root.plugin(
+                dim_app_server::codex_oauth::OpenAICodexOAuthPlugin::new(&names, 0).unwrap(),
+            ),
+            root.plugin(dim_app_server::grok_oauth::GrokOAuthPlugin::new(&names, 0).unwrap()),
+            root.plugin(dim_agent_aimux::AimuxPlugin::default()),
+        ];
+        for dependency in &dependencies {
+            active(dependency).await;
+        }
+        active(&root.plugin(ProviderPlugin::new(&names).unwrap())).await;
+        let provider = root.get::<ProviderService>().unwrap();
+        let cancel = CancellationToken::new();
+        let initial = provider.refresh("fixture".into(), &cancel).await.unwrap();
+        assert_eq!(initial.models.len(), 1);
+        fixture.pause_status.store(true, Ordering::SeqCst);
+        let reader = provider.clone();
+        let query = tokio::spawn(async move {
+            reader
+                .query_models(
+                    ModelQuery {
+                        provider_id: Some("fixture".into()),
+                        ..Default::default()
+                    },
+                    &CancellationToken::new(),
+                )
+                .await
+        });
+        fixture.status_entered.notified().await;
+        fixture.empty_catalog.store(true, Ordering::SeqCst);
+        let refreshed = provider.refresh("fixture".into(), &cancel).await.unwrap();
+        assert!(refreshed.models.is_empty());
+        fixture.status_resume.notify_one();
+        let page = query.await.unwrap().unwrap();
+        assert!(page.models.is_empty());
+        assert!(page.next.is_none());
+        binding.dispose().await.unwrap();
+        let page = provider
+            .query_models(
+                ModelQuery {
+                    provider_id: Some("fixture".into()),
+                    ..Default::default()
+                },
+                &cancel,
+            )
+            .await
+            .unwrap();
+        assert!(page.models.is_empty());
+        let value = serde_json::to_value(page).unwrap();
+        assert_eq!(value["empty"][0]["reason"]["kind"], "unreadable");
+        root.shutdown().await.unwrap();
+    })
+    .await
+    .expect("model page operations settle across refresh and unbind");
 }

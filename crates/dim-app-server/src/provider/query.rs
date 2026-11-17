@@ -128,34 +128,43 @@ ORDER BY 1,2 LIMIT ?6
                 model_id: model_id.clone(),
             });
             if model_id.is_empty() {
-                let listable = if descriptors
+                let reason = if descriptors
                     .iter()
                     .any(|descriptor| descriptor.provider_id == provider_id)
                 {
                     if !self.account_available(&provider_id, cancel).await? {
                         continue;
                     }
-                    true
+                    EmptyModelReason::NoModels { listable: true }
                 } else {
                     let id = provider_id.clone();
                     let db = self.db.clone();
                     let record = self
                         .owned(cancel, move |_| {
                             Box::pin(async move {
-                                db.run_read(move |c| read_static(c, &id))
+                                db.run_read(move |c| read_model_record(c, &id, ""))
                                     .await
                                     .map_err(ProviderError::from)
                             })
                         })
-                        .await?;
-                    record
-                        .as_ref()
-                        .is_some_and(|record| self.remote_model_list(&provider_id, record))
+                        .await;
+                    match record {
+                        Ok(Some(PersistedProviderRecord::Static(record))) => {
+                            EmptyModelReason::NoModels {
+                                listable: self.remote_model_list(&provider_id, &record),
+                            }
+                        }
+                        Ok(None) => continue,
+                        _ => {
+                            self.check(cancel)?;
+                            EmptyModelReason::Unreadable
+                        }
+                    }
                 };
                 page.empty.push(EmptyModelProvider {
                     provider_id,
                     provider_name,
-                    reason: EmptyModelReason::NoModels { listable },
+                    reason,
                 });
                 continue;
             }
@@ -183,14 +192,28 @@ ORDER BY 1,2 LIMIT ?6
             let preferences = self
                 .saved_preferences(&provider_id, &model_id, cancel)
                 .await?;
-            let mut model = catalog
+            let Some(mut model) = catalog
                 .models
                 .into_iter()
                 .find(|model| model.id == model_id)
-                .expect("the selected catalog model");
-            model.name = self
+            else {
+                continue;
+            };
+            model.name = match self
                 .model_name(provider_id.clone(), model_id.clone(), cancel)
-                .await?;
+                .await
+            {
+                Ok(name) => name,
+                Err(_) => {
+                    self.check(cancel)?;
+                    page.empty.push(EmptyModelProvider {
+                        provider_id,
+                        provider_name,
+                        reason: EmptyModelReason::Unreadable,
+                    });
+                    continue;
+                }
+            };
             page.models.push(ModelRow {
                 provider_id,
                 provider_name,
