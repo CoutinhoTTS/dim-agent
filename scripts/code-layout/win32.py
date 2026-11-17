@@ -288,13 +288,14 @@ class Console:
     """A ConPTY child with a synchronous write side and a reader thread."""
 
     def __init__(self, arguments, cwd, environment, columns=120, rows=30):
+        import msvcrt
         self._master_in, self._child_in = os.pipe()
         self._child_out, self._master_out = os.pipe()
         self._console = HPCON()
         status = kernel32.CreatePseudoConsole(
             COORD(columns, rows),
-            ctypes.c_void_p(os.get_osfhandle(self._child_in)),
-            ctypes.c_void_p(os.get_osfhandle(self._child_out)),
+            ctypes.c_void_p(msvcrt.get_osfhandle(self._child_in)),
+            ctypes.c_void_p(msvcrt.get_osfhandle(self._child_out)),
             0,
             ctypes.byref(self._console),
         )

@@ -8,7 +8,6 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <mach-o/dyld.h>
-#include <mach-o/getsect.h>
 #include <mach-o/loader.h>
 #include <signal.h>
 #include <stdint.h>
@@ -112,8 +111,31 @@ __attribute__((constructor)) static void setup(void) {
         errno = ENOEXEC;
         fail("not a 64-bit Mach-O main image");
     }
-    const struct section_64 *text =
-        getsectbynamefromheader_64(header, "__TEXT", "__text");
+    const struct section_64 *text = NULL;
+    const char *commands = (const char *)(header + 1);
+    for (uint32_t index = 0; index < header->ncmds; ++index) {
+        const struct load_command *command = (const struct load_command *)commands;
+        if (command->cmdsize < sizeof(*command)) {
+            errno = ENOEXEC;
+            fail("malformed Mach-O load command");
+        }
+        if (command->cmd == LC_SEGMENT_64) {
+            const struct segment_command_64 *segment =
+                (const struct segment_command_64 *)command;
+            if (!strncmp(segment->segname, "__TEXT", 16)) {
+                const struct section_64 *sections =
+                    (const struct section_64 *)(segment + 1);
+                for (uint32_t section = 0; section < segment->nsects; ++section) {
+                    if (!strncmp(sections[section].sectname, "__text", 16) &&
+                        !strncmp(sections[section].segname, "__TEXT", 16)) {
+                        text = &sections[section];
+                        break;
+                    }
+                }
+            }
+        }
+        commands += command->cmdsize;
+    }
     if (!text) {
         errno = ENOEXEC;
         fail("no __TEXT,__text section");
