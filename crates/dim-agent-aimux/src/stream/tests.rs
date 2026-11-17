@@ -245,11 +245,32 @@ async fn finish_releases_transport_before_usage_and_survives_late_cancel() {
     };
     let (mut stream, cancel, _, dropped) = fixture(vec![
         Ok(start()),
+        Ok(StreamPart::TextStart {
+            id: "text".into(),
+            provider_metadata: None,
+        }),
+        Ok(StreamPart::TextDelta {
+            id: "text".into(),
+            delta: "answer".into(),
+            provider_metadata: None,
+        }),
+        Ok(StreamPart::TextEnd {
+            id: "text".into(),
+            provider_metadata: None,
+        }),
         Ok(finish(FinishReasonUnified::Stop, usage)),
     ]);
     let ModelChunk::MessageStart { message_id } = stream.next().await.unwrap().unwrap() else {
         panic!("missing start")
     };
+    let ModelChunk::Text(delta) = stream.next().await.unwrap().unwrap() else {
+        panic!("missing text")
+    };
+    assert_eq!(delta, "answer");
+    assert!(matches!(
+        stream.next().await.unwrap().unwrap(),
+        ModelChunk::TextEnd
+    ));
     let ModelChunk::Usage(usage) = stream.next().await.unwrap().unwrap() else {
         panic!("missing usage")
     };
@@ -299,6 +320,117 @@ async fn missing_usage_is_distinct_from_zero_and_length_remains_max_tokens() {
                 ..
             }))
         ));
+    }
+}
+
+/// A reply that completes with neither non-whitespace text nor a tool call is
+/// the one failure the converter names itself: the provider called it a
+/// success and there is nothing for the turn to say.
+#[tokio::test]
+async fn a_completed_reply_with_no_answer_is_a_malformed_response() {
+    let text = |content: &str| {
+        vec![
+            Ok(StreamPart::TextStart {
+                id: "text".into(),
+                provider_metadata: None,
+            }),
+            Ok(StreamPart::TextDelta {
+                id: "text".into(),
+                delta: content.into(),
+                provider_metadata: None,
+            }),
+            Ok(StreamPart::TextEnd {
+                id: "text".into(),
+                provider_metadata: None,
+            }),
+        ]
+    };
+    let thinking = || {
+        vec![
+            Ok(StreamPart::ReasoningStart {
+                id: "thinking".into(),
+                provider_metadata: None,
+            }),
+            Ok(StreamPart::ReasoningDelta {
+                id: "thinking".into(),
+                delta: "thought".into(),
+                provider_metadata: None,
+            }),
+            Ok(StreamPart::ReasoningEnd {
+                id: "thinking".into(),
+                provider_metadata: None,
+            }),
+        ]
+    };
+    let stop = || Ok(finish(FinishReasonUnified::Stop, NativeUsage::default()));
+    let cases: Vec<(Vec<Result<StreamPart, AiMuxError>>, &str)> = vec![
+        (vec![Ok(start()), stop()], "a reply with no part at all"),
+        (
+            {
+                let mut parts = vec![Ok(start())];
+                parts.extend(text(" \n\t"));
+                parts.push(stop());
+                parts
+            },
+            "whitespace text",
+        ),
+        (
+            {
+                let mut parts = vec![Ok(start())];
+                parts.extend(thinking());
+                parts.push(stop());
+                parts
+            },
+            "thinking only",
+        ),
+    ];
+    for (parts, case) in cases {
+        let failure = collect_or_stall(fixture(parts).0, case)
+            .await
+            .into_iter()
+            .find_map(Result::err)
+            .unwrap_or_else(|| panic!("{case}: the reply completed"));
+        let HostError::Failed {
+            model: Some(model), ..
+        } = failure
+        else {
+            panic!("{case}: {failure:?}");
+        };
+        assert_eq!(model.kind, ModelFailureKind::MalformedResponse, "{case}");
+        assert_eq!(
+            model.reason.as_deref(),
+            Some("the response had no text and no tool call"),
+            "{case}"
+        );
+    }
+    // A reply with text, and one with a tool call only, complete as before.
+    for (parts, case) in [
+        (
+            {
+                let mut parts = vec![Ok(start())];
+                parts.extend(text("answer"));
+                parts.push(stop());
+                parts
+            },
+            "text without a tool call",
+        ),
+        (
+            vec![
+                Ok(start()),
+                Ok(tool("{}")),
+                Ok(finish(
+                    FinishReasonUnified::ToolCalls,
+                    NativeUsage::default(),
+                )),
+            ],
+            "a tool call without text",
+        ),
+    ] {
+        let chunks = collect_or_stall(fixture(parts).0, case).await;
+        assert!(
+            matches!(chunks.last(), Some(Ok(ModelChunk::MessageStop { .. }))),
+            "{case}: {chunks:?}"
+        );
     }
 }
 
@@ -951,6 +1083,19 @@ async fn recorded_reasoning_tokens_reach_the_agent_usage() {
     };
     let (stream, _, _, _) = fixture(vec![
         Ok(start()),
+        Ok(StreamPart::TextStart {
+            id: "text".into(),
+            provider_metadata: None,
+        }),
+        Ok(StreamPart::TextDelta {
+            id: "text".into(),
+            delta: "answer".into(),
+            provider_metadata: None,
+        }),
+        Ok(StreamPart::TextEnd {
+            id: "text".into(),
+            provider_metadata: None,
+        }),
         Ok(finish(FinishReasonUnified::Stop, usage)),
     ]);
     let recorded = collect_or_stall(stream, "recorded reasoning")

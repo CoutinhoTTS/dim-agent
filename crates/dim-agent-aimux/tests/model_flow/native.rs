@@ -2072,6 +2072,84 @@ async fn a_4xx_with_a_server_class_label_is_rejected_once() {
     responses.close().await;
 }
 
+/// A reply that completes with neither text nor a tool call is a
+/// `malformed_response`: it is retried once, and the next attempt's answer
+/// finishes the turn.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_empty_reply_is_retried_once_and_the_answer_finishes_the_turn() {
+    let chat = NativeServer::start("openai-chat").await;
+    let agent = model_agent(chat.models(), None).await;
+    let session = agent.create_session(chat.session_config()).await.unwrap();
+    session
+        .submit("empty-reply".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(&event.kind, EventKind::Text(data) if data.delta == "after the empty reply")),
+        "{events:?}"
+    );
+    assert!(
+        matches!(
+            events
+                .iter()
+                .rfind(|event| matches!(event.kind, EventKind::TurnEnd(_)))
+                .unwrap()
+                .kind,
+            EventKind::TurnEnd(TurnEndData {
+                outcome: TurnOutcome::Completed { .. },
+                ..
+            })
+        ),
+        "{events:?}"
+    );
+    let requests = chat.endpoint.requests.lock().unwrap().len();
+    assert_eq!(requests, 2, "the empty reply and one retry");
+    agent.close().await.unwrap();
+    chat.close().await;
+}
+
+/// An empty reply twice is a `malformed_response` that ends the turn: the
+/// retry is spent on the first repeat, so no third request follows.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_empty_reply_twice_fails_the_turn_without_a_third_attempt() {
+    let chat = NativeServer::start("openai-chat").await;
+    let agent = model_agent(chat.models(), None).await;
+    let session = agent.create_session(chat.session_config()).await.unwrap();
+    session
+        .submit("empty-reply-twice".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
+    let failure = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::ModelOutputEnd(data) => match &data.outcome {
+                ModelOutputOutcome::Failed {
+                    failure: Some(failure),
+                    ..
+                } => Some(failure.clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .expect("a failed model output");
+    assert_eq!(failure.kind, ModelFailureKind::MalformedResponse);
+    assert_eq!(
+        failure.reason.as_deref(),
+        Some("the response had no text and no tool call")
+    );
+    assert_eq!(failure.attempts, 2, "one retry, then the turn fails");
+    let requests = chat.endpoint.requests.lock().unwrap().len();
+    assert_eq!(requests, 2, "no third attempt");
+    agent.close().await.unwrap();
+    chat.close().await;
+}
+
 async fn respond_native(
     State(endpoint): State<NativeEndpoint>,
     uri: Uri,
@@ -2245,7 +2323,15 @@ async fn respond_native(
     let missing_stop = request.to_string().contains("native-stop-eof");
     let data = match endpoint.kind {
         "openai-chat" | "openai-compatible" => {
-            if continuation {
+            if request_text.contains("empty-reply") {
+                let attempt = endpoint.requests.lock().unwrap().len();
+                if request_text.contains("empty-reply-twice") || attempt == 1 {
+                    frame(json!({}), json!("stop")) + "data: [DONE]\n\n"
+                } else {
+                    frame(json!({"content":"after the empty reply"}), json!("stop"))
+                        + "data: [DONE]\n\n"
+                }
+            } else if continuation {
                 frame(json!({"content":"finished"}), json!("stop")) + "data: [DONE]\n\n"
             } else {
                 frame(json!({"content":"before"}), Value::Null)
@@ -3986,6 +4072,9 @@ async fn a_stored_summary_index_loads_and_continues() {
                 .insert_header("content-type", "text/event-stream")
                 .set_body_string(sse(vec![
                     json!({"type":"response.created","response":{"id":"resp-1","created_at":1,"model":"alias"}}),
+                    json!({"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg-1","role":"assistant","content":[]}}),
+                    json!({"type":"response.output_text.delta","item_id":"msg-1","output_index":0,"content_index":0,"delta":"answer"}),
+                    json!({"type":"response.output_item.done","output_index":0,"item":{"type":"message","id":"msg-1","role":"assistant","content":[{"type":"output_text","text":"answer"}]}}),
                     json!({"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}),
                 ])),
         )
