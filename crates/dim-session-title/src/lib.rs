@@ -13,7 +13,7 @@ use dim_agent_types::{
     ContentBlock, EventKind, InputBlock, Message, ModelId, Role, UserInput, markup::runtime_context,
 };
 use dim_app_server::{
-    settings::{SettingsScope, SettingsService, SourceDeclaration},
+    settings::{Settings, SettingsScope, SourceDeclaration},
     storage::{MetadataError, SessionMetadataService, Title, TitleSource},
 };
 use regex::Regex;
@@ -81,7 +81,7 @@ struct Document {
 }
 
 pub(crate) struct SessionTitlePlugin {
-    settings: Key<SettingsService>,
+    settings: Key<Settings>,
     parts: Key<PartRegistry>,
 }
 impl SessionTitlePlugin {
@@ -101,7 +101,7 @@ impl DynPlugin for SessionTitlePlugin {
     }
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
-            ctx.require_at(&self.settings)?.register_declared(
+            ctx.require_at(&self.settings)?.register(
                 ctx,
                 SourceDeclaration {
                     source: SOURCE.into(),
@@ -136,7 +136,7 @@ impl DynPlugin for SessionTitlePlugin {
 }
 
 struct SessionTitle {
-    settings: Key<SettingsService>,
+    settings: Key<Settings>,
     tree: Key<TreeCommands>,
     store: Key<SessionMetadataService>,
     auxiliary: Key<AuxiliaryModel>,
@@ -284,7 +284,7 @@ struct State {
 struct Owner {
     ctx: Ctx,
     id: String,
-    settings: Arc<SettingsService>,
+    settings: Arc<Settings>,
     tree: Arc<TreeCommands>,
     store: Arc<SessionMetadataService>,
     auxiliary: Arc<AuxiliaryModel>,
@@ -299,7 +299,7 @@ impl Owner {
     async fn document(&self) -> Result<Document, ()> {
         let snapshot = self
             .settings
-            .read_declared(SOURCE, SettingsScope::User, &self.stop)
+            .read(SOURCE, SettingsScope::User, &self.stop)
             .await
             .map_err(|_| ())?;
         serde_json::from_value(snapshot.document).map_err(|_| ())

@@ -2219,12 +2219,6 @@
         "removing": false
       },
       {
-        "service": "dyn rutis_bridge::session::services::HostDispatch#skillsBranch@main",
-        "provider": 77,
-        "generation": 1,
-        "removing": false
-      },
-      {
         "service": "dyn rutis_bridge::session::services::HostDispatch#timeline@main",
         "provider": 60,
         "generation": 1,
@@ -2434,13 +2428,7 @@
         "removing": false
       },
       {
-        "service": "dim_agent_capabilities::skills::catalog::SkillsCatalog#dim/skills/catalog-owner",
-        "provider": 28,
-        "generation": 1,
-        "removing": false
-      },
-      {
-        "service": "dim_agent_capabilities::skills::face::SkillsCatalog",
+        "service": "dim_agent_capabilities::skills::catalog::SkillsCatalog",
         "provider": 28,
         "generation": 1,
         "removing": false
@@ -2466,12 +2454,6 @@
       {
         "service": "dyn rutis_bridge::session::services::HostDispatch#rutis/loader",
         "provider": 2,
-        "generation": 1,
-        "removing": false
-      },
-      {
-        "service": "dyn rutis_bridge::session::services::HostDispatch#skillsCatalog",
-        "provider": 28,
         "generation": 1,
         "removing": false
       },
@@ -2952,7 +2934,7 @@
             "status": "Ready"
           },
           {
-            "service": "dim_agent_capabilities::skills::catalog::SkillsCatalog#dim/skills/catalog-owner",
+            "service": "dim_agent_capabilities::skills::catalog::SkillsCatalog",
             "scope": null,
             "status": "Ready"
           },
@@ -2997,7 +2979,7 @@
             "generation": 1
           },
           {
-            "service": "dim_agent_capabilities::skills::catalog::SkillsCatalog#dim/skills/catalog-owner",
+            "service": "dim_agent_capabilities::skills::catalog::SkillsCatalog",
             "scope": null,
             "provider": 28,
             "generation": 1
@@ -3047,7 +3029,7 @@
             "external": false
           },
           {
-            "service": "dim_agent_capabilities::skills::catalog::SkillsCatalog#dim/skills/catalog-owner",
+            "service": "dim_agent_capabilities::skills::catalog::SkillsCatalog",
             "provider": 28,
             "declared": true,
             "external": true
