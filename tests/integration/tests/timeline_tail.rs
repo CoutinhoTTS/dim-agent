@@ -149,9 +149,7 @@ impl TimelineStore for Held {
 /// that started it.
 #[derive(Default)]
 struct Rebuild {
-    staged: Vec<Arc<AgentEvent>>,
     processed: Vec<u64>,
-    read: bool,
     covered: u64,
     published: u64,
 }
@@ -198,51 +196,46 @@ impl DynPlugin for TailPart {
             let dispatcher = ctx.require_at(&self.dispatcher)?;
             let lifecycle = ctx.require_at(&self.lifecycle)?;
             let shared = self.shared.clone();
-            let staging = shared.clone();
-            dispatcher.subscribe(ctx, "TailHandover", &["*"], move |event| {
-                let mut rebuild = staging.lock().unwrap();
-                if !rebuild.read {
-                    rebuild.staged.push(event);
-                } else if event.sequence > rebuild.covered {
-                    rebuild.processed.push(event.sequence);
-                }
-                Box::pin(async { Ok(()) })
-            })?;
-            let read_now = self.read_now.lock().unwrap().take();
+            let read_now = self.read_now.clone();
             let done = self.read_done.clone();
+            let task_ctx = ctx.clone();
             let task = tokio::spawn(async move {
-                let Some(mut read_now) = read_now else {
-                    return;
-                };
-                if !lifecycle.activated().await {
-                    return;
-                }
-                let Some(()) = read_now.recv().await else {
-                    return;
-                };
-                let published = timeline.sequence();
-                let reply = timeline
-                    .query(page(4096, true))
+                let restored = shared.clone();
+                dispatcher
+                    .consume(
+                        &task_ctx,
+                        "TailHandover".into(),
+                        vec!["*".into()],
+                        Arc::new(move || {
+                            let timeline = timeline.clone();
+                            let lifecycle = lifecycle.clone();
+                            let restored = restored.clone();
+                            let read_now = read_now.lock().unwrap().take();
+                            Box::pin(async move {
+                                let mut read_now = read_now.expect("one rebuild per registration");
+                                assert!(lifecycle.activated().await);
+                                read_now.recv().await.expect("rebuild trigger");
+                                let published = timeline.sequence();
+                                let reply = timeline.query(page(4096, true)).await?;
+                                let QueryOutput::Events { events } = reply.result else {
+                                    panic!("handover selects events");
+                                };
+                                let mut rebuild = restored.lock().unwrap();
+                                rebuild.covered = reply.through;
+                                rebuild.published = published;
+                                rebuild
+                                    .processed
+                                    .extend(events.iter().map(|row| row.event.sequence));
+                                Ok(reply.through)
+                            })
+                        }),
+                        Arc::new(move |event| {
+                            shared.lock().unwrap().processed.push(event.sequence);
+                            Box::pin(async { Ok(()) })
+                        }),
+                    )
                     .await
-                    .expect("the read that adds the tail");
-                let QueryOutput::Events { events } = reply.result else {
-                    panic!("handover selects events");
-                };
-                let mut rebuild = shared.lock().unwrap();
-                rebuild.covered = reply.through;
-                rebuild.published = published;
-                rebuild.read = true;
-                rebuild
-                    .processed
-                    .extend(events.iter().map(|row| row.event.sequence));
-                let staged = std::mem::take(&mut rebuild.staged);
-                rebuild.processed.extend(
-                    staged
-                        .into_iter()
-                        .map(|event| event.sequence)
-                        .filter(|sequence| *sequence > reply.through),
-                );
-                drop(rebuild);
+                    .expect("consume rebuild and held-event drain");
                 let _ = done.send(());
             });
             ctx.effect(move || async move {
