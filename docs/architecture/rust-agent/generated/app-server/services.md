@@ -151,8 +151,6 @@ flowchart LR
   p37 -->|"dim_app_server::agents::AgentDirectory"| p39
   p3 -->|"dim_app_server::control::ProcessActivity"| p39
   p18 -->|"dim_app_server::settings::SettingsService"| p39
-  p8 -->|"dim_app_server::storage::face::Store"| p39
-  p8 -->|"dim_app_server::storage::metadata::binding::SessionMetadata"| p39
   p6 -->|"dim_app_server::storage::sqlite::SqliteStorage"| p39
   p8 -->|"dim_app_server::storage::timeline::SessionStore"| p39
   p2 -->|"rutis_loader::loader::Loader"| p39
@@ -216,7 +214,7 @@ flowchart LR
   p59 -->|"dim_agent_capabilities::workspace_tools::mentions::MentionIndex"| p11
   p10 -->|"dim_app_server::methods::ManagementMethods"| p11
   p10 -->|"dim_app_server::methods::ManagementMethods"| p9
-  p8 -->|"dim_app_server::storage::face::Store"| p9
+  p8 -->|"dim_app_server::storage::timeline::SessionStore"| p9
   p6 -->|"dim_app_server::storage::sqlite::SqliteStorage"| p8
   p10 -->|"dim_app_server::methods::ManagementMethods"| p7
   p6 -->|"dim_app_server::storage::sqlite::SqliteStorage"| p7
