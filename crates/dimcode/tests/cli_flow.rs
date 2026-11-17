@@ -12136,8 +12136,10 @@ fn tui_models_picker_edits_only_the_subagent_model_policy() {
     let mut terminal = Terminal::resume_tui(command);
     terminal.until("test / model");
     terminal.write(b"/models\r");
-    terminal.until("Subagent models: Agent choice");
-    terminal.write(b"Subagent\r");
+    terminal.until("Subagent models");
+    terminal.until("Agent choice");
+    // Tab focuses the policy section; Enter opens its page.
+    terminal.raw(b"\t\r");
     terminal.until("Inherit requesting branch");
     terminal.until("Existing members keep their models.");
     terminal.raw(b"\x1b[B\r");
@@ -12145,7 +12147,8 @@ fn tui_models_picker_edits_only_the_subagent_model_policy() {
     terminal.write(b"\r");
     thread::sleep(Duration::from_millis(300));
     terminal.write(b"\r");
-    terminal.until("Subagent models: Inherit requesting branch");
+    terminal.until("Subagent models");
+    terminal.until("Inherit requesting branch");
     terminal.until("Subagent model policy saved");
     terminal.write(b"\r");
     terminal.until("Fixed model");
@@ -12156,7 +12159,8 @@ fn tui_models_picker_edits_only_the_subagent_model_policy() {
     terminal.raw(b"\x1b[B\r");
     terminal.until("Fixed subagent model");
     terminal.write(b"other\r");
-    terminal.until("Subagent models: Test / other");
+    terminal.until("Subagent model policy saved");
+    terminal.until("Test / other");
     home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
@@ -12191,10 +12195,13 @@ fn tui_models_picker_edits_only_the_subagent_model_policy() {
     );
 }
 
-/// `/models` lists a Provider's models without offering `Edit models` when
-/// the daemon does not advertise the area's method.
+/// `/models` lists a Provider's models without offering `Manage models` when
+/// the daemon does not advertise the area's method, and keeps the recovery
+/// guidance as a read-only line. A Provider with nothing selectable names its
+/// models with missing limits once, and its other unavailable and disabled
+/// models beside them.
 #[test]
-fn tui_models_picker_hides_edit_models_without_management_methods() {
+fn tui_models_picker_hides_manage_models_without_management_methods() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
         wire.2 = true;
@@ -12211,7 +12218,13 @@ fn tui_models_picker_hides_edit_models_without_management_methods() {
                 "session.attach" => attach_record(&request),
                 "session.history" => json!({"events":[],"through":8,"nextAfter":8,"done":true}),
                 "session.idle" => json!({"sequence":8}),
-                "provider.list" => json!({"providers":[{"providerId":"test","displayName":"Test","enabled":true}]}),
+                "provider.list" => json!({"providers":[
+                    {"providerId":"test","displayName":"Test","enabled":true},
+                    {"providerId":"bare","displayName":"Bare","enabled":true}]}),
+                "provider.catalog" if request["params"]["providerId"] == "bare" => json!({"catalog":{"version":1,"disabledModelIds":["gone"],"models":[
+                    {"id":"narrow","name":"Narrow","unavailableReason":"limits_undeclared","missingLimits":["contextWindow","maxOutputTokens"],"capabilities":dim_agent_types::CatalogCapabilities::default()},
+                    {"id":"blocked","name":"Blocked","unavailableReason":"provider_unavailable","missingLimits":[],"capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)},
+                    {"id":"gone","name":"Gone","missingLimits":[],"capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)}]}}),
                 "provider.catalog" => json!({"catalog":{"version":1,"disabledModelIds":[],"models":[
                     {"id":"model","name":"Model","capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)}]}}),
                 "account.providers" => json!([]),
@@ -12224,10 +12237,17 @@ fn tui_models_picker_hides_edit_models_without_management_methods() {
     terminal.until("test / model");
     terminal.write(b"/models\r");
     terminal.until("Test / model");
+    terminal.until("dimcode models bare --set-missing-limits");
     thread::sleep(Duration::from_millis(300));
     let opened = terminal.transcript.clone();
-    assert!(opened.contains("Model"), "{opened}");
-    assert!(!opened.contains("Edit models"), "{opened}");
+    assert!(opened.contains("Model management"), "{opened}");
+    assert!(opened.contains("Bare: 1 model needs a window"), "{opened}");
+    assert!(
+        opened.contains("Bare: 1 unavailable and 1 disabled"),
+        "{opened}"
+    );
+    assert!(!opened.contains("2 unavailable"), "{opened}");
+    assert!(!opened.contains("Manage models"), "{opened}");
     terminal.raw(b"\x1b");
     thread::sleep(Duration::from_millis(200));
     terminal.write(b"/exit\r");
