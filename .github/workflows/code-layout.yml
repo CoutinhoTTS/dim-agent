@@ -49,7 +49,6 @@ jobs:
     timeout-minutes: 30
     env:
       CARGO_INCREMENTAL: "0"
-      DIM_LAYOUT_ARTIFACTS: ${{ runner.temp }}/layout-fixture-${{ matrix.platform }}
       RUSTC_WRAPPER: ""
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
@@ -89,6 +88,16 @@ jobs:
           }
       - run: rustup show
       - run: node --test ${{ matrix.test }}
+        env:
+          DIM_LAYOUT_ARTIFACTS: ${{ runner.temp }}/layout-fixture-${{ matrix.platform }}
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: layout-fixture-${{ matrix.platform }}
+          path: ${{ runner.temp }}/layout-fixture-${{ matrix.platform }}/*
+          if-no-files-found: warn
+          retention-days: 1
+          overwrite: true
 
   native-layout:
     strategy:
@@ -111,7 +120,6 @@ jobs:
     timeout-minutes: 240
     env:
       DIM_LAYOUT_PLATFORM: ${{ matrix.platform }}
-      DIM_LAYOUT_ARTIFACTS: ${{ runner.temp }}/layout-fixture-${{ matrix.platform }}
       CARGO_INCREMENTAL: "0"
       CARGO_BUILD_JOBS: "2"
       CARGO_PROFILE_RELEASE_LTO: ${{ matrix.platform == 'darwin-arm64' && 'thin' || 'fat' }}
@@ -179,7 +187,6 @@ jobs:
             ${{ runner.temp }}/dim-layout-${{ matrix.platform }}/symbols.order
             ${{ runner.temp }}/dim-layout-${{ matrix.platform }}/*.pages
             ${{ runner.temp }}/dim-layout-${{ matrix.platform }}/*.map
-            ${{ runner.temp }}/layout-fixture-${{ matrix.platform }}/*
           if-no-files-found: warn
           retention-days: 1
           overwrite: true
