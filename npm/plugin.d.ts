@@ -36,7 +36,11 @@ export interface PluginFiles {
   open(): Promise<FileScope>;
 }
 
-/** JSON-only; rutis (0.11+) may deliver bigint in incoming tool data beyond this type. */
+/** JSON data carried by the native bridge. Integers outside JavaScript's safe range
+ * arrive as bigint; sending back bigint requires a signed or unsigned 64-bit value.
+ * Numbers must be finite. This is not the external client's JSON encoding. */
+export type BridgeJsonValue = null | boolean | number | bigint | string | BridgeJsonValue[] | BridgeJsonObject;
+export type BridgeJsonObject = { [key: string]: BridgeJsonValue };
 
 /** Project roots are process-local numbers, not durable identities. */
 export type SettingsScope = 'user' | { project: number };
@@ -120,6 +124,59 @@ export interface ModalityTargets {
 }
 
 export type PermissionPreset = 'read-only' | 'workspace-write' | 'full-access';
+/** Session command-rule read; the owner checks the current user source on each call. */
+export type CommandRule = { command: string; match: 'exact' | 'prefix'; decision: 'allow' | 'deny' }
+export type CommandRulesReply = { rules: CommandRule[] }
+export interface CommandRulesError extends Error { code: 'unavailable' | 'cancelled' }
+export interface CommandRules { read(request: Record<string, never>): Promise<CommandRulesReply> }
+
+/** Model configuration's existing serde form; numeric fields are finite numbers. */
+export interface ModelConfig {
+  temperature?: number; maxTokens?: number; topP?: number; topK?: number;
+  stopSequences?: string[];
+  reasoning?: {
+    enabled?: true; effort?: string; budgetTokens?: number;
+    summary?: 'auto' | 'concise' | 'detailed'; includeThoughts?: boolean; interleavedThinking?: boolean;
+  };
+  providerOptions?: {
+    openai?: {
+      reasoningEffort?: string; serviceTier?: string; summary?: 'auto' | 'concise' | 'detailed';
+      interleavedThinking?: boolean;
+    };
+    'openai-compatible'?: {
+      reasoningEffort?: string; serviceTier?: string; interleavedThinking?: boolean;
+      thinking?: { type?: 'enabled' | 'disabled' }; enable_thinking?: boolean;
+    };
+    anthropic?: {
+      effort?: string; thinking?: { type?: 'adaptive' | 'enabled' | 'disabled'; budgetTokens?: number };
+      sendReasoning?: boolean; interleavedThinking?: boolean;
+    };
+    gemini?: { thinkingConfig?: { thinkingBudget?: number; includeThoughts?: boolean } };
+    deepseek?: EffortProviderOptions; moonshotai?: EffortProviderOptions; xai?: EffortProviderOptions;
+    zenmux?: EffortProviderOptions; aihubmix?: EffortProviderOptions;
+  };
+}
+export interface EffortProviderOptions { reasoningEffort?: string; interleavedThinking?: boolean }
+
+/** One source's loaded prompt value, using the same target identity. */
+export interface PromptEntry {
+  source: string; version: string; body: string;
+  scope: import('./branch-services.js').PromptScope;
+  delivery: 'system' | 'context' | 'state'; order: number;
+}
+export interface PromptLoadError extends Error { code: 'failed' | 'cancelled' }
+export interface PromptHost {
+  /** Explicit cancellation or caller-row unload notifies the source and waits for its own result.
+   * Abandoning the returned Promise does not cancel an accepted load. */
+  load(target: import('./branch-services.js').PromptSourceTarget, cancelled: () => Promise<void>): Promise<PromptEntry | null>;
+}
+export interface PromptRegistrationError extends Error { code: 'failed' }
+export interface PromptRegistry {
+  names(): string[];
+  /** Withdrawal removes future lookups; accepted loads keep their original callback. */
+  register(name: string, load: (target: import('./branch-services.js').PromptSourceTarget, cancelled: () => Promise<void>) => Promise<PromptEntry | null>): Promise<void>;
+}
+
 export interface PermissionPolicy {
   preset: PermissionPreset;
   allowedTools: string[];
@@ -459,32 +516,37 @@ export interface MethodDeclaration {
 export interface MethodCall {
   callId: string;
   method: string;
-  params: JsonValue;
+  params: BridgeJsonValue;
   /** The connection that called, when a client connection made the call. */
   origin?: { connectionId: string };
 }
 export interface SessionMethodCall extends MethodCall {
-  params: JsonObject & { sessionId: string; branchId?: string };
+  params: BridgeJsonObject & { sessionId: string; branchId?: string };
 }
 /** A method's failure as data; Rpc maps `code` to the wire error. A method may
  * instead rethrow a service error it received. */
 export interface MethodError { code: string; message: string }
-export type MethodReply = { kind: 'value'; value?: JsonValue } | MethodError;
+export type MethodReply<T = BridgeJsonValue> = { kind: 'value'; value?: T } | MethodError;
+/** Checks data fields without requiring interfaces to declare an index signature. */
+export type CheckedData<T> = T extends BridgeJsonValue | undefined ? T
+  : T extends ((...args: never[]) => unknown) | (abstract new (...args: never[]) => unknown) ? never
+  : T extends object ? keyof T extends never ? never : { [K in keyof T]: CheckedData<T[K]> } : never;
+export type MethodProgress = <T>(data: T & CheckedData<T>) => void;
 export type SessionMethodDeclaration = MethodDeclaration;
-export type SessionMethodReply = MethodReply;
+export type SessionMethodReply<T = BridgeJsonValue> = MethodReply<T>;
 /** How a registered management namespace serves one call. */
-export type MethodHandler = (call: MethodCall, cancelled: Promise<void>, progress: (data: JsonValue) => void) => Promise<MethodReply>;
+export type MethodHandler<T = BridgeJsonValue> = (call: MethodCall, cancelled: Promise<void>, progress: MethodProgress) => Promise<MethodReply<T>>;
 /** How a registered Session namespace serves one call. */
-export type SessionMethodHandler = (call: SessionMethodCall, cancelled: Promise<void>, progress: (data: JsonValue) => void) => Promise<SessionMethodReply>;
+export type SessionMethodHandler<T = BridgeJsonValue> = (call: SessionMethodCall, cancelled: Promise<void>, progress: MethodProgress) => Promise<SessionMethodReply<T>>;
 /** Process service `managementMethods` (protected-local v3 only): a process row
  * registers each of its namespaces, which stays registered until the row unloads. */
 export interface ManagementMethods {
-  register(namespace: string, declarations: MethodDeclaration[], call: MethodHandler): Promise<void>;
+  register<T extends MethodReply<unknown>>(namespace: string, declarations: MethodDeclaration[], call: (call: MethodCall, cancelled: Promise<void>, progress: MethodProgress) => Promise<T & CheckedData<T>>): Promise<void>;
 }
 /** Session service `sessionMethods`: a Session row registers each of its
  * namespaces, which stays registered until the row unloads. */
 export interface SessionMethods {
-  register(namespace: string, declarations: SessionMethodDeclaration[], call: SessionMethodHandler): Promise<void>;
+  register<T extends SessionMethodReply<unknown>>(namespace: string, declarations: SessionMethodDeclaration[], call: (call: SessionMethodCall, cancelled: Promise<void>, progress: MethodProgress) => Promise<T & CheckedData<T>>): Promise<void>;
 }
 
 export type CallChannelErrorCode = 'undeclared' | 'gone' | 'too_large';
@@ -616,6 +678,46 @@ export interface TimelineStore {
   latestSnapshot(request: { sessionId: string; branchId: string; through: number; interpreter: string }): Promise<{ snapshot: TimelineRecoverySnapshot | null }>;
 }
 
+/** One enabled Skill in the current Session view. */
+export type SkillSummary = { id: string; name: string; description: string; userInvocable: boolean };
+/** Branch service backed by its Session Skills owner. */
+export interface SkillsBranch {
+  list(request: Record<string, never>): SkillSummary[];
+}
+
+export type ApprovalDestination = {
+  branchId: string;
+  delegationId: string;
+  agentId: string;
+  interactive: boolean;
+  approvalTools: boolean;
+};
+/** Session service owned by Collaboration; reads an active delegation without changing it. */
+export interface CollaborationSession {
+  approvalDestination(request: { memberSessionId: string }): ApprovalDestination | null;
+}
+
+/** Process MCP owner operations for PluginManager content; credentials and connections stay private. */
+export interface McpService {
+  register(request: { plugin: string; dir: string; document: JsonValue }): Promise<null>;
+  withdraw(request: { plugin: string }): Promise<null>;
+  plugins(request: Record<string, never>): Promise<string[]>;
+  refusal(request: { plugin: string }): [string, string | null] | null;
+}
+
+export type SkillIssue =
+  | { kind: 'invalidManifest'; path: string; reason: string }
+  | { kind: 'unreadable'; path: string; reason: string }
+  | { kind: 'rootUnreadable'; root: string; reason: string }
+  | { kind: 'scanLimitReached'; root: string };
+/** Process Skills owner operations for plugin content; discovery state stays private. */
+export interface SkillsCatalog {
+  register(request: { plugin: string; root: string }): Promise<SkillIssue[]>;
+  withdraw(request: { plugin: string }): Promise<null>;
+  plugins(request: Record<string, never>): Promise<string[]>;
+  issues(request: { plugin: string }): Promise<SkillIssue[]>;
+}
+
 /** The existing user override; null keeps the consumer's factory or built-in text. */
 export interface BasePromptSettingsHost {
   base(request: Record<string, never>): Promise<string | null>;
@@ -625,6 +727,14 @@ export interface SkillsInstructionsSettingsHost {
 }
 export interface SummaryPromptSettingsHost {
   systemPrompt(request: Record<string, never>): Promise<string | null>;
+}
+
+/** Hooks-owned plugin content registration; see Hooks A.2. */
+export interface HooksService {
+  register(request: { plugin: string; dir: string; document: JsonValue }): Promise<null>;
+  withdraw(request: { plugin: string }): Promise<null>;
+  plugins(request: Record<string, never>): Promise<string[]>;
+  refusal(request: { plugin: string }): [error: string, reason: string | null] | null;
 }
 
 /** The ToolRegistry owner's read-only source status view. */

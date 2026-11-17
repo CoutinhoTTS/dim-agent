@@ -6,7 +6,7 @@ Generated from the real assembly: the App Server product profile (`serve` with a
 
 ## Services
 
-Each catalog name a part of the assembly provides or injects. `data` means shared with a dispatcher; `internal(reason)` means the face cannot cross; `shared-no-dispatcher` is shared but a leaf cannot call it. Methods are `sync` or `async`: synchronous methods return a value directly; asynchronous methods return a Promise to TypeScript callers. A non-data name is reached by Rust parts at its type's key.
+Each catalog name a part of the assembly provides or injects. `data` means shared with a dispatcher; `internal(reason)` means the face cannot cross; `shared-no-dispatcher` is shared but a leaf cannot call it. Methods are `sync` or `async` (callers in other languages always get a Promise). A non-data name is reached by Rust parts at its type's key.
 
 | Name | Group | Provider | Face | Methods |
 | --- | --- | --- | --- | --- |
@@ -44,7 +44,7 @@ Each catalog name a part of the assembly provides or injects. `data` means share
 | `partRegistry` | process | PartRegistry | data | `registerDefinition` async |
 | `pluginFileTransactions` | process | PluginFiles | internal(host-resource) | — |
 | `pluginFiles` | process | PluginFiles | data | `open` async |
-| `processActivity` | process | ServerControl | data | `hold` async, `release` async |
+| `processActivity` | process | ServerControl | data | `activated` async, `hold` async, `release` async |
 | `promptSuggestionSettingsHost` | process | PromptSuggestionSettings | data | `read` async |
 | `providerConnectionResolver` | process | Provider | internal(host-resource) | — |
 | `providerService` | process | Provider | internal(secret) | — |
@@ -65,7 +65,6 @@ Each catalog name a part of the assembly provides or injects. `data` means share
 | `skillsCatalog` | process | SkillsCatalog | internal(host-resource) | — |
 | `skillsInstructionsSettingsHost` | process | PromptSettings | data | `instructions` async |
 | `sqliteStorage` | process | SqliteStorage | internal(object) | — |
-| `store` | process | SessionStore | data | `addGrant` async, `catalog` async, `createOwnedSession` async, `creationRecord` async, `delete` async, `fork` async, `grants` async, `hasRecords` async, `owner` async, `query` async, `removeGrant` async, `removeWorktree` async, `removeWorktreeDirectory` async, `sessionConfig` async, `sessionConfigText` async, `sessionsUnderWorkspace` async, `setSessionLanguage` async, `worktreeDirectories` async, `worktreeUsages` async |
 | `summaryPromptSettingsHost` | process | PromptSettings | data | `systemPrompt` async |
 | `toolchainSourceHost` | process | ToolchainSource | data | `list` sync |
 | `uiExtensions` | process | UiExtensions | internal(control) | — |
@@ -98,7 +97,7 @@ Each catalog name a part of the assembly provides or injects. `data` means share
 | `skillsConfig` | session | SessionScope | data | `get` async |
 | `submitChecks` | session | InputMethods | internal(hot-path) | — |
 | `timelineFactory` | session | SessionScope | internal(control) | — |
-| `timelineStore` | session | SessionScope | data | `append` sync, `batchEnd` async, `batchEndAt` async, `branches` async, `closeCommits` async, `commits` async, `createSession` async, `head` async, `latestSnapshot` async, `query` async, `readPage` async, `readSegments` async, `releaseSession` async, `rollbackSession` async, `saveSnapshot` async, `sessionConfig` async, `trace` async |
+| `timelineStore` | session | SessionScope | internal(object) | — |
 | `timelineTree` | session | TimelineTree | internal(owner-api) | — |
 | `timelineTreeControl` | session | TimelineTree | internal(owner-api) | — |
 | `toolHost` | session | WorkspaceTools | data | `execute` async |

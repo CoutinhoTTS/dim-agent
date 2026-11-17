@@ -130,7 +130,7 @@ name-bound (#391, #392, #396–#398, #400).
   registers its parts from the row that holds it: Mcp, Collaboration, Agents, SkillsCatalog and
   WorkspaceTools, which holds the file-write coordinator. ConfiguredModels and ConfiguredModel, and
   PermissionRules and CommandRules, stay two plugins: the profile chooses which part binds the
-  Session's `PrepareModelHost` or `CommandRulesHost`, whether or not the process row runs. The
+  Session's `PrepareModelHost` or `CommandRules`, whether or not the process row runs. The
   minimal host starts its plugins when it starts.
 - Tools, tool sources and prompt sources register with ToolRegistry and PromptRegistry, and Session
   and management method namespaces with the Session's `sessionMethods` and the process's
@@ -323,8 +323,7 @@ These requirements concern how Dim uses rutis. They follow
     another language as a callable reference (`RemoteFunction`).
 - **Needed:** each owner exposes `register` for its contributions: ToolRegistry for tools and tool
   sources, PromptRegistry for prompt sources, Rpc for Session and management method namespaces.
-  Tools and method namespaces register from any language; prompt and tool sources stay Rust-only
-  until a foreign part needs one.
+  The public registration operations are data faces under [service faces §2](service-faces.md). Each owner defines its contribution shape and callback lifetime.
   - A registration belongs to its caller. In Rust the caller passes its ctx; from another language
     the bridge ties the registration to the calling row, and the handler is the caller's function,
     called back through the bridge. It is withdrawn when the caller unloads.
@@ -481,6 +480,13 @@ A value the host configures for a process name, such as a scripted `ModelHost`, 
 `AgentBuilder::process_value`. The Agent group row (`AgentBuilder::agent_row`) holds its provider and
 isolates the name per Agent instance, so neither Agents sharing a host nor the host's own provider of the
 name collide with it. The host places that row in its loader, whose catalog is the builder's. `session_value` stays for Session names.
+
+For a host-configured Session value that implements `HostDispatch` directly,
+`AgentBuilder::session_data_value` provides the same `Arc` at its native type key and
+`host_key_in(name, session_instance)`. Its catalog name must already be shared in the
+Session group. Both bindings belong to SessionScope and are withdrawn with it;
+`session_value` retains its existing native/marked-value behavior. This introduces no
+additional part or owner state. The value's operations own their cancellation contract.
 
 ### A.3 Settled questions
 

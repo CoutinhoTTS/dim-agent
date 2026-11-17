@@ -13,7 +13,7 @@ use dim_agent_capabilities::{
     host::*,
     host_platform::HostPlatform,
     model_provider::ModelProviderPlugin,
-    permission::{CommandRulesHost, NoCommandRules},
+    permission::{CommandRules, NoCommandRules},
     prompt_guide::{GuideEntries, GuideEntry, GuideScope},
     prompt_sources,
     tool_registry::{
@@ -242,7 +242,7 @@ async fn both_paths_carry_one_composition() {
     // adopts with it, and the System comes from `context/configured`.
     let mut builder = AgentBuilder::new(AgentConfig::default());
     mock_model_hosts(&mut builder);
-    builder.session_value(Arc::new(CommandRulesHost(Arc::new(NoCommandRules))));
+    builder.session_data_value(Arc::new(CommandRules(Arc::new(NoCommandRules))));
     defaults::install_with_prompt_capability(&mut builder, ModelProviderPlugin::new);
     prompt_sources::install_with_clock(
         &mut builder,
@@ -385,7 +385,7 @@ async fn an_adopted_request_and_the_summarizers_request_carry_one_system() {
                 Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
             }),
         );
-    builder.session_value(Arc::new(CommandRulesHost(Arc::new(NoCommandRules))));
+    builder.session_data_value(Arc::new(CommandRules(Arc::new(NoCommandRules))));
     defaults::install_with_prompt_capability(&mut builder, ModelProviderPlugin::new);
     prompt_sources::install_with_clock(
         &mut builder,
