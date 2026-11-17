@@ -860,8 +860,7 @@ impl DynPlugin for PromptPlugin {
                             let state = prompt.state.lock().unwrap();
                             for pending in state.pending.values() {
                                 let sources = &pending.update.sources;
-                                let expired = sources.iter().any(|target| {
-                                    match &event.kind {
+                                let expired = sources.iter().any(|target| match &event.kind {
                                     EventKind::TurnEnd(data) => matches!(
                                         &target.scope,
                                         PromptScope::Turn { id, .. } if id == &data.turn_id
@@ -875,7 +874,6 @@ impl DynPlugin for PromptPlugin {
                                         target.scope == data.scope
                                     }
                                     _ => false,
-                                    }
                                 });
                                 let interrupted = matches!(
                                     &event.kind,
