@@ -1,6 +1,6 @@
 # Release packaging
 
-PR checks use self-hosted runners. Release preparation, packaging, npm publication and acceptance use standard GitHub-hosted runners. The [project release skill](../../.agents/skills/dim-release/SKILL.md) covers version preparation, PRs, tags, draft inspection and recovery. [Rust alpha release](alpha.html) covers the alpha channels and local publication alternative (Chinese).
+The main PR checks use self-hosted runners; the separate code-layout workflow uses GitHub-hosted runners. Release preparation, packaging, npm publication and acceptance use standard GitHub-hosted runners. The [project release skill](../../.agents/skills/dim-release/SKILL.md) covers version preparation, PRs, tags, draft inspection and recovery. [Rust alpha release](alpha.html) covers the alpha channels and local publication alternative (Chinese).
 
 The source, including the Dim account plugin, uses MIT. An account-enabled distribution differs from the API-key one only by the OAuth client IDs compiled in from repository secrets.
 
@@ -167,7 +167,7 @@ The `Verify downloaded Node runtime` step runs on full `main` push checks and ma
 
 ### Action pins and updates
 
-External Actions in every workflow use full commit SHAs, including `code-layout.yml`. PR checks use the same policy because their Actions execute on persistent self-hosted runners. Pinning does not change the [CI trust boundary](#ci-trust-model).
+External Actions in every workflow use full commit SHAs, including `code-layout.yml`. This policy covers both persistent self-hosted runners and GitHub-hosted runners. Pinning does not change the [CI trust boundary](#ci-trust-model).
 
 Update an Action in a normal pull request:
 

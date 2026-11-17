@@ -138,11 +138,15 @@ fn main() { let x = std::hint::black_box(0); println!("{}", layout_first(x) + la
     selected_sysroot = root / 'selected-toolchain'
     selected_sysroot.symlink_to(sysroot, target_is_directory=True)
     selected_rustc = root / 'selected rustc'
+    compilation_marker = root / 'compiler-ran'
     selected_rustc.write_text(f'''#!{sys.executable}
 import os, sys
+from pathlib import Path
 if sys.argv[1:] == ['--print', 'sysroot']:
     print({str(selected_sysroot)!r})
 else:
+    if '--crate-name' in sys.argv and sys.argv[sys.argv.index('--crate-name') + 1] == 'dimcode':
+        Path({str(compilation_marker)!r}).write_text('compiled dimcode')
     os.execv({str(sysroot / 'bin/rustc')!r}, ['rustc', *sys.argv[1:]])
 ''')
     selected_rustc.chmod(0o700)
@@ -152,7 +156,9 @@ else:
         os.environ[variable] = str(selected_rustc)
         overridden = root / variable
         overridden.mkdir()
+        compilation_marker.unlink(missing_ok=True)
         recorded = build.cargo_link(overridden, shutil.which('cc'), 2)
+        assert compilation_marker.read_text() == 'compiled dimcode'
         assert '-B'+str(selected_sysroot / 'lib/rustlib/x86_64-unknown-linux-gnu/bin/gcc-ld') in recorded['arguments']
         assert recorded['rustc'] == subprocess.check_output([str(selected_rustc), '-vV'], text=True)
         replay = overridden / 'replay'
