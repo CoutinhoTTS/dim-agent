@@ -384,7 +384,9 @@ The default send mode is a TUI setting: an ACP client decides for itself how it
 holds a message typed during a run, and reaches interrupt and send now with
 `session/cancel` followed by a new `session/prompt`
 ([AcpGateway §4.2](plugins/AcpGateway.md#42-prompt-and-cancellation)). The Web
-composer is #1601.
+workspace offers the same two modes with a default saved in the browser, and the
+same interrupt-and-send-now sequence
+([Web workspace §4.5](web-workspace.md#45-sending-during-a-run)).
 
 Enter on an empty composer opens `/tasks` only after the earlier branches have
 had their say: the shell-run guard in either mode, then the steer of the oldest
