@@ -428,7 +428,7 @@ fn the_mainland_token_plan_is_its_own_plan_provider_beside_the_international_one
         assert_eq!(provider.auth.kind, "api_key", "{provider_id}");
         assert_eq!(catalog.is_plan(provider_id), Some(true), "{provider_id}");
         assert_eq!(
-            catalog.vendor_namespace(provider_id),
+            catalog.vendor_namespace(provider_id).as_deref(),
             Some("alibaba"),
             "{provider_id}"
         );
