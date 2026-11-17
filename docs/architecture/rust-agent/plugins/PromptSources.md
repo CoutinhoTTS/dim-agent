@@ -81,7 +81,7 @@ checks `system_is_static_and_instructions_and_environment_arrive_as_inputs`.
 | --- | --- |
 | 作用域 | Session |
 | 注入 | `S:SessionConfig` |
-| 提供 | `S:InitialPromptConfiguration`、`S:PromptHost`、`S:PromptRegistry` |
+| 提供 | `S:InitialPromptConfiguration`、`S:PromptHost`、`S:PromptRegistry`、`S:dyn HostDispatch#initialPromptConfiguration`、`S:dyn HostDispatch#promptHost`、`S:dyn HostDispatch#promptRegistry` |
 | 被注入于 | `Prompt`、`PromptSources`、`PromptSourcesBranch`、`Skills` |
 <!-- /generated -->
 
