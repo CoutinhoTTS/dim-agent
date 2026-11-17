@@ -25,9 +25,11 @@ This repository is Dim: a Rust coding agent (Agent v4), its App Server and the n
 
 - Each kind of internal data has one type definition. The producer guarantees the contract; consumers use it directly without re-validating, converting or filling in fields.
 - Parsing, validation and format conversion happen at the boundary where external data enters the system (user input, network responses, persisted files). Afterwards data is passed as explicit types and is not reprocessed layer by layer.
+- In new code, outgoing protocol messages are typed structs (the protocol dependency's own types or serde structs), not `json!` literals, the same way incoming data is parsed into explicit types.
 - When internal data does not match its contract, fix the producer, the type definition or the call flow. Do not mask the problem in consumers with field aliases, defaults, casts or conversion functions.
 - Do not add read/parse/normalize wrappers for data of a known type; access fields and call interfaces directly. Such a function must correspond to a real external data boundary or business transformation.
 - Missing values and recovery behavior must have a clear business meaning; do not introduce them because of uncertainty about what upstream returns.
+- Error enums tell failures apart by kind: in new code, do not add a variant that carries only a message when a variant with a kind fits.
 - `ToolResult.content` is the only text the model can read. Handles, cursors and state the model needs later must be written into `content`; `structuredContent` is only for persistence, UI and internal logic.
 - Incompatible persistence changes require an explicit format decision; do not silently reuse a version for incompatible committed formats. Validate against disposable databases, never a user's existing store.
 
