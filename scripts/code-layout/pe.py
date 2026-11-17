@@ -10,8 +10,7 @@ MACHINES = {
     IMAGE_FILE_MACHINE_ARM64: ("aarch64", 8),
 }
 
-_SECTION = re.compile(r"^([0-9a-fA-F]+) ([0-9a-fA-F]+)\s+\d+\s+(\.[A-Za-z0-9_$]+)\s*$")
-_CHUNK = re.compile(r"^([0-9a-fA-F]+) ([0-9a-fA-F]+)\s+\d+\s+(.*)$")
+_ENTRY = re.compile(r"^([0-9a-fA-F]+) ([0-9a-fA-F]+)\s+\d+( +)(\S.*)$")
 
 
 def sections(binary):
@@ -69,31 +68,32 @@ def symbols(map_path):
         chunk_symbols = [(address, name) for address, name in chunk_symbols
                          if chunk_start <= address < chunk_start + chunk_size]
         for address, name in chunk_symbols:
-            entries.append((address, name, chunk_size if len(chunk_symbols) == 1 else None))
+            entries.append((address, name, chunk_size if len(chunk_symbols) == 1 else None,
+                            chunk_start + chunk_size))
         chunk_symbols = []
 
-    for line in map_path.read_text().splitlines():
-        header = _SECTION.fullmatch(line)
-        if header:
-            if section == ".text":
-                finish()
-            section = header[3]
-            if section == ".text":
-                text_start, text_size = int(header[1], 16), int(header[2], 16)
-            chunk_start = chunk_size = None
-            continue
-        match = _CHUNK.fullmatch(line)
+    for line in map_path.read_text(encoding="utf-8").splitlines():
+        match = _ENTRY.fullmatch(line)
         if not match:
             continue
-        address = int(match[1], 16)
-        size = int(match[2], 16)
-        rest = match[3].strip()
-        if ":" in rest:
+        address, size = int(match[1], 16), int(match[2], 16)
+        indent, name = len(match[3]), match[4]
+        if indent == 1:
+            if section == ".text":
+                finish()
+            section = name
+            if section == ".text":
+                text_start, text_size = address, size
+            chunk_start = chunk_size = None
+            continue
+        if indent == 9:
             if section == ".text":
                 finish()
             chunk_start, chunk_size = address, size
-        elif section == ".text" and rest:
-            chunk_symbols.append((address, rest))
+        elif indent == 17 and section == ".text":
+            chunk_symbols.append((address, name))
+        elif section == ".text":
+            raise ValueError(f"unexpected lld map column: {line}")
     if section == ".text":
         finish()
     if text_start is None or text_size is None:
@@ -103,12 +103,12 @@ def symbols(map_path):
     )
     if not entries:
         raise ValueError("the lld map has no .text function symbols")
-    starts = sorted(set(address for address, _, _ in entries))
+    starts = sorted(set(address for address, _, _, _ in entries))
     end_by_start = {address: text_start + text_size for address in starts}
     for current, following in zip(starts, starts[1:]):
         end_by_start[current] = following
     functions = [
-        (address - text_start, end_by_start[address] - text_start, name)
-        for address, name, _ in entries
+        (address - text_start, min(end_by_start[address], chunk_end) - text_start, name)
+        for address, name, _, chunk_end in entries
     ]
-    return functions, [size for _, _, size in entries]
+    return functions, [size for _, _, size, _ in entries]

@@ -104,6 +104,11 @@ def relink(record, output, order_file=None, map_path=None, strict=False, preserv
     response = output.with_name(output.name + ".rsp")
     response.write_text("\n".join(quote(argument) for argument in arguments) + "\n")
     env = dict(os.environ, PATH=record["path"])
+    for key, value in record["linkEnv"].items():
+        if value is None:
+            env.pop(key, None)
+        else:
+            env[key] = value
     try:
         result = run_link([*record["compiler"], "@" + str(response)], cwd=record["cwd"], env=env)
     finally:
@@ -119,6 +124,7 @@ def capture(arguments):
     arguments = list(arguments)
     if not any(argument.lower() == "/brepro" for argument in expand(arguments)):
         arguments.append("/Brepro")
+    arguments.append("/demangle:no")
     expanded = expand(arguments)
     saved = []
     inputs = []
@@ -146,7 +152,8 @@ def capture(arguments):
     if not option(saved, "/lldmap:", str(root / "baseline.map")):
         saved.append(f"/lldmap:{root / 'baseline.map'}")
     record = {"arguments": saved, "cwd": os.getcwd(), "compiler": linker,
-              "output": output, "pdb": pdb, "inputs": inputs, "path": os.environ["PATH"]}
+              "output": output, "pdb": pdb, "inputs": inputs, "path": os.environ["PATH"],
+              "linkEnv": {key: os.environ.get(key) for key in ("LIB", "INCLUDE")}}
     (root / "link.json").write_text(json.dumps(record, indent=2) + "\n")
     relink(record, Path(output), preserve_pdb=True)
 

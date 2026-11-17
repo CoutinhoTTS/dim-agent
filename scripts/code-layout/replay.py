@@ -53,7 +53,7 @@ def preserve_cargo(files):
 
 def run_link(command, *, cwd, env):
     with subprocess.Popen(command, cwd=cwd, env=env, stdout=subprocess.PIPE,
-                          stderr=subprocess.PIPE, text=True,
+                          stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="surrogateescape",
                           start_new_session=os.name != "nt") as process:
         try:
             while True:

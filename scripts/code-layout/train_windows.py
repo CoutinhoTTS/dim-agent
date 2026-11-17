@@ -127,21 +127,22 @@ class Server:
     def close(self, profile=None):
         self.connect()
         handle = None
+        last = None
         if profile:
             handle = win32.open_process(self.process.pid)
             try:
                 base = win32.module(handle)[0]
                 rva, size = pe.text_range(self.binary)
+                _, last = win32.working_set_pages(handle, base, rva, size)
             except BaseException:
                 win32.close(handle)
                 raise
-        self.sequence += 1
-        deadline = time.monotonic() + 60
-        self.wire.write({"jsonrpc": "2.0", "id": self.sequence,
-                         "method": "daemon.shutdown", "params": {"force": True}})
-        if profile:
-            last = None
-            try:
+        try:
+            self.sequence += 1
+            deadline = time.monotonic() + 60
+            self.wire.write({"jsonrpc": "2.0", "id": self.sequence,
+                             "method": "daemon.shutdown", "params": {"force": True}})
+            if profile:
                 while self.process.poll() is None:
                     if time.monotonic() >= deadline:
                         raise TimeoutError("training process did not shut down within 60 seconds")
@@ -152,7 +153,8 @@ class Server:
                     if pages:
                         last = pages
                     time.sleep(.005)
-            finally:
+        finally:
+            if handle is not None:
                 win32.close(handle)
         if self.process.wait(timeout=max(0, deadline - time.monotonic())) != 0:
             raise RuntimeError(f"training process failed: {self.process.returncode}")
@@ -167,6 +169,7 @@ def tui(binary, home, stack, sampling, profile):
         [binary, "tui", "--home", home, "--cwd", home, "--fullscreen"],
         home, environment(home))
     stack.callback(console.close)
+    stack.callback(console.terminate)
     if sampling:
         console.trim_running()
     capture = bytearray()

@@ -15,8 +15,8 @@ The release profile uses full LTO (`lto = "fat"`) with one codegen unit to reduc
 
 ## Native executable layout
 
-The opt-in layout build groups functions used by startup, shutdown, the TUI
-model picker and a local tool conversation, reducing the number of unrelated
+The opt-in layout build groups functions whose pages are observed during startup,
+shutdown, the TUI model picker and a local tool conversation, aiming to reduce unrelated
 code pages mapped alongside them. It does not change business logic, introduce
 a runtime cache or change the allocator. Each platform is validated on native
 hardware and rejects cross compilation:
@@ -103,6 +103,12 @@ by `cc` (ld64) and does not change code signing or hardening of the Cargo
 output. The optimized candidate is an unsigned opt-in artifact, not a release
 artifact.
 
+The selected Rust sysroot supplies Cargo, rustc and `rust-objcopy`; its shared
+library directory is carried through the capture wrappers and replay. The
+command checks that `rust-objcopy --version` runs before starting Cargo. This
+tool ships with the pinned Rust compiler; a missing or broken tool fails the
+build instead of silently skipping stripping.
+
 Capture and replay use the same saved linker inputs, output path and ld64 map
 argument, including the first Cargo link. A temporary compiler wrapper records
 the effective `-Cstrip` option and preserves any existing `RUSTC_WRAPPER`.
@@ -111,16 +117,23 @@ after linking on macOS. The baseline must reproduce Cargo's executable byte for
 byte before any training, then restores Cargo's original file. The native
 fixture builds a Rust release executable with LTO and debug stripping through
 this same capture/replay path. ld64's map records exact atom sizes, so
-function-name/size parity is checked directly.
+function-name/size parity is checked directly. SDK and deployment-target
+environment values are captured for replay along with the tool loader paths.
 
 The training probe is a temporary dylib loaded with `DYLD_INSERT_LIBRARIES`.
-Its constructor remaps the page-aligned `__TEXT,__text` range from the same
-image file, which resets resident pages to the state at the end of loading, and
-then removes the injection variables so child processes are unaffected. It
+Its constructor locates the page-aligned `__TEXT,__text` range and removes
+the injection variables so child processes are unaffected. It
 reads `mincore` residency at normal exit and, for the TUI, on `SIGUSR1` before
-the explicit exit. This is page residency after a mapping reset, not an
-instruction or call-count trace; the page size is 4 KiB on x86-64 and 16 KiB on
-arm64.
+the explicit exit. This measures backing-page residency, including warm file
+cache pages from linking or previous runs; it does not identify pages accessed
+only by this process. The page size is 4 KiB on x86-64 and 16 KiB on arm64.
+[XNU's mincore implementation](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_mman.c)
+queries VM page dispositions, so replacing a mapping would not evict those
+backing pages. No mapping replacement is used. These samples guide an
+experimental order; process RSS/CPU improvements still require native measurement.
+The manifest identifies this metric as `codeResidencySource: mincore-backing-pages`;
+its `codePages`/`codeResident` fields describe backing pages, separately from
+process `resident` and `physicalFootprint`.
 
 Functions whose pages were observed are ordered with ld64's `-order_file`.
 `-order_file_statistics` reports entries the linker cannot match; only those
@@ -137,7 +150,7 @@ it does not override the release LTO policy.
 
 ### Windows
 
-Windows requires a native x86-64 or ARM64 MSVC Rust toolchain, the MSVC build
+Windows requires Python 3.9 or later, a native x86-64 or ARM64 MSVC Rust toolchain, the MSVC build
 tools, and either LLVM's `lld-link.exe` or the Rust toolchain's `rust-lld.exe`.
 Native dependency builds also use NASM on x64 and `clang-cl` on ARM64, matching
 the [release build environment](../release/README.md#runner-setup).
@@ -148,7 +161,7 @@ an opt-in artifact linked by `lld-link`, and the release workflow is unchanged.
 is rejected.
 
 The captured link line may contain response files. They are expanded, input
-object, library and `/NATVIS:` files are copied, and Cargo's final link and each replay use
+object/library files named by existing paths and `/NATVIS:` files are copied, and Cargo's final link and each replay use
 those saved paths through a response file. The capture adds `/Brepro` when it is
 absent and includes the same `/lldmap` argument from the first link. Input paths
 and [linker arguments](https://github.com/llvm/llvm-project/blob/main/lld/COFF/PDB.cpp)
@@ -163,11 +176,19 @@ to verify that the saved inputs suffice. It also captures and replays a real
 Rust LTO executable after the compiler has removed its temporary NatVis files.
 It retains both fixture executables, their PDBs and
 the captured arguments on failure; Windows short-path aliases must not replace
-the recorded path in the replay command.
+the recorded path in the replay command. Bare/default SDK library names remain
+linker-resolved with captured `LIB`/`INCLUDE`; the same native SDK and toolchain
+must remain installed. The capture is not a portable archive of the SDK.
 
 On either platform, a baseline byte mismatch retains both executable files and
 the captured link record in the CI artifact; Windows also retains the PDB pair.
 The hash check remains mandatory before training or ordering.
+The wrapper performs Cargo's first link with the layout build's captured paths,
+map and deterministic-link options. The later replay compares against that
+completed Cargo artifact, including Rust's post-link work, at the same canonical
+path. It checks reproduction of this opt-in link, not equivalence to a release
+built without the wrapper or proof of function semantics; native flow acceptance
+and symbol/size checks cover those separate boundaries.
 During baseline replay, handled interrupts (`SIGINT`/`SIGTERM`, plus Windows
 `SIGBREAK`) stop and reap the active linker or stripping tool before restoring
 Cargo's files. A PDB created only by replay is removed. Forced process termination
@@ -181,6 +202,7 @@ entry-time pages and the TUI profile covers pages faulted by the UI flow. Before
 exit or shutdown the trainer queries the executable's `.text` working-set pages
 with `QueryWorkingSetEx`. App Server shutdown sampling and the exit wait share a
 60-second deadline; expiry fails training and its owned process is terminated.
+A pre-shutdown sample is retained if shutdown finishes before another poll.
 Every Windows target runs the real TUI picker; a
 console-less runner is not accepted as native TUI evidence. The ConPTY launcher
 uses explicit null standard handles with `STARTF_USESTDHANDLES` so a redirected
@@ -198,22 +220,25 @@ uses the public `daemon.shutdown` RPC with `force`; the TUI exits through
 The order file is passed to `lld-link` as `/order:@file`. The diagnostic link
 reports unmatched names as `missing symbol ... [LNK4037]`; only those names are
 removed, then `/WX` makes the strict relink fail on any remaining warning. The
-`/lldmap` output records all `.text` symbols, including static ones. Only
+`/lldmap` output uses `/demangle:no` so its raw COFF names also match `/order`.
+Its output-section, input-chunk and symbol columns are parsed structurally.
+It records all `.text` symbols, including static ones. Only
 symbols inside their input chunk's half-open address range describe code;
-end labels are excluded even when another function follows that chunk. Parity
+end labels are excluded even when another function follows that chunk, and
+extents never include padding beyond their own chunk. Parity
 always checks the remaining symbol-name multiset. It compares the COMDAT body size for
 every name whose entries are unambiguous on both sides; a name with a chunk
 holding several symbols (for example an alias or folded body) on either side is
 compared by name and count only, and the skipped entries are counted in
 `manifest.json` as ambiguous. Selected addresses must follow the final order
-and at least one must move.
+and at least one must move. Aliases at the same address share an ordering position.
 
 Both current Windows release targets use fat LTO. The layout command preserves
 `CARGO_PROFILE_RELEASE_LTO` and never enables thin LTO implicitly.
 
 ### Measurements and artifacts
 
-After uninstrumented acceptance, the command alternates baseline and candidate
+After uninstrumented acceptance, the macOS and Windows commands alternate baseline and candidate
 samples from fresh disposable homes under the same platform sampling mechanism.
 It records wall time to App Server readiness, startup CPU, total resident
 memory, code-page residency and the wall time of a local-fixture tool
@@ -227,7 +252,8 @@ or treated as interchangeable with Linux `/proc` numbers.
 `baseline`, `symbols.order`, the linker maps, native page samples and
 `manifest.json` record the comparison inputs, platform, target, page size, LTO
 choice, source state, Rust version, artifact hashes, training counts and
-alternating measurement samples. Linker maps and native fixture maps are
+alternating measurement samples on macOS/Windows. The Linux manifest records
+artifact/layout validation without these alternating measurements. Linker maps and native fixture maps are
 uploaded on failure, and a size mismatch reports bounded before-only and
 after-only symbol/size entries. The probe
 and temporary homes are removed on completion or failure. Scheduling can change

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build and train a native Linux x86-64 executable, then reorder its functions.
+"""Build and train a native executable, then reorder its functions.
 
 The output directory must not exist. Cargo's executable is left unchanged; only
 an independently smoke-tested relink is published as OUTPUT/dimcode.

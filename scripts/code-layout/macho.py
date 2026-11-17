@@ -31,8 +31,7 @@ def _load_commands(data):
 
 
 def _cstring(data, at, size):
-    end = data.index(b"\0", at, at + size)
-    return data[at:end].decode()
+    return data[at:at + size].split(b"\0", 1)[0].decode("ascii")
 
 
 def text_range(binary):
@@ -104,7 +103,7 @@ def map_symbols(map_path, text_addr, text_size):
     end = text_addr + text_size
     entries = []
     in_symbols = False
-    for line in map_path.read_text().splitlines():
+    for line in map_path.read_text(encoding="utf-8", errors="surrogateescape").splitlines():
         if line.startswith("# Symbols:"):
             in_symbols = True
             continue

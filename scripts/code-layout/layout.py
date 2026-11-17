@@ -96,10 +96,8 @@ def _order(functions_before, functions_after, order_names, label):
             if name in positions and positions[name] != start:
                 raise RuntimeError(f"order file names an ambiguous symbol: {name}")
             positions[name] = start
-    ordered = sorted(positions.items(), key=lambda item: item[1])
-    ranks = {name: rank for rank, (name, _) in enumerate(ordered)}
-    requested_ranks = [ranks[name] for name in order_names]
-    if requested_ranks != sorted(requested_ranks):
+    requested_addresses = [positions[name] for name in order_names]
+    if requested_addresses != sorted(requested_addresses):
         raise RuntimeError("candidate function addresses do not follow the final symbol order")
 
     baseline_starts = {name: start for start, _, name in functions_before if name in names}

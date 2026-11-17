@@ -6,6 +6,43 @@ import test from 'node:test';
 const directory=fileURLToPath(new URL('./code-layout/',import.meta.url));
 const python=process.platform==='win32'?'python':'python3';
 
+test('COFF layout reads map columns, bounds chunks and accepts reordered aliases',()=>{
+  const result=spawnSync(python,['-',directory],{encoding:'utf8',input:String.raw`
+from pathlib import Path
+import sys
+import tempfile
+sys.path.insert(0, sys.argv[1])
+import build_windows
+import pe
+
+with tempfile.TemporaryDirectory(prefix='dim-layout-coff-') as temporary:
+    root = Path(temporary)
+    def write_map(path, chunks):
+        lines = ['Address  Size     Align Out     In      Symbol', '00001000 00000040  4096 .text']
+        for address, names in chunks:
+            lines.append(f'{address:08x} 00000010    16         library.lib(member.obj):(.text)')
+            lines.extend(f'{address:08x} 00000000     0                 {name}' for name in names)
+        path.write_text('\n'.join(lines)+'\n', encoding='utf-8')
+    base, candidate, order = root/'base.map', root/'candidate.map', root/'symbols.order'
+    write_map(base, [(0x1000, ['rust::first']), (0x1020, ['_Rrust_second','_Rrust_alias'])])
+    write_map(candidate, [(0x1000, ['_Rrust_second','_Rrust_alias']), (0x1020, ['rust::first'])])
+    functions, sizes = pe.symbols(base)
+    assert functions[0] == (0,16,'rust::first'), 'padding before the next chunk is not function code'
+    assert sorted(s for s in sizes if s is not None) == [16]
+    order.write_text('_Rrust_alias\n_Rrust_second\nrust::first\n')
+    assert build_windows.validate(base,candidate,order)['movedFunctionSymbols'] == 3
+    order.write_text('rust::first\n_Rrust_second\n_Rrust_alias\n')
+    try:
+        build_windows.validate(base,candidate,order)
+    except RuntimeError as error:
+        assert 'do not follow' in str(error)
+    else:
+        raise AssertionError('different addresses still have to follow the order')
+`});
+  assert.equal(result.error,undefined);
+  assert.equal(result.status,0,result.stdout+result.stderr);
+});
+
 test('Windows layout orders lld COFF functions and samples native working sets', {
   skip:process.platform!=='win32',
   timeout:120_000,
@@ -19,10 +56,13 @@ import subprocess
 import sys
 import tempfile
 import time
+from contextlib import ExitStack
+from unittest.mock import patch
 sys.path.insert(0, sys.argv[1])
 import build_windows
 import pe
 import win32
+import train_windows
 from samples import write as write_sample
 
 artifacts = os.environ.get('DIM_LAYOUT_ARTIFACTS')
@@ -61,7 +101,7 @@ void entry(void) {
               'arguments':['/entry:entry','/subsystem:console','/nodefaultlib',
                            str(root/'fixture.obj'),'kernel32.lib',
                            '/OUT:'+str(root/'base.exe')],
-              'cwd':str(root),'path':os.environ['PATH'],'pdb':None}
+              'cwd':str(root),'path':os.environ['PATH'],'pdb':None,'linkEnv':{}}
     base = root/'base.exe'; base_map = root/'base.map'
     build_windows.relink(record, base, map_path=base_map)
     assert subprocess.run([str(base)]).returncode == 42
@@ -115,7 +155,10 @@ void entry(void) {
     assert subprocess.run([str(captured)]).returncode == 42
 
     canonical = root/'canonical.rs'
-    canonical.write_text('fn main() { let p = std::env::args().nth(1).unwrap(); println!("{}", std::fs::canonicalize(p).unwrap().display()); }')
+    canonical.write_text('''#[inline(never)] fn layout_first(x: u32) -> u32 { std::hint::black_box(x).wrapping_add(3) }
+#[inline(never)] fn layout_second(x: u32) -> u32 { std::hint::black_box(x).wrapping_mul(5) }
+fn main() { assert_eq!(layout_first(layout_second(2)), 13); let p = std::env::args().nth(1).unwrap(); println!("{}", std::fs::canonicalize(p).unwrap().display()); }
+''')
     cl = shutil.which('cl')
     assert cl, 'cl must be on PATH'
     msvc = str(Path(cl).with_name('link.exe'))
@@ -137,6 +180,14 @@ void entry(void) {
     assert executable.read_bytes() == original, 'replay must retain Rust temporary NatVis inputs'
     expected = subprocess.check_output([str(root/'canonical.exe'), str(root)], text=True).strip()
     assert win32.canonical_path(root) == expected, (win32.canonical_path(root), expected)
+    rust_symbols, _ = pe.symbols(rust_capture/'baseline.map')
+    selected = [name for _, _, name in rust_symbols if 'layout_first' in name or 'layout_second' in name]
+    assert len(selected) == 2 and all('::' not in name for name in selected), selected
+    rust_order = root/'rust.order'; rust_order.write_text('\n'.join(reversed(selected))+'\n')
+    rust_candidate = root/'rust-candidate.exe'; rust_map = root/'rust.map'
+    assert build_windows.ordered_link(recorded, rust_candidate, rust_order, rust_map) == []
+    assert build_windows.validate(rust_capture/'baseline.map', rust_map, rust_order)['movedFunctionSymbols'] > 0
+    assert subprocess.check_output([str(rust_candidate), str(root)], text=True).strip() == expected
 
     process = subprocess.Popen(['cmd.exe','/c','ping','-n','5','127.0.0.1'],
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -183,7 +234,38 @@ int main(void) {
         console.write(b"\r")
         assert console.wait(timeout=20) == 0
     finally:
-        console.close()`});
+        console.terminate()
+        console.close()
+
+    original_console = win32.Console
+    handles = []
+    clock = [0]
+    def clock_now():
+        clock[0] += .1
+        return clock[0]
+    def fixture_console(*args):
+        child = original_console([str(root/'echoer.exe')], root, dict(os.environ))
+        handles.append(win32.open_process(child.pid))
+        return child
+    try:
+        with patch.object(win32, 'Console', side_effect=fixture_console), \
+             patch.object(train_windows.time, 'monotonic', side_effect=clock_now), \
+             patch.object(train_windows.time, 'sleep', side_effect=lambda _: None):
+            try:
+                with ExitStack() as stack:
+                    train_windows.tui(root/'unused.exe', root, stack, False, None)
+            except TimeoutError as error:
+                assert 'model picker' in str(error)
+            else:
+                raise AssertionError('the fixture never renders a model picker')
+        assert len(handles) == 1
+        code = win32.wintypes.DWORD()
+        assert win32.kernel32.GetExitCodeProcess(handles[0], win32.ctypes.byref(code))
+        assert code.value != 259, 'a failed TUI flow must not leave its child running'
+    finally:
+        for handle in handles:
+            win32.close(handle)
+`});
   assert.equal(result.error,undefined);
   assert.equal(result.status,0,result.stdout+result.stderr);
 });

@@ -145,6 +145,8 @@ with tempfile.TemporaryDirectory(prefix='dim-layout-shutdown-') as temporary:
         server.wire = SimpleNamespace(write=requests.append)
 
         def pages(*args):
+            if not requests:
+                return 4096, [0]
             if sample == 'unavailable':
                 clock[0] = 60
                 raise OSError('process sample unavailable')
@@ -169,6 +171,24 @@ with tempfile.TemporaryDirectory(prefix='dim-layout-shutdown-') as temporary:
         assert process.poll() is not None, 'the owned training process must be terminated and reaped'
         assert handles == [process.pid], 'the sampling handle must be closed'
         assert not profile.exists(), 'timed-out shutdown must not publish a sample'
+
+    with ExitStack() as stack:
+        process = subprocess.Popen([sys.executable, '-c', 'input()'], stdin=subprocess.PIPE)
+        stack.callback(train_windows.terminate, process)
+        stack.callback(process.stdin.close)
+        def shutdown(value):
+            process.stdin.write(b'\n'); process.stdin.flush()
+            assert process.wait(timeout=5) == 0
+        server = train_windows.Server.__new__(train_windows.Server)
+        server.process, server.binary = process, root/'fixture.exe'
+        server.sequence = 0
+        server.wire = SimpleNamespace(write=shutdown)
+        native = SimpleNamespace(open_process=lambda pid: pid, module=lambda handle: (0,),
+            close=lambda handle: None, working_set_pages=lambda *args: (4096, [0,1]), page_size=lambda: 4096)
+        with patch.object(train_windows, 'win32', native), \
+             patch.object(train_windows.pe, 'text_range', return_value=(0,8192)):
+            server.close(profile)
+        assert profile.read_text() == 'pagesize 4096\n0\n4096\n', 'a fast successful shutdown keeps the pre-shutdown sample'
 `});
   assert.equal(result.error,undefined);
   assert.equal(result.status,0,result.stdout+result.stderr);

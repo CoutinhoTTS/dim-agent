@@ -1,6 +1,6 @@
 /*
- * Temporary training probe: reset the main image's __text residency, then
- * record the pages faulted back in at a signal or at normal process exit.
+ * Temporary training probe: record the main image's __text mincore residency
+ * at a signal or at normal process exit.
  *
  * Loaded only through DYLD_INSERT_LIBRARIES. It changes no shipped artifact.
  */
@@ -15,7 +15,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
-#include <sys/stat.h>
 #include <unistd.h>
 
 #define PATH_CAPACITY 4096
@@ -56,12 +55,14 @@ static void write_sample(const char *path) {
         return;
     size_t count = (code_length + page_size - 1) / page_size;
     if (mincore((void *)code_address, code_length, resident)) {
-        fprintf(stderr, "dim-layout probe: mincore: %s\n", strerror(errno));
+        static const char message[] = "dim-layout probe: mincore failed\n";
+        (void)write(STDERR_FILENO, message, sizeof(message) - 1);
         return;
     }
     int descriptor = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
     if (descriptor < 0) {
-        fprintf(stderr, "dim-layout probe: open %s: %s\n", path, strerror(errno));
+        static const char message[] = "dim-layout probe: sample open failed\n";
+        (void)write(STDERR_FILENO, message, sizeof(message) - 1);
         return;
     }
     char buffer[65536];
@@ -87,7 +88,9 @@ static void write_sample(const char *path) {
 
 static void on_signal(int number_seen) {
     (void)number_seen;
+    int saved = errno;
     write_sample(sample_path);
+    errno = saved;
 }
 
 static void on_exit(void) {
@@ -151,23 +154,6 @@ __attribute__((constructor)) static void setup(void) {
     if (!length) {
         errno = ENOEXEC;
         fail("empty __text section");
-    }
-    const char *image = _dyld_get_image_name(0);
-    int descriptor = open(image, O_RDONLY);
-    if (descriptor < 0)
-        fail("cannot open the main image");
-    off_t offset = (off_t)text->offset - (off_t)(text_address - base);
-    if (offset < 0 || offset % (off_t)page_size) {
-        errno = EINVAL;
-        fail("__text file offset is not page-congruent");
-    }
-    void *mapped = mmap((void *)base, length, PROT_READ | PROT_EXEC,
-                        MAP_PRIVATE | MAP_FIXED, descriptor, offset);
-    int saved = errno;
-    close(descriptor);
-    if (mapped == MAP_FAILED) {
-        errno = saved;
-        fail("cannot reset __text residency");
     }
     resident = malloc((length + page_size - 1) / page_size);
     if (!resident)

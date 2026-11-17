@@ -6,14 +6,17 @@ import test from 'node:test';
 const directory=fileURLToPath(new URL('./code-layout/',import.meta.url));
 const python=process.platform==='win32'?'python':'python3';
 
-test('Mach-O function counts ignore terminators and ULEB alignment padding',()=>{
+test('Mach-O artifact parsing preserves fixed names, raw map bytes and function counts',()=>{
   const result=spawnSync(python,['-',directory],{encoding:'utf8',input:String.raw`
 from pathlib import Path
 import struct
 import sys
 import tempfile
+from unittest.mock import patch
 sys.path.insert(0, sys.argv[1])
+import build_darwin
 import macho
+import samples
 
 with tempfile.TemporaryDirectory(prefix='dim-layout-starts-') as temporary:
     binary = Path(temporary)/'fixture'
@@ -24,6 +27,26 @@ with tempfile.TemporaryDirectory(prefix='dim-layout-starts-') as temporary:
                               (bytes(8), 0)):
         binary.write_bytes(header + struct.pack('<IIII', macho.LC_FUNCTION_STARTS, 16, 48, len(payload)) + payload)
         assert macho.function_start_count(binary) == expected, payload.hex()
+
+    segment_size = 72 + 2*80
+    header = struct.pack('<IiiIIIII', macho.MH_MAGIC_64, 0x1000007, 3, 2, 1, segment_size, 0, 0)
+    segment = struct.pack('<II16sQQQQiiII', macho.LC_SEGMENT_64, segment_size, b'__TEXT',
+                          4096, 4096, 0, 4096, 5, 5, 2, 0)
+    def section(name, address, size, offset):
+        return struct.pack('<16s16sQQIIIIIIII', name, b'__TEXT', address, size, offset, 4, 0, 0, 0, 0, 0, 0)
+    binary.write_bytes(header + segment + section(b'__gcc_except_tab', 4160, 16, 576)
+                       + section(b'__text', 4096, 64, 512))
+    assert macho.text_range(binary) == (4096, 64, 512)
+    map_path = Path(temporary)/'fixture.map'
+    map_path.write_bytes(b'# Symbols:\n0x1000\t0x10\t[ 1] _entry\n'
+                         b'0x1010\t0x10\t[ 1] _raw_\xc0\n'
+                         b'0x2000\t0x10\t[ 1] literal string: \xc0\n')
+    sample = Path(temporary)/'fixture.pages'
+    order = Path(temporary)/'fixture.order'
+    samples.write(sample, 4096, [0])
+    with patch.object(macho, '_page_size', return_value=4096):
+        build_darwin.order(binary, map_path, [sample], order)
+    assert order.read_bytes() == b'_entry\n_raw_\xc0\n'
 `});
   assert.equal(result.error,undefined);
   assert.equal(result.status,0,result.stdout+result.stderr);
@@ -97,10 +120,13 @@ codegen-units = 1
 debug = 1
 strip = "debuginfo"
 ''')
-    (project/'src/main.rs').write_text('fn main() { println!("layout-rust"); }')
+    (project/'src/main.rs').write_text('''#[inline(never)] fn layout_first(x: u32) -> u32 { std::hint::black_box(x).wrapping_add(3) }
+#[inline(never)] fn layout_second(x: u32) -> u32 { std::hint::black_box(x).wrapping_mul(5) }
+fn main() { assert_eq!(layout_first(layout_second(2)), 13); println!("layout-rust"); }
+''')
     sysroot = subprocess.check_output([build_darwin.rustc_command(), '--print', 'sysroot'], text=True).strip()
     os.environ['RUSTC'] = str(Path(sysroot)/'bin/rustc')
-    subprocess.run(['cargo','generate-lockfile','--offline'], cwd=project, check=True)
+    subprocess.run([str(Path(sysroot)/'bin/cargo'),'generate-lockfile','--offline'], cwd=project, check=True)
     build_darwin.REPO = project
     capture = root/'capture'; capture.mkdir()
     recorded = build_darwin.cargo_link(capture, shutil.which('cc'), 1)
@@ -112,7 +138,14 @@ strip = "debuginfo"
     assert cargo.read_bytes() == original, 'replay must restore the original Cargo executable'
     assert replayed.read_bytes() == original, 'replay must include Rust post-link stripping'
     assert subprocess.check_output([str(replayed)], text=True).strip() == 'layout-rust'
-    assert macho.map_symbols(replay_map, *macho.text_range(replayed)[:2])
+    rust_symbols = macho.map_symbols(replay_map, *macho.text_range(replayed)[:2])
+    selected = [name for _, _, name in rust_symbols if 'layout_first' in name or 'layout_second' in name]
+    assert len(selected) == 2, selected
+    rust_order = root/'rust.order'; rust_order.write_text('\n'.join(reversed(selected))+'\n')
+    rust_candidate = root/'rust-candidate'; rust_map = root/'rust.map'
+    assert build_darwin.ordered_link(recorded, rust_candidate, rust_order, rust_map) == []
+    assert build_darwin.validate(replayed, rust_candidate, replay_map, rust_map, rust_order)['movedFunctionSymbols'] > 0
+    assert subprocess.check_output([str(rust_candidate)], text=True).strip() == 'layout-rust'
 
     page_size = os.sysconf('SC_PAGESIZE')
     page_sample = root/'sample.pages'
