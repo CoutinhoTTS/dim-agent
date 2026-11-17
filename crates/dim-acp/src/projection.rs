@@ -350,8 +350,10 @@ fn presentation(cwd: &Path, name: &str, input: &Value) -> Presentation {
             if path.is_some() && (offset.is_some() || limit.is_some()) {
                 let start = offset.unwrap_or(1);
                 title.push_str(&format!(":{start}"));
-                if let Some(limit) = limit {
-                    title.push_str(&format!("-{}", start + limit.saturating_sub(1)));
+                if let Some(limit) = limit
+                    && let Some(end) = start.checked_add(limit.saturating_sub(1))
+                {
+                    title.push_str(&format!("-{end}"));
                 }
             }
             (
