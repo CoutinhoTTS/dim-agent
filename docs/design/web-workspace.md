@@ -889,8 +889,9 @@ or page by it. The consequences are deliberate:
   `withInternal`, `withAcpSessions` and `withAutomationSessions` belong to `session.catalog` — so the page lists the
   row of any origin this browser hid. [#557's](https://github.com/arcships/dim/issues/557) filters do not apply: archive
   is not a classification, and it writes no `origin` and selects none.
-- A row keeps the sidebar's fields — preview or id, workspace, last activity, model, running state — adds the `closed`
-  fact this read returns, and offers Restore, Open and Delete.
+- A row keeps the sidebar's fields — title, preview, workspace, last activity, model, running state — adds the `closed`
+  fact this read returns, and offers Restore, Open and Delete. With neither a title nor a preview, its heading is
+  localized as “Untitled session” (“未命名会话”), with the Session id below it as secondary text.
 
 **Closed Sessions.** A Session this daemon closed keeps its stored rows but is absent from a read without
 `includeClosed` ([session catalog §3.3](appserver/session-catalog.md#33-sessionsummaries)), and the closed fact lasts
