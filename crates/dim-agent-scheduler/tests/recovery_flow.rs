@@ -513,8 +513,9 @@ async fn a_restart_resumes_the_stop_timer_of_a_terminal_launch() {
         // Session, and the stop time is an hour out, as a restart that comes
         // back long before it would find it. Only an advance reaches it.
         let soon = (dim_agent_scheduler::testing::clock(home.path()).now()
-            + chrono::Duration::seconds(3600))
-        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+            + jiff::SignedDuration::from_secs(3600))
+        .strftime("%Y-%m-%dT%H:%M:%S%.3fZ")
+        .to_string();
         edit_runs(home.path(), |runs| {
             let run = runs
                 .iter_mut()
@@ -601,8 +602,9 @@ async fn a_restarts_stop_timer_ends_when_its_record_is_gone() {
 
     // An hour out, so only the advance after the record leaves reaches it.
     let soon = (dim_agent_scheduler::testing::clock(home.path()).now()
-        + chrono::Duration::seconds(3600))
-    .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        + jiff::SignedDuration::from_secs(3600))
+    .strftime("%Y-%m-%dT%H:%M:%S%.3fZ")
+    .to_string();
     edit_runs(home.path(), |runs| {
         let run = runs
             .iter_mut()
@@ -686,8 +688,9 @@ async fn an_overdue_restored_stop_waits_for_publication_then_stops_once() {
     server.join().await.unwrap();
 
     let past = (dim_agent_scheduler::testing::clock(home.path()).now()
-        - chrono::Duration::seconds(60))
-    .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        - jiff::SignedDuration::from_secs(60))
+    .strftime("%Y-%m-%dT%H:%M:%S%.3fZ")
+    .to_string();
     edit_runs(home.path(), |runs| {
         let run = runs
             .iter_mut()
