@@ -6,6 +6,8 @@ on:
       - scripts/code-layout/**
       - scripts/code-layout.test.mjs
       - .github/workflows/code-layout.yml
+      - rust-toolchain.toml
+      - .node-version
   workflow_dispatch:
 
 permissions:

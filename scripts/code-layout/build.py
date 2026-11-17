@@ -21,14 +21,29 @@ import subprocess
 import sys
 import tempfile
 
-from train import train
-
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent.parent
 
 
 def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def cargo_link(work, compiler, jobs, target=None):
+    sysroot = Path(subprocess.check_output(["rustc", "--print", "sysroot"], cwd=REPO, text=True).strip())
+    linker_dir = sysroot / "lib/rustlib/x86_64-unknown-linux-gnu/bin/gcc-ld"
+    if not (linker_dir / "ld.lld").is_file():
+        raise RuntimeError(f"the selected Rust toolchain has no LLD at {linker_dir / 'ld.lld'}")
+    wrapper = work / "linker"
+    wrapper.write_text("#!/bin/sh\nexec " + shlex.join([sys.executable, str(HERE / "build.py"), "--capture"]) + ' "$@"\n')
+    wrapper.chmod(0o700)
+    env = dict(os.environ, DIM_LAYOUT_CAPTURE=str(work), DIM_LAYOUT_CC=compiler)
+    command = ["cargo", "rustc", "--release", "--locked", "-p", "dimcode", "--bin", "dimcode", "--jobs", str(jobs)]
+    if target:
+        command.extend(["--target", target])
+    command.extend(["--", f"-Clinker={wrapper}", f"-Clink-arg=-B{linker_dir}", "-Clink-arg=-fuse-ld=lld"])
+    subprocess.run(command, cwd=REPO, env=env, check=True)
+    return json.loads((work / "link.json").read_text())
 
 
 def capture(arguments):
@@ -153,6 +168,28 @@ def ordered_link(record, output, order_file):
     return sorted(omitted)
 
 
+def validate_layout(baseline, candidate, order_file):
+    before, after = symbols(baseline), symbols(candidate)
+    if Counter((name, end - start) for start, end, name in before) != Counter((name, end - start) for start, end, name in after):
+        raise RuntimeError("relink changed the function set or function sizes")
+    ranks = {name: rank for rank, name in enumerate(order_file.read_text().splitlines())}
+    if not ranks or set(ranks) - {name for _, _, name in after}:
+        raise RuntimeError("the final order must name existing function symbols")
+    positions = {}
+    for start, _, name in after:
+        if name in ranks:
+            positions[start] = min(positions.get(start, ranks[name]), ranks[name])
+    priorities = [rank for _, rank in sorted(positions.items())]
+    if priorities != sorted(priorities):
+        raise RuntimeError("candidate function addresses do not follow the final symbol order")
+    selected_before = Counter((name, start, end - start) for start, end, name in before if name in ranks)
+    selected_after = Counter((name, start, end - start) for start, end, name in after if name in ranks)
+    moved = sum((selected_before - selected_after).values())
+    if not moved:
+        raise RuntimeError("the symbol order moved no selected function addresses")
+    return {"orderedFunctionSymbols": sum(selected_after.values()), "movedFunctionSymbols": moved}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
@@ -165,6 +202,8 @@ def main():
         parser.error("jobs must be positive")
     if os.environ.get("CARGO_BUILD_TARGET") not in (None, "x86_64-unknown-linux-gnu"):
         parser.error("cross compilation is not supported")
+    from train import train
+
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
     compiler = shutil.which("cc")
@@ -172,16 +211,7 @@ def main():
         parser.error("cc is required")
     with tempfile.TemporaryDirectory(prefix="dim-layout-") as temporary:
         work = Path(temporary)
-        wrapper = work / "linker"
-        wrapper.write_text("#!/bin/sh\nexec " + shlex.join([sys.executable, str(HERE / "build.py"), "--capture"]) + ' "$@"\n')
-        wrapper.chmod(0o700)
-        env = dict(os.environ, DIM_LAYOUT_CAPTURE=str(work), DIM_LAYOUT_CC=compiler)
-        command = ["cargo", "rustc", "--release", "--locked", "-p", "dimcode", "--bin", "dimcode", "--jobs", str(args.jobs)]
-        if args.target:
-            command.extend(["--target", args.target])
-        command.extend(["--", f"-Clinker={wrapper}"])
-        subprocess.run(command, cwd=REPO, env=env, check=True)
-        record = json.loads((work / "link.json").read_text())
+        record = cargo_link(work, compiler, args.jobs, args.target)
         baseline = output / "baseline"
         relink(record, baseline)
         if digest(baseline) != digest(Path(record["output"])):
@@ -197,10 +227,7 @@ def main():
         candidate = output / "candidate"
         measurement["unorderableSymbols"] = ordered_link(record, candidate, order_file)
         measurement["orderedFunctions"] = len(order_file.read_text().splitlines())
-        before = symbols(baseline)
-        after = symbols(candidate)
-        if Counter((name, end - start) for start, end, name in before) != Counter((name, end - start) for start, end, name in after):
-            raise RuntimeError("relink changed the function set or function sizes")
+        measurement.update(validate_layout(baseline, candidate, order_file))
         train(candidate, work / "acceptance")
         manifest = {"source": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPO, text=True).strip(),
                     "dirty": bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=REPO)),

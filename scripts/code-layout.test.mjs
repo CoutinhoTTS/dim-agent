@@ -12,7 +12,7 @@ test('Linux layout relinks the same native inputs and preserves executable behav
   const result=spawnSync('python3',['-',directory],{encoding:'utf8',timeout:55_000,input:String.raw`
 import os
 from pathlib import Path
-import signal
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -25,6 +25,7 @@ with tempfile.TemporaryDirectory(prefix='dim-layout-test-') as temporary:
     source = root / 'main.c'
     source.write_text('''#include <stdio.h>
 __attribute__((noinline)) int first(void) { return 17; }
+int first_alias(void) __attribute__((alias("first")));
 __attribute__((noinline)) int second(void) { return 25; }
 __attribute__((noinline)) static int shared_name(void) { return 0; }
 __attribute__((noinline)) static int discarded_name(void) { return 0; }
@@ -49,13 +50,29 @@ int main(void) { printf("%d\\n", first() + second() + shared_name() + discarded_
     build.relink(record, base)
     original = build.symbols(base)
     order = root / 'order'
-    order.write_text('second\nfirst\nmain\n')
+    order.write_text('second\nfirst_alias\nfirst\nmain\n')
     changed = root / 'changed'
     build.relink(record, changed, order)
     reordered = build.symbols(changed)
     assert sorted((n,e-s) for s,e,n in original) == sorted((n,e-s) for s,e,n in reordered)
     addresses = {n:s for s,e,n in reordered}
     assert addresses['second'] < addresses['first'] < addresses['main']
+    assert addresses['first_alias'] == addresses['first']
+    assert build.validate_layout(base, changed, order)['movedFunctionSymbols'] > 0
+    try:
+        build.validate_layout(base, base, order)
+    except RuntimeError as error:
+        assert 'do not follow' in str(error)
+    else:
+        raise AssertionError('an unordered executable must not pass layout acceptance')
+    unchanged_order = root / 'unchanged.order'
+    unchanged_order.write_text('\n'.join(n for _,_,n in original if n in ('first','second','main'))+'\n')
+    try:
+        build.validate_layout(base, base, unchanged_order)
+    except RuntimeError as error:
+        assert 'moved no selected' in str(error)
+    else:
+        raise AssertionError('an unchanged layout must not be published as an optimized artifact')
     assert subprocess.check_output([str(base)]) == subprocess.check_output([str(changed)]) == b'42\n'
     probe = root / 'probe.so'
     subprocess.run(['cc','-shared','-fPIC','-O2','-Wall','-Wextra','-Werror',
@@ -75,6 +92,48 @@ int main(void) { printf("%d\\n", first() + second() + shared_name() + discarded_
     finally:
         terminate(process)
         process.stdout.close()
+
+    project = root / 'rust'
+    project.mkdir()
+    (project / 'src').mkdir()
+    (project / 'Cargo.toml').write_text('''[package]
+name = "dimcode"
+version = "0.0.0"
+edition = "2024"
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = "debuginfo"
+''')
+    (project / 'src/main.rs').write_text('''#[unsafe(no_mangle)]
+#[inline(never)]
+pub extern "C" fn layout_first(x: u32) -> u32 { x.wrapping_add(17) }
+#[unsafe(no_mangle)]
+#[inline(never)]
+pub extern "C" fn layout_second(x: u32) -> u32 { x ^ 25 }
+fn main() { let x = std::hint::black_box(0); println!("{}", layout_first(x) + layout_second(x)); }
+''')
+    shutil.copyfile(build.REPO / 'rust-toolchain.toml', project / 'rust-toolchain.toml')
+    for name in list(os.environ):
+        if name.startswith('CARGO_') or name in ('RUSTFLAGS', 'RUSTC_WRAPPER', 'RUSTC_WORKSPACE_WRAPPER'):
+            del os.environ[name]
+    os.environ['CARGO_HOME'] = str(root / 'cargo-home')
+    subprocess.run(['cargo','generate-lockfile','--offline'],cwd=project,check=True)
+    capture = root / 'capture'
+    capture.mkdir()
+    build.REPO = project
+    recorded = build.cargo_link(capture, shutil.which('cc'), 2)
+    rust_base = root / 'rust-base'
+    build.relink(recorded, rust_base)
+    assert build.digest(rust_base) == build.digest(Path(recorded['output']))
+    rust_names = [name for _,_,name in build.symbols(rust_base) if name in ('layout_first','layout_second')]
+    assert len(rust_names) == 2
+    rust_order = root / 'rust.order'
+    rust_order.write_text('\n'.join(reversed(rust_names))+'\n')
+    rust_changed = root / 'rust-changed'
+    build.ordered_link(recorded, rust_changed, rust_order)
+    assert build.validate_layout(rust_base, rust_changed, rust_order)['movedFunctionSymbols'] > 0
+    assert subprocess.check_output([str(rust_base)]) == subprocess.check_output([str(rust_changed)]) == b'42\n'
 `});
   assert.equal(result.error,undefined);
   assert.equal(result.status,0,result.stdout+result.stderr);

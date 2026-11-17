@@ -27,7 +27,10 @@ python3 scripts/code-layout/build.py --output /tmp/dim-layout-build --jobs 2
 
 The output directory must be new. Python 3.9 or later, `cc`, the pinned Rust
 toolchain's LLD and readable `/proc/<child>/smaps` / writable `clear_refs` are
-required. The tool builds `dimcode` with the repository's release profile and
+required. The tool selects that LLD explicitly for Cargo's original executable
+link; every replay retains the captured linker selection. A missing toolchain
+linker fails before the product build. The tool builds `dimcode` with the
+repository's release profile and
 preserves the build environment, including account build settings. An optional
 `--target x86_64-unknown-linux-gnu` selects Cargo's explicit native target path.
 Other targets and cross compilation are not supported by this command.
@@ -53,8 +56,12 @@ including neighboring functions on each page, rather than an instruction trace
 or a call-count profile.
 
 The same native objects are relinked with LLD's `--symbol-ordering-file`. The
-function-name/size multiset must remain equal. The candidate then runs all three
-flows without the probe, plus CLI help/version checks. Only after they pass does
+function-name/size multiset must remain equal. Selected function addresses must
+follow the final order, treating symbols at the same address as aliases, and at
+least one selected address must move. An unchanged or unordered candidate fails
+before publication; movement alone does not establish an RSS or CPU gain.
+The candidate then runs all three flows without the probe, plus CLI help/version
+checks. Only after they pass does
 the command produce `dimcode`. Cargo's original executable remains unchanged.
 `baseline`, `symbols.order`, three footprint files and `manifest.json` record the
 comparison inputs, source state, Rust version and artifact hashes. The probe and
