@@ -242,6 +242,7 @@ pub struct Signals {
     ticked: watch::Sender<u64>,
     timer: watch::Sender<Option<TimerWait>>,
     startup: watch::Sender<u64>,
+    loop_lookups: watch::Sender<u64>,
 }
 
 impl Signals {
@@ -300,6 +301,16 @@ impl Signals {
     /// The pre-publication waits this generation has reached.
     pub fn startup_waits(&self) -> u64 {
         *self.startup.borrow()
+    }
+
+    /// Publishes a completed loop lookup pass after its retry cadence is recorded.
+    pub(crate) fn loop_lookup_done(&self) {
+        self.loop_lookups.send_modify(|passes| *passes += 1);
+    }
+
+    /// The loop lookup passes completed by this home's Scheduler generations.
+    pub fn loop_lookups(&self) -> u64 {
+        *self.loop_lookups.borrow()
     }
 }
 
@@ -429,6 +440,16 @@ pub async fn retention(home: &Path, before: u64) {
     })
     .await
     .expect("the retention pass ends");
+}
+
+/// Waits for a loop lookup pass after the count taken before its host starts.
+pub async fn loop_lookup(home: &Path, before: u64) {
+    let mut passes = signals(home).loop_lookups.subscribe();
+    tokio::time::timeout(BOUND, async {
+        let _ = passes.wait_for(|passes| *passes > before).await;
+    })
+    .await
+    .expect("the loop lookup pass ends");
 }
 
 /// The Scheduler tasks that reached their pre-publication wait.

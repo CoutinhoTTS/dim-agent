@@ -467,6 +467,10 @@ fn note_loop_lookup(shared: &Shared, answer: Result<Lookup, SchedulerError>) {
     shared
         .loop_lookup
         .store(tick, std::sync::atomic::Ordering::Release);
+    #[cfg(feature = "testing")]
+    if let Some(signals) = &shared.signals {
+        signals.loop_lookup_done();
+    }
 }
 
 fn handler(shared: Arc<Shared>) -> Handler {
