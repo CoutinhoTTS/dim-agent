@@ -191,6 +191,12 @@ def validate_layout(baseline, candidate, order_file):
 
 
 def main():
+    if sys.platform == "darwin":
+        from build_darwin import main as platform_main
+        return platform_main()
+    if sys.platform == "win32":
+        from build_windows import main as platform_main
+        return platform_main()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--target", choices=["x86_64-unknown-linux-gnu"])
