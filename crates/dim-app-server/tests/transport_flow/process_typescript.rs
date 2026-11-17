@@ -1699,7 +1699,7 @@ async fn node_timeline_store_observes_native_commits_without_blocking_other_sess
     assert_ok(&first_after_second);
     assert_eq!(
         first_after_second["result"]["completions"], observed_sessions[0],
-        "Session A observed Session B commits"
+        "Session A must not observe Session B commits"
     );
     for id in &sessions {
         let closed = tokio::time::timeout(

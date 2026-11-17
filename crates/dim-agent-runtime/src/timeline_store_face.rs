@@ -12,8 +12,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 /// Shared native and data binding for one Timeline backend.
 /// Clone this binding across Agents using the same provider runtime.
-/// Other runtimes observe the provider through its bridge; native backend access
-/// is independent of this notification scope.
+/// Other runtimes may use read operations. Completion listeners must belong to
+/// the installed provider runtime; sharing this binding does not bridge runtime buses.
 #[derive(Clone)]
 pub struct TimelineStoreBinding(Arc<Binding>);
 struct Binding {

@@ -27,6 +27,7 @@ struct Listed {
 #[derive(Deserialize)]
 struct Management {
     providers: Vec<Listed>,
+    next: Option<String>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -121,18 +122,36 @@ async fn described(client: &mut Client) -> Result<Vec<Described>> {
         .collect())
 }
 
-/// Every Provider `provider.management` reports.
+/// Account providers enumerated through the paged management overview.
 async fn listed(client: &mut Client) -> Result<Vec<Listed>> {
-    if !client.supports(&["provider.management"]) {
+    if !client.supports(&["provider.management.list"]) {
         return Err("This daemon cannot describe account providers".into());
     }
-    let view: Management = client.typed("provider.management", json!({})).await?;
-    Ok(view.providers)
+    let mut providers = Vec::new();
+    let mut after: Option<String> = None;
+    loop {
+        let mut params = json!({"accountsOnly": true});
+        if let Some(id) = after {
+            params["after"] = json!(id);
+        }
+        let page: Management = client.typed("provider.management.list", params).await?;
+        providers.extend(page.providers);
+        after = page.next;
+        if after.is_none() {
+            return Ok(providers);
+        }
+    }
 }
 
 /// The described account `provider_id` names, or why this daemon has none.
 async fn described_account(client: &mut Client, provider_id: &str) -> Result<Described> {
-    let providers = listed(client).await?;
+    let page: Management = client
+        .typed(
+            "provider.management.list",
+            json!({"providerId": provider_id}),
+        )
+        .await?;
+    let providers = page.providers;
     if let Some(listed) = providers
         .iter()
         .find(|provider| provider.provider_id == provider_id)

@@ -225,12 +225,16 @@ async fn selection_with_preferences(
     cancel: &CancellationToken,
 ) -> Result<ModelSelection> {
     let provider = providers
-        .management(Some(target.provider_id.clone()), cancel)
+        .management(
+            target.provider_id.clone(),
+            Some(target.model_id.clone()),
+            cancel,
+        )
         .await
         .map_err(|error| format!("{}: {error}", target.provider_id))?
         .providers
         .into_iter()
-        .find(|provider| provider.provider_id == target.provider_id)
+        .find(|provider| provider.info.provider_id == target.provider_id)
         .ok_or_else(|| format!("{}: no such provider in the catalog", target.provider_id))?;
     let preferences = provider
         .preferences
@@ -2703,7 +2707,7 @@ mod tests {
         providers
             .update_preferences(
                 provider_id.into(),
-                created.version.expect("a provider version"),
+                created.info.version.expect("a provider version"),
                 "deepseek".into(),
                 PreferencesPatch {
                     reasoning_effort: Some(FieldUpdate::Set {

@@ -149,7 +149,7 @@ loader 的 `create_instance` 仍先等待行 settled；异步 apply 一直不返
 | `SkillsCatalogPlugin` | Skill discovery/catalog and business settings; privately supplies the reusable catalog's SkillSettingsHost | `SkillsCatalog`, Skills management contribution | `HostPlatform`, `SettingsService` |
 | `AgentDirectoryPlugin` | `AgentDirectory`：Agent 表与实例、Session 协议版本与占用、不可用记录、默认 agentId、serverInstanceId；不可重启 | `AgentDirectory` | — |
 | `rutis-loader` | 进程装配的配置行与 `agent` / `session` / `branch` instanced 分组的实例 | `Loader` | — |
-| `AgentsPlugin` | `AgentIndex`：目录逻辑、Session 准入、经 loader 创建与关闭 Agent、默认及恢复 Agent 装载入口；进程 builder | `AgentIndex` | `AgentDirectory`、`Loader`；`--database` 另注入 `SqliteStorage`、`store`，并从原生 `SessionStore` 装配 TimelineStore，产品 profile 另注入 `SettingsService`；受保护 profile 每次调用时读取 `ModelSelectionHost`，不依赖其提供方（方法合同 §3.2） |
+| `AgentsPlugin` | `AgentIndex`：目录逻辑、Session 准入、经 loader 创建与关闭 Agent、默认及恢复 Agent 装载入口；进程 builder | `AgentIndex` | `AgentDirectory`、`Loader`；`--database` 另注入 `SqliteStorage`、`store`、`sessionMetadata`（`SessionMetadataService`），并从原生 `SessionStore` 装配 TimelineStore，产品 profile 另注入 `SettingsService`；受保护 profile 每次调用时读取 `ModelSelectionHost`，不依赖其提供方（方法合同 §3.2） |
 | `AgentScope`（`agent` 实例中的行） | 一个 `Agent`（Session 建在同一 Agent 实例里）与承载监听的子插件 `Sessions`；`AgentHost`（agent、agentId、default、profile、承载监听的 ctx）；apply 登记进目录 | 经 `AgentDirectory` 登记 | `AgentDirectory`、`Loader`；`TimelineStore` 由已配置的 AgentBuilder 传入 |
 | `CollaborationDirectoryPlugin` | Team 关系与临时 Agent 归属的目录 | `CollaborationDirectory` | — |
 | `CollaborationPlugin` | 成员关系、临时 Agent 归属、参与 Session 的关闭观察任务 | `Collaboration` | `AgentIndex`、`CollaborationDirectory` |

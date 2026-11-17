@@ -199,7 +199,9 @@ async fn model_preview_resolves_startup_without_creating_sessions_or_saving_choi
             )
             .await,
     );
-    let before = client.rpc("provider.management", json!({})).await;
+    let before = client
+        .rpc("provider.management", json!({"providerId":provider}))
+        .await;
     assert_ok(&before);
     for (params, expected) in [
         (json!({"cwd":home}), "alpha"),
@@ -233,7 +235,9 @@ async fn model_preview_resolves_startup_without_creating_sessions_or_saving_choi
         .await;
     assert!(invalid.get("error").is_some(), "{invalid}");
     assert!(server.agent().unwrap().sessions().is_empty());
-    let after = client.rpc("provider.management", json!({})).await;
+    let after = client
+        .rpc("provider.management", json!({"providerId":provider}))
+        .await;
     assert_eq!(before["result"], after["result"]);
     let created = client.rpc("session.create", json!({"cwd":home})).await;
     assert_ok(&created);
@@ -263,6 +267,9 @@ async fn temporary_startup_connections_execute_all_formats_without_sharing_or_pe
             .unwrap(),
     )
     .unwrap();
+    use sha2::{Digest, Sha256};
+    let digest = format!("{:x}", Sha256::digest(std::fs::read(&image_path).unwrap()));
+    let reference = format!("img:{}", &digest[..16]);
     let seen = Seen::default();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}/gateway/v1", listener.local_addr().unwrap());
@@ -373,9 +380,10 @@ async fn temporary_startup_connections_execute_all_formats_without_sharing_or_pe
                 "{format}: {uri}"
             );
             assert!(
-                body.to_string().contains(png),
-                "{format}: the provider receives image bytes: {body}"
+                body.to_string().contains(&reference),
+                "{format}: the provider receives the image reference: {body}"
             );
+            assert!(!body.to_string().contains(png), "{format}: {body}");
             assert!(!body.to_string().contains(image["fileId"].as_str().unwrap()));
             assert!(
                 history
