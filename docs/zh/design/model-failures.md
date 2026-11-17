@@ -11,7 +11,7 @@ aimux 桥接层是唯一持有提供方结构化错误的地方，因此由它�
 | `network` | 在无条件码决定时，origin 为 Transport | 是 | 无法连接提供方，或连接中断 | 检查网络或代理 |
 | `rate_limited` | 429；条件码 `rate_limit_exceeded`、`rate_limit_error` | 是；`Retry-After` 在等待预算内时用作延迟 | 提供方正在限流 | 等待后重试 |
 | `server_error` | 408、除 501 和 505 外的 5xx；类别标签 `api_error`、`server_error`、`service_unavailable`、`request_timeout`、`timeout`；条件码 `engine_overloaded`、`model_overloaded`、`server_busy`、`overloaded_error` | 是 | 提供方报告服务器错误 | 稍后重试或换一个模型 |
-| `malformed_response` | `InvalidResponseData`、`JsonParse`、`InvalidToolInput`、`NoSuchTool`、`TypeValidation`、无法解码的流、始终没有完成的工具参数 | 一次 | 提供方发来的响应 Dim 无法使用 | 重试；若反复出现，换一个模型或检查代理或网关 |
+| `malformed_response` | `InvalidResponseData`、`JsonParse`、`InvalidToolInput`、`NoSuchTool`、`TypeValidation`、无法解码的流、始终没有完成的工具参数、以 end-turn 结束且既无任何非空白文本也无工具调用的回复 | 一次 | 提供方发来的响应 Dim 无法使用 | 重试；若反复出现，换一个模型或检查代理或网关 |
 | `auth_rejected` | 401、403；条件码 `invalid_api_key`；类别标签 `authentication_error` | 否（保留现有的一次凭据恢复） | 提供方拒绝了凭据 | 重新登录或检查 API key |
 | `quota_exhausted` | 402；条件码 `insufficient_quota`、`quota_exceeded`、`billing_error`、`credit_exhausted` | 否 | 账户没有配额了 | 检查套餐或计费 |
 | `not_found` | 404 | 否 | 提供方找不到模型或端点 | 检查模型和提供方 base URL |
@@ -77,6 +77,7 @@ ModelFailure {
 - 旧客户端读取的 `error` 是默认英文行 `<meaning>: <reason>. <action>`，没有 reason 时省略 `: <reason>`。不再有 `ApiCall:` 前缀。当该失败使其 turn 结算为 Failed 时，该回合在 `TurnOutcome::Failed.error` 中携带同一字符串，客户端据此可以区分两者并去掉重复。不使 turn 失败的失败（例如输出上限停止）不在 turn 的结果中携带任何内容。
 - `max_tokens` 停止保留其 presentation，同时写入 `failure.kind = output_limit`。它不使 turn 失败：Loop 以 `output_limit` 为 reason 把该 turn 结算为 Completed（见 Loop.md「声明了调用却从未执行的失败步骤」一节）。
 - 工具参数始终没有完成时写入 `failure.kind = malformed_response`，与 `InvalidToolInput` 对同一缺陷的 kind 相同。
+- 以 end-turn 停止、既没有非空白文本也没有工具调用的回复写入 `failure.kind = malformed_response`，原因为 "the response had no text and no tool call"。只有 thinking 不算回答，所以只带 thinking 的回复同样算空回复。该判断落在桥接层流结束处，因为只有它看得到完整响应；turn 循环不变，由它现有的 `malformed_response` 重试覆盖。该规则适用于每个 turn，包括 Loop 与 Goal 的驱动 turn：空回复在那里同样不是一个有效步骤。
 - 没有提供方边界的宿主机失败得到 kind `unknown` 和它原本携带的消息。
 
 ## 3. 谁来措辞

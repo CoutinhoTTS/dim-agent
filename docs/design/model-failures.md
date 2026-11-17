@@ -14,7 +14,7 @@ normalized codes and the `AiMuxError` variant. It never matches message text.
 | `network` | the origin is Transport, once no condition code decides | yes | could not reach the provider, or the connection dropped | check the network or proxy |
 | `rate_limited` | 429; the conditions `rate_limit_exceeded`, `rate_limit_error` | yes; `Retry-After` is used while it fits the wait budget | the provider is rate limiting requests | wait and try again |
 | `server_error` | 408, 5xx except 501 and 505; the labels `api_error`, `server_error`, `service_unavailable`, `request_timeout`, `timeout`; the conditions `engine_overloaded`, `model_overloaded`, `server_busy`, `overloaded_error` | yes | the provider reported a server error | try again later or choose another model |
-| `malformed_response` | `InvalidResponseData`, `JsonParse`, `InvalidToolInput`, `NoSuchTool`, `TypeValidation`, an undecodable stream, tool arguments that never complete | once | the provider sent a response Dim could not use | try again; if it repeats, choose another model or check the proxy or gateway |
+| `malformed_response` | `InvalidResponseData`, `JsonParse`, `InvalidToolInput`, `NoSuchTool`, `TypeValidation`, an undecodable stream, tool arguments that never complete, a reply that stops with an end-turn finish and carries no non-whitespace text and no tool call | once | the provider sent a response Dim could not use | try again; if it repeats, choose another model or check the proxy or gateway |
 | `auth_rejected` | 401, 403; the condition `invalid_api_key`; the label `authentication_error` | no (the existing one credential recovery stays) | the provider rejected the credentials | sign in again or check the API key |
 | `quota_exhausted` | 402; the conditions `insufficient_quota`, `quota_exceeded`, `billing_error`, `credit_exhausted` | no | the account has no quota left | check the plan or billing |
 | `not_found` | 404 | no | the provider did not find the model or endpoint | check the model and the provider's base URL |
@@ -143,6 +143,14 @@ ModelFailure {
 - Tool arguments that never complete write
   `failure.kind = malformed_response`, the kind `InvalidToolInput` carries for
   the same defect.
+- A reply that stops with an end-turn finish and carries no non-whitespace text
+  and no tool call writes `failure.kind = malformed_response` with the reason
+  "the response had no text and no tool call". Thinking alone is not an answer,
+  so a reply of thinking only counts as empty. The bridge decides it where the
+  stream completes, because it is the only part that sees the whole response;
+  the turn loop does not change, and its retry of `malformed_response` covers
+  it. The rule holds for every turn, driven Loop and Goal turns included: an
+  empty reply is not a step there either.
 - A failure from a host with no provider boundary gets kind `unknown` and the
   message it already carried.
 
