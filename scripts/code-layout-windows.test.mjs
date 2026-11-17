@@ -50,7 +50,7 @@ void entry(void) {
     ExitProcess(value ? 42 : 1);
 }
 ''')
-    subprocess.run(['cl','/nologo','/c','/Gy','/Od',str(root/'fixture.c'),
+    subprocess.run(['cl','/nologo','/c','/Gy','/Od','/Z7',str(root/'fixture.c'),
                     '/Fo:'+str(root/'fixture.obj')],check=True)
     host = build_windows.TARGETS[platform.machine().upper()]
     linker = build_windows.lld_linker(host)
@@ -82,15 +82,24 @@ void entry(void) {
 
     capture = root/'capture'; capture.mkdir()
     response = root/'link.rsp'
-    response.write_text(' '.join(['/entry:entry','/subsystem:console','/nodefaultlib',
-                                  str(root/'fixture.obj'),'kernel32.lib',
-                                  '/OUT:'+str(root/'captured.exe')]))
+    response.write_text(' '.join(build_windows.quote(argument) for argument in
+        ['/entry:entry','/subsystem:console','/nodefaultlib','/DEBUG',
+         '/PDBALTPATH:%_PDB%', '/PDB:'+str(root/'captured.pdb'),
+         str(root/'fixture.obj'),'kernel32.lib','/OUT:'+str(root/'captured.exe')]))
     os.environ['DIM_LAYOUT_CAPTURE'] = str(capture)
     os.environ['DIM_LAYOUT_LINKER'] = __import__('json').dumps(linker)
     build_windows.capture(['@'+str(response)])
     recorded = __import__('json').loads((capture/'link.json').read_text())
     assert recorded['inputs']
     assert recorded['output'].endswith('captured.exe')
+    captured = root/'captured.exe'
+    original = captured.read_bytes()
+    assert (root/'captured.pdb').is_file()
+    assert (capture/'baseline.map').is_file()
+    (root/'fixture.obj').unlink()
+    build_windows.relink(recorded, captured, preserve_pdb=True)
+    assert captured.read_bytes() == original, 'captured inputs and map arguments must preserve the PE/PDB identity'
+    assert subprocess.run([str(captured)]).returncode == 42
 
     canonical = root/'canonical.rs'
     canonical.write_text('fn main() { let p = std::env::args().nth(1).unwrap(); println!("{}", std::fs::canonicalize(p).unwrap().display()); }')

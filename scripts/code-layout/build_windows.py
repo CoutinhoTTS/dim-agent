@@ -94,7 +94,7 @@ def relink(record, output, order_file=None, map_path=None, strict=False, preserv
         raise RuntimeError("the captured link has no /OUT option")
     if record.get("pdb") and not preserve_pdb:
         option(arguments, "/PDB:", str(output.with_suffix(".pdb")))
-    if map_path:
+    if map_path and not option(arguments, "/lldmap:", str(map_path)):
         arguments.append(f"/lldmap:{map_path}")
     if order_file:
         arguments.append(f"/order:@{order_file}")
@@ -142,10 +142,12 @@ def capture(arguments):
             saved.append(argument)
     if not output or (root / "link.json").exists():
         raise RuntimeError("expected exactly one final executable link")
+    if not option(saved, "/lldmap:", str(root / "baseline.map")):
+        saved.append(f"/lldmap:{root / 'baseline.map'}")
     record = {"arguments": saved, "cwd": os.getcwd(), "compiler": linker,
               "output": output, "pdb": pdb, "inputs": inputs, "path": os.environ["PATH"]}
     (root / "link.json").write_text(json.dumps(record, indent=2) + "\n")
-    subprocess.run([*linker, *arguments], check=True)
+    relink(record, Path(output), preserve_pdb=True)
 
 
 def ordered_link(record, output, order_file, map_path):
@@ -288,6 +290,7 @@ def main():
         output.mkdir(parents=True)
         baseline = output / "baseline.exe"
         baseline_map = output / "baseline.map"
+        shutil.copyfile(work / "baseline.map", baseline_map)
         cargo = Path(record["output"])
         backup = work / "cargo.exe"
         backup_pdb = work / "cargo.pdb"
@@ -297,9 +300,12 @@ def main():
         if had_pdb:
             shutil.copyfile(pdb, backup_pdb)
         try:
-            relink(record, cargo, map_path=baseline_map, preserve_pdb=True)
-            if digest(cargo) != digest(backup):
-                raise RuntimeError("captured inputs did not reproduce Cargo's executable")
+            relink(record, cargo, preserve_pdb=True)
+            original_hash, replay_hash = digest(backup), digest(cargo)
+            if replay_hash != original_hash:
+                raise RuntimeError(
+                    "captured inputs did not reproduce Cargo's executable: "
+                    f"original={original_hash}, replay={replay_hash}")
             shutil.copyfile(cargo, baseline)
         finally:
             shutil.copyfile(backup, cargo)

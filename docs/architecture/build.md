@@ -144,13 +144,17 @@ an opt-in artifact linked by `lld-link`, and the release workflow is unchanged.
 is rejected.
 
 The captured link line may contain response files. They are expanded, input
-object and library files are copied, and each replay is written to a fresh
-response file. The captured final link adds `/Brepro` when it is absent so
-Cargo's `lld-link` output and every replay share deterministic timestamp and
-PDB metadata; this changes linker metadata only, not code layout. The baseline
-relink is produced at Cargo's original output path so an embedded PDB path stays
-identical, then Cargo's executable and PDB are restored. The lld map is written
-during that relink and must not change the binary.
+object and library files are copied, and Cargo's final link and each replay use
+those saved paths through a response file. The capture adds `/Brepro` when it is
+absent and includes the same `/lldmap` argument from the first link. Input paths
+and [linker arguments](https://github.com/llvm/llvm-project/blob/main/lld/COFF/PDB.cpp)
+contribute to PDB identity even when release Rust code has no debug information,
+so adding the map only during replay would change the PE
+metadata. The baseline relink uses the same output, PDB and map paths and must
+reproduce the executable byte for byte; then Cargo's executable and PDB are
+restored. The map is copied to the artifact directory after the original link.
+The native fixture checks this replay with CodeView debug information and a PDB,
+after removing the original object to verify that the saved inputs suffice.
 
 The trainer launches the App Server suspended and empties its working set at
 entry before resuming. The ConPTY-backed TUI is created running and trimmed
