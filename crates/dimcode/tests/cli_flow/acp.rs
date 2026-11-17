@@ -2725,7 +2725,8 @@ fn lody_projection(version: u32) {
 fn acp_stdio_sends_context_compaction_as_the_protocol_entity_only_when_declared() {
     for declared in [true, false] {
         let home = Home::new();
-        let daemon = home.daemon(|wire| {
+        let cwd = home.0.clone();
+        let daemon = home.daemon(move |wire| {
             wire.hello(METHODS);
             wire.created();
             let attach = wire.read("session.attach");
@@ -2755,7 +2756,27 @@ fn acp_stdio_sends_context_compaction_as_the_protocol_entity_only_when_declared(
             fact(wire, event(11, "consumed", "input", "consumed", json!({"input_id":"input"})));
             fact(wire, event(12, "compacting", "context", "compaction-start", json!({"turn_id":"turn","through":11,"trigger":"manual","strategy":"summary"})));
             fact(wire, event(13, "compacted", "context", "compaction", json!({"turn_id":"turn","through":11,"start":12,"status":"failed","error":"summary unavailable"})));
-            fact(wire, event(14, "end", "turn", "end", json!({"turn_id":"turn","status":"completed","reason":"end_turn"})));
+            fact(wire, event(20, "cancel-start", "context", "compaction-start", json!({"turn_id":"turn","through":11,"trigger":"manual","strategy":"summary"})));
+            fact(wire, event(21, "cancelled", "context", "compaction", json!({"turn_id":"turn","through":11,"start":20,"status":"cancelled","reason":"Stopped by user"})));
+            fact(wire, event(30, "skip-start", "context", "compaction-start", json!({"turn_id":"turn","through":11,"trigger":"threshold","strategy":"summary"})));
+            fact(wire, event(31, "skipped", "context", "compaction", json!({"turn_id":"turn","through":11,"start":30,"status":"skipped","reason":"insufficient history","diagnostics":{"reason":"manual","trigger":"manual","estimatedInputTokens":0.0,"entriesReplaced":0,"modelCallCount":0,"durationMs":0,"strategy":{"kind":"summary"}}})));
+            fact(wire, event(40, "summary-start", "context", "compaction-start", json!({"turn_id":"turn","through":11,"trigger":"manual","strategy":"summary"})));
+            fact(wire, event(41, "display", "display", "compaction", json!({"start":40,"strategy":"summary"})));
+            fact(wire, event(50, "end", "turn", "end", json!({"turn_id":"turn","status":"completed","reason":"end_turn"})));
+            if declared {
+                let attach = wire.read("session.attach");
+                assert_eq!(attach["params"]["expectedCwd"], json!(cwd));
+                wire.reply(&attach, json!({}));
+                let history = wire.read("session.history");
+                wire.reply(
+                    &history,
+                    json!({"events":[
+                        event(60,"replayed-start","context","compaction-start",json!({"through":11,"trigger":"manual","strategy":"summary"})),
+                        event(70,"replayed-display","display","compaction",json!({"start":71,"strategy":"summary"}))
+                    ],"through":71,"nextAfter":71,"done":true}),
+                );
+                fact(wire, event(72, "live-terminal", "context", "compaction", json!({"through":11,"start":60,"status":"cancelled","reason":"Stopped by user"})));
+            }
             detached_eof(wire);
         });
         let mut peer = Peer::start(&home);
@@ -2787,26 +2808,73 @@ fn acp_stdio_sends_context_compaction_as_the_protocol_entity_only_when_declared(
                     || update["_meta"]["lody"]["activity"]["kind"] == "context_compaction"
             })
             .collect();
-        let id = json!(["compaction", 12]).to_string();
+        let id = |start: u64| json!(["compaction", start]).to_string();
         if declared {
+            let entity = |update: &&Value| {
+                (
+                    update["sessionUpdate"].clone(),
+                    update["compactionId"].clone(),
+                    update["status"].clone(),
+                )
+            };
             assert_eq!(
-                compactions
-                    .iter()
-                    .map(|update| (
-                        update["sessionUpdate"].clone(),
-                        update["compactionId"].clone(),
-                        update["status"].clone(),
-                    ))
-                    .collect::<Vec<_>>(),
+                compactions.iter().map(entity).collect::<Vec<_>>(),
                 vec![
-                    (json!("compaction_update"), json!(id), json!("in_progress")),
-                    (json!("compaction_update"), json!(id), json!("failed")),
+                    (
+                        json!("compaction_update"),
+                        json!(id(12)),
+                        json!("in_progress")
+                    ),
+                    (json!("compaction_update"), json!(id(12)), json!("failed")),
+                    (
+                        json!("compaction_update"),
+                        json!(id(20)),
+                        json!("in_progress")
+                    ),
+                    (
+                        json!("compaction_update"),
+                        json!(id(20)),
+                        json!("cancelled")
+                    ),
+                    (
+                        json!("compaction_update"),
+                        json!(id(30)),
+                        json!("in_progress")
+                    ),
+                    (
+                        json!("compaction_update"),
+                        json!(id(30)),
+                        json!("completed")
+                    ),
+                    (
+                        json!("compaction_update"),
+                        json!(id(40)),
+                        json!("in_progress")
+                    ),
+                    (
+                        json!("compaction_update"),
+                        json!(id(40)),
+                        json!("completed")
+                    ),
                 ],
-                "the pair names one compaction entity: {compactions:?}"
+                "each compaction is one entity under its own start: {compactions:?}"
             );
             assert_eq!(
                 compactions[1]["error"], "summary unavailable",
-                "the protocol's own error field carries the reason"
+                "the protocol's own error field carries the failure"
+            );
+            assert_eq!(
+                compactions[3]["error"], "Cancelled: Stopped by user",
+                "a cancellation keeps its own status and its real reason"
+            );
+            assert!(
+                compactions[5].get("error").is_none(),
+                "a skipped compaction ends as completed and states no error: {:?}",
+                compactions[5]
+            );
+            assert_eq!(
+                compactions[7]["status"], "completed",
+                "the display summary closes the compaction its start opened"
             );
             assert!(
                 !peer
@@ -2815,15 +2883,62 @@ fn acp_stdio_sends_context_compaction_as_the_protocol_entity_only_when_declared(
                     .any(|frame| frame["params"]["update"]["title"] == "Context compaction"),
                 "a client that asked for the entity gets no compaction tool call"
             );
+
+            // A loaded session replays the compaction it kept, and a terminal
+            // fact that arrives after the replay patches that same entity.
+            peer.updates.clear();
+            peer.send(
+                4,
+                "session/load",
+                json!({"sessionId":"session","cwd":home.0,"mcpServers":[]}),
+            );
+            let loaded = peer.response(4);
+            assert!(loaded.get("error").is_none(), "{loaded}");
+            let replayed: Vec<_> = peer
+                .updates
+                .iter()
+                .map(|frame| &frame["params"]["update"])
+                .filter(|update| update["sessionUpdate"] == "compaction_update")
+                .collect();
+            assert_eq!(
+                replayed
+                    .iter()
+                    .map(|update| (update["compactionId"].clone(), update["status"].clone(),))
+                    .collect::<Vec<_>>(),
+                vec![
+                    (json!(id(60)), json!("in_progress")),
+                    (json!(id(71)), json!("completed")),
+                ],
+                "a loaded session replays the compaction it kept: {replayed:?}"
+            );
+            let live = peer.frame()["params"]["update"].clone();
+            assert_eq!(
+                (
+                    live["sessionUpdate"].clone(),
+                    live["compactionId"].clone(),
+                    live["status"].clone(),
+                ),
+                (
+                    json!("compaction_update"),
+                    json!(id(60)),
+                    json!("cancelled"),
+                ),
+                "a terminal fact after the replay patches the replayed start's entity: {live}"
+            );
+            assert_eq!(
+                live["error"], "Cancelled: Stopped by user",
+                "the live terminal keeps its reason"
+            );
         } else {
             assert_eq!(
                 compactions
                     .iter()
+                    .filter(|update| update["toolCallId"] == json!(id(12)))
                     .map(|update| (update["toolCallId"].clone(), update["status"].clone(),))
                     .collect::<Vec<_>>(),
                 vec![
-                    (json!(id), json!("in_progress")),
-                    (json!(id), json!("failed")),
+                    (json!(id(12)), json!("in_progress")),
+                    (json!(id(12)), json!("failed")),
                 ],
                 "without the capability the compaction stays the tool call it was"
             );
