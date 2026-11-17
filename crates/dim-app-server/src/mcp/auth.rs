@@ -202,6 +202,8 @@ impl Default for KeyState {
 pub struct McpAuth {
     store: Store,
     http: tokio::sync::OnceCell<reqwest_mcp::Client>,
+    #[cfg(feature = "testing")]
+    fail_http_build: std::sync::atomic::AtomicBool,
     keys: Mutex<HashMap<CredentialKey, KeyState>>,
     /// Each key's attempts. This lock orders attempt state (design §7):
     /// every change to it holds the lock, and an exchange holds it from its
@@ -222,6 +224,8 @@ impl McpAuth {
         Ok(Arc::new(Self {
             store: Store::new(files, root)?,
             http: tokio::sync::OnceCell::new(),
+            #[cfg(feature = "testing")]
+            fail_http_build: std::sync::atomic::AtomicBool::new(false),
             keys: Mutex::default(),
             attempts: tokio::sync::Mutex::default(),
             stopping: CancellationToken::new(),
@@ -231,7 +235,25 @@ impl McpAuth {
     }
 
     async fn http(&self) -> Result<&reqwest_mcp::Client, McpAuthError> {
-        self.http.get_or_try_init(|| async { oauth::http() }).await
+        self.http
+            .get_or_try_init(|| async {
+                #[cfg(feature = "testing")]
+                if self
+                    .fail_http_build
+                    .swap(false, std::sync::atomic::Ordering::SeqCst)
+                {
+                    return Err(McpAuthError::Unavailable);
+                }
+                oauth::http()
+            })
+            .await
+    }
+
+    /// Feature `testing` only: fail the next OAuth HTTP client initialization.
+    #[cfg(feature = "testing")]
+    pub fn fail_next_oauth_client_build(&self) {
+        self.fail_http_build
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Feature `testing` only: whether an OAuth request has built the client.
@@ -358,12 +380,11 @@ impl McpAuth {
                 previous: previous.as_ref(),
                 missing_scopes: &missing_scopes,
             };
-            let http = self.http().await?;
             let authorization = tokio::select! {
                 biased;
                 _ = self.stopping.cancelled() => return Err(McpAuthError::Closed),
                 _ = cancel.cancelled() => return Err(McpAuthError::Cancelled),
-                result = oauth::authorize(http, request) => result?,
+                result = async { oauth::authorize(self.http().await?, request).await } => result?,
             };
             let id = Uuid::new_v4();
             let expires_at = oauth::now() + ATTEMPT_MS;

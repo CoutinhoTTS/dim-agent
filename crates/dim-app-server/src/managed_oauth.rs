@@ -233,6 +233,8 @@ pub struct Service {
     state_key: &'static str,
     config: Config,
     client: OnceCell<Client>,
+    #[cfg(feature = "testing")]
+    fail_client_build: std::sync::atomic::AtomicBool,
     stopping: CancellationToken,
     attempts: Mutex<HashMap<Uuid, Attempt>>,
     tasks: TaskTracker,
@@ -367,6 +369,8 @@ impl Service {
             state_key,
             config,
             client: OnceCell::new(),
+            #[cfg(feature = "testing")]
+            fail_client_build: std::sync::atomic::AtomicBool::new(false),
             stopping: CancellationToken::new(),
             attempts: Mutex::new(HashMap::new()),
             tasks: TaskTracker::new(),
@@ -376,6 +380,13 @@ impl Service {
     async fn client(&self) -> Result<&Client> {
         self.client
             .get_or_try_init(|| async {
+                #[cfg(feature = "testing")]
+                if self
+                    .fail_client_build
+                    .swap(false, std::sync::atomic::Ordering::SeqCst)
+                {
+                    return Err(OAuthError::Transient(None));
+                }
                 Client::builder()
                     .timeout(Duration::from_secs(15))
                     .redirect(reqwest::redirect::Policy::none())
@@ -388,6 +399,12 @@ impl Service {
     #[cfg(feature = "testing")]
     pub(crate) fn client_initialized(&self) -> bool {
         self.client.initialized()
+    }
+    /// Feature `testing` only: fail the next HTTP client initialization.
+    #[cfg(feature = "testing")]
+    pub(crate) fn fail_next_client_build(&self) {
+        self.fail_client_build
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
     fn now() -> u64 {
         SystemTime::now()

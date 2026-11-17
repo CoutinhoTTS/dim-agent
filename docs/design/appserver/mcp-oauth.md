@@ -186,7 +186,8 @@ server, not by Mcp's assembly: a process whose MCP entries never sign in or refr
 OAuth HTTP client. Concurrent first operations share that one build. If building the client
 fails, the operation reports `mcp_auth_unavailable` like a network failure; assembly still
 succeeds, so unrelated MCP entries keep working. Only a successful build is retained; a later
-operation retries a failed build.
+operation retries a failed build. Discovery observes cancellation and owner shutdown before
+starting client initialization.
 
 ### 5.2 Discovery rules
 

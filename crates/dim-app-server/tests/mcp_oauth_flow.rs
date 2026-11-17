@@ -760,6 +760,34 @@ async fn sign_in_connects_refreshes_once_per_key_and_signs_out() {
         json!({"status":"required"})
     );
 
+    auth.fail_next_oauth_client_build();
+    let cancelled = CancellationToken::new();
+    cancelled.cancel();
+    let methods = daemon
+        .server
+        .service::<dim_app_server::methods::ManagementMethods>()
+        .unwrap();
+    let accepted = methods
+        .provider("mcp.auth.start")
+        .unwrap()
+        .accept(
+            "mcp.auth.start".into(),
+            user("docs"),
+            None,
+            cancelled,
+            |_| {},
+        )
+        .unwrap();
+    let error = accepted.reply.await.unwrap().unwrap_err();
+    assert_eq!(error.data.unwrap().app_error, "operation_interrupted");
+    let _ = accepted.settled.await;
+    assert!(!auth.oauth_client_initialized());
+    assert_eq!(
+        client.error("mcp.auth.start", user("docs")).await,
+        "mcp_auth_unavailable"
+    );
+    assert!(!auth.oauth_client_initialized());
+    assert!(authority.registrations.lock().unwrap().is_empty());
     let started = client.ok("mcp.auth.start", user("docs")).await;
     assert!(
         auth.oauth_client_initialized(),

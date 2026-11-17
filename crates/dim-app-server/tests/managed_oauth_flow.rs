@@ -848,6 +848,20 @@ async fn grok_device_flow_observes_slowdown_expiry_cancellation_and_uri_trust() 
         !grok.http_client_initialized(),
         "reading account state built an HTTP client"
     );
+    grok.fail_next_http_client_build();
+    let cancelled = CancellationToken::new();
+    cancelled.cancel();
+    assert!(matches!(
+        grok.begin_device(&cancelled).await,
+        Err(OAuthError::Closed)
+    ));
+    assert!(!grok.http_client_initialized());
+    assert!(matches!(
+        grok.begin_device(&cancel).await,
+        Err(OAuthError::Transient(None))
+    ));
+    assert!(!grok.http_client_initialized());
+    assert_eq!(f.device_requests.load(Ordering::SeqCst), 0);
     let started = std::time::Instant::now();
     let begin = grok.begin_device(&cancel).await.unwrap();
     assert!(
