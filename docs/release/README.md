@@ -144,12 +144,15 @@ The platform-independent `changes` and `ci-ok` jobs can run on any eligible self
 
 ## GitHub workflows
 
-`code-layout.yml` runs the Linux native-artifact test on hosted Ubuntu for changes
-to the layout tool, its test/workflow, `rust-toolchain.toml` or `.node-version`,
-and on manual dispatch. It checks real native linking, Rust fat-LTO capture and
-replay, function ordering and executable behavior. It does not build or publish
-release packages; the opt-in command is documented in the
-[build environment](../architecture/build.md#native-linux-executable-layout).
+`code-layout.yml` runs on changes to the layout tool, its tests/workflow,
+`rust-toolchain.toml` or `.node-version`, and on manual dispatch. Hosted Ubuntu,
+macOS arm64/x86-64 and Windows x86-64/ARM64 runners each run the native fixture
+test. The same matrix also builds, trains and validates a real `dimcode` with
+the release LTO choice (thin for macOS ARM64, fat otherwise): Cargo capture and
+replay, native page-residency or working-set sampling, function ordering,
+uninstrumented acceptance and alternating measurements. It does not build or
+publish release packages; the opt-in command is documented in the
+[build environment](../architecture/build.md#native-executable-layout).
 
 `ci.yml` runs on pull requests, pushes to `main`, and manual dispatch. A pull request runs the groups its changed paths need, as decided by `scripts/ci-changes.mjs`. A push to `main` runs only `changes` and `ci-ok` when its entire push range changes only documentation paths that select no check group. Architecture pages checked by `xtask` and the native storage format document retain the full main run, as do mixed pushes and pushes whose base cannot be compared. Manual dispatch selects every group. A documentation-only run leaves in-progress main build and test jobs running.
 

@@ -13,37 +13,55 @@ A normal Cargo installation is sufficient; compiler caching is optional. Each wo
 
 The release profile uses full LTO (`lto = "fat"`) with one codegen unit to reduce binary size. Hosted release builds use two Cargo jobs. The macOS ARM64 release job overrides LTO to `thin` on its 7 GB runner; full LTO requires a release build and runtime smoke test within that runner's memory budget before enabling it there. The other release targets retain full LTO. [The resource investigation](https://github.com/arcships/dim/issues/1674) tracks measurements and build costs. Code residency depends on executable layout and file-cache mapping conditions as well as code size. Normal PR tests use the dev profile, so release builds and runtime smoke tests on each supported platform must validate this setting.
 
-## Native Linux executable layout
+## Native executable layout
 
-On Linux x86-64 with 4 KiB pages, the opt-in layout build groups functions used by
-startup, shutdown, the TUI model picker and a local tool conversation. It reduces
-the number of unrelated code pages mapped alongside those functions. It does not
-change business logic, introduce a runtime cache or change the allocator.
+The opt-in layout build groups functions used by startup, shutdown, the TUI
+model picker and a local tool conversation, reducing the number of unrelated
+code pages mapped alongside them. It does not change business logic, introduce
+a runtime cache or change the allocator. Each platform is validated on native
+hardware and rejects cross compilation:
+
+| Host | Target | Page size | Release LTO |
+| --- | --- | --- | --- |
+| Linux x86-64 | `x86_64-unknown-linux-gnu` | 4 KiB | fat |
+| macOS arm64 | `aarch64-apple-darwin` | 16 KiB | thin on the release runner |
+| macOS x86-64 | `x86_64-apple-darwin` | 4 KiB | fat |
+| Windows x86-64 | `x86_64-pc-windows-msvc` | 4 KiB | fat |
+| Windows arm64 | `aarch64-pc-windows-msvc` | 4 KiB | fat |
+
+The command builds `dimcode` with the repository's release profile and
+preserves the build environment, including account build settings and the
+`CARGO_PROFILE_RELEASE_LTO` selection used by the release workflow. The output
+directory must be new. A failed build never produces its final executable.
+The release packaging workflow remains unchanged; this is opt-in build support.
 
 ```sh
 python3 scripts/code-layout/build.py --output /tmp/dim-layout-build --jobs 2
 /tmp/dim-layout-build/dimcode --version
 ```
 
-The output directory must be new. Python 3.9 or later, `cc`, the pinned Rust
-toolchain's LLD and readable `/proc/<child>/smaps` / writable `clear_refs` are
-required. The tool selects that LLD explicitly for Cargo's original executable
-link; every replay retains the captured linker selection. A missing toolchain
-linker fails before the product build. The tool builds `dimcode` with the
-repository's release profile and
-preserves the build environment, including account build settings. An optional
-`--target x86_64-unknown-linux-gnu` selects Cargo's explicit native target path.
-Other targets and cross compilation are not supported by this command.
+Training uses disposable homes and workspaces and a loopback model fixture. It
+runs the real App Server ready/shutdown path, opens and closes the TUI model
+picker three times and executes the real `read` tool. It does not use the
+product home, credentials or remote providers. Fingerprints are regenerated for
+every build; no order file, profile or runtime cache is committed.
+
+### Linux
+
+Python 3.9 or later, `cc`, the pinned Rust toolchain's LLD and readable
+`/proc/<child>/smaps` / writable `clear_refs` are required. The tool selects
+that LLD explicitly for Cargo's original executable link; every replay retains
+the captured linker selection. A missing toolchain linker fails before the
+product build. An optional `--target x86_64-unknown-linux-gnu` selects Cargo's
+explicit native target path.
 
 The build captures the final native linker inputs, reproduces Cargo's binary
 byte for byte, and trains only that binary. A temporary preload probe prefaults
 its executable pages, separates their mappings, clears reference bits and resets
 code-page permissions to invalidate cached translations before `main`, and reads
-the App Server's referenced pages after normal shutdown. The TUI
-opens and closes its model picker three times, is sampled before its explicit
-exit, and must then exit successfully. The conversation uses a loopback model fixture and
-executes the real `read` tool in a disposable workspace. Training does not use
-the user's product home, credentials or remote providers.
+the App Server's referenced pages after normal shutdown. The TUI opens and
+closes its model picker three times, is sampled before its explicit exit, and
+must then exit successfully.
 
 Whole functions intersecting referenced pages are grouped by shared usage:
 startup/shared functions first, then TUI, then conversation-only functions;
@@ -51,33 +69,115 @@ original address order is retained within each group. Functions not selected
 retain the linker's default ordering. A diagnostic link identifies names LLD
 resolves to shared or discarded definitions, including duplicate C-local names.
 Only reported names are removed from the order; a strict relink runs when any
-were removed. Any other diagnostic fails the build. This is page-access profiling,
-including neighboring functions on each page, rather than an instruction trace
-or a call-count profile.
+were removed. Any other diagnostic fails the build. This is page-access
+profiling, including neighboring functions on each page, rather than an
+instruction trace or a call-count profile.
 
 The same native objects are relinked with LLD's `--symbol-ordering-file`. The
 function-name/size multiset must remain equal. Selected function addresses must
 follow the final order, treating symbols at the same address as aliases, and at
 least one selected address must move. An unchanged or unordered candidate fails
 before publication; movement alone does not establish an RSS or CPU gain.
-The candidate then runs all three flows without the probe, plus CLI help/version
-checks. Only after they pass does
-the command produce `dimcode`. Cargo's original executable remains unchanged.
-`baseline`, `symbols.order`, three footprint files and `manifest.json` record the
-comparison inputs, source state, Rust version and artifact hashes. The probe and
-temporary homes are removed on completion or failure. Failed builds may leave
-diagnostic files in the output directory but never produce its final `dimcode`.
 
-Scheduling can change which neighboring pages a training run observes, so the
-optimized artifact is not promised to be byte-identical across training runs.
-Each build regenerates its own function order; an order from another compiler,
-feature set or source revision is not reused. The command adds a training pass
-and two or three native links after Cargo. The current release workflow remains unchanged:
-enabling this in packaging requires validation in the existing manylinux 2.28
-build environment. The tool does not raise the shipped executable's libc baseline.
-Normal Cargo builds and macOS, Windows and Linux ARM64 packaging are unchanged.
-[The code-residency issue](https://github.com/arcships/dim/issues/1674) tracks
-source-specific measurements and release integration.
+The current release workflow remains unchanged. Enabling this in Linux
+packaging requires validation in the existing manylinux 2.28 build environment;
+the tool does not raise the shipped executable's libc baseline. The candidate
+then runs all three flows without the probe, plus CLI help/version checks. Only
+after they pass does the command produce `dimcode`.
+
+### macOS
+
+macOS requires the Xcode command-line tools, Python 3.9 or later and a native
+arm64 or x86-64 host. `--target` may name the host architecture explicitly; a
+different architecture is rejected. The layout build uses the linker selected
+by `cc` (ld64) and does not change code signing or hardening of the Cargo
+output. The optimized candidate is an unsigned opt-in artifact, not a release
+artifact.
+
+Capture and replay use the same final linker inputs. A relink must reproduce
+Cargo's executable byte for byte before any training. The diagnostic link also
+writes an ld64 map; requiring that adding the map leaves the binary unchanged
+keeps the symbol source tied to the exact baseline. ld64's map records exact
+atom sizes, so function-name/size parity is checked directly.
+
+The training probe is a temporary dylib loaded with `DYLD_INSERT_LIBRARIES`.
+Its constructor remaps the page-aligned `__TEXT,__text` range from the same
+image file, which resets resident pages to the state at the end of loading, and
+then removes the injection variables so child processes are unaffected. It
+reads `mincore` residency at normal exit and, for the TUI, on `SIGUSR1` before
+the explicit exit. This is page residency after a mapping reset, not an
+instruction or call-count trace; the page size is 4 KiB on x86-64 and 16 KiB on
+arm64.
+
+Functions whose pages were observed are ordered with ld64's `-order_file`.
+`-order_file_statistics` reports entries the linker cannot match; only those
+names are removed and the strict relink uses `-fatal_warnings`. Any other
+diagnostic fails the build. The candidate must keep the same atom name/size
+multiset, the same function-start count and the selected addresses in the final
+order, and at least one selected address must move. Reordering can move
+alignment padding between functions, so the total `__text` size is recorded but
+is not treated as an invariant.
+
+The release workflow uses thin LTO for `darwin-arm64` on its 7 GB runner and fat
+LTO for `darwin-x64`. The layout command preserves that environment selection;
+it does not override the release LTO policy.
+
+### Windows
+
+Windows requires `lld-link.exe` from LLVM and a native x86-64 or ARM64 host.
+The command uses that linker for Cargo's original executable and every replay.
+Normal release builds still use the MSVC `link.exe`; the optimized candidate is
+an opt-in artifact linked by `lld-link`, and the release workflow is unchanged.
+`--target` may name the host architecture explicitly; a different architecture
+is rejected.
+
+The captured link line may contain response files. They are expanded, input
+object and library files are copied, and each replay is written to a fresh
+response file. The baseline relink is produced at Cargo's original output path
+so an embedded PDB path stays identical, then Cargo's executable and PDB are
+restored. The lld map is written during that relink and must not change the
+binary.
+
+The trainer launches the App Server and the ConPTY-backed TUI suspended,
+empties the process working set at entry, then resumes it. Before exit or
+shutdown it queries the executable's `.text` working-set pages with
+`QueryWorkingSetEx`. This is genuine working-set residency after an entry-time
+trim, not a reference-bit trace: the operating system may prefetch neighboring
+pages and the result includes page-granularity rounding. App Server shutdown
+uses the public `daemon.shutdown` RPC with `force`; the TUI exits through
+`/exit`. Both must exit with status 0.
+
+The order file is passed to `lld-link` as `/order:@file`. The diagnostic link
+reports unmatched names as `missing symbol ... [LNK4037]`; only those names are
+removed, then `/WX` makes the strict relink fail on any remaining warning. The
+`/lldmap` output records all `.text` symbols, including static ones. Parity uses
+the COMDAT body size when a chunk has exactly one symbol; a chunk holding
+several symbols (for example an alias or folded body) is compared by name only
+and recorded as ambiguous. Selected addresses must follow the final order and
+at least one must move.
+
+Both current Windows release targets use fat LTO. The layout command preserves
+`CARGO_PROFILE_RELEASE_LTO` and never enables thin LTO implicitly.
+
+### Measurements and artifacts
+
+After acceptance, the command alternates uninstrumented baseline and candidate
+samples from fresh disposable homes. It records wall time to App Server
+readiness, startup CPU, total resident memory, code-page residency and the wall
+time of a local-fixture tool conversation. On macOS, code pages come from the
+training probe's `mincore` sample at ready plus 100 ms and total resident memory
+from `ps`; on Windows they come from `QueryWorkingSetEx` and
+`GetProcessMemoryInfo`, with working set, private usage and pagefile usage kept
+distinct. These are OS-specific metrics and are never summed across platforms
+or treated as interchangeable with Linux `/proc` numbers.
+
+`baseline`, `symbols.order`, the linker maps, native page samples and
+`manifest.json` record the comparison inputs, source state, Rust version,
+artifact hashes, training counts and alternating measurement samples. The probe
+and temporary homes are removed on completion or failure. Scheduling can change
+which neighboring pages a training run observes, so the optimized artifact is
+not promised to be byte-identical across training runs; each build regenerates
+its own order.
 
 ## Development and CI
 

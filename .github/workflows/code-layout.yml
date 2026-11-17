@@ -1,10 +1,10 @@
-name: Linux code layout
+name: Native code layout
 
 on:
   pull_request:
     paths:
       - scripts/code-layout/**
-      - scripts/code-layout.test.mjs
+      - scripts/code-layout*.test.mjs
       - .github/workflows/code-layout.yml
       - rust-toolchain.toml
       - .node-version
@@ -14,7 +14,7 @@ permissions:
   contents: read
 
 jobs:
-  native-artifact:
+  linux-artifact:
     runs-on: ubuntu-22.04
     timeout-minutes: 10
     steps:
@@ -27,3 +27,130 @@ jobs:
           package-manager-cache: false
       - run: rustup show
       - run: node --test scripts/code-layout.test.mjs
+
+  platform-artifact:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: darwin-arm64
+            runner: macos-15
+            test: scripts/code-layout-darwin.test.mjs
+          - platform: darwin-x64
+            runner: macos-15-intel
+            test: scripts/code-layout-darwin.test.mjs
+          - platform: windows-x64
+            runner: windows-2022
+            test: scripts/code-layout-windows.test.mjs
+          - platform: windows-arm64
+            runner: windows-11-arm
+            test: scripts/code-layout-windows.test.mjs
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    env:
+      CARGO_INCREMENTAL: "0"
+      RUSTC_WRAPPER: ""
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version-file: .node-version
+          architecture: ${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}
+          package-manager-cache: false
+      - name: Configure Windows C/C++ toolchain
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+        with:
+          arch: ${{ runner.arch == 'ARM64' && 'arm64' || 'amd64' }}
+      - name: Locate lld-link
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $linker = Get-Command lld-link -ErrorAction SilentlyContinue
+          if (!$linker) {
+            $linker = Get-ChildItem -Recurse -Filter lld-link.exe -ErrorAction SilentlyContinue `
+              -Path "$env:ProgramFiles\LLVM\bin", "$env:ProgramFiles\Microsoft Visual Studio\2022\*\VC\Tools\Llvm\*\bin" |
+              Select-Object -First 1
+          }
+          if (!$linker) { throw 'lld-link.exe is required for the Windows layout build' }
+          $path = if ($linker -is [System.Management.Automation.ApplicationInfo]) { $linker.Source } else { $linker.FullName }
+          Split-Path $path >> $env:GITHUB_PATH
+          Write-Output "Using $path"
+      - run: rustup show
+      - run: node --test ${{ matrix.test }}
+
+  native-layout:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: darwin-arm64
+            runner: macos-15
+            target: aarch64-apple-darwin
+          - platform: darwin-x64
+            runner: macos-15-intel
+            target: x86_64-apple-darwin
+          - platform: windows-x64
+            runner: windows-2022
+            target: x86_64-pc-windows-msvc
+          - platform: windows-arm64
+            runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 240
+    env:
+      DIM_LAYOUT_PLATFORM: ${{ matrix.platform }}
+      CARGO_INCREMENTAL: "0"
+      CARGO_BUILD_JOBS: "2"
+      CARGO_PROFILE_RELEASE_LTO: ${{ matrix.platform == 'darwin-arm64' && 'thin' || 'fat' }}
+      RUSTC_WRAPPER: ""
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version-file: .node-version
+          architecture: ${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}
+          package-manager-cache: false
+      - name: Configure Windows C/C++ toolchain
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+        with:
+          arch: ${{ runner.arch == 'ARM64' && 'arm64' || 'amd64' }}
+      - name: Locate lld-link
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $linker = Get-Command lld-link -ErrorAction SilentlyContinue
+          if (!$linker) {
+            $linker = Get-ChildItem -Recurse -Filter lld-link.exe -ErrorAction SilentlyContinue `
+              -Path "$env:ProgramFiles\LLVM\bin", "$env:ProgramFiles\Microsoft Visual Studio\2022\*\VC\Tools\Llvm\*\bin" |
+              Select-Object -First 1
+          }
+          if (!$linker) { throw 'lld-link.exe is required for the Windows layout build' }
+          $path = if ($linker -is [System.Management.Automation.ApplicationInfo]) { $linker.Source } else { $linker.FullName }
+          Split-Path $path >> $env:GITHUB_PATH
+          Write-Output "Using $path"
+      - name: Build, train and validate the native executable
+        shell: bash
+        run: |
+          set -euo pipefail
+          python="python3"
+          if [[ "$RUNNER_OS" == Windows ]]; then python="python"; fi
+          output="$RUNNER_TEMP/dim-layout-$DIM_LAYOUT_PLATFORM"
+          "$python" scripts/code-layout/build.py --output "$output" --jobs 2
+          cat "$output/manifest.json"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: layout-${{ matrix.platform }}
+          path: |
+            ${{ runner.temp }}/dim-layout-${{ matrix.platform }}/manifest.json
+            ${{ runner.temp }}/dim-layout-${{ matrix.platform }}/symbols.order
+            ${{ runner.temp }}/dim-layout-${{ matrix.platform }}/*.pages
+          if-no-files-found: warn
+          retention-days: 1
+          overwrite: true
