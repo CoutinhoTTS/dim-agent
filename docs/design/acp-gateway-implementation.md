@@ -111,6 +111,9 @@ Zed 保持原有启动入口：npm 包的 `dim` 与 `dimcode` 别名指向同一
 
 模型选择通过 `provider.models.query` 的 `selectableOnly:true` 获取可用模型页，按 `next` 继续读取，组成 ACP 要求的完整选项列表；过滤条件由 Provider 拥有方执行。Provider 管理已有独立插件和公开读写接口，接线及尚未满足的 ACP 合同见 §4.5；首版不通过这些接口写入共享产品配置。账户认证只允许 §4.4 列出的 `account.providers/status` 和属于当前连接的 login attempt 调用；§4.7 的 `/usage` 额外允许当前模型 provider 的 `account.usage` 安全读取。不开放 `account.*` 代理、recover/logout、settings、持久 MCP 配置、插件管理或凭据接口。也不把 ACP 方法名直接转成原生 RPC 方法名。
 
+模型和 effort 配置选项需要 `provider.models.query` 与 `session.model.update`；
+仅提供 `provider.catalog` 不满足该功能的依赖。版本边界沿用 §2，不增加全目录查询回退。
+
 ## 4. 稳定 ACP v1 方法逐项映射
 
 原生参数和返回值以 [protocol.rs](../../crates/dim-app-server/src/protocol.rs)、[tree_protocol.rs](../../crates/dim-app-server/src/tree_protocol.rs) 及所属插件为准。下文保留两端各自的字段拼写，转换只发生在协议边界。

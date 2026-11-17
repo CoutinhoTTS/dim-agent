@@ -863,8 +863,6 @@ impl Worker {
                 let (provider, model) = (model.provider_id.clone(), model.model_id.clone());
                 params["model"] = json!({"provider": provider, "modelId": model});
                 target = Some((provider, model));
-            } else if self.model_session.is_some() {
-                return Err("This daemon cannot copy the adopted Session model. Restart the daemon with a version supporting session.create.modelFromSession, then rebind the temporary connection with DIM_BASE_URL and DIM_API_FORMAT".into());
             }
             match self.client.typed::<Created>("session.create", params).await {
                 Ok(created) => Ok(created),
@@ -5115,6 +5113,7 @@ pub(crate) async fn declare_model_limits(
                     "expectedVersion": version,
                     "modelId": model_id,
                     "edit": edit,
+                    "reply": "summary",
                 }),
             )
             .await

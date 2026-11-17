@@ -258,14 +258,10 @@ pub(super) fn provide(
                             )
                             .await
                             .map_err(error)?;
-                        let version = updated
-                            .info
-                            .version
-                            .ok_or_else(|| error(super::ProviderError::Failed))?;
                         match p.reply {
                             super::UpdateReplyKind::Full => reply(updated),
                             super::UpdateReplyKind::Summary => {
-                                reply(serde_json::json!({"version":version}))
+                                reply(serde_json::json!({"version":updated.info.version}))
                             }
                         }
                     }

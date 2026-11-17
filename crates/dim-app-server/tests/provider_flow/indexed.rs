@@ -642,6 +642,21 @@ async fn management_pages_keep_hidden_models_and_single_enablement_is_scoped() {
         .unwrap()
         .unwrap();
     assert_eq!(written, json!({"version":version + 1}));
+    let written = owner
+        .accept(
+            "provider.preferences.update".into(),
+            json!({"providerId":id,"expectedVersion":version + 1,"modelId":"model-002",
+                "patch":{"reasoningEffort":{"action":"clear"}},"reply":"summary"}),
+            None,
+            cancel.clone(),
+            |_| {},
+        )
+        .unwrap()
+        .reply
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(written, json!({"version":version + 2}));
     root.shutdown().await.unwrap();
 }
 

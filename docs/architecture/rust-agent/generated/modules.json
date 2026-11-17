@@ -31706,7 +31706,6 @@
         "path crate::provider::ProviderSelection",
         "path super::ProviderCatalog",
         "path super::ProviderError",
-        "path super::ProviderError::Failed",
         "path super::ProviderError::InvalidConfig",
         "use super::ProviderService"
       ]

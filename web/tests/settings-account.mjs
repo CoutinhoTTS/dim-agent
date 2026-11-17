@@ -353,7 +353,7 @@ test("provider overview follows pages on demand and opens only the selected deta
     requests.push({ method, params })
     if (method === "provider.management.list") return read({ drivers: [], errors: [], providers: [info(params.providerId ?? (params.after ? "second" : "first"))], next: params.providerId || params.after ? null : "first" })
     assert.equal(method, "provider.management")
-    assert.deepEqual(params, { providerId: "second" })
+    assert.deepEqual(params, { providerId: "second", page: { query: "", limit: 32 } })
     return read({ next: null, drivers: [], errors: [], providers: [{ ...info("second"), models: [], preferences: {} }] })
   } } }
   const root = node("root")
@@ -373,6 +373,9 @@ test("provider overview follows pages on demand and opens only the selected deta
     const modelsTab = all(root).find((element) => element.props.role === "tab" && text(element) === "models")
     await modelsTab.props.onClick(); await flush()
     assert.equal(requests.filter(({ method }) => method === "provider.management").length, 1)
+    assert.deepEqual(requests.at(-1).params, { providerId: "second", page: { query: "", limit: 32 } })
+    assert.doesNotMatch(text(root), /AssertionError/)
+    assert.ok(all(root).some((element) => element.props.class === "provider-models"))
   } finally {
     app.unmount()
     delete globalThis.settingsRoute
@@ -410,6 +413,63 @@ test("connection configuration reads and writes summaries without requesting mod
     assert.equal(requests.filter(({ method }) => method === "provider.update").length, 1)
     assert.equal(route.name, "settings-providers")
   } finally { app.unmount(); delete globalThis.settingsRoute; delete globalThis.settingsRouter; delete globalThis.settingsConnection }
+})
+
+test("model edits and creation keep the owner's active search results", async () => {
+  const requests = []
+  const provider = { providerId: "relay", displayName: "Relay", source: "custom", credentialAuthority: "static", enabled: true, version: 1, actions: ["models.create"], connection: null }
+  const entries = [{ model: { modelId: "first", displayName: "Needle", status: "active",
+    capabilities: { modalities: ["text"], toolCalling: true, streaming: true, structuredOutput: true, vision: false, audio: false, reasoning: false } },
+    source: "user", enabled: true, endpoint: null, unavailableReason: null, missingLimits: [], actions: ["edit"] }]
+  globalThis.settingsRoute = reactive({ name: "settings-provider-detail", params: { providerId: "relay" } })
+  globalThis.settingsConnection = { phase: "connected", client: { call: async (method, params, read) => {
+    requests.push({ method, params })
+    if (method === "provider.management.list") return read({ drivers: [], providers: [provider], errors: [], next: null })
+    if (method === "provider.models.edit" || method === "provider.models.create") {
+      assert.equal(params.reply, "summary")
+      if (method === "provider.models.edit") entries[0].model.displayName = params.edit.displayName
+      else entries.push({ ...entries[0], model: params.model })
+      provider.version++
+      return read({ version: provider.version })
+    }
+    assert.equal(method, "provider.management")
+    const query = (params.page?.query ?? "").toLowerCase()
+    const models = entries.filter(({ model }) => params.modelId ? model.modelId === params.modelId
+      : model.modelId.toLowerCase().includes(query) || model.displayName.toLowerCase().includes(query))
+    return read({ drivers: [], providers: [{ ...provider, models, preferences: {} }], errors: [], next: null })
+  } } }
+  const root = node("root")
+  const app = renderer.createApp(ProviderSettings).use(createPinia()).use(nuxtUiTestPlugin).provide(settingsDirtyKey, ref(false))
+  app.mount(root)
+  try {
+    await flush()
+    await all(root).find(element => element.props.role === "tab" && text(element) === "models").props.onClick()
+    await flush()
+    all(root).filter(element => element.props.type === "search").at(-1).props["onUpdate:modelValue"]("Needle")
+    await flush()
+    await all(root).find(element => element.type === "button" && text(element) === "edit").props.onClick()
+    await flush()
+    const fields = () => all(root).filter(element => element.type === "input" && element.props.required)
+    fields()[1].props["onUpdate:modelValue"]("Renamed")
+    await all(root).find(element => element.type === "form").props.onSubmit({ preventDefault() {} })
+    await flush()
+    const modelNames = () => all(root).filter(element => element.props.class === "provider-models")
+      .flatMap(element => all(element).filter(row => row.type === "strong").map(text))
+    assert.deepEqual(requests.at(-1), { method: "provider.management", params: { providerId: "relay", page: { query: "Needle", limit: 32 } } })
+    assert.deepEqual(modelNames(), [])
+    await all(root).find(element => element.type === "button" && text(element) === "addModel").props.onClick()
+    await flush()
+    fields()[0].props["onUpdate:modelValue"]("second")
+    fields()[1].props["onUpdate:modelValue"]("Unrelated")
+    await all(root).find(element => element.type === "form").props.onSubmit({ preventDefault() {} })
+    await flush()
+    assert.equal(requests.at(-2).method, "provider.models.create")
+    assert.deepEqual(requests.at(-1).params.page, { query: "Needle", limit: 32 })
+    assert.deepEqual(modelNames(), [])
+    all(root).filter(element => element.props.type === "search").at(-1).props["onUpdate:modelValue"]("")
+    await flush()
+    assert.deepEqual(modelNames(), ["Renamed", "Unrelated"])
+  } finally { app.unmount(); delete globalThis.settingsRoute; delete globalThis.settingsConnection }
 })
 
 test("a model search replaces a previous page cursor before load more can extend it", async () => {
@@ -470,5 +530,13 @@ test("a model search replaces a previous page cursor before load more can extend
     await flush()
     assert.deepEqual(requests.at(-1).params.page, { query: "delayed", limit: 32, after: "search-cursor" })
     assert.deepEqual(modelNames(), ["delayed", "delayed-next"])
+    await all(root).find((element) => element.props.role === "tab" && text(element) === "connection").props.onClick()
+    await flush()
+    await all(root).find((element) => element.props.role === "tab" && text(element) === "models").props.onClick()
+    await flush()
+    assert.deepEqual(requests.at(-1).params.page, { query: "", limit: 32 })
+    assert.deepEqual(modelNames(), ["first"])
+    const reopenedSearch = all(root).filter((element) => element.type === "input" && element.props.type === "search").at(-1)
+    assert.equal(reopenedSearch.props.value, "")
   } finally { app.unmount(); delete globalThis.settingsRoute; delete globalThis.settingsRouter; delete globalThis.settingsConnection }
 })

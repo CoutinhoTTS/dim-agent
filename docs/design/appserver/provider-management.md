@@ -1638,7 +1638,10 @@ The Web model editor requests its first page on opening, sends searches to the
 owner, and loads further pages on demand. A single-model write is followed by an
 exact `modelId` read and replaces that displayed row. Opening an existing model
 for editing also reads its current row, preferences and version together. Deletion removes only that
-row. A record-version conflict requires rereading before another write.
+row. With an active search, a write instead rereads the first bounded page of
+that query so the owner determines whether changed rows still match. Returning
+to the Models tab starts a new unfiltered first page, matching its empty search
+field. A record-version conflict requires rereading before another write.
 
 `provider.model.set_enabled` accepts `{providerId, expectedVersion, modelId,
 enabled}` and returns `{version}` through `managementMethods`. It checks the

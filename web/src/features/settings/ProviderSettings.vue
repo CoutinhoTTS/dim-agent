@@ -140,7 +140,11 @@ async function changeTab(next: string): Promise<void> {
   connectionDirty.value = false
   modelDirty.value = false
   tab.value = next
-  if (next === "models" && !modelDetail.value) await loadModelDetail()
+  if (next === "models") {
+    modelDetail.value = undefined
+    modelNext.value = null
+    await loadModelDetail(false, "")
+  }
 }
 async function reloadDetail(): Promise<void> {
   if (dirty.value && !await confirm.value?.open(t("discard"))) return

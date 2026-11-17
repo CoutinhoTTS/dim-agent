@@ -1407,11 +1407,9 @@ fn model_catalog_declares_limits_for_one_model() {
         assert_eq!(
             edit["params"],
             json!({"providerId":"fixture","expectedVersion":1,"modelId":"narrow",
-                "edit":{"contextWindow":64000,"maxOutputTokens":8000}})
+                "edit":{"contextWindow":64000,"maxOutputTokens":8000},"reply":"summary"})
         );
-        wire.reply(&edit, json!({"version":2,"disabledModelIds":[],"models":[
-            {"id":"narrow","name":"Narrow","unavailableReason":null,"missingLimits":[]}
-        ]}));
+        wire.reply(&edit, json!({"version":2}));
         let catalog = wire.read("provider.catalog");
         assert_eq!(catalog["params"], json!({"providerId":"fixture","modelId":"narrow"}));
         wire.reply(
@@ -1475,16 +1473,16 @@ fn model_catalog_declares_missing_limits_for_every_model() {
         assert_eq!(
             first["params"],
             json!({"providerId":"fixture","expectedVersion":1,"modelId":"narrow",
-                "edit":{"contextWindow":64000,"maxOutputTokens":8000}})
+                "edit":{"contextWindow":64000,"maxOutputTokens":8000},"reply":"summary"})
         );
-        wire.reply(&first, json!({"version":2,"disabledModelIds":[],"models":[]}));
+        wire.reply(&first, json!({"version":2}));
         let second = wire.read("provider.models.edit");
         assert_eq!(
             second["params"],
             json!({"providerId":"fixture","expectedVersion":2,"modelId":"wide",
-                "edit":{"maxOutputTokens":8000}})
+                "edit":{"maxOutputTokens":8000},"reply":"summary"})
         );
-        wire.reply(&second, json!({"version":3,"disabledModelIds":[],"models":[]}));
+        wire.reply(&second, json!({"version":3}));
         let catalog = wire.read("provider.catalog");
         wire.reply(
             &catalog,

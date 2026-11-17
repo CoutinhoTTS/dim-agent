@@ -136,6 +136,8 @@ test("model management searches on the server, loads more and rereads only a cha
   assert.deepEqual(loads[0], [false, "later-page"])
   all(root).find(n => n.type === "button" && text(n) === "loadMore").props.onClick()
   assert.deepEqual(loads[1], [true, "later-page"])
+  all(root).find(n => n.props.type === "search").props["onUpdate:modelValue"]("")
+  await flush()
   all(root).find(n => n.type === "input" && n.props["aria-label"] === "enabled visible").props["onUpdate:modelValue"](false)
   await flush()
   assert.deepEqual(calls, [

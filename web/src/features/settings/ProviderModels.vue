@@ -111,6 +111,10 @@ async function mutate(method: string, target: string, params: Record<string, unk
   const providerId = props.provider.providerId
   const reply = method === "provider.model.set_enabled" ? {} : { reply: "summary" }
   const ack = await connection.client.call(method, { providerId, expectedVersion: version, ...reply, ...params }, readModelWrite)
+  if (query.value) {
+    emit("load", false, query.value)
+    return ack.version
+  }
   let updated: ManagementProvider
   if (method === "provider.models.delete") {
     const preferences = { ...props.provider.preferences }

@@ -1587,29 +1587,55 @@ fn model_config_rejects_product_only_controls_before_starting_a_daemon() {
 }
 
 #[test]
-fn home_creation_inherits_adopted_models_without_provider_management() {
-    for (configured, management) in [(false, false), (false, true), (true, true)] {
+fn home_creation_uses_the_advertised_product_or_configured_model() {
+    use sha2::{Digest, Sha256};
+
+    for (inheritance, configured, management) in [
+        (true, false, false),
+        (true, false, true),
+        (true, true, true),
+        (false, true, false),
+    ] {
         let home = Home::new();
         let provider = if configured {
             "9f556780-8461-4cda-8108-22560729b8ba"
         } else {
             "temporary-source"
         };
+        let config = home.0.join("model.json");
+        let profile = if inheritance {
+            json!({"kind":"product"})
+        } else {
+            fs::write(&config, "{}").unwrap();
+            json!({"kind":"configured","modelConfigSha256":format!("{:x}", Sha256::digest(b"{}"))})
+        };
         let daemon = home.daemon(move |wire| {
-            wire.2=true;
+            wire.2 = true;
             let mut line = String::new();
             while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
                 let request: Value = serde_json::from_str(&line).unwrap();
                 line.clear();
-                if wire.2 && wire.empty_state(&request) { continue; }
+                if wire.2 && wire.empty_state(&request) {
+                    continue;
+                }
                 let result = match request["method"].as_str().unwrap() {
                     "hello" => {
-                        let mut features = vec!["session.create", "session.create.modelFromSession", "session.history", "session.history.latestTurn", "session.input.pending.blockPresence", "session.methods", "provider.list"];
+                        let mut features = vec![
+                            "session.create",
+                            "session.history",
+                            "session.history.latestTurn",
+                            "session.input.pending.blockPresence",
+                            "session.methods",
+                            "provider.list",
+                        ];
+                        if inheritance {
+                            features.push("session.create.modelFromSession");
+                        }
                         if management {
                             features.push("provider.management");
                         }
                         json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),
-                            "protocolVersion":4,"daemonProfile":{"kind":"product"},"features":features})
+                            "protocolVersion":4,"daemonProfile":profile,"features":features})
                     }
                     "session.attach" => {
                         let mut record = attach_record(&request);
@@ -1619,15 +1645,27 @@ fn home_creation_inherits_adopted_models_without_provider_management() {
                     "session.history" => json!({"events":[],"through":8,"nextAfter":8,"done":true}),
                     "session.idle" => json!({"sequence":8}),
                     "account.providers" => json!([]),
-                    "provider.management" => panic!("Session inheritance must not read Provider management"),
+                    "provider.management" => {
+                        panic!("Session inheritance must not read Provider management")
+                    }
                     "session.create" => {
-                        assert_eq!(request["params"]["modelFromSession"], "session");
-                        assert!(request["params"].get("model").is_none());
+                        if inheritance {
+                            assert_eq!(request["params"]["modelFromSession"], "session");
+                            assert!(request["params"].get("model").is_none());
+                        } else {
+                            assert_eq!(
+                                request["params"]["model"],
+                                json!({"provider":provider,"modelId":"model"})
+                            );
+                            assert!(request["params"].get("modelFromSession").is_none());
+                        }
                         assert!(request["params"].get("modelPreferences").is_none());
                         reject(wire, &request);
                         continue;
                     }
-                    "provider.select" | "provider.preferences.update" => panic!("Startup must not mutate shared preferences"),
+                    "provider.select" | "provider.preferences.update" => {
+                        panic!("Startup must not mutate shared preferences")
+                    }
                     _ => json!({}),
                 };
                 wire.reply(&request, result);
@@ -1635,6 +1673,9 @@ fn home_creation_inherits_adopted_models_without_provider_management() {
         });
         let mut command = command(&home);
         command.args(["--resume", "session"]);
+        if !inheritance {
+            command.args(["--model-config", config.to_str().unwrap()]);
+        }
         let mut terminal = Terminal::launch_tui(command);
         terminal.resize(160, 32);
         terminal.until(&format!("{provider} / model"));
