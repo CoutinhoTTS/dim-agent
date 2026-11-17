@@ -2,7 +2,9 @@
 //! or an anchor that is not a heading of it. A comment link resolves against
 //! the source file's own directory, so a file that moves leaves its inbound
 //! links broken: rustdoc resolves intra-doc item links only, and the checks
-//! under `docs/` do not read Rust sources.
+//! under `docs/` do not read Rust sources. Intra-doc item links are not checked
+//! here; they are rustdoc's (`rustdoc::broken_intra_doc_links`), which only
+//! `cargo doc` runs.
 use std::{
     collections::{BTreeMap, BTreeSet},
     error::Error,
