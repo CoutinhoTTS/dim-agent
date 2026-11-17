@@ -54,8 +54,9 @@ use workflow::WorkflowReads;
 const PUBLISH_INTERVAL: Duration = Duration::from_millis(16);
 const OUTPUT_INTERVAL: Duration = Duration::from_secs(1);
 /// The complete Provider editing interface, without legacy write fallbacks.
-const PROVIDER_METHODS: [&str; 4] = [
+const PROVIDER_METHODS: [&str; 5] = [
     "provider.management",
+    "provider.management.list",
     "provider.create",
     "provider.update",
     "provider.probe",
@@ -76,7 +77,7 @@ struct ProviderSummary {
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct ManagementEntry {
+struct ManagementInfo {
     provider_id: String,
     source: String,
     display_name: String,
@@ -84,9 +85,19 @@ struct ManagementEntry {
     version: Option<u32>,
     connection: Option<ManagementConnection>,
     account: Option<ManagementAccount>,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ManagementEntry {
+    #[serde(flatten)]
+    info: ManagementInfo,
     preferences: std::collections::BTreeMap<String, serde_json::Value>,
-    /// What the update did with the record's models; absent from the reads.
-    #[serde(default)]
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ManagementUpdateSummary {
+    #[serde(flatten)]
+    info: ManagementInfo,
     models_listed: Option<ModelsListed>,
 }
 /// `provider.management`'s safe account descriptor.
@@ -119,7 +130,12 @@ struct ManagementConnection {
 #[derive(Deserialize)]
 struct ProviderManagement {
     providers: Vec<ManagementEntry>,
+}
+#[derive(Deserialize)]
+struct ProviderManagementPage {
+    providers: Vec<ManagementInfo>,
     errors: Vec<ManagementError>,
+    next: Option<String>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -326,14 +342,6 @@ struct Worker {
     last_usage: Option<LastUsage>,
     /// The outstanding `session.context.compact` requests (`/compact`).
     compact_requests: Vec<u64>,
-    /// The catalog version each provider was last asked to refill at in this
-    /// connection, moved to the version the refresh stored: an endpoint that
-    /// lists nothing costs one request per unchanged record, not one per open,
-    /// and a write to the record (a re-point, an enable) asks once more.
-    refilled_catalogs: std::collections::HashMap<String, u32>,
-    /// The outstanding `provider.refresh` requests `models()` sent for those
-    /// catalogs, with the provider each was sent for.
-    refill_requests: Vec<(u64, String)>,
     /// Whether this Session's method table lists `session.suggestion.request`:
     /// `None` until the first completed turn reads it, and again after a
     /// Session switch.
@@ -727,8 +735,6 @@ impl Worker {
             context_request: None,
             last_usage: None,
             compact_requests: Vec::new(),
-            refilled_catalogs: Default::default(),
-            refill_requests: Vec::new(),
             suggestion_methods: None,
             suggestion_throttle_noted: false,
         }
@@ -863,12 +869,12 @@ impl Worker {
                     }
                     let snapshot: ProviderManagement = self
                         .client
-                        .typed("provider.management", json!({}))
+                        .typed("provider.management", json!({"providerId": provider}))
                         .await?;
                     snapshot
                         .providers
                         .into_iter()
-                        .find(|entry| entry.provider_id == provider)
+                        .find(|entry| entry.info.provider_id == provider)
                         .ok_or_else(|| format!("{cannot_copy}, or select a configured Provider model before starting a new Session"))?;
                 }
                 target = Some((provider, model));
@@ -1020,7 +1026,7 @@ impl Worker {
         if self.client.offers("provider.catalog") {
             reads.push((
                 "provider.catalog",
-                json!({"providerId":model.provider_id}),
+                json!({"providerId":model.provider_id,"modelId":model.model_id}),
                 OpeningRead::Catalog(model),
             ));
         }
@@ -1113,7 +1119,7 @@ impl Worker {
         }
         let request = self.client.typed::<ProviderCatalogSnapshot>(
             "provider.catalog",
-            json!({"providerId": model.provider_id}),
+            json!({"providerId": model.provider_id,"modelId":model.model_id}),
         );
         let snapshot = tokio::time::timeout(Duration::from_secs(5), request)
             .await
@@ -1664,9 +1670,19 @@ impl Worker {
                 }
             }
             Command::ListModels => {
-                let models = self.models().await.map_err(|error| error.to_string());
+                let models = self
+                    .models(String::new(), None)
+                    .await
+                    .map_err(|error| error.to_string());
                 self.send(Update::Models(models));
                 self.read_model_policy(false).await;
+            }
+            Command::QueryModels { query, after } => {
+                let models = self
+                    .models(query, after)
+                    .await
+                    .map_err(|error| error.to_string());
+                self.send(Update::Models(models));
             }
             Command::ReadIsolation => {
                 if !self.client.supports(&["settings.read", "settings.update"]) {
@@ -1885,6 +1901,8 @@ impl Worker {
                 }
             }
             Command::ClearModelPreferences {
+                query,
+                after,
                 provider_id,
                 model_id,
                 expected_version,
@@ -1899,7 +1917,10 @@ impl Worker {
                 // The reread lands before the notice: a conflict tells the
                 // user to reread and retry, so the row a retry presses must
                 // already carry the record's current version.
-                let models = self.models().await.map_err(|error| error.to_string());
+                let models = self
+                    .models(query, after)
+                    .await
+                    .map_err(|error| error.to_string());
                 self.send(Update::Models(models));
                 self.send(Update::Notice(match result {
                     Ok(()) => {
@@ -3346,16 +3367,30 @@ impl Worker {
         if !self.client.supports(&PROVIDER_METHODS) {
             return Err("This daemon cannot manage providers".into());
         }
-        let listed: ProviderManagement =
-            self.client.typed("provider.management", json!({})).await?;
-        for error in listed.errors {
-            self.send(Update::Notice(format!(
-                "{}: {}",
-                error.provider_id, error.message
-            )));
+        let mut providers = Vec::new();
+        let mut after: Option<String> = None;
+        loop {
+            let mut params = json!({});
+            if let Some(id) = after {
+                params["after"] = json!(id);
+            }
+            let page: ProviderManagementPage = self
+                .client
+                .typed("provider.management.list", params)
+                .await?;
+            for error in page.errors {
+                self.send(Update::Notice(format!(
+                    "{}: {}",
+                    error.provider_id, error.message
+                )));
+            }
+            providers.extend(page.providers);
+            after = page.next;
+            if after.is_none() {
+                break;
+            }
         }
-        listed
-            .providers
+        providers
             .into_iter()
             .filter_map(|entry| {
                 entry.connection.map(|connection| {
@@ -3478,8 +3513,8 @@ impl Worker {
                 }
                 listing_unsupported = true;
             }
-            let updated: ManagementEntry = self.client.typed("provider.update", json!({"providerId":provider_id,"expectedVersion":expected_version,"patch":patch})).await?;
-            let mut message = format!("{notice} {}", updated.display_name);
+            let updated: ManagementUpdateSummary = self.client.typed("provider.update", json!({"providerId":provider_id,"expectedVersion":expected_version,"patch":patch,"reply":"summary"})).await?;
+            let mut message = format!("{notice} {}", updated.info.display_name);
             match updated.models_listed {
                 Some(ModelsListed::Listed) => message.push_str("; listed its models"),
                 Some(ModelsListed::Unsupported) => listing_unsupported = true,
@@ -3493,264 +3528,136 @@ impl Worker {
         result.map_err(|error| error.to_string())
     }
 
-    /// The selectable models: every enabled static provider with
-    /// credentials and every signed-in managed provider (`provider.list`
-    /// lists static ones only), less unavailable and disabled models.
-    ///
-    /// A static provider whose stored catalog holds no models is asked to
-    /// refill it through `provider.refresh` when `provider.list` says its
-    /// models can be listed, once per connection. The request is sent, not
-    /// awaited: the picker opens with what the catalogs hold, a provider
-    /// still listing none shows its `no models` row meanwhile, and the reply
-    /// asks the open picker to read the list again. Every usable provider
-    /// that offers no selectable model is reported for its picker row, with
-    /// the reason and whether `provider.refresh` can list it.
-    async fn models(&mut self) -> crate::Result<ModelList> {
-        #[derive(Deserialize)]
-        struct Providers {
-            providers: Vec<Provider>,
-        }
+    async fn models(
+        &mut self,
+        query: String,
+        after: Option<dim_agent_types::ModelId>,
+    ) -> crate::Result<ModelList> {
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase")]
-        struct Provider {
+        struct Row {
             provider_id: String,
-            display_name: String,
-            /// Absent from a daemon that cannot say, and such a daemon cannot
-            /// be asked to list a provider's models either.
-            #[serde(default)]
-            remote_model_list: bool,
-            enabled: bool,
+            provider_name: String,
+            model: crate::wire::CatalogModel,
+            version: u32,
+            disabled: bool,
+            preferences: serde_json::Value,
         }
         #[derive(Deserialize)]
-        #[serde(rename_all = "camelCase")]
-        struct Managed {
-            provider_id: String,
-            display_name: String,
+        struct Page {
+            models: Vec<Row>,
+            next: Option<dim_agent_types::ModelId>,
+            empty: Vec<EmptyProvider>,
         }
-        #[derive(Deserialize)]
-        struct Account {
-            account: Option<serde_json::Value>,
-        }
-        let listed: Providers = self.client.typed("provider.list", json!({})).await?;
-        let mut usable: Vec<(String, String, bool)> = Vec::new();
-        // `provider.refresh` lists a static provider only; an account
-        // catalog is filled by its account owner.
-        let mut refillable = std::collections::HashSet::new();
-        for provider in listed
-            .providers
+        let page: Page = self
+            .client
+            .typed(
+                "provider.models.query",
+                json!({"query":query,"after":after}),
+            )
+            .await?;
+        let mut empty = page.empty;
+        let mut limits = std::collections::BTreeMap::<String, NeedsLimitsProvider>::new();
+        let mut unavailable = std::collections::BTreeMap::<String, (String, usize, usize)>::new();
+        let models = page
+            .models
             .into_iter()
-            .filter(|provider| provider.enabled)
-        {
-            if provider.remote_model_list {
-                refillable.insert(provider.provider_id.clone());
-            }
-            usable.push((
-                provider.provider_id,
-                provider.display_name,
-                provider.remote_model_list,
-            ));
-        }
-        let managed: Vec<Managed> = match self.client.typed("account.providers", json!({})).await {
-            Ok(providers) => providers,
-            Err(error)
-                if error.downcast_ref::<client::RpcError>().and_then(app_error)
-                    == Some("unknown_method") =>
-            {
-                Vec::new()
-            }
-            Err(error) => return Err(format!("account.providers: {error}").into()),
-        };
-        for provider in managed {
-            let status = self
-                .client
-                .typed::<Account>(
-                    "account.status",
-                    json!({"providerId": provider.provider_id}),
-                )
-                .await;
-            if status.is_ok_and(|status| status.account.is_some()) {
-                // A managed catalog is refreshed from its account owner.
-                usable.push((provider.provider_id, provider.display_name, true));
-            }
-        }
-        let mut models = Vec::new();
-        let mut empty = Vec::new();
-        let mut limits = Vec::new();
-        for (provider_id, provider_name, listable) in usable {
-            let snapshot = self
-                .client
-                .typed::<ProviderCatalogSnapshot>(
-                    "provider.catalog",
-                    json!({"providerId": provider_id}),
-                )
-                .await;
-            let catalog = match snapshot {
-                Ok(ProviderCatalogSnapshot { catalog }) => catalog,
-                Err(_) => {
-                    empty.push(EmptyProvider {
-                        provider_id,
-                        provider_name,
-                        reason: EmptyReason::Unreadable,
-                    });
-                    continue;
-                }
-            };
-            let version = catalog.as_ref().map_or(0, |catalog| catalog.version);
-            if catalog
-                .as_ref()
-                .is_none_or(|catalog| catalog.models.is_empty())
-                && refillable.contains(&provider_id)
-                && self.refilled_catalogs.insert(provider_id.clone(), version) != Some(version)
-                && let Ok(request) = self
-                    .client
-                    .send("provider.refresh", json!({"providerId": provider_id}))
-                    .await
-            {
-                self.refill_requests.push((request, provider_id.clone()));
-            }
-            let Some(catalog) = catalog else {
-                empty.push(EmptyProvider {
-                    provider_id,
-                    provider_name,
-                    reason: EmptyReason::NoModels { listable },
-                });
-                continue;
-            };
-            let preferences = self.saved_preferences(&provider_id).await;
-            let total = catalog.models.len();
-            let ambiguous: Vec<crate::wire::CatalogPreferences> = catalog
-                .models
-                .iter()
-                .filter_map(|model| model.metadata.clone())
-                .collect();
-            let undeclared = catalog
-                .models
-                .iter()
-                .filter(|model| {
-                    crate::limits_undeclared(
-                        &model.missing_limits,
-                        model.unavailable_reason.as_deref(),
-                        catalog.disabled_model_ids.contains(&model.id),
-                    )
-                })
-                .count();
-            let unavailable = catalog
-                .models
-                .iter()
-                .filter(|model| {
-                    model.unavailable_reason.is_some()
-                        && !crate::limits_undeclared(
-                            &model.missing_limits,
-                            model.unavailable_reason.as_deref(),
-                            catalog.disabled_model_ids.contains(&model.id),
-                        )
-                })
-                .count();
-            let disabled = catalog
-                .models
-                .iter()
-                .filter(|model| {
-                    model.unavailable_reason.is_none()
-                        && catalog.disabled_model_ids.contains(&model.id)
-                })
-                .count();
-            let before = models.len();
-            models.extend(
-                catalog
-                    .models
-                    .into_iter()
-                    .filter(|model| {
-                        model.unavailable_reason.is_none()
-                            && !catalog.disabled_model_ids.contains(&model.id)
-                    })
-                    .map(|model| {
-                        let (efforts, default_effort) = effort_choices(
-                            &model.capabilities,
-                            model
-                                .metadata
-                                .as_ref()
-                                .and_then(|meta| meta.reasoning.as_ref()),
-                        );
-                        let saved_effort = preferences.get(&model.id).and_then(|value| {
-                            value
-                                .get("reasoningEffort")
-                                .and_then(|effort| effort.as_str())
-                                .filter(|effort| efforts.iter().any(|option| option == *effort))
-                                .map(str::to_owned)
-                        });
-                        ModelItem {
-                            provider_id: provider_id.clone(),
-                            provider_name: provider_name.clone(),
-                            provider_version: catalog.version,
-                            model_id: model.id,
-                            display_name: model.name,
-                            zdr: model.zdr,
-                            efforts,
-                            default_effort,
-                            saved_effort,
-                            outcome: model_outcome(model.metadata.as_ref(), &provider_id),
+            .filter_map(|row| {
+                if row.disabled || row.model.unavailable_reason.is_some() {
+                    if crate::limits_undeclared(
+                        &row.model.missing_limits,
+                        row.model.unavailable_reason.as_deref(),
+                        row.disabled,
+                    ) {
+                        let candidates =
+                            match model_outcome(row.model.metadata.as_ref(), &row.provider_id) {
+                                ModelOutcome::Ambiguous { candidates } => candidates,
+                                _ => Vec::new(),
+                            };
+                        let provider =
+                            limits
+                                .entry(row.provider_id.clone())
+                                .or_insert(NeedsLimitsProvider {
+                                    provider_id: row.provider_id,
+                                    provider_name: row.provider_name,
+                                    count: 0,
+                                    candidates: Vec::new(),
+                                });
+                        provider.count += 1;
+                        for candidate in candidates {
+                            if !provider.candidates.contains(&candidate) {
+                                provider.candidates.push(candidate);
+                            }
                         }
-                    }),
-            );
-            if undeclared > 0 {
-                let mut candidates: Vec<String> = ambiguous
-                    .iter()
-                    .flat_map(|metadata| {
-                        metadata
-                            .identification
-                            .as_ref()
-                            .filter(|identification| identification.rule == "ambiguous")
-                            .map(|identification| {
-                                identification
-                                    .candidates
-                                    .iter()
-                                    .map(|candidate| {
-                                        format!("{}/{}", candidate.provider_id, candidate.model_id)
-                                    })
-                                    .collect::<Vec<_>>()
-                            })
-                            .unwrap_or_default()
-                    })
-                    .collect();
-                candidates.sort();
-                candidates.dedup();
-                limits.push(NeedsLimitsProvider {
-                    provider_id: provider_id.clone(),
-                    provider_name: provider_name.clone(),
-                    count: undeclared,
-                    candidates,
-                });
-            }
-            if models.len() == before && (undeclared == 0 || unavailable + disabled > 0) {
-                let reason = if total == 0 {
-                    EmptyReason::NoModels { listable }
-                } else if unavailable > 0 && disabled > 0 {
-                    EmptyReason::Mixed {
-                        unavailable,
-                        disabled,
+                    } else {
+                        let counts = unavailable.entry(row.provider_id.clone()).or_insert((
+                            row.provider_name.clone(),
+                            0,
+                            0,
+                        ));
+                        if row.model.unavailable_reason.is_some() {
+                            counts.1 += 1;
+                        } else {
+                            counts.2 += 1;
+                        }
                     }
-                } else if unavailable > 0 {
-                    EmptyReason::Unavailable { count: unavailable }
-                } else {
-                    EmptyReason::Disabled { count: disabled }
-                };
-                empty.push(EmptyProvider {
-                    provider_id,
-                    provider_name,
-                    reason,
-                });
+                    return None;
+                }
+                let model = row.model;
+                let (efforts, default_effort) = effort_choices(
+                    &model.capabilities,
+                    model.metadata.as_ref().and_then(|m| m.reasoning.as_ref()),
+                );
+                let saved_effort = row
+                    .preferences
+                    .get("reasoningEffort")
+                    .and_then(Value::as_str)
+                    .filter(|effort| efforts.iter().any(|option| option == *effort))
+                    .map(str::to_owned);
+                let outcome = model_outcome(model.metadata.as_ref(), &row.provider_id);
+                Some(ModelItem {
+                    provider_id: row.provider_id,
+                    provider_name: row.provider_name,
+                    provider_version: row.version,
+                    model_id: model.id,
+                    display_name: model.name,
+                    zdr: model.zdr,
+                    efforts,
+                    default_effort,
+                    saved_effort,
+                    outcome,
+                })
+            })
+            .collect();
+        for (provider_id, (provider_name, unavailable, disabled)) in unavailable {
+            if unavailable + disabled == 0 {
+                continue;
             }
+            let reason = match (unavailable, disabled) {
+                (0, count) => EmptyReason::Disabled { count },
+                (count, 0) => EmptyReason::Unavailable { count },
+                _ => EmptyReason::Mixed {
+                    unavailable,
+                    disabled,
+                },
+            };
+            empty.push(EmptyProvider {
+                provider_id,
+                provider_name,
+                reason,
+            });
         }
-        let current = self
-            .model
-            .as_ref()
-            .map(|model| (model.provider_id.clone(), model.model_id.clone()));
         Ok(ModelList {
+            query,
             models,
+            next: page.next,
             manage: self.client.supports(&["provider.management"]),
-            current,
+            current: self
+                .model
+                .as_ref()
+                .map(|m| (m.provider_id.clone(), m.model_id.clone())),
             empty,
-            limits,
+            limits: limits.into_values().collect(),
         })
     }
 
@@ -3824,24 +3731,6 @@ impl Worker {
         self.send(Update::ModelPolicy(update));
     }
 
-    /// Saved preferences for the picker. Empty when management is absent or
-    /// the read fails, so the catalog list still shows.
-    async fn saved_preferences(
-        &mut self,
-        provider_id: &str,
-    ) -> std::collections::BTreeMap<String, serde_json::Value> {
-        if !self.client.offers("provider.management") {
-            return std::collections::BTreeMap::new();
-        }
-        self.client
-            .typed::<ProviderManagement>("provider.management", json!({"providerId": provider_id}))
-            .await
-            .ok()
-            .and_then(|snapshot| snapshot.providers.into_iter().next())
-            .map(|provider| provider.preferences)
-            .unwrap_or_default()
-    }
-
     /// Saves `effort` when it differs from the stored reasoning effort.
     /// A daemon without management keeps the choice on this adoption only.
     async fn save_reasoning_effort(
@@ -3855,7 +3744,10 @@ impl Worker {
         }
         let snapshot: ProviderManagement = self
             .client
-            .typed("provider.management", json!({"providerId": provider_id}))
+            .typed(
+                "provider.management",
+                json!({"providerId": provider_id, "modelId": model_id}),
+            )
             .await?;
         let provider = snapshot
             .providers
@@ -3871,6 +3763,7 @@ impl Worker {
             return Ok(());
         }
         let version = provider
+            .info
             .version
             .ok_or("Provider catalog must be refreshed before editing preferences")?;
         self.client
@@ -4685,28 +4578,6 @@ impl Worker {
             }
             return Ok(());
         }
-        if let Some(index) = self
-            .refill_requests
-            .iter()
-            .position(|(request, _)| *request == id)
-        {
-            let (_, provider_id) = self.refill_requests.remove(index);
-            if let Ok(value) = result {
-                // The refresh stored the catalog under a new version; record
-                // it, so a listing that came back empty is not asked for
-                // again. A picker that is still open reads the list again to
-                // show the fill; with the picker closed this only records it.
-                #[derive(Deserialize)]
-                struct Stored {
-                    version: u32,
-                }
-                if let Ok(Stored { version }) = serde_json::from_value(value) {
-                    self.refilled_catalogs.insert(provider_id, version);
-                }
-                self.send(Update::ModelsRefilled);
-            }
-            return Ok(());
-        }
         if let Some(index) = self.shell_stops.iter().position(|stop| *stop == id) {
             self.shell_stops.remove(index);
             if let Err(error) = result {
@@ -5164,13 +5035,17 @@ pub(crate) async fn clear_saved_model_preferences(
     model_id: &str,
 ) -> crate::Result<()> {
     let snapshot: ProviderManagement = client
-        .typed("provider.management", json!({"providerId": provider_id}))
+        .typed(
+            "provider.management",
+            json!({"providerId": provider_id, "modelId": model_id}),
+        )
         .await?;
     let version = snapshot
         .providers
         .into_iter()
         .next()
         .ok_or("Provider management entry is missing")?
+        .info
         .version
         .ok_or("Provider catalog must be refreshed before editing preferences")?;
     clear_model_preferences(client, provider_id, model_id, version).await

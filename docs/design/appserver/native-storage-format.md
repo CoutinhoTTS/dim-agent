@@ -1,5 +1,60 @@
 # Rust 会话存储格式
 
+## v52: Sparse Provider state
+
+v52 separates provider headers from ordered model payload rows and immutable
+source generations. The provider owner defines source adoption, versions, pending
+conflicts and summary replies in [Provider management](provider-management.md#indexed-source-and-sparse-adoption).
+No untouched builtin provider/model is seeded. Header-only writes do not rewrite
+unchanged model rows. Model-scoped disables (with their original order), preferences,
+aliases and route declarations occupy keyed state rows; exact reads load only their
+target state, and header configuration leaves those rows untouched. Naming indexes
+store effective inputs, never published names.
+
+The v51 schema and triggers remain an exact historical admission shape. Upgrade
+runs in the existing native admission transaction, streaming one provider and its
+rows at a time. Preserve credentials and references, versions, enablement, model
+order, defaults/user/override membership, disabled IDs, preferences, aliases, routes,
+remote listings and pending source conflicts. Unknown historical bases are pinned;
+current bundled data is not evidence that an old field was a user edit. Malformed
+records retain their original bytes and diagnostics. Drop duplicate full-record
+payloads only after their equivalent rows have been admitted. Any failure rolls
+back schema, data and marker together.
+
+The available generation is archived once as the build-produced offset image in
+`provider_sources`, before publication, without inflating any model. Its identity
+is the image SHA-256. The image begins with eight little-endian 32-bit words:
+provider table offset/count, model table offset/count, matching-index offset/count,
+name-span table offset, and image format 1. Provider/model/index rows are 32/68/12
+bytes; every string or compressed payload is an offset/length span. The source
+layout is part of v52; a future incompatible image requires a new image format and
+an explicit native admission decision. Old bases reference their archived generation;
+range reads load only requested bytes. Unreferenced generations can be removed on
+activation, without enumerating models.
+
+Native backups include the source history required by admitted bases. Backup and
+archive restore continue to require the current exact native format.
+Supported older raw stores first pass the normal forward admission before backup;
+older-format archives remain refused. There is no downgrade.
+Older daemons refuse v52. Ordinary v52 reopen performs no migration or model sweep.
+
+## v51: Provider query indexes and bundled revision
+
+Adds `provider_query_records` with indexed enablement, credential configuration
+and provider kind, plus the provider header with model arrays removed.
+`provider_models` stores one default, user or override model entry per
+`(provider_id, model_id, source)` and indexes model IDs. Provider record
+insert/update triggers maintain both projections in the same transaction;
+provider deletion cascades to both. The upgrade backfills existing records.
+Malformed records remain available for owner diagnostics and produce no model
+entries. These tables are derived query projections of the Provider-owned record.
+
+`provider_bundle` records the bundled source fingerprint, expected semantic
+definition fingerprint and pending conflicts. `provider_catalog_revision` records
+the applied catalog revision. Existing provider payloads and versions retain
+their format. Schema and backfill commit in the native upgrade transaction; an
+error rolls back the upgrade. Older daemons reject v51 at admission.
+
 ## v50: native image migration
 
 Startup converts retained inline images in adopted inputs, tool results, compaction

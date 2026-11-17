@@ -111,10 +111,15 @@ loader configuration and package installation remain separate work. See
 
 ### Provider management
 
-Local protocol-v3 clients read `provider.management {providerId?}` for one safe
+Local protocol-v3 clients read `provider.management {providerId, modelId?}` for one safe
 editing snapshot containing the record version, connection fields, full model
 descriptors, available actions and saved preferences. Credentials, secret
 references, header values and proxy authentication are never returned.
+The no-argument aggregate read is removed: a client that needs every Provider's
+version, connection and models pages `provider.management.list` for the overview
+and `provider.models.query` for the models it displays or edits (the
+[Provider contract](../../docs/design/appserver/provider-management.md) owns the
+migration mapping).
 `provider.list`, `provider.catalog` and `provider.selection` retain their read shapes;
 `provider.list` additionally reports `remoteModelList` per provider, whether
 `provider.refresh` can list that provider's models.
@@ -471,7 +476,9 @@ The requesting connection hands only its final-response writer to the existing p
 
 ### Process activity
 
-`processActivity` is the App Server's process-scoped data service. Its shared catalog name and generated host dispatcher expose `hold() → id | null` and `release(id) → boolean`; the generated declarations are in `npm/branch-services.d.ts`. The owner releases a hold explicitly after settlement, including during its normal cleanup. A lost owner or failed release leaves the process busy until an explicit shutdown: row unload or runtime death does not prove that all accepted native effects settled. The native binding also offers an RAII hold; native handles do not cross the data face.
+`processActivity` is the App Server's process-scoped data service. Its shared catalog name and generated host dispatcher expose `activated() → boolean`, `hold() → id | null` and `release(id) → boolean`; the generated declarations are in `npm/branch-services.d.ts`. The owner releases a hold explicitly after settlement, including during its normal cleanup. A lost owner or failed release leaves the process busy until an explicit shutdown: row unload or runtime death does not prove that all accepted native effects settled. The native binding also offers an RAII hold; native handles do not cross the data face.
+
+The same face exposes `activated() → boolean`. It resolves `true` once `serve` has opened after every required process row became Active, and `false` when startup fails or shutdown begins before that call observes publication. Calls made after shutdown begins return `false`, including after a previous call returned `true`. `RunningServer::restart` reloads rows and does not reset it. Native and dispatched callers share the one readiness watch and the host's shutdown token; a caller that must also stop on its own generation's unload selects on that generation's stop token itself. The method observes host publication and carries no admission meaning; `hold` and `release` remain the admission operations.
 
 An owner acquires a hold **before accepting work**, including before a durable acceptance record or an asynchronous handoff, and retains it through the last owned effect. The hold vetoes idle shutdown, not explicit shutdown, and neither cancels nor owns the operation. `null` means idle shutdown has closed admission; the owner must not accept the operation. A successful idle shutdown permanently closes this service's admission. Future timer deadlines alone need no hold: a due pass acquires one before doing work, and a temporarily refused pass remains eligible after a rolled-back idle decision.
 
@@ -615,6 +622,11 @@ whole-buffer bound, listings, removal under a held lease, work directories and
 unchanged transaction/backup/lifecycle behavior.
 
 ## Managed provider contract
+
+Catalog reads accept caller cancellation. Concurrent reads may share the account
+owner's in-flight request; cancellation removes that caller, while remaining
+callers retain their request. `account_cancelled` reports a cancelled catalog wait.
+The owner removes a completed flight and retains no directory-result cache.
 
 `ManagedProvider` ([`src/managed_provider.rs`](src/managed_provider.rs)) is the typed port a managed provider plugin publishes, and `ManagedProviderBinding` hands it to the implementation `ManagedProviders`. That implementation is no service: its only service face is the process data face `managedSearch` (`search`), the account RPC uses it through the `account` method namespace the same plugin registers, and the model provider reads it through a process-internal key. `ManagedProviders` and its key are assembled on every server; the `account` namespace is assembled with a product home. Without a binding the process lists no managed providers and `managedSearch.search` fails with `unavailable`.
 

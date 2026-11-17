@@ -5,7 +5,7 @@ use dim_agent_capabilities::{
     host::{SessionFileErrorCode, SessionFiles, StoredSessionFile},
 };
 use dim_agent_runtime::SessionConfig;
-use dim_agent_runtime::testing::chain_events;
+use dim_agent_runtime::{TimelineStore, testing::chain_events};
 use dim_app_server::storage::{SessionStore, SessionStorePlugin, SqliteStoragePlugin};
 use rusqlite::Connection;
 use rutis::host::{CtxHost, FiberState};
@@ -744,7 +744,19 @@ async fn native_upgrade_externalizes_retained_images_and_preserves_shared_owners
             )
             .unwrap();
     }
-    connection.execute_batch("DROP TABLE agent_store_format; CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 49)); INSERT INTO agent_store_format VALUES(49)").unwrap();
+    connection
+        .execute_batch(
+            "DROP TABLE provider_name_keys; DROP TABLE provider_names; DROP TABLE provider_model_state;
+             DROP TABLE provider_bases; DROP TABLE provider_sources;
+             DROP TABLE provider_models;
+
+             DROP TABLE provider_catalog_revision;
+             DROP TABLE provider_bundle;
+             DROP TABLE agent_store_format;
+             CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 49));
+             INSERT INTO agent_store_format VALUES(49)",
+        )
+        .unwrap();
     drop(connection);
     let store = Store::mount(&home, true).await;
     let connection = Connection::open(home.database()).unwrap();
