@@ -18,13 +18,17 @@
 
 ## 公共条款对应表
 
-实现路径相对仓库根目录。模型名均在 [capability-models](capability-models/README.md) 下，除特别注明。
+下表省略路径的基准如下：运行时 `core/*` 与 `timeline_store.rs` 位于
+[`crates/dim-agent-runtime/src/`](../../../crates/dim-agent-runtime/src/)；SQLite 实现位于
+[`crates/dim-app-server/src/storage/`](../../../crates/dim-app-server/src/storage/)；能力实现（如 `wait.rs`）位于
+[`crates/dim-agent-capabilities/src/`](../../../crates/dim-agent-capabilities/src/)；`plugins/*.md` 位于
+[`docs/architecture/rust-agent/`](../../architecture/rust-agent/)。模型名均在 [capability-models](capability-models/README.md) 下，除特别注明。
 
 | 合同出处与承诺 | 实现入口 | 模型/命题或已有证据 | 前提提供者及缺口处置 |
 | --- | --- | --- | --- |
 | 总纲 §1、§2：分支序号确定顺序，允许多个写入者 | `core/timeline.rs`：`append_batch_registered_with_create_at`、`commit` | 本批 `SequenceAndBatch`；`timeline_batch` | 提交锁串行化整个分配/登记/入队过程；不证明锁库、调度公平或跨分支全序 |
 | principles §4.3：before 同步变换，失败采用原稿 | `Timeline::commit/before`、`AppendGuard` | 本批 `TransformOutcome`；`timeline_batch` 的成功变换路径 | 模型输入是整条 waterfall 的返回结果，不证明用户回调内部算法；no-wait、重入拒绝和中间变换丢弃由源码核对 |
-| 存储 §3：登记在入队前，登记失败不追加 | `Timeline::commit` 的 `register` 与 allocated 更新 | 源码/流程：`batch_is_registered_and_published_as_one_snapshot_unit` | 模型只保留 Timeline 结果，不证明生产者登记回调自身的内存回滚；该流程同时覆盖登记错误和 panic |
+| 存储 §3：登记在入队前；登记失败不追加另由实现/流程确认 | `Timeline::commit` 的 `register` 与 allocated 更新 | 源码/流程：`batch_is_registered_and_published_as_one_snapshot_unit` | 模型只保留 Timeline 结果，不证明生产者登记回调自身的内存回滚；该流程同时覆盖登记错误和 panic |
 | principles §4.5：批次一起提交、逐事件消费 | `Timeline::commit/publish`、`Dispatcher::run` | 本批 `AtomicVisibility`、`DeliveryIsOrdered`；`timeline_batch` | TimelineStore 保证原子批次和回调顺序；“决定事实最后”是生产者义务，不由通用总线判断 |
 | 存储 §3：分配、落盘、发布不同；只发布已落盘事实 | `Timeline::sequence/committed/publish`、`SqliteTimelineStore::commit_prepared` | 本批 `TypeOK`、`AtomicVisibility`、`ExternalPrefix` | SQLite 事务/fsync 正确性为存储依赖；MemoryTimelineStore 不是磁盘持久化证据 |
 | TimelineStore：接受的回调恰一次、按分支序号回调；失败 Session 拒绝后续批次 | `timeline_store.rs` trait；SQLite `Pending::publish`、`commit_round/commit_prepared/append` | 本批 `Resolve/Callback` 的环境约束；既有 storage 流程 | **是模型前提，不是本模型证明所得。** 源码由队列、事务、FnOnce callback 支持；跨 Session 故障隔离不在单分支模型中 |
@@ -69,19 +73,24 @@
 
 | 动作 | 对应代码及抽象 |
 | --- | --- |
-| `CommitBatch` | 提交锁内的 `commit`：before 返回结果、登记成功、连续编号、热窗口及 store 入队。`accept=FALSE` 表示 **allocated 已增加后** store 同步拒绝，Timeline 随即故障；不是登记失败 |
+| `CommitBatch` | 提交锁内的 `commit`：before 返回结果、登记成功、连续编号、热窗口及 store 入队。`accept=FALSE` 表示 **allocated 已增加后** store 同步拒绝，Timeline 随即故障；不是登记失败。对应 store closing 时的同步拒绝；已记录的 Session 存储故障通常在分配前拒绝，不属于这个窗口 |
 | `Resolve(last, ok)` | 存储轮完成若干连续批次，整个轮成功或失败；允许轮中多个批次一起落盘。其他 Session、SQLite rollback/retry 与编码抽象为端口结果 |
 | `Callback` | 按批次顺序调用 `Timeline::publish`；成功可在 durable 之后推进 published，已有 Timeline failure 则忽略。store failure 后剩余接受批次仅能失败 |
 | `Fetch/Deliver` | reader 先取一条已发布事实，成功 handler 后才推进 Dispatcher 位置。两个动作保留取出后发生存储故障的窗口；不覆盖 handler 错误或卸载 |
 | `ReadExternal` | 一次成功外部范围读取的上界与前缀（也允许故障后的成功历史读）；不展开 query I/O、失败、分页或祖先。返回旧快照合法，不把它当成最新投影 |
 | `Close` | 获取同一提交锁后设置 closing，并等待已分配尾部发布或 failure。不会删除已落盘历史 |
 
-编号、变换结果等局部公式主要确认模型没有写错约定；它们不独立证明 Rust 的锁或 waterfall。
+`SequenceAndBatch`、`AtomicVisibility`、`TransformOutcome`、`ExternalPrefix`、`DeliveryIsOrdered`
+由动作定义直接维持，是模型定义的自洽检查（self-consistent by definition），不作为独立的实现验证成果。
+它们不证明 Rust 的锁、waterfall 或存储实现。
 本批主要检验的是这些约定组合后，在轮提交、逐批回调、读取消费、关闭及同步/异步失败之间的交错。
 
 `ClosingSettles` 只在存储完成和回调获得弱公平调度时成立：环境最终提供成功或失败，而不是永远悬挂。
 不要求写入一定成功，不假设 handler 最终完成，也不证明整个 Session 关闭。
 没有状态约束剪掉越界失败路径；有限性来自写入批数和批大小，`CHECK_DEADLOCK FALSE` 允许完成态/等待态停留。
+
+`ClosedMeaning` 只用于一次 close，模型没有 idle thaw；实际 thaw 可清除 closing，
+而 closed 要到后续 publish 才改变，因此不能把该式外推为整个运行期的不变量。
 
 本模型从空分支开始，不检查重启恢复，也不把内存热窗口清理、fsync、事件 ID 随机唯一性或 SQL 实现作为已证明结论。
 `consumed <= published <= durable <= allocated` 是本模型边界；真实错误会使旧已分配尾部不再可用，不能据此承诺错误后内部查询仍返回它。

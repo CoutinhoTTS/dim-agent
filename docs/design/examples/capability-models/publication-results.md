@@ -12,8 +12,8 @@
 
 | 配置 | 有限范围 | generated / distinct | queue / depth | 时间 | exit |
 | --- | --- | --- | --- | --- | --- |
-| `TimelinePublication.cfg` | 2 个写入者；最多 2 批，每批 1–2 个事件 | 285,028 / 95,138 | 0 / 16 | 8s | 0 |
-| `TimelinePublication-ThreeBatches.cfg` | 2 个写入者；最多 3 批，每批 1 个事件 | 302,722 / 93,734 | 0 / 16 | 7s | 0 |
+| `TimelinePublication.cfg` | 2 个写入者；最多 2 批，每批 1–2 个事件 | 285,028 / 95,138 | 0 / 16 | 10s | 0 |
+| `TimelinePublication-ThreeBatches.cfg` | 2 个写入者；最多 3 批，每批 1 个事件 | 302,722 / 93,734 | 0 / 16 | 9s | 0 |
 
 两个配置均完成状态空间与时序性质检查，输出 `Model checking completed. No error has been found.`。
 TLC 给出的乐观 fingerprint 碰撞概率估计分别为 `9.8E-10`、`1.1E-9`；这些是有限检查结果，不是任意规模定理。
@@ -21,6 +21,10 @@ TLC 给出的乐观 fingerprint 碰撞概率估计分别为 `9.8E-10`、`1.1E-9`
 检查六个状态不变量：`TypeOK`、`SequenceAndBatch`、`AtomicVisibility`、`TransformOutcome`、
 `ExternalPrefix`、`ClosedMeaning`；三个动作性质：`FailureFreezesPublication`、`NoAdmissionAfterClose`、
 `DeliveryIsOrdered`；一个条件活性：`ClosingSettles`。精确公式在 [模型](TimelinePublication.tla) 中。
+
+其中 `SequenceAndBatch/AtomicVisibility/TransformOutcome/ExternalPrefix/DeliveryIsOrdered`
+是动作定义直接维持的自洽检查，不是五项独立的实现证明。组合交错的结论与存储前提见合同表。
+`ClosedMeaning` 不覆盖 idle thaw。
 
 ## 题设没有排除的关键窗口
 
@@ -33,7 +37,7 @@ TLC 给出的乐观 fingerprint 碰撞概率估计分别为 `9.8E-10`、`1.1E-9`
 | `publication_before_consumption` | `published > consumed`：发布不等于投影已消费 |
 | `inside_batch_delivery` | consumed 非零且不在 ends：已发布完整批次可以只消费到批中；只适用于两事件配置 |
 | `closing_waits_for_tail` | closing 且未 closed：关闭会等待已分配尾部 |
-| `late_callback_after_sync_rejection` | Timeline failed，store 未异步失败，accepted 小于批数，callbacks 小于 resolved，durable 大于 published：较早批次已落盘，但后次入队拒绝先使 Timeline 故障 |
+| `late_callback_after_sync_rejection` | Timeline failed，store 未异步失败，accepted 小于批数，callbacks 小于 resolved，durable 大于 published：较早批次已落盘，但 store closing 使后次入队同步拒绝；已知 Session 故障的分配前拒绝不属于此窗口 |
 | `inflight_delivery_can_outlive_fault` | failed 且 inflight 非零：故障发生时可能已经取出一条事件 |
 | `asynchronous_storage_failure` | failed 且 storeFailed：异步失败确实被探索 |
 | `both_writers` | events 中 writer 集合为 `{1, 2}` |
