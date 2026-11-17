@@ -20,6 +20,17 @@ compatibility behavior (A.7). Due timer, wakeup, stop and retention passes hold 
 while executing; a future deadline alone is not active work. A paused timer pass
 does not consume its deadline. This adds no Scheduler event or record field.
 
+Before the host has published the process, Scheduler starts none of its background
+business: startup delivery and loop recovery, the main timer (job windows, wakeups
+and loops), the startup retention pass and restored stop timers each await
+`processActivity.activated()` in their own tasks. It resolves once the host has
+opened after the required process rows are Active, is `false` when startup fails or
+shutdown begins before that observation, and a row reload does not reset it. This
+keeps the first `sessions.lookup` out of the interval where the stable face answers
+`reloading` because `AgentIndex` is not published yet; A.6's answer counting and
+lookup bound do not change. Each wait also ends on this generation's stop token, so
+unloading while waiting finishes the owned tasks without spending an attempt.
+
 ## 1. Structure
 
 ```mermaid
@@ -53,11 +64,11 @@ flowchart LR
   class Sched,MM,Tool new
 ```
 
-Jobs and windows span Sessions, so they belong to the process ([ADR 002](../../adr/002-plugin-scope.md) D1); offering a tool to a Session is the Session part's job (D2). The process part declares the existing `sessions`, `settings`, `pluginFiles` and `managementMethods` services. Agents' stable directory provides `sessions` and finds the current index on each call: index reload fails calls with `reloading`, without reloading Scheduler or any Session ([S2 D1](../appserver/sessions-service.md#3-decisions), [#35](https://github.com/arcships/dim/issues/35)). The Session tool declares its `scheduleJobs` dependency through the accepted binding (§1.1); undeclared `ctx.use` is not a generic optional native lookup. C3 keeps core tool consumers independent of optional rows. No dependency from ToolRegistry, Loop or Session readiness to Scheduler is introduced. Job edits use Settings' owner write and change events, never structural reload.
+Jobs and windows span Sessions, so they belong to the process ([ADR 002](../../adr/002-plugin-scope.md) D1); offering a tool to a Session is the Session part's job (D2). The process part declares the existing `sessions`, `settings`, `pluginFiles` and `managementMethods` services, and the `processActivity` publication and admission face. Agents' stable directory provides `sessions` and finds the current index on each call: index reload fails calls with `reloading`, without reloading Scheduler or any Session ([S2 D1](../appserver/sessions-service.md#3-decisions), [#35](https://github.com/arcships/dim/issues/35)). The Session tool declares its `scheduleJobs` dependency through the accepted binding (§1.1); undeclared `ctx.use` is not a generic optional native lookup. C3 keeps core tool consumers independent of optional rows. No dependency from ToolRegistry, Loop or Session readiness to Scheduler is introduced. Job edits use Settings' owner write and change events, never structural reload.
 
 | Part | Scope | Depends on | Provides |
 | --- | --- | --- | --- |
-| `Scheduler` | Process (control node) | Stable `sessions`, `settings`, `pluginFiles`, `managementMethods` | Job access, timer, delivery records; specified `scheduleJobs` and management namespace `schedule` |
+| `Scheduler` | Process (control node) | Stable `sessions`, `settings`, `pluginFiles`, `managementMethods`; `processActivity` | Job access, timer, delivery records; specified `scheduleJobs` and management namespace `schedule` |
 | `SchedulerSession` | Session, installed when Scheduler is enabled | Existing C4 tool contract; creation configuration; declared `scheduleJobs` dependency (§1.1) | Registers `schedule` and `wakeup` with `toolRegistry` and `session.wakeup` with `sessionMethods`; handlers refuse when `interactive === false` or the Session is a Collaboration member |
 
 **Contracts depended on:** [C4 tools](../session-typescript.md), [Settings](../appserver/settings-service.md), [S2 sessions](../appserver/sessions-service.md), [method admission](../contracts/session-boundary.md) and [pluginFiles](../../../crates/dim-app-server/README.md#trusted-plugin-storage). **Plugin-owned contracts specified here:** job and delivery data, the `schedule` and `wakeup` tools, `scheduleJobs.call`, management namespace `schedule`, the `session.wakeup` namespace, source `schedule`, marker `dim-scheduler` and submission ids `scheduler:<run_id>`. The risk `persistent_configuration` remains unclassified under Permission; no category is added.
@@ -98,7 +109,7 @@ The row fields below are the dependency, method-kind and Settings contract that 
 | `id` | `Scheduler` |
 | `name` | `Scheduler` |
 | `config` | `{}` |
-| `inject` | `settings`, `pluginFiles`, `managementMethods`, `partRegistry`, `sessions` |
+| `inject` | `settings`, `pluginFiles`, `managementMethods`, `partRegistry`, `sessions`, `processActivity` |
 | `provides` | `scheduleJobs`; apply registers `schedule` with `managementMethods` and the `SchedulerSession` part with `partRegistry` |
 | `settings` | The complete `schedule` source in §7.1, including its schema |
 
@@ -439,7 +450,15 @@ Rules: [principles §1 and §4](../../architecture/rust-agent/principles.md), [A
 
 ## 9. Requirements raised to mechanism owners
 
-None. The runtime assembly entries the binding uses (`AgentBuilder::optional_plugin`, `PluginRows` and `PartRegistry::register`) are the ones §1.2 records, and they already exist. Existing C3/C4, S2, Settings and pluginFiles mechanisms remain the baseline. The two sentences elsewhere that named Scheduler's old ownership are corrected in the same change because they follow from this one: [sessions service §8.7](../appserver/sessions-service.md#87-deleting-run-sessions) and [EventHub §10](EventHub.md#10-not-in-this-design). No new App Server method, service, event or infrastructure requirement is added.
+The runtime assembly entries the binding uses (`AgentBuilder::optional_plugin`, `PluginRows` and `PartRegistry::register`) are the ones §1.2 records, and they already exist. Existing C3/C4, S2, Settings and pluginFiles mechanisms remain the baseline. The two sentences elsewhere that named Scheduler's old ownership are corrected in the same change because they follow from this one: [sessions service §8.7](../appserver/sessions-service.md#87-deleting-run-sessions) and [EventHub §10](EventHub.md#10-not-in-this-design).
+
+### R1. Initial process publication
+
+- **Blocked:** Startup recovery, the timer and restored stop timers are process background work. [Plugin contract §7.1](../plugin-contract.md#71-phases) defines Activated only for Session and branch parts, so Scheduler can call `sessions.lookup` while `AgentIndex` is still being installed. The stable face answers `reloading`; a persisted attempt is spent and a healthy stored delivery can settle `lost` (A.6), contrary to the stored-ownership acceptance in [S2 §17.1](../appserver/sessions-service.md#171-stored-ownership-before-index-publication).
+- **Existing mechanisms considered:** `ServerControl` has the exact readiness state but is `internal(control)`; `AgentIndex` is `internal(owner-api)`, and `KeyedGate` would reload Scheduler with the index (S2 D1); two-phase row assembly changes startup for every optional row; a blocking or new `sessions` reply changes S2. None exposes process publication without a new consumer dependency or retry policy.
+- **Needed:** one process-scope data-face method, `processActivity.activated() -> boolean`, resolving once per host start after the required process rows are Active, resolving `false` when startup fails or shutdown begins before that observation, and not reset by a row reload. Its shared catalog name, `HostDispatch` and native binding are the same operation with the same cancellation semantics. It carries no business meaning, retry policy or storage.
+- **Effect:** no Timeline, event, storage-format, Session-input or `sessions` change; one additive data-face method backed by the existing readiness watch. The `hold`/`release` admission contract is unchanged.
+- **Owner:** App Server assembly/lifecycle (`ServerControl`), consumed by Scheduler and available to other process parts with the same need.
 
 ## 10. Session-scoped wakeup
 
@@ -746,6 +765,8 @@ Scheduler delivers no run outcome to a Session, writes no report input, and send
 
 Recovery never rewrites a settled record and never resends a window. A crash between persisting `delivering` and the input's reply is settled by `sessions.lookup` at the next start; a crash after a launched Session was created but before its identity was recorded leaves a Session named by no record (the known limit in Appendix F), and its record names no Session, so no lookup can reach it and it settles `lost` with `detail: launch_reply_unknown`. A lookup always targets the identity its record holds at the start of the pass, so a delivery whose launch reply arrived after the caller's own snapshot predated it is reconciled against the launched Session, not settled `lost` on a stale copy. A launch record that carries its Session resumes only its stop timer in any state, `delivered`, `lost` or `failed`: the timer is `deadline_at`, which the record carries, and it belongs to the launched Session until retention removes the record (A.7). Each `delivering` record is looked up once per timer pass and at most five times in all, across restarts. An `accepted` answer settles it `delivered`; the fifth answer without a fact settles it `lost` (§3.1). Recovery settles a record whose stored `attempts` is already at the bound `lost` with `detail: lookup_budget_exhausted`, before it looks anything up. Each pass persists the incremented `attempts` before the lookup, so a crash between attempts does not start the count again. "Never pruned while unsettled" therefore stays true and becomes bounded: a job whose target keeps failing neither grows records without bound nor writes twice.
 
+Initial process publication is not a lookup answer. Before `processActivity.activated()` resolves, recovery sends no lookup and persists no attempt, so a stored record stays exactly as written. After publication, a `reloading` answer from an owner generation's stop or load is a real answer: it counts toward the bound as this section states, including the fifth answer settling `lost`.
+
 ### A.7 Run storage and retention
 
 The process owner opens one `pluginFiles` scope and uses `scheduler/runs.json`, relative to the host-authorized root. Its text is one JSON document `{ "version": 1, "runs": [Delivery] }`, with `Delivery` defined in A.1. The host's S10 `{version:1,text}` envelope is separate: Scheduler supplies only the inner JSON text and never reads or writes that envelope itself. Jobs remain solely in Settings; a delivery records its job identity and what the window did, not another editable job configuration.
@@ -837,6 +858,7 @@ Verify actual flows through the management methods and the `schedule` tool, with
 19. **Absent attempts read as zero.** A stored `delivering` record without `attempts` reads as zero attempts, and its first lookup pass after the restart is attempt one.
 20. **An in-flight write is not settled by `unknown`.** The lookup answers `unknown`, the record stays `delivering` and the attempt counts; a later lookup answers `accepted`, the record settles `delivered`, and no second input was written.
 21. **Exhausted lookup budget.** A stored `delivering` record whose `attempts` is at the bound, read after a restart, settles `lost` with `detail: lookup_budget_exhausted`; no lookup is sent for it and no input is written.
+22. **Initial publication.** While the host has not published the process, Scheduler sends no `sessions.lookup` and persists no attempt; releasing publication performs one real attempt. A stored bound settles after publication without a lookup. Host shutdown or generation unload while waiting leaves records and attempts unchanged for the next start. A restored overdue stop acts after publication without the 60 s retry.
 
 ## Appendix E. Assumptions
 
@@ -905,7 +927,7 @@ no `schedule.*` methods or `schedule` tool. The process part is added with
 | `settings`, `pluginFiles` | Typed App Server services (`SettingsService`, `PluginFileTransactions`) keyed with `names.key()`; the crate depends on `dim-app-server`, which `xtask check` allows |
 | `sessions` | The shared host-dispatch name, called with its JSON envelope; its native request types are private to App Server |
 | Process storage | The typed `PluginFileTransactions` service of App Server ([trusted plugin storage](../../../crates/dim-app-server/README.md#trusted-plugin-storage)). The host writes the `{version: 1, text}` envelope; Scheduler supplies the inner v1 text, the same bytes the TypeScript version wrote. |
-| Timer, delivery writes and the stop timer | Owned by the process part: the timer, delivery tasks and retention run in its task tracker and start after its methods and services are registered. On unload (`ctx.cancellation_token()`), new work stops, waits end, and cleanup joins the tracker before the storage scope closes; an admitted `sessions` call settles first. A record still `delivering` is left in the file for the next generation's recovery. The Session tools return the unloading results of §1.3 and their own `schedule: cancelled before handover` or `wakeup: cancelled before handover`. |
+| Timer, delivery writes and the stop timer | Owned by the process part: the timer, delivery tasks and retention run in its task tracker and start after its methods and services are registered and the process is published (§9 R1). On unload (`ctx.cancellation_token()`), new work stops, waits end, and cleanup joins the tracker before the storage scope closes; an admitted `sessions` call settles first. A record still `delivering` is left in the file for the next generation's recovery. The Session tools return the unloading results of §1.3 and their own `schedule: cancelled before handover` or `wakeup: cancelled before handover`. |
 | Policy text | `install_with(builder, SchedulerTexts {description})`; `install` uses the built-in text. The description is protocol only, so no evaluation member is carried and no validation is needed. |
 | Guide entry | The Session part keys `GuideEntries` and registers the §5.2 entry, session-scoped, order 110 |
 | Optional row | `AgentBuilder::optional_plugin`: the host does not wait for the row, so missing dependencies or an unreadable delivery store fail only Scheduler (Appendix D item 14) |
