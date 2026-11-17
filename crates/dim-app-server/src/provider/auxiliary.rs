@@ -55,7 +55,7 @@ async fn run(
     cancel: CancellationToken,
 ) -> Result<AuxiliaryReply, AuxiliaryError> {
     let selectable = owner
-        .catalog_for(model.provider_id.clone(), &cancel)
+        .catalog_target(model.provider_id.clone(), model.model_id.clone(), &cancel)
         .await?
         .is_some_and(|catalog| catalog.selectable(&model.model_id).is_some());
     if !selectable {
