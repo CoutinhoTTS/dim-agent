@@ -413,7 +413,7 @@ fn the_mainland_token_plan_is_its_own_plan_provider_beside_the_international_one
     for (provider_id, display_name, base_url) in [
         (
             "bailian-token-plan",
-            "Model Studio Token Plan",
+            "Alibaba Cloud Model Studio Token Plan",
             "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
         ),
         (

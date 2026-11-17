@@ -4162,7 +4162,7 @@
     },
     {
       "providerId": "bailian-token-plan",
-      "displayName": "Model Studio Token Plan",
+      "displayName": "Alibaba Cloud Model Studio Token Plan",
       "driverKind": "openai-responses",
       "defaultBaseUrl": "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
       "auth": {"type":"api_key","headerName":"Authorization","prefix":"Bearer "},
