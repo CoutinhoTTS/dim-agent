@@ -866,7 +866,9 @@ async fn committed_shell_completion_recovers_after_notice_failure_and_host_loss(
             error.to_string().contains("injected exec notice failure"),
             "{error}"
         );
-        std::fs::write(work.home.join("ready"), session.id()).unwrap();
+        let ready = work.home.join("ready.tmp");
+        std::fs::write(&ready, session.id()).unwrap();
+        std::fs::rename(ready, work.home.join("ready")).unwrap();
         std::future::pending::<()>().await;
         return;
     }
