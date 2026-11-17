@@ -901,8 +901,9 @@ async fn overdue_wakeups_fire_in_at_order_with_a_stable_tie_breaker() {
     // instants are an hour out, so only the advance below reaches them.
     edit_wakeups(home.path(), |wakeups| {
         wakeups[0]["at"] = json!(instant_after(home.path(), 3600));
-        wakeups[1]["at"] = json!(instant_after(home.path(), 3560));
-        wakeups[2]["at"] = json!(instant_after(home.path(), 3560));
+        let tied_at = instant_after(home.path(), 3560);
+        wakeups[1]["at"] = json!(tied_at);
+        wakeups[2]["at"] = json!(tied_at);
         wakeups[3]["at"] = json!(instant_after(home.path(), 3580));
     });
     clock(home.path()).advance(chrono::Duration::seconds(3610));

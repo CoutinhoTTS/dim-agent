@@ -1715,3 +1715,84 @@ async fn node_reads_prompt_overrides_from_the_same_owner_as_native_consumers() {
     server.join().await.unwrap();
     std::fs::remove_dir_all(home).unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+async fn node_hooks_registration_uses_the_native_content_owner() {
+    use dim_app_server::hooks_settings::HooksService;
+    let home = home();
+    let mut parts = session_typescript::fixture();
+    parts.rows = vec![json!({
+        "id":"hooks-service", "name":parts.anchor.parent().unwrap().join("fixtures/hooks-service.ts"),
+        "provides":{}, "config":{}
+    })];
+    let (server, _, _) = session_typescript::start(config(&home, parts)).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    assert_eq!(
+        files_available(&mut client, "hooksprobe.read", json!({})).await,
+        json!({"plugins":[], "refusal":null})
+    );
+    let hooks = server.service::<HooksService>().unwrap();
+    let document =
+        json!({"hooks":{"Stop":[{"hooks":[{"type":"command", "command":"fixture-guard"}]}]}});
+    let registered = client
+        .rpc(
+            "hooksprobe.register",
+            json!({"dir":home, "document":document}),
+        )
+        .await;
+    assert_ok(&registered);
+    assert_eq!(
+        registered["result"]["plugins"],
+        json!(hooks.plugins(&CancellationToken::new()).await.unwrap())
+    );
+    let catalog = client.rpc("hooks.catalog", json!({})).await;
+    assert_ok(&catalog);
+    assert!(
+        catalog["result"]["hooks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(
+                |hook| hook["source"] == "plugin:foreign-kit" && hook["command"] == "fixture-guard"
+            )
+    );
+    let refused = client
+        .rpc(
+            "hooksprobe.register",
+            json!({"dir":home, "document":{"hooks":[]}}),
+        )
+        .await;
+    assert!(refused.get("error").is_some(), "{refused}");
+    let read = files_available(&mut client, "hooksprobe.read", json!({})).await;
+    assert_eq!(
+        read,
+        json!({"plugins":[], "refusal":hooks.plugin_refusal("foreign-kit")})
+    );
+    assert!(hooks.plugin_refusal("foreign-kit").is_some());
+    hooks
+        .register_plugin(
+            "foreign-kit".into(),
+            home.clone(),
+            document,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        files_available(&mut client, "hooksprobe.read", json!({})).await,
+        json!({"plugins":["foreign-kit"], "refusal":null})
+    );
+    assert_ok(&client.rpc("hooksprobe.withdraw", json!({})).await);
+    assert!(
+        hooks
+            .plugins(&CancellationToken::new())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
