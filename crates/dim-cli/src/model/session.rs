@@ -1116,7 +1116,9 @@ pub struct ModelList {
     pub manage: bool,
     pub current: Option<(String, String)>,
     /// The usable providers that offer no selectable model, with why, so the
-    /// picker can name them.
+    /// picker can name them. A provider in `limits` appears here only for its
+    /// other unavailable or disabled models; its undeclared models are not
+    /// counted again.
     pub empty: Vec<EmptyProvider>,
     /// The usable providers whose models include ones with undeclared
     /// limits, with how many.

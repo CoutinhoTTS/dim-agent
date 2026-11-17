@@ -178,7 +178,8 @@ Home / End          滚动（fullscreen，草稿为空） 滚动（fullscreen，
 
 默认发送模式是 TUI 的设置：ACP client 自行决定运行期间输入的消息如何暂存，中断并立即发送
 在 ACP 上是 `session/cancel` 之后发送新的 `session/prompt`
-（[AcpGateway §4.2](../plugins/AcpGateway.md#42-prompt-与取消)）。Web 输入框见 #1601。
+（[AcpGateway §4.2](../plugins/AcpGateway.md#42-prompt-与取消)）。Web 工作区提供同样的两种模式，缺省值保存在浏览器，
+中断并立即发送的步骤也相同（[Web 工作区 §4.5](../../design/web-workspace.md#45-sending-during-a-run)）。
 
 草稿为空时按 Enter 只有在更早的分支都不适用时才打开 `/tasks`：先是两种模式下的
 shell 运行拦截，再是 steer 最早的排队消息，只有在没有排队消息时才轮到它。任务行必须
@@ -777,7 +778,7 @@ Ctrl+T 立即运行所选任务，并报告所有者为手动窗口记录的投�
 
 ### Models 领域
 
-Models 领域（#818）：`/models` 里的 `Edit models` 打开单个提供方的面板，`dimcode models PROVIDER enable|disable|remove|inspect MODEL`、`edit MODEL`、`set MODEL PATH` 与 `add PATH` 是它在命令行上的同一领域，经 `provider.management` 与 `provider.models.*` 写入（[提供方管理](appserver/provider-management.md)）。提供方是领域的一部分，所以另一个提供方的回复不会落到面板里，面板标题也写明提供方（`Models · <name>`）。`dimcode models PROVIDER` 保持原有列表与四个标志；`--refresh` 就是该领域在命令行上的 reload。
+Models 领域（#818）：`/models` 里的 `Manage models` 先打开提供方列表，再打开单个提供方的面板，`dimcode models PROVIDER enable|disable|remove|inspect MODEL`、`edit MODEL`、`set MODEL PATH` 与 `add PATH` 是它在命令行上的同一领域，经 `provider.management` 与 `provider.models.*` 写入（[提供方管理](appserver/provider-management.md)）。提供方是领域的一部分，所以另一个提供方的回复不会落到面板里，面板标题也写明提供方（`Models · <name>`）。`dimcode models PROVIDER` 保持原有列表与四个标志；`--refresh` 就是该领域在命令行上的 reload。
 
 一个模型是一个条目。标签是显示名，详情是 id、两个上限（或 `undeclared`）、端点及其覆盖，以及所有者报告的不可用原因。条目按所有者报告的来源分组：默认模型在 `catalog`，descriptor 覆盖在 `overrides`，用户新增在 `added`，顺序固定。所有者报告为不可用的模型保留 `unavailable` 状态词，详情说明原因。账号条目在没有目录记录时没有条目；本次读取的 issue 说明它还没有目录。
 
@@ -809,20 +810,41 @@ Ctrl+R 读取该领域，并在提供方的 actions 含 `refresh` 时先发送 `
 ╰──── Enter toggle · Ctrl+E edit · Ctrl+R reload · Ctrl+N add · Ctrl+X remove · Tab inspect ─╯
 ```
 
-选择器为每个提供方增加一行：`Edit models`，位于该提供方的块内，detail 写明提供方，因此没有可选模型的提供方也能打开。守护进程未声明 `provider.management` 时没有这一行。它在选择器的位置打开该领域，在那里按 Esc 关闭到提示符，而不是回到选择器。
+`/models` 把对话模型候选、子代理模型策略与提供方管理放在三个固定分区里（#1676）；只有候选列表滚动。候选只包含可选模型：一行写提供方名称、模型 id、目录声明时的 `ZDR`、声明的推理强度与 `current` 标记。列表下方的选中摘要写明所选候选的 id 是如何识别的；候选行本身保持简短，摘要区为空时不显示说明文字。
+
+Tab / Shift+Tab 在守护进程提供的分区之间移动，Up/Down 停留在当前分区内；footer 写明该分区的 Enter 做什么。搜索只过滤候选：它从不隐藏策略或管理入口，没有匹配时两者保持原位。选中项从当前模型开始。`←`/`→` 只在候选分区循环推理强度，`Ctrl+X` 也只在那里清除所选模型的已保存偏好。在根层，Escape 先清除搜索，再关闭。
+
+策略分区显示当前策略，Enter 打开既有的 Agent choice / Inherit requesting branch / Fixed model 流程；固定模型页只列模型候选。守护进程未声明策略方法时没有这一分区（[子代理模型策略](../../design/subagent-model-policy.md#5-native-cli-interaction)）。
+
+管理分区包含一个 `Manage models` 入口与紧凑的诊断：缺少上限的模型、不可用与已禁用的模型、没有模型的提供方，以及所有者无法读取的目录。提供方缺少上限的模型就是它的原因，所以不会再计为不可用。Enter 打开提供方列表，每行写明提供方及其状态；没有可选模型的提供方也列在这里。选择提供方打开它既有的模型管理领域，沿用其编辑、启停用、刷新与检查操作。关闭该领域回到提供方列表，再关闭则回到各分区，搜索、选中项与列表位置保持原样；Read Models 再次运行，使候选显示所有者现在提供的内容。守护进程未声明 `provider.management` 时没有任何操作：诊断及其恢复指引保留为只读行。
 
 ```text
-Select a model
-> Ready / flash              ZDR  ‹ high ›  current
-  Ready / plain              low
-  Ready / sonnet             —
-  Edit models                Ready  ready
-  Other / model-x
-  Edit models                Other  other
-  Manual: no models · add a model with provider.models.create
-  Edit models                Manual  manual
-  Subagent models: Agent choice
-Enter select + default · ←/→ effort · Ctrl+B/F cursor · Ctrl+X clear saved · Esc clear/close
+╭─ Models ──────────────────────────────────────────────────────────────────────────────────────╮
+│ Conversation model                                                                            │
+│                                                                                               │
+│ >                                                                                             │
+│                                                                                               │
+│ › Ready / flash                         ZDR  ‹ high ›  current                                │
+│   Other / model-x                       low                                                   │
+│   Manual / house-model                                                                        │
+│ Selected: Ready / flash  identified: flash at ready                                           │
+│ Subagent models                                                                               │
+│ › Agent choice                                                                          Enter │
+│ Model management                                                                              │
+│ › Manage models                                                                   3 providers │
+│   4 with missing limits / 2 unavailable                                                       │
+╰───────────────────────── Enter select + default · ←/→ effort · Tab section · Esc clear/close ─╯
+```
+
+```text
+╭─ Manage models ───────────────────────────────────────────────────────────────────────────────╮
+│ >                                                                                             │
+│ › Ready                     ready · 4 with missing limits                                     │
+│   Other                     ready                                                             │
+│   Manual                    no models                                                         │
+│   Relay                     2 unavailable                                                     │
+│   Ready: 4 models need a window · dimcode models ready --set-missing-limits                   │
+╰─────────────────────────────────── Enter manage · Esc back ───────────────────────────────────╯
 ```
 
 `dimcode models PROVIDER remove MODEL` 不经面板的确认直接移除；`dimcode models PROVIDER inspect MODEL` 打印详情显示的那些行。

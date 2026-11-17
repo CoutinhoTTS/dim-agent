@@ -11,6 +11,8 @@ cargo build --workspace --locked
 
 A normal Cargo installation is sufficient; compiler caching is optional. Each worktree keeps its own target directory. Existing source caches can be reused without sharing build outputs.
 
+The release profile uses full LTO (`lto = "fat"`) with one codegen unit to reduce binary size. Hosted release builds use two Cargo jobs. The macOS ARM64 release job overrides LTO to `thin` on its 7 GB runner; full LTO requires a release build and runtime smoke test within that runner's memory budget before enabling it there. The other release targets retain full LTO. [The resource investigation](https://github.com/arcships/dim/issues/1674) tracks measurements and build costs. Code residency depends on executable layout and file-cache mapping conditions as well as code size. Normal PR tests use the dev profile, so release builds and runtime smoke tests on each supported platform must validate this setting.
+
 ## Native Linux executable layout
 
 On Linux x86-64 with 4 KiB pages, the opt-in layout build groups functions used by
