@@ -3041,6 +3041,18 @@ fn acp_stdio_sends_context_compaction_as_the_protocol_entity_only_when_declared(
                 compactions[5]["content"][0]["content"]["text"], "Skipped: insufficient history",
                 "the skipped reason is the text an undeclared client reads"
             );
+            let automatic =
+                |index: usize| compactions[index]["_meta"]["lody"]["activity"]["automatic"].clone();
+            assert_eq!(
+                (automatic(0), automatic(1)),
+                (json!(false), json!(false)),
+                "a manual compaction reports automatic false at its start and at its terminal"
+            );
+            assert_eq!(
+                (automatic(4), automatic(5)),
+                (json!(true), json!(true)),
+                "a threshold compaction reports automatic true at its start and at its terminal"
+            );
             assert!(
                 !peer
                     .updates
