@@ -11,6 +11,66 @@ cargo build --workspace --locked
 
 A normal Cargo installation is sufficient; compiler caching is optional. Each worktree keeps its own target directory. Existing source caches can be reused without sharing build outputs.
 
+## Native Linux executable layout
+
+On Linux x86-64 with 4 KiB pages, the opt-in layout build groups functions used by
+startup, shutdown, the TUI model picker and a local tool conversation. It reduces
+the number of unrelated code pages mapped alongside those functions. It does not
+change business logic, introduce a runtime cache or change the allocator.
+
+```sh
+python3 scripts/code-layout/build.py --output /tmp/dim-layout-build --jobs 2
+/tmp/dim-layout-build/dimcode --version
+```
+
+The output directory must be new. Python 3.9 or later, `cc`, the pinned Rust
+toolchain's LLD and readable `/proc/<child>/smaps` / writable `clear_refs` are
+required. The tool builds `dimcode` with the repository's release profile and
+preserves the build environment, including account build settings. An optional
+`--target x86_64-unknown-linux-gnu` selects Cargo's explicit native target path.
+Other targets and cross compilation are not supported by this command.
+
+The build captures the final native linker inputs, reproduces Cargo's binary
+byte for byte, and trains only that binary. A temporary preload probe prefaults
+its executable pages, separates their mappings, clears reference bits and resets
+code-page permissions to invalidate cached translations before `main`, and reads
+the App Server's referenced pages after normal shutdown. The TUI
+opens and closes its model picker three times, is sampled before its explicit
+exit, and must then exit successfully. The conversation uses a loopback model fixture and
+executes the real `read` tool in a disposable workspace. Training does not use
+the user's product home, credentials or remote providers.
+
+Whole functions intersecting referenced pages are grouped by shared usage:
+startup/shared functions first, then TUI, then conversation-only functions;
+original address order is retained within each group. Functions not selected
+retain the linker's default ordering. A diagnostic link identifies names LLD
+resolves to shared or discarded definitions, including duplicate C-local names.
+Those names alone are removed from the order before one strict relink; any other
+diagnostic fails the build. This is page-access profiling, including neighboring
+functions on each page, rather than an instruction trace or a call-count profile.
+
+The same native objects are relinked with LLD's `--symbol-ordering-file`. The
+function-name/size multiset must remain equal. The candidate then runs all three
+flows without the probe, plus CLI help/version checks. Only after they pass does
+the command produce `dimcode`. Cargo's original executable remains unchanged.
+`baseline`, `symbols.order`, three footprint files and `manifest.json` record the
+comparison inputs, source state, Rust version and artifact hashes. The probe and
+temporary homes are removed on completion or failure. Failed builds may leave
+diagnostic files in the output directory but never produce its final `dimcode`.
+
+Scheduling can change which neighboring pages a training run observes, so the
+optimized artifact is not promised to be byte-identical across training runs.
+Each build regenerates its own function order; an order from another compiler,
+feature set or source revision is not reused. The command adds a training pass
+and two or three native links after Cargo. The current release workflow remains unchanged:
+enabling this in packaging requires validation in the existing manylinux 2.28
+build environment. The tool does not raise the shipped executable's libc baseline.
+Normal Cargo builds and macOS, Windows and Linux ARM64 packaging are unchanged.
+[The code-residency issue](https://github.com/arcships/dim/issues/1674) tracks
+source-specific measurements and release integration.
+
+## Development and CI
+
 The macOS `verify` job has a seventy-five-minute overall deadline and allows four concurrent Cargo build jobs. It builds all workspace targets once, checks the architecture, then runs up to two recorded test executables at a time with up to three test threads per executable. The workspace run starts `transport_flow` and `cli_flow` first. The separate CLI profile and Node- and Python-backed Rust suites use two test threads each. The `dependencies` job allows two Cargo build jobs when installing `cargo-deny`.
 
 CI sets `CARGO_TARGET_DIR` to the checkout's `target` directory so a compiler cache's managed-target collection cannot remove binaries between the build and their later execution. Each executable keeps its Cargo package working directory and streams output immediately, with target start/end markers and exit status. A target has a ten-minute default deadline (`DIM_TEST_TIMEOUT_MS` overrides it); the full workspace step sets fifteen minutes per executable for the large flow suites at three test threads. Timeout and cancellation terminate its process tree. Failures still allow the other targets to finish and fail the step. Cargo runs documentation tests separately with the same feature selection. Local `cargo test --workspace --locked` remains available without Node.
