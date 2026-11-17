@@ -7,9 +7,9 @@ const directory=fileURLToPath(new URL('./code-layout/',import.meta.url));
 
 test('Linux layout relinks the same native inputs and preserves executable behavior', {
   skip:process.platform!=='linux'||process.arch!=='x64',
-  timeout:60_000,
+  timeout:180_000,
 },()=>{
-  const result=spawnSync('python3',['-',directory],{encoding:'utf8',timeout:55_000,input:String.raw`
+  const result=spawnSync('python3',['-',directory],{encoding:'utf8',timeout:170_000,input:String.raw`
 import os
 from pathlib import Path
 import shutil
@@ -115,7 +115,7 @@ fn main() { let x = std::hint::black_box(0); println!("{}", layout_first(x) + la
 ''')
     shutil.copyfile(build.REPO / 'rust-toolchain.toml', project / 'rust-toolchain.toml')
     for name in list(os.environ):
-        if name.startswith('CARGO_') or name in ('RUSTFLAGS', 'RUSTC_WRAPPER', 'RUSTC_WORKSPACE_WRAPPER'):
+        if name.startswith('CARGO_') or name in ('RUSTFLAGS', 'RUSTC', 'RUSTC_WRAPPER', 'RUSTC_WORKSPACE_WRAPPER'):
             del os.environ[name]
     os.environ['CARGO_HOME'] = str(root / 'cargo-home')
     subprocess.run(['cargo','generate-lockfile','--offline'],cwd=project,check=True)
@@ -134,6 +134,31 @@ fn main() { let x = std::hint::black_box(0); println!("{}", layout_first(x) + la
     build.ordered_link(recorded, rust_changed, rust_order)
     assert build.validate_layout(rust_base, rust_changed, rust_order)['movedFunctionSymbols'] > 0
     assert subprocess.check_output([str(rust_base)]) == subprocess.check_output([str(rust_changed)]) == b'42\n'
+
+    selected_sysroot = root / 'selected-toolchain'
+    selected_sysroot.symlink_to(sysroot, target_is_directory=True)
+    selected_rustc = root / 'selected rustc'
+    selected_rustc.write_text(f'''#!{sys.executable}
+import os, sys
+if sys.argv[1:] == ['--print', 'sysroot']:
+    print({str(selected_sysroot)!r})
+else:
+    os.execv({str(sysroot / 'bin/rustc')!r}, ['rustc', *sys.argv[1:]])
+''')
+    selected_rustc.chmod(0o700)
+    for variable in ('RUSTC', 'CARGO_BUILD_RUSTC'):
+        os.environ.pop('RUSTC', None)
+        os.environ['CARGO_BUILD_RUSTC'] = str(root / 'unused-compiler')
+        os.environ[variable] = str(selected_rustc)
+        overridden = root / variable
+        overridden.mkdir()
+        recorded = build.cargo_link(overridden, shutil.which('cc'), 2)
+        assert '-B'+str(selected_sysroot / 'lib/rustlib/x86_64-unknown-linux-gnu/bin/gcc-ld') in recorded['arguments']
+        assert recorded['rustc'] == subprocess.check_output([str(selected_rustc), '-vV'], text=True)
+        replay = overridden / 'replay'
+        build.relink(recorded, replay)
+        assert build.digest(replay) == build.digest(Path(recorded['output']))
+        assert subprocess.check_output([str(replay)]) == b'42\n'
 `});
   assert.equal(result.error,undefined);
   assert.equal(result.status,0,result.stdout+result.stderr);
