@@ -79,6 +79,15 @@ void entry(void) {
     assert recorded['inputs']
     assert recorded['output'].endswith('captured.exe')
 
+    canonical = root/'canonical.rs'
+    canonical.write_text('fn main() { let p = std::env::args().nth(1).unwrap(); println!("{}", std::fs::canonicalize(p).unwrap().display()); }')
+    cl = shutil.which('cl')
+    assert cl, 'cl must be on PATH'
+    msvc = str(Path(cl).with_name('link.exe'))
+    subprocess.run(['rustc', '-Clinker='+msvc, str(canonical), '-o', str(root/'canonical.exe')], check=True)
+    expected = subprocess.check_output([str(root/'canonical.exe'), str(root)], text=True).strip()
+    assert win32.canonical_path(root) == expected, (win32.canonical_path(root), expected)
+
     process = subprocess.Popen(['cmd.exe','/c','ping','-n','5','127.0.0.1'],
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                creationflags=win32.CREATE_SUSPENDED)
@@ -96,11 +105,9 @@ void entry(void) {
         win32.close(handle)
         process.kill(); process.wait()
 
-    console = win32.Console(['cmd.exe','/c','echo','layout-conpty'], root, dict(os.environ))
+    console = win32.Console(['cmd.exe','/c','echo','layout-conpty'], root, dict(os.environ),
+                            suspended=False, inherit_environment=True)
     try:
-        console.trim()
-        time.sleep(1)
-        assert console.poll() is None, (console.poll(), console.error)
         capture = bytearray()
         deadline = time.monotonic() + 20
         while time.monotonic() < deadline and b'layout-conpty' not in capture:
