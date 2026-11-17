@@ -2415,9 +2415,10 @@ impl Worker {
     /// `requireInactive`: the issue asks the picker to delete a Session a
     /// turn is running in, which the close in the delete settles.
     ///
-    /// The reply alone decides, because an attached Session is loaded and
-    /// so a `-32603` can only follow a close: every other error comes before
-    /// it and changes nothing.
+    /// A `-32603` does not confirm deletion or whether the Session closed:
+    /// storage operations can fail before or after close. The picker keeps
+    /// the row for reconciliation and leaves an affected current Session
+    /// (session-deletion-and-fork §3.5).
     async fn delete_session(&mut self, session_id: &str) -> DeleteOutcome {
         if !self.client.supports(&["session.delete"]) {
             return DeleteOutcome::Unsupported;
@@ -2433,11 +2434,11 @@ impl Worker {
             Ok(reply) if reply.deleted == Some(false) => DeleteOutcome::NothingRemoved,
             Ok(_) => DeleteOutcome::Deleted,
             Err(error) => {
-                let close_ran = error
+                let removal_failed = error
                     .downcast_ref::<client::RpcError>()
                     .is_some_and(|rpc| rpc.code == -32603);
                 let reason = crate::session_command::reason(&error);
-                if close_ran {
+                if removal_failed {
                     DeleteOutcome::ClosedNotRemoved(reason)
                 } else {
                     DeleteOutcome::Failed(reason)

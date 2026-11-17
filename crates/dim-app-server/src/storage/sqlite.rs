@@ -1804,6 +1804,16 @@ pub(super) fn validate_backup_schema(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Whether `connection`'s database is exactly the current [`FORMAT`]'s schema
+/// with its marker: what an offline tool requires before it touches a store it
+/// did not create.
+pub(super) fn is_current_format(connection: &Connection) -> Result<bool> {
+    Ok(
+        known_format(&schema(connection)?, Some(i64::from(FORMAT))) == Some(FORMAT)
+            && markers(connection)? == [i64::from(FORMAT)],
+    )
+}
+
 /// Reclaims free pages in an existing store by rewriting it with `VACUUM`
 /// (#600), after removing the content rows no reference reaches (#1697). Those
 /// rows are what an already-upgraded store still holds: the v50 conversion
