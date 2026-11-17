@@ -414,6 +414,7 @@ test("connection configuration reads and writes summaries without requesting mod
 
 test("a model search replaces a previous page cursor before load more can extend it", async () => {
   const requests = []
+  const pendingSearch = Promise.withResolvers()
   const route = reactive({ name: "settings-provider-detail", params: { providerId: "relay" } })
   const provider = { providerId: "relay", displayName: "Relay", source: "custom", credentialAuthority: "static", enabled: true, version: 1, actions: [],
     connection: { driverKind: "openai-compatible", auth: { type: "bearer" }, baseUrl: "https://example.test/v1", credentialConfigured: true, headerNames: [], proxyUrl: null, proxyAuthConfigured: false, timeoutMs: null } }
@@ -427,8 +428,9 @@ test("a model search replaces a previous page cursor before load more can extend
     if (method === "provider.management.list") return read({ drivers: [], providers: [provider], errors: [], next: null })
     assert.equal(method, "provider.management")
     const query = params.page?.query ?? ""
+    if (query === "delayed" && !params.page?.after) await pendingSearch.promise
     return read({ drivers: [], errors: [], next: query ? "search-cursor" : "cursor-1",
-      providers: [{ ...provider, preferences: {}, models: [entry(query || "first")] }] })
+      providers: [{ ...provider, preferences: {}, models: [entry(params.page?.after ? `${query}-next` : query || "first")] }] })
   } } }
   const root = node("root")
   const app = renderer.createApp(ProviderSettings).use(createPinia()).use(nuxtUiTestPlugin).provide(settingsDirtyKey, ref(false))
@@ -442,8 +444,6 @@ test("a model search replaces a previous page cursor before load more can extend
     assert.equal(before[0].params.page.after, undefined)
     const search = all(root).filter((element) => element.type === "input" && element.props.type === "search").at(-1)
     search.props["onUpdate:modelValue"]("later")
-    // The cursor above still names the previous query's rows: extending it
-    // would ask for a page of the new query after a foreign cursor.
     await all(root).find((element) => element.type === "button" && text(element) === "loadMore").props.onClick()
     await flush()
     const searched = requests.filter(({ method, params }) => method === "provider.management" && params.page?.query === "later")
@@ -452,6 +452,23 @@ test("a model search replaces a previous page cursor before load more can extend
     await all(root).find((element) => element.type === "button" && text(element) === "loadMore").props.onClick()
     await flush()
     assert.deepEqual(requests.at(-1).params.page, { query: "later", limit: 32, after: "search-cursor" })
-    assert.match(text(root), /later/)
+    const modelNames = () => all(root).filter((element) => element.type === "div" && element.props.class === "provider-models")
+      .flatMap((element) => all(element).filter((row) => row.type === "strong").map(text))
+    assert.deepEqual(modelNames(), ["later", "later-next"])
+    const queuedLoadMore = all(root).find((element) => element.type === "button" && text(element) === "loadMore").props.onClick
+    search.props["onUpdate:modelValue"]("delayed")
+    await flush()
+    await queuedLoadMore()
+    await flush()
+    const delayed = requests.filter(({ method, params }) => method === "provider.management" && params.page?.query === "delayed")
+    assert.equal(delayed.length, 1, "a pending first page owns the query until it supplies a continuation")
+    assert.deepEqual(delayed[0].params.page, { query: "delayed", limit: 32 })
+    pendingSearch.resolve()
+    await flush()
+    assert.deepEqual(modelNames(), ["delayed"], "the first page replaces every row from the previous query")
+    await all(root).find((element) => element.type === "button" && text(element) === "loadMore").props.onClick()
+    await flush()
+    assert.deepEqual(requests.at(-1).params.page, { query: "delayed", limit: 32, after: "search-cursor" })
+    assert.deepEqual(modelNames(), ["delayed", "delayed-next"])
   } finally { app.unmount(); delete globalThis.settingsRoute; delete globalThis.settingsRouter; delete globalThis.settingsConnection }
 })

@@ -89,11 +89,10 @@ async function loadDetail(): Promise<void> {
 }
 async function loadModelDetail(more = false, query = modelQuery.value): Promise<void> {
   if (query !== modelQuery.value) {
-    // The cursor belongs to the previous query's rows: a changed query starts
-    // its own first page instead of extending a list it has not drawn.
     more = false
     modelNext.value = null
   }
+  if (more && !modelNext.value) return
   modelQuery.value = query
   const request = ++modelRead
   const id = providerId.value
