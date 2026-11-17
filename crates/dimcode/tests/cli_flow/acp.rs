@@ -4217,7 +4217,9 @@ fn acp_stdio_names_each_tool_call_with_its_object_kind_and_location() {
         fact(wire, event(35, "rewrite", "step", "tool-use", json!({"turn_id":"turn","request_id":"model","call":{"id":"rewrite","name":"write","input":{"path":"notes.md","content":"newer text\n"}}})));
         fact(wire, event(36, "rewrite-done", "step", "tool-result", json!({"turn_id":"turn","request_id":"model","call_event_id":"rewrite","results":[{"call_id":"rewrite","result":{"content":"Wrote notes.md","structuredContent":{"path":"notes.md","bytesWritten":11,"revision":"r2","diff":"--- notes.md\n+++ notes.md\n@@ -1 +1 @@\n-new file\n+newer text\n"}}}]})));
         fact(wire, event(37, "huge", "step", "tool-use", json!({"turn_id":"turn","request_id":"model","call":{"id":"huge","name":"read","input":{"path":"src/parser.rs","offset":4294967296u64}}})));
-        fact(wire, event(38, "end", "turn", "end", json!({"turn_id":"turn","status":"completed","reason":"end_turn"})));
+        fact(wire, event(38, "overflow", "step", "tool-use", json!({"turn_id":"turn","request_id":"model","call":{"id":"overflow","name":"read","input":{"path":"src/parser.rs","offset":u64::MAX,"limit":2}}})));
+        fact(wire, event(39, "after", "step", "text", json!({"turn_id":"turn","request_id":"model","delta":"still here"})));
+        fact(wire, event(40, "end", "turn", "end", json!({"turn_id":"turn","status":"completed","reason":"end_turn"})));
         detached_eof(wire);
     });
     let mut peer = Peer::start(&home);
@@ -4309,6 +4311,22 @@ fn acp_stdio_names_each_tool_call_with_its_object_kind_and_location() {
         announced("huge")["locations"],
         json!([{"path":path}]),
         "a line ACP cannot carry as a u32 is left out, not truncated to another line"
+    );
+    let overflow = announced("overflow");
+    assert_eq!(
+        overflow["title"],
+        format!("Read src/parser.rs:{}", u64::MAX),
+        "an end past the largest offset is left out, not wrapped"
+    );
+    assert_eq!(overflow["locations"], json!([{"path":path}]));
+    assert!(
+        peer.updates.iter().any(|frame| {
+            let update = &frame["params"]["update"];
+            update["sessionUpdate"] == "agent_message_chunk"
+                && update["content"]["text"] == "still here"
+        }),
+        "a read at the largest offset leaves the projection answering: {:?}",
+        peer.updates
     );
     assert_eq!(announced("exec")["title"], "Run dim-acp tests");
     assert_eq!(announced("exec")["kind"], "execute");
