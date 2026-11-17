@@ -678,7 +678,7 @@
     },
     {
       "providerId": "aihubmix",
-      "displayName": "Aihubmix",
+      "displayName": "AIHubMix",
       "driverKind": "openai-compatible",
       "defaultBaseUrl": "https://aihubmix.com/v1",
       "auth": {"type":"api_key","headerName":"Authorization","prefix":"Bearer "},
@@ -3987,7 +3987,7 @@
     },
     {
       "providerId": "longcat",
-      "displayName": "Longcat",
+      "displayName": "LongCat",
       "driverKind": "openai-responses",
       "defaultBaseUrl": "https://api.longcat.chat/openai/v1",
       "auth": {"type":"api_key","headerName":"Authorization","prefix":"Bearer "},
@@ -4638,7 +4638,7 @@
     },
     {
       "providerId": "kling",
-      "displayName": "Kling",
+      "displayName": "Kling AI",
       "driverKind": "openai-compatible",
       "defaultBaseUrl": "https://api-singapore.klingai.com",
       "auth": {"type":"api_key","headerName":"Authorization","prefix":"Bearer "},
