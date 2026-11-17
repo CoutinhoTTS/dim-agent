@@ -213,9 +213,13 @@ impl ImageUnderstanding {
                                     text.push_str(INCOMPLETE);
                                 }
                                 ModelStopReason::EndTurn | ModelStopReason::StopSequence => {
-                                    let answer = AnswerStamp { version: VERSION, target };
+                                    let answer = AnswerStamp {
+                                        version: VERSION,
+                                        target,
+                                    };
                                     let stamp = json!({"imageUnderstanding": answer});
-                                    result.structured_content = Some(stamp.as_object().unwrap().clone());
+                                    result.structured_content =
+                                        Some(stamp.as_object().unwrap().clone());
                                 }
                                 ModelStopReason::ToolUse => {
                                     return Ok(failed(
@@ -231,7 +235,9 @@ impl ImageUnderstanding {
                         }
                         Err(error) => Ok(failed("image_understand_failed", error)),
                     }
-                }.boxed().shared();
+                }
+                .boxed()
+                .shared();
                 let flight = Arc::new(Flight { answer, cancel });
                 *entry = Arc::downgrade(&flight);
                 flight

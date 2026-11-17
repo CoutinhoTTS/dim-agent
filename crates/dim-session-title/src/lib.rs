@@ -342,11 +342,17 @@ impl Owner {
         let mut entered = false;
         let result: Result<&str, ()> = async {
             let document = self.document().await;
-            if !self.current(epoch) || document.as_ref().is_ok_and(|d| !d.enabled) { return Ok("skipped"); }
+            if !self.current(epoch) || document.as_ref().is_ok_and(|d| !d.enabled) {
+                return Ok("skipped");
+            }
             let stored = self.store.read(&self.id).await;
-            if !self.current(epoch) || stored.as_ref().is_ok_and(|m| m.title.is_some()) { return Ok("skipped"); }
+            if !self.current(epoch) || stored.as_ref().is_ok_and(|m| m.title.is_some()) {
+                return Ok("skipped");
+            }
             let kind = |value: &str| QueryFilter::In {
-                value: QueryOperand::Field { path: "kind".into() },
+                value: QueryOperand::Field {
+                    path: "kind".into(),
+                },
                 values: vec![value.into()],
             };
             let field = |path: &str, value: Value| QueryFilter::In {
@@ -390,9 +396,15 @@ impl Owner {
                 .await
                 .map_err(|_| ())?;
             let through = operator.through;
-            if through < sequence { return Err(()); }
-            let QueryOutput::Rows { rows } = operator.result else { return Err(()); };
-            if rows.is_empty() { return Ok("skipped"); }
+            if through < sequence {
+                return Err(());
+            }
+            let QueryOutput::Rows { rows } = operator.result else {
+                return Err(());
+            };
+            if rows.is_empty() {
+                return Ok("skipped");
+            }
             let first_query = request(
                 Some(through),
                 QueryFilter::And {
@@ -431,19 +443,18 @@ impl Owner {
             let Some(first) = rows.first() else {
                 return Ok("skipped");
             };
-            let [QueryValue::Value {
-                value: Value::String(first_id),
-            }] = first.values.as_slice()
+            let [
+                QueryValue::Value {
+                    value: Value::String(first_id),
+                },
+            ] = first.values.as_slice()
             else {
                 return Err(());
             };
             let input_query = request(
                 Some(through),
                 QueryFilter::And {
-                    conditions: vec![
-                        kind("input/message"),
-                        field("id", first_id.clone().into()),
-                    ],
+                    conditions: vec![kind("input/message"), field("id", first_id.clone().into())],
                 },
                 QuerySelect::Fields {
                     fields: vec!["data.user".into(), "data.blocks".into()],
@@ -466,8 +477,7 @@ impl Owner {
             };
             let source = match (user, blocks) {
                 (QueryValue::Value { value: user }, _) => {
-                    let input: UserInput =
-                        serde_json::from_value(user.clone()).map_err(|_| ())?;
+                    let input: UserInput = serde_json::from_value(user.clone()).map_err(|_| ())?;
                     input
                         .content
                         .iter()
@@ -506,11 +516,14 @@ impl Owner {
             let model = match rows.first() {
                 None => None,
                 Some(row) => {
-                    let [QueryValue::Value {
-                        value: Value::String(provider_id),
-                    }, QueryValue::Value {
-                        value: Value::String(model_id),
-                    }] = row.values.as_slice()
+                    let [
+                        QueryValue::Value {
+                            value: Value::String(provider_id),
+                        },
+                        QueryValue::Value {
+                            value: Value::String(model_id),
+                        },
+                    ] = row.values.as_slice()
                     else {
                         return Err(());
                     };
@@ -520,10 +533,14 @@ impl Owner {
                     })
                 }
             };
-            if !self.current(epoch) { return Ok("skipped"); }
+            if !self.current(epoch) {
+                return Ok("skipped");
+            }
             {
                 let mut state = self.state.lock().unwrap();
-                if state.epoch != epoch || self.stop.is_cancelled() { return Ok("skipped"); }
+                if state.epoch != epoch || self.stop.is_cancelled() {
+                    return Ok("skipped");
+                }
                 state.epoch += 1;
                 state.generating = true;
             }
@@ -536,7 +553,13 @@ impl Owner {
                 return Ok("skipped");
             }
             let cancel = self.stop.child_token();
-            let call = self.generate(document.model, model, &text, document.max_length, cancel.clone());
+            let call = self.generate(
+                document.model,
+                model,
+                &text,
+                document.max_length,
+                cancel.clone(),
+            );
             tokio::pin!(call);
             let completed = tokio::select! {
                 result = &mut call => result,

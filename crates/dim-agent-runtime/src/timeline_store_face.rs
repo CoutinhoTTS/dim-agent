@@ -352,30 +352,36 @@ impl HostDispatch for TimelineStoreBinding {
             return Ok(Value::future(async move {
                 let id = uuid::Uuid::new_v4().to_string();
                 let subscription_id = id.clone();
-                let disposer = caller.listen::<Completion>().name(owner.0.channel.clone()).on(move |completion, _| {
-                    let listener = listener.clone();
-                    let subscription_id = subscription_id.clone();
-                    let matches = completion.key.session_id == request.session_id;
-                    async move {
-                        if matches {
-                            let result = match &completion.result {
-                                Ok(()) => json!("committed"),
-                                Err(error) => json!(error),
-                            };
-                            let payload = json!({
-                                "subscriptionId": subscription_id,
-                                "batchId": completion.batch_id,
-                                "branchId": completion.key.branch_id,
-                                "through": completion.through,
-                                "result": result,
-                            });
-                            if let Err(error) = listener.call_async(Value::List(vec![payload.into()])).await {
-                                tracing::warn!(%error, "Timeline completion listener failed");
+                let disposer = caller
+                    .listen::<Completion>()
+                    .name(owner.0.channel.clone())
+                    .on(move |completion, _| {
+                        let listener = listener.clone();
+                        let subscription_id = subscription_id.clone();
+                        let matches = completion.key.session_id == request.session_id;
+                        async move {
+                            if matches {
+                                let result = match &completion.result {
+                                    Ok(()) => json!("committed"),
+                                    Err(error) => json!(error),
+                                };
+                                let payload = json!({
+                                    "subscriptionId": subscription_id,
+                                    "batchId": completion.batch_id,
+                                    "branchId": completion.key.branch_id,
+                                    "through": completion.through,
+                                    "result": result,
+                                });
+                                if let Err(error) =
+                                    listener.call_async(Value::List(vec![payload.into()])).await
+                                {
+                                    tracing::warn!(%error, "Timeline completion listener failed");
+                                }
                             }
+                            Ok(None)
                         }
-                        Ok(None)
-                    }
-                }).map_err(|error| Error::Value(error.to_string()))?;
+                    })
+                    .map_err(|error| Error::Value(error.to_string()))?;
                 owner
                     .0
                     .subscriptions
@@ -456,12 +462,36 @@ impl HostDispatch for TimelineStoreBinding {
         Ok(Value::future(async move {
             let result: crate::Result<serde_json::Value> = async {
                 Ok(match request {
-                    Request::CreateSession(p) => { store.create_session(&p.session_id, &p.config).await?; json!({}) },
-                    Request::ReleaseSession(p) => { store.release_session(&p.session_id).await?; json!({}) },
-                    Request::RollbackSession(p) => { store.rollback_session(&p.session_id).await?; json!({}) },
-                    Request::SaveSnapshot(p) => { store.save_snapshot(&TimelineKey {session_id:p.session_id,branch_id:p.branch_id}, p.snapshot).await?; json!({}) },
-                    Request::SessionConfig(p) => json!({"config":store.session_config(&p.session_id).await?}),
-                    Request::Branches(p) => json!({"branches":store.branches(&p.session_id).await?}),
+                    Request::CreateSession(p) => {
+                        store.create_session(&p.session_id, &p.config).await?;
+                        json!({})
+                    }
+                    Request::ReleaseSession(p) => {
+                        store.release_session(&p.session_id).await?;
+                        json!({})
+                    }
+                    Request::RollbackSession(p) => {
+                        store.rollback_session(&p.session_id).await?;
+                        json!({})
+                    }
+                    Request::SaveSnapshot(p) => {
+                        store
+                            .save_snapshot(
+                                &TimelineKey {
+                                    session_id: p.session_id,
+                                    branch_id: p.branch_id,
+                                },
+                                p.snapshot,
+                            )
+                            .await?;
+                        json!({})
+                    }
+                    Request::SessionConfig(p) => {
+                        json!({"config":store.session_config(&p.session_id).await?})
+                    }
+                    Request::Branches(p) => {
+                        json!({"branches":store.branches(&p.session_id).await?})
+                    }
                     Request::Head(key) => json!({"sequence":store.head(&key).await?}),
                     Request::ReadPage(p) => json!({"events":store.read_page(&TimelineKey {
                         session_id:p.session_id, branch_id:p.branch_id
@@ -472,23 +502,36 @@ impl HostDispatch for TimelineStoreBinding {
                             (segment.branch_id, segment.from..=segment.through)
                         }).collect()
                     ).await?}),
-                    Request::Query(p) => serde_json::to_value(store.query(&p.scope, &p.query, p.page.as_ref()).await?)
-                        .map_err(|error| AgentError::Storage(error.to_string()))?,
+                    Request::Query(p) => serde_json::to_value(
+                        store.query(&p.scope, &p.query, p.page.as_ref()).await?,
+                    )
+                    .map_err(|error| AgentError::Storage(error.to_string()))?,
                     Request::Trace(p) => json!({"trace":store.trace(&TimelineKey {
                         session_id:p.session_id, branch_id:p.branch_id
                     }, p.sequence).await?}),
                     Request::BatchEnd(p) => {
-                        store.batch_end(&TimelineKey {session_id:p.session_id, branch_id:p.branch_id}, p.sequence).await?;
+                        store
+                            .batch_end(
+                                &TimelineKey {
+                                    session_id: p.session_id,
+                                    branch_id: p.branch_id,
+                                },
+                                p.sequence,
+                            )
+                            .await?;
                         json!({})
                     }
                     Request::BatchEndAt(p) => json!({"sequence":store.batch_end_at(&TimelineKey {
                         session_id:p.session_id, branch_id:p.branch_id
                     }, p.sequence).await?}),
-                    Request::LatestSnapshot(p) => json!({"snapshot":store.latest_snapshot(&TimelineKey {
+                    Request::LatestSnapshot(p) => {
+                        json!({"snapshot":store.latest_snapshot(&TimelineKey {
                         session_id:p.session_id, branch_id:p.branch_id
-                    }, p.through, &p.interpreter).await?}),
+                    }, p.through, &p.interpreter).await?})
+                    }
                 })
-            }.await;
+            }
+            .await;
             result.map(Value::from).map_err(failure)
         }))
     }

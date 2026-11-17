@@ -1351,7 +1351,8 @@ impl TimelineFactory {
                 session_id: parent.id.clone(),
                 branch_id: id.clone(),
             };
-            let head = tokio::time::timeout(self.startup_timeout(), parent.assembly.store.head(&key));
+            let head =
+                tokio::time::timeout(self.startup_timeout(), parent.assembly.store.head(&key));
             let sequence = tokio::select! {
                 result = head =>
                     result.map_err(|_| AgentError::Build("branch opening timed out".into()))??,

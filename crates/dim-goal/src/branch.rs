@@ -740,7 +740,9 @@ impl Owner {
                 {
                     continue;
                 }
-                let end = previous.tree.end(info.id, BranchSource::Host { operation_id });
+                let end = previous
+                    .tree
+                    .end(info.id, BranchSource::Host { operation_id });
                 let result = tokio::select! {
                     result = end => result,
                     _ = previous.stop.cancelled() => return,

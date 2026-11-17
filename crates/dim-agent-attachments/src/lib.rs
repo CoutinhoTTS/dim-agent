@@ -186,8 +186,13 @@ impl DynPlugin for AttachmentsPlugin {
                             let name = input.name.unwrap_or_else(|| fallback.into());
                             let prepared = if input.image {
                                 let path = input.path.clone();
-                                let prepared = tokio::task::spawn_blocking(move || prepare_image(path));
-                                Some(prepared.await.map_err(|e| RpcError::invalid(e.to_string()))??)
+                                let prepared =
+                                    tokio::task::spawn_blocking(move || prepare_image(path));
+                                Some(
+                                    prepared
+                                        .await
+                                        .map_err(|e| RpcError::invalid(e.to_string()))??,
+                                )
                             } else {
                                 None
                             };
@@ -200,15 +205,16 @@ impl DynPlugin for AttachmentsPlugin {
                                 .import(session_id.clone(), name, path, cancel.clone())
                                 .await
                                 .map_err(put_error)?;
-                            let image = prepared.as_ref().map(|(_, media)| {
-                                dim_agent_types::ImageSource {
-                                    source_type: dim_agent_types::ImageSourceType::File,
-                                    file_id: Some(stored.file_id.clone()),
-                                    media_type: (*media).into(),
-                                    data: None,
-                                    url: None,
-                                }
-                            });
+                            let image =
+                                prepared
+                                    .as_ref()
+                                    .map(|(_, media)| dim_agent_types::ImageSource {
+                                        source_type: dim_agent_types::ImageSourceType::File,
+                                        file_id: Some(stored.file_id.clone()),
+                                        media_type: (*media).into(),
+                                        data: None,
+                                        url: None,
+                                    });
                             return methods::reply(serde_json::json!({
                                 "attachmentId": stored.file_id,
                                 "path": stored.path,
