@@ -1200,6 +1200,9 @@ struct App {
     /// A surface was opened from the Permissions page: closing it goes back
     /// to the page, as Process isolation and Command rules do.
     permissions_return: Option<ApprovalsPanel>,
+    /// The `/models` picker a Provider's management area was opened from:
+    /// closing the area goes back to the picker, as it was left.
+    models_return: Option<ModelsPanel>,
     /// Fullscreen reads the mouse (`tuiMouseMode`); off leaves selection
     /// and the wheel to the terminal.
     pub mouse: bool,
@@ -1483,7 +1486,7 @@ enum Prompt {
     Export(ListPanel),
     Report(Box<report_panel::Panel>),
     Fork(ForkAsk),
-    Models(ModelsPanel),
+    Models(Box<ModelsPanel>),
     Providers(Box<ProvidersPanel>),
     Plugins(PluginsPanel),
     Runtime(RuntimePanel),
@@ -1607,6 +1610,7 @@ impl App {
             jump: None,
             settings_return: None,
             permissions_return: None,
+            models_return: None,
             mouse,
             notify,
             notifications: Vec::new(),
@@ -1730,6 +1734,9 @@ impl App {
     fn open_prompt(&mut self, prompt: Prompt) {
         if matches!(self.prompt, Some(Prompt::Sessions(_))) {
             self.host.send(Command::CloseSessions);
+        }
+        if !matches!(prompt, Prompt::Management(_)) {
+            self.models_return = None;
         }
         if let Some(Prompt::Ask(question)) = self.prompt.take() {
             self.question_stash = Some(question);
@@ -2874,11 +2881,6 @@ impl App {
                     prompt.set_choices(result);
                 }
             }
-            Update::ModelsRefilled => {
-                if matches!(self.prompt, Some(Prompt::Models(_))) {
-                    self.host.send(Command::ListModels);
-                }
-            }
             Update::Isolation(result) => {
                 if let Some(Prompt::Isolation(panel)) = &mut self.prompt {
                     panel.set_snapshot(result);
@@ -3105,7 +3107,10 @@ impl App {
                     Some(Prompt::Sessions(panel)) => panel.paste(&text),
                     Some(Prompt::Tasks(panel)) => panel.paste(&text),
                     Some(Prompt::Lines(panel)) => panel.paste(&text),
-                    Some(Prompt::Models(panel)) => panel.paste(&text),
+                    Some(Prompt::Models(panel)) => {
+                        let effect = panel.paste(&text);
+                        self.apply_effect(effect);
+                    }
                     Some(Prompt::Theme(panel)) => panel.paste(&text),
                     Some(Prompt::Language(panel)) => panel.paste(&text),
                     Some(Prompt::Settings(panel)) => panel.paste(&text),
@@ -3959,6 +3964,13 @@ impl App {
                 if matches!(self.prompt, Some(Prompt::Sessions(_))) {
                     self.host.send(Command::CloseSessions);
                 }
+                if matches!(self.prompt, Some(Prompt::Management(_)))
+                    && let Some(panel) = self.models_return.take()
+                {
+                    self.prompt = Some(Prompt::Models(Box::new(panel)));
+                    self.host.send(Command::ListModels);
+                    return Outcome::Continue;
+                }
                 self.prompt = match self.prompt.take() {
                     Some(Prompt::Fork(ask)) => ask.timeline.map(Prompt::Timeline),
                     _ => None,
@@ -4081,13 +4093,14 @@ impl App {
                 )));
             }
             Effect::OpenArea { area, note } => {
-                self.permissions_return = match self.prompt.take() {
-                    Some(Prompt::Approvals(panel)) => Some(panel),
-                    prompt => {
-                        self.prompt = prompt;
-                        None
-                    }
-                };
+                let taken = self.prompt.take();
+                self.permissions_return = None;
+                self.models_return = None;
+                match taken {
+                    Some(Prompt::Approvals(panel)) => self.permissions_return = Some(panel),
+                    Some(Prompt::Models(panel)) => self.models_return = Some(*panel),
+                    prompt => self.prompt = prompt,
+                }
                 self.open_management(area, note);
             }
             Effect::StopTask {
@@ -4278,11 +4291,11 @@ impl App {
                 if provider_id == DIM_OAUTH_ID {
                     self.signed_in = true;
                 }
-                self.prompt = Some(Prompt::Models(ModelsPanel::new()));
+                self.prompt = Some(Prompt::Models(Box::new(ModelsPanel::new())));
                 self.host.send(Command::ListModels);
             }
             Effect::OpenModels => {
-                self.prompt = Some(Prompt::Models(ModelsPanel::new()));
+                self.prompt = Some(Prompt::Models(Box::new(ModelsPanel::new())));
                 self.host.send(Command::ListModels);
             }
             Effect::Logout(target) => self.host.send(Command::Logout(target)),
@@ -4296,12 +4309,19 @@ impl App {
                     t("The browser could not be opened. Open the link manually, then return here.")
                 });
             }
+            Effect::QueryModels { query, after } => {
+                self.host.send(Command::QueryModels { query, after })
+            }
             Effect::ClearModelPreferences {
+                query,
+                after,
                 provider_id,
                 model_id,
                 expected_version,
             } => {
                 self.host.send(Command::ClearModelPreferences {
+                    query,
+                    after,
                     provider_id,
                     model_id,
                     expected_version,
@@ -5576,7 +5596,7 @@ impl App {
                 Outcome::Continue
             }
             "models" => {
-                self.open_prompt(Prompt::Models(ModelsPanel::new()));
+                self.open_prompt(Prompt::Models(Box::new(ModelsPanel::new())));
                 self.host.send(Command::ListModels);
                 Outcome::Continue
             }
@@ -11860,7 +11880,7 @@ mod tests {
                 app.run_command("models", "");
                 let frame = app.frame(size);
                 emu.feed(&screen.render(&frame, size, &app.palette, app));
-                assert!(emu.rows_text().join("\n").contains("Select a model"));
+                assert!(emu.rows_text().join("\n").contains("Conversation model"));
                 assert_ne!(
                     screen.mouse(event(MouseKind::Press, column), app),
                     MouseOutcome::Models
@@ -11909,7 +11929,7 @@ mod tests {
             typed(&mut drawn.app, "/model");
             drawn.key(KeyCode::Enter);
             let models = screen(&mut drawn);
-            assert!(models.contains("Select a model"), "{models}");
+            assert!(models.contains("Conversation model"), "{models}");
         }
     }
 

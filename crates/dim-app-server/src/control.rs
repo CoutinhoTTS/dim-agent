@@ -51,6 +51,7 @@ impl ProcessActivity {
     /// Resolves once the host has opened after every required process row
     /// became Active. Resolves false when startup fails or shutdown begins
     /// before that observation. A row reload does not reset it.
+    /// Calls after shutdown begins return false, even after an earlier true.
     pub async fn activated(&self) -> bool {
         let mut ready = self.ready.clone();
         tokio::select! {
