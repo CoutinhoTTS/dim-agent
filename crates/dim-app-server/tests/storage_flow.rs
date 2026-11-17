@@ -5395,6 +5395,29 @@ async fn readers_open_on_demand_and_only_one_stays_idle() {
     store.close().await.unwrap();
     db.close().await.unwrap();
     assert_eq!(db.reader_connections(), 0, "close must drop every reader");
+
+    #[cfg(unix)]
+    {
+        let database = Database::new();
+        let db = SqliteStorage::open(database.0.clone()).unwrap();
+        let store = SqliteTimelineStore::new(db.clone());
+        let moved = database.0.with_extension("moved");
+        std::fs::rename(&database.0, &moved).unwrap();
+        assert!(store.session_config("missing").await.is_err());
+        assert_eq!(
+            db.reader_connections(),
+            0,
+            "a failed open releases its slot"
+        );
+        std::fs::rename(&moved, &database.0).unwrap();
+        assert!(store.session_config("missing").await.unwrap().is_none());
+        store.close().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), db.close())
+            .await
+            .expect("a failed reader open must not prevent shutdown")
+            .unwrap();
+        assert_eq!(db.reader_connections(), 0);
+    }
 }
 
 #[tokio::test]

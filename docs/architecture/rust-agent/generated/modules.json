@@ -3750,9 +3750,12 @@
       "parent": "dim_app_server::storage",
       "file": "crates/dim-app-server/src/storage/sqlite.rs",
       "unexpandedMacros": [
+        "assert",
+        "assert_eq",
         "eprintln",
         "format",
         "matches",
+        "panic",
         "tokio::pin",
         "tracing::error",
         "vec",
