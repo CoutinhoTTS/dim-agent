@@ -506,7 +506,7 @@ fn preserve_metadata(source: &std::fs::File, target: &std::fs::File) -> std::io:
             if size < 0 {
                 return Err(std::io::Error::last_os_error());
             }
-            let mut attributes = std::collections::BTreeMap::new();
+            let mut attributes = BTreeMap::new();
             for name in names[..size as usize].split_inclusive(|b| *b == 0) {
                 let size =
                     unsafe { libc::fgetxattr(fd, name.as_ptr().cast(), std::ptr::null_mut(), 0) };
