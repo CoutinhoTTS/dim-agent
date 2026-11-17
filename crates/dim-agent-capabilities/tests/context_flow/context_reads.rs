@@ -5488,7 +5488,7 @@ async fn model_only_reload_hands_off_a_running_preparation_at_its_recovery_cut()
                 Context::default(),
                 host.clone(),
             );
-            builder.timeline_store(store.clone());
+            builder.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(store.clone()));
             let agent = MinimalHost::start(&builder).await.unwrap();
             let session = agent
                 .create_session(SessionConfig::default())
