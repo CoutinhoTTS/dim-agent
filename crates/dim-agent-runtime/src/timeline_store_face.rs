@@ -362,8 +362,13 @@ impl HostDispatch for TimelineStoreBinding {
                                 Ok(()) => json!("committed"),
                                 Err(error) => json!(error),
                             };
-                            let payload = json!({"subscriptionId":subscription_id,"batchId":completion.batch_id,
-                                "branchId":completion.key.branch_id,"through":completion.through,"result":result});
+                            let payload = json!({
+                                "subscriptionId": subscription_id,
+                                "batchId": completion.batch_id,
+                                "branchId": completion.key.branch_id,
+                                "through": completion.through,
+                                "result": result,
+                            });
                             if let Err(error) = listener.call_async(Value::List(vec![payload.into()])).await {
                                 tracing::warn!(%error, "Timeline completion listener failed");
                             }
@@ -463,7 +468,9 @@ impl HostDispatch for TimelineStoreBinding {
                     }, p.after, p.limit, p.through).await?}),
                     Request::ReadSegments(p) => json!({"segments":store.read_segments(
                         &p.session_id,
-                        p.segments.into_iter().map(|segment| (segment.branch_id, segment.from..=segment.through)).collect()
+                        p.segments.into_iter().map(|segment| {
+                            (segment.branch_id, segment.from..=segment.through)
+                        }).collect()
                     ).await?}),
                     Request::Query(p) => serde_json::to_value(store.query(&p.scope, &p.query, p.page.as_ref()).await?)
                         .map_err(|error| AgentError::Storage(error.to_string()))?,

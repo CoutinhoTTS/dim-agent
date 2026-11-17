@@ -266,7 +266,9 @@ impl DynPlugin for GoalBranch {
                         closing.state.lock().unwrap().decisions.cancel();
                         closing.work.close();
                         closing.work.wait().await;
-                        if let Err(error)=closing.pause_closing().await {closing.dispatcher.fail(error);}
+                        if let Err(error) = closing.pause_closing().await {
+                            closing.dispatcher.fail(error);
+                        }
                     },
                     _ = closing.stop.cancelled() => {},
                 }
@@ -714,15 +716,41 @@ impl Owner {
         self.stepped.send_replace(through);
         let previous = self.clone();
         self.work.spawn(async move {
-            let active=tokio::select! {active=previous.phase.activated()=>active,_=previous.stop.cancelled()=>false};
-            if !active {return;}
-            let active=tokio::select! {active=previous.session.activated()=>active,_=previous.stop.cancelled()=>false};
-            if !active {return;}
+            let active = tokio::select! {
+                active = previous.phase.activated() => active,
+                _ = previous.stop.cancelled() => false,
+            };
+            if !active {
+                return;
+            }
+            let active = tokio::select! {
+                active = previous.session.activated() => active,
+                _ = previous.stop.cancelled() => false,
+            };
+            if !active {
+                return;
+            }
             for info in previous.tree.list() {
-                let Some(BranchSource::Host {operation_id})=info.source else {continue;};
-                if info.parent.as_deref()!=Some(previous.branch_id.as_str()) || info.create_anchor.is_none_or(|at|at>through) || fold::evaluation_of_operation(&operation_id).is_none() {continue;}
-                let result=tokio::select! {result=previous.tree.end(info.id,BranchSource::Host {operation_id})=>result,_=previous.stop.cancelled()=>return};
-                if let Err(error)=result && !matches!(error,AgentError::BranchEnded(_)) {previous.dispatcher.fail(error);return;}
+                let Some(BranchSource::Host { operation_id }) = info.source else {
+                    continue;
+                };
+                if info.parent.as_deref() != Some(previous.branch_id.as_str())
+                    || info.create_anchor.is_none_or(|at| at > through)
+                    || fold::evaluation_of_operation(&operation_id).is_none()
+                {
+                    continue;
+                }
+                let end = previous.tree.end(info.id, BranchSource::Host { operation_id });
+                let result = tokio::select! {
+                    result = end => result,
+                    _ = previous.stop.cancelled() => return,
+                };
+                if let Err(error) = result
+                    && !matches!(error, AgentError::BranchEnded(_))
+                {
+                    previous.dispatcher.fail(error);
+                    return;
+                }
             }
         });
         if let Some((at, _)) = opening {

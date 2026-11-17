@@ -5520,9 +5520,8 @@ fn a_new_session_shows_the_effort_its_creation_adopted() {
         let (calls, observed) = std::sync::mpsc::channel::<Value>();
         let daemon = home.daemon(move |wire| {
             wire.2 = true;
-            let mut capabilities =
-                serde_json::to_value(dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384))
-                    .unwrap();
+            let limits = dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384);
+            let mut capabilities = serde_json::to_value(limits).unwrap();
             capabilities["reasoning"] = json!(true);
             let mut line = String::new();
             while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
@@ -6386,14 +6385,16 @@ fn tui_mcp_and_configuration_commands_use_session_methods() {
         wire.reply(&request, catalog.clone());
         let start = wire.read("mcp.auth.start");
         assert_eq!((&start["params"]["id"], &start["params"]["source"]), (&json!("docs"), &json!("user")));
-        let expires = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64 + 60_000;
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap();
+        let expires = now.as_millis() as u64 + 60_000;
         wire.reply(&start, json!({"attemptId":"attempt","authorizationUrl":"https://auth.example/authorize","redirectUri":"http://localhost:1/callback","resource":"https://docs.example/mcp","issuer":"https://auth.example","expiresAt":expires}));
         let complete = wire.read("mcp.auth.complete");
         assert_eq!(complete["params"], json!({"attemptId":"attempt","callbackUrl":"http://localhost:1/callback?code=c"}));
         wire.reply(&complete, json!({}));
         let request = wire.read("provider.catalog");
         assert_eq!(request["params"], json!({"providerId":"test","modelId":"model"}));
-        let mut capabilities = serde_json::to_value(dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)).unwrap();
+        let limits = dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384);
+        let mut capabilities = serde_json::to_value(limits).unwrap();
         capabilities["reasoning"] = json!(true);
         wire.reply(&request, json!({"catalog":{"version":1,"disabledModelIds":[],"models":[{"id":"model","name":"Model","capabilities":capabilities,
             "metadata":{"reasoning":{"supported":true,"effortOptions":["high","low"]}}}]}}));
@@ -8253,7 +8254,8 @@ fn interactive_mcp_sign_in_hides_secrets_retries_callbacks_and_drains_before_nex
         let request = wire.read("mcp.auth.start");
         assert_eq!(request["params"]["source"],"project");
         assert_eq!(request["params"]["clientSecret"],"fixture-confidential-secret");
-        let expires = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64 + 60_000;
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap();
+        let expires = now.as_millis() as u64 + 60_000;
         wire.reply(&request,json!({"attemptId":"fixture-attempt","authorizationUrl":"https://issuer.example/authorize","redirectUri":"http://localhost:1456/callback","resource":"https://resource.example/mcp","issuer":"https://issuer.example","expiresAt":expires}));
         let callback = wire.read("mcp.auth.complete");
         assert_eq!(callback["params"]["callbackUrl"],"http://localhost:1456/callback?code=wrong-code&state=wrong-state");
@@ -8506,7 +8508,8 @@ fn mcp_submitted_success_stays_successful_after_interrupt_or_expiry() {
             mcp_hello(wire);
             let catalog=wire.read("mcp.catalog"); wire.reply(&catalog,mcp_catalog("docs"));
             let start=wire.read("mcp.auth.start");
-            let now=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap();
+            let now = now.as_millis() as u64;
             wire.reply(&start,json!({"attemptId":"held","authorizationUrl":"https://issuer.example/authorize","redirectUri":"http://localhost:1456/callback","resource":"https://resource.example/mcp","issuer":"https://issuer.example","expiresAt":now+if expires {1200} else {60_000}}));
             let callback=wire.read("mcp.auth.complete"); admitted.send(()).unwrap();
             wait_release.recv_timeout(PATIENCE).unwrap();
@@ -12310,8 +12313,8 @@ fn tui_models_picker_cycles_reasoning_effort() {
     let (calls, observed) = std::sync::mpsc::channel::<Value>();
     let daemon = home.daemon(move |wire| {
         wire.2 = true;
-        let mut capabilities =
-            serde_json::to_value(dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)).unwrap();
+        let limits = dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384);
+        let mut capabilities = serde_json::to_value(limits).unwrap();
         capabilities["reasoning"] = json!(true);
         let catalog = json!({"catalog":{"version":4,"disabledModelIds":[],"models":[{
             "id":"model","name":"Model","capabilities":capabilities,
@@ -12703,7 +12706,10 @@ fn member_tool_approval_requires_trusted_details_in_both_terminal_modes() {
             assert_eq!(answer["params"]["decision"], "deny");
             wire.reply(&answer, json!({}));
             wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"done","sequence":1,"create_at":1,"type":"step","name":"text","data":{"turn_id":"turn","request_id":"model","delta":"member approvals finished"}}}));
-            let mut line = String::new(); while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) { line.clear(); }
+            let mut line = String::new();
+            while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+                line.clear();
+            }
         });
         let mut command = home.command();
         command.arg(if fullscreen {
@@ -12747,7 +12753,10 @@ fn member_approval_without_the_detail_method_offers_only_rejection() {
             let answer = wire.read("approval.respond");
             assert_eq!(answer["params"]["decision"], "deny"); wire.reply(&answer, json!({}));
             wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"done","sequence":1,"create_at":1,"type":"step","name":"text","data":{"turn_id":"t","request_id":"r","delta":"unsupported approval rejected"}}}));
-            let mut line = String::new(); while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) { line.clear(); }
+            let mut line = String::new();
+            while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+                line.clear();
+            }
         });
         let mut command = home.command();
         command.arg(if fullscreen {

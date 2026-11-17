@@ -1433,7 +1433,8 @@ impl Env {
         events
             .iter()
             .filter(|event| {
-                matches!(&event.kind, EventKind::InputMessage(data) if data.effective_mode() != InputMode::Append)
+                matches!(&event.kind, EventKind::InputMessage(data)
+                    if data.effective_mode() != InputMode::Append)
                     && !consumed.contains(event.id.as_str())
                     && !deleted.contains(event.id.as_str())
             })
