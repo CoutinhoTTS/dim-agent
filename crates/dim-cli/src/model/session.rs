@@ -302,6 +302,10 @@ pub enum Command {
     CloseSessions,
     /// List the models that can be chosen.
     ListModels,
+    QueryModels {
+        query: String,
+        after: Option<dim_agent_types::ModelId>,
+    },
     ReadIsolation,
     SaveIsolation {
         expected_revision: String,
@@ -345,6 +349,8 @@ pub enum Command {
         request: u64,
     },
     ClearModelPreferences {
+        query: String,
+        after: Option<dim_agent_types::ModelId>,
         provider_id: String,
         model_id: String,
         expected_version: u32,
@@ -1048,7 +1054,8 @@ pub enum ModelOutcome {
 }
 
 /// Why a usable provider contributes no selectable model.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum EmptyReason {
     /// It lists no models: none discovered yet, or none at all. `listable`
     /// is whether `provider.refresh` can ask it for a listing.
@@ -1064,7 +1071,8 @@ pub enum EmptyReason {
 }
 
 /// A usable provider with no selectable model.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct EmptyProvider {
     pub provider_id: String,
     pub provider_name: String,
@@ -1110,13 +1118,17 @@ pub enum ModelPolicyUpdate {
 /// The models and which one is in effect.
 #[derive(Debug, Clone, Default)]
 pub struct ModelList {
+    pub query: String,
+    pub next: Option<dim_agent_types::ModelId>,
     pub models: Vec<ModelItem>,
     /// Whether the daemon manages Providers through `provider.management`:
     /// the picker offers a Provider's models for editing only when it does.
     pub manage: bool,
     pub current: Option<(String, String)>,
     /// The usable providers that offer no selectable model, with why, so the
-    /// picker can name them.
+    /// picker can name them. A provider in `limits` appears here only for its
+    /// other unavailable or disabled models; its undeclared models are not
+    /// counted again.
     pub empty: Vec<EmptyProvider>,
     /// The usable providers whose models include ones with undeclared
     /// limits, with how many.
@@ -1135,6 +1147,7 @@ pub struct SessionItem {
     /// The creation origin the daemon reports (`client`, `acp`, `internal`,
     /// `unknown`); absent from a daemon that does not report one.
     pub origin: Option<String>,
+    pub closed: bool,
 }
 
 /// The Session's stored title, unless it has none: empty, or the
@@ -1321,9 +1334,6 @@ pub enum Update {
     Upgrade(crate::update::Offer),
     Models(Result<ModelList, String>),
     EffortChoices(Result<crate::configure::EffortChoices, String>),
-    /// A catalog `models()` asked `provider.refresh` to fill holds models
-    /// now: a picker that is still open reads the list again.
-    ModelsRefilled,
     /// Sent only by a daemon that advertises the policy methods.
     ModelPolicy(ModelPolicyUpdate),
     Isolation(Result<ExecutionSnapshot, String>),
