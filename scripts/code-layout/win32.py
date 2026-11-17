@@ -315,7 +315,7 @@ class Console:
             raise ctypes.WinError(ctypes.get_last_error())
         if not kernel32.UpdateProcThreadAttribute(
             attributes, 0, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE,
-            ctypes.byref(self._console), ctypes.sizeof(HPCON), None, None,
+            self._console, ctypes.sizeof(HPCON), None, None,
         ):
             self.close()
             raise ctypes.WinError(ctypes.get_last_error())
