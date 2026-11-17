@@ -156,7 +156,7 @@ impl ManagedProvider for Provider {
     ) -> ManagedFuture<WebSearchResponse> {
         ready(Err(ManagedError::TokenMissing))
     }
-    fn catalog(&self, _: &str) -> ManagedFuture<ManagedCatalog> {
+    fn catalog(&self, _: &str, _: CancellationToken) -> ManagedFuture<ManagedCatalog> {
         let entry: ModelEntry = serde_json::from_value(json!({"modelId":"fixture-model",
             "displayName":"Fixture model","status":"active",
             "metadata":{"reasoning":{"supported":true,"effortOptions":["low","high"]}},
@@ -1406,14 +1406,9 @@ async fn an_account_identifies_its_models_with_its_prefix_and_aliases() {
     );
     let record = |home: &std::path::Path| -> Value {
         let store = rusqlite::Connection::open(home.join("rust").join("dimcode.sqlite")).unwrap();
-        let body: String = store
-            .query_row(
-                "SELECT record FROM providers WHERE provider_id='managed-fixture'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        serde_json::from_str(&body).unwrap()
+        dim_app_server::provider::testing::stored_provider(&store, "managed-fixture")
+            .unwrap()
+            .unwrap()
     };
     assert_eq!(
         record(&home)["modelConfigOverrides"],

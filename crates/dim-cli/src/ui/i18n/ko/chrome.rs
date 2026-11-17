@@ -336,9 +336,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "exit" => "종료",
 
         // composer/palette.rs
-        "Enter select + default · ←/→ effort · Ctrl+B/F cursor · Ctrl+X clear saved · Esc clear/close" => {
-            "Enter 선택 및 기본 설정 · ←/→ 추론 강도 · Ctrl+B/F 커서 · Ctrl+X 저장값 지우기 · Esc 지우기/닫기"
-        }
         "Default for new sessions in {folder}: {model}" => "새 세션의 {folder} 기본 모델: {model}",
         "Default for new sessions: {model}" => "새 세션 기본 모델: {model}",
         "Enter select · Esc clear/close" => "Enter 선택 · Esc 지우기/닫기",
@@ -417,6 +414,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         // models_panel.rs
         "Select a model" => "모델 선택",
         "Loading models..." => "모델 불러오는 중…",
+        "Previous page" => "이전 페이지",
+        "Next page" => "다음 페이지",
         "No models available. Connect a provider first." => {
             "사용 가능한 모델 없음. 먼저 프로바이더 연결"
         }
@@ -481,6 +480,33 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "이름 있는 에이전트 포함, 새 멤버에 적용"
         }
         "Existing members keep their models." => "기존 멤버는 모델 유지",
+        "Conversation model" => "대화 모델",
+        "Selected: {model}" => "선택됨: {model}",
+        "Model management" => "모델 관리",
+        "Manage models" => "모델 관리하기",
+        "1 provider" => "프로바이더 1개",
+        "{count} providers" => "프로바이더 {count}개",
+        "ready" => "준비됨",
+        "no models" => "모델 없음",
+        "catalog unreadable" => "catalog를 읽을 수 없음",
+        "{count} with missing limits" => "{count}개 한도 미선언",
+        "{count} unavailable" => "{count}개 사용 불가",
+        "{count} disabled" => "{count}개 비활성",
+        "{count} without models" => "{count}개 모델 없음",
+        "{count} unreadable" => "{count}개 읽을 수 없음",
+        "{unavailable} unavailable, {disabled} disabled" => {
+            "{unavailable}개 사용 불가, {disabled}개 비활성"
+        }
+        "Enter select + default · ←/→ effort · Tab section · Esc clear/close" => {
+            "Enter 선택 및 기본 설정 · ←/→ 추론 강도 · Tab 섹션 · Esc 지우기/닫기"
+        }
+        "Enter change · Tab section · Esc clear/close" => {
+            "Enter 변경 · Tab 섹션 · Esc 지우기/닫기"
+        }
+        "Enter manage · Tab section · Esc clear/close" => {
+            "Enter 관리 · Tab 섹션 · Esc 지우기/닫기"
+        }
+        "Enter manage · Esc back" => "Enter 관리 · Esc 뒤로",
         "unknown" => "알 수 없음",
         "Subagent model policy saved" => "서브에이전트 모델 정책 저장됨",
         "Subagent model policy changed elsewhere; choose again to reread it" => {

@@ -160,7 +160,7 @@ new/load/resume/fork 通过独立的 [TemporaryMcp](plugins/TemporaryMcp.md) Ses
 | 表面 | 首版 | 原生路径 / 缺口 |
 | --- | --- | --- |
 | `session/fork` | 仅在原生同时声明 `session.fork` 与 `session.turn.get` 时提供；单独启用 SDK `unstable_session_fork` | 无锚点时固定 main head；有 Lody turnId 时定位该真实 turn 的 `turn/end` sequence。`session.fork {sessionId,at}` → 新 id → attach。原生 rest-point 检查决定能否 fork；活动 turn 内的切点失败，不偷偷改成早一点的切点 |
-| `providers/list` | 读取可复用；整组语义待选择 | `provider.management {}` → 安全可配置 Provider 投影；ACP 的 providers capability 同时承诺三个方法，不能只凭 list 可读就声明，见 §4.5 |
+| `providers/list` | 读取可复用；整组语义待选择 | `provider.management.list {after?,limit?}` 逐页读取安全可配置 Provider 概要；ACP 的 providers capability 同时承诺三个方法，不能只凭 list 可读就声明，见 §4.5 |
 | `providers/set` | 编辑可复用；共享设置或临时覆盖待选择 | `provider.management {providerId}` → 同版本 `provider.update` 是共享设置的路径；全量 headers、固定 driver/auth 和凭据归属须准确转换。临时覆盖另缺采用接口，见 §4.5 |
 | `providers/disable` | 禁用可复用；共享设置或临时覆盖待选择 | 同版本 `provider.update {patch:{enabled:false}}` 是持久化禁用，不是 CLI disconnect、delete、logout 或清除临时 override；不能混淆，见 §4.5 |
 | `mcp/message` | 不支持 | 没有现成 MCP-over-ACP 入口 |
@@ -240,7 +240,7 @@ Provider 业务已经由 daemon 的 [ProviderPlugin](../../crates/dim-app-server
 
 | ACP 方法 | 可复用的原生调用 | 必须保留的语义 |
 | --- | --- | --- |
-| `providers/list {}` | `provider.management {}` → `{drivers,providers,errors}` | `providerId` 保留原值；只列能兑现配置合同的记录。静态连接的 driver/实际 endpoint 决定 `supported` 和 `current.apiType`；enabled=false 才投影 `current:null`，不能把未登录、缺凭据或缺模型伪装成禁用。只返回非秘密 `apiType/baseUrl`，不返回 headers、credential、secret ref、账户或 proxy 身份。损坏记录按原生 errors 处理，不能伪装为已禁用记录 |
+| `providers/list {}` | `provider.management.list {after?,limit?}` → `{drivers,providers,errors,next}`，按 `next` 读完所请求列表 | `providerId` 保留原值；只列能兑现配置合同的记录。静态连接的 driver/实际 endpoint 决定 `supported` 和 `current.apiType`；enabled=false 才投影 `current:null`，不能把未登录、缺凭据或缺模型伪装成禁用。只返回非秘密 `apiType/baseUrl`，不返回 headers、credential、secret ref、账户或 proxy 身份。损坏记录按原生 errors 处理，不能伪装为已禁用记录 |
 | `providers/set {providerId,apiType,baseUrl,headers?}` | 先 `provider.management {providerId}`，取得当前 `version/connection/actions`；再 `provider.update {providerId,expectedVersion,patch}` | 已知 id、可编辑记录、可表达的协议和认证方式才能进入写入；patch 组合 `baseUrl`、`enabled:true`、完整 header 操作及必要的 credential 操作，在原生一次 CAS 事务中提交。成功只返回 ACP `{}`，不返回原生管理快照 |
 | `providers/disable {providerId}` | 同样读取管理快照，再 `provider.update {providerId,expectedVersion,patch:{enabled:false}}` | 保留凭据、路由、模型和 Provider 身份；禁用后仍可发现且 `current:null`。明确未知 id 按草案幂等返回 `{}`；已存在但受限、损坏或管理读取失败不是未知 id。required=true 必须拒绝，不能以当前模型选中了该 Provider 就推导 required |
 

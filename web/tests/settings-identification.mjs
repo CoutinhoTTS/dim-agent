@@ -16,7 +16,7 @@ registerHooks({
       return { url: "data:text/javascript,export const useConnectionStore=()=>globalThis.modelsConnection", shortCircuit: true }
     }
     if (specifier === "../../stores/models") {
-      return { url: "data:text/javascript,export const useModelsStore=()=>({load:async()=>{}})", shortCircuit: true }
+      return { url: "data:text/javascript,export const useModels=()=>({load:async()=>{}})", shortCircuit: true }
     }
     if (specifier === "vue-i18n") {
       return {
