@@ -148,7 +148,9 @@ impl Reply {
                     () = stop.cancelled()=>{},
                     () = done.cancelled()=>{},
                     () = cancellation.cancelled()=>{
-                        if let Some(responder) = responder.lock().unwrap().take() { let _ = send(responder,Err(Error::request_cancelled()),&outbox); }
+                        if let Some(responder) = responder.lock().unwrap().take() {
+                            let _ = send(responder, Err(Error::request_cancelled()), &outbox);
+                        }
                     }
                 }
             });

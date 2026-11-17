@@ -168,9 +168,18 @@ pub(crate) async fn authenticate(
     let browser: Browser = rpc.typed("account.login.browser.begin",json!({"providerId":provider,"directory":login.directory,"redirectUri":login.redirect_uri})).await?;
     let mut completing = false;
     let result = async {
-        if !login.open_browser.is_some_and(|open|open(&browser.authorization_url)) { return Err(failed("Cannot open the login browser")); }
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|_|Error::internal_error())?.as_millis() as u64;
-        let deadline = tokio::time::sleep(Duration::from_millis(browser.expires_at.saturating_sub(now)));
+        if !login
+            .open_browser
+            .is_some_and(|open| open(&browser.authorization_url))
+        {
+            return Err(failed("Cannot open the login browser"));
+        }
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| Error::internal_error())?
+            .as_millis() as u64;
+        let remaining = browser.expires_at.saturating_sub(now);
+        let deadline = tokio::time::sleep(Duration::from_millis(remaining));
         tokio::pin!(deadline);
         let callback = capture.receive();
         tokio::pin!(callback);

@@ -134,6 +134,10 @@ pub(crate) struct HistoryPage {
     complete: bool,
 }
 
+/// How long a recovering Session waits between lookups of the input a client
+/// submitted before the connection was lost.
+const RETRY: std::time::Duration = std::time::Duration::from_millis(250);
+
 pub(crate) struct RecoveredSession {
     prepared: Prepared,
     input: Option<Event>,
@@ -434,7 +438,10 @@ impl Gateway {
         self.tasks.spawn(async move {
             tokio::select! {
                 () = stop.cancelled() => {},
-                result = future => { let _ = incoming.send(Incoming::Work(generation,Box::new(result))).await; },
+                result = future => {
+                    let work = Incoming::Work(generation, Box::new(result));
+                    let _ = incoming.send(work).await;
+                }
             }
         });
     }
@@ -1101,7 +1108,9 @@ impl Gateway {
                     let mut sent = false;
                     let result = async {
                         mcp.ensure(&id).await?;
-                        if let Some(provider) = provider { crate::auth::ensure(&rpc,&provider,&managed).await?; }
+                        if let Some(provider) = provider {
+                            crate::auth::ensure(&rpc, &provider, &managed).await?;
+                        }
                         let user = tokio::select! {
                             () = uploading.cancelled() => return Err(Error::new(-32800, "Request cancelled before submission")),
                             user = crate::content::upload(&rpc, &id, parts) => user?,
@@ -1503,8 +1512,11 @@ impl Gateway {
                 preparation,
                 result,
             } => {
-                if !matches!(self.sessions.get(&id),Some(Slot::Loading(loading)) if loading.preparation == preparation)
-                {
+                let current = matches!(
+                    self.sessions.get(&id),
+                    Some(Slot::Loading(loading)) if loading.preparation == preparation
+                );
+                if !current {
                     return Ok(());
                 }
                 let Some(Slot::Loading(mut loading)) = self.sessions.remove(&id) else {
@@ -2608,37 +2620,73 @@ impl Gateway {
         for (id, cwd, submission, accepted_input, turn_id) in sessions {
             let rpc = self.rpc.clone();
             let mcp = self.mcp.clone();
-            self.spawn_generation(generation,async move {
-                let result = tokio::time::timeout_at(deadline,async {
+            self.spawn_generation(generation, async move {
+                let result = tokio::time::timeout_at(deadline, async {
                     let mut input = None;
                     if let Some(submission) = submission {
-                        #[derive(Deserialize)] #[serde(tag="status",rename_all="lowercase")]
-                        enum Lookup { Accepted { event: Box<Event> },Unknown }
+                        #[derive(Deserialize)]
+                        #[serde(tag = "status", rename_all = "lowercase")]
+                        enum Lookup {
+                            Accepted { event: Box<Event> },
+                            Unknown,
+                        }
                         loop {
-                            match rpc.typed("session.input_lookup",json!({"sessionId":id,"branchId":"main","submissionId":submission})).await? {
-                                Lookup::Accepted { event }=>{ input = Some(*event); break; }
-                                Lookup::Unknown if tokio::time::Instant::now()+std::time::Duration::from_millis(250) < deadline=>tokio::time::sleep(std::time::Duration::from_millis(250)).await,
-                                Lookup::Unknown=>break,
+                            let query = json!({
+                                "sessionId":id,
+                                "branchId":"main",
+                                "submissionId":submission,
+                            });
+                            match rpc.typed("session.input_lookup", query).await? {
+                                Lookup::Accepted { event } => {
+                                    input = Some(*event);
+                                    break;
+                                }
+                                Lookup::Unknown
+                                    if tokio::time::Instant::now() + RETRY < deadline =>
+                                {
+                                    tokio::time::sleep(RETRY).await;
+                                }
+                                Lookup::Unknown => break,
                             }
                         }
                     }
-                    let prepared = read_history(&rpc,&id,Some(cwd)).await?;
-                    let input_id = input.as_ref().map(|event| event.id.clone()).or(accepted_input);
+                    let prepared = read_history(&rpc, &id, Some(cwd)).await?;
+                    let input_id = input
+                        .as_ref()
+                        .map(|event| event.id.clone())
+                        .or(accepted_input);
                     let prompt_turn = if turn_id.is_some() || input_id.is_some() {
-                        let mut query = json!({"sessionId":id,"branchId":"main","through":prepared.through});
-                        if let Some(turn) = turn_id { query["turnId"] = json!(turn); }
-                        else if let Some(input) = input_id {
+                        let mut query =
+                            json!({"sessionId":id,"branchId":"main","through":prepared.through});
+                        if let Some(turn) = turn_id {
+                            query["turnId"] = json!(turn);
+                        } else if let Some(input) = input_id {
                             if !rpc.supports("session.turn.get.inputId") {
-                                return Err(Error::new(-32001,"App Server lacks selected input turn lookup").data(json!({"code":"input_turn_lookup_unavailable"})));
+                                return Err(Error::new(
+                                    -32001,
+                                    "App Server lacks selected input turn lookup",
+                                )
+                                .data(json!({"code":"input_turn_lookup_unavailable"})));
                             }
                             query["inputId"] = json!(input);
                         }
-                        Some(rpc.typed("session.turn.get",query).await?)
-                    } else { None };
+                        Some(rpc.typed("session.turn.get", query).await?)
+                    } else {
+                        None
+                    };
                     mcp.ensure(&id).await?;
-                    Ok(RecoveredSession { prepared,input,prompt_turn })
-                }).await.unwrap_or_else(|_|Err(rpc::unavailable()));
-                Work::Recovered { id,result: Box::new(result) }
+                    Ok(RecoveredSession {
+                        prepared,
+                        input,
+                        prompt_turn,
+                    })
+                })
+                .await
+                .unwrap_or_else(|_| Err(rpc::unavailable()));
+                Work::Recovered {
+                    id,
+                    result: Box::new(result),
+                }
             });
         }
     }

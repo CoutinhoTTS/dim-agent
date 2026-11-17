@@ -8453,6 +8453,7 @@
         "path Client",
         "path Client::connect",
         "path dim_client::Error",
+        "path dim_client::RequestTooLarge",
         "path dim_client::RpcError",
         "use dim_client::Client",
         "use dim_client::Message"
