@@ -36,7 +36,11 @@ export interface PluginFiles {
   open(): Promise<FileScope>;
 }
 
-/** JSON-only; rutis (0.11+) may deliver bigint in incoming tool data beyond this type. */
+/** JSON data carried by the native bridge. Integers outside JavaScript's safe range
+ * arrive as bigint; sending back bigint requires a signed or unsigned 64-bit value.
+ * Numbers must be finite. This is not the external client's JSON encoding. */
+export type BridgeJsonValue = null | boolean | number | bigint | string | BridgeJsonValue[] | BridgeJsonObject;
+export type BridgeJsonObject = { [key: string]: BridgeJsonValue };
 
 /** Project roots are process-local numbers, not durable identities. */
 export type SettingsScope = 'user' | { project: number };
@@ -496,32 +500,37 @@ export interface MethodDeclaration {
 export interface MethodCall {
   callId: string;
   method: string;
-  params: JsonValue;
+  params: BridgeJsonValue;
   /** The connection that called, when a client connection made the call. */
   origin?: { connectionId: string };
 }
 export interface SessionMethodCall extends MethodCall {
-  params: JsonObject & { sessionId: string; branchId?: string };
+  params: BridgeJsonObject & { sessionId: string; branchId?: string };
 }
 /** A method's failure as data; Rpc maps `code` to the wire error. A method may
  * instead rethrow a service error it received. */
 export interface MethodError { code: string; message: string }
-export type MethodReply = { kind: 'value'; value?: JsonValue } | MethodError;
+export type MethodReply<T = BridgeJsonValue> = { kind: 'value'; value?: T } | MethodError;
+/** Checks data fields without requiring interfaces to declare an index signature. */
+export type CheckedData<T> = T extends BridgeJsonValue | undefined ? T
+  : T extends ((...args: never[]) => unknown) | (abstract new (...args: never[]) => unknown) ? never
+  : T extends object ? keyof T extends never ? never : { [K in keyof T]: CheckedData<T[K]> } : never;
+export type MethodProgress = <T>(data: T & CheckedData<T>) => void;
 export type SessionMethodDeclaration = MethodDeclaration;
-export type SessionMethodReply = MethodReply;
+export type SessionMethodReply<T = BridgeJsonValue> = MethodReply<T>;
 /** How a registered management namespace serves one call. */
-export type MethodHandler = (call: MethodCall, cancelled: Promise<void>, progress: (data: JsonValue) => void) => Promise<MethodReply>;
+export type MethodHandler<T = BridgeJsonValue> = (call: MethodCall, cancelled: Promise<void>, progress: MethodProgress) => Promise<MethodReply<T>>;
 /** How a registered Session namespace serves one call. */
-export type SessionMethodHandler = (call: SessionMethodCall, cancelled: Promise<void>, progress: (data: JsonValue) => void) => Promise<SessionMethodReply>;
+export type SessionMethodHandler<T = BridgeJsonValue> = (call: SessionMethodCall, cancelled: Promise<void>, progress: MethodProgress) => Promise<SessionMethodReply<T>>;
 /** Process service `managementMethods` (protected-local v3 only): a process row
  * registers each of its namespaces, which stays registered until the row unloads. */
 export interface ManagementMethods {
-  register(namespace: string, declarations: MethodDeclaration[], call: MethodHandler): Promise<void>;
+  register<T extends MethodReply<unknown>>(namespace: string, declarations: MethodDeclaration[], call: (call: MethodCall, cancelled: Promise<void>, progress: MethodProgress) => Promise<T & CheckedData<T>>): Promise<void>;
 }
 /** Session service `sessionMethods`: a Session row registers each of its
  * namespaces, which stays registered until the row unloads. */
 export interface SessionMethods {
-  register(namespace: string, declarations: SessionMethodDeclaration[], call: SessionMethodHandler): Promise<void>;
+  register<T extends SessionMethodReply<unknown>>(namespace: string, declarations: SessionMethodDeclaration[], call: (call: SessionMethodCall, cancelled: Promise<void>, progress: MethodProgress) => Promise<T & CheckedData<T>>): Promise<void>;
 }
 
 export type CallChannelErrorCode = 'undeclared' | 'gone' | 'too_large';

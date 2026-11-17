@@ -11,6 +11,8 @@ fn file(root: &Path) -> PathBuf {
 
 fn declarations(root: &Path) -> Result<String> {
     rutis_types::Exports::new()
+        .declared("serde_json::Value", "import('./plugin.js').BridgeJsonValue")
+        .declared("serde_json::Map", "import('./plugin.js').BridgeJsonObject")
         .declared(
             "dim_agent_types::PermissionPolicy",
             "import('./plugin.js').PermissionPolicy",

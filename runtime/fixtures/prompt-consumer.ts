@@ -3,6 +3,15 @@ import { partRow } from './part-row.ts'
 import type { PromptHost, PromptRegistry, PromptEntry, SessionMethods } from '../../npm/plugin.js'
 import type { InitialPromptConfiguration, PromptSourceTarget } from '../../npm/branch-services.js'
 
+function isPromptSourceTarget(value: unknown): value is PromptSourceTarget {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
+  if (!('source' in value) || typeof value.source !== 'string' || !('scope' in value)) return false
+  const scope = value.scope
+  return scope !== null && typeof scope === 'object' && !Array.isArray(scope)
+    && 'timeline' in scope && typeof scope.timeline === 'string' && 'kind' in scope
+    && (scope.kind === 'branch' || ((scope.kind === 'turn' || scope.kind === 'task') && 'id' in scope && typeof scope.id === 'string'))
+}
+
 const part = definePlugin({
   name: 'PromptConsumerFixture',
   provides: {},
@@ -31,7 +40,7 @@ const part = definePlugin({
         if (action === 'result') {
           try { return { kind: 'value', value: await pending } }
           catch (error) {
-            if (!(error instanceof Error) || !('code' in error)) throw error
+            if (!(error instanceof Error) || !('code' in error) || typeof error.code !== 'string') throw error
             return { kind: 'value', value: { error: { code: error.code, message: error.message } } }
           }
         }
@@ -41,11 +50,12 @@ const part = definePlugin({
             else await host.load({ source: 'missing', scope: { kind: 'branch', timeline: 'main' } }, () => new Promise(() => {}))
             throw new Error('the operation unexpectedly succeeded')
           } catch (error) {
-            if (!(error instanceof Error) || !('code' in error)) throw error
+            if (!(error instanceof Error) || !('code' in error) || typeof error.code !== 'string') throw error
             return { kind: 'value', value: { code: error.code, message: error.message } }
           }
         }
-        const target = call.params.target as PromptSourceTarget
+        const target = call.params.target
+        if (!isPromptSourceTarget(target)) throw new Error('invalid prompt target')
         if (action === 'abandon') {
           void host.load(target, () => new Promise(() => {}))
           return { kind: 'value', value: null }

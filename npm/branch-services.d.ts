@@ -13,7 +13,7 @@ export type BranchSource =
 
 export interface ApprovalCallData {
   name: string
-  input: Record<string, unknown>
+  input: import('./plugin.js').BridgeJsonObject
 }
 
 export interface ApprovalRequestData {
@@ -311,7 +311,7 @@ export interface ModelCapabilities {
   reasoning: boolean
   contextWindow: number | bigint
   maxOutputTokens: number | bigint
-  providerState?: Record<string, unknown> | null
+  providerState?: import('./plugin.js').BridgeJsonObject | null
 }
 
 export interface ReasoningBudget {
@@ -405,7 +405,7 @@ export type RequestMetadata = {
    * another adoption replaces it.
    */
   agentId?: string | null
-} & Record<string, unknown>
+} & import('./plugin.js').BridgeJsonObject
 
 /**
  * The model-owned part of configuration. Tool declarations and system content
@@ -502,13 +502,13 @@ export type QueryOperand =
   | { kind: "root"; path: string }
   | { kind: "concat"; parts: QueryOperand[] }
   | { kind: "element"; path: string }
-  | { kind: "value"; value: unknown }
+  | { kind: "value"; value: import('./plugin.js').BridgeJsonValue }
 
 export type QueryComparison = "eq" | "ne" | "lt" | "le" | "gt" | "ge"
 
 export type QueryFilter =
   | { op: "compare"; left: QueryOperand; comparison: QueryComparison; right: QueryOperand }
-  | { op: "in"; value: QueryOperand; values: unknown[] }
+  | { op: "in"; value: QueryOperand; values: import('./plugin.js').BridgeJsonValue[] }
   | { op: "present"; value: QueryOperand }
   | { op: "prefix"; value: QueryOperand; prefix: string }
   | { op: "contains"; value: QueryOperand; text: string }
@@ -551,7 +551,7 @@ export interface QuerySpec {
 /** Missing properties and array projections retain their shape independently of JSON null. */
 export type QueryValue =
   | { kind: "missing" }
-  | { kind: "value"; value: unknown }
+  | { kind: "value"; value: import('./plugin.js').BridgeJsonValue }
   | { kind: "elements"; values: QueryValue[] }
 
 /** Continuation data bound to the query and logical scope, without server-side state. */
@@ -1082,9 +1082,9 @@ export type JsonSchema = {
   properties?: Record<string, JsonSchema> | null
   items?: JsonSchema | null
   required?: string[] | null
-  enum?: unknown[] | null
+  enum?: import('./plugin.js').BridgeJsonValue[] | null
   description?: string | null
-} & Record<string, unknown>
+} & import('./plugin.js').BridgeJsonObject
 
 /**
  * The mount read's reply (MCP Apps §4.1). `text` and `blob` are exclusive;
@@ -1099,7 +1099,7 @@ export interface McpWidgetResult {
   mimeType: string
   text?: string | null
   blob?: string | null
-  app?: Record<string, unknown> | null
+  app?: import('./plugin.js').BridgeJsonObject | null
 }
 
 export type ToolContent = string | ContentBlock[]
@@ -1110,9 +1110,9 @@ export type ToolContent = string | ContentBlock[]
  */
 export interface McpAppCallResult {
   content: ToolContent
-  structuredContent?: Record<string, unknown> | null
+  structuredContent?: import('./plugin.js').BridgeJsonObject | null
   isError?: boolean | null
-  meta?: Record<string, unknown> | null
+  meta?: import('./plugin.js').BridgeJsonObject | null
 }
 
 /** Management view, without credentials, transport handles or registry access. */
@@ -1145,7 +1145,7 @@ export interface McpSession {
    * server request.
    * @throws {McpAppErrorThrown}
    */
-  call(server: string, tool: string, arguments: Record<string, unknown>): Promise<McpAppCallResult>
+  call(server: string, tool: string, arguments: import('./plugin.js').BridgeJsonObject): Promise<McpAppCallResult>
 }
 
 export type WorkflowRoot = { project: string } | { package: string }
