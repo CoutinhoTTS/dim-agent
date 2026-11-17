@@ -9333,6 +9333,7 @@ mod tests {
                     updated_at: u64::MAX,
                     model: "p/m".into(),
                     origin: None,
+                    closed: false,
                 })
                 .collect()));
             Prompt::Sessions(panel)
@@ -19712,6 +19713,7 @@ mod tests {
             updated_at: u64::MAX,
             model: "p/m".into(),
             origin: None,
+            closed: false,
         };
         let here = item("s-here", "Fix the failing test", &launch);
         let also = item("s-also", "Retry the flaky test", &launch);
