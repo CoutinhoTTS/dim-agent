@@ -153,8 +153,11 @@ so adding the map only during replay would change the PE
 metadata. The baseline relink uses the same output, PDB and map paths and must
 reproduce the executable byte for byte; then Cargo's executable and PDB are
 restored. The map is copied to the artifact directory after the original link.
-The native fixture checks this replay with CodeView debug information and a PDB,
-after removing the original object to verify that the saved inputs suffice.
+The native fixture checks this replay at the captured output path with CodeView
+debug information and a PDB, after removing the original object to verify that
+the saved inputs suffice. It retains both fixture executables, their PDBs and
+the captured arguments on failure; Windows short-path aliases must not replace
+the recorded path in the replay command.
 
 The trainer launches the App Server suspended and empties its working set at
 entry before resuming. The ConPTY-backed TUI is created running and trimmed

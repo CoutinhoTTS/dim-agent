@@ -31,7 +31,7 @@ class Keep(tempfile.TemporaryDirectory):
         if artifacts:
             target = Path(artifacts)
             target.mkdir(parents=True, exist_ok=True)
-            for pattern in ('*.map', '*.order'):
+            for pattern in ('*.map', '*.order', 'captured*.exe', 'captured*.pdb', 'capture/link.json'):
                 for path in Path(self.name).glob(pattern):
                     shutil.copy2(path, target / path.name)
         super().cleanup()
@@ -55,6 +55,7 @@ void entry(void) {
     host = build_windows.TARGETS[platform.machine().upper()]
     linker = build_windows.lld_linker(host)
     assert linker, 'lld-link or rust-lld must be available'
+    print(subprocess.check_output([*linker, '--version'], text=True).strip(), flush=True)
     record = {'compiler':linker,
               'arguments':['/entry:entry','/subsystem:console','/nodefaultlib',
                            str(root/'fixture.obj'),'kernel32.lib',
@@ -92,13 +93,16 @@ void entry(void) {
     recorded = __import__('json').loads((capture/'link.json').read_text())
     assert recorded['inputs']
     assert recorded['output'].endswith('captured.exe')
-    captured = root/'captured.exe'
+    captured = Path(recorded['output'])
     original = captured.read_bytes()
+    (root/'captured-original.exe').write_bytes(original)
+    shutil.copyfile(recorded['pdb'], root/'captured-original.pdb')
     assert (root/'captured.pdb').is_file()
     assert (capture/'baseline.map').is_file()
     (root/'fixture.obj').unlink()
     build_windows.relink(recorded, captured, preserve_pdb=True)
-    assert captured.read_bytes() == original, 'captured inputs and map arguments must preserve the PE/PDB identity'
+    assert captured.read_bytes() == original, ('captured inputs and map arguments must preserve the PE/PDB identity',
+        recorded['output'], str(root/'captured.exe'), build_windows.digest(root/'captured-original.exe'), build_windows.digest(captured))
     assert subprocess.run([str(captured)]).returncode == 42
 
     canonical = root/'canonical.rs'
