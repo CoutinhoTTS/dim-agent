@@ -13,7 +13,7 @@ Each catalog name a part of the assembly provides or injects. `data` means share
 | `agentDirectory` | process | AgentDirectory | internal(owner-api) | — |
 | `agentIndex` | process | Agents | internal(owner-api) | — |
 | `auxiliaryModel` | process | Provider | data | `complete` async |
-| `basePromptSettingsHost` | process | PromptSettings | internal(owner-api) | — |
+| `basePromptSettingsHost` | process | PromptSettings | data | `base` async |
 | `callChannel` | process | CallChannel | data | `closed` async, `notify` async |
 | `callers` | process | CallChannel | internal(owner-api) | — |
 | `collaboration` | process | Collaboration | internal(host-resource) | — |
@@ -29,7 +29,6 @@ Each catalog name a part of the assembly provides or injects. `data` means share
 | `hostPlatform` | process | HostPlatform | internal(object) | — |
 | `listenAddresses` | process | Transport | data | `read` async |
 | `loader` | process | rutis-loader | internal(owner-api) | — |
-| `loaderService` | process | rutis-loader | shared-no-dispatcher | — |
 | `localId` | process | root | data | `get` sync |
 | `loops` | process | Scheduler | data | `list` async, `next` async, `start` async, `stop` async |
 | `managedSearch` | process | ManagedProviders | data | `search` async |
@@ -38,14 +37,12 @@ Each catalog name a part of the assembly provides or injects. `data` means share
 | `mcpAuth` | process | Mcp | internal(secret) | — |
 | `mcpService` | process | Mcp | internal(host-resource) | — |
 | `mentionIndex` | process | WorkspaceToolsOwner | internal(host-resource) | — |
-| `modalityConnectionHost` | process | Provider | internal(legacy-no-consumer) | — |
 | `modelHost` | process | Aimux | internal(owner-api) | — |
 | `modelSelectionHost` | process | Provider | data | `resolve` async |
 | `openAICodexOAuthService` | process | OpenAICodexOAuth | internal(secret) | — |
 | `partRegistry` | process | PartRegistry | data | `registerDefinition` async |
 | `pluginFileTransactions` | process | PluginFiles | internal(host-resource) | — |
 | `pluginFiles` | process | PluginFiles | data | `open` async |
-| `pluginMounter` | process | rutis-loader | shared-no-dispatcher | — |
 | `processActivity` | process | ServerControl | data | `hold` async, `release` async |
 | `promptSuggestionSettingsHost` | process | PromptSuggestionSettings | data | `read` async |
 | `providerConnectionResolver` | process | Provider | internal(host-resource) | — |
@@ -65,9 +62,9 @@ Each catalog name a part of the assembly provides or injects. `data` means share
 | `settings` | process | Settings | data | `projects` sync, `read` async, `register` async, `update` async |
 | `settingsService` | process | Settings | internal(owner-api) | — |
 | `skillsCatalog` | process | SkillsCatalog | internal(host-resource) | — |
-| `skillsInstructionsSettingsHost` | process | PromptSettings | internal(owner-api) | — |
+| `skillsInstructionsSettingsHost` | process | PromptSettings | data | `instructions` async |
 | `sqliteStorage` | process | SqliteStorage | internal(object) | — |
-| `summaryPromptSettingsHost` | process | PromptSettings | internal(owner-api) | — |
+| `summaryPromptSettingsHost` | process | PromptSettings | data | `systemPrompt` async |
 | `toolchainSourceHost` | process | ToolchainSource | data | `list` sync |
 | `uiExtensions` | process | UiExtensions | internal(control) | — |
 | `uiHost` | process | UiHost | internal(control) | — |
@@ -104,7 +101,7 @@ Each catalog name a part of the assembly provides or injects. `data` means share
 | `timelineTreeControl` | session | TimelineTree | internal(owner-api) | — |
 | `toolHost` | session | WorkspaceTools | data | `execute` async |
 | `toolRegistry` | session | ToolRegistry | data | `register` async |
-| `toolSourcesView` | session | ToolRegistry | internal(owner-api) | — |
+| `toolSourcesView` | session | ToolRegistry | data | `get` sync, `observe` async |
 | `treeCommands` | session | TimelineTree | data | `create` async, `end` async, `info` async, `input` async, `list` async, `page` async, `query` async |
 | `uiResources` | session | UiResources | data | `publishFile` async, `withdraw` async |
 | `agentLoop` | branch | Loop | internal(hot-path) | — |
@@ -121,7 +118,6 @@ Each catalog name a part of the assembly provides or injects. `data` means share
 | `fileReads` | branch | FileReads | internal(hot-path) | — |
 | `inputQueue` | branch | InputQueue | data | `submit` async, `withdraw` async |
 | `loopState` | branch | Loop | internal(hot-path) | — |
-| `modelProvider` | branch | ModelProvider | internal(hot-path) | — |
 | `permission` | branch | Permission | data | `check` async |
 | `prompt` | branch | Prompt | internal(hot-path) | — |
 | `promptSourcesBranch` | branch | PromptSourcesBranch | internal(hot-path) | — |

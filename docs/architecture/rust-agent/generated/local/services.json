@@ -2045,12 +2045,6 @@
         "removing": false
       },
       {
-        "service": "dim_agent_capabilities::model_provider::ModelProvider@main",
-        "provider": 72,
-        "generation": 1,
-        "removing": false
-      },
-      {
         "service": "dim_agent_capabilities::permission::Permission@main",
         "provider": 73,
         "generation": 1,
@@ -4162,6 +4156,12 @@
       },
       {
         "service": "dyn rutis_bridge::session::services::HostDispatch#toolRegistry@session",
+        "provider": 54,
+        "generation": 1,
+        "removing": false
+      },
+      {
+        "service": "dyn rutis_bridge::session::services::HostDispatch#toolSourcesView@session",
         "provider": 54,
         "generation": 1,
         "removing": false
