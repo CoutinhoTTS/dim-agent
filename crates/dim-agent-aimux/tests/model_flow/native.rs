@@ -2150,6 +2150,79 @@ async fn an_empty_reply_twice_fails_the_turn_without_a_third_attempt() {
     chat.close().await;
 }
 
+/// A reply of thinking only completes with no answer, so it is a
+/// `malformed_response`. Its thinking is already committed, which is what the
+/// retry policy tests: today that output stops recovery after the first
+/// attempt, so the turn fails with `attempts = 1`. Replay safety narrowed to
+/// answer content would retry it once, so the second attempt's answer would
+/// finish the turn over two requests.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_thinking_only_reply_fails_after_one_attempt() {
+    let chat = NativeServer::start("openai-chat").await;
+    let agent = model_agent(chat.models(), None).await;
+    let session = agent.create_session(chat.session_config()).await.unwrap();
+    session
+        .submit("empty-reply-thinking".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(&event.kind, EventKind::Thinking(data) if data.delta == "leaked tool-call markup")),
+        "the thinking-only reply is committed as it arrives: {events:?}"
+    );
+    let failure = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::ModelOutputEnd(data) => match &data.outcome {
+                ModelOutputOutcome::Failed {
+                    failure: Some(failure),
+                    ..
+                } => Some(failure.clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .expect("a failed model output");
+    assert_eq!(failure.kind, ModelFailureKind::MalformedResponse);
+    assert_eq!(
+        failure.reason.as_deref(),
+        Some("the response had no text and no tool call")
+    );
+    // Today's behaviour: committed thinking closes replay safety, so there is
+    // no retry. Narrowing replay safety to answer content would make later
+    // implementation attempts 2 and run 2 requests, the second ending the turn
+    // with "after the thinking-only reply"; this test is the record of that
+    // change.
+    assert_eq!(
+        failure.attempts, 1,
+        "today: 1 attempt, no retry; a narrowed replay rule makes it 2"
+    );
+    assert!(
+        matches!(
+            events
+                .iter()
+                .rfind(|event| matches!(event.kind, EventKind::TurnEnd(_)))
+                .unwrap()
+                .kind,
+            EventKind::TurnEnd(TurnEndData {
+                outcome: TurnOutcome::Failed { .. },
+                ..
+            })
+        ),
+        "{events:?}"
+    );
+    let requests = chat.endpoint.requests.lock().unwrap().len();
+    assert_eq!(
+        requests, 1,
+        "today: 1 request, no retry; a narrowed replay rule makes it 2"
+    );
+    agent.close().await.unwrap();
+    chat.close().await;
+}
+
 async fn respond_native(
     State(endpoint): State<NativeEndpoint>,
     uri: Uri,
@@ -2323,7 +2396,21 @@ async fn respond_native(
     let missing_stop = request.to_string().contains("native-stop-eof");
     let data = match endpoint.kind {
         "openai-chat" | "openai-compatible" => {
-            if request_text.contains("empty-reply") {
+            if request_text.contains("empty-reply-thinking") {
+                let attempt = endpoint.requests.lock().unwrap().len();
+                if attempt == 1 {
+                    frame(
+                        json!({"reasoning_content":"leaked tool-call markup"}),
+                        Value::Null,
+                    ) + &frame(json!({}), json!("stop"))
+                        + "data: [DONE]\n\n"
+                } else {
+                    frame(
+                        json!({"content":"after the thinking-only reply"}),
+                        json!("stop"),
+                    ) + "data: [DONE]\n\n"
+                }
+            } else if request_text.contains("empty-reply") {
                 let attempt = endpoint.requests.lock().unwrap().len();
                 if request_text.contains("empty-reply-twice") || attempt == 1 {
                     frame(json!({}), json!("stop")) + "data: [DONE]\n\n"
