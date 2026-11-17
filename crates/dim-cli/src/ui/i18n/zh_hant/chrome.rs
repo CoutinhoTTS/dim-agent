@@ -125,6 +125,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Observing conversation" => "正在檢視對話",
         "Conversation unavailable" => "對話無法使用",
         "Session closed" => "工作階段已關閉",
+        "This session is closed and cannot be resumed. Read its stored history with dimcode export {id} using the same --home." => {
+            "此工作階段已關閉，無法繼續對話。使用相同的 --home 執行 dimcode export {id} 可讀取已儲存的歷史。"
+        }
         "Member conversation" => "成員對話",
         "x stop command · Esc back" => "x 停止指令 · Esc 返回",
         "Esc back" => "Esc 返回",
