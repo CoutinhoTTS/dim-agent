@@ -28,3 +28,6 @@ dim-client.workspace = true
 futures-util.workspace = true
 tracing-subscriber.workspace = true
 rutis-loader.workspace = true
+
+[lints]
+workspace = true
