@@ -3,7 +3,7 @@ use crate::{
     agent_records::AgentRecords,
     protocol::{AgentInfo, CreateWorktree, SessionOrigin},
     settings::SettingsService,
-    storage::{PreparedWorktree, SessionStore, SqliteStorage},
+    storage::{PreparedWorktree, SessionMetadataService, SessionStore, SqliteStorage, Store},
     worktrees::{CreatedWorktree, ManagedWorktrees, WorktreeError},
 };
 use dim_agent_capabilities::{host::ModelSelectionHost, methods::RpcError};
@@ -26,7 +26,7 @@ use rutis_loader::resolve::Build;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     num::NonZeroU64,
-    path::{Component, Path},
+    path::Path,
     sync::{
         Arc, Mutex, OnceLock,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
@@ -392,7 +392,8 @@ pub struct AgentIndex {
     loader: OnceLock<(Loader, Ctx)>,
     startup_timeout: Duration,
     records: Option<Arc<AgentRecords>>,
-    session_store: Option<Arc<SessionStore>>,
+    session_store: Option<Arc<Store>>,
+    session_metadata: Option<Arc<SessionMetadataService>>,
     settings: Option<Arc<SettingsService>>,
     stopping: CancellationToken,
     /// Notified once an `idle` call on this generation is admitted and
@@ -906,7 +907,6 @@ impl AgentIndex {
                         .session_store
                         .as_ref()
                         .unwrap()
-                        .timeline_store()
                         .session_config(id)
                         .await?
                         .ok_or_else(|| AgentError::Storage(format!("unknown session {id}")))?;
@@ -1092,9 +1092,9 @@ impl AgentIndex {
         session: &Session,
         version: u32,
     ) -> dim_agent_runtime::Result<crate::protocol::SessionInfo> {
-        let title = match (&self.session_store, version >= 3) {
+        let title = match (&self.session_metadata, version >= 3) {
             (_, false) => None,
-            (Some(store), true) => Some(match store.metadata(session.id()).await {
+            (Some(store), true) => Some(match store.read(session.id()).await {
                 Ok(metadata) => metadata.into(),
                 Err(_) => crate::storage::TitleFields::default(),
             }),
@@ -1188,7 +1188,6 @@ impl AgentIndex {
                     }],
                 };
                 store
-                    .timeline_store()
                     .query(&scope, &query.query, query.page.as_ref())
                     .await?
                     .result
@@ -1319,7 +1318,6 @@ impl AgentIndex {
                     }],
                 };
                 store
-                    .timeline_store()
                     .query(&scope, &query.query, query.page.as_ref())
                     .await?
                     .result
@@ -1531,7 +1529,7 @@ impl AgentIndex {
             .activity
             .take_hold()
             .ok_or_else(|| AgentError::Reloading("process admission".into()))?;
-        Self::check_session_id(id)?;
+        crate::protocol::check_session_id(id)?;
         let slot = self.slot(id);
         let gate = slot.gate.lock().await;
         let removed = self.remove_locked(id, &slot).await?;
@@ -1553,7 +1551,7 @@ impl AgentIndex {
         &self,
         id: &str,
     ) -> dim_agent_runtime::Result<DeleteOutcome> {
-        Self::check_session_id(id)?;
+        crate::protocol::check_session_id(id)?;
         let slot = self.slot(id);
         let gate = slot.gate.lock().await;
         // One match yields both the outcome and what there is to announce, so
@@ -1572,17 +1570,6 @@ impl AgentIndex {
             self.announce(removed).await;
         }
         Ok(outcome)
-    }
-
-    /// The id names `command-output/<id>`, so only a single path component
-    /// can be a Session's (D3); refused before any admission state exists.
-    fn check_session_id(id: &str) -> dim_agent_runtime::Result<()> {
-        if !matches!(Path::new(id).components().collect::<Vec<_>>()[..],
-            [Component::Normal(name)] if name == id)
-        {
-            return Err(AgentError::InvalidInput(format!("invalid Session id {id}")));
-        }
-        Ok(())
     }
 
     /// Removes `id` with its admission gate held: its led members, its owned
@@ -2134,6 +2121,13 @@ impl AgentIndex {
     }
 }
 
+type StoredKeys = (
+    Key<Store>,
+    Key<SessionStore>,
+    Key<SqliteStorage>,
+    Key<SessionMetadataService>,
+);
+
 /// Owns every Agent subtree: the process assembly entry.
 pub(crate) struct AgentsPlugin {
     builder: AgentBuilder,
@@ -2141,7 +2135,7 @@ pub(crate) struct AgentsPlugin {
     /// The process root: top-level loader instances are created from it.
     root: Ctx,
     /// Native storage only with a database.
-    stored: Option<(Key<SessionStore>, Key<SqliteStorage>)>,
+    stored: Option<StoredKeys>,
     /// Settings only with local execution.
     settings: Option<Key<SettingsService>>,
     loader: Key<Loader>,
@@ -2160,14 +2154,14 @@ impl AgentsPlugin {
             stored: config
                 .database_path
                 .is_some()
-                .then(|| Ok::<_, Error>((names.key()?, names.key()?)))
+                .then(|| Ok::<_, Error>((names.key()?, names.key()?, names.key()?, names.key()?)))
                 .transpose()?,
             settings: config
                 .local_execution()
                 .then(|| names.key::<SettingsService>())
                 .transpose()?,
             loader: names.key()?,
-            directory: names.key()?,
+            directory: Key::of(),
             activity: names.key()?,
             parts: names.key()?,
             builder,
@@ -2182,9 +2176,11 @@ impl DynPlugin for AgentsPlugin {
     }
     fn injects(&self) -> Vec<TypeKey> {
         let mut injects = Vec::new();
-        if let Some((store, storage)) = &self.stored {
+        if let Some((store, native, storage, metadata)) = &self.stored {
             injects.push(store.erase());
+            injects.push(native.erase());
             injects.push(storage.erase());
+            injects.push(metadata.erase());
         }
         if let Some(settings) = &self.settings {
             injects.push(settings.erase());
@@ -2198,7 +2194,12 @@ impl DynPlugin for AgentsPlugin {
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
             let stored = match &self.stored {
-                Some((store, storage)) => Some((ctx.require_at(store)?, ctx.require_at(storage)?)),
+                Some((store, native, storage, metadata)) => Some((
+                    ctx.require_at(store)?,
+                    ctx.require_at(native)?,
+                    ctx.require_at(storage)?,
+                    ctx.require_at(metadata)?,
+                )),
                 None => None,
             };
             let settings = match &self.settings {
@@ -2234,12 +2235,16 @@ impl DynPlugin for AgentsPlugin {
                 },
             )?;
             let mut builder = self.builder.clone();
-            let (records, session_store) = match stored {
-                Some((store, storage)) => {
-                    builder.timeline_store(store.timeline_store());
-                    (Some(Arc::new(AgentRecords(storage))), Some(store))
+            let (records, session_store, session_metadata) = match stored {
+                Some((store, native, storage, metadata)) => {
+                    builder.timeline_store(native.timeline_store());
+                    (
+                        Some(Arc::new(AgentRecords(storage))),
+                        Some(store),
+                        Some(metadata),
+                    )
                 }
-                None => (None, None),
+                None => (None, None, None),
             };
             let default_id = match &records {
                 Some(records) => records
@@ -2262,6 +2267,7 @@ impl DynPlugin for AgentsPlugin {
                 startup_timeout: self.config.startup_timeout,
                 records,
                 session_store,
+                session_metadata,
                 settings,
                 selects_models: self.config.protected_profile(),
                 stopping: CancellationToken::new(),

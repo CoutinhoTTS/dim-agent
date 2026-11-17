@@ -462,6 +462,8 @@ InputQueue 仍是拥有决定的分支 Capability；InputMethods 仍是 Session 
 | `SessionConfig` | 下方的 Rust 结构体 |
 | 错误 | 带 A.6 错误码的 `SessionsError`，由 `AgentError` 映射：`Closed` → `session_closed`，`UnknownBranch` → `branch_missing`，`BranchEnded` → `branch_ended`，`Reloading` → `reloading`，`InvalidInput` → `rejected`，其余 → `failed` |
 
+以下是绑定摘录，不是完整的 DTO 定义。请求与回复的全部字段见 [agents/sessions.rs](../../../../crates/dim-app-server/src/agents/sessions.rs)。
+
 ```rust
 pub struct LaunchRequest {
     pub agent: Option<String>,            // 缺省：Agents 的默认 profile

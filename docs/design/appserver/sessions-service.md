@@ -130,6 +130,8 @@ The call path from a consumer to a Session (a call path, not an assembly graph):
 | Session facade, Permission, Loop | Session, branch | Unchanged; read through public calls |
 | InputQueue withdrawal service | Branch | Added by S1 |
 
+`AgentDirectory` is private owner state shared by the Agents directory, index and Agent scope through a typed key. It has no public catalog name; public Session operations use `sessions`. The private dependency still controls assembly and cleanup ordering.
+
 ## 5. Service shape
 
 | Item | Content |
@@ -915,7 +917,7 @@ changes are included; Scheduler and Workflow keep the existing S2 interface.
 ## Appendix A. Rust binding
 
 The types live next to `AgentIndex` in [agents/sessions.rs](../../../crates/dim-app-server/src/agents/sessions.rs). A Rust
-plugin in another crate uses the named service.
+plugin in another crate uses the named service. The following is a binding excerpt, not the complete DTO definitions; the linked source defines all request and reply fields.
 
 ```rust
 pub struct SessionRef { pub session_id: String, pub branch_id: String }

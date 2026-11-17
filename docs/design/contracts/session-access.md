@@ -535,6 +535,8 @@ while the first write is still unpublished.
 | `SessionConfig` | Rust struct below |
 | Errors | `SessionsError` with the codes of A.6, mapped from `AgentError`: `Closed` → `session_closed`, `UnknownBranch` → `branch_missing`, `BranchEnded` → `branch_ended`, `Reloading` → `reloading`, `InvalidInput` → `rejected`, others → `failed` |
 
+The following is a binding excerpt, not the complete DTO definitions. See [agents/sessions.rs](../../../crates/dim-app-server/src/agents/sessions.rs) for all request and reply fields.
+
 ```rust
 pub struct LaunchRequest {
     pub agent: Option<String>,            // absent: Agents' default profile
