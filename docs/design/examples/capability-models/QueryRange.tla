@@ -16,7 +16,7 @@ Qualified == {p \in Target : Eligible(p, Target)}
 Group(g) == {p \in Qualified : s.history[p].id = g}
 Reference == CASE Kind = "unmatched" -> { [key |-> p, value |-> p] : p \in Qualified }
  [] Kind = "count" -> { [key |-> g, value |-> Cardinality(Group(g))] : g \in Ids(Qualified) }
- [] OTHER -> { [key |-> p, value |-> p] : p \in {p \in Qualified:
+ [] OTHER -> { [key |-> p, value |-> p, group |-> s.history[p].id] : p \in {p \in Qualified:
        \A r \in Group(s.history[p].id): IF Kind = "first" THEN p <= r ELSE p >= r }}
 Before(a,b) == IF s.desc THEN a > b ELSE a < b
 RECURSIVE Ordered(_)
@@ -61,7 +61,7 @@ Scan ==
                         !.picks[g] = IF keep /\ (@ = 0 \/ Kind = "last") THEN p ELSE @]
 Computed == CASE Kind = "unmatched" -> {[key |-> p,value |-> p]:p \in s.matches}
  [] Kind = "count" -> {[key |-> g,value |-> s.groups[g]]:g \in {g \in 1..2:s.groups[g]>0}}
- [] OTHER -> {[key |-> s.picks[g],value |-> s.picks[g]]:g \in {g \in 1..2:s.picks[g]>0}}
+ [] OTHER -> {[key |-> s.picks[g],value |-> s.picks[g],group |-> g]:g \in {g \in 1..2:s.picks[g]>0}}
 Page ==
     /\ s.phase = "scan" /\ s.scan = 5
     /\ LET remaining == Ordered({r \in Computed:s.after = 0 \/ Before(s.after,r.key)})
@@ -84,7 +84,7 @@ StorageError ==
 Next == AppendSuffix \/ Publish \/ Read \/ Scan \/ Page
     \/ (\E binding \in {<<s.chain,s.cut,s.from,Kind>>,
           <<s.chain,s.cut+1,s.from,Kind>>, <<s.chain,s.cut,s.from,"differentQuery">>}:NextPage(binding))
-    \/ (\E chain \in BOOLEAN, cut \in 0..4, from \in {0,1,2,3,6}, internal \in BOOLEAN:
+    \/ (\E chain \in BOOLEAN, cut \in 0..4, from \in 0..6, internal \in BOOLEAN:
           Capture(chain,cut,from,internal))
     \/ StorageError
 Spec == Init /\ [][Next]_s

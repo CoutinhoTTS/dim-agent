@@ -9,11 +9,11 @@ jar SHA-256：`936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88`
 
 | 配置 | generated / distinct | queue / depth | exit |
 | --- | --- | --- | --- |
-| QueryRange-unmatched.cfg | 2,914,176 / 1,367,856 | 0 / 36 | 0 |
-| QueryRange-first.cfg | 3,816,448 / 1,858,560 | 0 / 20 | 0 |
-| QueryRange-last.cfg | 3,816,448 / 1,858,560 | 0 / 20 | 0 |
-| QueryRange-count.cfg | 3,816,448 / 1,858,560 | 0 / 20 | 0 |
-| QueryRange-TwoRows.cfg | 2,515,776 / 1,169,840 | 0 / 20 | 0 |
+| QueryRange-unmatched.cfg | 3,686,272 / 1,736,496 | 0 / 36 | 0 |
+| QueryRange-first.cfg | 4,703,232 / 2,296,832 | 0 / 20 | 0 |
+| QueryRange-last.cfg | 4,703,232 / 2,296,832 | 0 / 20 | 0 |
+| QueryRange-count.cfg | 4,703,232 / 2,296,832 | 0 / 20 | 0 |
+| QueryRange-TwoRows.cfg | 3,287,872 / 1,538,480 | 0 / 20 | 0 |
 
 所有配置有 1,024 个初态，状态队列耗尽，均输出 `Model checking completed. No error has been found.`。
 检查 `SourcePartition`、`ScanAgrees`、`PagesArePrefix`、`CompleteResult`、`ErrorIsNotEmptySuccess`
@@ -42,8 +42,12 @@ for kind in unmatched first last count TwoRows; do
 done
 ```
 
-可用机器记录的 `-seed` / `-fp` 重现随机参数。计数对应最终文件，早期语法错误、
+上面的循环使用新的随机参数。若需复现记录的随机参数，须在每条命令显式传入对应运行的 `-seed <seed> -fp <fingerprint>`。计数对应最终文件，早期语法错误、
 范围构造拆分前的运行和被终止的开发运行不计为本批通过证据。
 
 本批不改运行时代码，未重跑 Rust 工作区；现有 SQL/memory 对照流程只作为引用的实现证据。
 文档链接、哈希、ADR freeze 和 diff 检查由本 PR 验证。没有引入通用验证平台、强制 CI 或新业务约定。
+
+评审修正后五配置全部重跑：first/last 同时比较 group 与位置，from 扩展为 0..6，
+覆盖当前分支 sequence 2/3。0 仍只是缺省哨兵，wire 显式零拒绝没有由模型验证。
+SourcePartition 只比较集合，不验证 tail 向量顺序及单来源重复行。

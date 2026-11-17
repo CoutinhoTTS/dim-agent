@@ -14,7 +14,8 @@ Refs #1732，第二批 B；独立基于 main `c8e4edd5b6cf01936ec1478b8d000f5476
 `Capture/NextPage` 捕获存储分界和尾部，`Read` 从祖先及当前物理存储范围拼接输入，
 `Scan` 逐条累加匹配身份、分组计数和候选，`Page` 最后排序、按游标取页。
 另一个声明式定义 `Reference` 直接在固定逻辑历史上做集合选择、极值和基数计算。
-`ScanAgrees` 和 `CompleteResult` 比较两条路径。
+`ScanAgrees` 和 `CompleteResult` 比较两条路径；first/last 的行同时携带 group 与选中位置，
+因此把正确位置挂到错误分组也不能通过比较。
 
 | 现行合同 | 实现入口 | 本批模型/命题 | 边界与后续 |
 | --- | --- | --- | --- |
@@ -25,7 +26,7 @@ Refs #1732，第二批 B；独立基于 main `c8e4edd5b6cf01936ec1478b8d000f5476
 | related 使用完整范围，after 不缩小关联搜索 | memory `Evaluation::prepare/matches` 中 `records(None)`；SQLite relation scope | `Scan` 对每个 start 在整个 input 检查匹配 end，Page 才应用 after；`ScanAgrees/CompleteResult` | 只建模按身份排除关联终态，不包含任意嵌套 outer/root、数组条件和全部过滤表达式 |
 | pick first/last 按事件顺序，不被结果升降序改变 | memory query 分组/选取循环和 `push`；SQLite 分组/排序生成 | Scan 按位置累积 first/last；Reference 独立取每组极值；Page 最后排序；`ScanAgrees` | 单个身份分组键；输出按位置升降序。多字段排序/类型比较留实现对照 |
 | 分组计数先算完再分页 | 同上 groups/count 与最终 after/limit | Scan 累加计数；Reference 用 Cardinality；分页按组键；`CompleteResult` | 不包括按计数排序、多键分组、数值表示等价规则 |
-| next 绑定逻辑范围和查询，不绑定物理落盘分界 | `timeline_store.rs::query_binding`、memory cursor 检查、SQLite `after` | token 保存 chain/cut/from/Kind；NextPage 比较有效 token、修改 cut、修改 query；错误不重启查询 | 单 Session/分支，省略固定身份和不变排序字段；不证明 JSON 编码、游标字段数/类型校验 |
+| next 绑定逻辑范围和查询，不绑定物理落盘分界 | `timeline_store.rs::query_binding`、memory cursor 检查、SQLite `after` | token 保存 chain/cut/from/Kind；NextPage 比较有效 token、修改 cut、修改 query；错误不重启查询 | 仅 chain/cut/from/Kind；实际 binding 还含 Session、branch、intervals、filter、group、select 等身份；不证明这些字段完整绑定、JSON 编码或字段类型校验 |
 | 未来范围、无效 from、存储错误不是空结果 | Timeline query 校验及 store Result 传播 | Capture 返回 invalidRange；StorageError/NextPage 返回独立 error 阶段；`ErrorIsNotEmptySuccess` | 这里只检查模型保持错误类别，不能当作 Rust 所有错误传播路径的证明 |
 
 实现源文件：
@@ -42,7 +43,8 @@ Refs #1732，第二批 B；独立基于 main `c8e4edd5b6cf01936ec1478b8d000f5476
 因此晚到后缀可能改变关联判断，不能把它当成无关事件。
 
 祖先位置 2 在 fork=1 时不可见。查询可选 branch 或 chain、内外部可见性、through=0..4，
-以及默认或显式 from（含祖先/当前分支/范围外）。未来 cut、越界 from 作为明确错误返回。
+以及默认或显式 from（含祖先/当前分支/范围外）。模型的 0 是“未提供 from”的哨兵，
+不是 wire 中的显式 sequence=0；其拒绝属于参数校验，未在此模型展开。位置 3/4/5 对应当前分支 sequence 1/2/3。未来 cut、越界 from 作为明确错误返回。
 每页重新捕获磁盘/尾部分界，但不能改变逻辑 chain/cut/from；扫描间允许发布继续推进。
 分页可能是空、单页、多页，也可能在后续页发生错误；错误保留先前已返回的前缀，不伪装成成功结束。
 
@@ -64,7 +66,7 @@ Refs #1732，第二批 B；独立基于 main `c8e4edd5b6cf01936ec1478b8d000f5476
 
 这些是既有测试入口，本批不把它们计作重新执行通过。
 每个物理来源按位置唯一、记录内容不变是存储前提；模型检查磁盘/尾部集合不相交，
-不证明 SQL 解码不会在单一来源内重复产生同一行。续页调用者的权限/可见性重新校验也未展开。正文编码、missing/null、数值/数组语义、
+也不检查 tail 向量顺序，不证明 SQL 解码不会在单一来源内重复产生同一行。续页调用者的权限/可见性重新校验也未展开。正文编码、missing/null、数值/数组语义、
 任意字段排序、任意深祖先链、取消/故障恢复、完整游标身份校验和 SQL 性能没有由本模型证明。
 #1732 的 B 因此只推进表中子集；完整表达式和边界审计不能因这五个配置通过就勾为全部完成。
 
