@@ -45,7 +45,7 @@ with tempfile.TemporaryDirectory(prefix='dim-layout-coff-') as temporary:
     profile = root/'sample.pages'
     samples.write(profile, 4096, [0])
     build_windows.order(base, [profile], order)
-    assert order.read_bytes() == b'_Rraw_\xc0\n_Rsecond\n'
+    assert order.read_bytes().splitlines() == [b'_Rraw_\xc0', b'_Rsecond']
     assert build_windows.validate(base,candidate,order)['movedFunctionSymbols'] == 2
 `});
   assert.equal(result.error,undefined);

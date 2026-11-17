@@ -54,18 +54,21 @@ output.write_bytes(payload)
             source_argument = str(source) if os.name == 'nt' else os.path.relpath(source)
             arguments = ([str(tool),source_argument,'-o',str(cargo)] if module == build_darwin
                          else [source_argument,'/OUT:'+str(cargo),'/PDB:'+str(pdb)])
-            copyfile = shutil.copyfile
+            copy2 = shutil.copy2
             def save_input(src, dst, **kwargs):
-                result = copyfile(src, dst, **kwargs)
+                result = copy2(src, dst, **kwargs)
                 if corrupt and Path(src).samefile(source):
                     Path(dst).write_bytes(b'WRONG SAVED INPUT')
+                    shutil.copystat(src, dst)
                 return result
-            with patch.dict(os.environ, environment), patch.object(shutil, 'copyfile', side_effect=save_input):
+            with patch.dict(os.environ, environment), patch.object(shutil, 'copy2', side_effect=save_input):
                 module.capture(arguments)
             original = cargo.read_bytes()
             assert original.endswith(b'ORIGINAL INPUT'), 'the first link must use original inputs, even if capture is wrong'
             original_pdb = pdb.read_bytes() if pdb.exists() else None
             record = json.loads((work/'link.json').read_text())
+            captured = next(item for item in record['inputs'] if Path(item['source']).samefile(source))
+            assert Path(captured['file']).read_bytes() == (b'WRONG SAVED INPUT' if corrupt else b'ORIGINAL INPUT')
             shutil.rmtree(source.parent)
             try:
                 baseline, _ = module.replay_baseline(record, work, output)
