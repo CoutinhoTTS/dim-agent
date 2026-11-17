@@ -25,7 +25,7 @@ use dim_agent_types::{
     AgentEvent, BranchSource, DeltaData, EventKind, InputBlock, InputMessageData, InputMode,
     StepData, ToolCall, ToolDefinition, ToolResult,
 };
-use dim_app_server::settings::{SettingsPlugin, SettingsService};
+use dim_app_server::settings::{Settings, SettingsPlugin};
 use rutis::Ctx;
 use rutis::host::{CtxHost, DynPlugin, Effect, Key, TypeKey};
 use rutis_loader::resolve::Build;
@@ -904,7 +904,7 @@ impl Env {
         let mut builder = AgentBuilder::new(AgentConfig::default());
         dim_goal::install(&mut builder);
         dim_agent_capabilities::register_names(&mut builder);
-        dim_agent_runtime::names::register::<SettingsService>(builder.catalog_mut(), None);
+        dim_agent_runtime::names::register::<Settings>(builder.catalog_mut(), None);
         builder
             .require_feature(Feature::new("SessionMethods").session(
                 "SessionMethods",

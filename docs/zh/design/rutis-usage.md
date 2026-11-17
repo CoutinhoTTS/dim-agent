@@ -93,7 +93,7 @@ builder 在两个宿主里建出的两个 Agent 不会挂上彼此的部件。
   做，用它自己的登记处。必需部件尚未有人登记时，实例的创建像等必需行一样等它。
   持有进程状态的功能从持有它的那一行登记部件：Mcp、Collaboration、Agents、SkillsCatalog，以及持有文件写协调器的
   WorkspaceTools。ConfiguredModels 与 ConfiguredModel、PermissionRules 与 CommandRules 仍是两个插件：由 profile
-  选择哪个部件为 Session 绑定 `PrepareModelHost` 或 `CommandRulesHost`，与进程行是否运行无关。最小宿主在启动时
+  选择哪个部件为 Session 绑定 `PrepareModelHost` 或 `CommandRules`，与进程行是否运行无关。最小宿主在启动时
   启动它的插件。
 - 工具、工具来源和提示词来源已经向 ToolRegistry 和 PromptRegistry 登记，Session 方法和管理方法的命名空间向 Session 的 `sessionMethods` 和进程的 `managementMethods` 登记，Rpc 每次调用时读取它们（R6，[#382](https://github.com/arcships/dim/issues/382)）。
 - `partRegistry` 可以跨语言调用：TypeScript 或 Python 插件是进程里的一行，用 `registerDefinition` 登记自己的部件（附录 B，[#403](https://github.com/arcships/dim/issues/403)）；声明了组的行会被 App Server 拒绝。
@@ -243,8 +243,7 @@ Dim 的部件如何消费总线事件，以及 Dim 定义了哪些公开总线�
     （`caller_row`）。经调用方的 `ctx.effect` 做的登记在调用方卸载时撤下；bridge 能把其他语言的函数作为可调用的
     引用传过来（`RemoteFunction`）。
 - **所需机制：**每个所有者为它的贡献提供 `register`：ToolRegistry 管工具和工具来源，PromptRegistry 管提示词来源，
-  Rpc 管 Session 方法和管理方法的命名空间。工具和方法命名空间可以从任何语言登记；提示词来源和工具来源在有外来部件
-  需要之前仍只限 Rust。
+  Rpc 管 Session 方法和管理方法的命名空间。公开登记操作遵循[服务面 §2](service-faces.md)，是数据面；各所有者定义自己的贡献形状和回调生命周期。
   - 登记属于调用方。在 Rust 里调用方传入自己的 ctx；从其他语言调用时，bridge 把登记绑定到发起调用的行，处理函数
     是调用方自己的函数，经 bridge 回调。调用方卸载时登记撤下。
   - 同一个名字向同一个所有者登记第二次会失败，与一个名字有第二个提供者时一样。
@@ -376,6 +375,12 @@ Agent（`AgentBuilder::build`），宿主以 `partRegistry` 把它提供给自�
 宿主为进程名称配置的值（例如脚本化的 `ModelHost`）用 `AgentBuilder::process_value`。Agent 组行
 （`AgentBuilder::agent_row`）包含它的提供方，并按 Agent 实例隔离该名称，因此共享宿主的其他 Agent、宿主自己
 对该名称的提供方都不会与它冲突。宿主把这一行放进自己的 loader，该 loader 的服务目录是 builder 的。`session_value` 保留给 Session 名称。
+
+对于直接实现 `HostDispatch` 的宿主配置 Session 值，
+`AgentBuilder::session_data_value` 把同一个 `Arc` 提供到原生类型键及
+`host_key_in(name, session_instance)`。名称必须已在服务目录的 Session 组中共享。
+两个绑定都属于 SessionScope，并随它撤销；`session_value` 保持原有原生/标记值行为。
+此绑定不增加部件或 owner 状态；取消契约由该值的操作负责。
 
 ### A.3 已定的问题
 

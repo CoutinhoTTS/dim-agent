@@ -6,17 +6,14 @@ Generated from the real assembly: the App Server product profile (`serve` with a
 
 ## Services
 
-Each catalog name a part of the assembly provides or injects. `data` means shared with a dispatcher; `internal(reason)` means the face cannot cross; `shared-no-dispatcher` is shared but a leaf cannot call it. Methods are `sync` or `async`: synchronous methods return a value directly; asynchronous methods return a Promise to TypeScript callers. A non-data name is reached by Rust parts at its type's key.
+Each catalog name a part of the assembly provides or injects. `data` means shared with a dispatcher; `internal(reason)` means the face cannot cross; `shared-no-dispatcher` is shared but a leaf cannot call it. Methods are `sync` or `async` (TypeScript callers receive a direct value for `sync` and a Promise for `async`). A non-data name is reached by Rust parts at its type's key.
 
 | Name | Group | Provider | Face | Methods |
 | --- | --- | --- | --- | --- |
-| `agentDirectory` | process | AgentDirectory | internal(owner-api) | — |
 | `agentIndex` | process | Agents | internal(owner-api) | — |
 | `auxiliaryModel` | process | Provider | data | `complete` async |
 | `basePromptSettingsHost` | process | PromptSettings | data | `base` async |
 | `callChannel` | process | CallChannel | data | `closed` async, `notify` async |
-| `callers` | process | CallChannel | internal(owner-api) | — |
-| `collaboration` | process | Collaboration | internal(host-resource) | — |
 | `collaborationDirectory` | process | CollaborationDirectory | data | `relations` async |
 | `connectionHub` | process | Connection | internal(control) | — |
 | `credentialVariablesHost` | process | root | data | `variables` async |
@@ -26,7 +23,7 @@ Each catalog name a part of the assembly provides or injects. `data` means share
 | `fileStorage` | process | FileStorage | internal(object) | — |
 | `fsHost` | process | FileStorage | data | `closeRead` async, `openRead` async, `readAt` async |
 | `grokOAuthService` | process | GrokOAuth | internal(secret) | — |
-| `hooksService` | process | HooksSettings | internal(host-resource) | — |
+| `hooksService` | process | HooksSettings | data | `plugins` async, `refusal` sync, `register` async, `withdraw` async |
 | `hostPlatform` | process | HostPlatform | internal(object) | — |
 | `listenAddresses` | process | Transport | data | `read` async |
 | `loader` | process | rutis-loader | internal(owner-api) | — |
@@ -35,8 +32,7 @@ Each catalog name a part of the assembly provides or injects. `data` means share
 | `managedSearch` | process | ManagedProviders | data | `search` async |
 | `managedWorktrees` | process | ManagedWorktrees | internal(hot-path) | — |
 | `managementMethods` | process | ManagementMethods | data | `register` async |
-| `mcpAuth` | process | Mcp | internal(secret) | — |
-| `mcpService` | process | Mcp | internal(host-resource) | — |
+| `mcpService` | process | Mcp | data | `plugins` async, `refusal` sync, `register` async, `withdraw` async |
 | `mentionIndex` | process | WorkspaceToolsOwner | internal(host-resource) | — |
 | `modalityTargets` | process | Modality | data | `resolve` async |
 | `modelHost` | process | Aimux | internal(owner-api) | — |
@@ -45,11 +41,10 @@ Each catalog name a part of the assembly provides or injects. `data` means share
 | `partRegistry` | process | PartRegistry | data | `registerDefinition` async |
 | `pluginFileTransactions` | process | PluginFiles | internal(host-resource) | — |
 | `pluginFiles` | process | PluginFiles | data | `open` async |
-| `processActivity` | process | ServerControl | data | `hold` async, `release` async |
+| `processActivity` | process | ServerControl | data | `activated` async, `hold` async, `release` async |
 | `promptSuggestionSettingsHost` | process | PromptSuggestionSettings | data | `read` async |
 | `providerConnectionResolver` | process | Provider | internal(host-resource) | — |
 | `providerService` | process | Provider | internal(secret) | — |
-| `publication` | process | McpPublication | internal(host-resource) | — |
 | `reservedMethods` | process | root | data | `check` async |
 | `rutis/loader` | process | rutis-loader | data | `create` async, `reload` async, `remove` async, `status` async |
 | `scheduleJobs` | process | Scheduler | data | `call` async |
@@ -63,7 +58,7 @@ Each catalog name a part of the assembly provides or injects. `data` means share
 | `sessions` | process | AgentDirectory | data | `delete` async, `exists` async, `history` async, `idle` async, `input` async, `launch` async, `lookup` async, `pending` async, `stop` async, `withdraw` async |
 | `settings` | process | Settings | data | `projects` sync, `read` async, `register` async, `update` async |
 | `settingsService` | process | Settings | internal(owner-api) | — |
-| `skillsCatalog` | process | SkillsCatalog | internal(host-resource) | — |
+| `skillsCatalog` | process | SkillsCatalog | data | `issues` async, `plugins` async, `register` async, `withdraw` async |
 | `skillsInstructionsSettingsHost` | process | PromptSettings | data | `instructions` async |
 | `sqliteStorage` | process | SqliteStorage | internal(object) | — |
 | `store` | process | SessionStore | data | `addGrant` async, `catalog` async, `createOwnedSession` async, `creationRecord` async, `delete` async, `fork` async, `grants` async, `hasRecords` async, `owner` async, `query` async, `removeGrant` async, `removeWorktree` async, `removeWorktreeDirectory` async, `sessionConfig` async, `sessionConfigText` async, `sessionsUnderWorkspace` async, `setSessionLanguage` async, `worktreeDirectories` async, `worktreeUsages` async |
@@ -76,26 +71,25 @@ Each catalog name a part of the assembly provides or injects. `data` means share
 | `worktreeAssociations` | process | SessionStore | data | `associate` async |
 | `agentConfig` | session | SessionScope | data | `get` async |
 | `collaborationConfig` | session | SessionScope | data | `get` async |
-| `collaborationSession` | session | CollaborationSession | internal(legacy-no-consumer) | — |
-| `commandRulesHost` | session | CommandRules | internal(hot-path) | — |
+| `collaborationSession` | session | CollaborationSession | data | `approvalDestination` sync |
+| `commandRules` | session | CommandRules | data | `read` async |
 | `compactionStrategyHost` | session | ProductSummaryStrategy | internal(hot-path) | — |
 | `contextModelHost` | session | SessionScope | internal(hot-path) | — |
 | `faultReporter` | session | SessionScope | internal(hot-path) | — |
 | `guideEntries` | session | PromptGuide | data | `register` async |
 | `historyRenderer` | session | SessionScope | internal(hot-path) | — |
-| `initialPromptConfiguration` | session | PromptRegistry | internal(hot-path) | — |
+| `initialPromptConfiguration` | session | PromptRegistry | data | `get` async |
 | `mcpSession` | session | McpSession | data | `call` async, `refresh` async, `state` async, `widget` async |
 | `prepareContextHost` | session | SessionScope | internal(hot-path) | — |
 | `prepareModelHost` | session | PrepareModelHost | internal(hot-path) | — |
-| `promptHost` | session | PromptRegistry | internal(hot-path) | — |
-| `promptRegistry` | session | PromptRegistry | internal(hot-path) | — |
+| `promptHost` | session | PromptRegistry | data | `load` async |
+| `promptRegistry` | session | PromptRegistry | data | `names` sync, `register` async |
 | `sessionConfig` | session | SessionScope | data | `get` async |
 | `sessionIdentity` | session | SessionScope | data | `get` async |
 | `sessionLanguage` | session | PromptSources | data | `get` async |
 | `sessionLifecycle` | session | SessionScope | data | `activated` async, `closing` async, `hold` async, `release` async |
 | `sessionLoader` | session | SessionScope | internal(control) | — |
 | `sessionMethods` | session | SessionMethods | data | `register` async |
-| `sessionSkills` | session | Skills | internal(host-resource) | — |
 | `skillsConfig` | session | SessionScope | data | `get` async |
 | `submitChecks` | session | InputMethods | internal(hot-path) | — |
 | `timelineFactory` | session | SessionScope | internal(control) | — |
@@ -111,7 +105,7 @@ Each catalog name a part of the assembly provides or injects. `data` means share
 | `approval` | branch | Approval | data | `decide` async, `pending` async |
 | `backgroundExec` | branch | BackgroundExec | data | `output` async, `outputPage` async, `stop` async, `wait` async |
 | `branchLifecycle` | branch | BranchScope | data | `activated` async, `closing` async |
-| `branchLine` | branch | BranchLine | internal(hot-path) | — |
+| `branchLine` | branch | BranchLine | data | `cursor` async, `ending` async, `resolved` async |
 | `branchOpening` | branch | BranchScope | internal(hot-path) | — |
 | `configurationPublisher` | branch | ContextPreparation | internal(hot-path) | — |
 | `configureControl` | branch | Prompt | internal(hot-path) | — |
@@ -124,7 +118,7 @@ Each catalog name a part of the assembly provides or injects. `data` means share
 | `permission` | branch | Permission | data | `check` async |
 | `prompt` | branch | Prompt | internal(hot-path) | — |
 | `promptSourcesBranch` | branch | PromptSourcesBranch | internal(hot-path) | — |
-| `skillsBranch` | branch | SkillsBranch | internal(host-resource) | — |
+| `skillsBranch` | branch | SkillsBranch | data | `list` sync |
 | `timeline` | branch | BranchScope | data | `ancestors` async, `append` async, `branchId` async, `committed` async, `hasPending` async, `query` async, `sequence` async |
 | `timelineIdentity` | branch | BranchScope | data | `get` async |
 | `toolBinding` | branch | ToolBinding | internal(hot-path) | — |

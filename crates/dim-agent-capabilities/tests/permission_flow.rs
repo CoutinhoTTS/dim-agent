@@ -6,7 +6,7 @@ use dim_agent_capabilities::{
     host_platform::{HostPlatform, ShellStatus},
     model_provider::ModelProviderPlugin,
     permission::{
-        AdmissionDecision, AdviseTool, CommandRulesHost, Decision, NoCommandRules, Permission,
+        AdmissionDecision, AdviseTool, CommandRules, Decision, NoCommandRules, Permission,
         PermissionState, PermissionUpdateError, ReadCommandRules, ToolAdviceReply,
         ToolAdviceRequest,
     },
@@ -309,9 +309,9 @@ async fn ruled_agent(tools: Arc<RiskTools>, rules: Arc<dyn ReadCommandRules>) ->
         .timeline_store(dim_agent_runtime::TimelineStoreBinding::new(Arc::new(
             MemoryTimelineStore::default(),
         )))
-        .session_value(Arc::new(PromptHost(Arc::new(EmptyPromptHost))))
+        .session_data_value(Arc::new(PromptHost(Arc::new(EmptyPromptHost))))
         .session_value(Arc::new(InitialPromptConfiguration::fixed(None)))
-        .session_value(Arc::new(CommandRulesHost(rules)));
+        .session_data_value(Arc::new(CommandRules(rules)));
     defaults::install_with_prompt_capability(&mut builder, ModelProviderPlugin::new);
     defaults::mock_model_hosts(&mut builder);
     defaults::tool_host(&mut builder, tools);
@@ -349,9 +349,9 @@ async fn granted_agent_with(
         .timeline_store(dim_agent_runtime::TimelineStoreBinding::new(Arc::new(
             MemoryTimelineStore::default(),
         )))
-        .session_value(Arc::new(PromptHost(Arc::new(EmptyPromptHost))))
+        .session_data_value(Arc::new(PromptHost(Arc::new(EmptyPromptHost))))
         .session_value(Arc::new(InitialPromptConfiguration::fixed(None)))
-        .session_value(Arc::new(CommandRulesHost(Arc::new(NoCommandRules))))
+        .session_data_value(Arc::new(CommandRules(Arc::new(NoCommandRules))))
         .session_value(Arc::new(SessionGrantsHost(grants)))
         .process_value(Arc::new(SessionFiles(files)))
         .process_value(Arc::new(platform));
@@ -1919,9 +1919,9 @@ async fn advised_agent(
         .timeline_store(dim_agent_runtime::TimelineStoreBinding::new(Arc::new(
             MemoryTimelineStore::default(),
         )))
-        .session_value(Arc::new(PromptHost(Arc::new(EmptyPromptHost))))
+        .session_data_value(Arc::new(PromptHost(Arc::new(EmptyPromptHost))))
         .session_value(Arc::new(InitialPromptConfiguration::fixed(None)))
-        .session_value(Arc::new(CommandRulesHost(rules)));
+        .session_data_value(Arc::new(CommandRules(rules)));
     defaults::install_with_prompt_capability(&mut builder, ModelProviderPlugin::new);
     defaults::mock_model_hosts(&mut builder);
     defaults::tool_host(&mut builder, tools);
