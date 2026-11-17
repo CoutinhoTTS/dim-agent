@@ -319,13 +319,23 @@ fn resolve(path: &Path) -> PathBuf {
 fn failure(link: &DocsLink) -> Option<String> {
     let text = match fs::read_to_string(&link.file) {
         Ok(text) => text,
-        Err(_) => return Some("no such file".to_owned()),
+        Err(error) => return Some(read_failure(&error)),
     };
     let anchor = link.anchor.as_deref()?;
     if headings(&text).contains(anchor) {
         return None;
     }
     Some(format!("no heading `#{anchor}` in the document"))
+}
+
+/// Why the document a link names cannot be read: a directory, and a file the
+/// filesystem refuses, are not missing, and the message says which happened.
+fn read_failure(error: &std::io::Error) -> String {
+    match error.kind() {
+        std::io::ErrorKind::NotFound => "no such file".to_owned(),
+        std::io::ErrorKind::IsADirectory => "is a directory, not a document".to_owned(),
+        _ => format!("cannot be read: {error}"),
+    }
 }
 
 /// The GitHub heading slugs of a Markdown document: an ATX heading (`## Title`)
@@ -574,5 +584,51 @@ mod tests {
                 "atx".to_owned()
             ])
         );
+    }
+
+    /// A tree whose one source file is `source` and whose one document is
+    /// `document` at `docs/design/example.md`, under a fresh directory.
+    fn tree(name: &str, source: &str, document: Option<&[u8]>) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "dim-xtask-comment-links-{name}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("crates/example/src")).unwrap();
+        std::fs::write(root.join("crates/example/src/lib.rs"), source).unwrap();
+        if let Some(document) = document {
+            std::fs::create_dir_all(root.join("docs/design")).unwrap();
+            std::fs::write(root.join("docs/design/example.md"), document).unwrap();
+        }
+        root
+    }
+
+    fn refusal(root: &Path) -> String {
+        let error = check(root).unwrap_err().to_string();
+        std::fs::remove_dir_all(root).unwrap();
+        error
+    }
+
+    #[test]
+    fn a_link_to_a_directory_is_not_a_missing_document() {
+        let root = tree(
+            "directory",
+            "/// [example](../../../docs/design)\n",
+            Some(b"# Present\n"),
+        );
+        let error = refusal(&root);
+        assert!(error.contains("is a directory, not a document"), "{error}");
+    }
+
+    #[test]
+    fn a_document_that_cannot_be_read_says_why() {
+        let root = tree(
+            "unreadable",
+            "/// [example](../../../docs/design/example.md)\n",
+            Some(b"\xff\xfe"),
+        );
+        let error = refusal(&root);
+        assert!(error.contains("cannot be read:"), "{error}");
+        assert!(!error.contains("no such file"), "{error}");
     }
 }
