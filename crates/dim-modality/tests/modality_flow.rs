@@ -13,7 +13,10 @@ use dim_modality::{
     ProgressSink, RealtimeConnection, RealtimeEnd, RealtimeEvent, RealtimeFrame, RealtimeLimits,
     RealtimeOpened, RealtimeTransport, RemoteCancel, Submitted, TargetRequest, adapter_key,
 };
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{
+    SinkExt, StreamExt,
+    future::{AbortHandle, Abortable},
+};
 use rutis::Disposer;
 use rutis::{Ctx, Plugin};
 use serde_json::{Value, json};
@@ -934,24 +937,23 @@ async fn cancelling_target_reads_releases_only_the_callers_pending_work() {
     .await;
     let ctx = observed.get().unwrap();
     let targets = ctx.get::<ModalityTargets>().unwrap();
-    let call = targets.clone();
     let cancel = CancellationToken::new();
     let cancelled = cancel.clone();
-    let native = tokio::spawn(async move {
-        call.resolve(
-            TargetRequest {
-                category: "ocr".into(),
-                operation: "recognize".into(),
-                model: None,
-            },
-            cancelled,
-        )
-        .await
-    });
-    wait_for_count(|| fixture.describes(), 1, "the pending target read").await;
-    cancel.cancel();
+    fixture.on_pending(move || cancelled.cancel());
+    let native = targets.resolve(
+        TargetRequest {
+            category: "ocr".into(),
+            operation: "recognize".into(),
+            model: None,
+        },
+        cancel,
+    );
     assert_eq!(
-        native.await.unwrap().unwrap_err().code,
+        tokio::time::timeout(Duration::from_secs(10), native)
+            .await
+            .expect("the pending target read is cancelled")
+            .unwrap_err()
+            .code,
         "operation_interrupted"
     );
     wait_for_count(|| fixture.dropped(), 1, "the cancelled target read").await;
@@ -959,6 +961,8 @@ async fn cancelling_target_reads_releases_only_the_callers_pending_work() {
     let face = ctx
         .get_at::<dyn HostDispatch>(&host_key("modalityTargets"))
         .unwrap();
+    let (abort, registration) = AbortHandle::new_pair();
+    fixture.on_pending(move || abort.abort());
     let pending = face
         .invoke(
             "resolve",
@@ -967,10 +971,13 @@ async fn cancelling_target_reads_releases_only_the_callers_pending_work() {
             ]),
         )
         .unwrap();
-    let pending = tokio::spawn(rutis_bridge::session::settle(pending));
-    wait_for_count(|| fixture.describes(), 2, "the pending wire target read").await;
-    pending.abort();
-    assert!(pending.await.unwrap_err().is_cancelled());
+    let pending = Abortable::new(rutis_bridge::session::settle(pending), registration);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(10), pending)
+            .await
+            .expect("the pending wire target read is abandoned")
+            .is_err()
+    );
     wait_for_count(|| fixture.dropped(), 2, "the abandoned wire target read").await;
     assert_eq!(
         resolve_target(ctx, json!({"category":"image", "operation":"understand"})).await,
@@ -5369,6 +5376,8 @@ use rutis_bridge::session::{HostDispatch, Reply, Value as ServiceValue, host_key
 
 const PP_OCR_MODEL: &str = "pp-ocr";
 
+type PendingReadAction = Box<dyn FnOnce() + Send>;
+
 /// The fixture `ocrHelper` service: its `describe` returns the JSON the test
 /// set, or `null`, and counts the calls so a flow can tell a task read it.
 /// Past the replies it is allowed, it answers with a future that never
@@ -5383,6 +5392,7 @@ struct OcrHelperFixture {
     describes: Arc<AtomicUsize>,
     replies: Arc<AtomicUsize>,
     dropped: Arc<AtomicUsize>,
+    on_pending: Arc<Mutex<Option<PendingReadAction>>>,
 }
 impl OcrHelperFixture {
     fn new(description: Option<Value>) -> Self {
@@ -5397,6 +5407,7 @@ impl OcrHelperFixture {
             describes: Default::default(),
             replies: Arc::new(AtomicUsize::new(usize::MAX)),
             dropped: Default::default(),
+            on_pending: Default::default(),
         }
     }
     fn set(&self, description: Option<Value>) {
@@ -5417,6 +5428,9 @@ impl OcrHelperFixture {
     fn dropped(&self) -> usize {
         self.dropped.load(Ordering::SeqCst)
     }
+    fn on_pending(&self, action: impl FnOnce() + Send + 'static) {
+        *self.on_pending.lock().unwrap() = Some(Box::new(action));
+    }
 }
 /// Counts a pending `describe` answer dropped without one.
 struct PendingRead(Arc<AtomicUsize>);
@@ -5434,8 +5448,13 @@ impl HostDispatch for OcrHelperFixture {
         let count = self.describes.fetch_add(1, Ordering::SeqCst) + 1;
         if count > self.replies.load(Ordering::SeqCst) {
             let dropped = self.dropped.clone();
+            let on_pending = self.on_pending.clone();
             return Ok(ServiceValue::future(async move {
                 let _pending = PendingRead(dropped);
+                let action = on_pending.lock().unwrap().take();
+                if let Some(action) = action {
+                    action();
+                }
                 std::future::pending::<Reply>().await
             }));
         }
