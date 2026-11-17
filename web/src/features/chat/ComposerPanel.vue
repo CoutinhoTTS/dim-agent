@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref, useId, watch } from "vue"
+import { computed, nextTick, onActivated, onMounted, onUnmounted, ref, useId, watch } from "vue"
 import { useRoute, useRouter } from "vue-router"
 import { useI18n } from "vue-i18n"
 import type { DraftAttachments, FileCandidate, ModelId, PermissionPreset, PermissionPolicy, QueuedInput, RestoredImage, SubmitMode, UserInput, WithdrawResult } from "../../rpc/protocol"
@@ -698,6 +698,10 @@ onMounted(() => {
     observer = new ResizeObserver(() => followScroll())
     observer.observe(element)
   }
+})
+onActivated(() => {
+  resize()
+  field.value?.focus()
 })
 defineExpose({ focus: () => field.value?.focus(), quote })
 </script>

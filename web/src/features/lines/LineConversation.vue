@@ -31,6 +31,7 @@ const searchFiles = computed(() => view.value?.methods.includes("session.files.s
 const open = computed(() => line.value === undefined
   ? branch.value?.status !== "failed"
   : line.value.state.kind === "working" || line.value.state.kind === "waiting")
+const prompting = computed(() => approval.value !== undefined || questions.value.length > 0)
 const title = computed(() => lineName(t, line.value, props.branchId))
 const state = computed(() => line.value?.state ?? (branch.value?.running ? { kind: "working" as const } : { kind: "waiting" as const }))
 const parentName = computed(() => {
@@ -151,31 +152,33 @@ function noModel(): void {
       <div v-else-if="questions.length" class="line-approval question-prompts">
         <QuestionPrompt v-for="question in questions" :key="JSON.stringify([question.branchId, question.requestId, question.callId])" :session-id="sessionId" :question="question" />
       </div>
-      <ComposerPanel
-        v-else-if="open"
-        ref="composer"
-        :session-id="sessionId"
-        :running="running"
-        :stopping="stopping"
-        :model="view.model"
-        :send="send"
-        :stores-pastes="view?.methods.includes('attachment.put') === true"
-        :search-files="searchFiles"
-        :stop="stop"
-        :held="branch?.queued ?? []"
-        :withdraw-held="view?.methods.includes('session.input.withdraw') === true ? withdrawHeld : undefined"
-        :model-selectable="false"
-        :select-model="noModel"
-        :placeholder="t('lines.placeholder')"
-        :create-branch="connection.supports('session.branch_create') ? createBranch : undefined"
-        :open-lines="() => ui.openLines(sessionId)"
-        variant="panel"
-      >
-        <template #status>
-          <span class="line-status">⑂ {{ lineStateLabel(t, state) }}</span>
-        </template>
-      </ComposerPanel>
-      <div v-else class="line-readonly">
+      <KeepAlive>
+        <ComposerPanel
+          v-if="open && !prompting"
+          ref="composer"
+          :session-id="sessionId"
+          :running="running"
+          :stopping="stopping"
+          :model="view.model"
+          :send="send"
+          :stores-pastes="view?.methods.includes('attachment.put') === true"
+          :search-files="searchFiles"
+          :stop="stop"
+          :held="branch?.queued ?? []"
+          :withdraw-held="view?.methods.includes('session.input.withdraw') === true ? withdrawHeld : undefined"
+          :model-selectable="false"
+          :select-model="noModel"
+          :placeholder="t('lines.placeholder')"
+          :create-branch="connection.supports('session.branch_create') ? createBranch : undefined"
+          :open-lines="() => ui.openLines(sessionId)"
+          variant="panel"
+        >
+          <template #status>
+            <span class="line-status">⑂ {{ lineStateLabel(t, state) }}</span>
+          </template>
+        </ComposerPanel>
+      </KeepAlive>
+      <div v-if="!open && !prompting" class="line-readonly">
         <span>⑂ {{ lineStateLabel(t, state) }}</span>
         <span>{{ t("lines.readOnly") }}</span>
       </div>

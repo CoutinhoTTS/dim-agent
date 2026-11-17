@@ -17,7 +17,7 @@ globalThis.ResizeObserver = class {
   disconnect() { this.observed = [] }
 }
 
-const components = /\/(AppearanceSettings|ChatPage|LineConversation|ComposerPanel|ComposerPermissionMenu|ConfirmDialog|QuestionPrompt|TimelineUserMessage)\.vue$/
+const components = /\/(AppearanceSettings|ChatPage|LineConversation|LinesPanel|ComposerPanel|ComposerPermissionMenu|ConfirmDialog|QuestionPrompt|TimelineUserMessage)\.vue$/
 registerHooks({
   resolve(specifier, context, next) {
     if (specifier.startsWith("../../stores/") || (context.parentURL?.endsWith("/stores/chat.ts") && ["./connection", "./sessions", "./ui"].includes(specifier))) {
@@ -51,8 +51,14 @@ const { useChatStore } = await import("../src/stores/chat.ts")
 const { readNotification } = await import("../src/rpc/read.ts")
 const { RpcError } = await import("../src/rpc/client.ts")
 const node = (type, text = "") => ({
-  type, text, children: [], props: {}, parent: undefined, style: {}, value: "", scrollHeight: 40,
-  addEventListener() {}, focus() {}, scrollTo() {}, getRootNode() { return {} },
+  type, text, children: [], props: {}, parent: undefined, style: {}, value: "",
+  /** An element in no document has no layout: a browser reports nothing for it, and so does this. */
+  get scrollHeight() {
+    let element = this
+    while (element.parent !== undefined) element = element.parent
+    return element.type === "root" ? 40 : 0
+  },
+  addEventListener() {}, focus() { this.focuses = (this.focuses ?? 0) + 1 }, scrollTo() {}, getRootNode() { return {} },
   setSelectionRange(start) { this.selectionStart = start },
   showModal() { this.props.open = true }, close() { this.props.open = false },
 })
@@ -84,12 +90,12 @@ const question = (branchId, callId, multiSelect = false) => ({
   questions: [{ id: "1", question: `Choose ${callId}`, options: [{ label: "Alpha" }, { label: "Beta" }], multiSelect, allowCustom: true }],
 })
 
-function mount(t, branchId, questions = [], component, stores = {}, props = {}) {
+function mount(t, branchId, questions = [], component, stores = {}, props = {}, sharedView) {
   const replies = [], submissions = []
   globalThis.chatInputNavigations = []
   globalThis.chatInputStops = []
   globalThis.chatInputWithdrawals = []
-  const view = reactive({
+  const view = sharedView ?? reactive({
     status: "ready", rows: [], running: true, stopping: false, sessionRunning: true,
     approvals: [], questions, methods: ["attachment.put", "session.files.search"], queued: [],
     lines: [{ id: "worker", purpose: "Worker", parentId: "main", state: { kind: "working" } }],
@@ -127,7 +133,7 @@ function mount(t, branchId, questions = [], component, stores = {}, props = {}) 
   app.use(nuxtUiTestPlugin)
   app.mount(root)
   t.after(() => app.unmount())
-  return { root, view, replies, submissions }
+  return { root, view, replies, submissions, unmount: () => app.unmount() }
 }
 
 async function permissionSession(t, policy) {
@@ -753,6 +759,256 @@ test("an empty draft held through a delayed withdrawal stops once, after every r
   assert.deepEqual(events, ["withdraw-start:first", "withdraw-reply:first", "withdraw-start:second", "withdraw-reply:second", "stop", "submit"], "every withdrawal replies before the one stop, and the submit follows it")
   assert.equal(run.stopped.length, 1, "one stop for the gesture")
   assert.deepEqual(run.sent.map((submission) => submission.value), ["one\ntwo"], "the recalled messages are submitted once")
+})
+
+/** A page prompt that takes the composer's place, shown and cleared while a stop is out. */
+const promptTakes = {
+  question: (view, branchId) => ({
+    take: async () => { view.questions = [question(branchId, "while-stopping")]; await flush() },
+    clear: async () => { view.questions = []; await flush() },
+  }),
+  approval: (view, branchId) => ({
+    take: async () => {
+      view.approvals = [{ sessionId: "session", branchId, requestId: "while-stopping", call: { name: "exec", input: { command: "ls" } }, reason: "run ls" }]
+      await flush()
+    },
+    clear: async () => { view.approvals = []; await flush() },
+  }),
+}
+
+for (const [branchId, kind] of [["main", "question"], ["main", "approval"], ["worker", "question"], ["worker", "approval"]]) {
+  test(`${kind} on ${branchId}: a prompt that takes the composer's place keeps a withdrawn draft through a failed stop`, async (t) => {
+    const picture = storedImage("stored-before")
+    const held = heldInput("first", "before ", picture, " after")
+    const { root, view, submissions } = mount(t, branchId)
+    const chat = globalThis.chatInputStores.chat
+    let releaseWithdrawal, failStop
+    const withdrawal = new Promise((resolve) => { releaseWithdrawal = resolve })
+    chat.withdrawInput = async (sessionId, branch, inputId) => {
+      globalThis.chatInputWithdrawals.push({ sessionId, branch, inputId })
+      await withdrawal
+      if (branchId === "main") view.queued = []
+      else view.branches.worker.queued = []
+      return { status: "deleted" }
+    }
+    chat.stop = async (sessionId, branch) => {
+      globalThis.chatInputStops.push({ sessionId, branch })
+      return new Promise((_, reject) => { failStop = () => reject(new Error("the run would not stop")) })
+    }
+    view.methods = [...view.methods, "session.input.withdraw"]
+    if (branchId === "main") view.queued = [held]
+    else view.branches.worker.queued = [held]
+    await flush()
+    const field = all(root).find((element) => element.type === "textarea")
+    field.props.onFocus()
+    field.props["onUpdate:modelValue"]("draft")
+    await flush()
+    const shown = field.focuses
+
+    const gesture = click(button(root, "composer.sendNowHint"))
+    await flush()
+    assert.equal(globalThis.chatInputWithdrawals.length, 1, "the gesture withdraws the held message once")
+    releaseWithdrawal()
+    await flush()
+    assert.equal(globalThis.chatInputStops.length, 1, "the stop is out after the withdrawal's reply")
+
+    const prompts = promptTakes[kind](view, branchId)
+    await prompts.take()
+    assert.equal(all(root).some((element) => element.type === "textarea"), false, `the ${kind} takes the composer's place`)
+    assert.equal(submissions.length, 0, "nothing is submitted while the stop is out")
+    const hidden = field.focuses
+    assert.equal(hidden, shown, `the ${kind} takes the caret and the composer it holds no place for does not`)
+
+    failStop()
+    await gesture
+    await flush()
+    assert.equal(globalThis.chatInputWithdrawals.length, 1, "the withdrawal that went is not repeated")
+    assert.equal(submissions.length, 0, "a stop that fails sends nothing")
+
+    await prompts.clear()
+    const back = all(root).find((element) => element.type === "textarea")
+    assert.notEqual(back, undefined, "the composer comes back when the prompt clears")
+    assert.equal(back.value, "before  after\ndraft", "the recalled message and the typed draft are still there")
+    assert.equal(back.focuses, hidden + 1, "it takes the caret once on the way back")
+    assert.equal(all(root).filter((element) => element.type === "img").length, 1, "the recalled stored image is still in the draft")
+    assert.match(text(root), /composer\.sendNowFailed/, "the reason is reported where the draft came back")
+
+    // The message left the queue when it was recalled, so a send that fails keeps
+    // the whole draft and the next retry is the one that delivers it.
+    chat.stop = async () => { globalThis.chatInputStops.push({ sessionId: "session", branch: branchId }) }
+    chat.submit = async () => { throw new Error("the connection dropped") }
+    await click(button(root, "composer.sendNowHint"))
+    await flush()
+    assert.equal(globalThis.chatInputStops.length, 2, "the retry asks for the stop again")
+    assert.match(text(root), /the connection dropped/, "a send that fails says why")
+    assert.equal(back.value, "before  after\ndraft", "and keeps the whole draft")
+    assert.equal(submissions.length, 0, "while nothing reaches the session")
+
+    chat.submit = async (sessionId, branch, value, attachments, mode) => { submissions.push({ sessionId, branch, value, attachments, mode }) }
+    await click(button(root, "composer.sendNowHint"))
+    await flush()
+    assert.equal(globalThis.chatInputWithdrawals.length, 1, "the retry recalls nothing a second time")
+    assert.equal(globalThis.chatInputStops.length, 3, "and asks for the stop again")
+    assert.equal(submissions.length, 1, "the retry sends once")
+    assert.equal(submissions[0].value, "before  after\ndraft", "the recalled words keep their order ahead of the typed draft")
+    assert.deepEqual(submissions[0].attachments.restored, [{ at: 7, image: picture }], "the recalled image keeps its place between the words")
+    assert.equal(submissions[0].mode, "queue")
+
+    await prompts.take()
+    await prompts.clear()
+    assert.equal(all(root).find((element) => element.type === "textarea").value, "", "the accepted draft is gone from the composer")
+    assert.equal(all(root).filter((element) => element.type === "img").length, 0, "and its image with it")
+  })
+}
+
+test("an ended line shows no composer, so nothing can be sent from it", async (t) => {
+  const { root, view } = mount(t, "worker")
+  view.lines[0].state = { kind: "ended" }
+  await flush()
+  assert.equal(all(root).find((element) => element.type === "textarea"), undefined)
+  assert.match(text(root), /lines\.readOnly/)
+})
+
+test("switching the shown line leaves one composer's draft out of the other's", async (t) => {
+  const view = reactive({
+    status: "ready", rows: [], running: true, stopping: false, sessionRunning: true,
+    approvals: [], questions: [], methods: ["attachment.put", "session.files.search", "session.input.withdraw"], queued: [],
+    lines: [{ id: "worker", purpose: "Worker", parentId: "main", state: { kind: "working" } }, { id: "other", purpose: "Other", parentId: "main", state: { kind: "working" } }],
+    branches: { worker: { status: "ready", rows: [], running: true }, other: { status: "ready", rows: [], running: true } },
+  })
+  const ui = reactive({
+    lineTabs: { session: ["worker", "other"] },
+    activeLineTab: { session: "worker" },
+    detailExpanded: false, detailFocused: true, extension: undefined,
+    openLines() {}, openLine() {}, closeLineTab() {}, closeDetail() {},
+    activateLine(sessionId, branchId) { this.activeLineTab = { ...this.activeLineTab, [sessionId]: branchId } },
+    approvalKeyboard: () => false,
+  })
+  const { default: LinesPanel } = await import("../src/features/lines/LinesPanel.vue")
+  const { root } = mount(t, "worker", [], LinesPanel, { ui }, { sessionId: "session" }, view)
+  await flush()
+  const field = all(root).find((element) => element.type === "textarea")
+  field.props.onFocus()
+  field.props["onUpdate:modelValue"]("line draft")
+  await flush()
+
+  ui.activateLine("session", "other")
+  await flush()
+  assert.equal(all(root).includes(field), false, "the other line shows its own composer, not this one")
+  const other = all(root).find((element) => element.type === "textarea")
+  assert.equal(other?.value ?? "", "", "the other line's composer starts empty")
+  assert.equal(all(root).filter((element) => element.type === "img").length, 0, "and does not carry the recalled image")
+
+  other.props.onFocus()
+  other.props["onUpdate:modelValue"]("other draft")
+  await flush()
+  ui.activateLine("session", "worker")
+  await flush()
+  const back = all(root).find((element) => element.type === "textarea")
+  assert.equal(/other draft/.test(back?.value ?? ""), false, "the worker's composer shows no part of the other line's draft")
+})
+
+test("a prompt that takes the composer's place keeps the draft typed before it", async (t) => {
+  for (const [branchId, kind] of [["main", "question"], ["worker", "approval"]]) {
+    const { root, view } = mount(t, branchId)
+    await flush()
+    const field = all(root).find((element) => element.type === "textarea")
+    field.props.onFocus()
+    field.props["onUpdate:modelValue"]("half a thought")
+    await flush()
+
+    const prompts = promptTakes[kind](view, branchId)
+    await prompts.take()
+    assert.equal(all(root).some((element) => element.type === "textarea"), false, `the ${kind} takes the composer's place`)
+    await prompts.clear()
+
+    const back = all(root).find((element) => element.type === "textarea")
+    assert.equal(back.value, "half a thought", `the draft typed before the ${kind} is still there`)
+    const before = back.focuses
+    await prompts.take()
+    await prompts.clear()
+    assert.equal(back.focuses, before + 1, `the composer the ${kind} displaces takes its caret back once`)
+  }
+})
+
+test("a prompt that takes the composer's place keeps it hidden through a stop that succeeds", async (t) => {
+  const picture = storedImage("stored-before")
+  const held = heldInput("first", "before ", picture, " after")
+  const { root, view, submissions } = mount(t, "main")
+  const chat = globalThis.chatInputStores.chat
+  let releaseWithdrawal, settleStop
+  const withdrawal = new Promise((resolve) => { releaseWithdrawal = resolve })
+  chat.withdrawInput = async (sessionId, branch, inputId) => {
+    globalThis.chatInputWithdrawals.push({ sessionId, branch, inputId })
+    await withdrawal
+    view.queued = []
+    return { status: "deleted" }
+  }
+  chat.stop = async (sessionId, branch) => {
+    globalThis.chatInputStops.push({ sessionId, branch })
+    return new Promise((resolve) => { settleStop = resolve })
+  }
+  view.methods = [...view.methods, "session.input.withdraw"]
+  view.queued = [held]
+  await flush()
+  const field = all(root).find((element) => element.type === "textarea")
+  field.props.onFocus()
+  field.props["onUpdate:modelValue"]("draft")
+  await flush()
+
+  const gesture = click(button(root, "composer.sendNowHint"))
+  await flush()
+  assert.equal(globalThis.chatInputWithdrawals.length, 1, "the gesture withdraws the held message")
+  releaseWithdrawal()
+  await flush()
+  assert.equal(globalThis.chatInputStops.length, 1, "the stop is out after the withdrawal's reply")
+
+  view.questions = [question("main", "while-stopping")]
+  await flush()
+  assert.equal(all(root).some((element) => element.type === "textarea"), false, "the question takes the composer's place")
+
+  settleStop()
+  await gesture
+  await flush()
+  assert.equal(submissions.length, 1, "the draft goes out once the stopped run has settled")
+  assert.equal(submissions[0].value, "before  after\ndraft", "with the recalled message ahead of the typed draft")
+  assert.equal(all(root).some((element) => element.type === "textarea"), false, "and the composer stays hidden behind the question")
+
+  view.questions = []
+  await flush()
+  const back = all(root).find((element) => element.type === "textarea")
+  assert.equal(back.value, "", "the composer that returns shows nothing the accepted message took")
+  assert.equal(all(root).filter((element) => element.type === "img").length, 0, "and no part of its image")
+  assert.notEqual(back.style.height, "0px", "not the height it measured while it was hidden")
+})
+
+test("a composer the page keeps for a prompt is released with the page", async (t) => {
+  const urls = []
+  const realCreate = URL.createObjectURL, realRevoke = URL.revokeObjectURL
+  URL.createObjectURL = (file) => { const url = `blob:${file.name}`; urls.push(url); return url }
+  URL.revokeObjectURL = (url) => { urls.splice(urls.indexOf(url), 1) }
+  t.after(() => { URL.createObjectURL = realCreate; URL.revokeObjectURL = realRevoke })
+  const { root, view, unmount } = mount(t, "main")
+  await flush()
+  const field = all(root).find((element) => element.type === "textarea")
+  field.props.onFocus()
+  field.props.onPaste({ clipboardData: { files: [new File(["bytes"], "kept.png", { type: "image/png" })] }, preventDefault() {} })
+  await flush()
+  assert.deepEqual(urls, ["blob:kept.png"], "the draft holds its preview while the composer is mounted")
+
+  view.questions = [question("main", "while-hidden")]
+  await flush()
+  assert.deepEqual(urls, ["blob:kept.png"], "a prompt that takes its place keeps the draft, preview and all")
+  view.questions = []
+  await flush()
+  assert.equal(all(root).find((element) => element.type === "textarea").value, "")
+  assert.equal(all(root).filter((element) => element.type === "img").length, 1, "the preview is back with the composer")
+  assert.deepEqual(urls, ["blob:kept.png"], "and was never released on the way")
+
+  view.questions = [question("main", "while-gone")]
+  await flush()
+  unmount()
+  assert.deepEqual(urls, [], "the page that goes releases the composer it kept while a prompt held its place")
 })
 
 test("a stop that fails keeps the whole draft in the composer and sends nothing", async (t) => {
