@@ -223,6 +223,7 @@ impl SessionStore {
                     request.with_preview,
                     request.with_internal,
                     request.with_acp_sessions,
+                    request.with_acp_history,
                     request.with_automation_sessions,
                     request.include_closed,
                 ))
@@ -244,7 +245,8 @@ impl SessionStore {
             })
             .transpose()?;
         self.timeline.db.run_read_cancellable(cancel, move |connection| {
-            let index = if request.with_preview { "session_catalog_with_preview" } else { "session_catalog_by_activity" };
+            let acp_history = request.with_acp_sessions && request.with_acp_history;
+            let index = if request.with_preview && !acp_history { "session_catalog_with_preview" } else { "session_catalog_by_activity" };
             let mut sql = format!(
                 "SELECT c.session_id AS session_id, c.cwd, s.created_at_ms, b.sequence, o.agent_id, \
                  m.revision, m.title, m.title_source, c.preview, c.updated_at_ms AS updated_at_ms, \
@@ -256,10 +258,13 @@ impl SessionStore {
                  CROSS JOIN timeline_branches b ON b.session_id=c.session_id AND b.branch_id='main' \
                  LEFT JOIN session_metadata m ON m.session_id=c.session_id \
                  WHERE o.protocol_version<=?1 AND o.agent_id IN (SELECT value FROM json_each(?2)) \
-                 AND c.session_id NOT IN (SELECT value FROM json_each(?3))"
+                 AND (c.session_id NOT IN (SELECT value FROM json_each(?3)){})",
+                if acp_history { " OR s.origin = 'acp'" } else { "" }
             );
             let mut values: Vec<rusqlite::types::Value> = vec![i64::from(version).into(), serde_json::to_string(&hosts).map_err(error)?.into(), serde_json::to_string(&closed).map_err(error)?.into()];
-            if request.with_preview { sql.push_str(" AND c.preview IS NOT NULL"); }
+            if request.with_preview {
+                sql.push_str(if acp_history { " AND (c.preview IS NOT NULL OR s.origin = 'acp')" } else { " AND c.preview IS NOT NULL" });
+            }
             if !request.with_internal { sql.push_str(" AND s.origin != 'internal'"); }
             if !request.with_acp_sessions { sql.push_str(" AND s.origin != 'acp'"); }
             if !request.with_automation_sessions { sql.push_str(" AND s.origin != 'automation'"); }

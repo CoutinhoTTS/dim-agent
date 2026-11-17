@@ -2081,6 +2081,25 @@ the selection down.
 - A daemon before `session.catalog` is listed through `session.summaries`, and
   the client applies the scope to the rows it receives: the exact launch
   workspace, membership in the git set, or no filter.
+- The `/settings` "Show ACP sessions" switch applies the
+  [ACP visibility preference](appserver/session-classification.md#38-client-requirements).
+  Workspace and search filters still apply. When on, the picker requests
+  [`withAcpHistory`](appserver/session-catalog.md#31-sessioncatalog) alongside
+  `withAcpSessions` if the daemon advertises `session.catalog.acpHistory`;
+  ordinary rows keep their existing preview and closed filters. An older
+  daemon keeps its supported request, without the new parameter.
+  Closed rows include `Session closed` in their detail; Enter keeps the
+  picker open and explains that the Session cannot be resumed and its stored
+  Timeline can be read with `dimcode export SESSION_ID` (using the same
+  `--home`). It does not attempt attach or reopen the Session.
+
+  ```text
+  Show ACP sessions: off           Show ACP sessions: on
+    [Chat] Update cache              [Chat] Update cache
+                                     [ACP ] Editor conversation
+                                     [ACP ] Earlier work · Session closed
+                                     [ACP ] <empty Session id>
+  ```
 - `dimcode --resume ID` resumes a Session of any workspace, and cleanup selects
   across every workspace.
 - `Ctrl+X` removes the selected row after `Delete "{name}"? Enter confirm ·

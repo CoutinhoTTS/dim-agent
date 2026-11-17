@@ -1056,6 +1056,17 @@ impl Projection {
                 && task.finished.is_none()
                 && task.kind == TaskKind::Member(MemberTarget::Starting)
         };
+        if let CollaborationDelivery::Ok { agent_id, .. } = &data.delivery
+            && !agent_id.contains(':')
+            && let Some(task) = self.tasks.iter().find(|task| starting(task))
+            && task.agent_id.is_none()
+            && let Some(name) = &task.agent
+        {
+            self.name_agents(
+                HashMap::from([(agent_id.clone(), name.clone())]),
+                Vec::new(),
+            );
+        }
         let delivered_name = match &data.delivery {
             CollaborationDelivery::Ok { agent_id, .. } => {
                 Some(self.agent_names.get(agent_id).unwrap_or(agent_id).clone())
@@ -1170,6 +1181,7 @@ impl Projection {
 
     pub fn prepend(&mut self, mut older: Self) {
         older.name_agents(self.agent_names.clone(), Vec::new());
+        self.name_agents(older.agent_names.clone(), Vec::new());
         older.rows.retain(|row| {
             if let Some(existing) = self
                 .rows
@@ -1590,12 +1602,17 @@ impl Projection {
         }
     }
 
-    /// Names native Agents on tasks and cards, from one shared `agent.list`
-    /// that was asked to name `asked`.
+    /// Names native Agents on tasks and cards from delivered profiles or
+    /// `agent.list`, retaining prior names when a directory read omits them.
+    /// `asked` records the IDs covered by a directory read, even on failure.
     pub fn name_agents(&mut self, names: HashMap<String, String>, asked: Vec<String>) {
         self.agents_read.extend(asked);
+        self.agent_names.extend(names);
         let update = |task: &mut TaskView| {
-            if let Some(name) = task.agent_id.as_ref().and_then(|id| names.get(id))
+            if let Some(name) = task
+                .agent_id
+                .as_ref()
+                .and_then(|id| self.agent_names.get(id))
                 && !name.is_empty()
             {
                 task.agent = Some(name.clone());
@@ -1611,7 +1628,6 @@ impl Projection {
                     .task,
             );
         }
-        self.agent_names = names;
         self.refresh_result_labels();
     }
 
