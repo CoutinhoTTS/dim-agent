@@ -803,6 +803,14 @@ Provider 为一次非对话调用解析模型的连接，Modality 在该调用�
 
 ## 4. 客户端集成
 
+`provider.management` 只作用于单个 Provider；原先的无参聚合读取已移除。需要所有
+Provider 的版本、连接与模型描述符的客户端，用 `provider.management.list` 分页读取
+概览，并按需用 `provider.models.query` 读取要展示或编辑的模型；单个编辑表单使用精确的
+`provider.management {providerId, modelId?}` 快照。这些读取都是有界分页或一个显式目标，
+服务器不保留其结果，也不保留解析后的目录。从 `provider.management {}` 迁移时，提供方
+列表与保存版本读取改为 `provider.management.list`，模型能力与上限读取改为
+`provider.models.query` 或精确的 management 快照。
+
 ```text
 Desktop / CLI             Local App Server            Provider / account
     | hello: actual methods      |                            |
@@ -840,7 +848,7 @@ credential clear 和 enabled:false，修复只 clear 导致已启用记录缺凭
 若强度被切换过，
 先把它存成该模型的 `reasoningEffort`，再连同其余已保存偏好一起发送。编辑提供方的模型列表属于
 Models 管理领域（[CLI 命令 § Models 领域](../cli-commands.md#models-领域)）：`/models` 的
-`Edit models` 与 `dimcode models PROVIDER add|edit|set|remove|inspect` 读取
+`Manage models` 与 `dimcode models PROVIDER add|edit|set|remove|inspect` 读取
 `provider.management`，并经 `provider.models.*` 写入；上面的选择器动作保持不变。
 
 catalog 条目带 `zdr: true` 的模型在推理强度前显示 `ZDR` 标签，固定子代理模型选择器也一样。
@@ -850,9 +858,14 @@ catalog 条目带 `zdr: true` 的模型在推理强度前显示 `ZDR` 标签，�
 模型列表通过 `provider.models.query` 按页读取和服务端搜索。远程目录刷新由 Provider 或
 账号管理面板中的显式操作发起；模型选择器关闭时释放结果，重新打开时重新查询。
 
-未声明的模型不是选择器行。每个至少有一个此类模型的 Provider 在模型行之后保留一行灰色提示：
-统计需要窗口的模型数量并给出声明命令；该 Provider 没有任何可选模型时，这条提示取代空 Provider
-行，而不是与之并列。`dimcode models PROVIDER --set-limits MODEL --context-window N
+未声明的模型不是选择器行。选择器的 `Model management` 分区位于滚动的候选列表之外，保留紧凑的诊断：
+多少模型缺少上限、多少不可用或已禁用、多少 Provider 没有模型、多少目录所有者无法读取
+（[CLI 命令 § Models 领域](../cli-commands.md#models-领域)）。Enter 打开 Provider 列表，每行写明
+Provider 及其状态；至少有一个模型缺少上限的 Provider 写明数量，footer 给出声明命令
+（`dimcode models PROVIDER --set-missing-limits ...`）。没有任何可选模型的 Provider 仍可在该列表中
+找到，并写明原因，包括 `no models` 与 `catalog unreadable`。选择 Provider 打开既有的 Models
+管理领域，因此诊断从不成为模型候选。守护进程未声明 `provider.management` 时，同样的原因及其
+恢复命令以只读行显示，没有可执行的管理操作。`dimcode models PROVIDER --set-limits MODEL --context-window N
 --max-output-tokens N` 通过 `models.edit` 为单个模型声明两项上限；
 `--set-missing-limits --context-window N --max-output-tokens N` 为列表标为 `undeclared`
 的每个模型声明，即缺失上限是唯一障碍的启用模型；被禁用或因其他原因不可用的模型不写入。
@@ -862,9 +875,11 @@ catalog 条目带 `zdr: true` 的模型在推理强度前显示 `ZDR` 标签，�
 `undeclared`，并在行下列出声明命令。
 
 ```text
-Select a model
-> Provider / model          ZDR  ‹ high ›
-Enter select + default · ←/→ effort · Ctrl+B/F cursor · Ctrl+X clear saved · Esc clear/close
+Models
+  Conversation model
+  > Provider / model          ZDR  ‹ high ›
+  Selected: Provider / model
+Enter select + default · ←/→ effort · Tab section · Esc clear/close
 ```
 
 ```text
@@ -971,9 +986,12 @@ Migration 保留自己的快照、回执、账本与报告。明确映射连接�
 
 旧行 source 为 builtin 时映射到该 ID 的内置项。没有目标时导入从该内置项的捆绑定义
 开始，与在已播种目标上的导入完全相同，因此 ID 没有捆绑定义的 builtin 行会被拒绝；已有
-目标必须是未改动的播种记录。custom 行的 ID 属于捆绑目录时拒绝。两个入口用同一解析器
-解析并校验既有目标记录，校验不通过则拒绝该项。Migration 在转换之前把不是未改动播种记录的
-目标归为 Conflict 且不带原因；其余情况下转换的拒绝原因同时到达两个入口。
+目标必须是未改动的播种记录。转换后的记录写的是定义的名称，而不是源行的名称：内置项的
+名称是用户不设置的目录数据，所以目录改名之前写下的源行仍能导入，并带上当前名称。它写的
+driver 与 auth 必须一致，因为这两项决定记录到达哪里。custom 行的 ID 属于捆绑目录时拒绝。
+两个入口用同一解析器解析并校验既有目标记录，校验不通过则拒绝该项。Migration 在转换之前把
+不是未改动播种记录的目标归为 Conflict 且不带原因；其余情况下转换的拒绝原因同时到达两个
+入口。
 
 provider_selections 同样共用一次转换：工作区作用域是已存在目录的规范路径，所选模型
 必须在 Provider 目录中对该记录可用。目录已不存在的选择按该原因拒绝，它本就无法匹配。

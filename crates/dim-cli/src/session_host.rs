@@ -3546,16 +3546,6 @@ impl Worker {
             .into_iter()
             .filter_map(|row| {
                 if row.disabled || row.model.unavailable_reason.is_some() {
-                    let counts = unavailable.entry(row.provider_id.clone()).or_insert((
-                        row.provider_name.clone(),
-                        0,
-                        0,
-                    ));
-                    if row.model.unavailable_reason.is_some() {
-                        counts.1 += 1;
-                    } else {
-                        counts.2 += 1;
-                    }
                     if crate::limits_undeclared(
                         &row.model.missing_limits,
                         row.model.unavailable_reason.as_deref(),
@@ -3580,6 +3570,17 @@ impl Worker {
                             if !provider.candidates.contains(&candidate) {
                                 provider.candidates.push(candidate);
                             }
+                        }
+                    } else {
+                        let counts = unavailable.entry(row.provider_id.clone()).or_insert((
+                            row.provider_name.clone(),
+                            0,
+                            0,
+                        ));
+                        if row.model.unavailable_reason.is_some() {
+                            counts.1 += 1;
+                        } else {
+                            counts.2 += 1;
                         }
                     }
                     return None;
@@ -3611,6 +3612,9 @@ impl Worker {
             })
             .collect();
         for (provider_id, (provider_name, unavailable, disabled)) in unavailable {
+            if unavailable + disabled == 0 {
+                continue;
+            }
             let reason = match (unavailable, disabled) {
                 (0, count) => EmptyReason::Disabled { count },
                 (count, 0) => EmptyReason::Unavailable { count },

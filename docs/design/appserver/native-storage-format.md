@@ -367,17 +367,17 @@ Cannot open native store <path>.
 
 ## SQLite 运行参数与空间回收
 
-进程用一个写连接打开本库，另有四个只读连接服务读取（[#599](https://github.com/arcships/dim/issues/599)）：写连接在格式门禁及其准入事务提交后才设置连接级 PRAGMA：`journal_mode=WAL`、`synchronous=FULL`（macOS 另加 `fullfsync`）、`foreign_keys=ON`、`wal_autocheckpoint=0`、`journal_size_limit=64 MiB`、`cache_size=-32768`（32 MiB）。只读连接以 `SQLITE_OPEN_READ_ONLY` 打开，只设 `busy_timeout=5s`、`cache_size=-32768` 和 `catalog_fold` 函数，不设 `journal_mode`、`synchronous`、`foreign_keys`、`wal_autocheckpoint`、`journal_size_limit` 或 `fullfsync`。每次读取在其语句开始时的最后提交上运行，不等待写事务或 fsync；调用按顺序轮换连接，目录扫描等长读不会占住其他读取。写连接与 fork/delete 的复制连接用 `sqlite3_busy_handler`：每 1 ms 重试一次、约 5 秒后放弃，两者因此轮流取得写锁，而不是一方在另一方退避期间长期占有。
+进程用一个写连接打开本库，业务读取使用至多四个按需创建的只读连接（[#599](https://github.com/arcships/dim/issues/599)、[#1673](https://github.com/arcships/dim/issues/1673)）：写连接在格式门禁及其准入事务提交后才设置连接级 PRAGMA：`journal_mode=WAL`、`synchronous=FULL`（macOS 另加 `fullfsync`）、`foreign_keys=ON`、`wal_autocheckpoint=0`、`journal_size_limit=64 MiB`、`cache_size=-512`（512 KiB）。只读连接在第一次读取需要时创建，以 `SQLITE_OPEN_READ_ONLY` 打开，只设 `busy_timeout=5s`、`cache_size=-256`（256 KiB）和 `catalog_fold` 函数，不设 `journal_mode`、`synchronous`、`foreign_keys`、`wal_autocheckpoint`、`journal_size_limit` 或 `fullfsync`。每次读取在其语句开始时的最后提交上运行，不等待写事务或 fsync；空闲连接先被复用，全部繁忙时再创建一个（至多四个），到达上限后在该连接池上休眠等待一个连接返回，不轮询 CPU。执行中及排队的读取全部结束后关闭多出来的只读连接，空闲只保留一个连接供连续读取复用页缓存。写连接与 fork/delete 的复制连接用 `sqlite3_busy_handler`：每 1 ms 重试一次、约 5 秒后放弃，两者因此轮流取得写锁，而不是一方在另一方退避期间长期占有。
 
 | 参数 | 值 | 作用 |
 | --- | --- | --- |
 | `wal_autocheckpoint` | `0` | 关闭提交事务内的自动检查点。writer 在每轮提交并发布后、WAL 达到 4 MiB（SQLite 默认的 1000 页）时执行 `PRAGMA wal_checkpoint(PASSIVE)`；检查点因此不占提交路径。只读连接不自动检查点。 |
 | `journal_size_limit` | 64 MiB | 检查点重启 WAL 后，文件截到不超过该值；单轮写入本身更大时保留该轮的大小。导出等读者持长读事务时 WAL 仍会在导出期间增长，导出结束后下一次检查点照常复制并重启。被动检查点不等待读者。 |
-| `cache_size` | 每个连接 32 MiB | 在 650 MB、2,300 个 Session 的一次性库上重复读取每个 Session 的尾部事件：缓存为 2–16 MiB 时十次读取共从分页器读约 205 MB，32 MiB 起降到约 20 MB，64 MiB 与 128 MiB 不再减少。32 MiB 是容纳该热点工作集的最小值；写连接和四个只读连接各用该值。 |
+| `cache_size` | 写连接 512 KiB；只读连接 256 KiB | 都是每连接的建议缓存上限，不是预分配或整个 SQLite 堆的硬上限：SQLite 按实际读取的页分配。默认值优先满足普通点读取与写入；重复整库扫描可能增加分页器读取量。空闲存储的 SQLite 分配预算为 1.5 MiB（[#1673](https://github.com/arcships/dim/issues/1673)）；Provider 与其他业务模块共用本存储服务，合并业务负载后仍须验证该预算（[#1672](https://github.com/arcships/dim/issues/1672)）。 |
 | `busy handler` | 每 1 ms，约 5 秒 | 写连接与 fork/delete 的复制连接共用；两者在同一 WAL 上交替取得写锁，使分块的复制/删除与写入轮都能前进。 |
 | `foreign_keys` | 复制连接 `OFF` | fork 在最后一个事务才插入 `agent_sessions`，此前先写事件、内容、快照与分支；SQLite 的外键是连接级设置，复制连接关闭它，最后一个事务在提交时仍满足全部约束。 |
 
-关闭时先关闭四个只读连接，再执行 `PRAGMA wal_checkpoint(TRUNCATE)`，把 WAL 折回数据库并截为零；另一个连接（如运行中的导出）仍持读事务时这一步可能失败，下次打开继续。
+关闭时先关闭已创建的只读连接（按需创建，通常一个或没有），再执行 `PRAGMA wal_checkpoint(TRUNCATE)`，把 WAL 折回数据库并截为零；另一个连接（如运行中的导出）仍持读事务时这一步可能失败，下次打开继续。
 
 fork 与 Session 删除各用一条复制连接，按 256 个逻辑序号（内容按 1024 个哈希）分块提交，每块之间让写入轮取得写锁。复制连接与写连接一样在 macOS 上设置 `fullfsync`。fork 的中间块以 `synchronous=NORMAL` 提交，最后插入 `agent_sessions` 的事务以 `FULL` 提交：它的 fsync（macOS 上为 F_FULLFSYNC）覆盖此前写入 WAL 的全部帧，中断只留下不可达的行，不会出现可见但不完整的 Session。删除先在一个 `FULL` 事务中移除使 Session 可见的行（文件与输出归属、授权、标题、目录、owner、session 与分支），再以 `NORMAL` 分块删除事件、快照和内容；中断只留下不可达的行，重试同一 id 即可清除。两者都不改变持久化格式。
 
