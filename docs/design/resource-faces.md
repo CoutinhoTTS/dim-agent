@@ -602,9 +602,10 @@ code the operation already uses, so one code vocabulary serves the local and the
 ## 5. `store` and `timelineStore`
 
 The repository and Timeline operations use two names on the daemon that owns the state: process
-`store` provides the repository operations (§5.2), and Session-scoped `timelineStore` provides
-the Timeline operations and completion notifications below. Both use the existing state owner;
-the split follows §9(6), without changing Session placement or the storage engine.
+`store` provides the repository operations (§5.2), retaining its existing Timeline `query`,
+and Session-scoped `timelineStore` provides the Timeline operations and completion notifications
+below. Both use the existing state owner; the split follows §9(6), without changing Session
+placement or the storage engine.
 Worktree association uses the separate existing `worktreeAssociations` face
 ([service faces](service-faces.md) §4.8), listed alongside them below.
 
@@ -685,7 +686,9 @@ returning, and the row's unload withdraws it. Register before the batches to obs
 there is no replay of earlier admissions. `closeCommits` withdraws it explicitly and is
 idempotent. Each listener receives only its requested Session's completions, tagged with its own
 subscription id. A slow or failed observer does not delay durable completion or release, and
-ending observation never cancels a write or the native publication callback.
+ending observation never cancels a write or the native publication callback. The calling row must
+belong to the runtime in which the provider installed the binding; sharing the native binding
+with another runtime does not connect that runtime's listeners to the provider's completion bus.
 
 The native binding retains synchronous `append` admission and its existing publish callback.
 Its notification `batchId` is the JSON encoding of `[branchId, through]`, the batch identity
@@ -694,8 +697,8 @@ is notification correlation only, with no additional durable fact or lookup. A s
 admission refusal produces no completion notification. The one backend callback keeps native
 publication synchronous, then enqueues observation on rutis's existing ordered asynchronous
 bus. Release drains that backend's writes and callbacks; it does not wait for observers to finish.
-Foreign callers may observe and read, but synchronous append across a link is rejected as stated
-in §5.1.
+Foreign-language rows in the provider runtime may observe and read; a separate runtime has
+read-only access. Synchronous append across a link is rejected as stated in §5.1.
 
 The Rust `TimelineStore` trait is the local binding of `timelineStore`, not a second contract
 (§6); the SQL engine remains the provider's implementation. The binding of `append` is

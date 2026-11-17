@@ -131,6 +131,7 @@ impl From<ManagedError> for ManagedSearchError {
             | ManagedError::InvalidCallback
             | ManagedError::AttemptNotFound
             | ManagedError::AttemptClosed
+            | ManagedError::Cancelled
             | ManagedError::ServiceReloading
             | ManagedError::InvalidInput
             | ManagedError::ResetDenied
@@ -162,6 +163,7 @@ pub enum ManagedError {
     AttemptNotFound,
     AttemptClosed,
     ServiceReloading,
+    Cancelled,
     InvalidInput,
     UnknownModel,
     LeaseNotFound,
@@ -269,7 +271,7 @@ pub trait ManagedProvider: Send + Sync + 'static {
         request: WebSearchRequest,
         cancel: CancellationToken,
     ) -> ManagedFuture<WebSearchResponse>;
-    fn catalog(&self, provider: &str) -> ManagedFuture<ManagedCatalog>;
+    fn catalog(&self, provider: &str, cancel: CancellationToken) -> ManagedFuture<ManagedCatalog>;
     fn credential(&self, provider: &str, model: &str) -> ManagedFuture<CredentialLease>;
     /// One controlled recovery after the relay rejected `lease`.
     fn recover_rejected(&self, lease: &CredentialLease) -> ManagedFuture<CredentialLease>;
@@ -332,6 +334,7 @@ impl From<ManagedError> for ManagedProviderError {
                 "account_invalid_response",
                 "Managed provider returned an invalid response",
             ),
+            ManagedError::Cancelled => ("account_cancelled", "Managed account operation cancelled"),
             ManagedError::ServiceReloading => {
                 ("service_reloading", "Managed provider service is reloading")
             }
@@ -524,7 +527,7 @@ impl ManagedProviders {
         id: &str,
         cancel: &CancellationToken,
     ) -> Result<ManagedCatalog, ManagedProviderError> {
-        let catalog = self.provider(cancel)?.catalog(id).await?;
+        let catalog = self.provider(cancel)?.catalog(id, cancel.clone()).await?;
         if !valid_catalog(&catalog) {
             return Err(invalid());
         }
