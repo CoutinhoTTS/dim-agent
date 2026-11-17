@@ -23,15 +23,17 @@ pub fn check(root: &Path) -> Result<()> {
     for path in sources(root) {
         let text = fs::read_to_string(&path)?;
         for (line, comment) in comments(&text) {
-            for target in link_targets(&comment) {
+            let comment = without_code_spans(&comment);
+            for (offset, target) in link_targets(&comment) {
                 let Some(link) = docs_link(&path, root, target) else {
                     continue;
                 };
                 checked += 1;
                 if let Some(reason) = failure(&link) {
                     errors.push(format!(
-                        "{}:{line}: `{target}`: {reason}",
-                        path.strip_prefix(root).unwrap_or(&path).display()
+                        "{}:{}: `{target}`: {reason}",
+                        path.strip_prefix(root).unwrap_or(&path).display(),
+                        line + offset
                     ));
                 }
             }
@@ -85,9 +87,9 @@ fn path_name(path: &Path) -> String {
 
 /// Each comment in `text`, as its first line number and its text with the
 /// `//`, `/*` and `*/` delimiters removed. A comment is either a `//` line or a
-/// `/* */` block, and a block does not nest. Neither opens inside a string or a
-/// character literal, where the same characters mean something else: a glob
-/// such as `"**/*.rs"` is not a comment start.
+/// `/* */` block, and a block nests as Rust's does. Neither opens inside a
+/// string or a character literal, where the same characters mean something
+/// else: a glob such as `"**/*.rs"` is not a comment start.
 fn comments(text: &str) -> Vec<(usize, String)> {
     let mut found = Vec::new();
     let mut rest = text;
@@ -98,9 +100,9 @@ fn comments(text: &str) -> Vec<(usize, String)> {
             found.push((line, body[..end].to_owned()));
             2 + end
         } else if let Some(body) = rest.strip_prefix("/*") {
-            let end = body.find("*/").unwrap_or(body.len());
+            let (end, consumed) = block(body);
             found.push((line, body[..end].to_owned()));
-            2 + end + if end < body.len() { 2 } else { 0 }
+            2 + consumed
         } else if let Some(length) = literal(rest) {
             length
         } else {
@@ -110,6 +112,31 @@ fn comments(text: &str) -> Vec<(usize, String)> {
         rest = &rest[skipped..];
     }
     found
+}
+
+/// The body of the block comment whose opening `/*` precedes `body`, as the
+/// length of the body before its closing `*/` and the bytes through that
+/// closing delimiter. `body` may hold nested comments, which Rust allows and
+/// which therefore do not end the outer one early.
+fn block(body: &str) -> (usize, usize) {
+    let mut depth = 1;
+    let mut index = 0;
+    while index < body.len() {
+        let rest = &body[index..];
+        if rest.starts_with("/*") {
+            depth += 1;
+            index += 2;
+        } else if rest.starts_with("*/") {
+            depth -= 1;
+            if depth == 0 {
+                return (index, index + 2);
+            }
+            index += 2;
+        } else {
+            index += rest.chars().next().map_or(1, char::len_utf8);
+        }
+    }
+    (body.len(), body.len())
 }
 
 /// The length of the string or character literal that starts `rest`, `None`
@@ -165,41 +192,85 @@ fn character_literal(body: &str) -> Option<usize> {
     body[end..].starts_with('\'').then_some(end + 1)
 }
 
-/// The targets of the Markdown links in `comment`, in source order: inline
-/// `[text](target)` links and `[label]: target` reference definitions alike, so
-/// a definition that moves with its document is checked like the reference that
-/// uses it.
-fn link_targets(comment: &str) -> Vec<&str> {
+/// `comment` with the text of its code spans overwritten by spaces: Markdown
+/// reads a link written inside a code span as syntax being documented, not as
+/// a link. Newlines keep their place, so a link after a span reports its own
+/// line.
+fn without_code_spans(comment: &str) -> String {
+    let mut masked = comment.as_bytes().to_vec();
+    let mut offset = 0;
+    while let Some(found) = comment[offset..].find('`') {
+        let open = offset + found;
+        let run = comment[open..].chars().take_while(|c| *c == '`').count();
+        let Some(close) = closing_span(comment, open + run, run) else {
+            offset = open + run;
+            continue;
+        };
+        for byte in &mut masked[open..close + run] {
+            if *byte != b'\n' {
+                *byte = b' ';
+            }
+        }
+        offset = close + run;
+    }
+    String::from_utf8(masked).expect("masking a comment keeps it text")
+}
+
+/// Where the run of `length` backticks that closes the code span whose body
+/// starts at `body` begins, `None` when the span never closes.
+fn closing_span(text: &str, body: usize, length: usize) -> Option<usize> {
+    let mut offset = body;
+    while let Some(found) = text[offset..].find('`') {
+        let found = offset + found;
+        let run = text[found..].chars().take_while(|c| *c == '`').count();
+        if run == length {
+            return Some(found);
+        }
+        offset = found + run;
+    }
+    None
+}
+
+/// The targets of the Markdown links in `comment`, in source order, each with
+/// the number of lines from the start of the comment: inline `[text](target)`
+/// links and `[label]: target` reference definitions alike, so a definition
+/// that moves with its document is checked like the reference that uses it.
+fn link_targets(comment: &str) -> Vec<(usize, &str)> {
     let mut targets = Vec::new();
     let mut rest = comment;
     while let Some(open) = rest.find("](") {
+        let at = comment.len() - rest.len() + open;
         rest = &rest[open + 2..];
         let Some(close) = rest.find(')') else { break };
-        push_target(&rest[..close], &mut targets);
+        push_target(
+            &rest[..close],
+            comment[..at].matches('\n').count(),
+            &mut targets,
+        );
         rest = &rest[close + 1..];
     }
-    for line in comment.lines() {
-        let line = line.trim_start_matches([' ', '\t', '*', '/', '!']);
-        if let Some((_, target)) = line
+    for (line, text) in comment.lines().enumerate() {
+        let text = text.trim_start_matches([' ', '\t', '*', '/', '!']);
+        if let Some((_, target)) = text
             .strip_prefix('[')
             .and_then(|text| text.split_once("]:"))
         {
-            push_target(target, &mut targets);
+            push_target(target, line, &mut targets);
         }
     }
     targets
 }
 
-/// Pushes the link target in `text`, `None` for nothing: Markdown lets either
-/// form wrap the path in angle brackets and follow it with a title.
-fn push_target<'a>(text: &'a str, targets: &mut Vec<&'a str>) {
+/// Pushes the link target in `text`, nothing for none of it: Markdown lets
+/// either form wrap the path in angle brackets and follow it with a title.
+fn push_target<'a>(text: &'a str, line: usize, targets: &mut Vec<(usize, &'a str)>) {
     let target = text.trim();
     let target = match target.strip_prefix('<') {
         Some(rest) => rest.split_once('>').map_or(rest, |(path, _)| path),
         None => target.split_whitespace().next().unwrap_or_default(),
     };
     if !target.is_empty() {
-        targets.push(target);
+        targets.push((line, target));
     }
 }
 
@@ -257,37 +328,88 @@ fn failure(link: &DocsLink) -> Option<String> {
     Some(format!("no heading `#{anchor}` in the document"))
 }
 
-/// The GitHub heading slugs of a Markdown document. A repeated heading also
-/// gets `-1`, `-2` variants, which is what a link to a duplicate must name.
+/// The GitHub heading slugs of a Markdown document: an ATX heading (`## Title`)
+/// and a Setext heading (a paragraph line underlined by `===` or `---`) alike,
+/// since a link may name either. A fence hides the lines it holds, indented by
+/// up to three spaces as GitHub allows. A repeated heading also gets `-1`, `-2`
+/// variants, which is what a link to a duplicate must name.
 fn headings(text: &str) -> BTreeSet<String> {
     let mut slugs = BTreeSet::new();
     let mut seen: BTreeMap<String, usize> = BTreeMap::new();
-    let mut fenced = false;
+    let mut fence: Option<char> = None;
+    let mut paragraph: Option<&str> = None;
     for line in text.lines() {
-        if line.starts_with("```") || line.starts_with("~~~") {
-            fenced = !fenced;
+        let body = line.trim_start_matches(' ');
+        let indented = line.len() - body.len() <= 3;
+        if let Some(marker) = fence {
+            if indented && fence_marker(body).is_some() && body.trim_matches(marker).is_empty() {
+                fence = None;
+            }
             continue;
         }
-        if fenced {
+        if indented && let Some(marker) = fence_marker(body) {
+            fence = Some(marker);
+            paragraph = None;
             continue;
         }
-        let Some(rest) = line.trim_start().strip_prefix('#') else {
-            continue;
-        };
-        let heading = rest.trim_start_matches('#').trim();
-        if heading.is_empty() {
+        if body.trim().is_empty() {
+            paragraph = None;
             continue;
         }
-        let slug = slug(heading);
-        let count = seen.entry(slug.clone()).or_insert(0);
-        slugs.insert(if *count == 0 {
-            slug
-        } else {
-            format!("{slug}-{count}")
-        });
-        *count += 1;
+        if let Some(heading) = atx(body) {
+            push_heading(&mut slugs, &mut seen, heading);
+            paragraph = None;
+            continue;
+        }
+        if let Some(title) = paragraph.take().filter(|_| setext(body)) {
+            push_heading(&mut slugs, &mut seen, title);
+            continue;
+        }
+        paragraph = Some(body.trim());
     }
     slugs
+}
+
+/// The marker of the fence line `body` opens: a run of at least three backticks
+/// or tildes, which GitHub also allows indented by up to three spaces.
+fn fence_marker(body: &str) -> Option<char> {
+    let marker = body.chars().next().filter(|c| matches!(c, '`' | '~'))?;
+    (body.chars().take_while(|c| *c == marker).count() >= 3).then_some(marker)
+}
+
+/// The text of an ATX heading line, `None` for a line of prose: GitHub takes
+/// at most six `#`s and needs whitespace after them, so `#128 is not a
+/// heading` is prose rather than an anchor.
+fn atx(line: &str) -> Option<&str> {
+    let hashes = line
+        .chars()
+        .take_while(|character| *character == '#')
+        .count();
+    if hashes == 0 || hashes > 6 {
+        return None;
+    }
+    let heading = line[hashes..].strip_prefix([' ', '\t'])?.trim();
+    (!heading.is_empty()).then_some(heading)
+}
+
+/// Whether `line` underlines a Setext heading: a run of `=` or of `-` alone on
+/// its line, which titles the paragraph line above it.
+fn setext(line: &str) -> bool {
+    let underline = line.trim();
+    !underline.is_empty()
+        && (underline.chars().all(|character| character == '=')
+            || underline.chars().all(|character| character == '-'))
+}
+
+fn push_heading(slugs: &mut BTreeSet<String>, seen: &mut BTreeMap<String, usize>, heading: &str) {
+    let slug = slug(heading);
+    let count = seen.entry(slug.clone()).or_insert(0);
+    slugs.insert(if *count == 0 {
+        slug
+    } else {
+        format!("{slug}-{count}")
+    });
+    *count += 1;
 }
 
 /// GitHub's heading slug: lowercase, code spans, emphasis and link markup
@@ -324,6 +446,37 @@ mod tests {
     }
 
     #[test]
+    fn a_block_comment_ends_after_its_nested_comments() {
+        let text = "/* outer /* inner */ [x](../../docs/a.md) */";
+        assert_eq!(
+            comments(text),
+            vec![(1, " outer /* inner */ [x](../../docs/a.md) ".to_owned())]
+        );
+    }
+
+    #[test]
+    fn a_link_in_a_block_comment_reports_its_own_line() {
+        let text = "/*\n * [a](../../docs/a.md)\n * [b](../../docs/b.md)\n */";
+        let (line, comment) = comments(text).remove(0);
+        let targets = link_targets(&comment);
+        assert_eq!(
+            targets,
+            vec![(1, "../../docs/a.md"), (2, "../../docs/b.md")]
+        );
+        assert_eq!(line + targets[1].0, 3);
+    }
+
+    #[test]
+    fn a_link_inside_a_code_span_is_not_a_link() {
+        let comment =
+            "Write `[a](../../docs/a.md)` or `[b](../../docs/b.md)`, not [c](../../docs/c.md)";
+        assert_eq!(
+            link_targets(&without_code_spans(comment)),
+            vec![(0, "../../docs/c.md")]
+        );
+    }
+
+    #[test]
     fn a_link_after_a_glob_string_literal_keeps_its_own_line() {
         let text = concat!(
             "let pattern = \"**/*.rs\";\n",
@@ -337,7 +490,7 @@ mod tests {
                 link_targets(&comment)
                     .into_iter()
                     .next()
-                    .map(|target| (line, target.to_owned()))
+                    .map(|(offset, target)| (line + offset, target.to_owned()))
             })
             .next()
             .expect("the doc line is a comment");
@@ -358,7 +511,11 @@ mod tests {
             + "// see [Prompt §6.1]: ../../../docs/design/plugins/Prompt.md\n";
         let mut targets = Vec::new();
         for (_, comment) in comments(&text) {
-            targets.extend(link_targets(&comment).into_iter().map(str::to_owned));
+            targets.extend(
+                link_targets(&comment)
+                    .into_iter()
+                    .map(|(_, target)| target.to_owned()),
+            );
         }
         assert_eq!(
             targets,
@@ -388,6 +545,34 @@ mod tests {
         assert_eq!(
             headings(text),
             BTreeSet::from(["one".to_owned(), "one-1".to_owned()])
+        );
+    }
+
+    #[test]
+    fn a_heading_needs_whitespace_after_its_hashes() {
+        let text = "#128 was fixed\n#[derive(Clone)]\n# Title\n";
+        assert_eq!(headings(text), BTreeSet::from(["title".to_owned()]));
+    }
+
+    #[test]
+    fn a_fence_indented_by_up_to_three_spaces_hides_its_lines() {
+        let text = "# One\n   ```text\n# hidden\n   ```\n# Two\n    ```\n# visible\n";
+        assert_eq!(
+            headings(text),
+            BTreeSet::from(["one".to_owned(), "two".to_owned(), "visible".to_owned()])
+        );
+    }
+
+    #[test]
+    fn a_setext_heading_titles_the_line_above_its_underline() {
+        let text = "Setext one\n==========\n\nSetext two\n----------\n# Atx\n";
+        assert_eq!(
+            headings(text),
+            BTreeSet::from([
+                "setext-one".to_owned(),
+                "setext-two".to_owned(),
+                "atx".to_owned()
+            ])
         );
     }
 }
