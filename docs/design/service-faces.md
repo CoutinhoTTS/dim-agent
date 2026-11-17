@@ -90,6 +90,7 @@ Rust 产品装配的现状以 [生成的 catalog](../architecture/rust-agent/gen
 | `wakeups` | `wakeups.create/list/cancel` | 形状按 [Scheduler](plugins/Scheduler.md#102-methods-and-tool) §10.2。 |
 | `loops` | `loops.start/next/list/stop` | 形状按 [Scheduler](plugins/Scheduler.md#126-interfaces) §12.6；`start`、`next`、`stop` 是迁改，`list` 是读取。投递 pass、恢复与 `settle_delivering` 不在此面。 |
 | `sessionFiles` | `sessionFiles.put/import/read/register/owns/owned_paths` | 形状按 [Session files](appserver/session-files.md) §9.1，`SessionFiles` 是进程内绑定。 |
+| `commandRules` | `commandRules.read` | Session 命令规则读取，按 [命令规则](appserver/permission-command-rules.md#41-language-neutral-adr-002-d5) §4.1。 |
 | `managedSearch` | `managedSearch.search` | 凭据由实现持有，见 §4.6。 |
 | `agentConfig` | `agentConfig.get()` | 形状见 §4.8。 |
 | `sessionLanguage` | `sessionLanguage.get()` | 形状见 §4.8。 |
@@ -112,7 +113,6 @@ Rust 产品装配的现状以 [生成的 catalog](../architecture/rust-agent/gen
 | `loader` | `rutis/loader` | 插件管理走数据面 |
 | `sessionStore` | `sessionMetadata`、`sessionFiles` | 行与文件分开 |
 | `timelineTree`、`timelineTreeControl` | `treeCommands` | 建/读分支走 `treeCommands` |
-| `callers` | `callChannel` | 调用通道走数据面 |
 
 ### 3.4 对象/句柄：拆成操作加 id
 
@@ -173,12 +173,7 @@ Rust 产品装配的现状以 [生成的 catalog](../architecture/rust-agent/gen
 | `configurationPublisher` | branch | ContextPreparation | hot-path | 待迁移；按 #1292 定义操作面 |
 | `configureControl` | branch | Prompt | hot-path | 待迁移；按 #1292 定义操作面 |
 | `fileReads` | branch | FileReads | hot-path | 待迁移；按 #1292 定义操作面 |
-| `branchLine` | branch | BranchLine | hot-path | 待迁移；按 #1292 定义操作面 |
 | `submitChecks` | session | InputMethods | hot-path | 待迁移；按 #1292 定义操作面 |
-| `commandRulesHost` | session | CommandRules | hot-path | 待迁移；按 #1292 定义操作面 |
-| `promptHost` | session | PromptRegistry | hot-path | 待迁移；按 #1292 定义操作面 |
-| `promptRegistry` | session | PromptRegistry | hot-path | 待迁移；按 #1292 定义操作面 |
-| `initialPromptConfiguration` | session | PromptRegistry | hot-path | 待迁移；按 #1292 定义操作面 |
 | `historyRenderer` | session | SessionScope | hot-path | 待迁移；按 #1292 定义操作面 |
 | `contextModelHost` | session | SessionScope | hot-path | 待迁移；按 #1292 定义操作面 |
 | `prepareModelHost` | session | PrepareModelHost | hot-path | 待迁移；按 #1292 定义操作面 |
@@ -202,7 +197,6 @@ Rust 产品装配的现状以 [生成的 catalog](../architecture/rust-agent/gen
 | `mentionIndex` | process | WorkspaceToolsOwner | host-resource |
 | `skillsCatalog` | process | SkillsCatalog | host-resource |
 | `mcpService` | process | Mcp | host-resource |
-| `hooksService` | process | HooksSettings | host-resource |
 | `providerService` | process | Provider | secret |
 | `providerConnectionResolver` | process | Provider | host-resource |
 | `sessionLoader` | session | SessionScope | control |
@@ -379,6 +373,11 @@ modelSelectionHost.resolve({explicit?: ModelId, cwd?}) -> ModelSelection
 ### Skills Session 列表
 
 `skillsBranch` 的 `list({})` 与 Session 内部视图的边界由 [Skills owner](../architecture/rust-agent/plugins/Skills.md#data-face) 定义。Rust binding 与 wire 使用同一 owner；`SessionSkills` 保留为 Session 实例内的私有类型 key，不再有目录名字。
+
+### 4.11 `hooksService`
+
+插件内容登记、撤回、列表和拒绝原因读取使用同一个 Hooks owner；原生与跨语言绑定保持其持久化、
+启用及已接纳工作结算语义。操作与错误由 [Hooks A.2.1](plugins/Hooks.md#a21-plugin-content-data-face) 定义。
 
 ## 5. 验证
 

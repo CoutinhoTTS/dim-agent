@@ -2219,12 +2219,6 @@
         "removing": false
       },
       {
-        "service": "dyn rutis_bridge::session::services::HostDispatch#skillsBranch@main",
-        "provider": 77,
-        "generation": 1,
-        "removing": false
-      },
-      {
         "service": "dyn rutis_bridge::session::services::HostDispatch#timeline@main",
         "provider": 60,
         "generation": 1,
