@@ -1396,7 +1396,7 @@ fn model_catalog_declares_limits_for_one_model() {
         let hello = wire.read("hello");
         wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods"]}));
         let catalog = wire.read("provider.catalog");
-        assert_eq!(catalog["params"], json!({"providerId":"fixture"}));
+        assert_eq!(catalog["params"], json!({"providerId":"fixture","modelId":"narrow"}));
         wire.reply(
             &catalog,
             json!({"catalog":{"version":1,"disabledModelIds":[],"models":[
@@ -1407,13 +1407,11 @@ fn model_catalog_declares_limits_for_one_model() {
         assert_eq!(
             edit["params"],
             json!({"providerId":"fixture","expectedVersion":1,"modelId":"narrow",
-                "edit":{"contextWindow":64000,"maxOutputTokens":8000}})
+                "edit":{"contextWindow":64000,"maxOutputTokens":8000},"reply":"summary"})
         );
-        wire.reply(&edit, json!({"version":2,"disabledModelIds":[],"models":[
-            {"id":"narrow","name":"Narrow","unavailableReason":null,"missingLimits":[]}
-        ]}));
+        wire.reply(&edit, json!({"version":2}));
         let catalog = wire.read("provider.catalog");
-        assert_eq!(catalog["params"], json!({"providerId":"fixture"}));
+        assert_eq!(catalog["params"], json!({"providerId":"fixture","modelId":"narrow"}));
         wire.reply(
             &catalog,
             json!({"catalog":{"version":2,"disabledModelIds":[],"models":[
@@ -1475,16 +1473,16 @@ fn model_catalog_declares_missing_limits_for_every_model() {
         assert_eq!(
             first["params"],
             json!({"providerId":"fixture","expectedVersion":1,"modelId":"narrow",
-                "edit":{"contextWindow":64000,"maxOutputTokens":8000}})
+                "edit":{"contextWindow":64000,"maxOutputTokens":8000},"reply":"summary"})
         );
-        wire.reply(&first, json!({"version":2,"disabledModelIds":[],"models":[]}));
+        wire.reply(&first, json!({"version":2}));
         let second = wire.read("provider.models.edit");
         assert_eq!(
             second["params"],
             json!({"providerId":"fixture","expectedVersion":2,"modelId":"wide",
-                "edit":{"maxOutputTokens":8000}})
+                "edit":{"maxOutputTokens":8000},"reply":"summary"})
         );
-        wire.reply(&second, json!({"version":3,"disabledModelIds":[],"models":[]}));
+        wire.reply(&second, json!({"version":3}));
         let catalog = wire.read("provider.catalog");
         wire.reply(
             &catalog,
@@ -5667,7 +5665,7 @@ fn home_after_new_drops_the_previous_sessions_effort() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
         wire.hello(&[
-            "provider.management",
+            "session.create.modelFromSession",
             "provider.management.list",
             "ui.open",
             "ui.close",
@@ -5713,16 +5711,10 @@ fn home_after_new_drops_the_previous_sessions_effort() {
         );
         wire.reply(&effort, json!({"outcome":"adopted"}));
 
-        // `/new` and its first message create the next Session, which has
-        // adopted no preference yet.
-        let providers = wire.read("provider.management");
-        assert_eq!(providers["params"], json!({"providerId":"test"}));
-        wire.reply(
-            &providers,
-            json!({"providers":[{"providerId":"test","source":"user",
-                "displayName":"Test","preferences":{}}],"errors":[]}),
-        );
+        // `/new` and its first message create the next Session, which
+        // inherits the model and has adopted no preference yet.
         let create = wire.read("session.create");
+        assert_eq!(create["params"]["modelFromSession"], "session");
         assert!(
             create["params"].get("modelPreferences").is_none(),
             "{create}"
@@ -9349,7 +9341,9 @@ fn tui_provider_management_uses_the_production_daemon_and_survives_restart() {
     );
     terminal.write(b"/models\r");
     terminal.until("Provider flow /");
-    terminal.write(b"Provider flow\r");
+    terminal.write(b"Provider flow");
+    terminal.until("1 provider");
+    terminal.write(b"\r");
     terminal.until("Default for new sessions: Provider flow / fixture-model");
     terminal.write(b"stale-effort-message\r");
     terminal.until("provider-updated-reply");
@@ -9366,6 +9360,7 @@ fn tui_provider_management_uses_the_production_daemon_and_survives_restart() {
     terminal.write(b"/models\r");
     terminal.until("Provider flow /");
     terminal.write(b"Provider flow");
+    terminal.until("1 provider");
     assert!(
         rpc(
             &mut wire,
