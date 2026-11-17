@@ -1531,7 +1531,7 @@ async fn nested_instances_preserve_optional_rows_and_cleanup_across_create_resto
     let rolled_back = Arc::new(AtomicUsize::new(0));
     let mut builtins = Modules::new();
     let mut b = builder();
-    b.timeline_store(store);
+    b.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(store));
     let entered = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
     let fail = Arc::new(std::sync::atomic::AtomicBool::new(false));

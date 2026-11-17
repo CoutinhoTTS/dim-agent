@@ -248,7 +248,9 @@ async fn serve_fixture(reply: Reply) -> Fixture {
     let work = home.join("work");
     std::fs::create_dir_all(&work).unwrap();
     let mut builder = AgentBuilder::new(AgentConfig::default());
-    builder.timeline_store(Arc::new(dim_agent_runtime::MemoryTimelineStore::default()));
+    builder.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(Arc::new(
+        dim_agent_runtime::MemoryTimelineStore::default(),
+    )));
     capability_defaults::install_local_execution(
         &mut builder,
         ModelProviderPlugin::new,
@@ -488,7 +490,9 @@ async fn serve_compaction_fixture_with(
         .unwrap();
     std::fs::create_dir_all(home.join("work")).unwrap();
     let mut builder = AgentBuilder::new(AgentConfig::default());
-    builder.timeline_store(Arc::new(dim_agent_runtime::MemoryTimelineStore::default()));
+    builder.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(Arc::new(
+        dim_agent_runtime::MemoryTimelineStore::default(),
+    )));
     capability_defaults::install_local_execution(
         &mut builder,
         ModelProviderPlugin::new,
