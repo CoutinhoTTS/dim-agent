@@ -1000,6 +1000,7 @@
       "file": "crates/dim-agent-capabilities/src/permission.rs",
       "unexpandedMacros": [
         "format",
+        "serde_json::json",
         "tokio::select",
         "unreachable",
         "vec"
@@ -9530,7 +9531,6 @@
       "to": "dim_agent_capabilities::permission",
       "references": [
         "mod permission",
-        "path permission::CommandRulesHost",
         "path permission::Permission"
       ]
     },
@@ -11831,10 +11831,10 @@
       "from": "dim_agent_capabilities::defaults",
       "to": "dim_agent_capabilities::permission",
       "references": [
-        "path CommandRulesHost",
+        "path CommandRules",
         "path NoCommandRules",
         "path PermissionPlugin::new",
-        "use crate::permission::CommandRulesHost",
+        "use crate::permission::CommandRules",
         "use crate::permission::NoCommandRules",
         "use crate::permission::PermissionPlugin"
       ]
@@ -14700,6 +14700,7 @@
         "path CancelledFn",
         "path HostError",
         "path HostError::Cancelled",
+        "path HostError::Failed",
         "path HostFuture",
         "path call_until_cancelled",
         "use crate::host::CancelledFn",
@@ -14714,6 +14715,16 @@
       "references": [
         "path HostPlatform",
         "use crate::host_platform::HostPlatform"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::permission",
+      "to": "dim_agent_capabilities::port_faces",
+      "references": [
+        "path crate::port_faces::Empty",
+        "path crate::port_faces::read",
+        "path crate::port_faces::request",
+        "path crate::port_faces::unknown_method"
       ]
     },
     {
@@ -29917,9 +29928,9 @@
       "from": "dim_app_server::permission_rules",
       "to": "dim_agent_capabilities::permission",
       "references": [
-        "path CommandRulesHost",
+        "path CommandRules",
         "path ReadCommandRules",
-        "use dim_agent_capabilities::permission::CommandRulesHost",
+        "use dim_agent_capabilities::permission::CommandRules",
         "use dim_agent_capabilities::permission::ReadCommandRules"
       ]
     },

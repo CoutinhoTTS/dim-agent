@@ -93,7 +93,7 @@ fn register_names_in(catalog: &mut dim_agent_runtime::names::ServiceCatalog) {
     register::<host::CompactionStrategyHost>(catalog, session);
     register::<host::PromptHost>(catalog, session);
     register::<host::ToolHost>(catalog, session);
-    register::<permission::CommandRulesHost>(catalog, session);
+    catalog.register_shared_instance("commandRules", SESSION_GROUP);
     register::<hooks::HookSourcesHost>(catalog, session);
     register::<hooks::HooksRuntime>(catalog, session);
     register::<input_queue::SubmitChecks>(catalog, session);

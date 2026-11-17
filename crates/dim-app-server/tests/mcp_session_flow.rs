@@ -2579,7 +2579,7 @@ async fn mcp_image_tool_results_reach_the_model_and_the_session_keeps_working() 
                     },
                 )),
             ))
-            .session_value(Arc::new(dim_agent_capabilities::permission::CommandRulesHost(
+            .session_data_value(Arc::new(dim_agent_capabilities::permission::CommandRules(
                 Arc::new(dim_agent_capabilities::permission::NoCommandRules),
             )));
         dim_agent_aimux::install(&mut builder);
