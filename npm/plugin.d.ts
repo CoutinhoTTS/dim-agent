@@ -511,3 +511,23 @@ export interface ManagedSearch {
     results: { title: string; url: string; snippet: string; publishedAt?: string }[]
   }>
 }
+
+/** The existing user override; null keeps the consumer's factory or built-in text. */
+export interface BasePromptSettingsHost {
+  base(request: Record<string, never>): Promise<string | null>;
+}
+export interface SkillsInstructionsSettingsHost {
+  instructions(request: Record<string, never>): Promise<string | null>;
+}
+export interface SummaryPromptSettingsHost {
+  systemPrompt(request: Record<string, never>): Promise<string | null>;
+}
+
+/** The ToolRegistry owner's read-only source status view. */
+export interface ToolSourceRejection { version: string; reason: string }
+export interface ToolSourceStatus { adopted: string | null; rejected: ToolSourceRejection | null }
+export type ToolSourcesState = Record<string, ToolSourceStatus>
+export interface ToolSourcesView {
+  get(request: Record<string, never>): ToolSourcesState
+  observe(request: Record<string, never>, onState: (state: ToolSourcesState) => void | Promise<void>): Promise<void>
+}

@@ -32,8 +32,6 @@ const CAPABILITY_NAMES: [&str; 2] = ["dispatcher", "timeline"];
 const EXPORT_PREFIX: &str = "rutis-export:";
 /// Groups in the order the table lists them.
 const GROUPS: [&str; 3] = ["process", "session", "branch"];
-/// Shared loader names with no host dispatch today (#1289).
-const EXTERNAL_SHARED: [&str; 2] = ["loaderService", "pluginMounter"];
 
 fn file(root: &Path) -> PathBuf {
     root.join("docs/architecture/rust-agent/generated/catalog.md")
@@ -122,7 +120,6 @@ async fn collect() -> Result<String> {
 fn face(name: &str, shared: bool, dispatcher: bool, reason: Option<&str>) -> Result<String> {
     match (shared, dispatcher, reason) {
         (true, true, None) => Ok("data".into()),
-        (true, false, None) if EXTERNAL_SHARED.contains(&name) => Ok("shared-no-dispatcher".into()),
         (true, false, None) => Err(format!("{name}: shared but has no dispatcher").into()),
         (false, true, _) => Err(format!("{name}: has a dispatcher but is not shared").into()),
         (false, false, Some(reason)) if FACE_REASONS.contains(&reason) => {
@@ -184,6 +181,7 @@ impl Table {
         let names = Names {
             catalog,
             instances: &instances,
+            ctx,
         };
         let plugins: BTreeMap<_, _> = layers
             .iter()
@@ -329,6 +327,7 @@ fn order(group: &str) -> usize {
 /// Which catalog name a key of the assembly is.
 struct Names<'a> {
     catalog: &'a ServiceCatalog,
+    ctx: &'a Ctx,
     /// The Session's and the branch's instance.
     instances: &'a BTreeMap<&'static str, InstanceId>,
 }
@@ -338,8 +337,8 @@ struct Found {
 }
 impl Names<'_> {
     /// A dispatcher's key carries its name; a Rust key is named after its
-    /// type, as the Rust binding names it. The catalog must hold that name,
-    /// in the group whose instance the key is qualified with.
+    /// type when the catalog maps that key or a matching dispatcher exists.
+    /// Shared fallback alone does not name an owner-private Rust key.
     fn of(&self, key: &TypeKey) -> Option<Found> {
         let dispatcher = key.type_id() == TypeId::of::<dyn HostDispatch>();
         let name = match key.name() {
@@ -350,12 +349,23 @@ impl Names<'_> {
         let group = match self.catalog.key_in(&name, &Build::default()) {
             Ok(registered) => {
                 let rust = &registered == key;
-                let shared = registered == host_key(&name).erase();
+                let shared = registered == host_key(&name).erase()
+                    && (dispatcher
+                        || self
+                            .ctx
+                            .get_at::<dyn HostDispatch>(&host_key(&name))
+                            .is_some());
                 (key.instance_id().is_none() && (rust || shared)).then_some("process")?
             }
             Err(LoaderError::OutsideInstance { group, .. }) => {
                 let (group, instance) = self.instances.get_key_value(group.as_str())?;
-                (key.instance_id() == Some(*instance)).then_some(*group)?
+                let mapped = !self.catalog.is_shared(&name)
+                    || dispatcher
+                    || self
+                        .ctx
+                        .get_at::<dyn HostDispatch>(&host_key(&name).instance(*instance))
+                        .is_some();
+                (key.instance_id() == Some(*instance) && mapped).then_some(*group)?
             }
             Err(_) => return None,
         };
@@ -366,6 +376,126 @@ impl Names<'_> {
 #[cfg(test)]
 mod face_tests {
     use super::face;
+    struct CatalogPrivate;
+    struct CatalogEcho;
+
+    #[rutis::service]
+    impl CatalogEcho {
+        pub fn ping(&self) -> String {
+            "echo".into()
+        }
+    }
+
+    struct CatalogBindings;
+    impl rutis::Plugin for CatalogBindings {
+        type Deps = ();
+        fn name(&self) -> &str {
+            "CatalogBindings"
+        }
+        async fn apply(&self, ctx: &rutis::Ctx, (): ()) -> rutis::Result {
+            ctx.provide(CatalogPrivate)?;
+            ctx.provide(CatalogEcho)?;
+            Ok(())
+        }
+    }
+
+    struct CatalogMissing;
+    impl rutis::host::DynPlugin for CatalogMissing {
+        fn name(&self) -> &str {
+            "CatalogMissing"
+        }
+        fn injects(&self) -> Vec<rutis::host::TypeKey> {
+            vec![rutis_bridge::session::host_key("catalogMissing").erase()]
+        }
+        fn apply<'a>(
+            &'a self,
+            _: &'a rutis::Ctx,
+        ) -> rutis::host::BoxFuture<'a, rutis::Result<rutis::host::Effect>> {
+            Box::pin(async { Ok(rutis::host::Effect::Done) })
+        }
+    }
+
+    #[tokio::test]
+    async fn product_catalog_distinguishes_private_keys_from_public_bindings() {
+        use super::*;
+        for missing in [false, true] {
+            let dir = app_server::scratch(if missing {
+                "catalog-missing"
+            } else {
+                "catalog-bindings"
+            })
+            .unwrap();
+            let probe = Probe::default();
+            let server = app_server::serve_product(&dir, |builder| {
+                builder.plugin(|_| Ok(Box::new(CatalogBindings)));
+                if missing {
+                    builder.optional_plugin(|_| Ok(Box::new(CatalogMissing)));
+                }
+                builder.catalog_mut().register_shared("catalogEcho");
+                let probe = probe.clone();
+                builder.require_feature(
+                    Feature::new("CatalogProbe")
+                        .branch("CatalogProbe", move |_| Ok(Box::new(probe.clone()))),
+                );
+            })
+            .await
+            .unwrap();
+            let agent = server.agent().unwrap();
+            let session = agent
+                .create_session(SessionConfig {
+                    cwd: dir.to_string_lossy().into_owned(),
+                    tools: None,
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            let layers = [
+                ("process", app_server::process_layer(server.diagnostics())),
+                ("session", session.diagnostics().unwrap()),
+                ("branch", session.branch_diagnostics("main").unwrap()),
+            ];
+            let ctx = probe.0.lock().unwrap().take().unwrap();
+            if missing {
+                let result = Table::new(agent.catalog(), agent.faces(), &layers, &ctx);
+                assert!(
+                    matches!(result, Err(error) if error.to_string().contains("catalogMissing: shared but has no dispatcher"))
+                );
+            } else {
+                let table = Table::new(agent.catalog(), agent.faces(), &layers, &ctx)
+                    .unwrap()
+                    .render();
+                assert!(
+                    table.contains(
+                        "| `catalogEcho` | process | CatalogBindings | data | `ping` async |"
+                    ),
+                    "{table}"
+                );
+                for private in ["catalogPrivate", "loaderService", "pluginMounter"] {
+                    assert!(
+                        !table.contains(&format!("| `{private}` |")),
+                        "{private} is a private key, not a public face"
+                    );
+                }
+                assert!(table.contains("| `rutis/loader` |"));
+                let reply: String =
+                    rutis_bridge::session::call_service(&ctx, "catalogEcho", "ping", ())
+                        .await
+                        .unwrap();
+                assert_eq!(reply, ctx.get::<CatalogEcho>().unwrap().ping());
+                let mut declared = agent.catalog().clone();
+                declared.register::<CatalogPrivate>("catalogPrivate");
+                let result = Table::new(&declared, agent.faces(), &layers, &ctx);
+                assert!(
+                    matches!(result, Err(error) if error.to_string().contains("catalogPrivate: no face"))
+                );
+            }
+            session.close().await.unwrap();
+            server.shutdown();
+            server.join().await.unwrap();
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
     #[test]
     fn data_and_internal_are_derived_from_shared_dispatcher_and_reason() {
         assert_eq!(face("x", true, true, None).unwrap(), "data");
@@ -373,10 +503,7 @@ mod face_tests {
             face("x", false, false, Some("secret")).unwrap(),
             "internal(secret)"
         );
-        assert_eq!(
-            face("loaderService", true, false, None).unwrap(),
-            "shared-no-dispatcher"
-        );
+        assert!(face("loaderService", true, false, None).is_err());
     }
     #[test]
     fn contradictions_are_errors() {

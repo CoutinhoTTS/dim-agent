@@ -1168,7 +1168,7 @@ impl Projection {
             };
             if rows.first().is_none_or(|row| row.values[0] != latest[0]) {
                 return Err(AgentError::InvalidInput(
-                    "Prompt references require explicit migration: stop the daemon, then run cargo run --locked -p xtask -- migrate-prompt-references DB SESSION BRANCH (docs/design/prompt-state-read.md)".into(),
+                    "Prompt references require explicit migration: stop the daemon, then run dimcode --migrate-prompt-references --database DB --session SESSION --branch BRANCH (docs/design/prompt-state-read.md)".into(),
                 ));
             }
         }
@@ -1394,10 +1394,17 @@ impl Prompt {
             if let Some(error) = self.dispatcher.failure() {
                 return Err(error);
             }
-            tokio::select! {
-                changed = progress.changed() => changed.map_err(|_|AgentError::Closed("Prompt".into()))?,
-                _ = self.lifecycle.cancelled() => return Err(AgentError::Closed("Prompt".into())),
-                _ = self.branch_phase.closing() => return Err(AgentError::Cancelled("prompt adoption".into())),
+            let progress = tokio::select! {
+                changed = progress.changed() => changed.map_err(|_| AgentError::Closed("Prompt".into())),
+                _ = self.lifecycle.cancelled() => Err(AgentError::Closed("Prompt".into())),
+                _ = self.branch_phase.closing() => Err(AgentError::Cancelled("prompt adoption".into())),
+            };
+            if let Err(error) = progress {
+                return Err(self
+                    .timeline
+                    .failure()
+                    .or_else(|| self.dispatcher.failure())
+                    .unwrap_or(error));
             }
         }
         if let Some(error) = self.dispatcher.failure() {

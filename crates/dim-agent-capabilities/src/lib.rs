@@ -77,7 +77,7 @@ fn register_names_in(catalog: &mut dim_agent_runtime::names::ServiceCatalog) {
     register::<timeline_tree::TimelineTree>(catalog, session);
     register::<timeline_tree::TreeCommands>(catalog, session);
     register::<tool_registry::ToolRegistry>(catalog, session);
-    register::<tool_registry::ToolSourcesView>(catalog, session);
+    catalog.register_shared_instance("toolSourcesView", SESSION_GROUP);
     register::<history::HistoryRenderer>(catalog, session);
     register::<prompt::InitialPromptConfiguration>(catalog, session);
     register::<prompt_guide::GuideEntries>(catalog, session);
@@ -110,7 +110,6 @@ fn register_names_in(catalog: &mut dim_agent_runtime::names::ServiceCatalog) {
     register::<context_preparation::ContextPreparation>(catalog, branch);
     register::<context_usage::ContextUsage>(catalog, branch);
     register::<context_preparation::ConfigurationPublisher>(catalog, branch);
-    register::<model_provider::ModelProvider>(catalog, branch);
     register::<tool_executor::ToolExecutor>(catalog, branch);
     register::<tool_binding::ToolBinding>(catalog, branch);
     register::<permission::Permission>(catalog, branch);

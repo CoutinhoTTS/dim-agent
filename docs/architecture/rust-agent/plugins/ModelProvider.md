@@ -39,6 +39,10 @@ owner shutdown releases the waiters. Provider-specific limits still apply.
 
 ## Events and lifetime
 
+ModelProvider is the private owner of its execution state, tasks and subscriptions;
+it publishes `StateCell<ModelProgress>` for observation, not its implementation object.
+Calls and interruption enter through the Timeline facts below.
+
 Consumes `model/call`, `stop/interrupt`, `step/model-start`, `input/applied`,
 `turn/start`, `turn/end`. Produces `step/text`, `step/thinking`,
 `step/tool-use-start`, `step/tool-use`, `step/model-content`, `model/usage`
@@ -123,8 +127,8 @@ its `step/model-output-end` carries no `failure`, and the turn ends Failed. Only
 the attempt count and the wait budget are shared: the backoff curve and the one
 `malformed_response` retry are request-local and restart in the continuation.
 
-The 8 calls and 300 s are ModelProvider's documented public limits: a disposer
-reads them and declines a spent chain without reading ModelProvider's state.
+The shared invocation path enforces the failure-chain limits before invoking
+the model; no separate disposer is required.
 ModelProvider sets `failure.retryForbidden` when its failure policy forbids
 retrying the failure that ended the request; it is written only when true, and
 a continuation declines it.
@@ -141,7 +145,7 @@ a continuation declines it.
 | --- | --- |
 | 作用域 | 分支 |
 | 注入 | `B:ContextPreparation`、`B:Dispatcher`、`B:Timeline`、`B:TimelineIdentity`、`P:ModelHost` |
-| 提供 | `B:ModelProvider`、`B:StateCell<ModelProgress>` |
+| 提供 | `B:StateCell<ModelProgress>` |
 | 被注入于 | — |
 <!-- /generated -->
 
