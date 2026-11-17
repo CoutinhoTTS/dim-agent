@@ -263,6 +263,9 @@ async fn temporary_startup_connections_execute_all_formats_without_sharing_or_pe
             .unwrap(),
     )
     .unwrap();
+    use sha2::{Digest, Sha256};
+    let digest = format!("{:x}", Sha256::digest(std::fs::read(&image_path).unwrap()));
+    let reference = format!("img:{}", &digest[..16]);
     let seen = Seen::default();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}/gateway/v1", listener.local_addr().unwrap());
@@ -373,9 +376,10 @@ async fn temporary_startup_connections_execute_all_formats_without_sharing_or_pe
                 "{format}: {uri}"
             );
             assert!(
-                body.to_string().contains(png),
-                "{format}: the provider receives image bytes: {body}"
+                body.to_string().contains(&reference),
+                "{format}: the provider receives the image reference: {body}"
             );
+            assert!(!body.to_string().contains(png), "{format}: {body}");
             assert!(!body.to_string().contains(image["fileId"].as_str().unwrap()));
             assert!(
                 history
