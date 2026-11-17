@@ -213,6 +213,7 @@ pub const WEB_MANAGEMENT_METHODS: &[&str] = &[
     "provider.list",
     "provider.catalog",
     "provider.refresh",
+    "provider.model.set_enabled",
     "provider.models.set_enabled",
     "provider.models.edit",
     "provider.models.reset",
