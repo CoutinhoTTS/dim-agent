@@ -12,7 +12,7 @@ use dim_agent_capabilities::{
         ExecShellRuntime, HostPlatform, Os, OutputEncoding, ShellEdition, ShellSource, ShellStatus,
     },
     model_provider::ModelProviderPlugin,
-    permission::{CommandRulesHost, NoCommandRules},
+    permission::{CommandRules, NoCommandRules},
     prompt_sources,
     skill_settings::{SkillSettings, SkillSettingsHost},
     skills::{self, MemorySkillSettings, SkillsCatalog, SkillsCatalogPlugin},
@@ -506,7 +506,7 @@ pub async fn env(dirs: &Dirs, options: Options) -> Env {
         .session_value(Arc::new(ToolHost(Arc::new(GateTools(gate.clone())))))
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(None)))
-        .session_value(Arc::new(CommandRulesHost(Arc::new(NoCommandRules))))
+        .session_data_value(Arc::new(CommandRules(Arc::new(NoCommandRules))))
         .session_value(Arc::new(CompactionStrategyHost(None)))
         .require_feature(
             Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {

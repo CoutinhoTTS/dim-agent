@@ -43,7 +43,7 @@ Each catalog name a part of the assembly provides or injects. `data` means share
 | `partRegistry` | process | PartRegistry | data | `registerDefinition` async |
 | `pluginFileTransactions` | process | PluginFiles | internal(host-resource) | — |
 | `pluginFiles` | process | PluginFiles | data | `open` async |
-| `processActivity` | process | ServerControl | data | `hold` async, `release` async |
+| `processActivity` | process | ServerControl | data | `activated` async, `hold` async, `release` async |
 | `promptSuggestionSettingsHost` | process | PromptSuggestionSettings | data | `read` async |
 | `providerConnectionResolver` | process | Provider | internal(host-resource) | — |
 | `providerService` | process | Provider | internal(secret) | — |
@@ -64,7 +64,6 @@ Each catalog name a part of the assembly provides or injects. `data` means share
 | `skillsCatalog` | process | SkillsCatalog | internal(host-resource) | — |
 | `skillsInstructionsSettingsHost` | process | PromptSettings | data | `instructions` async |
 | `sqliteStorage` | process | SqliteStorage | internal(object) | — |
-| `store` | process | SessionStore | data | `addGrant` async, `catalog` async, `createOwnedSession` async, `creationRecord` async, `delete` async, `fork` async, `grants` async, `hasRecords` async, `owner` async, `query` async, `removeGrant` async, `removeWorktree` async, `removeWorktreeDirectory` async, `sessionConfig` async, `sessionConfigText` async, `sessionsUnderWorkspace` async, `setSessionLanguage` async, `worktreeDirectories` async, `worktreeUsages` async |
 | `summaryPromptSettingsHost` | process | PromptSettings | data | `systemPrompt` async |
 | `toolchainSourceHost` | process | ToolchainSource | data | `list` sync |
 | `uiExtensions` | process | UiExtensions | internal(control) | — |
