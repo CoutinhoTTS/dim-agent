@@ -802,6 +802,14 @@ Provider 为一次非对话调用解析模型的连接，Modality 在该调用�
 
 ## 4. 客户端集成
 
+`provider.management` 只作用于单个 Provider；原先的无参聚合读取已移除。需要所有
+Provider 的版本、连接与模型描述符的客户端，用 `provider.management.list` 分页读取
+概览，并按需用 `provider.models.query` 读取要展示或编辑的模型；单个编辑表单使用精确的
+`provider.management {providerId, modelId?}` 快照。这些读取都是有界分页或一个显式目标，
+服务器不保留其结果，也不保留解析后的目录。从 `provider.management {}` 迁移时，提供方
+列表与保存版本读取改为 `provider.management.list`，模型能力与上限读取改为
+`provider.models.query` 或精确的 management 快照。
+
 ```text
 Desktop / CLI             Local App Server            Provider / account
     | hello: actual methods      |                            |

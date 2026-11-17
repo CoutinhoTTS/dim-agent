@@ -1283,6 +1283,17 @@ this page defines nothing about how an adapter declares or runs its work.
 
 ## 4. Client integration
 
+`provider.management` is scoped to one Provider; the former no-argument
+aggregate read is removed. A client that needs every Provider's version,
+connection and model descriptors pages `provider.management.list` for the
+overview and requests `provider.models.query` for the models it displays or
+edits; the exact `provider.management {providerId, modelId?}` snapshot serves
+one editing form. These reads are bounded pages or one explicit target, and the
+server retains neither their results nor a parsed catalog. Migrating from
+`provider.management {}` maps the provider-list and save-version reads to
+`provider.management.list`, and the model capability and limit reads to
+`provider.models.query` or the exact management snapshot.
+
 ```text
 Desktop / CLI              Local App Server             Provider / account
     | hello: actual methods       |                            |

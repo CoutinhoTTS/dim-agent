@@ -115,6 +115,11 @@ Local protocol-v3 clients read `provider.management {providerId, modelId?}` for 
 editing snapshot containing the record version, connection fields, full model
 descriptors, available actions and saved preferences. Credentials, secret
 references, header values and proxy authentication are never returned.
+The no-argument aggregate read is removed: a client that needs every Provider's
+version, connection and models pages `provider.management.list` for the overview
+and `provider.models.query` for the models it displays or edits (the
+[Provider contract](../../docs/design/appserver/provider-management.md) owns the
+migration mapping).
 `provider.list`, `provider.catalog` and `provider.selection` retain their read shapes;
 `provider.list` additionally reports `remoteModelList` per provider, whether
 `provider.refresh` can list that provider's models.
