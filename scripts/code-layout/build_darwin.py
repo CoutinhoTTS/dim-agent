@@ -48,7 +48,8 @@ def cargo_link(work, compiler, jobs, target=None):
             + ' "$@"\n'
         )
         path.chmod(0o700)
-    env = dict(os.environ, RUSTC=rustc, DIM_LAYOUT_CAPTURE=str(work), DIM_LAYOUT_CC=compiler,
+    env = dict(os.environ, RUSTC=rustc, RUSTUP_TOOLCHAIN=str(sysroot),
+               DIM_LAYOUT_CAPTURE=str(work), DIM_LAYOUT_CC=compiler,
                DIM_LAYOUT_OBJCOPY=str(objcopy),
                RUSTC_WRAPPER=str(rustc_wrapper),
                DIM_LAYOUT_RUSTC_WRAPPER=os.environ.get("RUSTC_WRAPPER", ""))

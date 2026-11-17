@@ -57,6 +57,7 @@ test('macOS layout orders Mach-O functions and samples __text residency', {
   timeout:120_000,
 },()=>{
   const result=spawnSync(python,['-',directory],{encoding:'utf8',timeout:115_000,input:String.raw`
+import json
 import os
 from pathlib import Path
 import shutil
@@ -115,6 +116,8 @@ int main(void) { return first() + second(); }
 name = "dimcode"
 version = "0.0.0"
 edition = "2021"
+[dependencies]
+layout_dependency = { path = "../dependency" }
 [profile.release]
 lto = "fat"
 codegen-units = 1
@@ -123,10 +126,16 @@ strip = "debuginfo"
 ''')
     (project/'src/main.rs').write_text('''#[inline(never)] fn layout_first(x: u32) -> u32 { std::hint::black_box(x).wrapping_add(3) }
 #[inline(never)] fn layout_second(x: u32) -> u32 { std::hint::black_box(x).wrapping_mul(5) }
-fn main() { assert_eq!(layout_first(layout_second(2)), 13); println!("layout-rust"); }
+fn main() { assert_eq!(layout_first(layout_second(layout_dependency::value())), 13); println!("layout-rust"); }
 ''')
     sysroot = subprocess.check_output([build_darwin.rustc_command(), '--print', 'sysroot'], text=True).strip()
-    os.environ['RUSTC'] = str(Path(sysroot)/'bin/rustc')
+    dependency = root/'dependency'; (dependency/'src').mkdir(parents=True)
+    (dependency/'Cargo.toml').write_text('[package]\nname = "layout_dependency"\nversion = "0.0.0"\nedition = "2021"\n')
+    (dependency/'src/lib.rs').write_text('pub fn value() -> u32 { 2 }\n')
+    (project/'rust-toolchain.toml').write_text('[toolchain]\npath = '+json.dumps(sysroot)+'\n')
+    (dependency/'rust-toolchain.toml').write_text('[toolchain]\npath = '+json.dumps(str(root/'unselected-toolchain'))+'\n')
+    os.environ.pop('RUSTUP_TOOLCHAIN', None)
+    os.environ['RUSTC'] = str(Path(shutil.which('rustup')).with_name('rustc'))
     subprocess.run([str(Path(sysroot)/'bin/cargo'),'generate-lockfile','--offline'], cwd=project, check=True)
     build_darwin.REPO = project
     capture = root/'capture'; capture.mkdir()

@@ -104,7 +104,11 @@ output. The optimized candidate is an unsigned opt-in artifact, not a release
 artifact.
 
 The selected Rust sysroot supplies Cargo, rustc and `rust-objcopy`; its shared
-library directory is carried through the capture wrappers and replay. The
+library directory is carried through the capture wrappers and replay.
+The build sets [`RUSTUP_TOOLCHAIN`](https://rust-lang.github.io/rustup/environment-variables.html)
+to that sysroot so a compiler proxy keeps the
+same toolchain when Cargo compiles dependencies outside the workspace.
+Explicit compiler and compiler-wrapper selections are preserved. The
 command checks that `rust-objcopy --version` runs before starting Cargo. This
 tool ships with the pinned Rust compiler; a missing or broken tool fails the
 build instead of silently skipping stripping.
