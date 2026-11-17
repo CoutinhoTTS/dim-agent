@@ -37,10 +37,24 @@ Skill 行补全 `/skill:<name> ` 标记。没有匹配项时草稿保持不变�
 
 Skill 行读作 `/skill:<name>`，带其描述。只列出已启用、未被其他来源遮蔽、且可被用户调用、名称可被 token 承载的 Skill：名称含 `A-Z`、`a-z`、`0-9`、`_`、`-`、`.` 之外字符，或以句点结尾的 Skill 无法被引用，因此也不列出。列表跟随会话的目录：
 客户端在挂载、切换会话、`/reload-skills` 之后以及 `/skills` 中的改动之后重新读取。不提供 `skills.catalog` 的守护进程只显示命令，不报错。
-用 `Enter` 或 `Tab` 选择 Skill 行只填入 `/skill:<name> `，绝不发送；该 token 随消息文本一起提交，草稿把它画成一个高亮单位。
+用 `Enter` 或 `Tab` 选择 Skill 行只填入 `/skill:<name> `，绝不发送；该 token 随消息文本一起提交，草稿把它画成一个高亮单位，读作该 Skill 的名称。
 输入 `/skill:` 会把菜单缩到只剩 Skill：`skill:` 命名空间之后的查询只匹配 Skill 名称。以 `/skill:` 开头的草稿作为消息发送，绝不当作命令执行；token 只要位于消息开头或空白之后，就可以出现在句中。Skill 排在命令之后；
 只有当查询是某个 Skill 名称的前缀、且不是任何命令名或别名的前缀时，Skill 才排在前面；因此与命令同名的 Skill 两行都保留，命令在前。
 `/` 是唯一的触发器：`@` 仍是文件选择器。
+
+草稿把从菜单填入的引用画成 Skill 的名称：选中 `status` 后输入框读作 `/status`，而不是解析器前缀 `/skill:status`。
+
+```text
+› /stat|                 › /status |
+  ├─ /skill:status       ├─ 填入的 /skill:status
+  └─ /skill:staged       └─ 画作名称，发送 /skill:status
+```
+
+只有填入的引用才画作名称；操作者自己输入的文本按原样显示，半写或写错的引用仍然可见。
+草稿的文本仍是 `/skill:<name> `，提交和输入历史都保留它。终端原生选区复制的是显示出来的 `/status`，粘贴该标签不会恢复 Skill 引用；
+需重新选择 Skill，或粘贴完整 token。光标把引用当作一个单位跨过，一次删除整个引用，换行按显示名称计算。
+名称同时是输入框会派发的命令时（如 `/models`），草稿保留规范 token（`/skill:models`），因为裸名称会让草稿看起来像那条命令，而草稿仍是消息。
+两种模式下菜单行都读作 `/skill:<name>`，说明它填入哪个 token；对话记录保留提交的 token。
 
 两种模式下，菜单都适应终端可用的列数和行数。命令名优先于描述和快捷键标签。
 快捷键标签会挤占命令名时省略标签，但不改变按键绑定。
@@ -976,6 +990,7 @@ Remove 先在提示栏询问，`Remove deny prefix git push? Enter confirm · Es
 | `/export markdown PATH` 或 `/export json PATH` | 交互客户端空闲时把当前主分支导出到文件。 |
 | `dimcode export SESSION_ID [--output PATH] [--database PATH]` | 不经守护进程，把 Session 的完整 Timeline 写成带版本的 JSONL（[Timeline 导出](appserver/timeline-export.md)）；未给输出路径时写到 stdout。 |
 | `dimcode daemon vacuum [--database PATH]` | 先删除离线原生库中没有任何存储引用到达的内容行（仅 `node`/`message`，每个 Session 一个事务），再用 SQLite `VACUUM` 重写，回收这些行与已删除 Session 留下的页；打印操作前后的大小、删除的行数及其正文字节数，某个 Session 指向库中不存在的内容时不删除任何东西（[存储格式](appserver/native-storage-format.md#sqlite-运行参数与空间回收)）；守护进程持库时失败，也不创建或升级库。 |
+| `dimcode --migrate-prompt-references --database PATH --session ID --branch NAME` | 离线写出守卫的显式迁移提示所要求的已保存引用结果，并打印写入结果（[显式旧引用迁移](../../design/prompt-state-read.md#显式旧引用迁移入口)）；它必须是第一个参数，拒绝不存在的库、被守护进程持有的库和不在当前格式的库，从不创建或升级库，重复运行不写入任何内容并报告 `Wrote 0`。 |
 | `dimcode skills list` | 经 `skills.catalog` 列出工作区的 Skills：每个条目的名称、来源、状态、文件与描述，然后是目录的 issues。 |
 | `dimcode skills enable\|disable ID` | 经 `skills.set_enabled` 启用或停用单个 Skill，然后再次报告目录。 |
 | `dimcode skills reload` | 经 `skills.refresh` 重新扫描用户与项目根，并通过 [Skills 管理界面](#管理界面)报告结果。 |

@@ -8,6 +8,7 @@ mod identities;
 mod image_upgrade;
 mod members;
 mod metadata;
+mod prompt_migration;
 mod query;
 mod reclaim;
 mod sqlite;
@@ -26,6 +27,7 @@ pub use members::initialize_session_member_index;
 #[cfg(feature = "testing")]
 pub use metadata::testing;
 pub use metadata::{MetadataError, SessionMetadata, Title, TitleFields, TitleSource};
+pub use prompt_migration::{Migrated, migrate_prompt_references};
 #[cfg(feature = "testing")]
 pub use query::{QueryStatementStats, sqlite_memory};
 pub use reclaim::Reclaimed;

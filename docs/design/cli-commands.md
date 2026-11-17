@@ -193,7 +193,8 @@ Session's catalog: the client rereads it on attach, on a Session switch, after
 `/reload-skills`, and after a change in `/skills`. A daemon that does not serve
 `skills.catalog` shows the commands alone, without an error. Choosing a Skill row,
 with `Enter` or `Tab`, fills `/skill:<name> ` and never sends; the token is part
-of the message text and the draft draws it as one highlighted unit. Typing `/skill:`
+of the message text and the draft draws it as one highlighted unit, reading the
+Skill's name. Typing `/skill:`
 narrows the menu to Skills: the query after the `skill:` namespace matches Skill
 names only. A draft that begins with `/skill:` is sent as a message and never run as
 a command, and a token may stand mid-sentence as long as it starts the message or
@@ -201,6 +202,28 @@ follows whitespace. Skills come after commands; a Skill leads only when its name
 starts with the query and no command name or alias does, so a name shared with a
 command keeps both rows, the command first. `/` is the only trigger: `@` stays the
 file picker.
+
+The draft draws a reference the palette filled by the Skill's name, so a chosen
+`status` reads `/status` and not the parser's `/skill:status`:
+
+```text
+› /stat|                 › /status |
+  ├─ /skill:status       ├─ a filled /skill:status
+  └─ /skill:staged       └─ drawn by its name, sent as /skill:status
+```
+
+Only a filled reference is a named unit; text the operator typed is drawn as typed,
+so no character of the operator's own words ever reads as something else and a
+half-typed or malformed reference stays visible. The draft's text is still
+`/skill:<name> `: that is what it submits and what the input history keeps. Native
+terminal selection copies the displayed `/status`; pasting that label does not
+restore a Skill reference. Choose the Skill again or paste its canonical token.
+The cursor steps over the reference as one unit, a delete takes it whole, and the
+input wraps by the name it draws. A Skill
+whose name is also a command the input dispatches keeps the canonical token
+(`/skill:models`, not `/models`), because the plain name would read as that command
+while the draft is still a message. The menu's rows read `/skill:<name>` in both
+modes: a row states the token it fills; the transcript keeps the submitted token.
 
 The menu fits the available terminal columns and rows in both modes. Command
 names take priority over descriptions and shortcut labels. A shortcut that
@@ -1738,6 +1761,7 @@ whole rule as one quoted argument, so global options stay unambiguous.
 | `/export` in either terminal UI | Choose Markdown or JSON in a dialog for an opened Session; save a uniquely named file in the CLI current directory. |
 | `dimcode export SESSION_ID [--output PATH] [--database PATH]` | Write the Session's whole Timeline as versioned JSONL without a daemon ([Timeline export](appserver/timeline-export.md)); write to stdout when no output path is supplied. |
 | `dimcode daemon vacuum [--database PATH]` | Remove the content rows no stored reference reaches from an offline native store (`node`/`message` only, one transaction per Session), then rewrite it with SQLite `VACUUM` to reclaim the pages they and deleted Sessions left; print the size before and after with the removed rows and their content bytes, and remove nothing when a Session names content the store does not hold ([storage format](appserver/native-storage-format.md#sqlite-运行参数与空间回收)). It fails while a daemon owns the database and never creates or upgrades one. |
+| `dimcode --migrate-prompt-references --database PATH --session ID --branch NAME` | Write the saved-reference result the guard's explicit-migration message asks for, offline, and print what it wrote ([explicit legacy migration](prompt-state-read.md#显式旧引用迁移入口)); it must be the first argument, refuses a missing database, a store a daemon holds and a store not at the current format, never creates or upgrades one, and a repeated run writes nothing and reports `Wrote 0`. |
 | `dimcode migration [run\|inspect] [--source OLD_HOME]` | Import by default, or inspect, a stopped legacy data home through the shared [Migration plugin](../../crates/dim-migration/README.md). |
 | `dimcode migration list\|show TASK\|cancel TASK` | Query durable results or request cancellation without a daemon. |
 | `dimcode migration retry TASK [--source OLD_HOME]` | Reconcile a previous task's source again; return a new task linked to the old report. |
@@ -2086,6 +2110,25 @@ the selection down.
 - A daemon before `session.catalog` is listed through `session.summaries`, and
   the client applies the scope to the rows it receives: the exact launch
   workspace, membership in the git set, or no filter.
+- The `/settings` "Show ACP sessions" switch applies the
+  [ACP visibility preference](appserver/session-classification.md#38-client-requirements).
+  Workspace and search filters still apply. When on, the picker requests
+  [`withAcpHistory`](appserver/session-catalog.md#31-sessioncatalog) alongside
+  `withAcpSessions` if the daemon advertises `session.catalog.acpHistory`;
+  ordinary rows keep their existing preview and closed filters. An older
+  daemon keeps its supported request, without the new parameter.
+  Closed rows include `Session closed` in their detail; Enter keeps the
+  picker open and explains that the Session cannot be resumed and its stored
+  Timeline can be read with `dimcode export SESSION_ID` (using the same
+  `--home`). It does not attempt attach or reopen the Session.
+
+  ```text
+  Show ACP sessions: off           Show ACP sessions: on
+    [Chat] Update cache              [Chat] Update cache
+                                     [ACP ] Editor conversation
+                                     [ACP ] Earlier work · Session closed
+                                     [ACP ] <empty Session id>
+  ```
 - `dimcode --resume ID` resumes a Session of any workspace, and cleanup selects
   across every workspace.
 - `Ctrl+X` removes the selected row after `Delete "{name}"? Enter confirm ·
