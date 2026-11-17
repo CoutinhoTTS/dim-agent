@@ -55210,10 +55210,10 @@
     },
     {
       "from": "dim_session_title",
-      "to": "dim_app_server::storage::timeline",
+      "to": "dim_app_server::storage::metadata::binding",
       "references": [
-        "path SessionStore",
-        "use dim_app_server::storage::SessionStore"
+        "path SessionMetadataService",
+        "use dim_app_server::storage::SessionMetadataService"
       ]
     }
   ],
