@@ -60,6 +60,10 @@ jobs:
           node-version-file: .node-version
           architecture: ${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}
           package-manager-cache: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        if: runner.os == 'Windows'
+        with:
+          python-version: '3.12'
       - name: Configure Windows C/C++ toolchain
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
@@ -117,6 +121,10 @@ jobs:
           node-version-file: .node-version
           architecture: ${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}
           package-manager-cache: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        if: runner.os == 'Windows'
+        with:
+          python-version: '3.12'
       - name: Configure Windows C/C++ toolchain
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
