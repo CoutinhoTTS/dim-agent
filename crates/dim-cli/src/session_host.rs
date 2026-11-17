@@ -3474,7 +3474,8 @@ impl Worker {
                 )
                 .await?;
             Ok(format!("Added {name}"))
-        }.await;
+        }
+        .await;
         result.map_err(|error| error.to_string())
     }
 

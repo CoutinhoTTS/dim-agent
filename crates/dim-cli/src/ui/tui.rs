@@ -2214,13 +2214,18 @@ impl App {
             if beat != self.last_pulse {
                 self.last_pulse = beat;
                 if self.fullscreen {
-                    let running: Vec<_> = self.history.iter().enumerate().filter_map(|(at, block)| {
-                        matches!(
-                            block,
-                            Block::ToolGroup(group) if group.state == GroupState::Running
-                        )
-                        .then_some(self.dropped + at)
-                    }).collect();
+                    let running: Vec<_> = self
+                        .history
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(at, block)| {
+                            matches!(
+                                block,
+                                Block::ToolGroup(group) if group.state == GroupState::Running
+                            )
+                            .then_some(self.dropped + at)
+                        })
+                        .collect();
                     for id in running {
                         self.mark_rewritten(id);
                     }
@@ -9238,12 +9243,10 @@ mod tests {
                         .collect();
                     assert_eq!(shown, draft, "{cols} columns, fullscreen={fullscreen}");
                     drawn.key(KeyCode::Enter);
-                    assert!(
-                        matches!(
-                            sent.borrow().last(),
-                            Some(Command::Submit(text, _)) if text == draft
-                        )
-                    );
+                    assert!(matches!(
+                        sent.borrow().last(),
+                        Some(Command::Submit(text, _)) if text == draft
+                    ));
                 }
             }
         }
@@ -17972,12 +17975,10 @@ mod tests {
             "restoring never submits automatically"
         );
         press(&mut app, KeyCode::Enter);
-        assert!(
-            matches!(
-                sent.borrow().as_slice(),
-                [Command::SubmitDraft(restored, _)] if restored == &parts
-            )
-        );
+        assert!(matches!(
+            sent.borrow().as_slice(),
+            [Command::SubmitDraft(restored, _)] if restored == &parts
+        ));
     }
 
     /// A withdrawn message returns as the operator's own words: a block the
