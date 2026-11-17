@@ -2,6 +2,7 @@
 
 import ctypes
 from ctypes import wintypes
+import hashlib
 import os
 import subprocess
 import threading
@@ -406,6 +407,10 @@ class Console:
                 setattr(self, name, None)
 
 
+FILE_SHARE_READ = 0x00000001
+FILE_SHARE_WRITE = 0x00000002
+FILE_SHARE_DELETE = 0x00000004
+FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
 GENERIC_READ = 0x80000000
 GENERIC_WRITE = 0x40000000
 OPEN_EXISTING = 3
@@ -415,6 +420,34 @@ kernel32.CreateFileW.argtypes = [
     wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
 ]
 kernel32.CreateFileW.restype = wintypes.HANDLE
+kernel32.GetFinalPathNameByHandleW.argtypes = [
+    wintypes.HANDLE, wintypes.LPWSTR, wintypes.DWORD, wintypes.DWORD
+]
+kernel32.GetFinalPathNameByHandleW.restype = wintypes.DWORD
+
+
+def canonical_path(path):
+    handle = kernel32.CreateFileW(
+        str(path), 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        None, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, None,
+    )
+    if not handle or handle == INVALID_HANDLE_VALUE:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        buffer = ctypes.create_unicode_buffer(32768)
+        length = kernel32.GetFinalPathNameByHandleW(handle, buffer, len(buffer), 0)
+        if not length or length >= len(buffer):
+            raise ctypes.WinError(ctypes.get_last_error())
+        return buffer.value
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def default_pipe(native_home):
+    """The endpoint the CLI derives from the canonical native home."""
+    canonical = canonical_path(native_home)
+    key = hashlib.sha256(f"dimcode:{canonical}".encode()).hexdigest()
+    return rf"\\.\pipe\dim-rust-{key[:32]}"
 
 
 def open_pipe(name, timeout=10):

@@ -9,7 +9,6 @@ import re
 import subprocess
 import threading
 import time
-import uuid
 
 from flows import LocalModel, checks, configure, conversation, environment
 import pe
@@ -49,7 +48,7 @@ class Server:
         home.mkdir(parents=True, mode=0o700)
         native = home / "rust"
         native.mkdir(mode=0o700)
-        self.pipe = rf"\\.\pipe\dim-layout-{uuid.uuid4()}"
+        self.pipe = win32.default_pipe(native)
         error = stack.enter_context((home / "server.stderr").open("w"))
         flags = win32.CREATE_SUSPENDED if sampling else 0
         self.process = subprocess.Popen(
