@@ -378,9 +378,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "exit" => "sair",
 
         // composer/palette.rs
-        "Enter select + default · ←/→ effort · Ctrl+B/F cursor · Ctrl+X clear saved · Esc clear/close" => {
-            "Enter selecionar + padrão · ←/→ esforço · Ctrl+B/F cursor · Ctrl+X limpar salvos · Esc limpar/fechar"
-        }
         "Default for new sessions in {folder}: {model}" => {
             "Modelo padrão para novas sessões em {folder}: {model}"
         }
@@ -465,6 +462,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         // models_panel.rs
         "Select a model" => "Selecione um modelo",
         "Loading models..." => "Carregando modelos…",
+        "Previous page" => "Página anterior",
+        "Next page" => "Próxima página",
         "No models available. Connect a provider first." => {
             "Nenhum modelo disponível. Conecte um provedor."
         }
@@ -527,6 +526,33 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "Vale para novos membros, inclusive Agentes nomeados."
         }
         "Existing members keep their models." => "Membros existentes mantêm seus modelos.",
+        "Conversation model" => "Modelo da conversa",
+        "Selected: {model}" => "Selecionado: {model}",
+        "Model management" => "Gerenciamento de modelos",
+        "Manage models" => "Gerenciar modelos",
+        "1 provider" => "1 provedor",
+        "{count} providers" => "{count} provedores",
+        "ready" => "pronto",
+        "no models" => "sem modelos",
+        "catalog unreadable" => "catálogo ilegível",
+        "{count} with missing limits" => "{count} sem limites",
+        "{count} unavailable" => "{count} indisponíveis",
+        "{count} disabled" => "{count} desativados",
+        "{count} without models" => "{count} sem modelos",
+        "{count} unreadable" => "{count} ilegíveis",
+        "{unavailable} unavailable, {disabled} disabled" => {
+            "{unavailable} indisponíveis, {disabled} desativados"
+        }
+        "Enter select + default · ←/→ effort · Tab section · Esc clear/close" => {
+            "Enter selecionar + padrão · ←/→ esforço · Tab seção · Esc limpar/fechar"
+        }
+        "Enter change · Tab section · Esc clear/close" => {
+            "Enter alterar · Tab seção · Esc limpar/fechar"
+        }
+        "Enter manage · Tab section · Esc clear/close" => {
+            "Enter gerenciar · Tab seção · Esc limpar/fechar"
+        }
+        "Enter manage · Esc back" => "Enter gerenciar · Esc voltar",
         "unknown" => "desconhecido",
         "Subagent model policy saved" => "Política de modelo de subagente salva",
         "Subagent model policy changed elsewhere; choose again to reread it" => {

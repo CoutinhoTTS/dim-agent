@@ -42,6 +42,7 @@ fn install(builder: &mut dim_agent_runtime::AgentBuilder) {
             ..dim_modality::InstallOptions::default()
         },
     );
+    dim_image_understanding::install(builder);
 }
 
 /// The commit this source build was made from, which `build.rs` reads at build

@@ -8471,15 +8471,22 @@ async fn node_approval_destination_matches_the_native_owner_during_a_delegation(
         serde_json::to_value(native.approval_destination("missing")).unwrap()
     );
     assert!(missing["result"].is_null());
-    let invalid = rutis_bridge::session::HostDispatch::invoke(
-        native.as_ref(),
-        "approvalDestination",
+    for args in [
         rutis_bridge::session::Value::List(vec![
             json!({"memberSessionId":"missing","extra":true}).into(),
         ]),
-    )
-    .unwrap_err();
-    assert_eq!(invalid.code(), Some("invalid_request"));
+        rutis_bridge::session::Value::List(vec![rutis_bridge::session::Value::callback(|_| {
+            panic!("invalid approval destination arguments must not invoke callbacks")
+        })]),
+    ] {
+        let invalid = rutis_bridge::session::HostDispatch::invoke(
+            native.as_ref(),
+            "approvalDestination",
+            args,
+        )
+        .unwrap_err();
+        assert_eq!(invalid.code(), Some("invalid_request"));
+    }
     say(&mut client, lead, tool(json!({
         "action":"request",
         "profile":{"name":"wire-worker","description":"fixture","systemPrompt":"work","tools":["agent","danger"]},
