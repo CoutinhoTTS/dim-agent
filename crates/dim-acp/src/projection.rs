@@ -71,9 +71,9 @@ pub(crate) struct Projection {
     texts: HashMap<String, TextCursor>,
     thoughts: HashMap<String, TextCursor>,
     calls: HashMap<String, Call>,
-    /// Each open compaction start with the `automatic` flag its start carried:
-    /// the undeclared path writes that flag into `_meta.lody.activity`.
-    compactions: HashMap<u64, bool>,
+    /// Each open compaction start with the trigger it carried; the undeclared
+    /// path reports at its terminal whether that trigger was automatic.
+    compactions: HashMap<u64, CompactionTrigger>,
     closed_requests: HashSet<String>,
 }
 
@@ -593,9 +593,10 @@ impl Projection {
     }
 
     /// A compaction as the protocol's own entity, keyed by the start it belongs
-    /// to; the client declared `session.compaction`. The summary is not sent:
-    /// Dim keeps the retained summary in the compaction record, and reading it
-    /// for every completion is the history read this projection must not make.
+    /// to; the client declared `session.compaction`. It does not send the
+    /// summary, because Dim keeps the retained summary in the compaction record
+    /// and reading it for every completion is the history read this projection
+    /// must not make.
     fn compaction(
         &mut self,
         start: u64,
@@ -822,7 +823,7 @@ impl Projection {
             }
             EventContent::CompactionStart(data) => {
                 let automatic = !matches!(data.trigger, CompactionTrigger::Manual);
-                self.compactions.insert(event.sequence, automatic);
+                self.compactions.insert(event.sequence, data.trigger);
                 if self.compaction_updates {
                     self.compaction(
                         event.sequence,
@@ -843,7 +844,10 @@ impl Projection {
             }
             EventContent::CompactionSummary(data) => {
                 let start = data.start.unwrap_or(event.sequence);
-                let automatic = data.start.and_then(|start| self.compactions.remove(&start));
+                let automatic = data
+                    .start
+                    .and_then(|start| self.compactions.remove(&start))
+                    .map(|trigger| !matches!(trigger, CompactionTrigger::Manual));
                 let mut activity = json!({"version":1,"kind":"context_compaction"});
                 if let Some(automatic) = automatic {
                     activity["automatic"] = json!(automatic);
@@ -862,7 +866,10 @@ impl Projection {
                 }
             }
             EventContent::Compaction(data) => {
-                let automatic = data.start.and_then(|start| self.compactions.remove(&start));
+                let automatic = data
+                    .start
+                    .and_then(|start| self.compactions.remove(&start))
+                    .map(|trigger| !matches!(trigger, CompactionTrigger::Manual));
                 let (status, terminal, diagnostics, reason) = match &data.outcome {
                     ContextCompactionResult::Completed { diagnostics, .. } => (
                         acp::ToolCallStatus::Completed,

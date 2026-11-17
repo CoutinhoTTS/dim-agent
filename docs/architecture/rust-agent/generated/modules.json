@@ -8375,6 +8375,7 @@
       "from": "dim_acp::projection",
       "to": "dim_agent_types::model",
       "references": [
+        "path CompactionTrigger",
         "use dim_agent_types::CompactionTrigger"
       ]
     },
