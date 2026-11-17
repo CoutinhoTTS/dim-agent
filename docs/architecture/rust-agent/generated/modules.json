@@ -8387,6 +8387,14 @@
     },
     {
       "from": "dim_acp::projection",
+      "to": "dim_agent_types::tool",
+      "references": [
+        "path ToolResult",
+        "use dim_agent_types::ToolResult"
+      ]
+    },
+    {
+      "from": "dim_acp::projection",
       "to": "dim_client::wire",
       "references": [
         "path Event",

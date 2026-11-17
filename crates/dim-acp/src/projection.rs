@@ -3,7 +3,7 @@
 use agent_client_protocol::schema::v1 as acp;
 use dim_agent_types::{
     CompactionTrigger, ContentBlock, ContextCompactionResult, ExecStatus, ImageSource, ToolContent,
-    UserInput, markup,
+    ToolResult, UserInput, markup,
 };
 use dim_client::wire::{Event, EventContent, Progress};
 use serde_json::{Value, json};
@@ -14,6 +14,9 @@ use std::{
 
 /// The longest title built from a model's own words before it is cut.
 const TITLE_MAX_CHARS: usize = 80;
+
+/// The first line of the display diff a `write` returns for a file it created.
+const CREATED_DIFF: &str = "--- /dev/null\n";
 
 #[derive(Default)]
 struct TextCursor {
@@ -66,7 +69,7 @@ pub(crate) struct Projection {
     inputs: HashMap<String, UserInput>,
     texts: HashMap<String, TextCursor>,
     thoughts: HashMap<String, TextCursor>,
-    tools: HashSet<String>,
+    calls: HashMap<String, Call>,
     compactions: HashMap<u64, bool>,
     closed_requests: HashSet<String>,
 }
@@ -80,9 +83,9 @@ pub(crate) fn tool_id(branch: &str, request: &str, call: &str) -> String {
 fn meta(lody: Option<Value>, turn: Option<&str>) -> Option<acp::Meta> {
     let mut lody = match (lody, turn) {
         (Some(Value::Object(lody)), _) => lody,
-        (Some(_), _) => unreachable!("a lody extension is an object"),
+        (Some(_), _) => unreachable!("every lody extension is an object"),
         (None, None) => return None,
-        (None, Some(_)) => acp::Meta::new(),
+        (None, Some(_)) => serde_json::Map::new(),
     };
     if let Some(turn) = turn {
         lody.insert("turnId".into(), json!(turn));
@@ -111,32 +114,6 @@ fn image(source: &ImageSource) -> Option<acp::ContentBlock> {
         (None, None) => return None,
     };
     Some(acp::ContentBlock::Image(image))
-}
-
-/// What a tool message says besides its status: the content it produced, the
-/// output it returns as data, and the `lody` extension it carries.
-#[derive(Default)]
-struct ToolFields {
-    content: Option<Vec<acp::ToolCallContent>>,
-    raw_output: Option<Value>,
-    lody: Option<Value>,
-}
-
-impl ToolFields {
-    fn content(mut self, content: Vec<acp::ToolCallContent>) -> Self {
-        self.content = Some(content);
-        self
-    }
-
-    fn raw_output(mut self, raw_output: Value) -> Self {
-        self.raw_output = Some(raw_output);
-        self
-    }
-
-    fn lody(mut self, lody: Value) -> Self {
-        self.lody = Some(lody);
-        self
-    }
 }
 
 /// The messages one fact produces, each serialized once with the turn that
@@ -269,7 +246,8 @@ fn preview(content: &ToolContent) -> String {
 
 /// A tool call message: the crate omits a field holding that field's own
 /// default, and the gateway spells out both so a client reads the same
-/// message it read before the projection was typed.
+/// message it read before the projection was typed. A call always states both
+/// fields, so this is the one write a serialized message still takes.
 fn call_message(call: acp::ToolCall) -> Value {
     let mut message = serde_json::to_value(acp::SessionUpdate::ToolCall(call))
         .expect("an ACP session update is JSON");
@@ -280,6 +258,32 @@ fn call_message(call: acp::ToolCall) -> Value {
         message["status"] = json!("pending");
     }
     message
+}
+
+/// What a tool message says besides its status: the content it produced, the
+/// output it returns as data, and the `lody` extension it carries.
+#[derive(Default)]
+struct ToolFields {
+    content: Option<Vec<acp::ToolCallContent>>,
+    raw_output: Option<Value>,
+    lody: Option<Value>,
+}
+
+impl ToolFields {
+    fn content(mut self, content: Vec<acp::ToolCallContent>) -> Self {
+        self.content = Some(content);
+        self
+    }
+
+    fn raw_output(mut self, raw_output: Value) -> Self {
+        self.raw_output = Some(raw_output);
+        self
+    }
+
+    fn lody(mut self, lody: Value) -> Self {
+        self.lody = Some(lody);
+        self
+    }
 }
 
 /// A present, non-empty string field of a tool input.
@@ -399,6 +403,62 @@ fn presentation(cwd: &Path, name: &str, input: &Value) -> Presentation {
     }
 }
 
+/// A tool call as it was announced: its result reports the file changes its
+/// own input states.
+struct Call {
+    name: String,
+    input: Value,
+}
+
+/// The file changes a tool call states, as the result confirms them: each
+/// `edit` replacement as its own diff, and a whole-file `write` without old
+/// text only when the file it wrote did not exist before.
+fn file_changes(cwd: &Path, call: &Call, result: &ToolResult) -> Vec<acp::ToolCallContent> {
+    let Some(path) = argument(&call.input, "path").and_then(|path| absolute(cwd, path)) else {
+        return Vec::new();
+    };
+    match call.name.as_str() {
+        "write" if created(result) => argument(&call.input, "content")
+            .map(|content| vec![acp::ToolCallContent::Diff(acp::Diff::new(path, content))])
+            .unwrap_or_default(),
+        "edit" => replacements(&call.input)
+            .into_iter()
+            .map(|(old, new)| {
+                acp::ToolCallContent::Diff(acp::Diff::new(path.clone(), new).old_text(old))
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Whether a successful `write` created its file: the display diff it returns
+/// starts at `/dev/null` exactly for a creation, and an overwrite's starts at
+/// the file (WorkspaceTools.md, "File mutation display results"). A result
+/// whose diff was dropped for size does not say, so it reports no creation.
+fn created(result: &ToolResult) -> bool {
+    result
+        .structured_content
+        .as_ref()
+        .and_then(|content| content.get("diff"))
+        .and_then(Value::as_str)
+        .is_some_and(|diff| diff.starts_with(CREATED_DIFF))
+}
+
+/// The old/new pairs of an `edit` input: its `edits` list, or the one pair a
+/// recorded call carries beside the path.
+fn replacements(input: &Value) -> Vec<(&str, &str)> {
+    fn pair(value: &Value) -> Option<(&str, &str)> {
+        Some((
+            value.get("oldText")?.as_str()?,
+            value.get("newText")?.as_str()?,
+        ))
+    }
+    match input.get("edits").and_then(Value::as_array) {
+        Some(edits) => edits.iter().filter_map(pair).collect(),
+        None => pair(input).into_iter().collect(),
+    }
+}
+
 impl Projection {
     /// `cwd` is the session directory a relative tool path resolves against.
     pub(crate) fn new(cwd: impl Into<PathBuf>) -> Self {
@@ -456,7 +516,17 @@ impl Projection {
     ) {
         let presentation = presentation(&self.cwd, name, &input);
         let meta = messages.meta(fields.lody);
-        if self.tools.insert(id.clone()) {
+        let announced = self
+            .calls
+            .insert(
+                id.clone(),
+                Call {
+                    name: name.to_owned(),
+                    input: input.clone(),
+                },
+            )
+            .is_some();
+        if !announced {
             messages.push_call(
                 acp::ToolCall::new(id, presentation.title)
                     .name(name)
@@ -503,6 +573,19 @@ impl Projection {
             )
             .meta(meta),
         ));
+    }
+
+    /// A tool call's result content: the file changes its input states, then
+    /// the output the tool returned.
+    fn result_content(&self, id: &str, result: &ToolResult) -> Vec<acp::ToolCallContent> {
+        let mut content: Vec<acp::ToolCallContent> = self
+            .calls
+            .get(id)
+            .filter(|_| result.is_error != Some(true))
+            .map(|call| file_changes(&self.cwd, call, result))
+            .unwrap_or_default();
+        content.extend(tool_content(&result.content));
+        content
     }
 
     pub(crate) fn event(&mut self, event: &Event) -> Vec<Value> {
@@ -611,7 +694,7 @@ impl Projection {
             EventContent::ToolResult(data) => {
                 for call in &data.results {
                     let id = tool_id("main", &data.request_id, &call.call_id);
-                    if !self.tools.contains(&id) {
+                    if !self.calls.contains_key(&id) {
                         self.tool(
                             id.clone(),
                             &call.call_id,
@@ -622,23 +705,29 @@ impl Projection {
                         );
                     }
                     Self::tool_update(
-                        tool_id("main", &data.request_id, &call.call_id),
+                        id,
                         if call.result.is_error == Some(true) {
                             acp::ToolCallStatus::Failed
                         } else {
                             acp::ToolCallStatus::Completed
                         },
-                        ToolFields::default().content(tool_content(&call.result.content)),
+                        ToolFields::default().content(self.result_content(
+                            &tool_id("main", &data.request_id, &call.call_id),
+                            &call.result,
+                        )),
                         &mut messages,
                     );
                 }
             }
-            EventContent::ToolCompleted(data) => Self::tool_update(
-                tool_id("main", &data.request_id, &data.call_id),
-                acp::ToolCallStatus::InProgress,
-                ToolFields::default().content(tool_content(&data.result.content)),
-                &mut messages,
-            ),
+            EventContent::ToolCompleted(data) => {
+                let id = tool_id("main", &data.request_id, &data.call_id);
+                Self::tool_update(
+                    id.clone(),
+                    acp::ToolCallStatus::InProgress,
+                    ToolFields::default().content(self.result_content(&id, &data.result)),
+                    &mut messages,
+                );
+            }
             EventContent::ExecStarted(data) => {
                 let id = json!(["background", data.task_id]).to_string();
                 self.tool(
