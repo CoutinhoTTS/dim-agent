@@ -173,6 +173,30 @@ async fn managed_launch_maps_root_and_subtree_and_restores_after_host_restart() 
             .await;
         assert_ok(&attach);
         assert_eq!(attach["result"]["origin"], "automation");
+        assert_ok(&client.rpc("session.detach", json!({"sessionId":id})).await);
+        session.idle("main").await.unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !session.unload_if_idle().await.unwrap() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the detached managed Session unloads after becoming idle");
+        assert!(agent.get_session(id).is_none(), "{subtree}");
+        let ownership = listed(&mut client).await;
+        let entry = ownership
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["taskId"] == tree["taskId"])
+            .unwrap();
+        assert_eq!(entry["sessions"], json!([id]), "{subtree}");
+        assert_eq!(entry["root"], tree["root"], "{subtree}");
+        let attach = client
+            .rpc("session.attach", json!({"sessionId":id, "expectedCwd":cwd}))
+            .await;
+        assert_ok(&attach);
+        assert_eq!(agent.get_session(id).unwrap().config().cwd, tree["cwd"]);
         created.push((id.to_owned(), tree.clone()));
     }
     let before = listed(&mut client).await;

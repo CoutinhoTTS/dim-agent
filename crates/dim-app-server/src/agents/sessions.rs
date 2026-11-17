@@ -96,6 +96,8 @@ pub struct LaunchRequest {
     /// its text rules and writes it as the first manual title.
     #[serde(default)]
     pub title: Option<String>,
+    /// The workspace to create; requires the `sessions.launch.worktree` feature.
+    /// See [managed worktrees §3](https://github.com/arcships/dim/blob/main/docs/design/worktree-management.md#3-创建).
     #[serde(default, deserialize_with = "crate::protocol::optional_worktree")]
     pub worktree: Option<crate::protocol::CreateWorktree>,
 }
@@ -121,6 +123,8 @@ pub struct LaunchReply {
     pub session_id: String,
     /// The effective policy the Session was created with.
     pub policy: PermissionPolicy,
+    /// The created workspace for `sessions.launch.worktree`; omitted if not requested.
+    /// See [managed worktrees §3](https://github.com/arcships/dim/blob/main/docs/design/worktree-management.md#3-创建).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub worktree: Option<crate::worktrees::CreatedWorktreeReply>,
 }

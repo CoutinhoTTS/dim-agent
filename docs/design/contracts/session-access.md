@@ -81,9 +81,9 @@ sequenceDiagram
   participant S as Session (non-interactive)
   participant TL as Branch Timeline
   participant L as InputQueue, Loop
-  C->>AI: launch {policy, starter}
+  C->>AI: launch {policy, starter, worktree?}
   AI->>AI: cap policy by the starter's current policy
-  AI-->>C: {sessionId, policy}
+  AI-->>C: {sessionId, policy, worktree?}
   C->>AI: input {sessionId, main, queue, marker dim-scheduler, submissionId}
   AI->>S: input
   S->>TL: input/message
@@ -149,7 +149,7 @@ Queue inputs are consumed when Loop starts the turn they drive. Steer inputs are
 
 | Interface | Mode | Purpose |
 | --- | --- | --- |
-| `sessions.launch(LaunchRequest) -> {sessionId, policy}` | async | Create a non-interactive Session for automation with a capped policy |
+| `sessions.launch(LaunchRequest) -> {sessionId, policy, worktree?}` | async | Create a non-interactive Session for automation with a capped policy |
 | `sessions.input(InputWrite) -> {inputId, sequence}` | async | Write input with source raw blocks |
 | `sessions.lookup({sessionId, branchId, submissionId}) -> LookupReply` | async | Find a committed input after an uncertain outcome |
 | `sessions.history(HistoryRequest) -> HistoryPage` | async | Read history, optionally as a fixed prefix bounded by the published head |
@@ -225,7 +225,7 @@ Withdrawn ([#24](https://github.com/arcships/dim/issues/24)): a caller withdraws
 
 | Method | Mode | Request | Reply | Errors |
 | --- | --- | --- | --- | --- |
-| `launch` | async | `LaunchRequest` | `{sessionId, policy}` | `rejected`, `agent_unknown`, `session_closed`, `branch_missing` (the starter), `branch_ended` (the starter), `reloading`, `failed` |
+| `launch` | async | `LaunchRequest` | `{sessionId, policy, worktree?}` | `rejected`, `agent_unknown`, `session_closed`, `branch_missing` (the starter), `branch_ended` (the starter), `reloading`, `failed` |
 | `input` | async | `InputWrite` | `{inputId, sequence}` | `rejected`, `ambiguous`, `session_closed`, `branch_missing`, `branch_ended`, `reloading`, `publication_unknown`, `failed` |
 | `lookup` | async | `{sessionId, branchId, submissionId}` | `LookupReply` | `ambiguous`, `session_closed`, `branch_missing`, `branch_ended`, `reloading` |
 | `exists` | async | `{sessionId}` | `{exists}` | `rejected`, `reloading` |
@@ -242,7 +242,8 @@ Withdrawn ([#24](https://github.com/arcships/dim/issues/24)): a caller withdraws
   "cwd": "string",
   "model?": { "providerId": "string", "modelId": "string" },  // takes precedence over the profile's model
   "policy?": { /* PermissionPolicy data */ },  // narrowed request; absent: starter's or read-only default
-  "starter?": { "sessionId": "string", "branchId": "string" } } // upper bound; absent: host configuration bound
+  "starter?": { "sessionId": "string", "branchId": "string" }, // upper bound; absent: host configuration bound
+  "worktree?": { /* managed worktrees §3 request */ } }
 // InputWrite
 { "sessionId": "string", "branchId": "string",
   "mode": "queue" | "steer" | "append",
@@ -288,6 +289,8 @@ Withdrawn ([#24](https://github.com/arcships/dim/issues/24)): a caller withdraws
 Every method can also fail `failed` (A.6). Cancellation: the caller dropping an `idle` or `history` call ends it with no effect. Dropping an `input` before the reply leaves the outcome uncertain; the caller resolves it with `lookup`.
 
 `launch` creates a Session with `interactive = false`. The effective policy is the requested policy capped by the starter's current policy, which is a Timeline fact read at launch. Without a starter, a run started by a management method defaults to read-only unless the request declares a policy, and it is always capped by host configuration.
+
+The optional `worktree` request and reply members follow [managed worktrees §3](../worktree-management.md#3-创建), which owns their shapes, capability gate, absence and invalid-input behavior.
 
 `delete` is Agents' Session delete (S5c): it closes the Session if it is loaded, then removes its rows and files. An absent or already deleted Session replies `{}`, so a caller deletes again after any error ([sessions service §6.8](../appserver/sessions-service.md#68-delete)). The caller that launched a Session deletes it when it drops the last record that names it ([§8.7](../appserver/sessions-service.md#87-deleting-run-sessions)).
 

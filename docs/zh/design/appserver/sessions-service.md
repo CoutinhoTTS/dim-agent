@@ -46,7 +46,7 @@ spike 改变了三处设计：服务由谁提供（第 5 条）、生命周期�
 | D3 | 上限取较低的预设、`disallowedTools` 的并集，并且只保留双方都无条件允许的 `allowedTools` 条目 | 只取较低的预设；拒绝比上限更宽的请求 | 只取预设时，请求的 `allowedTools` 条目可能越过上限，不安全。合同规定对更宽的请求取上限，而不是拒绝 |
 | D4 | 没有启动方时，上限是宿主的 Session 默认值（`ServerConfig.session_defaults.permission_policy`） | 新增一个自动化专用的宿主设置 | 它是宿主现有的答案：没人选择策略时 Session 能做什么。不增加任何配置，以后需要单独设置时可以增量添加，不破坏任何东西 |
 | D5 | 读不到启动方时启动失败：启动方已不存在时为 `session_closed` 或 `branch_missing`，无法恢复时为 `failed`，其 Permission 重载期间为 `reloading` | 退回到宿主上限 | 失败即关闭：宿主上限可能比启动方的策略更宽 |
-| D6 | `launch` 回复 `{sessionId, policy}`，带生效策略 | 只回复 `{sessionId}` | 调用方不必再读一次，就能记录一次运行得到的权限，并看出上限是否生效 |
+| D6 | `launch` 回复 `{sessionId, policy, worktree?}`，带生效策略以及请求时的[托管 worktree 回复](../../../design/worktree-management.md#3-创建) | 只回复 `{sessionId}` | 调用方不必再读一次，就能记录一次运行得到的权限，并看出上限是否生效 |
 | D7 | `LaunchRequest.model` 为 `{providerId, modelId}` | 单独的模型 id 字符串 | 模型 id 只在其 provider 内唯一。`{providerId, modelId}` 即 `ModelId`，Agent profile 与 `session.create` 的显式模型都用这个类型 |
 | D8 | `input` 在发布后回复 | 提交时回复 | 回复后立即调用 `history {atLeast: sequence}` 必须成功（第 7 条） |
 | D9 | `lookup` 先等待待发布事件再扫描；Rpc 的 `session.input_lookup` 使用同一份代码 | 立即扫描；另写一个扫描器 | 已提交但尚未发布的输入会读成 `unknown`，Scheduler 就会把一条正在运行的输入记为 `lost` |
@@ -411,7 +411,7 @@ S2 不需要为此改动。每次调用都持有租约，`sessions` 不在已装
 | `future_sequence` | `history` | `atLeast` 或 `through` 超过已发布 head | false |
 | `ambiguous` | `input`、`lookup` | 不止一条输入使用该 `submissionId`，写于分支只接受一次之前；未写入 | false |
 | `publication_unknown` | `input`、`withdraw` | 已提交，发布未确认；恢复后重新提交、`lookup` 或 `history` | true |
-| `failed` | 全部 | Session 故障、存储、模型解析、项目授权、Session 构建；对 `delete` 指 Session 的命令输出或行无法删除（§6.8） | false |
+| `failed` | 全部 | Session 故障、存储、模型解析、项目授权、Session 构建、[托管 worktree 创建](../../../design/worktree-management.md#3-创建)；对 `delete` 指 Session 的命令输出或行无法删除（§6.8） | false |
 
 ## 10. 时序与冲突
 
@@ -443,11 +443,11 @@ S2 不需要为此改动。每次调用都持有租约，`sessions` 不在已装
 [Session 访问](../contracts/session-access.md)（中英文），只改 `sessions` 部分：
 
 - **引言、§4、附录 B、§8（D3）。** Agents 重载让进行中的调用以 `reloading` 失败；调用方不重载（D1，#35）。
-- **§3.1。** `launch` 箭头去掉 `source`，回复加上 `policy`。
+- **§3.1。** `launch` 箭头去掉 `source` 并增加可选 `worktree`；回复加上 `policy` 和可选 `worktree`。
 - **§7。** 策略上限是给受信任调用方用的约定，不是安全边界（§11）。
 - **A.1。**
   - 删除“调用方的 `source` 由 Agents 固定……”一句：rutis 不传递调用方身份，§9.3 也已撤回该需求。
-  - `launch` 回复 `{sessionId, policy}`，新增错误 `agent_unknown`、`session_closed` 与 `branch_missing`。
+  - `launch` 回复 `{sessionId, policy, worktree?}`，新增错误 `agent_unknown`、`session_closed` 与 `branch_missing`。可选 `worktree` 请求与回复链接到[托管 worktree §3](../../../design/worktree-management.md#3-创建)。
   - `model` 改为 `{providerId, modelId}`。
   - `stop` 新增 `reason?`。
   - `HistoryRequest` 新增 `limit?`，`HistoryPage.events` 为该分支的 `AgentEvent` 记录。

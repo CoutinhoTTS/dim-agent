@@ -85,7 +85,7 @@ the contract refinements in §12.
 | D3 | The cap takes the lower preset, the union of `disallowedTools`, and keeps an `allowedTools` entry only when both sides allow that tool unconditionally | The lower preset alone; rejecting requests wider than the bound | The preset alone lets a requested `allowedTools` entry exceed the bound, which is unsound. The contract caps a wider request rather than rejecting it |
 | D4 | Without a starter, the bound is the host's Session defaults (`ServerConfig.session_defaults.permission_policy`) | A new host setting for automation | It is the host's existing answer to what a Session may do when nobody chose its policy. It adds no configuration, and a separate setting can be added later without breaking anything |
 | D5 | A starter that cannot be read fails the launch: `session_closed` or `branch_missing` when it is gone, `failed` when it cannot be restored, `reloading` while its Permission reloads | Falling back to the host bound | The launch fails closed: the host bound may be wider than the starter's policy |
-| D6 | `launch` replies `{sessionId, policy}` with the effective policy | `{sessionId}` only | The caller can record the authority a run got, and see that a cap took effect, without another read |
+| D6 | `launch` replies `{sessionId, policy, worktree?}` with the effective policy and, when requested, the [managed-worktree reply](../worktree-management.md#3-创建) | `{sessionId}` only | The caller can record the authority a run got, and see that a cap took effect, without another read |
 | D7 | `LaunchRequest.model` is `{providerId, modelId}` | A bare model id string | A model id is unique only within its provider. `{providerId, modelId}` is `ModelId`, the type of Agent profiles and of `session.create`'s explicit model |
 | D8 | `input` replies after publication | Replying at commit | `history {atLeast: sequence}` right after the reply must succeed (finding 7) |
 | D9 | `lookup` waits for pending publication, then scans; Rpc's `session.input_lookup` uses the same code | Scanning at once; a second scanner | An input that is committed but not yet published would read `unknown`, and Scheduler would mark a running input `lost` |
@@ -616,7 +616,7 @@ job every five minutes adds about 288 a day. So the consumers delete them (D14):
 | `future_sequence` | `history` | `atLeast` or `through` beyond the published head | false |
 | `ambiguous` | `input`, `lookup` | More than one input has that `submissionId`, written before branches accepted each id once; nothing written | false |
 | `publication_unknown` | `input`, `withdraw` | Committed, publication not confirmed; resubmit, `lookup` or `history` after recovery | true |
-| `failed` | All | Session fault, storage, model resolution, project authorization, Session build; for `delete`, the Session's command output or rows could not be removed (§6.8) | false |
+| `failed` | All | Session fault, storage, model resolution, project authorization, Session build, [managed-worktree creation](../worktree-management.md#3-创建); for `delete`, the Session's command output or rows could not be removed (§6.8) | false |
 
 ## 10. Timing and conflicts
 
@@ -659,13 +659,13 @@ job every five minutes adds about 288 a day. So the consumers delete them (D14):
 
 - **Intro, §4, Appendix B, §8 (D3).** An Agents reload fails the calls in flight with `reloading`; callers do not
   reload (D1, #35).
-- **§3.1.** The `launch` arrow loses `source` and the reply gains `policy`.
+- **§3.1.** The `launch` arrow loses `source` and gains optional `worktree`; the reply gains `policy` and optional `worktree`.
 - **§7.** The policy cap is a convention for trusted callers, not a security boundary (§11).
 - **A.1.**
   - The sentence "A caller's `source` is fixed by Agents …" is removed: rutis passes no caller identity, and §9.3
     already withdrew the requirement.
-  - `launch` replies `{sessionId, policy}` and gains the errors `agent_unknown`, `session_closed` and
-    `branch_missing`.
+  - `launch` replies `{sessionId, policy, worktree?}` and gains the errors `agent_unknown`, `session_closed` and
+    `branch_missing`. Its optional `worktree` request and reply link to [managed worktrees §3](../worktree-management.md#3-创建).
   - `model` becomes `{providerId, modelId}`.
   - `stop` gains `reason?`.
   - `HistoryRequest` gains `limit?`, and `HistoryPage.events` are `AgentEvent` records of the branch.
