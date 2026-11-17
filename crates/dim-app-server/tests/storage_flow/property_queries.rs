@@ -3652,6 +3652,21 @@ async fn query_cursors_reject_changed_logical_scope_and_queries_in_both_stores()
             .query(&original_scope, &original_query, Some(&page(1)))
             .await
             .unwrap();
+        let complete = store
+            .query(&original_scope, &original_query, Some(&page(10)))
+            .await
+            .unwrap();
+        assert!(
+            complete.next.is_none(),
+            "the reference page contains every group"
+        );
+        let dim_agent_runtime::QueryOutput::Rows { rows: expected } = complete.result else {
+            panic!("grouped field rows");
+        };
+        let dim_agent_runtime::QueryOutput::Rows { rows: first_rows } = &first.result else {
+            panic!("grouped field rows");
+        };
+        assert_eq!(first_rows.as_slice(), &expected[..1]);
         let cursor = first.next.expect("multiple groups require a continuation");
         let continuation = QueryPage {
             after: Some(cursor),
@@ -3668,6 +3683,11 @@ async fn query_cursors_reject_changed_logical_scope_and_queries_in_both_stores()
             rows.len(),
             2,
             "{backend}: changing page size preserves the binding and advances the page"
+        );
+        assert_eq!(
+            rows.as_slice(),
+            &expected[1..3],
+            "{backend}: continuation preserves group and row identity after the first page"
         );
         for (name, scope, query) in &cases {
             store

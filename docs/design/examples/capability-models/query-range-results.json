@@ -100,5 +100,15 @@
     "result": "28 passed; 0 failed; 137 filtered out",
     "scope": "SQLite and Memory logical cursor rejection matrix; existing property query flows including physical tail persistence. Source hashes above retain the original code_base; this hash identifies the revised test. Unchanged TLC evidence reused.",
     "clippy": "passed: cargo clippy --locked -p dim-app-server --test storage_flow -- -D warnings"
+  },
+  "main_integration": {
+    "main_commit": "543ae5204f94bc9bee73aacf27f2a3ea13840487",
+    "test_path": "crates/dim-app-server/tests/storage_flow/property_queries.rs",
+    "test_sha256": "cefac5f0d4186312aee979406fc8eac48aa6d1db2e365dd4f6a15d0791fabbda",
+    "scope": "Preserve C and B README entries; strengthen page-size compatibility with exact first/resumed group and row identity against a complete reference page. Timeline query implementation unchanged by main integration.",
+    "results": "Module run: 27 passed, added assertion failed because the fixture omitted the mandatory row-query page. Corrected final targeted test: 1 passed, 0 failed. Reuse unaffected 27 tests; not a final single 28-pass run.",
+    "test_command": "cargo test --locked -p dim-app-server --test storage_flow query_cursors_reject_changed_logical_scope_and_queries_in_both_stores",
+    "clippy": "cargo clippy --locked -p dim-app-server --test storage_flow -- -D warnings: passed",
+    "tlc": "Unchanged model/configs, prior results reused."
   }
 }

@@ -63,3 +63,14 @@ SourcePartition 只比较集合，不验证 tail 向量顺序及单来源重复�
 使用隔离 DIMCODE_HOME、独立 worktree target、4 build jobs、CARGO_INCREMENTAL=0。模型与配置未变，以上五组 TLC 结果复用，没有声称重跑 TLC 或 Rust 精化证明。
 
 对应 storage_flow 的 Clippy（`-D warnings`）、格式、ADR freeze、diff 和模型/config/基线/修改后测试哈希检查通过。
+
+## main 集成与续页身份复核
+
+合入 `543ae5204f94bc9bee73aacf27f2a3ea13840487`，解决 README 冲突时保留 B/C 两个入口。
+Timeline 查询实现未变。续页正例从只检查两行，加强为检查完整 group/values 与同范围完整参照页
+的对应切片相等，并检查首行身份；直接比较 QueryRow，不增转换层。
+模块运行中其余 27 项通过；新断言最初漏传行查询必需的 page，导致 fixture 失败，
+改为 page(10) 并确认无后续页后，最终目标流程 1 passed / 0 failed。复用未受影响的 27 项，
+不把这两次结果写作一次 28 项全绿。最终 storage_flow Clippy -D warnings 通过。
+JSON main_integration 保留最终测试哈希；旧运行快照不改写。模型/config 未变，复用 TLC。
+消融：只增加同一公共接口的结果对照，保留完整身份断言；不新增测试框架或运行时改动。
