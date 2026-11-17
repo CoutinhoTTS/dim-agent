@@ -70,7 +70,7 @@ def validate_sizes(functions_before, functions_after, sizes_before, sizes_after,
     for name, before in before_by_name.items():
         after = after_by_name[name]
         if None in before or None in after:
-            ambiguous += sum(1 for size in after if size is None)
+            ambiguous += len(before)
             continue
         if Counter(before) != Counter(after):
             mismatches.append((name, sorted(before), sorted(after)))
