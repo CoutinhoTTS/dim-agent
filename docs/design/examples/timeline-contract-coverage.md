@@ -23,6 +23,12 @@
 [`crates/dim-app-server/src/storage/`](../../../crates/dim-app-server/src/storage/)；能力实现（如 `wait.rs`）位于
 [`crates/dim-agent-capabilities/src/`](../../../crates/dim-agent-capabilities/src/)；`plugins/*.md` 位于
 [`docs/architecture/rust-agent/`](../../architecture/rust-agent/)。模型名均在 [capability-models](capability-models/README.md) 下，除特别注明。
+测试入口：`timeline_batch`、`timeline_tail`、`local_execution`、`session_lifecycle` 位于
+[`tests/integration/tests/`](../../../tests/integration/tests/)；`dispatch_flow` 位于
+[`crates/dim-agent-capabilities/tests/`](../../../crates/dim-agent-capabilities/tests/)；
+`storage_flow/property_queries` 位于 [`crates/dim-app-server/tests/`](../../../crates/dim-app-server/tests/)。
+B 的后续查询范围证据见 [#1737](https://github.com/arcships/dim/pull/1737) 的
+`docs/design/examples/query-range-verification.md`；与 C 一样，不追溯计入本批模型的覆盖。
 
 | 合同出处与承诺 | 实现入口 | 模型/命题或已有证据 | 前提提供者及缺口处置 |
 | --- | --- | --- | --- |
