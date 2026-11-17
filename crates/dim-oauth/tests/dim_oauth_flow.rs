@@ -657,7 +657,7 @@ fn listed_ids(catalog: &BundledCatalog) -> Vec<String> {
     let mut seen = HashSet::new();
     catalog
         .providers()
-        .flat_map(|provider| provider.models.iter().map(|model| model.model_id.clone()))
+        .flat_map(|provider| provider.models.into_iter().map(|model| model.model_id))
         .filter(|id| seen.insert(id.clone()))
         .collect()
 }
@@ -1365,10 +1365,42 @@ async fn managed_catalog_writes_distinguish_account_changes_from_version_conflic
         })
     ));
     let read = provider
-        .management(Some(PROVIDER.into()), &cancel())
+        .management(PROVIDER.into(), None, &cancel())
         .await
         .unwrap();
-    assert_eq!(read.providers[0].version, Some(version));
+    assert_eq!(read.providers[0].info.version, Some(version));
+    let overview = provider
+        .management_page(
+            dim_app_server::provider::ManagementPageRequest {
+                query: Some("Dim OAuth".into()),
+                accounts_only: true,
+                ..Default::default()
+            },
+            &cancel(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(overview.providers.len(), 1);
+    assert_eq!(
+        overview.providers[0].version,
+        Some(version),
+        "searching the account descriptor still reads its stored catalog version"
+    );
+    let cross_field = provider
+        .management_page(
+            dim_app_server::provider::ManagementPageRequest {
+                query: Some(format!("{PROVIDER} Dim OAuth")),
+                accounts_only: true,
+                ..Default::default()
+            },
+            &cancel(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        cross_field.providers.is_empty(),
+        "search matches each field separately"
+    );
     root.shutdown().await.unwrap();
     std::fs::remove_dir_all(home).unwrap();
 }
@@ -1462,28 +1494,22 @@ async fn a_stored_unavailable_media_model_is_excluded_from_every_use() {
         .await
         .unwrap();
     let database = rusqlite::Connection::open(home.join("native.sqlite")).unwrap();
-    let (version, body): (u32, String) = database
+    let body: String = database
         .query_row(
-            "SELECT version,record FROM providers WHERE provider_id=?1",
+            "SELECT entry FROM provider_models WHERE provider_id=?1 AND model_id='fixture-image' AND source='default'",
             [PROVIDER],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| row.get(0),
         )
         .unwrap();
-    let mut body: Value = serde_json::from_str(&body).unwrap();
-    let model = body["models"]
-        .as_array_mut()
-        .unwrap()
-        .iter_mut()
-        .find(|model| model["entry"]["modelId"] == "fixture-image")
-        .unwrap();
+    let mut model: Value = serde_json::from_str(&body).unwrap();
     // The refresh wrote the kind reason; the status is the only unavailable
     // fact, exactly as a record from before the projection fix could hold it.
     assert_eq!(model["unavailableReason"], "unsupported_model_type");
     model["entry"]["status"] = json!("unavailable");
     database
         .execute(
-            "UPDATE providers SET version=?2,record=?3 WHERE provider_id=?1",
-            rusqlite::params![PROVIDER, version, body.to_string()],
+            "UPDATE provider_models SET entry=?2 WHERE provider_id=?1 AND model_id='fixture-image' AND source='default'",
+            rusqlite::params![PROVIDER, model.to_string()],
         )
         .unwrap();
     drop(database);
@@ -1521,5 +1547,97 @@ async fn a_stored_unavailable_media_model_is_excluded_from_every_use() {
         .unwrap();
     assert_eq!(refused.to_string(), "Model is unavailable");
     root.shutdown().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn directory_reads_share_only_in_flight_work_and_cancel_independently() {
+    let fixture = oauth::start().await;
+    let home = home();
+    let Process { root, providers } = process(&home).await;
+    login(&providers, &fixture.base).await;
+    fixture.service.models_wait.store(true, Ordering::SeqCst);
+    let first_cancel = cancel();
+    let first = {
+        let providers = providers.clone();
+        let token = first_cancel.clone();
+        tokio::spawn(async move { providers.catalog(PROVIDER, &token).await })
+    };
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while fixture.service.calls("GET /v1/models") == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let second_cancel = cancel();
+    let mut second = Box::pin(providers.catalog(PROVIDER, &second_cancel));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut second)
+            .await
+            .is_err()
+    );
+    first_cancel.cancel();
+    assert_eq!(
+        first.await.unwrap().err().unwrap().code,
+        "account_cancelled"
+    );
+    fixture.service.models_wait.store(false, Ordering::SeqCst);
+    fixture.service.models_release.notify_waiters();
+    let result = second.await.unwrap();
+    assert!(!result.models.is_empty());
+    assert_eq!(fixture.service.calls("GET /v1/models"), 1);
+    providers.catalog(PROVIDER, &cancel()).await.unwrap();
+    assert_eq!(
+        fixture.service.calls("GET /v1/models"),
+        2,
+        "a completed result is never cached"
+    );
+    fixture.service.models_wait.store(true, Ordering::SeqCst);
+    let final_cancel = cancel();
+    let pending = {
+        let providers = providers.clone();
+        let token = final_cancel.clone();
+        tokio::spawn(async move { providers.catalog(PROVIDER, &token).await })
+    };
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while fixture.service.calls("GET /v1/models") < 3 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    final_cancel.cancel();
+    assert_eq!(
+        pending.await.unwrap().err().unwrap().code,
+        "account_cancelled"
+    );
+    fixture.service.models_wait.store(false, Ordering::SeqCst);
+    providers.catalog(PROVIDER, &cancel()).await.unwrap();
+    assert_eq!(
+        fixture.service.calls("GET /v1/models"),
+        4,
+        "a cancelled flight cannot absorb the next read"
+    );
+    fixture.service.models_wait.store(true, Ordering::SeqCst);
+    let pending = {
+        let providers = providers.clone();
+        tokio::spawn(async move { providers.catalog(PROVIDER, &cancel()).await })
+    };
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while fixture.service.calls("GET /v1/models") < 5 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    providers.logout(PROVIDER, &cancel()).await.unwrap();
+    assert_eq!(
+        pending.await.unwrap().err().unwrap().code,
+        "account_cancelled",
+        "logout retires the old account's directory request"
+    );
+    root.shutdown().await.unwrap();
+    fixture.service.models_release.notify_waiters();
     std::fs::remove_dir_all(home).unwrap();
 }

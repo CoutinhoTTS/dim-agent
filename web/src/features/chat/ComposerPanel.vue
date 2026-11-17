@@ -6,7 +6,7 @@ import type { DraftAttachments, FileCandidate, ModelId, PermissionPreset, Permis
 import { linkMentions, mentionTrigger, type FileMention, type MentionTrigger } from "../../mentions"
 import { SKILL_TOKEN_PREFIX, namesSkillToken, skillCommandQuery, skillSegments, startsWithSkillToken } from "../../skill-token"
 import { useComposerStore } from "../../stores/composer"
-import { useModelsStore } from "../../stores/models"
+import { useModels } from "../../stores/models"
 import { useSessionsStore } from "../../stores/sessions"
 import { useConnectionStore } from "../../stores/connection"
 import ComposerModelMenu from "./ComposerModelMenu.vue"
@@ -75,7 +75,7 @@ const { t } = useI18n()
 const route = useRoute()
 const router = useRouter()
 
-const models = useModelsStore()
+const models = useModels()
 const sessions = useSessionsStore()
 const connection = useConnectionStore()
 const field = ref<HTMLTextAreaElement>()

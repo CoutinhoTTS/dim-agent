@@ -437,6 +437,7 @@ impl Wire {
             "session.history.latestTurn",
             "session.input.pending.blockPresence",
             "provider.list",
+            "provider.models.query",
         ];
         let empty_methods = !extra.contains(&"session.methods");
         self.2 = empty_methods || hello["params"]["clientName"] == "AcpGateway";
@@ -1353,7 +1354,7 @@ fn model_adoption_names_the_declaring_command_for_undeclared_limits() {
         );
         wire.send(json!({"jsonrpc":"2.0","id":create["id"],"error":{"code":-32000,"message":"Explicit model is unavailable","data":{"appError":"provider_invalid_config"}}}));
         let catalog = wire.read("provider.catalog");
-        assert_eq!(catalog["params"], json!({"providerId":"fixture"}));
+        assert_eq!(catalog["params"], json!({"providerId":"fixture","modelId":"narrow"}));
         wire.reply(
             &catalog,
             json!({"catalog":{"version":1,"disabledModelIds":[],"models":[
@@ -5206,7 +5207,10 @@ fn interactive_configuration_commands_route_and_recover_without_submitting_comma
     }
     fn catalog(wire: &mut Wire) {
         let request = wire.read("provider.catalog");
-        assert_eq!(request["params"], json!({"providerId":"test"}));
+        assert_eq!(
+            request["params"],
+            json!({"providerId":"test","modelId":"model"})
+        );
         let mut capabilities = serde_json::to_value(
             dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384),
         )
@@ -5304,7 +5308,7 @@ fn explicit_model_selection_uses_protocol_field_names_from_tui_and_line_client()
             let home = Home::new();
             let daemon = home.daemon(move |wire| {
             let hello = wire.read("hello");
-            let mut features = vec!["session.create", "session.history", "provider.list", "provider.management"];
+            let mut features = vec!["session.create", "session.history", "provider.list", "provider.management","provider.management.list"];
             if leaf {
                 features.push("ui.leaf.2");
             }
@@ -5331,7 +5335,7 @@ fn explicit_model_selection_uses_protocol_field_names_from_tui_and_line_client()
             wire.send(json!({"jsonrpc":"2.0","id":create["id"],"error":{"code":-32000,"message":"fixture stops here","data":{"appError":"provider_failed"}}}));
             if tui {
                 let catalog = wire.read("provider.catalog");
-                assert_eq!(catalog["params"], json!({"providerId":"fixture"}));
+                assert_eq!(catalog["params"], json!({"providerId":"fixture","modelId":"fixture-model"}));
                 wire.reply(&catalog, json!({"catalog":null}));
                 assert_eq!(wire.trailing_request(), None, "a rejected creation must not attach or submit");
             }
@@ -5543,7 +5547,7 @@ fn a_new_session_shows_the_effort_its_creation_adopted() {
                         "features":["session.create","session.history","session.history.latestTurn","session.input.pending.blockPresence","session.methods","provider.list",
                             "provider.catalog","provider.management"]}),
                     "provider.list" => json!({"providers":[{"providerId":"test","displayName":"Test","enabled":true}]}),
-                    "provider.management" => json!({"providers":[{"providerId":"test","source":"custom",
+                    "provider.management" | "provider.management.list" => json!({"providers":[{"providerId":"test","source":"custom",
                         "displayName":"Test","enabled":true,"version":1,"connection":null,
                         "preferences":{"model":{"reasoningEffort":"high"}}}],"errors":[]}),
                     "provider.catalog" => json!({"catalog":{"version":1,"disabledModelIds":[],"models":[{"id":"model","name":"Model",
@@ -5664,6 +5668,7 @@ fn home_after_new_drops_the_previous_sessions_effort() {
     let daemon = home.daemon(|wire| {
         wire.hello(&[
             "provider.management",
+            "provider.management.list",
             "ui.open",
             "ui.close",
             "ui.attach",
@@ -5689,7 +5694,7 @@ fn home_after_new_drops_the_previous_sessions_effort() {
 
         // `/effort high` adopts the value on the first Session.
         let catalog = wire.read("provider.catalog");
-        assert_eq!(catalog["params"], json!({"providerId":"test"}));
+        assert_eq!(catalog["params"], json!({"providerId":"test","modelId":"model"}));
         let mut capabilities = serde_json::to_value(
             dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384),
         )
@@ -5711,7 +5716,7 @@ fn home_after_new_drops_the_previous_sessions_effort() {
         // `/new` and its first message create the next Session, which has
         // adopted no preference yet.
         let providers = wire.read("provider.management");
-        assert_eq!(providers["params"], json!({}));
+        assert_eq!(providers["params"], json!({"providerId":"test"}));
         wire.reply(
             &providers,
             json!({"providers":[{"providerId":"test","source":"user",
@@ -5917,8 +5922,13 @@ fn repicking_the_current_model_keeps_the_effort() {
                     "features":["session.create","session.history","session.history.latestTurn","session.input.pending.blockPresence","session.methods","provider.list",
                         "provider.catalog","provider.management","provider.selection","provider.select"]}),
                 "provider.list" => json!({"providers":[{"providerId":"test","displayName":"Test","enabled":true}]}),
+                "provider.models.query" => {
+                    let mut page = models::picker_page("test", "Test", catalog.clone());
+                    page["models"][0]["preferences"] = json!({"reasoningEffort":"high"});
+                    page
+                },
                 "provider.catalog" => catalog.clone(),
-                "provider.management" => json!({"providers":[{"providerId":"test","source":"custom",
+                "provider.management" | "provider.management.list" => json!({"providers":[{"providerId":"test","source":"custom",
                     "displayName":"Test","enabled":true,"version":1,"connection":null,
                     "preferences":{"model":{"reasoningEffort":"high"}}}],"errors":[]}),
                 "session.create" => panic!("resuming must not create a Session"),
@@ -6261,7 +6271,10 @@ fn tui_shell_mode_runs_through_session_methods_and_shows_the_recorded_run() {
 fn tui_effort_dialog_selects_the_current_models_effort_and_cancels_without_writing() {
     fn catalog(wire: &mut Wire) {
         let request = wire.read("provider.catalog");
-        assert_eq!(request["params"], json!({"providerId":"test"}));
+        assert_eq!(
+            request["params"],
+            json!({"providerId":"test","modelId":"model"})
+        );
         let mut capabilities = serde_json::to_value(
             dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384),
         )
@@ -6379,7 +6392,7 @@ fn tui_mcp_and_configuration_commands_use_session_methods() {
         assert_eq!(complete["params"], json!({"attemptId":"attempt","callbackUrl":"http://localhost:1/callback?code=c"}));
         wire.reply(&complete, json!({}));
         let request = wire.read("provider.catalog");
-        assert_eq!(request["params"], json!({"providerId":"test"}));
+        assert_eq!(request["params"], json!({"providerId":"test","modelId":"model"}));
         let mut capabilities = serde_json::to_value(dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)).unwrap();
         capabilities["reasoning"] = json!(true);
         wire.reply(&request, json!({"catalog":{"version":1,"disabledModelIds":[],"models":[{"id":"model","name":"Model","capabilities":capabilities,
@@ -6877,7 +6890,7 @@ fn tui_sends_dropped_files_as_links_and_images_by_model_capability() {
         let history = wire.read("session.history");
         wire.reply(&history,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
         let catalog = wire.read("provider.catalog");
-        assert_eq!(catalog["params"], json!({"providerId":"test"}));
+        assert_eq!(catalog["params"], json!({"providerId":"test","modelId":"model"}));
         let capabilities = json!({"modalities":["text"],"toolCalling":true,"streaming":true,"structuredOutput":true,"vision":false,"audio":false,"reasoning":false,"contextWindow":128000,"maxOutputTokens":16384});
         wire.reply(&catalog, json!({"catalog":{"version":1,"disabledModelIds":[],"models":[{"id":"model","name":"Model","capabilities":capabilities}]}}));
         wire.no_context();
@@ -7009,8 +7022,8 @@ fn browser_login_hides_callback_and_refreshes_the_managed_catalog() {
     let daemon = home.daemon(|wire| {
         wire.2 = true;
         let hello = wire.read("hello");
-        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods","provider.list","provider.management","account.login.browser.begin","account.login.browser.complete","provider.refresh"]}));
-        let listed = wire.read("provider.management");
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods","provider.list","provider.management","provider.management.list","account.login.browser.begin","account.login.browser.complete","provider.refresh"]}));
+        let listed = wire.read("provider.management.list");
         wire.reply(&listed,json!({"providers":[{"providerId":"fixture","displayName":"Fixture","account":{"namespace":"account","loginMethods":["browser"]}}]}));
         let begin = wire.read("account.login.browser.begin");
         assert_eq!(begin["params"]["directory"],"https://fixture.invalid");
@@ -7060,8 +7073,8 @@ fn device_login_polls_and_cancels_the_attempt_on_ctrl_c() {
     let daemon = home.daemon(|wire| {
         wire.2 = true;
         let hello = wire.read("hello");
-        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods","provider.list","provider.management","account.login.begin","account.login.status","account.login.cancel"]}));
-        let listed = wire.read("provider.management");
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods","provider.list","provider.management","provider.management.list","account.login.begin","account.login.status","account.login.cancel"]}));
+        let listed = wire.read("provider.management.list");
         wire.reply(&listed,json!({"providers":[{"providerId":"fixture","displayName":"Fixture","account":{"namespace":"account","loginMethods":["device"]}}]}));
         let begin = wire.read("account.login.begin");
         wire.reply(&begin,json!({"attemptId":"device","verificationUri":"https://fixture.invalid/device","userCode":"TEST-CODE","expiresAt":999999}));
@@ -9221,7 +9234,13 @@ fn tui_provider_management_uses_the_production_daemon_and_survives_restart() {
     terminal.until("Disconnect");
     terminal.until("Added Provider flow");
     let mut wire = connect(&home);
-    let snapshot = rpc(&mut wire, "provider.management", json!({}));
+    let overview = rpc(
+        &mut wire,
+        "provider.management.list",
+        json!({"query":"Provider flow"}),
+    );
+    let id = overview["result"]["providers"][0]["providerId"].clone();
+    let snapshot = rpc(&mut wire, "provider.management", json!({"providerId":id}));
     let provider = snapshot["result"]["providers"]
         .as_array()
         .unwrap()
@@ -12019,7 +12038,7 @@ fn tui_provider_create_recovery_preserves_changed_draft_until_confirmation() {
     let daemon = home.daemon(move |wire| {
         wire.2 = true;
         let hello = wire.read("hello");
-        wire.reply(&hello, json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.input.pending.blockPresence","session.methods","provider.management","provider.create","provider.update","provider.probe"]}));
+        wire.reply(&hello, json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.input.pending.blockPresence","session.methods","provider.management","provider.management.list","provider.create","provider.update","provider.probe"]}));
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -12028,7 +12047,7 @@ fn tui_provider_create_recovery_preserves_changed_draft_until_confirmation() {
         let accounts = wire.read("account.providers");
         wire.reply(&accounts, json!([]));
         for _ in 0..2 {
-            let listed = wire.read("provider.management");
+            let listed = wire.read("provider.management.list");
             wire.reply(&listed, json!({"providers":[],"errors":[]}));
         }
         let probe = wire.read("provider.probe");
@@ -12037,10 +12056,10 @@ fn tui_provider_create_recovery_preserves_changed_draft_until_confirmation() {
         let id = create["params"]["providerId"].clone();
         let mut entry = json!({"providerId":id,"source":"custom","displayName":"Recovered provider","enabled":true,"version":1,"preferences":{},"connection":{"driverKind":"openai-compatible","auth":{"type":"bearer"},"baseUrl":"https://first.example/v1","credentialConfigured":true}});
         wire.send(json!({"jsonrpc":"2.0","id":create["id"],"error":{"code":-32000,"message":"Create reply lost"}}));
-        let listed = wire.read("provider.management");
+        let listed = wire.read("provider.management.list");
         wire.send(json!({"jsonrpc":"2.0","id":listed["id"],"error":{"code":-32000,"message":"Snapshot unavailable"}}));
         for _ in 0..2 {
-            let listed = wire.read("provider.management");
+            let listed = wire.read("provider.management.list");
             wire.reply(&listed, json!({"providers":[entry],"errors":[]}));
         }
         let probe = wire.read("provider.probe");
@@ -12051,12 +12070,14 @@ fn tui_provider_create_recovery_preserves_changed_draft_until_confirmation() {
         assert_eq!(update["params"]["providerId"], id);
         assert_eq!(update["params"]["expectedVersion"], 1);
         assert_eq!(update["params"]["patch"], probe["params"]["connection"]);
+        assert_eq!(update["params"]["reply"], "summary");
+        entry.as_object_mut().unwrap().remove("preferences");
         entry["version"] = json!(2);
         entry["connection"]["baseUrl"] = json!("https://second.example/v1");
         entry["modelsListed"] = json!("listed");
         wire.reply(&update, entry.clone());
         // The update stored the listing itself; the CLI never asks again.
-        let listed = wire.read("provider.management");
+        let listed = wire.read("provider.management.list");
         wire.reply(&listed, json!({"providers":[entry],"errors":[]}));
         wait_release.recv_timeout(PATIENCE).unwrap();
     });
@@ -12107,7 +12128,7 @@ fn tui_models_picker_edits_only_the_subagent_model_policy() {
                 "session.history" => json!({"events":[],"through":8,"nextAfter":8,"done":true}),
                 "session.idle" => json!({"sequence":8}),
                 "provider.list" => json!({"providers":[{"providerId":"test","displayName":"Test","enabled":true}]}),
-                "provider.catalog" => json!({"catalog":{"version":1,"disabledModelIds":[],"models":[
+                "provider.catalog" | "provider.models.query" => json!({"catalog":{"version":1,"disabledModelIds":[],"models":[
                     {"id":"model","name":"Model","capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)},
                     {"id":"other","name":"Other","capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)}]}}),
                 "account.providers" => json!([]),
@@ -12128,6 +12149,12 @@ fn tui_models_picker_edits_only_the_subagent_model_policy() {
                 }
                 _ => json!({}),
             };
+            let result = if request["method"] == "provider.models.query" && result.get("catalog").is_some() {
+                let mut page = models::picker_page("test", "Test", result);
+                let query = request["params"]["query"].as_str().unwrap_or("").to_lowercase();
+                page["models"].as_array_mut().unwrap().retain(|row| format!("{} {}", row["model"]["id"],row["model"]["name"]).to_lowercase().contains(&query));
+                page
+            } else { result };
             wire.reply(&request, result);
         }
     });
@@ -12158,7 +12185,9 @@ fn tui_models_picker_edits_only_the_subagent_model_policy() {
     terminal.until("Fixed model");
     terminal.raw(b"\x1b[B\r");
     terminal.until("Fixed subagent model");
-    terminal.write(b"other\r");
+    terminal.write(b"other");
+    thread::sleep(Duration::from_millis(300));
+    terminal.write(b"\r");
     terminal.until("Subagent model policy saved");
     terminal.until("Test / other");
     home.kill(&terminal);
@@ -12227,9 +12256,25 @@ fn tui_models_picker_hides_manage_models_without_management_methods() {
                     {"id":"gone","name":"Gone","missingLimits":[],"capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)}]}}),
                 "provider.catalog" => json!({"catalog":{"version":1,"disabledModelIds":[],"models":[
                     {"id":"model","name":"Model","capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)}]}}),
+                "provider.models.query" => json!({"models":[
+                    {"providerId":"bare","providerName":"Bare","version":1,"preferences":{},"disabled":false,"model":
+                        {"id":"narrow","name":"Narrow","unavailableReason":"limits_undeclared","missingLimits":["contextWindow","maxOutputTokens"],"capabilities":dim_agent_types::CatalogCapabilities::default()}},
+                    {"providerId":"bare","providerName":"Bare","version":1,"preferences":{},"disabled":false,"model":
+                        {"id":"blocked","name":"Blocked","unavailableReason":"provider_unavailable","missingLimits":[],"capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)}},
+                    {"providerId":"bare","providerName":"Bare","version":1,"preferences":{},"disabled":true,"model":
+                        {"id":"gone","name":"Gone","missingLimits":[],"capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)}},
+                    {"providerId":"test","providerName":"Test","version":1,"preferences":{},"disabled":false,"model":
+                        {"id":"model","name":"Model","capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)}}],
+                    "next":null,"empty":[]}),
                 "account.providers" => json!([]),
                 _ => json!({}),
             };
+            let result = if request["method"] == "provider.models.query" && result.get("catalog").is_some() {
+                let mut page = models::picker_page("test", "Test", result);
+                let query = request["params"]["query"].as_str().unwrap_or("").to_lowercase();
+                page["models"].as_array_mut().unwrap().retain(|row| format!("{} {}", row["model"]["id"],row["model"]["name"]).to_lowercase().contains(&query));
+                page
+            } else { result };
             wire.reply(&request, result);
         }
     });
@@ -12291,9 +12336,14 @@ fn tui_models_picker_cycles_reasoning_effort() {
                 "session.history" => json!({"events":[],"through":8,"nextAfter":8,"done":true}),
                 "session.idle" => json!({"sequence":8}),
                 "provider.list" => json!({"providers":[{"providerId":"test","displayName":"Test","enabled":true}]}),
+                "provider.models.query" => {
+                    let mut page = models::picker_page("test", "Test", catalog.clone());
+                    page["models"][0]["preferences"] = preferences.clone();
+                    page
+                },
                 "provider.catalog" => catalog.clone(),
                 "account.providers" => json!([]),
-                "provider.management" => json!({"providers":[{"providerId":"test","source":"custom","displayName":"Test","enabled":true,"version":version,"connection":null,"preferences":{"model":preferences.clone()}}],"errors":[]}),
+                "provider.management" | "provider.management.list" => json!({"providers":[{"providerId":"test","source":"custom","displayName":"Test","enabled":true,"version":version,"connection":null,"preferences":{"model":preferences.clone()}}],"errors":[]}),
                 "provider.preferences.update" => {
                     version += 1;
                     preferences = json!({"reasoningEffort":request["params"]["patch"]["reasoningEffort"]["value"],"serviceTier":"priority"});
@@ -12304,6 +12354,12 @@ fn tui_models_picker_cycles_reasoning_effort() {
                 "provider.select" => json!({}),
                 _ => json!({}),
             };
+            let result = if request["method"] == "provider.models.query" && result.get("catalog").is_some() {
+                let mut page = models::picker_page("test", "Test", result);
+                let query = request["params"]["query"].as_str().unwrap_or("").to_lowercase();
+                page["models"].as_array_mut().unwrap().retain(|row| format!("{} {}", row["model"]["id"],row["model"]["name"]).to_lowercase().contains(&query));
+                page
+            } else { result };
             wire.reply(&request, result);
         }
     });
@@ -12386,7 +12442,7 @@ fn tui_models_picker_writes_the_default_the_launch_workspace_reads() {
                     "session.history" => json!({"events":[],"through":8,"nextAfter":8,"done":true}),
                     "session.idle" => json!({"sequence":8}),
                     "provider.list" => json!({"providers":[{"providerId":"test","displayName":"Test","enabled":true}]}),
-                    "provider.catalog" => json!({"catalog":{"version":1,"disabledModelIds":[],"models":[
+                    "provider.catalog" | "provider.models.query" => json!({"catalog":{"version":1,"disabledModelIds":[],"models":[
                         {"id":"model","name":"Model","capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)}]}}),
                     // The folder answers only the launch workspace: the
                     // attached Session's `/workspace` has no row either.
@@ -12402,7 +12458,13 @@ fn tui_models_picker_writes_the_default_the_launch_workspace_reads() {
                     "account.providers" => json!([]),
                     _ => json!({}),
                 };
-                wire.reply(&request, result);
+                let result = if request["method"] == "provider.models.query" && result.get("catalog").is_some() {
+                let mut page = models::picker_page("test", "Test", result);
+                let query = request["params"]["query"].as_str().unwrap_or("").to_lowercase();
+                page["models"].as_array_mut().unwrap().retain(|row| format!("{} {}", row["model"]["id"],row["model"]["name"]).to_lowercase().contains(&query));
+                page
+            } else { result };
+            wire.reply(&request, result);
             }
         });
         let mut command = home.command();
@@ -12475,11 +12537,17 @@ fn tui_models_picker_draws_its_hint_in_the_interface_language() {
                 "session.history" => json!({"events":[],"through":8,"nextAfter":8,"done":true}),
                 "session.idle" => json!({"sequence":8}),
                 "provider.list" => json!({"providers":[{"providerId":"test","displayName":"Test","enabled":true}]}),
-                "provider.catalog" => json!({"catalog":{"version":1,"disabledModelIds":[],"models":[
+                "provider.catalog" | "provider.models.query" => json!({"catalog":{"version":1,"disabledModelIds":[],"models":[
                     {"id":"model","name":"Model","capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)}]}}),
                 "account.providers" => json!([]),
                 _ => json!({}),
             };
+            let result = if request["method"] == "provider.models.query" && result.get("catalog").is_some() {
+                let mut page = models::picker_page("test", "Test", result);
+                let query = request["params"]["query"].as_str().unwrap_or("").to_lowercase();
+                page["models"].as_array_mut().unwrap().retain(|row| format!("{} {}", row["model"]["id"],row["model"]["name"]).to_lowercase().contains(&query));
+                page
+            } else { result };
             wire.reply(&request, result);
         }
     });
@@ -12502,391 +12570,90 @@ fn tui_models_picker_draws_its_hint_in_the_interface_language() {
     daemon.join().unwrap();
 }
 
-/// `/models` sends `provider.refresh` for a usable provider whose catalog is
-/// empty when the daemon says its models can be listed, draws its rows without
-/// waiting for that listing, shows the models a late listing returns in the
-/// same open picker, keeps the row of a refresh that fails, and asks an
-/// unchanged catalog once in a connection while a written record asks once
-/// more.
 #[test]
-fn tui_models_picker_refills_an_empty_provider_catalog() {
+fn tui_models_picker_reads_pages_on_demand_and_reopens_without_a_cache() {
     let home = Home::new();
-    let refreshed = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
-    let seen = refreshed.clone();
-    let listed = std::sync::Arc::new(std::sync::Mutex::new(0usize));
-    let counted = listed.clone();
-    let stored = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::<
-        String,
-        Value,
-    >::new()));
-    let kept = stored.clone();
-    let changed = stored.clone();
-    let (release, wait_release) = std::sync::mpsc::channel::<()>();
-    let daemon = home.daemon(move |wire| {
-        wire.2 = true;
-        // One writer at a time: the listing a provider is slow to give is
-        // answered from another thread once the test releases it, so the
-        // daemon keeps serving the requests the picker makes meanwhile.
-        let writes = std::sync::Arc::new(std::sync::Mutex::new(()));
-        let held_writes = writes.clone();
-        // One listing is held in this test; the loop serves the rest.
-        let mut wait_release = Some(wait_release);
-        let mut line = String::new();
-        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
-            let request: Value = serde_json::from_str(&line).unwrap();
-            line.clear();
-            if wire.2 && wire.empty_state(&request) { continue; }
-            let answer = match request["method"].as_str().unwrap() {
-                "hello" => Some(json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,
-                    "daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.input.pending.blockPresence","session.methods",
-                    "provider.list","provider.catalog","provider.refresh"]})),
-                "session.create" => panic!("resuming must not create a Session"),
-                "session.attach" => Some(attach_record(&request)),
-                "session.history" => Some(json!({"events":[],"through":8,"nextAfter":8,"done":true})),
-                "session.idle" => Some(json!({"sequence":8})),
-                "provider.list" => {
-                    *counted.lock().unwrap() += 1;
-                    Some(json!({"providers":[
-                        {"providerId":"fresh","displayName":"Fresh","enabled":true,"remoteModelList":true},
-                        {"providerId":"broken","displayName":"Broken","enabled":true,"remoteModelList":true},
-                        {"providerId":"unlisted","displayName":"Unlisted","enabled":true,"remoteModelList":false}]}))
-                }
-                "provider.catalog" => {
-                    let provider = request["params"]["providerId"].as_str().unwrap();
-                    let catalog = stored.lock().unwrap().get(provider).cloned().unwrap_or_else(|| {
-                        json!({"version":1,"disabledModelIds":[],"models":[]})
-                    });
-                    Some(json!({"catalog":catalog}))
-                }
-                "provider.refresh" => {
-                    let provider = request["params"]["providerId"].as_str().unwrap().to_owned();
-                    seen.lock().unwrap().push(provider.clone());
-                    if provider == "broken" {
-                        let _guard = writes.lock().unwrap();
-                        wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{"code":-32000,"message":"listing failed"}}));
-                        None
-                    } else {
-                        // Hold the listing: the picker may not wait for it.
-                        let mut socket = wire.0.get_ref().try_clone().unwrap();
-                        let stored = kept.clone();
-                        let writes = held_writes.clone();
-                        let id = request["id"].clone();
-                        let wait = wait_release.take().expect("one held listing");
-                        thread::spawn(move || {
-                            wait.recv_timeout(PATIENCE).unwrap();
-                            let catalog = json!({"version":2,"disabledModelIds":[],"models":[
-                                {"id":"vendor/model-a","name":"Model A","unavailableReason":null,
-                                    "capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)},
-                                {"id":"vendor/model-b","name":"Model B","unavailableReason":null,
-                                    "capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)}]});
-                            stored.lock().unwrap().insert(provider, catalog.clone());
-                            let _guard = writes.lock().unwrap();
-                            writeln!(socket, "{}", json!({"jsonrpc":"2.0","id":id,"result":catalog}))
-                                .unwrap();
-                            socket.flush().unwrap();
-                        });
-                        None
-                    }
-                }
-                "account.providers" => Some(json!([])),
-                _ => Some(json!({})),
-            };
-            if let Some(result) = answer {
-                let _guard = writes.lock().unwrap();
-                wire.reply(&request, result);
-            }
-        }
-    });
-    let mut command = home.command();
-    command.env("LC_ALL", "C");
-    let mut terminal = Terminal::resume_tui(command);
-    terminal.until("test / model");
-    terminal.write(b"/models\r");
-    // The listing is still held: the picker draws every row it has.
-    terminal.until("Fresh: no models · dimcode models fresh --refresh");
-    terminal.until("Broken: no models · dimcode models broken --refresh");
-    terminal.until("Unlisted: no models · add a model with provider.models.create");
-    release.send(()).unwrap();
-    // The listing that arrives late fills the picker that is already open.
-    terminal.until("Fresh / vendor/model-a");
-    terminal.until("Fresh / vendor/model-b");
-    // Closing and reopening in the same connection asks no provider again,
-    // though the failed refresh kept its row.
-    terminal.write(b"\x1b");
-    thread::sleep(Duration::from_millis(500));
-    terminal.write(b"/models\r");
-    let deadline = Instant::now() + PATIENCE;
-    while *listed.lock().unwrap() < 3 {
-        assert!(Instant::now() < deadline, "the picker did not open again");
-        thread::sleep(Duration::from_millis(10));
-    }
-    terminal.until("Broken: no models · dimcode models broken --refresh");
-    terminal.until("Fresh / vendor/model-a");
-    // Another client writes the record (an enable or a re-point), which moves
-    // its catalog version: the same empty catalog is asked once more.
-    changed.lock().unwrap().insert(
-        "broken".to_owned(),
-        json!({"version":3,"disabledModelIds":[],"models":[]}),
-    );
-    terminal.write(b"\x1b");
-    thread::sleep(Duration::from_millis(500));
-    terminal.write(b"/models\r");
-    let deadline = Instant::now() + PATIENCE;
-    while *listed.lock().unwrap() < 4 {
-        assert!(
-            Instant::now() < deadline,
-            "the picker did not open after the write"
-        );
-        thread::sleep(Duration::from_millis(10));
-    }
-    terminal.until("Broken: no models · dimcode models broken --refresh");
-    // `listed` counts provider.list calls, and a refill reply re-reads the
-    // list, so reaching 4 does not prove this open ran; a repaint of the
-    // previous picker can satisfy the row above. Wait for the refresh the
-    // assertion below checks before the deliberate kill.
-    let refresh_deadline = Instant::now() + PATIENCE;
-    while refreshed.lock().unwrap().len() < 3 {
-        assert!(
-            Instant::now() < refresh_deadline,
-            "the written catalog version was not listed again: {:?}",
-            refreshed.lock().unwrap()
-        );
-        thread::sleep(Duration::from_millis(10));
-    }
-    home.kill(&terminal);
-    terminal.wait();
-    daemon.join().unwrap();
-    assert_eq!(
-        *refreshed.lock().unwrap(),
-        ["fresh".to_owned(), "broken".to_owned(), "broken".to_owned()],
-        "one refresh per catalog version that can be listed, none on an unchanged reopen"
-    );
-}
-
-/// A refill that lands after the picker closed is recorded, so the provider
-/// is not asked again, but it starts no re-read: the next open is what reads
-/// the catalog the listing stored.
-#[test]
-fn tui_models_picker_does_not_reread_when_a_refill_lands_closed() {
-    let home = Home::new();
-    let listed = std::sync::Arc::new(std::sync::Mutex::new(0usize));
-    let counted = listed.clone();
-    let refreshed = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
-    let seen = refreshed.clone();
-    let stored = std::sync::Arc::new(std::sync::Mutex::new(Value::Null));
-    let kept = stored.clone();
-    let (release, wait_release) = std::sync::mpsc::channel::<()>();
-    let daemon = home.daemon(move |wire| {
-        wire.2 = true;
-        let mut wait_release = Some(wait_release);
-        let mut line = String::new();
-        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
-            let request: Value = serde_json::from_str(&line).unwrap();
-            line.clear();
-            if wire.2 && wire.empty_state(&request) { continue; }
-            let answer = match request["method"].as_str().unwrap() {
-                "hello" => Some(json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,
-                    "daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.input.pending.blockPresence","session.methods",
-                    "provider.list","provider.catalog","provider.refresh"]})),
-                "session.create" => panic!("resuming must not create a Session"),
-                "session.attach" => Some(attach_record(&request)),
-                "session.history" => Some(json!({"events":[],"through":8,"nextAfter":8,"done":true})),
-                "session.idle" => Some(json!({"sequence":8})),
-                "provider.list" => {
-                    *counted.lock().unwrap() += 1;
-                    Some(json!({"providers":[
-                        {"providerId":"fresh","displayName":"Fresh","enabled":true,"remoteModelList":true}]}))
-                }
-                "provider.catalog" => {
-                    let catalog = kept.lock().unwrap().clone();
-                    Some(json!({"catalog":catalog}))
-                }
-                "provider.refresh" => {
-                    seen.lock()
-                        .unwrap()
-                        .push(request["params"]["providerId"].as_str().unwrap().to_owned());
-                    let mut socket = wire.0.get_ref().try_clone().unwrap();
-                    let stored = stored.clone();
-                    let id = request["id"].clone();
-                    let wait = wait_release.take().expect("one held listing");
-                    thread::spawn(move || {
-                        wait.recv_timeout(PATIENCE).unwrap();
-                        let catalog = json!({"version":2,"disabledModelIds":[],"models":[
-                            {"id":"vendor/model-a","name":"Model A","unavailableReason":null,
-                                "capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)}]});
-                        *stored.lock().unwrap() = catalog.clone();
-                        writeln!(socket, "{}", json!({"jsonrpc":"2.0","id":id,"result":catalog}))
-                            .unwrap();
-                        socket.flush().unwrap();
-                    });
-                    None
-                }
-                "account.providers" => Some(json!([])),
-                _ => Some(json!({})),
-            };
-            if let Some(result) = answer {
-                wire.reply(&request, result);
-            }
-        }
+    let daemon = home.daemon(|wire| {
+        wire.hello(&[]);
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, attach_record(&attach));
+        let history = wire.read("session.history");
+        wire.reply(&history, json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+        wire.no_context();
+        let accounts = wire.read("account.providers");
+        wire.reply(&accounts, json!([]));
+        let first = wire.read("provider.models.query");
+        assert!(first["params"]["after"].is_null());
+        wire.reply(&first, json!({"models":[],"empty":[{"providerId":"empty","providerName":"Empty","reason":{"kind":"no_models","listable":true}}],"next":{"providerId":"empty","modelId":""}}));
+        let next = wire.read("provider.models.query");
+        assert_eq!(next["params"]["after"], json!({"providerId":"empty","modelId":""}));
+        let snapshot = json!({"catalog":{"version":1,"disabledModelIds":[],"models":[{"id":"second","name":"Second","capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000,16_384)}]}});
+        wire.reply(&next, models::picker_page("test", "Test", snapshot.clone()));
+        let reopened = wire.read("provider.models.query");
+        assert!(reopened["params"]["after"].is_null());
+        wire.reply(&reopened, models::picker_page("test", "Changed", snapshot));
+        wire.hold();
     });
     let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("test / model");
     terminal.write(b"/models\r");
-    terminal.until("Fresh: no models · dimcode models fresh --refresh");
-    terminal.write(b"\x1b");
+    terminal.until("Empty: no models");
+    terminal.until("Next page");
+    terminal.write(b"\r");
+    terminal.until("Test / second");
+    terminal.raw(b"\x1b");
     terminal.until("Ask anything...");
-    let opens = *listed.lock().unwrap();
-    release.send(()).unwrap();
-    thread::sleep(Duration::from_millis(500));
-    assert_eq!(
-        *listed.lock().unwrap(),
-        opens,
-        "a refill that lands with the picker closed starts no re-read"
-    );
-    // The next open reads the catalog the refresh stored, and asks nothing.
     terminal.write(b"/models\r");
-    terminal.until("Fresh / vendor/model-a");
-    assert_eq!(
-        refreshed.lock().unwrap().as_slice(),
-        ["fresh".to_owned()],
-        "the provider recorded its refill; the reopen asks again"
-    );
+    terminal.until("Changed / second");
     home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
 }
 
-/// A provider that offers nothing selectable keeps a row naming it and the
-/// reason: no models with the refresh command when the daemon can list them,
-/// no models with the add method when it cannot, an unreadable catalog, or
-/// the unavailable and disabled counts together. Undeclared limits count as
-/// the reason only when declaring them would unblock the model: a model
-/// unavailable for another reason keeps that reason, and a disabled one is
-/// not counted. The picker refills only the provider whose catalog is empty
-/// and can be listed: a provider whose models are its bundled catalog's, one
-/// the daemon cannot list and one whose catalog cannot be read are never
-/// refreshed.
 #[test]
 fn tui_models_picker_names_every_provider_with_no_selectable_model() {
     let home = Home::new();
-    let refreshed = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
-    let seen = refreshed.clone();
-    // The daemon reports the re-list that follows its refill: after the
-    // second list's last catalog reply the client has nothing in flight, so
-    // the kill below cannot interrupt a reply.
-    let (settled, wait_settled) = std::sync::mpsc::channel();
-    let daemon = home.daemon(move |wire| {
-        wire.2 = true;
-        let mut version = 1u32;
-        let mut catalogs = 0usize;
-        let mut line = String::new();
-        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
-            let request: Value = serde_json::from_str(&line).unwrap();
-            line.clear();
-            if wire.2 && wire.empty_state(&request) { continue; }
-            let model = |id: &str, reason: Option<&str>, declared: bool| {
-                let reason = reason.map_or(Value::Null, |reason| json!(reason));
-                let capabilities = if declared {
-                    dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)
-                } else {
-                    dim_agent_types::CatalogCapabilities::default()
-                };
-                let missing = if declared {
-                    json!([])
-                } else {
-                    json!(["contextWindow", "maxOutputTokens"])
-                };
-                json!({"id":id,"name":id,"unavailableReason":reason,
-                    "missingLimits":missing,"capabilities":capabilities})
-            };
-            let result = match request["method"].as_str().unwrap() {
-                "hello" => json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,
-                    "daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.input.pending.blockPresence","session.methods",
-                    "provider.list","provider.catalog"]}),
-                "session.create" => panic!("resuming must not create a Session"),
-                "session.attach" => {
-                    let mut record = attach_record(&request);
-                    record["model"] = json!({"providerId":"ready","modelId":"vendor/model-a"});
-                    record
-                }
-                "session.history" => json!({"events":[],"through":8,"nextAfter":8,"done":true}),
-                "session.idle" => json!({"sequence":8}),
-                "provider.list" => json!({"providers":[
-                    {"providerId":"ready","displayName":"Ready","enabled":true,"remoteModelList":true},
-                    {"providerId":"empty","displayName":"Empty","enabled":true},
-                    {"providerId":"mixed","displayName":"Mixed","enabled":true},
-                    {"providerId":"hidden","displayName":"All disabled","enabled":true},
-                    {"providerId":"blank","displayName":"Blank","enabled":true,"remoteModelList":true},
-                    {"providerId":"manual","displayName":"Manual","enabled":true,"remoteModelList":false},
-                    {"providerId":"broken","displayName":"Broken","enabled":true}]}),
-                "provider.catalog" => {
-                    let provider = request["params"]["providerId"].as_str().unwrap();
-                    catalogs += 1;
-                    let last = catalogs == 14;
-                    if provider == "broken" {
-                        wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
-                            "code":-32000,"message":"catalog read failed"}}));
-                        if last {
-                            settled.send(()).ok();
-                        }
-                        continue;
-                    }
-                    let (models, disabled) = match provider {
-                        "empty" => (
-                            json!([
-                                model("vendor/embed-a", Some("provider_unavailable"), false),
-                                model("vendor/embed-b", Some("provider_unavailable"), false)]),
-                            json!([]),
-                        ),
-                        "mixed" => (
-                            json!([
-                                model("vendor/embed-c", Some("provider_unavailable"), true),
-                                model("vendor/hidden-a", None, true),
-                                model("vendor/hidden-c", Some("limits_undeclared"), false)]),
-                            json!(["vendor/hidden-a", "vendor/hidden-c"]),
-                        ),
-                        "hidden" => (
-                            json!([model("vendor/hidden-b", None, true)]),
-                            json!(["vendor/hidden-b"]),
-                        ),
-                        "blank" | "manual" => (json!([]), json!([])),
-                        _ => (json!([model("vendor/model-a", None, true)]), json!([])),
-                    };
-                    wire.reply(
-                        &request,
-                        json!({"catalog":{"version":version,"disabledModelIds":disabled,"models":models}}),
-                    );
-                    if last {
-                        settled.send(()).ok();
-                    }
-                    continue;
-                }
-                "provider.refresh" => {
-                    seen.lock()
-                        .unwrap()
-                        .push(request["params"]["providerId"].as_str().unwrap().to_owned());
-                    // The refresh stores the listed catalog under a new
-                    // version, and the read reports it, so the re-list does
-                    // not ask for the same refill again.
-                    version = 2;
-                    json!({"version":version,"disabledModelIds":[],"models":[]})
-                }
-                "account.providers" => json!([]),
-                _ => json!({}),
-            };
-            wire.reply(&request, result);
+    let daemon = home.daemon(|wire| {
+        wire.hello(&[]);
+        let attach = wire.read("session.attach");
+        let mut record = attach_record(&attach);
+        record["model"] = json!({"providerId":"ready","modelId":"vendor/model-a"});
+        wire.reply(&attach, record);
+        let history = wire.read("session.history");
+        wire.reply(&history, json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+        wire.no_context();
+        let accounts = wire.read("account.providers");
+        wire.reply(&accounts, json!([]));
+        let query = wire.read("provider.models.query");
+        let mut rows = Vec::new();
+        for (provider,name,id,reason,disabled) in [
+            ("ready","Ready","vendor/model-a",None,false),
+            ("empty","Empty","vendor/embed-a",Some("provider_unavailable"),false),
+            ("empty","Empty","vendor/embed-b",Some("provider_unavailable"),false),
+            ("mixed","Mixed","vendor/embed-c",Some("provider_unavailable"),false),
+            ("mixed","Mixed","vendor/hidden-a",None,true),
+            ("mixed","Mixed","vendor/hidden-c",Some("limits_undeclared"),true),
+            ("hidden","All disabled","vendor/hidden-b",None,true),
+        ] {
+            rows.push(json!({"providerId":provider,"providerName":name,"version":1,"preferences":{},"disabled":disabled,"model":{"id":id,"name":id,"unavailableReason":reason,"capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000,16_384)}}));
         }
+        wire.reply(&query,json!({"models":rows,"next":null,"empty":[
+            {"providerId":"blank","providerName":"Blank","reason":{"kind":"no_models","listable":true}},
+            {"providerId":"manual","providerName":"Manual","reason":{"kind":"no_models","listable":false}},
+            {"providerId":"broken","providerName":"Broken","reason":{"kind":"unreadable"}}
+        ]}));
+        wire.hold();
     });
     let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("ready / vendor/model-a");
     terminal.write(b"/models\r");
     terminal.until("Ready / vendor/model-a");
-    terminal.until("Empty: 2 models unavailable · dimcode models empty");
-    terminal.until("Mixed: 2 unavailable and 1 disabled · dimcode models mixed");
-    terminal.until("All disabled: 1 model disabled · dimcode models hidden");
-    terminal.until("Blank: no models · dimcode models blank --refresh");
-    terminal.until("Manual: no models · add a model with provider.models.create");
-    terminal.until("Broken: catalog unreadable · dimcode models broken");
+    terminal.until_anywhere("Empty: 2 models unavailable · dimcode models empty");
+    terminal.until_anywhere("Mixed: 2 unavailable and 1 disabled · dimcode models mixed");
+    terminal.until_anywhere("All disabled: 1 model disabled · dimcode models hidden");
+    terminal.until_anywhere("Blank: no models · dimcode models blank --refresh");
+    terminal.until_anywhere("Manual: no models · add a model with provider.models.create");
+    terminal.until_anywhere("Broken: catalog unreadable · dimcode models broken");
     assert!(
         !terminal.transcript.contains("Ready / vendor/hidden-b"),
         "a disabled model is not selectable"
@@ -12895,18 +12662,9 @@ fn tui_models_picker_names_every_provider_with_no_selectable_model() {
         !terminal.transcript.contains("need a window"),
         "a model unavailable for another reason, and a disabled one, raise no limits row"
     );
-    wait_settled
-        .recv_timeout(PATIENCE)
-        .expect("the picker settles after its re-list");
     home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
-    let refreshed = refreshed.lock().unwrap();
-    assert_eq!(
-        refreshed.as_slice(),
-        ["blank".to_owned()],
-        "only the empty catalog the daemon can list is refreshed"
-    );
 }
 
 #[test]

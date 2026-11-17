@@ -609,7 +609,7 @@ async fn web_entry_admits_token_holders_to_sessions_and_safe_management() {
     );
     for (method, params) in [
         ("provider.list", json!({})),
-        ("provider.management", json!({})),
+        ("provider.management.list", json!({})),
         ("account.providers", json!({})),
         ("account.codex.status", json!({})),
         ("account.grok.status", json!({})),
