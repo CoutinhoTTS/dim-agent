@@ -217,7 +217,10 @@ jobs:
         run: node scripts/alpha-version.mjs "$RELEASE_VERSION"
       - name: Stamp the build
         shell: bash
-        run: echo "DIM_BUILD_ID=$(node -p 'require(\"node:crypto\").randomUUID()')" >> "$GITHUB_ENV"
+        run: |
+          stamp="$(node -p 'require("node:crypto").randomUUID()')"
+          : "${stamp:?Failed to generate a build ID}"
+          printf 'DIM_BUILD_ID=%s\n' "$stamp" >> "$GITHUB_ENV"
       - name: Build native payload for target architecture
         env:
           LINUX_IMAGE: ${{ matrix.linux_image }}
