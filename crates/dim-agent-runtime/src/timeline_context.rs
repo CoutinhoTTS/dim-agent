@@ -149,7 +149,10 @@ impl TimelineContext {
     }
 
     /// Starts dispatch once every capability of the subtree is Active.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one parameter per handle a branch's TimelineContext is built from"
+    )]
     pub(crate) fn start(
         id: String,
         ctx: Ctx,

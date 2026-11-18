@@ -564,8 +564,7 @@ async fn temporary_startup_connections_execute_all_formats_without_sharing_or_pe
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn startup_admission_rejects_unsafe_connections_and_ambiguous_models_without_creating_sessions()
- {
+async fn startup_admission_rejects_unsafe_connections_and_ambiguous_models_without_sessions() {
     let home = std::env::temp_dir().join(format!("dim-admission-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&home).unwrap();
     let seen = Seen::default();

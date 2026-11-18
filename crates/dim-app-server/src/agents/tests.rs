@@ -107,7 +107,9 @@ impl rutis::host::DynPlugin for ProgressingProcess {
             let mut completed = self.completed.subscribe();
             while *completed.borrow_and_update() < self.step {
                 tokio::select! {
-                    result = completed.changed() => result.map_err(|error| rutis::host::ErrorKind::PluginFailed(error.into()))?,
+                    result = completed.changed() => {
+                        result.map_err(|error| rutis::host::ErrorKind::PluginFailed(error.into()))?
+                    }
                     _ = ctx.cancelled() => return Err(rutis::host::ErrorKind::PluginFailed("opening cancelled".into()).into()),
                 }
             }

@@ -319,7 +319,10 @@ struct ManifestFile {
     name: String,
     version: Option<String>,
     #[serde(default)]
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "the manifest's `description` is accepted and not read"
+    )]
     description: Option<String>,
     dependencies: Option<String>,
     code: Option<CodeFile>,

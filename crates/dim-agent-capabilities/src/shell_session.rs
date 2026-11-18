@@ -305,7 +305,10 @@ pub struct ShellSession {
     lifecycle: CancellationToken,
     host: Arc<HostPlatform>,
     timeline: Arc<Timeline>,
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "stored at composition; no shell path dispatches through it"
+    )]
     dispatcher: Arc<Dispatcher>,
     /// SessionStore's output ownership (ADR 013); absent in hosts without
     /// native storage, where shell output has no owner.

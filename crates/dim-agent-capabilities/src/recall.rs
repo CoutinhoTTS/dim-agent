@@ -147,19 +147,31 @@ impl RecallTool {
         if arguments.open.is_none() && (arguments.about.is_some() || arguments.tool.is_some()) {
             return tokio::select! {
                 _ = cancel.cancelled() => Err(HostError::Cancelled("recall".into())),
-                result = search::run(&self.0, &branch, &context.branch_id, &arguments, &cancel) => result,
+                result = search::run(&self.0, &branch, &context.branch_id, &arguments, &cancel) =>
+                    result,
             };
         }
         let head = branch.sequence();
         if arguments.open.is_some() {
             return tokio::select! {
                 _ = cancel.cancelled() => Err(HostError::Cancelled("recall".into())),
-                answer = search::open(&self.0, &branch, &context.branch_id, head, &arguments, &cancel) => answer,
+                answer =
+                    search::open(&self.0, &branch, &context.branch_id, head, &arguments, &cancel) =>
+                    answer,
             };
         }
         tokio::select! {
             _ = cancel.cancelled() => Err(HostError::Cancelled("recall".into())),
-            answer = search::index(&self.0, &branch, &context.branch_id, &context.turn_id, head, &arguments, &cancel) => answer,
+            answer = search::index(
+                &self.0,
+                &branch,
+                &context.branch_id,
+                &context.turn_id,
+                head,
+                &arguments,
+                &cancel,
+            ) =>
+                answer,
         }
     }
 }

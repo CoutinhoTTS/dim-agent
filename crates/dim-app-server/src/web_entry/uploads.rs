@@ -108,9 +108,11 @@ pub(super) async fn upload(
         );
     };
     let closing = site.stopping.clone();
+    let upload = receive(site.clone(), session, options.image, &mut multipart);
+    let limit = Duration::from_secs(120);
     let received = tokio::select! {
         _ = closing.cancelled() => Err(RpcError::interrupted()),
-        result = tokio::time::timeout(Duration::from_secs(120), receive(site.clone(), session, options.image, &mut multipart)) => {
+        result = tokio::time::timeout(limit, upload) => {
             result.unwrap_or_else(|_| Err(RpcError::invalid("Upload timed out")))
         }
     };

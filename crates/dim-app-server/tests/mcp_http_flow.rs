@@ -1874,7 +1874,8 @@ async fn legacy_sse_accepts_default_message_events() {
         move || { let rx = messages.subscribe(); let stop = stop.clone(); async move {
             let endpoint = futures_util::stream::once(async { Ok::<_, Infallible>(Event::default().event("endpoint").data("/post?sessionId=fixture")) });
             let replies = futures_util::stream::unfold(rx, |mut rx| async move {
-                rx.recv().await.ok().map(|data| (Ok::<_, Infallible>(Event::default().data(data)), rx))
+                let data = rx.recv().await.ok()?;
+                Some((Ok::<_, Infallible>(Event::default().data(data)), rx))
             });
             Sse::new(endpoint.chain(replies).take_until(stop.cancelled_owned()))
         }}

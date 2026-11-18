@@ -19,7 +19,9 @@ impl Owner {
     fn on_record(&self, record: &SessionBroadcastEvent) {
         if let SessionBroadcastEvent::Event { branch_id, event } = record
             && branch_id == "main"
-            && matches!(&event.kind, EventKind::InputApplied(data) if data.mode.unwrap_or(dim_agent_types::InputMode::Queue) == dim_agent_types::InputMode::Queue)
+            && matches!(&event.kind, EventKind::InputApplied(data)
+                if data.mode.unwrap_or(dim_agent_types::InputMode::Queue)
+                    == dim_agent_types::InputMode::Queue)
         {
             notify(
                 &self.ctx,
