@@ -137,7 +137,7 @@ pub fn session_entry(body: String, scope: PromptScope) -> Option<PromptEntry> {
 
 /// Mirrors TS `formatCurrentDate`.
 pub fn local_today() -> String {
-    chrono::Local::now().format("%Y-%m-%d").to_string()
+    jiff::Zoned::now().strftime("%Y-%m-%d").to_string()
 }
 
 pub(crate) fn sha256_version(text: &str) -> String {
