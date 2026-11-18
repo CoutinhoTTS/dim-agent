@@ -86,7 +86,13 @@ export async function startModelFixture({respond, logFile}) {
       } catch {
         parsed = {};
       }
-      const entry = {index: requests.length, url: request.url, method: request.method, body: parsed};
+      const entry = {
+        index: requests.length,
+        url: request.url,
+        method: request.method,
+        authorization: request.headers.authorization ?? request.headers['x-api-key'],
+        body: parsed,
+      };
       requests.push(entry);
       if (logFile) appendFileSync(logFile, `${JSON.stringify(entry)}\n`);
       // A provider's model listing, which the provider panel probes; every

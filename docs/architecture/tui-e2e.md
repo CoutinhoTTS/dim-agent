@@ -9,7 +9,7 @@ contract tests, and line-mode CLI flows.
 ## Command
 
 ```sh
-cargo build --locked -p dimcode
+cargo build --locked -p dimcode -p dim-app-server
 node scripts/tui-tmux/run.mjs
 ```
 
@@ -33,6 +33,7 @@ Prerequisites:
 | Requirement | Notes |
 | --- | --- |
 | `target/debug/dimcode` | Built from the checkout; `--binary` names another build |
+| `target/debug/dim-app-server` | The provider scenario's `--server` profile; `--binary` looks for it beside the CLI, and the case names the build command when it is missing |
 | tmux | 3.2 or newer, on macOS or Linux |
 | Node.js | The version in `.node-version`; the suite and its fixture are plain ES modules |
 | No network | The model fixture listens on loopback; the suite sets `DIMCODE_UPDATE_CHECK=0` |
@@ -52,7 +53,7 @@ bounded:
 | Product home | `--home <case>/home` with `rust/` at mode 0700; the product home `~/.dimcode` is never touched |
 | User home | `HOME=<case>/user-home` and `TMPDIR=<case>/tmp`, so terminal helpers and tools write nothing outside the case |
 | tmux server | One per case, on `<case>/tmux.sock`; `remain-on-exit` keeps the pane's last screen and its exit status |
-| Daemon | The production App Server: the CLI's own `app-server` subcommand (`--server` is not used) |
+| Daemon | The production App Server. Most cases run the CLI's own `app-server` subcommand with `--model-config`; the provider case runs the standalone `dim-app-server` next to the CLI (`--server`, no `--model-config`), so `/connect` manages real providers in the case's home |
 | Model | A loopback OpenAI-compatible fixture; prompts map to fixed replies and scripted tool calls (`exec`, `ask_user`) |
 | Environment | `TERM=screen-256color`, `LANG=en_US.UTF-8`, `SHELL=/bin/sh`, `locale: en` in `config.json` |
 
@@ -97,8 +98,8 @@ the home and raw streams in place for inspection.
 | approvals | `question_panel_answer_reaches_the_next_request` | The question panel's options, the review step, and the chosen label in the tool result the model receives |
 | tasks | `background_task_row_and_tasks_panel` | A background command's task row, `1 in background`, the Background tasks panel, and stopping it with `x` |
 | members | `member_conversation_and_stop_all` | A delegated member's task row, the read-only member conversation, `Ctrl+X` stop-all, and the leader's settled turn |
-| providers | `provider_panel_adds_and_keeps_a_custom_provider` | `/connect` adds a custom provider against the fixture, tests and applies it, and the product home keeps it across a daemon restart |
-| suggestions | `prompt_suggestion_offers_and_takes_the_next_message` | A completed turn offers the next message; `Tab` takes it in scrollback and keeps the focus in fullscreen, `Right` takes it in both, `Escape` and an edit withdraw it, and taking it never sends |
+| providers | `provider_panel_adds_and_keeps_a_custom_provider` | On the production App Server profile (`--server`, no `--model-config`) `/connect` adds a custom provider against the fixture, tests and applies it, a turn uses its key, and the product home keeps it across a daemon restart |
+| suggestions | `prompt_suggestion_offers_and_takes_the_next_message` | Every completed turn draws its own numbered offer; `Tab` takes it in scrollback, `Tab` keeps the focus in fullscreen (and `Enter` sends nothing) while `Right` takes it there, and `Escape` withdraws it without asking again |
 | daemon | `daemon_stop_reports_disconnect_and_resume_replays_history` | A stopped daemon keeps the draft, names `dimcode --resume`, exits cleanly with the terminal restored; the resumed session replays history and accepts a new prompt |
 | launcher | `npm_launcher_streams_and_passes_interrupts` | The npm launcher starts the native TUI, streams an answer, and a second `Ctrl+C` exits 130 with the terminal restored |
 

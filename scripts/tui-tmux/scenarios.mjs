@@ -49,6 +49,17 @@ async function waitForRequest(model, predicate, {timeout = 20_000, describe = 'a
   }
 }
 
+/// A rejected gesture has no event of its own, so the evidence is the window
+/// in which nothing reached the fixture.
+async function settleWithout(model, predicate, {timeout = 1500} = {}) {
+  const deadline = Date.now() + timeout;
+  for (;;) {
+    if (model.requests.some((entry) => predicate(entry.body))) return false;
+    if (Date.now() >= deadline) return true;
+    await sleep(100);
+  }
+}
+
 async function exitWith(terminal, expected = 0) {
   terminal.send('/exit');
   terminal.key('Enter');
@@ -682,10 +693,10 @@ const scenarios = [
   {
     name: 'provider_panel_adds_and_keeps_a_custom_provider',
     area: 'providers',
-    title: 'The provider panel adds a custom provider against the fixture and keeps it after a restart',
+    title: 'The provider panel adds a custom provider against the fixture on the production App Server and keeps it after a restart',
     async run(tui) {
       await tui.setup({respond: () => ({text: ANSWER})});
-      const open = () => tui.launch([], {waitForComposer: true, modelConfig: false});
+      const open = () => tui.launch([], {waitForComposer: true, server: true});
       const terminal = await open();
 
       terminal.send('/connect');
@@ -704,6 +715,7 @@ const scenarios = [
       terminal.key('Enter');
       terminal.key('Enter');
       await terminal.waitFor('Disable provider', {timeout: 40_000});
+      assert(terminal.capture().includes('Added Fixture provider'), 'the create was applied');
       terminal.key('Escape');
       await terminal.waitFor('Enter open', {describe: 'the providers list again'});
       await terminal.waitForAbsent('Disable provider');
@@ -711,6 +723,16 @@ const scenarios = [
       await terminal.waitFor('302.AI', {describe: 'the cleared provider filter'});
       terminal.key('Escape');
       await terminal.waitForAbsent('Providers');
+
+      await terminal.sendPrompt('a turn through the added provider');
+      await terminal.waitFor(ANSWER);
+      const turn = await waitForRequest(
+        tui.model,
+        (request) =>
+          (request.tools ?? []).length > 0 && userText(request).includes('a turn through the added provider'),
+        {describe: 'the turn through the added provider'},
+      );
+      assert.equal(turn.authorization, 'Bearer fixture-key', 'the turn used the added provider');
       await exitWith(terminal);
 
       tui.stopDaemon();
@@ -729,52 +751,78 @@ const scenarios = [
   {
     name: 'prompt_suggestion_offers_and_takes_the_next_message',
     area: 'suggestions',
-    title: 'A completed turn offers the next message; Tab takes it in scrollback, Right in both, and an edit withdraws it',
+    title: 'A completed turn offers the next message; Tab takes it in scrollback, Tab keeps the focus in fullscreen, Right takes it there, and Escape withdraws it',
     async run(tui) {
-      const OFFER = 'run the fixture suite';
+      const OFFER = /run the fixture suite #(\d+)/;
       const prediction = (request) => userText(request).startsWith('You predict the next message');
+      let next = 0;
       await tui.setup({
-        respond: (request) => (prediction(request) ? {text: OFFER} : {text: ANSWER}),
+        respond: (request) =>
+          prediction(request) ? {text: `run the fixture suite #${(next += 1)}`} : {text: ANSWER},
         documents: {'rust/prompt-suggestion.json': {enabled: true, maxChars: 80}},
       });
       const predictions = () => tui.model.requests.filter((entry) => prediction(entry.body)).length;
+      const drawn = (terminal) => OFFER.exec(terminal.capture())?.[0];
       const takeTurn = async (terminal, text) => {
         await terminal.sendPrompt(text);
         await terminal.waitFor(ANSWER);
-        await terminal.waitFor(OFFER, {timeout: 30_000});
+        const deadline = Date.now() + 30_000;
+        for (;;) {
+          const offer = drawn(terminal);
+          if (offer) return offer;
+          if (Date.now() >= deadline) {
+            throw new Error(`waited 30000ms for a suggestion offer\n${terminal.capture()}`);
+          }
+          await sleep(100);
+        }
+      };
+      const clears = async (terminal, offer) => {
+        terminal.key('C-c');
+        await terminal.waitFor('Press Ctrl+C again to exit', {describe: 'the cleared draft'});
+        assert(!terminal.capture().includes(offer), 'the cleared draft leaves no offer behind');
       };
 
       for (const args of [[], ['--fullscreen']]) {
         const scrollback = args.length === 0;
         const terminal = await tui.launch(args, {waitForComposer: true});
 
-        await takeTurn(terminal, 'offer me the next message');
+        const first = await takeTurn(terminal, 'offer me the next message');
         terminal.key('Tab');
-        terminal.send('x');
         if (scrollback) {
-          await terminal.waitFor(`${OFFER}x`, {describe: 'the offer Tab completed into the draft'});
+          terminal.send('x');
+          await terminal.waitFor(`${first}x`, {describe: 'the offer Tab completed into the draft'});
         } else {
-          await terminal.waitForAbsent(OFFER);
-          await terminal.waitFor('x', {describe: 'the typed draft'});
+          await terminal.waitFor(first, {describe: 'the offer Tab left alone'});
+          terminal.key('Enter');
+          const sent = await settleWithout(
+            tui.model,
+            (request) => userText(request) === first,
+            {describe: 'the offer Tab and Enter did not send'},
+          );
+          assert(sent, 'fullscreen Tab kept the focus and Enter did not send the offer');
+          terminal.key('Right');
+          terminal.send('z');
+          await terminal.waitFor(`${first}z`, {describe: 'the offer Right put in the draft'});
         }
-        terminal.key('C-c');
-        await terminal.waitFor('Press Ctrl+C again to exit', {describe: 'the cleared draft'});
+        await clears(terminal, first);
 
-        await takeTurn(terminal, 'offer it again');
+        const second = await takeTurn(terminal, 'offer it again');
+        assert.notEqual(second, first, 'the next completed turn draws a different offer');
         terminal.key('Right');
         assert(
-          !tui.model.requests.some((entry) => userText(entry.body) === OFFER),
+          !tui.model.requests.some((entry) => userText(entry.body) === second),
           'taking the offer fills the draft without sending it',
         );
         terminal.send('z');
-        await terminal.waitFor(`${OFFER}z`, {describe: 'the offer Right put in the draft'});
-        terminal.key('C-c');
-        await terminal.waitFor('Press Ctrl+C again to exit', {describe: 'the cleared draft'});
+        await terminal.waitFor(`${second}z`, {describe: 'the offer Right put in the draft'});
+        await clears(terminal, second);
 
-        await takeTurn(terminal, 'offer it one more time');
+        const third = await takeTurn(terminal, 'offer it one more time');
+        assert.notEqual(third, second, 'each completed turn draws its own offer');
+        const asked = predictions();
         terminal.key('Escape');
-        await terminal.waitForAbsent(OFFER);
-        await terminal.waitFor('Ask anything...', {describe: 'the withdrawn offer'});
+        await terminal.waitForAbsent(third);
+        assert.equal(predictions() - asked, 0, 'Escape withdraws the offer without asking again');
         await exitWith(terminal);
       }
     },

@@ -59,6 +59,7 @@ export class TmuxCase {
     this.home = path.join(root, 'home');
     this.userHome = path.join(root, 'user-home');
     this.socket = path.join(root, 'tmux.sock');
+    this.appServer = path.join(path.dirname(binary), 'dim-app-server');
     this.requestsFile = path.join(root, 'requests.jsonl');
     this.interactionsFile = path.join(root, 'interactions.log');
     this.sessions = [];
@@ -141,14 +142,27 @@ export class TmuxCase {
 
   /// Starts one CLI (or launcher) on its own tmux session and taps the pane's
   /// output stream, which is where escape sequences a pane cannot show live.
-  async launch(argv = [], {env = {}, cols = 100, rows = 30, name, command, waitForComposer = false, modelConfig = true} = {}) {
+  ///
+  /// `modelConfig` runs the development model profile, whose daemon serves
+  /// sessions but not provider management. `server` runs the managed
+  /// production profile instead: the standalone App Server next to the CLI with
+  /// the case's product home, so `/connect` manages real providers.
+  async launch(
+    argv = [],
+    {env = {}, cols = 100, rows = 30, name, command, waitForComposer = false, modelConfig = true, server = false} = {},
+  ) {
     const session = name ?? `cli-${this.sessions.length + 1}`;
     this.sessions.push(session);
+    if (server && !fs.existsSync(this.appServer)) {
+      throw new Error(`${this.appServer} is missing; build it with: cargo build --locked -p dim-app-server`);
+    }
     const program =
       command ??
-      (modelConfig
-        ? [this.binary, '--home', this.home, '--model-config', this.modelFile]
-        : [this.binary, '--home', this.home]);
+      (server
+        ? [this.binary, '--home', this.home, '--server', this.appServer]
+        : modelConfig
+          ? [this.binary, '--home', this.home, '--model-config', this.modelFile]
+          : [this.binary, '--home', this.home]);
     const line = shellCommand(this.environment(env), [...program, ...argv]);
     this.log(`# launch ${session}: ${line}`);
     this.tmuxRun(['new-session', '-d', '-s', session, '-x', String(cols), '-y', String(rows), line]);

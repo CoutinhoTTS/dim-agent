@@ -82,7 +82,7 @@ Run at the workspace root:
 | `cargo test --workspace --locked` | Before merging |
 | `cargo run --locked -p xtask -- check` | After changing capabilities, assembly or crate dependencies |
 | `node --test scripts/*.test.mjs` | After changing development or release scripts |
-| `cargo build --locked -p dimcode && node scripts/tui-tmux/run.mjs` | Before and after changing terminal UI behavior; local only, never in CI ([suite](docs/architecture/tui-e2e.md)) |
+| `cargo build --locked -p dimcode -p dim-app-server && node scripts/tui-tmux/run.mjs` | Before and after changing terminal UI behavior; local only, never in CI ([suite](docs/architecture/tui-e2e.md)) |
 
 The full CI sequence, including the ignored CLI profile and Node-backed flow tests, is in `.github/workflows/ci.yml`. Release preparation and draft publication follow [.agents/skills/dim-release/SKILL.md](.agents/skills/dim-release/SKILL.md).
 
