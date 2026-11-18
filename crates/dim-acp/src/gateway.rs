@@ -1616,6 +1616,7 @@ impl Gateway {
                                     &id,
                                     json!({
                                         "sessionUpdate":"agent_message_chunk",
+                                        "messageId":crate::projection::notice_id("refusal", &prompt.submission),
                                         "content":{"type":"text","text":error.message},
                                     }),
                                 )
@@ -1803,7 +1804,15 @@ impl Gateway {
                     },
                 };
                 if let Some(text) = text {
-                    self.update(&id, json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":text}})).await?;
+                    self.update(
+                        &id,
+                        json!({
+                            "sessionUpdate":"agent_message_chunk",
+                            "messageId":crate::projection::notice_id("command", &command_id.to_string()),
+                            "content":{"type":"text","text":text},
+                        }),
+                    )
+                    .await?;
                 }
                 command
                     .reply

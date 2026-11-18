@@ -824,6 +824,73 @@ fn acp_compact_commands_report_each_native_outcome_once_and_cancel_without_submi
 }
 
 #[test]
+fn acp_stdio_names_the_message_of_a_failed_command_after_its_operation() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&[METHODS, &["session.methods"]].concat());
+        wire.created();
+        command_session(
+            wire,
+            &[
+                "session.goal.get",
+                "session.goal.set",
+                "session.goal.edit",
+                "session.goal.pause",
+                "session.goal.resume",
+                "session.goal.clear",
+            ],
+        );
+        for message in ["Goal storage is unavailable", "Goal storage is full"] {
+            let read = wire.read("session.goal.get");
+            wire.send(
+                json!({"jsonrpc":"2.0","id":read["id"],"error":{"code":-32000,
+                "message":message,"data":{"appError":"storage_failed"}}}),
+            );
+        }
+        detached_eof(wire);
+    });
+    let mut peer = Peer::start(&home);
+    peer.initialize();
+    peer.send(2, "session/new", json!({"cwd":home.0,"mcpServers":[]}));
+    assert!(peer.response(2).get("error").is_none());
+    let mut ids = Vec::new();
+    for (request, message) in [
+        (3, "Command failed: Goal storage is unavailable"),
+        (4, "Command failed: Goal storage is full"),
+    ] {
+        peer.updates.clear();
+        peer.send(
+            request,
+            "session/prompt",
+            json!({"sessionId":"session","prompt":[{"type":"text","text":"/goal"}]}),
+        );
+        assert_eq!(
+            peer.response(request)["result"]["stopReason"],
+            "end_turn",
+            "{updates:?}",
+            updates = peer.updates
+        );
+        let chunk = peer
+            .updates
+            .iter()
+            .map(|frame| frame["params"]["update"].clone())
+            .find(|update| update["sessionUpdate"] == "agent_message_chunk")
+            .expect("a failed command states why");
+        assert_eq!(chunk["content"]["text"], message);
+        let id = chunk["messageId"]
+            .as_str()
+            .unwrap_or_else(|| panic!("the failure names its message: {chunk}"));
+        let parts: Vec<&str> = serde_json::from_str(id).unwrap();
+        assert_eq!(&parts[..2], ["gateway", "command"]);
+        assert!(uuid::Uuid::parse_str(parts[2]).is_ok(), "{id}");
+        ids.push(id.to_owned());
+    }
+    assert_ne!(ids[0], ids[1], "one failure message per command");
+    peer.close();
+    daemon.join().unwrap();
+}
+
+#[test]
 fn acp_stdio_distinguishes_rejected_and_uncertain_submissions_on_a_live_connection() {
     let cases = [
         Some("invalid_params"),
@@ -3522,17 +3589,25 @@ fn acp_stdio_correlates_the_consumed_input_and_deduplicates_unicode_progress() {
     );
     let response = peer.response(3);
     assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
-    let text: String = peer
+    let chunks: Vec<&Value> = peer
         .updates
         .iter()
-        .filter(|frame| frame["params"]["update"]["sessionUpdate"] == "agent_message_chunk")
-        .map(|frame| {
-            frame["params"]["update"]["content"]["text"]
-                .as_str()
-                .unwrap()
-        })
+        .map(|frame| &frame["params"]["update"])
+        .filter(|update| update["sessionUpdate"] == "agent_message_chunk")
+        .collect();
+    let text: String = chunks
+        .iter()
+        .map(|update| update["content"]["text"].as_str().unwrap())
         .collect();
     assert_eq!(text, "A🦀B");
+    assert_eq!(
+        chunks
+            .iter()
+            .map(|update| update["messageId"].clone())
+            .collect::<Vec<_>>(),
+        vec![json!("model"); chunks.len()],
+        "a committed delta and a replacing progress preview name the same message"
+    );
     assert!(
         !peer
             .updates
@@ -3831,11 +3906,14 @@ fn acp_stdio_member_approval_shows_the_original_action_and_rechecks_before_allow
 }
 
 /// Appendix D 7: a blocked prompt ends the ACP turn with `refusal`, and the check's
-/// message is the text the user sees.
+/// message is the text the user sees. The refusal is a message of its own, named
+/// by the submission of the prompt it refused, never by a model request or an
+/// input.
 #[test]
 fn acp_stdio_reports_a_blocked_prompt_as_refusal_with_the_reason() {
     let home = Home::new();
-    let daemon = home.daemon(|wire| {
+    let (submitted, received) = std::sync::mpsc::channel();
+    let daemon = home.daemon(move |wire| {
         wire.hello(METHODS);
         wire.created();
         let attach = wire.read("session.attach");
@@ -3845,11 +3923,29 @@ fn acp_stdio_reports_a_blocked_prompt_as_refusal_with_the_reason() {
             &history,
             json!({"events":[],"through":8,"nextAfter":8,"done":true}),
         );
+        let fact = |wire: &mut Wire, value: Value| {
+            wire.notice(
+                "session.event",
+                json!({"sessionId":"session","branchId":"main","event":value}),
+            )
+        };
         let submit = wire.read("session.submit");
-        wire.send(
-            json!({"jsonrpc":"2.0","id":submit["id"],"error":{"code":-32000,
-            "message":"Hook user: no prompts today","data":{"appError":"input_blocked"}}}),
-        );
+        let input = event(9, "input-1", "input", "message", json!({"submission_id":submit["params"]["submissionId"],"user":submit["params"]["user"],"mode":"queue"}));
+        wire.reply(&submit, json!({"event":input}));
+        fact(wire, input);
+        fact(wire, event(10, "turn-start", "turn", "start", json!({"turn_id":"turn"})));
+        fact(wire, event(11, "consumed", "input", "consumed", json!({"input_id":"input-1"})));
+        fact(wire, event(12, "model-start", "step", "model-start", json!({"turn_id":"turn","request_id":"model"})));
+        fact(wire, event(13, "text", "step", "text", json!({"turn_id":"turn","request_id":"model","delta":"Answer"})));
+        fact(wire, event(14, "turn-end", "turn", "end", json!({"turn_id":"turn","status":"completed","reason":"end_turn"})));
+        for message in ["Hook user: no prompts today", "Hook user: still no"] {
+            let submit = wire.read("session.submit");
+            submitted.send(submit["params"]["submissionId"].clone()).unwrap();
+            wire.send(
+                json!({"jsonrpc":"2.0","id":submit["id"],"error":{"code":-32000,
+                "message":message,"data":{"appError":"input_blocked"}}}),
+            );
+        }
         detached_eof(wire);
     });
     let mut peer = Peer::start(&home);
@@ -3861,22 +3957,55 @@ fn acp_stdio_reports_a_blocked_prompt_as_refusal_with_the_reason() {
         "session/prompt",
         json!({"sessionId":"session","prompt":[{"type":"text","text":"Prompt"}]}),
     );
-    let response = peer.response(3);
-    assert_eq!(
-        response["result"]["stopReason"],
-        "refusal",
-        "{response}: {updates:?}",
-        updates = peer.updates
-    );
-    assert!(
-        peer.updates.iter().any(|frame| {
-            frame["params"]["update"]["sessionUpdate"] == "agent_message_chunk"
-                && frame["params"]["update"]["content"]["text"]
-                    .as_str()
-                    .is_some_and(|text| text.contains("Hook user: no prompts today"))
-        }),
-        "the block's message is text: {:?}",
-        peer.updates
+    assert_eq!(peer.response(3)["result"]["stopReason"], "end_turn");
+    let answer = peer
+        .updates
+        .iter()
+        .map(|frame| frame["params"]["update"].clone())
+        .find(|update| update["sessionUpdate"] == "agent_message_chunk")
+        .unwrap();
+    assert_eq!(answer["messageId"], "model");
+    let mut refusals = Vec::new();
+    for (request, prompt) in [(4, "Prompt"), (5, "Another prompt")] {
+        peer.updates.clear();
+        peer.send(
+            request,
+            "session/prompt",
+            json!({"sessionId":"session","prompt":[{"type":"text","text":prompt}]}),
+        );
+        let response = peer.response(request);
+        assert_eq!(
+            response["result"]["stopReason"],
+            "refusal",
+            "{response}: {updates:?}",
+            updates = peer.updates
+        );
+        let submission = received.recv_timeout(PATIENCE).unwrap();
+        let chunk = peer
+            .updates
+            .iter()
+            .map(|frame| frame["params"]["update"].clone())
+            .find(|update| update["sessionUpdate"] == "agent_message_chunk")
+            .expect("the block's message is text");
+        assert_eq!(
+            chunk["messageId"],
+            json!(["gateway", "refusal", submission]).to_string(),
+            "the refusal is the message of the submission it refused"
+        );
+        assert_ne!(chunk["messageId"], answer["messageId"]);
+        assert_ne!(chunk["messageId"], "input-1");
+        assert!(
+            chunk["content"]["text"]
+                .as_str()
+                .unwrap()
+                .starts_with("Hook user:"),
+            "the refusal carries the block's message: {chunk}"
+        );
+        refusals.push(chunk["messageId"].clone());
+    }
+    assert_ne!(
+        refusals[0], refusals[1],
+        "one refusal per refused operation"
     );
     peer.close();
     daemon.join().unwrap();
@@ -3928,6 +4057,74 @@ fn acp_load_bounds_a_long_turn_and_marks_the_omitted_prefix() {
     assert_eq!(text, "p0");
     let live = peer.frame();
     assert_eq!(live["params"]["update"]["content"]["text"], "live");
+    peer.close();
+    daemon.join().unwrap();
+}
+
+/// #1792: every chunk of one message carries that message's id, and a message
+/// replayed from the store keeps the id it streamed with.
+#[test]
+fn acp_load_gives_a_message_the_same_id_on_replay_and_live_streaming() {
+    let home = Home::new();
+    let cwd = home.0.clone();
+    let daemon = home.daemon(move |wire| {
+        wire.hello(METHODS);
+        let attach = wire.read("session.attach");
+        assert_eq!(attach["params"]["expectedCwd"], json!(cwd));
+        wire.reply(&attach, json!({"sequence":1000}));
+        let read = wire.read("session.history");
+        assert_eq!(read["params"]["latestTurn"], true);
+        wire.notice("session.event", json!({"sessionId":"saved","branchId":"main","event":event(1001,"live","step","text",json!({"turn_id":"turn","request_id":"reply","delta":" live"}))}));
+        wire.reply(&read,json!({"events":[
+            event(1,"input","input","message",json!({"user":{"content":[{"type":"text","text":"question"}]},"mode":"queue"})),
+            event(2,"start","turn","start",json!({"turn_id":"turn"})),
+            event(3,"consumed","input","consumed",json!({"input_id":"input"})),
+            event(4,"thought","step","thinking",json!({"turn_id":"turn","request_id":"reply","delta":"replayed thought"})),
+            event(5,"text","step","text",json!({"turn_id":"turn","request_id":"reply","delta":"replayed answer"}))
+        ],"through":1000,"nextAfter":5,"done":true}));
+        detached_eof(wire);
+    });
+    let mut peer = Peer::start(&home);
+    peer.initialize();
+    peer.send(
+        2,
+        "session/load",
+        json!({"sessionId":"saved","cwd":home.0,"mcpServers":[]}),
+    );
+    let loaded = peer.response(2);
+    assert!(loaded.get("error").is_none(), "{loaded}");
+    let update = |kind: &str| {
+        peer.updates
+            .iter()
+            .map(|frame| frame["params"]["update"].clone())
+            .filter(|update| update["sessionUpdate"] == kind)
+            .collect::<Vec<_>>()
+    };
+    let user = update("user_message_chunk");
+    assert_eq!(user.len(), 1, "{user:?}");
+    assert_eq!(
+        user[0]["messageId"], "input",
+        "the operator's message is the input it came from"
+    );
+    let text = update("agent_message_chunk");
+    assert_eq!(text.len(), 1, "{text:?}");
+    assert_eq!(text[0]["content"]["text"], "replayed answer");
+    assert_eq!(
+        text[0]["messageId"], "reply",
+        "the answer is the request that produced it"
+    );
+    let thought = update("agent_thought_chunk");
+    assert_eq!(thought.len(), 1, "{thought:?}");
+    assert_eq!(
+        thought[0]["messageId"], "reply",
+        "reasoning belongs to the message it reasoned for"
+    );
+    let live = peer.frame();
+    assert_eq!(live["params"]["update"]["content"]["text"], " live");
+    assert_eq!(
+        live["params"]["update"]["messageId"], text[0]["messageId"],
+        "the live continuation of a replayed message keeps that message's id"
+    );
     peer.close();
     daemon.join().unwrap();
 }
@@ -4056,7 +4253,7 @@ fn acp_load_materializes_user_and_tool_file_images_in_order() {
         let history = wire.read("session.history");
         let source = |id| json!({"type":"file","mediaType":"image/png","fileId":id});
         wire.reply(&history, json!({"events":[
-            event(1,"input","input","message",json!({"user":{"content":[{"type":"text","text":"before"},{"type":"image","source":source("user-image")},{"type":"text","text":"after"}]},"mode":"queue"})),
+            event(1,"input","input","message",json!({"user":{"content":[{"type":"text","text":"before"},{"type":"image","source":source("user-image")},{"type":"text","text":"<dim-skill name=\"commit\">\n# Commit\n</dim-skill>"},{"type":"text","text":"after"}]},"mode":"queue"})),
             event(2,"start","turn","start",json!({"turn_id":"turn"})),
             event(3,"consumed","input","consumed",json!({"input_id":"input"})),
             event(4,"result","step","tool-result",json!({"turn_id":"turn","request_id":"request","results":[{"call_id":"call","result":{"content":[{"type":"text","text":"caption"},{"type":"image","source":source("tool-image")}]}}]}))
@@ -4088,13 +4285,25 @@ fn acp_load_materializes_user_and_tool_file_images_in_order() {
         .iter()
         .filter(|update| update["sessionUpdate"] == "user_message_chunk")
         .collect();
-    assert_eq!(user.len(), 3);
+    assert_eq!(user.len(), 4);
     assert_eq!(user[0]["content"]["text"], "before");
     assert_eq!(
         user[1]["content"],
         json!({"type":"image","mimeType":"image/png","data":"aW1hZ2U="})
     );
-    assert_eq!(user[2]["content"]["text"], "after");
+    assert_eq!(
+        user[2]["content"]["text"], "\nSkill loaded: commit",
+        "a loaded Skill replays as one line of the operator's message"
+    );
+    assert_eq!(user[3]["content"]["text"], "after");
+    assert_eq!(
+        user.iter()
+            .map(|update| update["messageId"].clone())
+            .collect::<Vec<_>>(),
+        vec![json!("input"); 4],
+        "every block of the message, its image and its Skill line included, \
+         names the input it belongs to"
+    );
     let tool = updates
         .iter()
         .find(|update| update["sessionUpdate"] == "tool_call_update")
