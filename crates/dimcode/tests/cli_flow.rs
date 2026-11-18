@@ -6476,11 +6476,6 @@ fn tui_home_commands_without_a_session_answer_and_send_nothing() {
         terminal.until("Git branch");
         terminal.write(b"/export\r");
         terminal.until("/export needs a session");
-        assert!(
-            !terminal.transcript.contains("Export session"),
-            "a refused export opened its dialog: {}",
-            terminal.transcript
-        );
         terminal.write(b"/queue\r");
         terminal.until("/queue needs a session");
         terminal.write(b"/agent ghost\r");
@@ -6492,6 +6487,11 @@ fn tui_home_commands_without_a_session_answer_and_send_nothing() {
         terminal.wait();
         daemon.join().unwrap();
         assert!(!terminal.transcript.contains("session_closed"));
+        assert!(
+            !terminal.transcript.contains("Export session"),
+            "a refused export opened its dialog: {}",
+            terminal.transcript
+        );
     }
 }
 
