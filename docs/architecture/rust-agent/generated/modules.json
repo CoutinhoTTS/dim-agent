@@ -18292,6 +18292,7 @@
       "to": "dim_agent_capabilities::host",
       "references": [
         "path HostError",
+        "path HostError::Cancelled",
         "path HostError::failed",
         "path ToolExecutionContext"
       ]
@@ -55769,6 +55770,10 @@
     {
       "module": "dim_agent_capabilities::workspace_tools::files::codec",
       "path": "char::is_ascii_alphanumeric"
+    },
+    {
+      "module": "dim_agent_capabilities::workspace_tools::files::write",
+      "path": "BTreeMap::new"
     },
     {
       "module": "dim_agent_runtime::assembly",
