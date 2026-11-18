@@ -181,6 +181,7 @@ fn dim_device_login_refreshes_the_model_catalog_before_exiting() {
 }
 
 #[test]
+#[ignore = "TUI E2E runs in the local tmux suite"]
 fn dim_device_login_can_retry_the_model_refresh_from_the_account_panel() {
     const PROVIDER: &str = "dimcode-api-oauth";
     let home = Home::new();
@@ -491,6 +492,7 @@ fn account_help_prints_usage_without_contacting_a_daemon() {
 /// The `/connect` panel signs in through each described namespace; a
 /// daemon without the method shows the error in the sign-in step.
 #[test]
+#[ignore = "TUI E2E runs in the local tmux suite"]
 fn the_provider_panel_signs_in_through_each_described_namespace() {
     for fullscreen in [false, true] {
         let home = Home::new();
@@ -574,6 +576,7 @@ fn the_provider_panel_signs_in_through_each_described_namespace() {
 }
 
 #[test]
+#[ignore = "TUI E2E runs in the local tmux suite"]
 fn a_panel_without_the_sign_in_method_shows_the_unsupported_daemon_error() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {

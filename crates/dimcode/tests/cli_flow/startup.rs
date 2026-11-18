@@ -27,6 +27,7 @@ fn reject(wire: &mut Wire, request: &Value) {
 }
 
 #[test]
+#[ignore = "TUI E2E runs in the local tmux suite"]
 fn home_browsing_and_exit_need_no_session_in_both_tui_modes() {
     for fullscreen in [false, true] {
         for leaf in [false, true] {
@@ -59,6 +60,7 @@ fn home_browsing_and_exit_need_no_session_in_both_tui_modes() {
 }
 
 #[test]
+#[ignore = "TUI E2E runs in the local tmux suite"]
 fn first_shell_command_creates_once_without_submitting_a_model_turn() {
     for fullscreen in [false, true] {
         for private in [false, true] {
@@ -120,6 +122,7 @@ fn first_shell_command_creates_once_without_submitting_a_model_turn() {
 }
 
 #[test]
+#[ignore = "TUI E2E runs in the local tmux suite"]
 fn home_previews_the_model_without_creating_a_session_and_survives_preview_errors() {
     for fullscreen in [false, true] {
         for outcome in ["ready", "rejected", "preview-timeout"] {
@@ -184,6 +187,7 @@ fn preview_catalog() -> Value {
 /// Bare `/effort` at Home lists the preview's advertised efforts, with the
 /// preview's own preference marked current.
 #[test]
+#[ignore = "TUI E2E runs in the local tmux suite"]
 fn bare_effort_at_home_lists_the_preview_models_choices() {
     for fullscreen in [false, true] {
         let home = Home::new();
@@ -230,6 +234,7 @@ fn bare_effort_at_home_lists_the_preview_models_choices() {
 /// A Home with neither a preview nor a model says what to do instead of
 /// waiting for choices from a model it does not show.
 #[test]
+#[ignore = "TUI E2E runs in the local tmux suite"]
 fn bare_effort_at_home_without_a_model_says_what_to_do() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
@@ -254,6 +259,7 @@ fn bare_effort_at_home_without_a_model_says_what_to_do() {
 /// A choice made at Home reaches the Session the first message creates, and
 /// writes no saved preference.
 #[test]
+#[ignore = "TUI E2E runs in the local tmux suite"]
 fn a_choice_at_home_reaches_the_first_session_and_saves_nothing() {
     for fullscreen in [false, true] {
         let home = Home::new();
@@ -336,6 +342,7 @@ fn a_choice_at_home_reaches_the_first_session_and_saves_nothing() {
 /// `/models` at Home drops the effort Home chose, because it was chosen for
 /// the model the picker replaced.
 #[test]
+#[ignore = "TUI E2E runs in the local tmux suite"]
 fn a_model_picked_at_home_drops_the_effort_home_chose() {
     let home = Home::new();
     let (created, creations) = std::sync::mpsc::channel::<Value>();
@@ -444,6 +451,7 @@ fn a_model_picked_at_home_drops_the_effort_home_chose() {
 /// through `modelFromSession`, which a creation's preferences cannot
 /// accompany, so a value says where it applies instead of never arriving.
 #[test]
+#[ignore = "TUI E2E runs in the local tmux suite"]
 fn home_that_inherits_a_model_refuses_a_preference_choice() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
@@ -493,6 +501,7 @@ fn home_that_inherits_a_model_refuses_a_preference_choice() {
 /// is held for the first Session, and refused when the model advertises no
 /// tiers.
 #[test]
+#[ignore = "TUI E2E runs in the local tmux suite"]
 fn fast_at_home_lists_tiers_and_holds_a_choice_for_the_first_session() {
     for tiers in [true, false] {
         let home = Home::new();
@@ -583,6 +592,7 @@ fn fast_at_home_lists_tiers_and_holds_a_choice_for_the_first_session() {
 }
 
 #[test]
+#[ignore = "TUI E2E runs in the local tmux suite"]
 fn first_text_or_draft_creates_once_with_startup_options_in_both_tui_modes() {
     for fullscreen in [false, true] {
         for draft in [false, true] {
@@ -671,6 +681,7 @@ fn first_text_or_draft_creates_once_with_startup_options_in_both_tui_modes() {
 }
 
 #[test]
+#[ignore = "TUI E2E runs in the local tmux suite"]
 fn a_refused_leaf_start_shows_the_error_restores_the_terminal_and_exits() {
     for fullscreen in [false, true] {
         for queued in ["", "second message\r", "/new\rqueued after new\r"] {
@@ -714,6 +725,7 @@ fn a_refused_leaf_start_shows_the_error_restores_the_terminal_and_exits() {
 }
 
 #[test]
+#[ignore = "TUI E2E runs in the local tmux suite"]
 fn direct_startup_reaches_each_creation_entry_without_persisting_secrets() {
     for format in [
         "anthropic",
@@ -835,6 +847,7 @@ fn direct_startup_reaches_each_creation_entry_without_persisting_secrets() {
 }
 
 #[test]
+#[ignore = "TUI E2E runs in the local tmux suite"]
 fn resume_startup_is_adopted_or_explicitly_rejected_before_input_in_every_client() {
     for (tui, leaf) in [(false, false), (true, false), (true, true)] {
         for model in [None, Some("replacement")] {
@@ -938,6 +951,7 @@ fn resume_effort_only_sends_forced_inheritance_before_submitting() {
 }
 
 #[test]
+#[ignore = "TUI E2E runs in the local tmux suite"]
 fn home_first_message_inherits_the_adopted_model_without_replaying_startup() {
     for (resume, switched) in [(false, false), (true, false), (false, true)] {
         let home = Home::new();
@@ -1108,6 +1122,7 @@ fn an_output_limit_at_or_above_the_context_limit_reaches_the_daemon() {
 }
 
 #[test]
+#[ignore = "TUI E2E runs in the local tmux suite"]
 fn temporary_model_preferences_use_adopted_choices_without_a_provider_catalog() {
     for from_history in [false, true] {
         let home = Home::new();
@@ -1587,6 +1602,7 @@ fn model_config_rejects_product_only_controls_before_starting_a_daemon() {
 }
 
 #[test]
+#[ignore = "TUI E2E runs in the local tmux suite"]
 fn home_creation_uses_the_advertised_product_or_configured_model() {
     use sha2::{Digest, Sha256};
 
@@ -1694,6 +1710,7 @@ fn home_creation_uses_the_advertised_product_or_configured_model() {
 /// `-p` on `tui` is the interface's first message: one submission, and the
 /// interface stays open for the next one.
 #[test]
+#[ignore = "TUI E2E runs in the local tmux suite"]
 fn a_first_prompt_is_submitted_once_and_the_interface_stays() {
     for fullscreen in [false, true] {
         let home = Home::new();
@@ -1741,6 +1758,7 @@ fn a_first_prompt_is_submitted_once_and_the_interface_stays() {
 /// `-p` with `--image` submits the text and the image together through the
 /// same composer a typed message uses.
 #[test]
+#[ignore = "TUI E2E runs in the local tmux suite"]
 fn a_first_prompt_submits_its_image_with_the_text() {
     let home = Home::new();
     let image = home.0.join("shot.png");
@@ -1800,6 +1818,7 @@ fn a_first_prompt_submits_its_image_with_the_text() {
 
 /// A first prompt on a resumed Session attaches first and submits into it.
 #[test]
+#[ignore = "TUI E2E runs in the local tmux suite"]
 fn a_first_prompt_on_a_resumed_session_submits_into_it() {
     let home = Home::new();
     let (submitted, seen) = std::sync::mpsc::channel();
@@ -1842,6 +1861,7 @@ fn a_first_prompt_on_a_resumed_session_submits_into_it() {
 
 /// A first prompt that names a command runs it instead of sending it.
 #[test]
+#[ignore = "TUI E2E runs in the local tmux suite"]
 fn a_first_prompt_that_names_a_command_runs_it() {
     let home = Home::new();
     let (settled, seen) = std::sync::mpsc::channel();
@@ -1872,6 +1892,7 @@ fn a_first_prompt_that_names_a_command_runs_it() {
 
 /// A first message no Session can take stays in the composer.
 #[test]
+#[ignore = "TUI E2E runs in the local tmux suite"]
 fn a_first_prompt_without_a_session_stays_in_the_draft() {
     let home = Home::new();
     let (settled, seen) = std::sync::mpsc::channel();
@@ -1911,6 +1932,7 @@ fn a_first_prompt_without_a_session_stays_in_the_draft() {
 /// A first message stays in the composer when the resumed Session cannot
 /// attach, the other way no Session takes it.
 #[test]
+#[ignore = "TUI E2E runs in the local tmux suite"]
 fn a_first_prompt_is_kept_when_the_resumed_session_cannot_attach() {
     let home = Home::new();
     let (settled, seen) = std::sync::mpsc::channel();
@@ -1944,6 +1966,7 @@ fn a_first_prompt_is_kept_when_the_resumed_session_cannot_attach() {
 /// A draft the user starts before the refusal returns keeps the composer,
 /// and the refused first message is reported instead of silently dropped.
 #[test]
+#[ignore = "TUI E2E runs in the local tmux suite"]
 fn a_first_prompt_a_new_draft_keeps_out_is_reported() {
     let home = Home::new();
     let (created, refusing) = std::sync::mpsc::channel();

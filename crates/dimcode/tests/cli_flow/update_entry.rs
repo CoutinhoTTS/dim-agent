@@ -5,6 +5,7 @@
 use super::*;
 
 #[test]
+#[ignore = "TUI E2E runs in the local tmux suite"]
 fn update_names_the_command_and_sends_no_input() {
     for fullscreen in [false, true] {
         for package in [None, Some("dimcode"), Some("dimcode-alpha")] {

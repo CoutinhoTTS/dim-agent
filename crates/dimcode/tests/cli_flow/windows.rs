@@ -181,6 +181,7 @@ fn line_window_keeps_one_large_atomic_batch_whole() {
 }
 
 #[test]
+#[ignore = "TUI E2E runs in the local tmux suite"]
 fn an_orphan_tool_result_reads_its_arguments_only_after_expanding_details() {
     let home = Home::new();
     fs::write(
@@ -233,6 +234,7 @@ fn an_orphan_tool_result_reads_its_arguments_only_after_expanding_details() {
 }
 
 #[test]
+#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_attach_keeps_buffered_configuration_and_skips_ended_branch_inventories() {
     let home = Home::new();
     let (ready, received) = std::sync::mpsc::channel();

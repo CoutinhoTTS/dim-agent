@@ -69,7 +69,7 @@ Every public service is a data face. The contract is [service faces](docs/design
 - Verify that the remaining necessary changes satisfy the user flow, reusing relevant tests first; after integration, check the interfaces and flows actually affected. Reuse evidence that still applies; only expand or repeat verification for new changes, failures or unresolved doubts. Progress is not measured by test count, failure count or number of runs.
 - Automated tests only protect architectural flows, public interfaces, cross-crate contracts, persistence formats, user flows and release artifacts. Assertions about private modules, helper functions, single functions, internal call order or mock configuration belong in the nearest flow test, not in standalone tests.
 - Scenarios involving security, data loss, data migration, protocol compatibility or release artifacts may keep a dedicated test if they cannot be triggered reliably in a flow test.
-- Run terminal-interaction E2E tests for the native TUI through the local tmux suite. Keep those E2E scenarios out of CI. CI may run focused component and protocol tests for TUI behavior, along with line-mode CLI flows. See [Terminal end-to-end suite](docs/architecture/tui-e2e.md).
+- Run terminal-interaction E2E tests for the native TUI through the local tmux suite. Every TUI flow is `#[ignore]`d in `crates/dimcode/tests/cli_flow*` and runs only there; no CI job runs one. CI keeps the component render and keyboard tests, the protocol contract tests and the line-mode CLI flows. See [Terminal end-to-end suite](docs/architecture/tui-e2e.md).
 
 ### Verification commands
 

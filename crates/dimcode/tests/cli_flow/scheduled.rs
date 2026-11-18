@@ -4,6 +4,7 @@ use super::*;
 use std::sync::mpsc;
 
 #[test]
+#[ignore = "TUI E2E runs in the local tmux suite"]
 fn user_queue_reports_a_daemon_without_block_presence() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
@@ -28,6 +29,7 @@ fn user_queue_reports_a_daemon_without_block_presence() {
 }
 
 #[test]
+#[ignore = "TUI E2E runs in the local tmux suite"]
 fn automatic_inputs_stay_out_of_the_user_queue_after_resume_and_live_delivery() {
     for fullscreen in [false, true] {
         let home = Home::queued();
@@ -956,6 +958,7 @@ fn scheduled_set_reports_a_conflict_when_the_re_read_fails() {
 /// `scheduled edit ID` opens the job's own document in the editor and
 /// writes it at the revision the listing reported.
 #[test]
+#[ignore = "TUI E2E runs in the local tmux suite"]
 fn scheduled_edit_writes_what_the_editor_leaves() {
     let home = Home::new();
     let script = editor(
@@ -1182,6 +1185,7 @@ fn scheduled_remove_names_the_kind_the_daemon_cannot_serve() {
 /// `/scheduled` lists the jobs with their schedule, state, next window and
 /// last outcome, and every kind calls the method its design names.
 #[test]
+#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_scheduled_panel_lists_and_manages_jobs() {
     let home = Home::new();
     let (shown, wait_shown) = mpsc::channel();
@@ -1306,6 +1310,7 @@ const EDITS_THE_PROMPT: &str = "case \"$(cat \"$1\")\" in\n\
 /// Ctrl+E opens the job's document, Ctrl+N the create document, and each
 /// writes with the method its kind names, in both terminal modes.
 #[test]
+#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_scheduled_panel_edits_and_creates_jobs() {
     for fullscreen in [false, true] {
         let home = Home::new();
@@ -1402,6 +1407,7 @@ fn tui_scheduled_panel_edits_and_creates_jobs() {
 /// A stale revision writes nothing, says so, reads the area again, and the
 /// next edit opens the stored job, in both terminal modes.
 #[test]
+#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_scheduled_panel_keeps_the_users_text_when_the_revision_is_stale() {
     for fullscreen in [false, true] {
         let home = Home::new();
@@ -1478,6 +1484,7 @@ fn tui_scheduled_panel_keeps_the_users_text_when_the_revision_is_stale() {
 /// A delete the owner refuses as a conflict writes nothing, says so, and
 /// shows the jobs as they now are.
 #[test]
+#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_scheduled_panel_reports_a_conflict_on_remove() {
     let home = Home::new();
     let (shown, wait_shown) = mpsc::channel();
@@ -1547,6 +1554,7 @@ fn tui_scheduled_panel_reports_a_conflict_on_remove() {
 /// key stays visible, and the remove confirmation for a long name is drawn
 /// whole, in both terminal modes.
 #[test]
+#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_scheduled_panel_shows_every_key_and_confirmation_at_80_columns() {
     for fullscreen in [false, true] {
         let home = Home::new();
@@ -1648,6 +1656,7 @@ fn tui_scheduled_panel_shows_every_key_and_confirmation_at_80_columns() {
 /// A create the owner refuses keeps the user's text, and the next Ctrl+N
 /// writes that same text again with no revision, in both terminal modes.
 #[test]
+#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_scheduled_panel_keeps_the_users_text_when_a_create_is_refused() {
     for fullscreen in [false, true] {
         let home = Home::new();
@@ -1718,6 +1727,7 @@ fn tui_scheduled_panel_keeps_the_users_text_when_a_create_is_refused() {
 /// the refusal opens that job's document, and coming back reopens the kept
 /// text at the revision it was read at.
 #[test]
+#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_scheduled_panel_keeps_a_refused_edit_for_its_own_job() {
     let home = Home::new();
     let seen = home.0.join("seen.log");
@@ -1839,6 +1849,7 @@ fn tui_scheduled_panel_keeps_a_refused_edit_for_its_own_job() {
 /// on one line wherever the name is drawn: the command line's columns, the
 /// panel's row and the remove confirmation.
 #[test]
+#[ignore = "TUI E2E runs in the local tmux suite"]
 fn scheduled_draws_a_job_name_on_one_line() {
     const NAME: &str = "evil\u{1b}[2J\nx\ty";
     // The command line's columns: one line per job, no escape sequence.
@@ -1920,6 +1931,7 @@ fn scheduled_draws_a_job_name_on_one_line() {
 /// not a refusal: the draft's file goes, and the next Ctrl+N opens a fresh
 /// document instead of the text the user wrote.
 #[test]
+#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_scheduled_panel_reports_an_unreadable_create_reply_as_applied() {
     let home = Home::new();
     let seen = home.0.join("seen.log");
@@ -2009,6 +2021,7 @@ fn tui_scheduled_panel_reports_an_unreadable_create_reply_as_applied() {
 /// A daemon without the Scheduler's methods leaves the panel open on the
 /// unsupported-daemon sentence rather than an empty list.
 #[test]
+#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_scheduled_panel_says_when_the_daemon_cannot_manage_it() {
     let home = Home::new();
     let (shown, wait_shown) = mpsc::channel();
@@ -2054,6 +2067,7 @@ fn tui_scheduled_panel_says_when_the_daemon_cannot_manage_it() {
 /// withdraws it. The test pins that the two keys agree: each stops the run and
 /// submits only the typed draft, and the automatic input stays pending.
 #[test]
+#[ignore = "TUI E2E runs in the local tmux suite"]
 fn a_held_scheduled_input_is_left_by_send_now_and_by_escape_then_enter() {
     let mut seen = Vec::new();
     for (label, escape_first) in [("send now", false), ("escape then enter", true)] {

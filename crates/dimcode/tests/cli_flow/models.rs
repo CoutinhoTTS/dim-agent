@@ -3,6 +3,7 @@
 use super::*;
 
 #[test]
+#[ignore = "TUI E2E runs in the local tmux suite"]
 fn models_reports_account_discovery_failure_instead_of_an_empty_list() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
@@ -42,6 +43,7 @@ fn hello(wire: &mut Wire) {
 }
 
 #[test]
+#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_connect_disabled_provider_refreshes_its_model_management_panel() {
     for fullscreen in [false, true] {
         let home = Home::new();
@@ -653,6 +655,7 @@ fn models_area_add_keeps_the_text_when_the_id_exists() {
 /// the area fails: the panel shows the refresh note and the read error, not
 /// a refusal.
 #[test]
+#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_models_area_keeps_a_refresh_whose_read_fails() {
     let home = Home::new();
     let (shown, wait_shown) = std::sync::mpsc::channel();
@@ -778,6 +781,7 @@ fn picker_catalog() -> Value {
 }
 
 #[test]
+#[ignore = "TUI E2E runs in the local tmux suite"]
 fn picker_and_limit_declaration_read_the_same_catalog() {
     let snapshot = json!({"catalog":{"version":7,"disabledModelIds":["disabled"],"models":[
         {"id":"ready","name":"Ready","zdr":true,"capabilities":capabilities()},
@@ -954,6 +958,7 @@ fn area_models_unavailable_after_toggle() -> Value {
 /// the complete enabled set at the read's version, Tab shows the descriptor,
 /// and Esc closes back to the Provider list and then the picker.
 #[test]
+#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_models_area_opens_and_toggles_a_model() {
     let home = Home::new();
     let (shown, wait_shown) = std::sync::mpsc::channel();
@@ -1041,6 +1046,7 @@ fn tui_models_area_opens_and_toggles_a_model() {
 /// it sends nothing, while the model below it still toggles with the
 /// complete enabled set.
 #[test]
+#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_models_area_offers_no_toggle_for_an_unavailable_model() {
     let home = Home::new();
     let (shown, wait_shown) = std::sync::mpsc::channel();
@@ -1126,6 +1132,7 @@ fn tui_models_area_offers_no_toggle_for_an_unavailable_model() {
 /// A write the owner refuses keeps the panel and its list, and shows the
 /// owner's message.
 #[test]
+#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_models_area_keeps_the_panel_on_a_refused_write() {
     let home = Home::new();
     let (shown, wait_shown) = std::sync::mpsc::channel();
@@ -1206,6 +1213,7 @@ fn area_models_later() -> Value {
 /// the stale revision: the next Ctrl+E opens the current document and writes
 /// at the version it reports.
 #[test]
+#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_models_area_rereads_after_a_conflict() {
     let home = Home::new();
     let script = home.0.join("editor.sh");
@@ -1325,6 +1333,7 @@ fn tui_models_area_rereads_after_a_conflict() {
 
 /// Both surfaces report the conflict, then the failed re-read.
 #[test]
+#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_models_area_reports_a_conflict_whose_reread_fails() {
     let home = Home::new();
     let script = home.0.join("editor.sh");

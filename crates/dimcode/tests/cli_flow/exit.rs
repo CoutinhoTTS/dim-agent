@@ -3,6 +3,7 @@
 use super::*;
 
 #[test]
+#[ignore = "TUI E2E runs in the local tmux suite"]
 fn keyboard_protocol_follows_the_screen_and_restores_both_stacks_on_exit() {
     let check = |transcript: &str, fullscreen: bool, enabled: bool| {
         let mut screen = 0;
@@ -99,6 +100,7 @@ fn keyboard_protocol_follows_the_screen_and_restores_both_stacks_on_exit() {
 /// terminal stops consuming output from then on. Two Ctrl+C presses still
 /// end the process with the interrupt status.
 #[test]
+#[ignore = "TUI E2E runs in the local tmux suite"]
 fn ctrl_c_ends_the_interface_when_the_terminal_stops_reading_after_the_goodbye_panel() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
@@ -146,6 +148,7 @@ fn ctrl_c_ends_the_interface_when_the_terminal_stops_reading_after_the_goodbye_p
 /// renderer is blocked on a full queue while the keys arrive. The exit ends
 /// the process the same way.
 #[test]
+#[ignore = "TUI E2E runs in the local tmux suite"]
 fn ctrl_c_ends_the_interface_when_the_output_queue_is_already_full() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {

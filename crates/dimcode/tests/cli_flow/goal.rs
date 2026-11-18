@@ -423,6 +423,7 @@ fn line_goal_shows_no_copied_goal_after_a_fork() {
 }
 
 #[test]
+#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_goal_shows_the_state_and_marks_the_status_area() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
@@ -519,6 +520,7 @@ fn tui_goal_shows_the_state_and_marks_the_status_area() {
 }
 
 #[test]
+#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_goal_acts_on_the_shown_line_and_a_new_line_has_none() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
@@ -596,6 +598,7 @@ fn tui_goal_acts_on_the_shown_line_and_a_new_line_has_none() {
 /// A read the command needs fails. `/goal OBJECTIVE` reports it and sends no
 /// goal method, instead of deciding from the fold it already has.
 #[test]
+#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_goal_reports_a_failed_read_and_sends_nothing() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
@@ -655,6 +658,7 @@ fn tui_goal_reports_a_failed_read_and_sends_nothing() {
 }
 
 #[test]
+#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_goal_reads_owner_state_while_the_transcript_window_is_loading() {
     let home = Home::new();
     let (inventory_done, wait_inventory) = std::sync::mpsc::channel();

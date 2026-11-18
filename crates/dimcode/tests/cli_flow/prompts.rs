@@ -125,6 +125,7 @@ fn prompt_set_merges_one_field_and_keeps_the_others() {
 }
 
 #[test]
+#[ignore = "TUI E2E runs in the local tmux suite"]
 fn prompt_edit_writes_what_the_editor_leaves() {
     let home = Home::new();
     let script = home.0.join("editor.sh");
