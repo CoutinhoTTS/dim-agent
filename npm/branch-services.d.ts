@@ -473,7 +473,7 @@ export interface SkillsConfigReply {
 
 /**
  * Skills' factory configuration: the text that replaces [`INSTRUCTIONS`]
- * ([model-prompts §9.2](../../../docs/design/model-prompts.md#92-every-capability-that-writes-model-facing-text)).
+ * ([model-prompts §9.2](../../../../docs/design/model-prompts.md#92-every-capability-that-writes-model-facing-text)).
  */
 export interface SkillsConfig {
   /**

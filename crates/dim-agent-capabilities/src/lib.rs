@@ -45,6 +45,7 @@ pub mod skills;
 pub mod steer;
 pub mod summary_strategy;
 pub mod timeline_tree;
+pub mod timestamp;
 pub mod tool_binding;
 pub mod tool_executor;
 pub mod tool_registry;
@@ -61,7 +62,7 @@ pub fn register_names(builder: &mut dim_agent_runtime::AgentBuilder) {
 }
 
 /// The runtime's catalog with this crate's names, for mounting parts outside
-/// an assembly ([`dim_agent_runtime::names::process_plugin`]).
+/// an assembly.
 pub fn catalog() -> dim_agent_runtime::names::ServiceCatalog {
     let mut catalog = dim_agent_runtime::names::catalog();
     register_names_in(&mut catalog);

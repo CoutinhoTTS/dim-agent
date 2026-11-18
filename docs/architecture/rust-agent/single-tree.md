@@ -103,7 +103,7 @@ profile 未要求的已登记部件由可选挂载器挂载，宿主通过现有
 
 因此，ShellInput、Attachments 等由安装函数要求的第一方 Rust 部件属于必需成员：它们不能 Active，Session 就不能发布。当前接受这一后果，因为这些部件的启动失败主要属于实现错误，其依赖是核心服务。依赖可能长期不可用的服务的 Rust 功能，以 `AgentBuilder::feature` 加入而不要求其部件，由可选挂载器挂载。
 
-必需部件在 `apply` 中登记的子插件仍由该部件等待，等待指子插件 `Active` 而不是 settle：`(&view).await` 在子插件的依赖尚未就绪时也会返回，此时子插件仍是 `Pending`。部件用 `mount_active` 挂载子插件，等待本身没有期限：创建期间整次打开的无进展期限覆盖它，到期时报告子插件的名字和它缺的依赖，创建随之失败；创建之后，该部件与任何缺依赖的行一样保持 `Loading` 直到子插件 `Active`（rutis D22），其代被取消时结束等待；返回因此意味着其服务和订阅已就绪。创建只等待自己的必需行和已挂载的必需部件，不再做全进程检查；`Agent::check_assembly()` 在测试创建 Session 与分支之后跑一次，检查必需行和作用域交出的必需视图及其子树的 Active 状态，发现未等待的子插件就报告；仅可选行及其子树不参加此 Active 校验。两者仍参加依赖读取和实例键审计。release 与 debug 创建因此相同，每次创建都不做全进程诊断扫描。
+必需部件在 `apply` 中登记的子插件仍由该部件等待，等待指子插件 `Active` 而不是 settle：`(&view).await` 在子插件的依赖尚未就绪时也会返回，此时子插件仍是 `Pending`。部件用 `mount_active` 挂载子插件，等待本身没有期限：创建期间整次打开的无进展期限覆盖它，到期时报告子插件的名字和它缺的依赖，创建随之失败；创建之后，该部件与任何缺依赖的行一样保持 `Loading` 直到子插件 `Active`（rutis D22），其代被取消时结束等待；返回因此意味着其服务和订阅已就绪。创建只等待自己的必需行和已挂载的必需部件，不再做全进程检查；`Agent::check_assembly()` 在测试创建 Session 与分支之后跑一次，检查必需行和作用域交出的必需视图及其子树的 Active 状态，发现未等待的子插件就报告；仅可选行及其子树不参加此 Active 校验。两者仍参加必需读取和实例键审计。release 与 debug 创建因此相同，每次创建都不做全进程诊断扫描。
 
 这修正装配自身的等待范围（[#132](https://github.com/arcships/dim/issues/132)，[ADR 002 D3](../../adr/002-plugin-scope.md#d3-dependencies-follow-scope-and-point-from-extensions-to-the-core)、[Session access §9.4](../../design/contracts/session-access.md#94-optional-parts-per-enabled-plugin)、[规则 §4.8](principles.md#4-通过时间线扩展行为)）。输入仍经原有分支初始化、ToolBinding 取样和 BranchOpening；不增加发布阶段或工具专用接线。顺序、批次、Timeline 及重载语义均不变。
 
@@ -246,9 +246,9 @@ Feature::new(name).session(..).branch(..)          不持有进程状态的插�
 
 门面（`Session::session_service::<T>()`、`Session::service::<T>(branch)`、`Branch::service::<T>()`）只读取 `PublicService` 类型，并拒绝未在对应组（`session` 或 `branch`）注册的名字。
 
-插件在 `apply` 中直接读取服务时使用 `Ctx::require` / `require_as` 的严格读取。`ServiceReadError` 保留服务键、插件、实例、调用位置和原因，包括 `Undeclared`、`OutOfScope`、`Inactive`、`TypeMismatch`、`Unavailable` 及拦截失败；不统一降为“服务不存在”。该检查在 debug 与 release 都执行。
+插件在 `apply` 中读取必需服务时使用 `Ctx::require` / `require_as` 的严格读取。`ServiceReadError` 保留服务键、插件、实例、调用位置和原因，包括 `Undeclared`、`OutOfScope`、`Inactive`、`TypeMismatch`、`Unavailable` 及拦截失败；不统一降为“服务不存在”。该检查在 debug 与 release 都执行。
 
-rutis 严格读取允许自身提供的服务，也允许可见范围相同的祖先声明；项目仍要求每个 Plugin 在自己的 `Deps` 列全必需外部依赖，以保证自身重载关系。插件外的门面查询和作用域发布使用 `get_as`，缺失按对应公开接口返回构建错误或 `service_reloading`；不能用它绕过插件内的依赖声明。`Agent::check_assembly()` 另在快照上报告插件内直接 `get_as` 的未声明外部访问、读取代次不在已解析依赖中和无实例键提供；创建不运行它，测试对每个装配在创建 Session 与分支后调用一次。
+rutis 严格读取允许自身提供的服务，也允许可见范围相同的祖先声明；项目仍要求每个 Plugin 在自己的 `Deps` 列全必需外部依赖，以保证自身重载关系。插件外的门面查询和作用域发布使用 `get_as`，缺失按对应公开接口返回构建错误或 `service_reloading`；不能用它绕过插件内的依赖声明。`Agent::check_assembly()` 另在快照上报告未声明的必需读取（包括查找提供者前以 `Undeclared` 拒绝的读取）、读取代次不在已解析依赖中和无实例键提供；[可选读取](../../design/rutis-usage.md#35-how-each-runtime-resolves-a-name)不要求依赖声明；创建不运行它，测试对每个装配在创建 Session 与分支后调用一次。
 
 ## 事件
 

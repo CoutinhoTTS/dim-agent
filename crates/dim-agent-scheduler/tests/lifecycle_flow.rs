@@ -529,8 +529,10 @@ async fn deleting_a_job_retires_its_history_and_launched_sessions() {
             .unwrap();
         run["deadline_at"] = json!("2020-01-01T00:00:00.000Z");
     });
+    let startup_retention = signals(home.path()).retention();
     let server = start(home.path(), Arc::new(Script::default())).await;
     let mut client = connect(&server).await;
+    retention(home.path(), startup_retention).await;
     let listed = client.rpc("session.summaries", json!({})).await.unwrap();
     assert!(listed.to_string().contains(&launched), "{listed}");
 
@@ -558,10 +560,12 @@ async fn deleting_a_job_retires_its_history_and_launched_sessions() {
 }
 
 /// The instant a delivery record carries.
-fn instant(stamped: &Value) -> chrono::DateTime<chrono::Utc> {
-    chrono::DateTime::parse_from_rfc3339(stamped.as_str().expect("a stamped instant"))
+fn instant(stamped: &Value) -> jiff::Timestamp {
+    stamped
+        .as_str()
+        .expect("a stamped instant")
+        .parse::<jiff::Timestamp>()
         .unwrap()
-        .with_timezone(&chrono::Utc)
 }
 
 /// Whether the stop timer's own interrupt is on the branch: the reason
@@ -663,12 +667,13 @@ async fn a_launch_counts_its_stop_time_from_when_its_record_is_written() {
 
     // The hold outlasts the whole run budget. A record stamped before the wait
     // carries a stop time the advance below has already passed.
-    clock(home.path()).advance(chrono::Duration::minutes(6));
+    clock(home.path()).advance(jiff::SignedDuration::from_secs(6 * 60));
     // A record is stamped to the millisecond, so the instant the advance
     // reached is read as a stamp and parsed the way a record's is.
     let reached = clock(home.path())
         .now()
-        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        .strftime("%Y-%m-%dT%H:%M:%S%.3fZ")
+        .to_string();
     let advanced = instant(&json!(reached));
     release.send(()).unwrap();
     held.await.unwrap();
@@ -686,7 +691,7 @@ async fn a_launch_counts_its_stop_time_from_when_its_record_is_written() {
     );
     assert_eq!(
         deadline_at,
-        created_at + chrono::Duration::minutes(5),
+        created_at + jiff::SignedDuration::from_secs(5 * 60),
         "the stop time is the record's own instant plus the budget: {run}"
     );
 
@@ -741,8 +746,9 @@ async fn a_launch_session_is_stopped_at_its_stop_time() {
     drop(client);
     server.shutdown();
     server.join().await.unwrap();
-    let soon = (clock(home.path()).now() + chrono::Duration::seconds(3600))
-        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let soon = (clock(home.path()).now() + jiff::SignedDuration::from_secs(3600))
+        .strftime("%Y-%m-%dT%H:%M:%S%.3fZ")
+        .to_string();
     edit_runs(home.path(), |runs| {
         let run = runs
             .iter_mut()

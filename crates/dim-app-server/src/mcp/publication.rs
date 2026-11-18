@@ -871,7 +871,10 @@ mod tests {
             if self.1.block.load(Ordering::SeqCst) {
                 self.1.entered.notify_one();
                 let cancel = ctx.cancellation_token();
-                tokio::select! { _ = cancel.cancelled() => return Ok(()), _ = self.1.release.notified() => {} }
+                tokio::select! {
+                    _ = cancel.cancelled() => return Ok(()),
+                    _ = self.1.release.notified() => {}
+                }
             }
             Plugin::apply(&self.0, ctx, deps).await
         }

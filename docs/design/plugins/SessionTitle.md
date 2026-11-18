@@ -225,7 +225,11 @@ generation deadline uses the input excerpt as a fallback title: collapse whitesp
 metadata operation with source `auto`. Account-service failure alone does not consume one of
 the three failed attempts that cannot complete a metadata write. Session closing or explicit cancellation never falls back.
 The deadline includes both generation paths; timing out cancels and joins the active call before
-the fallback write. Whitespace-only text has no title and is treated as no text.
+the fallback write. Whitespace-only text has no title and is treated as no text. A model reply
+that completes with no non-whitespace text and no tool call is a `malformed_response`
+([model failures §4](../model-failures.md#4-retry)); the auxiliary model retries it once, so a
+single empty answer costs one more request, and a repeated one is an auxiliary error that falls
+back to the excerpt.
 
 DimOAuth implements this optional service for its own provider; its endpoint, authentication,
 refresh and rejection classification belong to its [runtime contract](../../../crates/dim-oauth/docs/runtime-contract.md).
