@@ -162,6 +162,7 @@ async function main() {
     } catch (error) {
       process.stderr.write(`tui-tmux: cleanup failed: ${error.message}\n`);
     }
+    if (!options.keep) fs.rmSync(root, {recursive: true, force: true});
     process.exit(code);
   };
   for (const [signal, code] of [['SIGINT', 130], ['SIGTERM', 143]]) {
