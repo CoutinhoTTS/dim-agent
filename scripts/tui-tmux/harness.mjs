@@ -98,6 +98,10 @@ export class TmuxCase {
         'set-option -g remain-on-exit on',
         'set-option -g exit-empty off',
         'set-option -g default-terminal "screen-256color"',
+        'set-option -g default-shell "/bin/sh"',
+        // The server is started by this process, so its initial environment
+        // carries the developer's variables until the case overrides them.
+        'set-option -g update-environment ""',
         'set-option -g history-limit 20000',
         'set-option -g status off',
         'set-option -g escape-time 10',
@@ -172,8 +176,17 @@ export class TmuxCase {
           ? [this.binary, '--home', this.home, '--model-config', this.modelFile]
           : [this.binary, '--home', this.home]);
     const line = shellCommand(this.environment(env), [...program, ...argv]);
+    // Keep the developer's login shell and profile out of the pane: the
+    // placeholder is an explicit `/bin/sh` with the case's disposable HOME and
+    // PATH, so nothing it does can write to the user's home or print into the
+    // tap. The tap exists before the CLI starts, so no first frame escapes it.
+    const placeholder = shellCommand(this.environment({}), ['/bin/sh', '-c', 'exec /bin/sleep 3600']);
     this.log(`# launch ${session}: ${line}`);
-    this.tmuxRun(['new-session', '-d', '-s', session, '-x', String(cols), '-y', String(rows)]);
+    this.tmuxRun(['start-server']);
+    for (const [key, value] of Object.entries(this.environment(env))) {
+      this.tmuxRun(['set-environment', '-g', key, value]);
+    }
+    this.tmuxRun(['new-session', '-d', '-s', session, '-x', String(cols), '-y', String(rows), placeholder]);
     const rawFile = path.join(this.root, `${session}.raw`);
     this.tmuxRun(['pipe-pane', '-o', '-t', session, `cat >> ${quote(rawFile)}`]);
     this.tmuxRun(['respawn-pane', '-k', '-t', session, line]);
