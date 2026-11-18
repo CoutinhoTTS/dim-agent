@@ -138,8 +138,12 @@ Consumes `branch/create`, `branch/create-failed`, `branch/ended`, `branch/end`,
   otherwise wait on silence.
 - **Ended notice.** On the opener, the roster update and `<dim-branch-ended>` in one
   Steer, for any end of a line it opened other than that line's own `end`.
-- **Primary status note.** On the new primary line and on the old one, one keyed Append of
-  `<dim-branch-primary>` under `branch:primary`, stating the role the line now holds. Its guidance section is pending the prompt design; BranchLine writes the fact sentence only.
+- **Primary status note.** On the new primary line and on the former one, one keyed Append of
+  `<dim-branch-line>` under `branch:line`, carrying `primary`, restating the identity it replaces
+  and then the policy for the role the line now holds. The key is the identity's, so a
+  compaction replays the note and the line still knows which line it is: the note repeats the
+  birth block's sentences byte for byte and its end-rule bullet is the one the line's case gives
+  it, because a line that is an ancestor of the new primary line cannot `end` itself.
 
 BranchLine mounts at the committed Dispatcher cutoff without reading historical events. It starts its writer after both branch and Session publication so all current child directory entries are available. Roster repair reads known current creation positions and the last roster block. Parent notices read the last parent block and the requested parent's read cursor. Old turn progress is not restored; a recovery turn end does not emit an idle notice. Read cursors are loaded for one target when used, and neither ordinary input history nor all tool results are retained. No recovery event is written.
 
