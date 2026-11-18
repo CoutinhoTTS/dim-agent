@@ -342,75 +342,205 @@ impl Owner {
         let mut entered = false;
         let result: Result<&str, ()> = async {
             let document = self.document().await;
-            if !self.current(epoch) || document.as_ref().is_ok_and(|d| !d.enabled) { return Ok("skipped"); }
+            if !self.current(epoch) || document.as_ref().is_ok_and(|d| !d.enabled) {
+                return Ok("skipped");
+            }
             let stored = self.store.read(&self.id).await;
-            if !self.current(epoch) || stored.as_ref().is_ok_and(|m| m.title.is_some()) { return Ok("skipped"); }
+            if !self.current(epoch) || stored.as_ref().is_ok_and(|m| m.title.is_some()) {
+                return Ok("skipped");
+            }
             let kind = |value: &str| QueryFilter::In {
-                value: QueryOperand::Field { path: "kind".into() }, values: vec![value.into()],
+                value: QueryOperand::Field {
+                    path: "kind".into(),
+                },
+                values: vec![value.into()],
             };
             let field = |path: &str, value: Value| QueryFilter::In {
-                value: QueryOperand::Field { path: path.into() }, values: vec![value],
+                value: QueryOperand::Field { path: path.into() },
+                values: vec![value],
             };
             let request = |through, filter, select, pick| TimelineQuery {
-                scope: TimelineQueryScope::Branch, from: None, through, include_publishing: false,
-                query: QuerySpec { filter: Some(filter), select, group_by: vec![], pick, order_by: vec![] },
-                page: Some(QueryPage { limit: NonZeroU64::MIN, after: None }),
+                scope: TimelineQueryScope::Branch,
+                from: None,
+                through,
+                include_publishing: false,
+                query: QuerySpec {
+                    filter: Some(filter),
+                    select,
+                    group_by: vec![],
+                    pick,
+                    order_by: vec![],
+                },
+                page: Some(QueryPage {
+                    limit: NonZeroU64::MIN,
+                    after: None,
+                }),
             };
-            let operator = self.tree.query("main".into(), request(None, QueryFilter::And {
-                conditions: vec![kind("input/message"), field("id", input_id.into()), eligible_input()],
-            }, QuerySelect::Fields { fields: vec!["id".into()] }, Some(QueryPick::First))).await.map_err(|_| ())?;
-            let through = operator.through;
-            if through < sequence { return Err(()); }
-            let QueryOutput::Rows { rows } = operator.result else { return Err(()); };
-            if rows.is_empty() { return Ok("skipped"); }
-            let first = self.tree.query("main".into(), request(Some(through), QueryFilter::And {
-                conditions: vec![kind("input/applied"), QueryFilter::Exists {
-                    condition: Box::new(QueryFilter::And { conditions: vec![
+            let operator_query = request(
+                None,
+                QueryFilter::And {
+                    conditions: vec![
                         kind("input/message"),
-                        QueryFilter::Compare {
-                            left: QueryOperand::Field { path: "id".into() },
-                            comparison: dim_agent_runtime::QueryComparison::Eq,
-                            right: QueryOperand::Outer { path: "data.input_id".into() },
-                        },
+                        field("id", input_id.into()),
                         eligible_input(),
-                    ] }),
-                }],
-            }, QuerySelect::Fields { fields: vec!["data.input_id".into()] }, Some(QueryPick::First))).await.map_err(|_| ())?;
-            let QueryOutput::Rows { rows } = first.result else { return Err(()); };
-            let Some(first) = rows.first() else { return Ok("skipped"); };
-            let [QueryValue::Value { value: Value::String(first_id) }] = first.values.as_slice() else { return Err(()); };
-            let input = self.tree.query("main".into(), request(Some(through), QueryFilter::And {
-                conditions: vec![kind("input/message"), field("id", first_id.clone().into())],
-            }, QuerySelect::Fields { fields: vec!["data.user".into(), "data.blocks".into()] }, Some(QueryPick::First))).await.map_err(|_| ())?;
-            let QueryOutput::Rows { rows } = input.result else { return Err(()); };
-            let Some(row) = rows.first() else { return Err(()); };
-            let [user, blocks] = row.values.as_slice() else { return Err(()); };
+                    ],
+                },
+                QuerySelect::Fields {
+                    fields: vec!["id".into()],
+                },
+                Some(QueryPick::First),
+            );
+            let operator = self
+                .tree
+                .query("main".into(), operator_query)
+                .await
+                .map_err(|_| ())?;
+            let through = operator.through;
+            if through < sequence {
+                return Err(());
+            }
+            let QueryOutput::Rows { rows } = operator.result else {
+                return Err(());
+            };
+            if rows.is_empty() {
+                return Ok("skipped");
+            }
+            let first_query = request(
+                Some(through),
+                QueryFilter::And {
+                    conditions: vec![
+                        kind("input/applied"),
+                        QueryFilter::Exists {
+                            condition: Box::new(QueryFilter::And {
+                                conditions: vec![
+                                    kind("input/message"),
+                                    QueryFilter::Compare {
+                                        left: QueryOperand::Field { path: "id".into() },
+                                        comparison: dim_agent_runtime::QueryComparison::Eq,
+                                        right: QueryOperand::Outer {
+                                            path: "data.input_id".into(),
+                                        },
+                                    },
+                                    eligible_input(),
+                                ],
+                            }),
+                        },
+                    ],
+                },
+                QuerySelect::Fields {
+                    fields: vec!["data.input_id".into()],
+                },
+                Some(QueryPick::First),
+            );
+            let first = self
+                .tree
+                .query("main".into(), first_query)
+                .await
+                .map_err(|_| ())?;
+            let QueryOutput::Rows { rows } = first.result else {
+                return Err(());
+            };
+            let Some(first) = rows.first() else {
+                return Ok("skipped");
+            };
+            let [
+                QueryValue::Value {
+                    value: Value::String(first_id),
+                },
+            ] = first.values.as_slice()
+            else {
+                return Err(());
+            };
+            let input_query = request(
+                Some(through),
+                QueryFilter::And {
+                    conditions: vec![kind("input/message"), field("id", first_id.clone().into())],
+                },
+                QuerySelect::Fields {
+                    fields: vec!["data.user".into(), "data.blocks".into()],
+                },
+                Some(QueryPick::First),
+            );
+            let input = self
+                .tree
+                .query("main".into(), input_query)
+                .await
+                .map_err(|_| ())?;
+            let QueryOutput::Rows { rows } = input.result else {
+                return Err(());
+            };
+            let Some(row) = rows.first() else {
+                return Err(());
+            };
+            let [user, blocks] = row.values.as_slice() else {
+                return Err(());
+            };
             let source = match (user, blocks) {
                 (QueryValue::Value { value: user }, _) => {
                     let input: UserInput = serde_json::from_value(user.clone()).map_err(|_| ())?;
-                    input.content.iter().enumerate().filter_map(|(index, block)| match block {
-                        ContentBlock::Text { text } if !runtime_context(index, text) => Some(text.as_str()),
-                        _ => None,
-                    }).collect::<Vec<_>>().join("\n")
+                    input
+                        .content
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, block)| match block {
+                            ContentBlock::Text { text } if !runtime_context(index, text) => {
+                                Some(text.as_str())
+                            }
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n")
                 }
                 (_, QueryValue::Value { value: blocks }) => goal_objective(blocks).ok_or(())?,
                 _ => return Ok("skipped"),
             };
-            let configured = self.tree.query("main".into(), request(Some(through), kind("context/configured"),
-                QuerySelect::Fields { fields: vec!["data.settings.providerId".into(), "data.settings.modelId".into()] },
-                Some(QueryPick::Last))).await.map_err(|_| ())?;
-            let QueryOutput::Rows { rows } = configured.result else { return Err(()); };
+            let configured_query = request(
+                Some(through),
+                kind("context/configured"),
+                QuerySelect::Fields {
+                    fields: vec![
+                        "data.settings.providerId".into(),
+                        "data.settings.modelId".into(),
+                    ],
+                },
+                Some(QueryPick::Last),
+            );
+            let configured = self
+                .tree
+                .query("main".into(), configured_query)
+                .await
+                .map_err(|_| ())?;
+            let QueryOutput::Rows { rows } = configured.result else {
+                return Err(());
+            };
             let model = match rows.first() {
                 None => None,
                 Some(row) => {
-                    let [QueryValue::Value { value: Value::String(provider_id) }, QueryValue::Value { value: Value::String(model_id) }] = row.values.as_slice() else { return Err(()); };
-                    Some(ModelId { provider_id: provider_id.clone(), model_id: model_id.clone() })
+                    let [
+                        QueryValue::Value {
+                            value: Value::String(provider_id),
+                        },
+                        QueryValue::Value {
+                            value: Value::String(model_id),
+                        },
+                    ] = row.values.as_slice()
+                    else {
+                        return Err(());
+                    };
+                    Some(ModelId {
+                        provider_id: provider_id.clone(),
+                        model_id: model_id.clone(),
+                    })
                 }
             };
-            if !self.current(epoch) { return Ok("skipped"); }
+            if !self.current(epoch) {
+                return Ok("skipped");
+            }
             {
                 let mut state = self.state.lock().unwrap();
-                if state.epoch != epoch || self.stop.is_cancelled() { return Ok("skipped"); }
+                if state.epoch != epoch || self.stop.is_cancelled() {
+                    return Ok("skipped");
+                }
                 state.epoch += 1;
                 state.generating = true;
             }
@@ -423,25 +553,49 @@ impl Owner {
                 return Ok("skipped");
             }
             let cancel = self.stop.child_token();
-            let call = self.generate(document.model, model, &text, document.max_length, cancel.clone());
+            let call = self.generate(
+                document.model,
+                model,
+                &text,
+                document.max_length,
+                cancel.clone(),
+            );
             tokio::pin!(call);
             let completed = tokio::select! {
                 result = &mut call => result,
                 _ = tokio::time::sleep(Duration::from_secs(30)) => {
-                    cancel.cancel(); let _ = call.await;
+                    cancel.cancel();
+                    let _ = call.await;
                     Ok(fallback_title(&text, document.max_length))
                 },
-                _ = self.stop.cancelled() => { cancel.cancel(); let _ = call.await; return Ok("skipped"); },
+                _ = self.stop.cancelled() => {
+                    cancel.cancel();
+                    let _ = call.await;
+                    return Ok("skipped");
+                },
             };
-            if self.stop.is_cancelled() { return Ok("skipped"); }
+            if self.stop.is_cancelled() {
+                return Ok("skipped");
+            }
             let text = completed?;
-            if text.is_empty() { return Err(()); }
-            match self.store.set_title(&self.id, stored.revision, Some(Title { text, source: TitleSource::Auto })).await {
+            if text.is_empty() {
+                return Err(());
+            }
+            let title = Title {
+                text,
+                source: TitleSource::Auto,
+            };
+            let written = self
+                .store
+                .set_title(&self.id, stored.revision, Some(title))
+                .await;
+            match written {
                 Ok(_) => Ok("completed"),
                 Err(MetadataError::Storage(_)) => Err(()),
                 Err(_) => Ok("discarded"),
             }
-        }.await;
+        }
+        .await;
         if entered {
             let mut state = self.state.lock().unwrap();
             state.generating = false;

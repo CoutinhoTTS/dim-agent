@@ -246,10 +246,12 @@ impl Realtime {
         let cancel_session = CancellationToken::new();
         let (events_tx, events_rx) = mpsc::channel(EVENT_BUFFER);
         let opened = tokio::select! {
-            result =
-                adapter
-                    .0
-                    .realtime_open(connection, request.params, events_tx, cancel_session.child_token()) =>
+            result = adapter.0.realtime_open(
+                connection,
+                request.params,
+                events_tx,
+                cancel_session.child_token(),
+            ) =>
             {
                 match result {
                     Ok(opened) => opened,

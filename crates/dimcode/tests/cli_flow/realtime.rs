@@ -29,7 +29,7 @@ fn stub(listener: std::net::TcpListener) -> thread::JoinHandle<()> {
         listener.set_nonblocking(true).unwrap();
         runtime.block_on(async move {
             let listener = tokio::net::TcpListener::from_std(listener).unwrap();
-            #[allow(clippy::result_large_err)]
+            #[expect(clippy::result_large_err, reason = "tungstenite's `Callback` hands back its own `ErrorResponse`, which is not ours to box")]
             fn checked(request: &WsRequest, response: WsResponse) -> Handshake {
                 assert_eq!(
                     request.uri().path_and_query().unwrap().as_str(),

@@ -108,15 +108,33 @@ pub(crate) async fn import(
                             "Legacy OAuth tokens are invalid; source preserved".into(),
                         ));
                     }
-                    if key == "nextApiOauth" && (
-                        !tokens["clientId"].as_str().is_some_and(|id| !id.trim().is_empty())
-                        || !["issuer", "tokenEndpoint", "relayBaseUrl"].iter().all(|key| http_url(&tokens[*key]))
-                        || ["authorizationEndpoint", "deviceAuthorizationEndpoint", "deviceTokenEndpoint"].iter().any(|key| {
-                            tokens.get(*key).is_some_and(|value| !value.is_null() && !http_url(value))
-                        })
-                        || tokens.get("scope").is_some_and(|value| !matches!(value, Value::Null | Value::String(_)))
-                    ) {
-                        return Err(Error::Object("Legacy Dim OAuth tokens are incompatible; source preserved".into()));
+                    if key == "nextApiOauth" {
+                        let required_endpoints = ["issuer", "tokenEndpoint", "relayBaseUrl"];
+                        let optional_endpoints = [
+                            "authorizationEndpoint",
+                            "deviceAuthorizationEndpoint",
+                            "deviceTokenEndpoint",
+                        ];
+                        let has_client = tokens["clientId"]
+                            .as_str()
+                            .is_some_and(|id| !id.trim().is_empty());
+                        let endpoints_valid = required_endpoints
+                            .iter()
+                            .all(|key| http_url(&tokens[*key]));
+                        let bad_optional_endpoint = optional_endpoints.iter().any(|key| {
+                            tokens
+                                .get(*key)
+                                .is_some_and(|value| !value.is_null() && !http_url(value))
+                        });
+                        let bad_scope = tokens
+                            .get("scope")
+                            .is_some_and(|value| !matches!(value, Value::Null | Value::String(_)));
+                        if !has_client || !endpoints_valid || bad_optional_endpoint || bad_scope
+                        {
+                            return Err(Error::Object(
+                                "Legacy Dim OAuth tokens are incompatible; source preserved".into(),
+                            ));
+                        }
                     }
                     fields.insert(key.into(), tokens.clone());
                 }

@@ -61,7 +61,10 @@ fn connection(address: SocketAddr) -> ModalityConnection {
 
 /// The handshake callback the stub accepts with: tungstenite's `Callback`
 /// hands back an `ErrorResponse` of its own size, which is not ours to box.
-#[allow(clippy::result_large_err)]
+#[expect(
+    clippy::result_large_err,
+    reason = "tungstenite's `Callback` hands back its own `ErrorResponse`, which is not ours to box"
+)]
 fn checked(
     request: &Request,
     response: Response,
@@ -78,7 +81,10 @@ fn checked(
     Ok(response)
 }
 
-#[allow(clippy::result_large_err)]
+#[expect(
+    clippy::result_large_err,
+    reason = "tungstenite's `Callback` hands back its own `ErrorResponse`, which is not ours to box"
+)]
 fn accepted(
     _request: &Request,
     response: Response,
@@ -86,7 +92,10 @@ fn accepted(
     Ok(response)
 }
 
-#[allow(clippy::result_large_err)]
+#[expect(
+    clippy::result_large_err,
+    reason = "tungstenite's `Callback` hands back its own `ErrorResponse`, which is not ours to box"
+)]
 fn unauthorized(
     request: &Request,
     _response: Response,

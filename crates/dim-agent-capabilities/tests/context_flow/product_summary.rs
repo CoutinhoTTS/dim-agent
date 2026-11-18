@@ -374,7 +374,10 @@ async fn product_session_with(
     .await
 }
 
-#[expect(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one parameter per window and host the summary session is built from"
+)]
 async fn product_session_on(
     window: u64,
     tools: Arc<dyn ToolDriver>,

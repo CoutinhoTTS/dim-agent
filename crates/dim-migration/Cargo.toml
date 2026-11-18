@@ -35,3 +35,6 @@ dim-agent-scheduler = { path = "../dim-agent-scheduler" }
 tempfile = "3"
 dim-app-server = { workspace = true, features = ["testing"] }
 dim-client.workspace = true
+
+[lints]
+workspace = true

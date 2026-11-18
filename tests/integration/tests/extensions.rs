@@ -566,7 +566,6 @@ impl DynPlugin for MountedChild {
 /// Registers `Switch` and `Late` in the Session group and installs the rows
 /// that provide them, whose toggles the test keeps, plus the owner's report
 /// of each apply that is about to mount.
-#[allow(clippy::type_complexity)]
 fn mounting_builder() -> (
     AgentBuilder,
     tokio::sync::watch::Sender<bool>,

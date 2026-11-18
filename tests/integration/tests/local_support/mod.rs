@@ -1,6 +1,9 @@
 //! Shared fixture for PromptSources and Skills flows: temporary home and cwd,
 //! process services on a host root, a scripted model and a gated tool.
-#![allow(dead_code)]
+#![expect(
+    dead_code,
+    reason = "twelve flow binaries share this fixture; each uses the parts it needs"
+)]
 
 use dim_agent_capabilities::{
     defaults,

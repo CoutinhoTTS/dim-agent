@@ -72,13 +72,25 @@ impl Terminal {
                 }
                 _ = timer.tick(), if self.interactive && output_error.is_none() => {
                     let snapshot = progress.borrow().clone();
-                    if let Err(error) = screen.draw(snapshot.as_ref(), &source, &target, started, migration.stopping.is_cancelled()) {
+                    let drawing = screen.draw(
+                        snapshot.as_ref(),
+                        &source,
+                        &target,
+                        started,
+                        migration.stopping.is_cancelled(),
+                    );
+                    if let Err(error) = drawing {
                         output_error = Some(error);
                         migration.cancel_current();
                     }
                 }
-                changed = progress.changed(), if !self.interactive && !self.json && output_error.is_none() => {
-                    let next_stage = progress.borrow().as_ref().map(|progress| progress.task.stage.clone());
+                changed = progress.changed(),
+                    if !self.interactive && !self.json && output_error.is_none() =>
+                {
+                    let next_stage = progress
+                        .borrow()
+                        .as_ref()
+                        .map(|progress| progress.task.stage.clone());
                     if changed.is_ok() && let Some(next_stage) = next_stage
                         && next_stage != last_stage
                     {

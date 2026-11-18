@@ -261,7 +261,10 @@ impl SessionStore {
                  AND (c.session_id NOT IN (SELECT value FROM json_each(?3)){})",
                 if acp_history { " OR s.origin = 'acp'" } else { "" }
             );
-            let mut values: Vec<rusqlite::types::Value> = vec![i64::from(version).into(), serde_json::to_string(&hosts).map_err(error)?.into(), serde_json::to_string(&closed).map_err(error)?.into()];
+            let hosts = serde_json::to_string(&hosts).map_err(error)?.into();
+            let closed = serde_json::to_string(&closed).map_err(error)?.into();
+            let mut values: Vec<rusqlite::types::Value> =
+                vec![i64::from(version).into(), hosts, closed];
             if request.with_preview {
                 sql.push_str(if acp_history { " AND (c.preview IS NOT NULL OR s.origin = 'acp')" } else { " AND c.preview IS NOT NULL" });
             }
@@ -303,13 +306,23 @@ impl SessionStore {
                 let parsed = (|| -> Result<SessionSummary> {
                     Ok(SessionSummary {
                         session: SessionInfo {
-                            session_id: id.clone(), cwd: row.get(1).map_err(error)?,
-                            created_at: read_sequence(row, 2).map_err(error)?, sequence: read_sequence(row, 3).map_err(error)?,
-                            agent_id: Some(row.get(4).map_err(error)?), title: Some(metadata::decode(row, 5).map_err(error)?.into()),
-                            model: ModelId { provider_id: row.get(10).map_err(error)?, model_id: row.get(11).map_err(error)? },
-                            origin: Some(stored_origin(row, 12)?), parent_session_id: row.get(13).map_err(error)?,
-                            running: false, attached_clients: 0,
-                        }, preview: row.get(8).map_err(error)?, updated_at: read_sequence(row, 9).map_err(error)?,
+                            session_id: id.clone(),
+                            cwd: row.get(1).map_err(error)?,
+                            created_at: read_sequence(row, 2).map_err(error)?,
+                            sequence: read_sequence(row, 3).map_err(error)?,
+                            agent_id: Some(row.get(4).map_err(error)?),
+                            title: Some(metadata::decode(row, 5).map_err(error)?.into()),
+                            model: ModelId {
+                                provider_id: row.get(10).map_err(error)?,
+                                model_id: row.get(11).map_err(error)?,
+                            },
+                            origin: Some(stored_origin(row, 12)?),
+                            parent_session_id: row.get(13).map_err(error)?,
+                            running: false,
+                            attached_clients: 0,
+                        },
+                        preview: row.get(8).map_err(error)?,
+                        updated_at: read_sequence(row, 9).map_err(error)?,
                         // Agents marks the rows this daemon closed; the query
                         // already leaves them out unless it asked for them.
                         closed: false,
