@@ -15,7 +15,7 @@ The release profile uses full LTO (`lto = "fat"`) with one codegen unit to reduc
 
 ## Native executable layout
 
-The native layout build groups functions whose pages are observed during startup,
+The opt-in layout build groups functions whose pages are observed during startup,
 shutdown, the TUI model picker and a local tool conversation, aiming to reduce unrelated
 code pages mapped alongside them. It does not change business logic, introduce
 a runtime cache or change the allocator. Each platform is validated on native
@@ -34,7 +34,7 @@ preserves the build environment, including account build settings and the
 `CARGO_PROFILE_RELEASE_LTO` selection used by the release workflow. Every
 platform uses the same compiler selection: `RUSTC`, then `CARGO_BUILD_RUSTC`,
 then `rustc` from PATH; Cargo configuration's `build.rustc` is superseded. Use a new output directory for the initial build. A failed build never produces its final executable.
-The release workflow stages the validated layout executable on these targets. Linux arm64 uses the ordinary Cargo release output.
+The release workflow packages the ordered executable on Linux x64 and the regular Cargo executable on other targets.
 
 ```sh
 python3 scripts/code-layout/build.py --output /tmp/dim-layout-build --jobs 2
@@ -98,7 +98,7 @@ follow the final order, treating symbols at the same address as aliases, and at
 least one selected address must move. An unchanged or unordered candidate fails
 before publication; movement alone does not establish an RSS or CPU gain.
 
-Linux x64 release packaging runs the layout build inside its pinned manylinux 2.28 container. The candidate
+Linux x64 releases build and validate the ordered executable in the pinned manylinux 2.28 container. The candidate
 then runs all three flows without the probe, plus CLI help/version checks. Only
 after they pass does the command produce `dimcode`.
 
@@ -108,7 +108,8 @@ macOS requires the Xcode command-line tools, Python 3.9 or later and a native
 arm64 or x86-64 host. `--target` may name the host architecture explicitly; a
 different architecture is rejected. The layout build uses the linker selected
 by `cc` (ld64) and does not change code signing or hardening of the Cargo
-output. The validated executable enters the native archive and npm staging flow.
+output. The optimized candidate is an unsigned opt-in artifact, not a release
+artifact.
 
 The selected Rust sysroot supplies Cargo, rustc and `rust-objcopy`; its shared
 library directory is carried through the capture wrappers and replay.
@@ -170,7 +171,8 @@ tools, and either LLVM's `lld-link.exe` or the Rust toolchain's `rust-lld.exe`.
 Native dependency builds also use NASM on x64 and `clang-cl` on ARM64, matching
 the [release build environment](../release/README.md#runner-setup).
 The command uses that LLD linker for Cargo's original executable and every replay.
-The Windows release workflow stages the validated LLD executable. MSVC `link.exe` builds the capture wrapper.
+Normal release builds still use the MSVC `link.exe`; the optimized candidate is
+an opt-in artifact linked by `lld-link`, and the release workflow is unchanged.
 `--target` may name the host architecture explicitly; a different architecture
 is rejected.
 

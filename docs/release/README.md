@@ -164,13 +164,11 @@ permissions on macOS files downloaded from Actions. It does not build or
 publish release packages; the opt-in command is documented in the
 [build environment](../architecture/build.md#native-executable-layout).
 
-The release build packages the executable that passed layout validation on Linux
-x64 (inside manylinux 2.28), macOS arm64/x64 and Windows arm64/x64. Each job
-trains and validates its own stamped, account-enabled binary. Linux arm64 uses
-Cargo's release executable. An explicit rebuild of an older tag uses Cargo on
-targets for which that tag predates the layout builder. An ordering or validation
-failure stops the release build before staging. Paired performance measurements
-run separately in the manual layout workflow.
+For Linux x64, release packaging stages the executable validated by the layout
+builder inside the pinned manylinux 2.28 container. An ordering or acceptance
+failure stops packaging. An explicitly requested historical tag that predates
+the builder uses its original Cargo build. Linux arm64, macOS and Windows
+release packages use the ordinary Cargo executable.
 
 `ci.yml` runs on pull requests, pushes to `main`, and manual dispatch. A pull request runs the groups its changed paths need, as decided by `scripts/ci-changes.mjs`. A push to `main` runs only `changes` and `ci-ok` when its entire push range changes only documentation paths that select no check group. Architecture pages checked by `xtask` and the native storage format document retain the full main run, as do mixed pushes and pushes whose base cannot be compared. Manual dispatch selects every group. A documentation-only run leaves in-progress main build and test jobs running.
 
