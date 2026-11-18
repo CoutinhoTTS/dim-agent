@@ -2504,6 +2504,57 @@ async fn a_same_target_save_supersedes_the_target_gone_claim() {
     server.join().await.unwrap();
 }
 
+/// A pause and resume that commit between the disable's read and its CAS
+/// force a retry, and the retry re-checks the claim: the job stays enabled
+/// (A.3).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_pause_and_resume_between_the_disable_read_and_write_supersedes_it() {
+    let home = home();
+    let server = start(home.path(), Arc::new(Script::default())).await;
+    let mut client = support::connect(&server).await;
+    let session = create_session(&mut client, home.path(), true).await;
+    let job = save_session_job(
+        &mut client,
+        "pause-resume",
+        &session,
+        None,
+        json!({"at": "2030-01-01T00:00:00Z"}),
+    )
+    .await;
+    client
+        .rpc("session.close", json!({"sessionId": session}))
+        .await
+        .unwrap();
+    let hold = support::holds(home.path()).hold_next_disable();
+    let accepted: Value = client
+        .typed("schedule.run_now", json!({"job_id": job}))
+        .await
+        .unwrap();
+    let run = settled(&mut client, &job, accepted["run_id"].as_str().unwrap()).await;
+    assert_eq!(run["state"], "failed", "{run}");
+    hold.read.notified().await;
+    for enabled in [false, true] {
+        client
+            .typed::<Value>(
+                "schedule.set_enabled",
+                json!({"job_id": job, "enabled": enabled}),
+            )
+            .await
+            .unwrap();
+    }
+    hold.release();
+    // The released disable retries at once; one timer pass after it is the
+    // claim scan that must leave the superseded write alone.
+    step(home.path(), 1).await;
+    let listed: Value = client.typed("schedule.list", json!({})).await.unwrap();
+    let listed = listed_job_value(&listed, &job);
+    assert_eq!(listed["enabled"], true, "{listed}");
+    assert!(listed["disabled_reason"].is_null(), "{listed}");
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
 /// No save captures authority (§3.3): a job stores the preset its target
 /// names, and every launch applies the live host bound. The legacy
 /// `policy_cap` is read and preserved, never written.
