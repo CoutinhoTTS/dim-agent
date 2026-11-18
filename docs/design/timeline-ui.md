@@ -16,7 +16,7 @@ L0  Session ............ the subject: identity, workspace, interaction surface
      ├ point ........... a cut: the turn boundary just before a user message
      │   ├ e edit / q quote        (existing)
      │   ├ b branch here → a line in this Session
-     │   └ f fork here   → a new Session (main only)
+     │   └ f fork here   → a new Session (root only)
      ├ marker .......... ⑂ a line opened here (pickable)
      └ /timeline ....... every point of the shown line, to jump to (§4.6)
  L3  Lines (/lines) .... every line under the line it was cut from
@@ -34,11 +34,11 @@ Both share the point → derive entry. They differ in where the result lives (#4
 | --- | --- | --- |
 | Result | A line of this Session | A new Session |
 | Shares | The workspace and the subject; talks with its parent | History up to the cut only |
-| Points | Any open line, at a valid context boundary | `main` only, at a rest point |
-| After | The screen stays; the new line answers in the side panel (§4.7) | The TUI attaches to the fork |
+| Points | Any open line, at a valid context boundary | `main`, the root, at a rest point |
+| After | The screen stays; the new line answers in the side panel (§4.7) | The TUI attaches to the fork, whose primary line is its root |
 | Trace on the source | A `⑂` marker | None (§7) |
 
-An action that does not apply says why in a notice (`A fork copies main; b opens a line here`, `Line has ended: X`). The App Server stays the only judge of a valid cut; its refusal is shown as a notice.
+An action that does not apply says why in a notice (`A fork copies main; b opens a line here`, `Line has ended: X`). The App Server stays the only judge of a valid cut; its refusal is shown as a notice. A fork is not "continue from here": that is moving the primary line (§6.1), which stays inside the Session.
 
 ## 4. Timeline and points
 
@@ -70,7 +70,7 @@ A box too narrow for the hint shows `e edit`.
 
 ### 4.3 `f`: fork here
 
-On `main` only, from a Tab pick or `/timeline` (§4.6), which is how scrollback picks a message. A bordered confirmation names the cut and explains that the source Session stays unchanged. Cancel is selected initially; Up/Down or Tab selects an action, Enter confirms, `1` or `y` creates the fork, and `2`, `n` or Esc cancels. Other keys do not dismiss it. The question and actions are in the body, not the composer's border:
+On `main`, the root, only, from a Tab pick or `/timeline` (§4.6), which is how scrollback picks a message. A fork copies the root to a rest point, never the primary line's own history, and the UI says so. A bordered confirmation names the cut and explains that the source Session stays unchanged. Cancel is selected initially; Up/Down or Tab selects an action, Enter confirms, `1` or `y` creates the fork, and `2`, `n` or Esc cancels. Other keys do not dismiss it. The question and actions are in the body, not the composer's border:
 
 ```text
 ╭─ Fork session ─────────────────────────────────────────────╮
@@ -102,7 +102,7 @@ A line is named by the first line of its purpose; its short id follows, and name
 
 ### 4.5 Where am I
 
-While a line is shown, the composer's bottom border names its path from `main`, each line by its name (§4.4), and its cut:
+While a line is shown, the composer's bottom border names its path from `main`, each line by its name (§4.4), and its cut. When the shown line is the primary line, the border also marks it 主线; the root reads 起点:
 
 ```
 ╰── ~/repo (main) · ⑂ main ▸ parser race ▸ the guard · after message 4 ─╯
@@ -215,14 +215,21 @@ Unchanged from #427 §14: a switch writes a `⑂ name · id` boundary and the sh
 
 ```
 ┌ Lines ───────────────────────────────────────────────────────────┐
-│   main                  the session itself                       │
+│   main             起点                                         │
 │     docs pass           after message 1 · b-02 · ended itself    │
-│     parser race         after message 3 · b-7c · working · shown │
+│     parser race         after message 3 · b-7c · 主线 · shown    │
 │       the guard         after message 4 · b-c3 · working         │
-└──────────────────── Enter show the line · x end it · Esc close ──┘
+└ Enter show · p continue from here · x end it · Esc close ───────┘
 ```
 
-Forks are other Sessions and belong to `/resume`. Keys stay as #427 §14 defines them.
+主線 is the primary line and 起点 is the root. `p` moves the primary line to the selected line
+("continue from here"): the Session's conversation, its default targets and its centring follow, and the
+old primary line stays open with the lines it opened. It is refused on the root, on a line a plugin
+opened, and on the line that is already primary; the panel states that the old primary line stays open.
+`x` is refused on the root and on the primary line, and on every line above the primary line, because
+ending a line ends everything below it.
+
+Forks are other Sessions and belong to `/resume`; a fork's own primary line is its root. Keys stay as #427 §14 defines them, with `p` added.
 
 ### Unread replies
 
