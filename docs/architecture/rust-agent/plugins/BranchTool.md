@@ -8,7 +8,9 @@ leaves it out. The facts it emits and consumes are BranchLine's, the branch
 part below.
 
 `create` passes the optional idle notice policy to TimelineTree. The child
-restores it from its opening identity before BranchLine handles turn ends.
+restores it from its opening identity before BranchLine handles turn ends. `create` also
+checks two guards of its own: the calling line must be the current primary line, and the
+Session's total of open lines the tool and clients opened must be below the cap.
 
 ## Dependencies
 
@@ -27,7 +29,7 @@ action-based object, `{action, prompt?, at?, to?, content?, mode?, branch?,
 after?, limit?}`, with `action` required and no other properties; risk stays
 `session`, and Approval admits each call like any tool
 ([event-driven flows](../event-driven-flows.md)). A refusal is an error result
-whose `structuredContent` carries a code (`branch_not_main`, `branch_not_kin`,
+whose `structuredContent` carries a code (`branch_not_primary`, `branch_limit_reached`, `branch_not_kin`,
 `branch_not_tool_line`, `branch_ended`, `branch_cannot_end`) and writes
 nothing. The tools registry and the calling line's BranchLine are found per
 call; the registration is withdrawn when this part unloads, and a reloaded
@@ -39,8 +41,7 @@ earlier page carries no name: each page is rendered on its own. A tool
 result with declared effects carries them on its item, absent when the
 result declared none, a path verbatim and a command cut at its 200th
 character with the cut marked (session boundary A.6; the compaction digest
-shares the rule). The target is the line the caller was cut from, and on
-`main` a tool line it opened; with no
+shares the rule). The target is the line the caller was cut from or a line the caller opened; with no
 `after`, the read continues after the caller's last successful read of that
 line, which BranchLine retains from live results and otherwise reads for that
 specific target from its own `step/tool-use` and `step/tool-result` (design [§6](../../../design/timeline-branches.md#6-messages-between-lines)).
@@ -73,20 +74,20 @@ specific target from its own `step/tool-use` and `step/tool-result` (design [§6
 ## BranchLine
 
 Owner: [timeline_tree.rs](../../../../crates/dim-agent-capabilities/src/timeline_tree.rs).
-Folds the line's own committed facts into its role, its open tool lines, the
-state of its current turn and the line's read cursors, and writes the roster,
-the parent block, the idle notice and the ended notice through
+Folds the line's own committed facts into its role, the lines it opened, the
+state of its current turn and the line's read cursors, and writes its roster,
+the parent block, the idle notice, the ended notice and a primary status note through
 `S:TreeCommands`.
 
-Its role (main, tool line or host line) and its parent come from
+Its role and its parent come from
 `TreeCommands.info`, which is filled from the parent's `branch/create` at
 creation and at restore.
 
 ### Data face
 
 The branch-scoped `branchLine` face exposes the owner's existing read operations:
-`resolved()` returns `[role, parent]` or `null`, where role is `main`, `tool` or
-`host`; `ending()` reports whether the line committed its own `branch/end`;
+`resolved()` returns `[role, parent]` or `null`, where role is `main` (the root), `tool`, `user` or
+`plugin`; `primary()` reports whether the line is the current primary line; `ending()` reports whether the line committed its own `branch/end`;
 `cursor(target)` returns its latest successful read cursor for that target or
 `null`. Cursor read failures use the standard `AgentError` name, variant code
 and display message on the wire; native error source identity is not serialized.
@@ -113,11 +114,10 @@ Consumes `branch/create`, `branch/create-failed`, `branch/ended`, `branch/end`,
 `input/message`, `input/consumed`, `input/deleted`, `turn/end`, `step/tool-use` and
 `step/tool-result`. It writes only `input/message`, through the tree's input path.
 
-- **Roster.** On `main`, a keyed Append of `<dim-branch-lines>` lists the tool
-  lines it opened that are still open, in the order it opened them, with the
-  first line of each purpose; when none is open the key is retired.
-- **Parent block.** On a tool line or a host line, one keyed Append of
-  `<dim-branch-parent>` on the line itself when its parent ends a turn past
+- **Roster.** On a line that has opened lines, a keyed Append under `branch:roster` of `<dim-branch-lines>` lists the tool and user lines it opened that are still open, in the order it opened them, with the
+  first line of each purpose; when none is open the key is retired. A plugin line is never on a roster.
+- **Parent block.** On a line that is not the root, one keyed Append of
+  `<dim-branch-parent>` on the line itself when its opener ends a turn past
   the line's read cursor for it, the head the latest block reported, and the
   line's opening, the sequence of its `branch/create` on the parent. It names
   the parent, that head and the cursor, and never carries the parent's
@@ -126,18 +126,20 @@ Consumes `branch/create`, `branch/create-failed`, `branch/ended`, `branch/end`,
   decided from the line's state rather than the parent's signal: the parent's
   turn-end, published by TimelineTree, and the line's own write queue wake the
   writer, and consuming, deleting or interrupting a held block queues the same
-  decision. An idle line is not woken, and `main` gets none. A child whose
+  decision. An idle line is not woken, and the root gets none. A child whose
   inherited prefix holds a live parent block, meaning a nested line, gets one
   more block in its opening input, naming its own parent at the cut;
   TimelineTree writes it with the identity block
   (design [§7.1.1](../../../design/timeline-branches.md#711-the-parent-block-branchparent)).
-- **Idle notice.** On a tool line, one Steer to its parent at a `turn/end` that
-  neither steered the parent in that turn, called `end`, nor left a driving
-  input pending. A steer counts only once its tool result says the call was
+- **Idle notice.** On a line opened by the tool, one Steer to its opener at a `turn/end` that
+  neither steered the opener in that turn, called `end`, nor left a driving
+  input pending, and only while the line is not the current primary line. A steer counts only once its tool result says the call was
   accepted: a refused or denied call wrote nothing to the parent, which would
   otherwise wait on silence.
-- **Ended notice.** On `main`, the roster update and `<dim-branch-ended>` in one
-  Steer, for any end of a tool line other than the line's own `end`.
+- **Ended notice.** On the opener, the roster update and `<dim-branch-ended>` in one
+  Steer, for any end of a line it opened other than that line's own `end`.
+- **Primary status note.** On the new primary line and on the old one, one keyed Append of
+  `<dim-branch-primary>` under `branch:primary`, stating the role the line now holds. Its guidance section is pending the prompt design; BranchLine writes the fact sentence only.
 
 BranchLine mounts at the committed Dispatcher cutoff without reading historical events. It starts its writer after both branch and Session publication so all current child directory entries are available. Roster repair reads known current creation positions and the last roster block. Parent notices read the last parent block and the requested parent's read cursor. Old turn progress is not restored; a recovery turn end does not emit an idle notice. Read cursors are loaded for one target when used, and neither ordinary input history nor all tool results are retained. No recovery event is written.
 
