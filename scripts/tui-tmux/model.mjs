@@ -18,8 +18,8 @@ function frame(delta, finishReason = null) {
   })}\n\n`;
 }
 
-/// The OpenAI-compatible reply for one scripted turn: streamed text in
-/// `chunkSize` pieces, or tool calls the real runtime executes.
+/// The OpenAI-compatible reply for one scripted turn: streamed reasoning and
+/// text in `chunkSize` pieces, or tool calls the real runtime executes.
 export function replyFrames(reply) {
   const frames = [];
   if (reply.toolCalls?.length) {
@@ -36,10 +36,15 @@ export function replyFrames(reply) {
     frames.push(frame({}, reply.finishReason ?? 'tool_calls'));
     return frames;
   }
-  const characters = Array.from(reply.text ?? '');
-  const size = reply.chunkSize ?? Math.max(1, Math.ceil(characters.length / 4));
-  for (let index = 0; index < characters.length; index += size) {
-    frames.push(frame({content: characters.slice(index, index + size).join('')}));
+  for (const [field, character] of [
+    ['reasoning_content', reply.thinking],
+    ['content', reply.text],
+  ]) {
+    const characters = Array.from(character ?? '');
+    const size = reply.chunkSize ?? Math.max(1, Math.ceil(characters.length / 4));
+    for (let index = 0; index < characters.length; index += size) {
+      frames.push(frame({[field]: characters.slice(index, index + size).join('')}));
+    }
   }
   frames.push(frame({}, reply.finishReason ?? 'stop'));
   return frames;

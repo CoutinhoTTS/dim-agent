@@ -216,6 +216,66 @@ const scenarios = [
     },
   },
   {
+    name: 'resize_during_thinking_rewraps_multiline_history',
+    area: 'terminal-modes',
+    title: 'Resizing while expanded reasoning streams keeps every history row and still answers',
+    async run(tui) {
+      const userLines = ['first user line', 'second user line', 'last user line'];
+      const thoughts = [
+        'First thought: keep every history row',
+        'Second thought: rewrap the reasoning',
+        'Third thought: settle into the answer',
+      ];
+      const thinking = `${thoughts.join('\n')}\n${'checking the resize barrier '.repeat(16)}REASONING-END`;
+      const answer = 'The answer arrives after the reasoning.';
+      await tui.setup({
+        config: {tuiThinkingDetailsExpanded: true},
+        respond: (request) =>
+          (request.tools ?? []).length > 0
+            ? {thinking, text: answer, chunkSize: 4, chunkDelayMs: 60}
+            : {text: ANSWER},
+      });
+      const terminal = await tui.launch([], {waitForComposer: true});
+      terminal.send(userLines[0]);
+      terminal.key('C-j');
+      terminal.send(userLines[1]);
+      terminal.key('C-j');
+      terminal.send(userLines[2]);
+      terminal.key('Enter');
+      await terminal.waitFor('First thought', {history: true, describe: 'the streamed reasoning'});
+      await terminal.waitFor('checking the resize barrier', {history: true, describe: 'the reasoning body'});
+
+      for (const [cols, rows] of [[100, 24], [60, 24], [120, 40], [45, 18], [100, 36]]) {
+        const painted = await terminal.resizeTo(cols, rows, {stable: false});
+        assert(painted.includes('Ask anything...'), `${cols}x${rows} keeps the composer`);
+        const transcript = terminal.screen({history: true});
+        const unwrapped = transcript
+          .split('\n')
+          .map((row) => row.replace(/^\s*[┃│]\s?/, ''))
+          .join('');
+        for (const line of userLines) {
+          assert(unwrapped.includes(line), `${cols}x${rows} keeps ${line}`);
+        }
+        for (const thought of thoughts) {
+          assert(unwrapped.includes(thought), `${cols}x${rows} keeps ${thought}`);
+        }
+      }
+
+      await terminal.waitFor(answer, {timeout: 30_000, describe: 'the answer after the reasoning'});
+      const settled = terminal.screen({history: true});
+      assert(settled.includes('Thought'), 'the reasoning settled into a thought row');
+      for (const thought of thoughts) {
+        assert(settled.includes(thought), `the settled transcript keeps ${thought}`);
+      }
+      assert.equal(
+        lastTurnText(tui.model),
+        userLines.join('\n'),
+        'the model received the multiline prompt once',
+      );
+      await exitWith(terminal);
+    },
+  },
+  {
     name: 'composer_edits_multiline_and_stores_a_large_paste',
     area: 'composer',
     title: 'The composer edits a newline draft and stores a multi-line paste as an attachment',

@@ -43,6 +43,13 @@ test('a scripted reply frames text and tool calls as an OpenAI stream', () => {
   assert(text.at(-1).includes('"finish_reason":"stop"'), 'the last choice stops the reply');
   assert(text.join('').includes('"delta":{"content":"'), 'the text is streamed as deltas');
   assert.equal(text.filter((frame) => frame.includes('"content"')).map((frame) => JSON.parse(frame.slice('data: '.length)).choices[0].delta.content).join(''), 'answer');
+  const reasoned = replyFrames({thinking: 'plan', text: 'answer'});
+  const deltas = reasoned.map((frame) => JSON.parse(frame.slice('data: '.length)).choices[0].delta);
+  assert.equal(deltas.filter((delta) => delta.reasoning_content).map((delta) => delta.reasoning_content).join(''), 'plan', 'reasoning streams as reasoning_content');
+  assert(
+    deltas.findIndex((delta) => delta.reasoning_content) < deltas.findIndex((delta) => delta.content),
+    'reasoning arrives before the answer',
+  );
   const calls = replyFrames({toolCalls: [{name: 'exec', arguments: {command: 'echo hi'}}]});
   const delta = JSON.parse(calls[0].slice('data: '.length));
   assert.equal(delta.choices[0].delta.tool_calls[0].function.name, 'exec');

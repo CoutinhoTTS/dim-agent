@@ -54,10 +54,10 @@ bounded:
 | --- | --- |
 | Product home | `--home <case>/home` with `rust/` at mode 0700; the product home `~/.dimcode` is never touched |
 | User home | `HOME=<case>/user-home` and `TMPDIR=<case>/tmp`, so terminal helpers and tools write nothing outside the case |
-| tmux server | One per case, on `<case>/tmux.sock`; `remain-on-exit` keeps the pane's last screen and its exit status. The pane starts as a shell, the output tap is attached, and the CLI is respawned into it, so no first frame escapes the tap |
+| tmux server | One per case, on `<case>/tmux.sock`; `remain-on-exit` keeps the pane's last screen and its exit status. The server starts with the case's global environment (`HOME`, `TMPDIR`, `PATH`, `SHELL`) and `default-shell` pinned to `/bin/sh`, so no developer login shell or profile runs. `new-session` starts an inert `/bin/sh` placeholder, the output tap is attached, and only then is the CLI respawned into the pane, so no first frame escapes the tap |
 | Daemon | The production App Server. Most cases run the CLI's own `app-server` subcommand with `--model-config`; the provider case runs the standalone `dim-app-server` next to the CLI (`--server`, no `--model-config`), so `/connect` manages real providers in the case's home |
 | Model | A loopback OpenAI-compatible fixture; prompts map to fixed replies and scripted tool calls (`exec`, `ask_user`) |
-| Environment | `TERM=screen-256color`, `LANG=en_US.UTF-8`, `SHELL=/bin/sh`, `TMUX=<case socket>,0,0` so the CLI takes its multiplexer branch, `locale: en` in `config.json` |
+| Environment | `TERM=screen-256color`, `LANG=en_US.UTF-8`, `SHELL=/bin/sh`, `HOME=<case>/user-home`, `TMPDIR=<case>/tmp`, `TMUX=<case socket>,0,0` so the CLI takes its multiplexer branch, `locale: en` in `config.json` |
 
 The launcher scenario runs `npm/bin/dimcode.mjs` with a copied platform package,
 so the wrapper's own code path starts the same native binary.
@@ -93,6 +93,7 @@ and raw streams in place for inspection.
 | terminal-modes | `fullscreen_switches_screens_and_restores_the_terminal` | Fullscreen takes the alternate screen; `/tui` leaves and re-enters it; the multiplexer's `ModifyOtherKeys` enable/reset pair appears and balances; the last screen is the caller's |
 | terminal-modes | `resize_rewraps_history_without_losing_rows` | Resizing to 60x18 and 140x40 keeps the message and answer, rewraps rows, and draws to the new width: the capture is taken only after tmux reports the target pane size and a stable frame at the new width, never wider than the pane |
 | terminal-modes | `resize_during_a_stream_rewraps_and_finishes` | A resize while the fixture streams repaints the live output at the new width, keeps the streamed text, and the run still finishes |
+| terminal-modes | `resize_during_thinking_rewraps_multiline_history` | Expanded reasoning streams in a turn sent as three lines; five resizes (100x24, 60x24, 120x40, 45x18, 100x36) keep every user line and every reasoning line, the transcript settles as a thought, and the answer still arrives |
 | composer | `composer_edits_multiline_and_stores_a_large_paste` | `Ctrl+J` newline editing, backspace, a five-line bracketed paste stored as an attachment, and the exact prompt text the model receives |
 | composer | `file_mention_inserts_a_workspace_link` | The `@` picker lists the `--cwd` workspace and inserts the chosen file into the prompt |
 | no-session | `home_commands_without_a_session_answer_and_send_nothing` | `/export`, `/queue`, `/agent` and `/mcp list` answer at home in both layouts, the draft survives, and the fixture model receives no request |
@@ -140,7 +141,7 @@ CI (#1810).
 | --- | --- | --- |
 | Scrollback and fullscreen | `scrollback_streams_and_exits_cleanly`, `fullscreen_switches_screens_and_restores_the_terminal` | `cli_flow/exit.rs`, `dim-cli` render tests (CI) |
 | Mode switching | `fullscreen_switches_screens_and_restores_the_terminal` | `exit::keyboard_protocol_follows_the_screen_and_restores_both_stacks_on_exit` (moved) |
-| Resizing | `resize_rewraps_history_without_losing_rows`, `resize_during_a_stream_rewraps_and_finishes` | `tui_resizing_during_thinking_preserves_multiline_history` (moved) |
+| Resizing | `resize_rewraps_history_without_losing_rows`, `resize_during_a_stream_rewraps_and_finishes`, `resize_during_thinking_rewraps_multiline_history` | `tui_resizing_during_thinking_preserves_multiline_history` (moved) |
 | History and resume | `daemon_stop_reports_disconnect_and_resume_replays_history` | `daemon_replace::*` (CI) |
 | Normal exit and interruption | `scrollback_streams_and_exits_cleanly`, `npm_launcher_streams_and_passes_interrupts`, `streaming_status_reports_and_interrupts` | `exit::ctrl_c_*` (CI, admitted: backpressure has no tmux equivalent) |
 | Composer editing and paste | `composer_edits_multiline_and_stores_a_large_paste` | `interactive_composer_preserves_multiline_pastes_and_edits_atomic_markers` (CI) |
@@ -165,7 +166,7 @@ one.
 
 | Retained behavior | Outcome |
 | --- | --- |
-| Resize during thinking | **Moved**: `resize_during_a_stream_rewraps_and_finishes` resizes while the fixture streams, asserts the repaint at the new width and that the run finishes |
+| Resize during thinking | **Moved**: `resize_during_thinking_rewraps_multiline_history` streams expanded reasoning into a three-line prompt, resizes through five sizes while it runs, and asserts every user line and reasoning line survives each repaint before the answer settles |
 | Suggestion request suppression by a draft | **Moved**: `suggestion_asks_nothing_while_a_draft_exists` asserts that a draft withdraws the offer, no request follows, and the next turn asks again |
 | Suggestion suppression by a pending question or an active goal, a daemon without the method, the narrow terminal and the settings row | **Admitted in CI** (#1810): no scenario proves them yet |
 | Backpressure on exit (a reader that stops or a full output queue) | **Admitted in CI** (#1810): tmux always reads its pane, so the suite cannot exhibit it |
@@ -191,7 +192,7 @@ the verdict and where its behavior lives afterwards.
 | Model picker | Four cases kept: localized hint, no-management guidance, empty providers, and on-demand paging |
 | Input suggestions | `right_takes_the_offer_into_the_draft_without_sending`, `a_narrow_terminal_truncates_the_offer` and the ten request/suppression cases are kept; `tab_takes_the_offer_in_scrollback` merges into `tab_keeps_the_fullscreen_focus_and_right_still_takes_the_offer`, which is kept |
 | Missing session | `/export`, `/queue`, `/agent` and a valued `/effort` merge into the new `tui_home_commands_without_a_session_answer_and_send_nothing`; `tui_shell_session_creation_failure_settles_with_the_no_session_notice` and `tui_mcp_without_a_session_reports_the_catalog_only` are kept |
-| Coverage to account for | `tui_resizing_during_thinking_preserves_multiline_history`, `tui_stays_up_when_the_daemon_leaves_and_restores_the_terminal_on_exit`, `unix_npm_wrapper_preserves_the_native_terminal_and_interrupt_flow`, `tui_provider_management_uses_the_production_daemon_and_survives_restart`, `question::native_tui_question_answer_reaches_the_next_model_request` and `tasks::native_tui_stop_all_settles_the_member_and_reports_cancellation_to_the_leader` are kept |
+| Coverage to account for | `tui_resizing_during_thinking_preserves_multiline_history`, `tui_stays_up_when_the_daemon_leaves_and_restores_the_terminal_on_exit`, `unix_npm_wrapper_preserves_the_native_terminal_and_interrupt_flow`, `tui_provider_management_uses_the_production_daemon_and_survives_restart`, `question::native_tui_question_answer_reaches_the_next_model_request` and `tasks::native_tui_stop_all_settles_the_member_and_reports_cancellation_to_the_leader` were kept by #1802 and are each moved by the scenario named in the inventory |
 | Startup routing carry-forward | `fresh_native_startup_uses_workspace_and_ask_without_policy_file` moves with the line-mode production flows, not the TUI suite; see [Line-mode routing exception](#line-mode-routing-exception) |
 
 The no-session gate, the hook rows and the input-suggestion flows are the groups
@@ -332,7 +333,7 @@ flows.
 
 - merged → `tui_home_commands_without_a_session_answer_and_send_nothing` (#1805, gone) — `tui_agent_without_a_session_answers_the_no_session_notice_and_sends_nothing`, `tui_valued_effort_at_home_without_a_model_says_what_to_do_and_sends_nothing`, `tui_export_and_queue_require_an_open_session`
 - merged → `tui_draws_a_prompt_hooks_context_as_a_status_row` (#1805, gone) — `tui_names_a_one_line_hook_context_in_the_singular`
-- tmux `resize_rewraps_history_without_losing_rows` — keep — `tui_resizing_during_thinking_preserves_multiline_history`
+- tmux `resize_during_thinking_rewraps_multiline_history` — keep — `tui_resizing_during_thinking_preserves_multiline_history`
 - tmux `file_mention_inserts_a_workspace_link` — unreviewed — `tui_at_mentions_pick_files_from_the_working_directory`
 - tmux `npm_launcher_streams_and_passes_interrupts` — keep — `unix_npm_wrapper_preserves_the_native_terminal_and_interrupt_flow` (ignored, production boundary)
 - tmux `queue_holds_steers_and_deletes` — keep — `tui_queue_panel_deletes_steers_and_moves_applied_inputs_to_the_transcript`

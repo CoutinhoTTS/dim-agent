@@ -208,9 +208,11 @@ jobs:
           npm ci --prefix runtime/plugins/workflow --ignore-scripts --registry=https://registry.npmjs.org
           (cd runtime && npm install --no-save --ignore-scripts --install-links ./plugins/workflow)
           export DIM_TEST_APP_SERVER="$PWD/target/debug/dim-app-server"
-          # The TUI's end-to-end flows are ignored in the test target and run
-          # only in the local tmux suite (docs/architecture/tui-e2e.md), so
-          # this step names the production and line-mode flows it keeps.
+          # The TUI cases a tmux scenario replaces are ignored in the test
+          # target and run only in the local tmux suite
+          # (docs/architecture/tui-e2e.md); the remaining TUI cases still run
+          # under the ordinary selection, so this step names the production
+          # and line-mode flows it keeps.
           node scripts/run-rust-test.mjs target/test-artifacts.jsonl cli_flow \
             accounts::login_reaches_the_codex_account_of_the_production_daemon \
             acp::acp_stdio_temporary_mcp_calls_tools_and_settles_the_child_on_eof \
