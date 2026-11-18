@@ -10104,6 +10104,7 @@ fn tui_queue_shows_held_messages_and_steers_or_withdraws_them() {
     terminal.write(b"\x1b[1;2D");
     terminal.until("third");
     let plain = strip_ansi(&terminal.transcript);
+    assert!(!plain.contains("Queue (0)"), "{plain}");
     assert!(plain.contains("┃ first"), "{plain}");
     assert!(plain.contains("┃ second"), "{plain}");
     assert!(!plain.contains("┃ third"), "{plain}");
