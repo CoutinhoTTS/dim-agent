@@ -5326,7 +5326,8 @@
       "file": "crates/dim-cli/src/ui/mod.rs",
       "unexpandedMacros": [
         "cfg",
-        "format"
+        "format",
+        "matches"
       ]
     },
     {
@@ -57211,6 +57212,10 @@
     },
     {
       "module": "dim_cli::ui::tui::tests",
+      "path": "Component::Prefix"
+    },
+    {
+      "module": "dim_cli::ui::tui::tests",
       "path": "ManagementView::default"
     },
     {
@@ -57280,6 +57285,14 @@
     {
       "module": "dim_cli::ui::tui::tests",
       "path": "PluginAction::Enable"
+    },
+    {
+      "module": "dim_cli::ui::tui::tests",
+      "path": "Prefix::VerbatimDisk"
+    },
+    {
+      "module": "dim_cli::ui::tui::tests",
+      "path": "Prefix::VerbatimUNC"
     },
     {
       "module": "dim_cli::ui::tui::tests",
