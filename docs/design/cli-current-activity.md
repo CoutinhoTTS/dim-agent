@@ -37,6 +37,9 @@ right side of the bottom border. Keep the existing notice slots and
 Shorten the status within its existing space by terminal cell width. Preserve
 the phase and any known object ahead of optional elapsed text.
 
+The examples use `o` for the existing task marker and brackets for a history
+placeholder. The outer frame in the fullscreen example denotes the viewport.
+
 Scrollback during a dispatched batch at the default tool detail setting:
 
 ```text
@@ -58,12 +61,14 @@ Scrollback while the model generates and a server runs in the background:
 +------------------------------------- ~/repo -+
 ```
 
-Narrow scrollback with the elapsed label omitted:
+The same generating state in narrow scrollback, with both elapsed labels
+omitted and the task still visible:
 
 ```text
-+-- Tool batch pending --------+
+  o Dev server
++-- Generating ----------------+
 | >                            |
-+----------------- /lines (1) -+
++--------------------- ~/repo -+
 ```
 
 The task row’s elapsed time comes from the task’s own start. Show “this turn”
@@ -80,22 +85,29 @@ Source reviewed against `077892025020a2875a559b432dfa3256878422ff`.
   Use current turn and request identity with ModelProvider progress. The
   output identity and counts in [session.turn.get](input-state-read.md#turn-identity-read)
   describe the latest open model output at the fixed cutoff.
-- The default ToolExecution assembly publishes `step/tool-call` and
-  `step/tool-result`. Correlate dispatch and batch settlement by Session,
-  branch, turn, request and dispatch event ID (the public result’s
-  `call_event_id`). Undispatched results have no public event view.
+- Loop writes the top-level dispatch (`step/tool-call`). ToolExecutor
+  writes the dispatched batch result (`step/tool-result`). Correlate them
+  by Session, branch, turn, request and dispatch event ID (the result’s
+  `call_event_id`). An undispatched `step/tool-result` has no
+  `call_event_id` and retires no dispatched batch. Protocol v3 and v4 expose
+  it. The v1 event view omits it.
   Track the top-level batch for the composer. Nested batches have their own
   identities and do not replace it. Model-streamed call arguments are separate
-  from dispatch. [Public event types](../../crates/dim-agent-types/src/v1.rs),
-  [ToolExecution scheduling and lifecycle](../architecture/rust-agent/plugins/ToolExecution.md#scheduling)
+  from dispatch. [Loop](../architecture/rust-agent/plugins/Loop.md#the-continuations-tool-boundary),
+  [ToolExecution](../architecture/rust-agent/plugins/ToolExecution.md#events-and-lifetime),
+  [v3/v4 event visibility](../../crates/dim-app-server/src/tree_protocol.rs),
+  [v1 event view](../../crates/dim-agent-types/src/v1.rs)
 - The public schema also has `step/tool-start` and `step/tool-completed`.
   The default assembly constructs `ToolExecutorPlugin::new`, which sets
   `emit_progress` to false. Both per-call appends require that flag. The CLI
-  design uses the default batch facts. For example, an exclusive `wait` in
-  `[exec, wait]` can be dispatched long before its handler can run, and each
-  call’s admission can delay its handler. The shipped facts give neither
-  the active call set nor individual completion before the batch result.
-  [ADR 005 D1](../adr/005-observability.md#d1-two-observation-layers)
+  design uses the default batch facts. In `[exec, wait]`, the exclusive
+  `exec` occupies the earlier step. The concurrent `wait` is dispatched in
+  the same batch, and its handler can run only after that step settles and
+  its own admission finishes. The shipped facts give neither the active
+  call set nor individual completion before the batch result.
+  [ADR 005 D1](../adr/005-observability.md#d1-two-observation-layers),
+  [ToolExecution scheduling](../architecture/rust-agent/plugins/ToolExecution.md#scheduling),
+  [WaitTool](../../crates/dim-agent-capabilities/src/wait.rs)
 - [WorkspaceTools](../architecture/rust-agent/plugins/WorkspaceTools.md)
   publishes background handoff as `exec/started`, settlement as
   `exec/ended`, and pending tasks via `session.exec.pending`. Use the
@@ -135,10 +147,11 @@ The owner decision must cover:
   immediate outcomes without leaving a live wait claim. A timeout ends the
   wait independently of the target’s outcome.
 - Evidence for any claim that the foreground is waiting on one object.
-  If other calls can still be active and their state is unknown, use the
-  neutral batch status. A confirmed untargeted wait can say “Waiting for a
-  background task or new input”. A confirmed targeted wait with an
-  unavailable task can say “Waiting for task: details unavailable”.
+  A concurrent wait can share a step with calls such as `read`. Use the
+  neutral batch status while a sibling is active or its state is unknown.
+  A confirmed untargeted wait can say “Waiting for a background task or
+  new input”. A confirmed targeted wait with an unavailable task can say
+  “Waiting for task: details unavailable”.
 - If exact reconnect restoration is required, a bounded owner read at a
   fixed cutoff and an ordered handoff to live updates. A gap leaves the
   relationship unknown. WaitBranch reload settles accepted calls and
@@ -194,7 +207,8 @@ adopted inputs. Repainting adds zero RPCs, history scans or remote CI polls.
   generation, multiple dispatched calls, approval, question and retry,
   missing titles and turn origins, attachment/branch switches, truncated
   windows, duplicate events, stale replies and terminal task facts arriving
-  before pending replies. Assert restored tasks never imply a wait. Check
+  before pending replies. Verify an undispatched result does not retire a
+  dispatched batch and restored tasks never imply a wait. Check
   OSC bytes independently through the existing terminal status checks.
 - With a disposable `DIMCODE_HOME` and deterministic provider, capture
   both modes at 100, 60 and 32 columns using a synthetic “CI checks” task.
@@ -207,7 +221,8 @@ adopted inputs. Repainting adds zero RPCs, history scans or remote CI polls.
 - After an owner contract is approved, separately verify the named status
   only appears after admission and clears at the matching settlement.
   Cover untargeted and unknown-target waits, colliding task IDs across
-  scopes, immediate outcomes, parallel work and missing clock origins.
+  scopes, immediate outcomes, active or unknown concurrent siblings and
+  missing clock origins.
   If exact reconnect becomes part of that contract, test owner cutoff,
   live handoff, stale settlement and wait generation reload.
 
