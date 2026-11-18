@@ -47,6 +47,7 @@ pub(crate) fn convert(
         let mut ended_inputs = HashSet::new();
         let mut completed_calls = HashSet::new();
         let mut thinking = HashMap::<String, String>::new();
+        let mut answered = false;
         let terminal = loop {
             let next = tokio::select! {
                 biased;
@@ -116,6 +117,7 @@ pub(crate) fn convert(
                         if let MessagePart::Text { text, .. } = part { text.push_str(&delta); }
                         content::update(part, metadata);
                     }
+                    if !delta.trim().is_empty() { answered = true; }
                     if !delta.is_empty() { yield Ok(ModelChunk::Text(delta)); }
                 }
                 StreamPart::ReasoningDelta { id, delta, provider_metadata } => {
@@ -229,6 +231,9 @@ pub(crate) fn convert(
                     if reason != ModelStopReason::MaxTokens && (!block_active.is_empty() || !calls.is_empty() || !ended_inputs.is_empty()) {
                         break Some(Err(error(AiMuxError::invalid_response_data("Model finished with incomplete blocks or tool calls"), &cancel)));
                     }
+                    if reason == ModelStopReason::EndTurn && !answered && completed_calls.is_empty() {
+                        break Some(Err(empty_reply()));
+                    }
                     break Some(Ok((usage_chunk(usage), reason)));
                 }
                 StreamPart::Error { error: failure } => break Some(Err(error(failure, &cancel))),
@@ -304,6 +309,33 @@ fn usage_chunk(usage: NativeUsage) -> Option<Usage> {
         cost: None,
         currency: None,
     })
+}
+
+/// The one failure the converter builds itself: a reply that completed with
+/// neither text nor a tool call. The provider's structured error, which
+/// carries every other failure, has nothing to say about a reply it called
+/// successful, so the bridge names this defect here.
+fn empty_reply() -> HostError {
+    let reason = "the response had no text and no tool call";
+    HostError::Failed {
+        message: ModelFailureKind::MalformedResponse.line(Some(reason)),
+        budget: None,
+        kind: HostErrorKind::Other,
+        model: Some(Box::new(ModelFailureFacts {
+            kind: ModelFailureKind::MalformedResponse,
+            reason: Some(reason.to_owned()),
+            status: None,
+            provider_code: None,
+            request_id: None,
+            cause: Vec::new(),
+            retry_after: None,
+            attempts: 1,
+            waited: std::time::Duration::ZERO,
+            retry_after_stop: None,
+            retry_forbidden: false,
+        })),
+        presentation: None,
+    }
 }
 
 pub(crate) fn error(failure: AiMuxError, cancel: &CancellationToken) -> HostError {
