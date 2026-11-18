@@ -8220,6 +8220,7 @@
       "from": "dim_acp::interaction",
       "to": "dim_acp::projection",
       "references": [
+        "path tool_id",
         "use crate::projection::tool_id"
       ]
     },
