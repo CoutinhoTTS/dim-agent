@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Build and train a native executable, then reorder its functions.
 
-The output directory must not exist. Cargo's executable is left unchanged; only
-an independently smoke-tested relink is published as OUTPUT/dimcode.
+Use a new output directory for the initial build. On macOS and Windows,
+--resume and --measure-only reuse an existing build directory.
 """
 
 import argparse
