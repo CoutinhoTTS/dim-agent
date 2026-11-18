@@ -8812,7 +8812,7 @@ fn fullscreen_home(cols: usize, p: &Palette) -> Vec<String> {
     rows.extend(
         [
             (t("Commands"), "Ctrl+O"),
-            (t("Resume"), "/resume"),
+            (t("Sessions"), "/resume"),
             (t("Models"), "/models"),
             (t("scrollback"), "/tui"),
             (t("Exit"), "/exit"),
@@ -16104,6 +16104,50 @@ mod tests {
         drawn.key(KeyCode::Up);
         drawn.key(KeyCode::Char('e'));
         assert_eq!(drawn.app.composer.text(), "check the build");
+    }
+
+    #[test]
+    fn fullscreen_home_adapts_to_the_viewport_and_yields_to_the_session() {
+        let mut drawn = Drawn::new((92, 22), None, true);
+        assert!(drawn.app.frame(drawn.size).home.is_empty());
+        drawn.app.set_fullscreen(true);
+        drawn.app.set_notice("fixture notice");
+        let render_frame = |app: &mut App, size: (u16, u16)| {
+            let frame = app.frame(size);
+            let mut screen = FullScreen::new(size, true);
+            let mut emu = crate::ui::render::testterm::Emu::new(size.0.into(), size.1.into());
+            emu.feed(&screen.render(&frame, size, &app.palette, app));
+            emu.rows_text()
+        };
+        let wide = render_frame(&mut drawn.app, drawn.size).join("\n");
+        assert!(
+            wide.contains("Welcome to DIM") && wide.contains("Ctrl+O"),
+            "{wide}"
+        );
+        assert!(wide.contains("fixture notice"), "{wide}");
+        let narrow = render_frame(&mut drawn.app, (32, 22)).join("\n");
+        assert!(
+            narrow.contains("DIM") && narrow.contains("/resume"),
+            "{narrow}"
+        );
+        assert!(!narrow.contains(STARTUP_LOGO[0]), "{narrow}");
+        let short = render_frame(&mut drawn.app, (92, 9));
+        assert!(short.iter().any(|row| row.trim() == "DIM"), "{short:?}");
+        assert!(
+            short.iter().all(|row| !row.contains("/resume")),
+            "{short:?}"
+        );
+
+        drawn.app.apply(Update::Switched {
+            session_id: "s1".into(),
+            kind: SwitchKind::Resumed,
+            cwd: None,
+        });
+        drawn.show(&[("m1", "session transcript")], "main", true);
+        assert!(drawn.app.frame(drawn.size).home.is_empty());
+        let attached = render_frame(&mut drawn.app, drawn.size).join("\n");
+        assert!(attached.contains("session transcript"), "{attached}");
+        assert!(!attached.contains("/resume"), "{attached}");
     }
 
     /// Entering fullscreen lays out only the shown Session's transcript,

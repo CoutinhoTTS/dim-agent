@@ -1051,7 +1051,7 @@ the composer and press Enter to run them.
              | Welcome to DIM 0.1.0-alpha.25!   |
              |                                  |
              | Commands                  Ctrl+O |
-             | Resume                   /resume |
+             | Sessions                 /resume |
              | Models                   /models |
              | scrollback                  /tui |
              | Exit                       /exit |
