@@ -762,7 +762,10 @@ fn exit_drains_output_even_when_offload_is_slow() {
             let (entered, ready) = tokio::sync::oneshot::channel();
             let occupied = tokio::task::spawn_blocking(move || {
                 entered.send(()).unwrap();
-                let _ = blocker.1.wait_timeout_while(blocker.0.lock().unwrap(), Duration::from_secs(5), |done| !*done).unwrap();
+                let (done, wait) = &*blocker;
+                let _ = wait
+                    .wait_timeout_while(done.lock().unwrap(), Duration::from_secs(5), |done| !*done)
+                    .unwrap();
             });
             ready.await.unwrap();
             std::fs::write(harness.cwd.join(format!("go-{attempt}")), "go").unwrap();
@@ -3098,4 +3101,108 @@ async fn a_batch_that_edits_then_runs_a_command_sees_the_edit() {
         results[2].contains("after"),
         "the command sees the edit: {results:?}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_recovery_wake_faults_the_session_and_is_posted_once_on_retry() {
+    for failure in [1, 2] {
+        tokio::time::timeout(Duration::from_secs(15), async {
+            let harness = Harness::new(platform(&[]).await, Hook::None).await;
+            let session = harness.session().await;
+            let id = session.id().to_owned();
+            unload_once_released(&session).await;
+            let ids = stored(
+                &harness,
+                &id,
+                vec![
+                    EventKind::ExecStarted(ExecStartedData {
+                        turn_id: "old-turn".into(),
+                        request_id: "old-request".into(),
+                        call_id: "old-call".into(),
+                        task_id: "owed-task".into(),
+                        description: "owed task".into(),
+                        title: None,
+                        output_path: harness
+                            .output_root
+                            .join("owed.log")
+                            .to_string_lossy()
+                            .into_owned(),
+                    }),
+                    EventKind::ExecEnded(ExecEndedData {
+                        task_id: "owed-task".into(),
+                        status: ExecStatus::Completed,
+                        result: ToolResult::text("already finished"),
+                    }),
+                ],
+            )
+            .await;
+            harness
+                .store
+                .fail_next_wake
+                .store(failure, Ordering::SeqCst);
+            match harness.agent.restore_session(id.clone()).await {
+                Err(error) => assert!(
+                    error.to_string().contains("injected exec wake failure"),
+                    "{error}"
+                ),
+                Ok(failed) => {
+                    let error = failed.idle("main").await.unwrap_err();
+                    assert!(
+                        error.to_string().contains("injected exec wake failure"),
+                        "{error}"
+                    );
+                    if let Err(error) = failed.close().await {
+                        assert!(
+                            error.to_string().contains("injected exec wake failure"),
+                            "{error}"
+                        );
+                    }
+                }
+            }
+            assert!(
+                harness.store.fail_next_wake.load(Ordering::SeqCst) == 0,
+                "the recovery attempted the owed wake"
+            );
+            let key = TimelineKey {
+                session_id: id.clone(),
+                branch_id: "main".into(),
+            };
+            let head = harness.store.head(&key).await.unwrap();
+            let persisted: Vec<_> = harness
+                .store
+                .read(&key, 1..=head)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|r| r.event)
+                .collect();
+            assert!(
+                notifications(&persisted).is_empty(),
+                "failed wake was not committed"
+            );
+            assert_eq!(ended(&persisted).len(), 1);
+            let recovered = harness.agent.restore_session(id.clone()).await.unwrap();
+            recovered.idle("main").await.unwrap();
+            let events = local_events(&recovered).await;
+            assert_eq!(
+                notifications(&events),
+                vec![("owed-task".into(), ids[1].clone())]
+            );
+            assert_eq!(
+                ended(&events).len(),
+                1,
+                "recovery must not rerun or re-end the process"
+            );
+            unload_once_released(&recovered).await;
+            let repeated = harness.agent.restore_session(id).await.unwrap();
+            repeated.idle("main").await.unwrap();
+            assert_eq!(
+                notifications(&local_events(&repeated).await),
+                vec![("owed-task".into(), ids[1].clone())]
+            );
+            harness.shutdown().await;
+        })
+        .await
+        .expect("failed wake recovery completes without losing its obligation");
+    }
 }

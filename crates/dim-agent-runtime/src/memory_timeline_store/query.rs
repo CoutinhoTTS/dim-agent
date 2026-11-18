@@ -344,9 +344,10 @@ impl<'a> Evaluation<'a> {
                 )?,
                 _ => !matches!(operand(value)?, QueryValue::Missing),
             },
-            QueryFilter::Prefix { value, prefix } => {
-                matches!(operand(value)?, QueryValue::Value { value: Value::String(s) } if s.starts_with(prefix))
-            }
+            QueryFilter::Prefix { value, prefix } => matches!(
+                operand(value)?,
+                QueryValue::Value { value: Value::String(s) } if s.starts_with(prefix)
+            ),
             QueryFilter::TextCandidate {
                 field,
                 partition_by,
@@ -383,9 +384,10 @@ impl<'a> Evaluation<'a> {
                     true
                 }
             }
-            QueryFilter::Contains { value, text } => {
-                matches!(operand(value)?, QueryValue::Value { value: Value::String(s) } if s.contains(text))
-            }
+            QueryFilter::Contains { value, text } => matches!(
+                operand(value)?,
+                QueryValue::Value { value: Value::String(s) } if s.contains(text)
+            ),
             QueryFilter::And { conditions } => {
                 for condition in conditions {
                     if !self.matches(condition, record, root, outer, element)? {

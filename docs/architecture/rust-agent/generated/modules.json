@@ -51336,6 +51336,7 @@
         "path Prompt::Tasks",
         "path QUEUE_HINT",
         "path QUEUE_HINT_MORE",
+        "path STARTUP_LOGO",
         "path TASK_FADE",
         "path WebOpened",
         "path apply_jump",

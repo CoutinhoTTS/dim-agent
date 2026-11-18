@@ -391,11 +391,24 @@ async fn session(
             }
         }
     }
-    let mut note_id="migration-metadata".to_owned();
-    while data.records.iter().any(|record|record.id==note_id){note_id.push('-');}
-    data.records.push(RecordedMessage{id:note_id,created_at:None,message:Message::text(Role::User,format!("Imported legacy historical metadata and available artifacts: {}. Execution is not resumed.",metadata_path)),in_context:false});
+    let mut note_id = "migration-metadata".to_owned();
+    while data.records.iter().any(|record| record.id == note_id) {
+        note_id.push('-');
+    }
+    let note = format!(
+        "Imported legacy historical metadata and available artifacts: {}. Execution is not resumed.",
+        metadata_path
+    );
+    data.records.push(RecordedMessage {
+        id: note_id,
+        created_at: None,
+        message: Message::text(Role::User, note),
+        in_context: false,
+    });
     for (record_index, part_index, id, media_type) in images {
-        let MessageContent::Parts(parts) = &mut data.records[record_index].message.content else { unreachable!() };
+        let MessageContent::Parts(parts) = &mut data.records[record_index].message.content else {
+            unreachable!()
+        };
         parts[part_index] = MessagePart::Image { source: ImageSource {
             file_id: Some(file_ids[&id].clone()),
             source_type: ImageSourceType::File,
