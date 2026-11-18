@@ -19,6 +19,21 @@ test('every tmux scenario is unique and documented', () => {
   assert(document.includes('node scripts/tui-tmux/run.mjs'), 'the suite documents its command');
 });
 
+test('the migration mapping keeps the line-mode startup case and the #1805 survivors', () => {
+  assert(
+    document.includes('`fresh_native_startup_uses_workspace_and_ask_without_policy_file`'),
+    'the startup case keeps its routing in the mapping',
+  );
+  assert(document.includes('is line mode, not a TUI case'), 'the startup case is recorded as line mode');
+  for (const survivor of [
+    'tui_home_commands_without_a_session_answer_and_send_nothing',
+    'tui_draws_a_prompt_hooks_context_as_a_status_row',
+    'prompt_suggestion::tab_keeps_the_fullscreen_focus_and_right_still_takes_the_offer',
+  ]) {
+    assert(document.includes(survivor), `the mapping names the survivor ${survivor}`);
+  }
+});
+
 test('no CI job runs the tmux suite', () => {
   assert(!workflow.includes('tui-tmux'), 'CI must not invoke the local TUI E2E suite');
 });
