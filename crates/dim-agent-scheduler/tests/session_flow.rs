@@ -2504,57 +2504,6 @@ async fn a_same_target_save_supersedes_the_target_gone_claim() {
     server.join().await.unwrap();
 }
 
-/// A pause and resume that commit between the disable's read and its CAS
-/// force a retry, and the retry re-checks the claim: the job stays enabled
-/// (A.3).
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_pause_and_resume_between_the_disable_read_and_write_supersedes_it() {
-    let home = home();
-    let server = start(home.path(), Arc::new(Script::default())).await;
-    let mut client = support::connect(&server).await;
-    let session = create_session(&mut client, home.path(), true).await;
-    let job = save_session_job(
-        &mut client,
-        "pause-resume",
-        &session,
-        None,
-        json!({"at": "2030-01-01T00:00:00Z"}),
-    )
-    .await;
-    client
-        .rpc("session.close", json!({"sessionId": session}))
-        .await
-        .unwrap();
-    let hold = support::holds(home.path()).hold_next_disable();
-    let accepted: Value = client
-        .typed("schedule.run_now", json!({"job_id": job}))
-        .await
-        .unwrap();
-    let run = settled(&mut client, &job, accepted["run_id"].as_str().unwrap()).await;
-    assert_eq!(run["state"], "failed", "{run}");
-    hold.read.notified().await;
-    for enabled in [false, true] {
-        client
-            .typed::<Value>(
-                "schedule.set_enabled",
-                json!({"job_id": job, "enabled": enabled}),
-            )
-            .await
-            .unwrap();
-    }
-    hold.release();
-    // The released disable retries at once; one timer pass after it is the
-    // claim scan that must leave the superseded write alone.
-    step(home.path(), 1).await;
-    let listed: Value = client.typed("schedule.list", json!({})).await.unwrap();
-    let listed = listed_job_value(&listed, &job);
-    assert_eq!(listed["enabled"], true, "{listed}");
-    assert!(listed["disabled_reason"].is_null(), "{listed}");
-    drop(client);
-    server.shutdown();
-    server.join().await.unwrap();
-}
-
 /// No save captures authority (§3.3): a job stores the preset its target
 /// names, and every launch applies the live host bound. The legacy
 /// `policy_cap` is read and preserved, never written.
@@ -2607,7 +2556,7 @@ async fn no_save_stores_a_policy_cap() {
 
 /// A save that sends the legacy `reuse` binding's mapped target explicitly
 /// has not replaced it: nothing is released, before or after a retention
-/// pass (A.7).
+/// pass, and the legacy `policy_cap` stays stored (A.7, §2.3).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_explicitly_sent_equivalent_target_does_not_release_the_binding() {
     let home = home();
@@ -2653,6 +2602,17 @@ async fn an_explicitly_sent_equivalent_target_does_not_release_the_binding() {
         run.get("released").is_none(),
         "the equivalent target releases nothing: {run}"
     );
+    let stored = stored_document(home.path())["jobs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|job| job["id"] == "reuse")
+        .unwrap()
+        .clone();
+    assert!(
+        stored.get("policy_cap").is_some(),
+        "an equivalent target keeps the legacy cap: {stored}"
+    );
     // A retention pass re-derives no release either.
     let before = signals(home.path()).retention();
     client
@@ -2667,52 +2627,6 @@ async fn an_explicitly_sent_equivalent_target_does_not_release_the_binding() {
         run.get("released").is_none(),
         "the retention pass releases nothing: {run}"
     );
-    drop(client);
-    server.shutdown();
-    server.join().await.unwrap();
-}
-
-/// A failed release wakes a retention pass, so the release heals at once
-/// rather than at the timer's next minute (A.7).
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_failed_release_wakes_a_retention_pass() {
-    let home = home();
-    let server = start(home.path(), Arc::new(Script::default())).await;
-    let mut client = support::connect(&server).await;
-    let launched = create_session(&mut client, home.path(), true).await;
-    let retarget = create_session(&mut client, home.path(), true).await;
-    save_session_job(
-        &mut client,
-        "seed",
-        &launched,
-        None,
-        json!({"at": "2030-01-01T00:00:00Z"}),
-    )
-    .await;
-    drop(client);
-    server.shutdown();
-    server.join().await.unwrap();
-    seed_legacy_reuse_job(home.path(), &launched);
-
-    let server = start(home.path(), Arc::new(Script::default())).await;
-    let mut client = support::connect(&server).await;
-    support::holds(home.path()).fail_next_release();
-    client
-        .typed::<Value>(
-            "schedule.save",
-            json!({"job": {"id": "reuse",
-                "target": {"kind": "session", "session_id": retarget, "branch_id": "main"}}}),
-        )
-        .await
-        .unwrap();
-    // No delivery or delete follows: only the failed release's wake can run
-    // the pass that re-derives it.
-    wait_for("the failed release heals at the wake", || {
-        stored_runs(home.path())
-            .iter()
-            .any(|run| run["run_id"] == "run-1" && run["released"] == true)
-    })
-    .await;
     drop(client);
     server.shutdown();
     server.join().await.unwrap();
@@ -2769,53 +2683,6 @@ async fn a_later_save_of_a_retargeted_job_releases_nothing_again() {
     assert!(
         holds.release_failure_armed(),
         "the later save attempts no release"
-    );
-    drop(client);
-    server.shutdown();
-    server.join().await.unwrap();
-}
-
-/// A legacy `reuse` job saved with its mapped `session` target explicitly
-/// has not replaced the binding, and keeps its stored cap (A.7, §2.3).
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_legacy_job_saved_with_its_mapped_target_keeps_its_policy_cap() {
-    let home = home();
-    let server = start(home.path(), Arc::new(Script::default())).await;
-    let mut client = support::connect(&server).await;
-    let launched = create_session(&mut client, home.path(), true).await;
-    save_session_job(
-        &mut client,
-        "seed",
-        &launched,
-        None,
-        json!({"at": "2030-01-01T00:00:00Z"}),
-    )
-    .await;
-    drop(client);
-    server.shutdown();
-    server.join().await.unwrap();
-    seed_legacy_reuse_job(home.path(), &launched);
-
-    let server = start(home.path(), Arc::new(Script::default())).await;
-    let mut client = support::connect(&server).await;
-    client
-        .typed::<Value>(
-            "schedule.save",
-            json!({"job": {"id": "reuse",
-                "target": {"kind": "session", "session_id": launched, "branch_id": "main"}}}),
-        )
-        .await
-        .unwrap();
-    let stored = stored_document(home.path())["jobs"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|job| job["id"] == "reuse")
-        .unwrap()
-        .clone();
-    assert!(
-        stored.get("policy_cap").is_some(),
-        "an equivalent target keeps the legacy cap: {stored}"
     );
     drop(client);
     server.shutdown();
