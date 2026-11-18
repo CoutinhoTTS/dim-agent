@@ -127,7 +127,15 @@ BranchLine 注入 `B:Dispatcher`、`B:TimelineIdentity`、`B:BranchLifecycle` �
 这两个模式和用词与 Collaboration 的消息相同（`append`、`steer`），含义也相同，因为两者用的都是 InputQueue 的模式。
 
 - **标记。** `<dim-branch-message from="C" to="P">`。接收方凭这个标记把消息和用户的话区分开。RPC 只接收操作者内容、不接收块，所以客户端无法伪造消息。
-- **允许的两端。** 一条线对两条线发消息和读取：它被切出来的那条线，以及它开过的每条未结束的线。这条边对每条线都双向可用：工具线给父线发消息，父线给它开出的工具线发消息，插件线给开出它的那条线发消息、那条线读它，曾经是默认分支而开过线的线这两条都保留。`end` 不属于这条边：`end {content}` 不接受目标，所以它永远结束调用方自己（§10、§11）。其他任何组合都由工具结果拒绝，什么也不写：兄弟分支、工具线读插件线、插件线收发消息、已结束的线。协调沿父子关系走，所以它留在开线的那条线上，默认分支移动时它不跟着动。拒绝码仍是 `branch_not_kin` 和 `branch_not_tool_line`；一条线仍然绝不通过工具读插件线。
+- **允许的两端。** 一条规则：把本文早先写 `main` 的地方换成开出目标的那条线，不论它是谁：
+
+  | 组合 | 发消息 | 读取 | 拒绝 |
+  | --- | --- | --- | --- |
+  | 开线方与它开出的每条未结束的线 | 双方都可以给对方发消息 | 双方都可以读对方：开线方读它开出的线，那条线从自己的切点读开线方 | 无 |
+  | 插件线与其开线方 | 两个方向都不行 | 插件线读它被切出来的那条线；没有哪条线经工具读插件线 | 发消息，以及开线方的读取：`branch_not_tool_line` |
+  | 其他任何组合：兄弟分支、相隔两代的线、已结束的线 | 不行 | 不行 | `branch_not_kin`，已结束的线是 `branch_ended` |
+
+  用户开的线是像工具线一样的对话线，前两行原样适用。`end` 不属于任何组合：`end {content}` 不接受目标，所以它永远结束调用方自己（§10、§11）。协调沿父子关系走，所以它留在开线的那条线上，默认分支移动时它不跟着动；曾经的默认分支保留它开出的线，并继续与它们互发消息、互读。
 - **读取。** `read {branch, after?, limit?}` 返回目标已提交历史的一页，未结束或已结束都可以，经 `TreeCommands.page` 从存储读取，按 Collaboration 的 `read` 渲染成员页面的方式呈现：输入、文本、工具调用与结果、每轮结束，带 `nextCursor`；工具结果条目携带其工具在该结果上声明的效果（[工具契约 A.6](contracts/session-boundary.md#a6-工具效果)），仅当结果至少声明了一个时才存在，路径原样，命令在第 200 个字符处截断并标出截断。目标是被调用方切出来的那条线，或调用方开过的线。两个方向共用一条游标规则：
   - 不带 `after` 时，读取从调用方上一次成功读取该线的位置继续：最后一次返回了页的读取的 `nextCursor`。此前没有读过时，读被切出来的那条线从调用方的切点开始，读调用方开过的线从那条线的第一个事件开始。
   - 显式 `after` 从该点读取。读被切出来的那条线时，低于切点的值会抬到切点，因为切点之前的事件已经是这条线自己的历史。读自己开过的线时，值原样使用，所以 `after: 0` 会从一条线的开头重读。
@@ -391,10 +399,10 @@ WorkspaceTools 不变。
 
 | 动作 | 输入 | 谁 | 作用 | 结果文本 |
 | --- | --- | --- | --- | --- |
-| `create` | `prompt`、`at?`、`idleNotice?`（`steer` \| `none`） | `main`，不论它是不是默认分支 | 开一条切在 `at` 的工具线（默认与现在相同：在本次请求的模型开始之前）。空闲通知默认是 `steer` | `Line created: C` |
-| `message` | `to`、`content`、`mode?`（`append` \| `steer`） | `main` → 它未结束的工具线；工具线 → 它的父分支 | 在 `to` 上写一条 `input/message` | `Sent to C.` |
-| `read` | `branch`、`after?`、`limit?`（1–200） | `main`，读它的工具线；一条线，读它被切出来的那条线 | 从存储读一页；不给 `after` 时从调用方的游标开始（§6） | 这一页的 JSON：items、`nextCursor`、`done` |
-| `end` | `content` | 不是默认分支的工具线，对它自己 | 树锁下的一次 `TreeCommands.end(C, source, final_message)`：先检查守卫，再给父线写最终消息（steer），最后写 `branch/end`，`source` 就是这次调用。被拒绝的结束不写最终消息 | `Line C is ending; your final message was sent to P.` |
+| `create` | `prompt`、`at?`、`idleNotice?`（`steer` \| `none`） | 根，以及当前的默认分支 | 开一条切在 `at` 的工具线（默认与现在相同：在本次请求的模型开始之前），它向调用方汇报。这次开线会越过 Session 上限时以 `branch_limit_reached` 被拒绝（§6.1）。空闲通知默认是 `steer` | `Line created: C` |
+| `message` | `to`、`content`、`mode?`（`append` \| `steer`） | 一条线给它开过的线；一条线给它被切出来的那条线 | 在 `to` 上写一条 `input/message` | `Sent to C.` |
+| `read` | `branch`、`after?`、`limit?`（1–200） | 一条线，读被切出来的那条线或它开过的线 | 从存储读一页；不给 `after` 时从调用方的游标开始（§6） | 这一页的 JSON：items、`nextCursor`、`done` |
+| `end` | `content` | 不是默认分支的工具线，对它自己 | 树锁下的一次 `TreeCommands.end(C, source, final_message)`：先检查守卫，在 C 上写带最终消息的 `branch/end`，再用由 `source` 推出的 submission id 把这条消息（steer）送到父线（§10）。被拒绝的结束不写最终消息 | `Line C is ending; your final message was sent to P.` |
 
 输入 schema 为 `{action, prompt?, at?, idleNotice?, to?, content?, mode?, branch?, after?, limit?}`，`action` 必填，`additionalProperties: false`。`idleNotice` 只对 `create` 有效。
 
