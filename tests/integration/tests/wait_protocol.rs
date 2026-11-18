@@ -20,6 +20,7 @@ enum Action {
     TaskB,
     Steer,
     Plain,
+    Consume,
     Reload,
     TakeA,
 }
@@ -63,13 +64,42 @@ impl DynPlugin for Probe {
     }
 }
 
+/// The input id a trace action appends, so a later `Consume` names it.
+fn input_id(position: usize) -> String {
+    format!("input-{position}")
+}
+
+/// The input positions a trace's `Consume` actions retired: each `Consume`
+/// reads the latest applied arrival that is still pending. A `Consume` with
+/// nothing left to read retires nothing.
+fn retired(history: &[Action]) -> Vec<usize> {
+    let mut retired: Vec<usize> = Vec::new();
+    for (position, action) in history.iter().enumerate() {
+        if *action != Action::Consume {
+            continue;
+        }
+        let latest = (0..position).rev().find(|index| {
+            matches!(
+                history[*index],
+                Action::TaskA | Action::TaskB | Action::Steer
+            ) && !retired.contains(index)
+        });
+        if let Some(latest) = latest {
+            retired.push(latest);
+        }
+    }
+    retired
+}
+
 fn expected(history: &[Action], taken: &[usize], task: Option<&str>) -> Option<usize> {
+    let retired = retired(history);
     let candidates: Vec<_> = history
         .iter()
         .enumerate()
         .filter(|(i, action)| {
             matches!(action, Action::TaskA | Action::TaskB | Action::Steer)
                 && !taken.contains(i)
+                && !retired.contains(i)
                 && history[..*i]
                     .iter()
                     .rev()
@@ -121,6 +151,7 @@ async fn compare(
             })
         }
         WaitResult::UserSteer { .. } => Some(Action::Steer),
+        WaitResult::AlreadyNotified { .. } => None,
         WaitResult::Timeout { .. } => None,
         other => panic!("unexpected result for {history:?}: {other:?}"),
     };
@@ -168,7 +199,9 @@ async fn wait_timeline_traces_match_the_notification_contract() {
             },
         ));
     let host = MinimalHost::start(&builder).await.unwrap();
-    let alphabet = [Start, End, TaskA, TaskB, Steer, Plain, Reload, TakeA];
+    let alphabet = [
+        Start, End, TaskA, TaskB, Steer, Plain, Consume, Reload, TakeA,
+    ];
     let mut traces = Vec::new();
     for a in alphabet {
         for b in alphabet {
@@ -182,13 +215,15 @@ async fn wait_timeline_traces_match_the_notification_contract() {
         vec![Start, TaskA, Reload, TaskB, TakeA],
         vec![Start, TaskA, End, Start, TaskB],
         vec![Start, TaskA, TakeA, TaskA, TakeA],
+        vec![Start, TaskA, Steer, Consume, Consume, TakeA],
+        vec![Start, TaskB, TaskA, Consume, TakeA, TakeA],
     ]);
     for trace in &traces {
         let session = host.create_session(SessionConfig::default()).await.unwrap();
         let (timeline, ctx) = seen.lock().unwrap().clone().unwrap();
         let mut history = Vec::new();
         let mut taken = Vec::new();
-        for action in trace {
+        for (position, action) in trace.iter().enumerate() {
             match action {
                 Reload => {
                     let id = session
@@ -202,6 +237,23 @@ async fn wait_timeline_traces_match_the_notification_contract() {
                     ctx.view(id).unwrap().restart().await.unwrap();
                 }
                 TakeA => compare(&session, &history, &mut taken, Some("a")).await,
+                Consume => {
+                    let retired = retired(&history);
+                    let latest = (0..history.len()).rev().find(|index| {
+                        matches!(history[*index], TaskA | TaskB | Steer) && !retired.contains(index)
+                    });
+                    if let Some(latest) = latest {
+                        timeline
+                            .append(
+                                EventKind::InputConsumed(InputConsumedData {
+                                    input_id: input_id(latest),
+                                })
+                                .into(),
+                            )
+                            .unwrap();
+                        session.idle("main").await.unwrap();
+                    }
+                }
                 _ => {
                     let draft = match action {
                         Start => EventKind::TurnStart(TurnStartData {
@@ -224,7 +276,8 @@ async fn wait_timeline_traces_match_the_notification_contract() {
                                     } else {
                                         InputMode::Steer
                                     }),
-                                )));
+                                )))
+                                .with_id(input_id(position));
                             if matches!(action, TaskA | TaskB) {
                                 let task = if *action == TaskA { "a" } else { "b" };
                                 draft.tags = Some(vec![format!("{WAKE_TASK_TAG}{task}")]);
@@ -235,6 +288,18 @@ async fn wait_timeline_traces_match_the_notification_contract() {
                     };
                     timeline.append(draft).unwrap();
                     session.idle("main").await.unwrap();
+                    if matches!(action, TaskA | TaskB | Steer | Plain) {
+                        timeline
+                            .append(
+                                EventKind::InputApplied(InputAppliedData {
+                                    input_id: input_id(position),
+                                    mode: None,
+                                })
+                                .into(),
+                            )
+                            .unwrap();
+                        session.idle("main").await.unwrap();
+                    }
                 }
             }
             history.push(*action);
@@ -286,12 +351,18 @@ async fn wait_timeline_traces_match_the_notification_contract() {
             })
         };
         timeline.append(boundary.into()).unwrap();
+        let steer = EventDraft::from(EventKind::InputMessage(InputMessageData::text(
+            "during recovery",
+            Some(InputMode::Steer),
+        )))
+        .with_id(input_id(0));
+        timeline.append(steer).unwrap();
         timeline
             .append(
-                EventKind::InputMessage(InputMessageData::text(
-                    "during recovery",
-                    Some(InputMode::Steer),
-                ))
+                EventKind::InputApplied(InputAppliedData {
+                    input_id: input_id(0),
+                    mode: None,
+                })
                 .into(),
             )
             .unwrap();
