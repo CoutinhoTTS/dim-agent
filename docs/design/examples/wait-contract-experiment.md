@@ -75,14 +75,16 @@ this is not a promise of deduplication by task id.
 i. Q excludes it from then on, so a wait that starts after the model read the input waits for what
 comes after it, instead of returning an arrival the model already has.
 
-**N2c — A read notice answers its own task once.** A call naming a task whose notice the model read
-in this turn returns already_notified for that task and spends nothing, because the notice it names
-will not come again. The record is made by Consume alone, so a Delete of the same input leaves the
-call to timeout, and End or Reload clears the record before the call is made. The record is read
-where the call polls, before it registers and again after each wake, so a notice read while the
-call sleeps does not end that sleep. A selectable occurrence still wins: when a steer, or another
-notice for the named task, is queued, the call takes it and ends as steer or notification instead of
-answering already_notified.
+**N2c — A read notice answers its own task without consuming an arrival.** A call naming a task
+whose notice the model read in this turn returns already_notified for that task, because the notice
+it names will not come again. It consumes no arrival and spends no record: the answer is about the
+task, so the queue and the record are as the call found them, and every later call naming that task
+answers the same way until the turn ends. The record is made by Consume alone, so a Delete of the
+same input leaves the call to timeout, and End or Reload clears the record before the call is made.
+The record is read where the call polls, before it registers and again after each wake, so a notice
+read while the call sleeps does not end that sleep. A selectable occurrence still wins: when a
+steer, or another notice for the named task, is queued, the call takes it and ends as steer or
+notification instead of answering already_notified.
 
 **N3 — Recovery preserves the admission rule without restoring old notifications.** The recovered
 open flag is OpenAt(H,c), by P1 of the recovery argument. The new generation's pending sequence is

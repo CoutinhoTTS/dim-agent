@@ -70,8 +70,10 @@ Sleep == /\ s.phase="registered" /\ ~s.closing /\ Matching(s.queue,s.target)= <<
  /\ s'=[s EXCEPT !.phase="sleep"]
 \* The model already read the named task's notice and nothing released matches:
 \* the call answers at once instead of waiting for a notice that will not come
-\* again. The check is the poll before registering, which the call repeats
-\* after each wake, so a record made while it sleeps does not end the sleep.
+\* again. It consumes no arrival and leaves the record in place, so a later call
+\* for the same task answers the same way. The check is the poll before
+\* registering, which the call repeats after each wake, so a record made while
+\* it sleeps does not end the sleep.
 AlreadyNotified == /\ s.waiting#0 /\ s.phase="poll" /\ ~s.closing
  /\ s.target#0 /\ s.target\in s.notified /\ Matching(s.queue,s.target)= <<>>
  /\ s'=[s EXCEPT !.waiting=0, !.phase="idle", !.finished=@\cup{s.waiting},
