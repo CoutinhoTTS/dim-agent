@@ -378,12 +378,17 @@ async fn process_requests_use_connection_snapshots_and_release_retained_streams_
         root.plugin(AimuxPlugin::default()).await.unwrap();
         let host = root.get::<ModelHost>().unwrap();
         let request = |text: &str| Arc::new(ModelRequest::new("logical-provider", "test-model", vec![Message::text(Role::User, text)]));
-        let connection = |server: &TestServer, key: &str| ModelConnection::Http(HttpModelConnection {
- api_key: None,
-            network: Default::default(),
-            protocol: ModelProtocol::OpenaiCompatible, base_url: server.url.clone(),
-            bearer: Some(key.to_owned()), headers: Default::default(), preset: None,
-        });
+        let connection = |server: &TestServer, key: &str| {
+            ModelConnection::Http(HttpModelConnection {
+                api_key: None,
+                network: Default::default(),
+                protocol: ModelProtocol::OpenaiCompatible,
+                base_url: server.url.clone(),
+                bearer: Some(key.to_owned()),
+                headers: Default::default(),
+                preset: None,
+            })
+        };
         for (server, key) in [(&first, "first-secret"), (&second, "second-secret")] {
             let mut stream = host.0.invoke(request("text"), connection(server, key), CancellationToken::new()).await.unwrap();
             while let Some(chunk) = stream.next().await { chunk.unwrap(); }
@@ -418,7 +423,13 @@ async fn process_requests_use_connection_snapshots_and_release_retained_streams_
         assert!(matches!(partial.next().await.unwrap().unwrap(), ModelChunk::Text(_)));
         root.shutdown().await.unwrap();
         for stream in [&mut unpolled, &mut partial] {
-            assert!(matches!(stream.next().await, Some(Err(HostError::Failed { kind: HostErrorKind::OwnerClosed, .. }))));
+            assert!(matches!(
+                stream.next().await,
+                Some(Err(HostError::Failed {
+                    kind: HostErrorKind::OwnerClosed,
+                    ..
+                }))
+            ));
             assert!(stream.next().await.is_none());
         }
         assert!(matches!(host.0.invoke(request("text"), connection(&first, "old"), CancellationToken::new()).await,
@@ -444,7 +455,13 @@ async fn native_http_text_usage_tools_and_continuation_follow_agent_events() {
         assert!(events.iter().any(|e| matches!(&e.kind, EventKind::Thinking(data) if data.delta == "thinking")));
         assert!(events.iter().any(|e| matches!(&e.kind, EventKind::Text(data) if data.delta == "hello")));
         assert!(events.iter().any(|e| matches!(&e.kind, EventKind::ModelUsage(data) if data.usage.prompt_tokens == 10. && data.usage.total_tokens == 13. && data.usage.cache_read_tokens == Some(2.))));
-        let call = events.iter().find_map(|e| if let EventKind::ModelCall(call) = &e.kind { Some(call) } else { None }).unwrap();
+        let call = events
+            .iter()
+            .find_map(|e| match &e.kind {
+                EventKind::ModelCall(call) => Some(call),
+                _ => None,
+            })
+            .unwrap();
         let metadata = call.request.metadata.as_ref().unwrap();
         assert_eq!(metadata.session_id.as_deref(), Some(session.id()));
         assert_eq!(metadata.turn_id.as_deref(), Some(call.turn_id.as_str()));
@@ -455,7 +472,17 @@ async fn native_http_text_usage_tools_and_continuation_follow_agent_events() {
         let events = chain_events(&session, "main", ..).await.unwrap();
         assert!(events.iter().any(|e| matches!(&e.kind, EventKind::ToolResult(data) if data.results[0].result.content == ToolContent::Text("result text".into()))));
         assert!(events.iter().any(|e| matches!(&e.kind, EventKind::Text(data) if data.delta == "tool completed")));
-        assert!(matches!(events.iter().rfind(|event| matches!(event.kind, EventKind::TurnEnd(_))).unwrap().kind, EventKind::TurnEnd(TurnEndData { outcome: TurnOutcome::Completed { .. }, .. })));
+        assert!(matches!(
+            events
+                .iter()
+                .rfind(|event| matches!(event.kind, EventKind::TurnEnd(_)))
+                .unwrap()
+                .kind,
+            EventKind::TurnEnd(TurnEndData {
+                outcome: TurnOutcome::Completed { .. },
+                ..
+            })
+        ));
         let requests = server.endpoint.requests.lock().unwrap().clone();
         assert_eq!(requests.len(), 3);
         for request in &requests {
@@ -477,7 +504,10 @@ async fn native_http_text_usage_tools_and_continuation_follow_agent_events() {
         assert_eq!(requests[2]["messages"].as_array().unwrap().last().unwrap()["content"], "result text");
 
         let mut explicit = session_config();
-        explicit.model.config = Some(ModelConfig { temperature: Some(0.375), ..Default::default() });
+        explicit.model.config = Some(ModelConfig {
+            temperature: Some(0.375),
+            ..Default::default()
+        });
         explicit.model.metadata = Some(serde_json::from_value(json!({
             "sessionId": "stale-session", "turnId": "stale-turn", "requestId": "stale-request",
             "runId": "caller-run", "traceId": "caller-trace", "experiment": "selected"
@@ -486,7 +516,13 @@ async fn native_http_text_usage_tools_and_continuation_follow_agent_events() {
         selected.submit("text".into(), InputMode::Queue, "main").await.unwrap();
         selected.idle("main").await.unwrap();
         let events = chain_events(&selected, "main", ..).await.unwrap();
-        let call = events.iter().find_map(|e| if let EventKind::ModelCall(call) = &e.kind { Some(call) } else { None }).unwrap();
+        let call = events
+            .iter()
+            .find_map(|e| match &e.kind {
+                EventKind::ModelCall(call) => Some(call),
+                _ => None,
+            })
+            .unwrap();
         assert_eq!(call.request.config.as_ref().unwrap().temperature, Some(0.375));
         assert_eq!(call.request.config.as_ref().unwrap().max_tokens, None, "An explicit model configuration must not inherit catalog fields");
         let metadata = call.request.metadata.as_ref().unwrap();
@@ -697,7 +733,8 @@ async fn responses_without_output_details_records_zero() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn interrupt_releases_native_request_and_keeps_other_branches_usable() {
     tokio::time::timeout(Duration::from_secs(15), async {
-        let server = TestServer::start().await; let agent = model_agent(server.models(), None).await;
+        let server = TestServer::start().await;
+        let agent = model_agent(server.models(), None).await;
         let session = agent.create_session(session_config()).await.unwrap();
         session.submit("wait".into(), InputMode::Queue, "main").await.unwrap();
         // Streaming text is progress until its block ends (agent-029).
@@ -718,7 +755,8 @@ async fn interrupt_releases_native_request_and_keeps_other_branches_usable() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn failed_native_outputs_do_not_execute_tools_or_invent_usage() {
     tokio::time::timeout(Duration::from_secs(15), async {
-        let server = TestServer::start().await; let agent = model_agent(server.models(), None).await;
+        let server = TestServer::start().await;
+        let agent = model_agent(server.models(), None).await;
         for prompt in ["unauthorized", "truncated", "length"] {
             let session = agent.create_session(session_config()).await.unwrap();
             session.submit(prompt.into(), InputMode::Queue, "main").await.unwrap();
@@ -878,23 +916,41 @@ impl rutis::host::DynPlugin for OverrideRequest {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn before_committed_request_controls_model_settings_and_tool_admission() {
     tokio::time::timeout(Duration::from_secs(15), async {
-        let original = TestServer::start().await; let selected = TestServer::start().await;
+        let original = TestServer::start().await;
+        let selected = TestServer::start().await;
         let mut config = configuration(&original.url);
         config.providers.push(dim_agent_aimux::config::ProviderConfig {
-            id: "selected".into(), kind: dim_agent_aimux::config::ProviderKind::OpenaiCompatible,
-            api_key_env: None, base_url: selected.url.clone(), headers: Default::default(), compatible: None,
-            models: vec![dim_agent_aimux::config::ModelEntry { id: "selected-model".into(), context_window: Some(128_000), max_output_tokens: Some(4096), config: ModelConfig { max_tokens: Some(99.), temperature: Some(0.8), ..Default::default() } }],
+            id: "selected".into(),
+            kind: dim_agent_aimux::config::ProviderKind::OpenaiCompatible,
+            api_key_env: None,
+            base_url: selected.url.clone(),
+            headers: Default::default(),
+            compatible: None,
+            models: vec![dim_agent_aimux::config::ModelEntry {
+                id: "selected-model".into(),
+                context_window: Some(128_000),
+                max_output_tokens: Some(4096),
+                config: ModelConfig {
+                    max_tokens: Some(99.),
+                    temperature: Some(0.8),
+                    ..Default::default()
+                },
+            }],
         });
         let models = Arc::new(AimuxModels::from_config(config).unwrap());
         for remove_tools in [false, true] {
             let mut builder = builder(models.clone(), Arc::new(MockTools));
             builder.require_feature(Feature::new("test.final-model-request").branch("test.final-model-request", move |names| Ok(Box::new(OverrideRequest { remove_tools, timeline: names.key()? }))));
-            let agent = model_agent(models.clone(), Some(builder)).await; let session = agent.create_session(session_config()).await.unwrap();
+            let agent = model_agent(models.clone(), Some(builder)).await;
+            let session = agent.create_session(session_config()).await.unwrap();
             session.submit("tool".into(), InputMode::Queue, "main").await.unwrap();
             session.idle("main").await.unwrap();
             let events = chain_events(&session, "main", ..).await.unwrap();
             if remove_tools {
-                assert!(!events.iter().any(|event| matches!(event.kind, EventKind::ToolCall(_) | EventKind::ToolResult(_))));
+                assert!(!events.iter().any(|event| matches!(
+                    event.kind,
+                    EventKind::ToolCall(_) | EventKind::ToolResult(_)
+                )));
                 assert!(events.iter().any(|event| matches!(&event.kind, EventKind::ModelOutputEnd(end) if matches!(end.outcome, ModelOutputOutcome::Failed { .. }))));
             } else {
                 assert!(events.iter().any(|event| matches!(&event.kind, EventKind::Text(text) if text.delta == "tool completed")));

@@ -892,9 +892,13 @@ mod tests {
                             } else {
                                 // The request arrives in absolute form; the origin
                                 // wants origin form.
-                                let path = target
+                                let origin = target
                                     .split_once("://")
-                                    .and_then(|(_, authority)| authority.find('/').map(|i| &authority[i..]))
+                                    .map(|(_, authority)| authority);
+                                let path = origin
+                                    .and_then(|authority| {
+                                        authority.find('/').map(|i| &authority[i..])
+                                    })
                                     .unwrap_or("/");
                                 let version = parts.next().unwrap_or("HTTP/1.1");
                                 let tail = head.split_once("\r\n").map(|(_, tail)| tail).unwrap_or("");

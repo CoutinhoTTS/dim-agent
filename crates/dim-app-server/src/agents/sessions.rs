@@ -96,6 +96,10 @@ pub struct LaunchRequest {
     /// its text rules and writes it as the first manual title.
     #[serde(default)]
     pub title: Option<String>,
+    /// The workspace to create; requires the `sessions.launch.worktree` feature.
+    /// See [managed worktrees §3](https://github.com/arcships/dim/blob/main/docs/design/worktree-management.md#3-创建).
+    #[serde(default, deserialize_with = "crate::protocol::optional_worktree")]
+    pub worktree: Option<crate::protocol::CreateWorktree>,
 }
 /// The creation origins a `sessions.launch` caller may declare: work a saved
 /// configuration runs with no person present. A closed enum, so a caller
@@ -119,6 +123,10 @@ pub struct LaunchReply {
     pub session_id: String,
     /// The effective policy the Session was created with.
     pub policy: PermissionPolicy,
+    /// The created workspace for `sessions.launch.worktree`; omitted if not requested.
+    /// See [managed worktrees §3](https://github.com/arcships/dim/blob/main/docs/design/worktree-management.md#3-创建).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<crate::worktrees::CreatedWorktreeReply>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -455,34 +463,38 @@ impl AgentIndex {
             .await?;
         let origin = request.origin.map(LaunchOrigin::session_origin);
         let index = self.clone();
-        let session = tokio::spawn(async move {
+        let (session, worktree) = tokio::spawn(async move {
             let _activity = activity;
-            let session = index
-                .create_session(
+            let created = index
+                .create_with_worktree(
                     &host,
                     config,
                     PROTOCOL_VERSION,
-                    None,
                     origin.unwrap_or(SessionOrigin::Internal),
-                    None,
+                    request.worktree,
+                    &index.stopping,
                 )
                 .await?;
             index.retain_versions();
-            Ok::<_, AgentError>(session)
+            Ok::<_, super::CreateSessionError>(created)
         })
         .await
         .map_err(|error| SessionsError::Failed {
             message: error.to_string(),
         })?
         .map_err(|error| match error {
-            AgentError::Reloading(_) => SessionsError::from(error),
-            error => SessionsError::Failed {
+            super::CreateSessionError::Agent(error @ AgentError::Reloading(_)) => error.into(),
+            super::CreateSessionError::Agent(error) => SessionsError::Failed {
                 message: error.to_string(),
+            },
+            super::CreateSessionError::Worktree(error) => SessionsError::Failed {
+                message: format!("{}: {}", error.code(), error.message()),
             },
         })?;
         Ok(LaunchReply {
             session_id: session.id().to_owned(),
             policy,
+            worktree: worktree.as_ref().map(|created| created.reply()),
         })
     }
 
@@ -677,7 +689,9 @@ impl AgentIndex {
                     dispatch.wait_for(|state| state.sequence >= through || state.failure.is_some())
                         .await.map(|state| state.failure.clone())
                 } => {
-                    if let Some(error) = result.map_err(|_| AgentError::Closed(request.branch_id.clone()))? {
+                    let failure = result
+                        .map_err(|_| AgentError::Closed(request.branch_id.clone()))?;
+                    if let Some(error) = failure {
                         return Err(settlement(error));
                     }
                 }

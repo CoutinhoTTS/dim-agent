@@ -2,7 +2,10 @@
 //! compares Goal's inputs with these, byte for byte: the change triggers the
 //! Session part and the tool write, and the state records the branch part
 //! answers them with.
-#![allow(dead_code)]
+#![expect(
+    dead_code,
+    reason = "each test binary uses the helpers it needs; the rest are shared"
+)]
 
 /// The fact a state record answers: the change trigger it commits with (R5),
 /// named by its submission id, or the sequence of the fact it answers.

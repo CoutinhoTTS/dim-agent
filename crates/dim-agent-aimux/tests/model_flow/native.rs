@@ -2697,11 +2697,16 @@ async fn four_native_apis_preserve_signed_blocks_and_tool_continuation() {
                 _ => assert_eq!(next["messages"].as_array().unwrap().last().unwrap()["content"],"result text"),
             }
             if kind!="openai-chat" {
-                let content = events.iter().find(|e|matches!(e.kind,EventKind::ModelContent(_))).unwrap();
+                let content = events
+                    .iter()
+                    .find(|e| matches!(e.kind, EventKind::ModelContent(_)))
+                    .unwrap();
                 assert!(dim_agent_types::v1::EventRef::new(content).is_none());
                 for event in &events {
                     if matches!(event.kind,EventKind::ModelCall(_) | EventKind::ContextPrepare(_)) {
-                        let wire=serde_json::to_value(dim_agent_types::v1::EventRef::new(event).unwrap()).unwrap();
+                        let wire =
+                            serde_json::to_value(dim_agent_types::v1::EventRef::new(event).unwrap())
+                                .unwrap();
                         assert!(!wire["data"]["request"]["messages"].to_string().contains("providerMetadata"));
                     }
                 }
@@ -2710,8 +2715,16 @@ async fn four_native_apis_preserve_signed_blocks_and_tool_continuation() {
             let protocol=match kind {"openai-chat"=>ModelProtocol::OpenaiChat,"openai-responses"=>ModelProtocol::OpenaiResponses,"anthropic"=>ModelProtocol::Anthropic,_=>ModelProtocol::Gemini};
             let connection=||ModelConnection::Http(HttpModelConnection{protocol,base_url:server.url.clone(),network:Default::default(),headers:Default::default(),bearer:if kind=="anthropic" {Some("bearer-secret".into())} else {None},api_key:None,preset:None});
             let request=Arc::new(ModelRequest::new("local","test-model",vec![Message::text(Role::User,"tool")]));
-            let mut unpolled=host.0.invoke(request.clone(),connection(),CancellationToken::new()).await.unwrap();
-            let mut partial=host.0.invoke(request,connection(),CancellationToken::new()).await.unwrap();
+            let mut unpolled = host
+                .0
+                .invoke(request.clone(), connection(), CancellationToken::new())
+                .await
+                .unwrap();
+            let mut partial = host
+                .0
+                .invoke(request, connection(), CancellationToken::new())
+                .await
+                .unwrap();
             while !matches!(partial.next().await.unwrap().unwrap(),ModelChunk::Text(_)) {}
             if kind=="anthropic" {
                 let requests=server.endpoint.requests.lock().unwrap();
@@ -2736,9 +2749,23 @@ async fn four_native_apis_preserve_signed_blocks_and_tool_continuation() {
                 assert!(!headers.contains_key("authorization"));
             }
             agent.close().await.unwrap();
-            for stream in [&mut unpolled,&mut partial] { assert!(matches!(stream.next().await,Some(Err(HostError::Failed{kind:HostErrorKind::OwnerClosed,..})))); }
+            for stream in [&mut unpolled, &mut partial] {
+                assert!(matches!(
+                    stream.next().await,
+                    Some(Err(HostError::Failed {
+                        kind: HostErrorKind::OwnerClosed,
+                        ..
+                    }))
+                ));
+            }
             if kind == "gemini" {
-                use aimux_core::{language_model::LanguageModel, language_model_message::{LanguageModelMessage, TextPart, UserPart}, options::CallOptions, stream_part::StreamPart, types::FinishReasonUnified};
+                use aimux_core::{
+                    language_model::LanguageModel,
+                    language_model_message::{LanguageModelMessage, TextPart, UserPart},
+                    options::CallOptions,
+                    stream_part::StreamPart,
+                    types::FinishReasonUnified,
+                };
                 use aimux_provider_utils::Resolvable;
                 use aimux_providers::vertex::{VertexProviderSettings, create_google_vertex};
                 let provider = create_google_vertex(VertexProviderSettings {
@@ -3274,7 +3301,8 @@ async fn native_content_keeps_unsigned_thinking_and_respects_committed_tools() {
             agent.close().await.unwrap();
         }
         let custom=builder(models.clone(),Arc::new(ErrorEcho));
-        let agent=model_agent(models,Some(custom)).await;let session=agent.create_session(server.session_config()).await.unwrap();
+        let agent = model_agent(models, Some(custom)).await;
+        let session = agent.create_session(server.session_config()).await.unwrap();
         session.submit("tool".into(),InputMode::Queue,"main").await.unwrap();session.idle("main").await.unwrap();
         let requests=server.endpoint.requests.lock().unwrap().clone();
         let last=&requests.last().unwrap().2;
@@ -3302,7 +3330,15 @@ async fn native_content_keeps_unsigned_thinking_and_respects_committed_tools() {
                         MessagePart::Text {text:"kept".into(),start_time:None,end_time:None,provider_metadata:None},
                     ])}
                 ]));
-                let connection=ModelConnection::Http(HttpModelConnection {protocol:ModelProtocol::Anthropic,base_url:server.url.clone(),network:Default::default(),headers:Default::default(),bearer:None,api_key:None,preset:None});
+                let connection = ModelConnection::Http(HttpModelConnection {
+                    protocol: ModelProtocol::Anthropic,
+                    base_url: server.url.clone(),
+                    network: Default::default(),
+                    headers: Default::default(),
+                    bearer: None,
+                    api_key: None,
+                    preset: None,
+                });
                 let before=server.endpoint.requests.lock().unwrap().len();
                 let mut stream=host.0.invoke(request,connection,CancellationToken::new()).await.expect("stored thinking with thinking off must not fail the request");
                 while let Some(chunk)=stream.next().await{chunk.unwrap();}
@@ -3339,7 +3375,13 @@ async fn native_content_keeps_unsigned_thinking_and_respects_committed_tools() {
             // the turn ends on its outcome; what the case pins is the extra
             // request and that neither one dispatched the announced call.
             assert_eq!(server.endpoint.requests.lock().unwrap().len(), 2, "{kind}: {prompt}: the cut request and its continuation");
-            let terminals: Vec<_> = events.iter().filter_map(|event| match &event.kind { EventKind::ModelOutputEnd(data) => Some(&data.outcome), _ => None }).collect();
+            let terminals: Vec<_> = events
+                .iter()
+                .filter_map(|event| match &event.kind {
+                    EventKind::ModelOutputEnd(data) => Some(&data.outcome),
+                    _ => None,
+                })
+                .collect();
             assert_eq!(terminals.len(), 2, "{kind}: {prompt}");
             assert!(matches!(events.iter().rfind(|event| matches!(event.kind, EventKind::TurnEnd(_))).unwrap().kind,
                 EventKind::TurnEnd(TurnEndData { outcome: TurnOutcome::Failed { ref error }, .. }) if matches!(&terminals[1], ModelOutputOutcome::Failed { error: last, .. } if last == error)),
@@ -3354,9 +3396,25 @@ async fn native_content_keeps_unsigned_thinking_and_respects_committed_tools() {
             session.submit(prompt.into(), InputMode::Queue, "main").await.unwrap();
             session.idle("main").await.unwrap();
             let events = chain_events(&session, "main", ..).await.unwrap();
-            let visible: String = events.iter().filter_map(|event| match &event.kind { EventKind::Text(data) => Some(data.delta.as_str()), _ => None }).collect();
+            let visible: String = events
+                .iter()
+                .filter_map(|event| match &event.kind {
+                    EventKind::Text(data) => Some(data.delta.as_str()),
+                    _ => None,
+                })
+                .collect();
             assert_eq!(visible, "Cannot comply.");
-            assert!(matches!(events.iter().rfind(|event| matches!(event.kind, EventKind::TurnEnd(_))).unwrap().kind, EventKind::TurnEnd(TurnEndData { outcome: TurnOutcome::Completed { .. }, .. })));
+            assert!(matches!(
+                events
+                    .iter()
+                    .rfind(|event| matches!(event.kind, EventKind::TurnEnd(_)))
+                    .unwrap()
+                    .kind,
+                EventKind::TurnEnd(TurnEndData {
+                    outcome: TurnOutcome::Completed { .. },
+                    ..
+                })
+            ));
             session.submit("follow-up".into(), InputMode::Queue, "main").await.unwrap();
             session.idle("main").await.unwrap();
             let requests = server.endpoint.requests.lock().unwrap().clone();
@@ -3404,7 +3462,15 @@ async fn native_content_keeps_unsigned_thinking_and_respects_committed_tools() {
         ] {
             let mut request=ModelRequest::new("local",server.model_id(),vec![Message::text(Role::User,"settings")]);
             request.config=Some(serde_json::from_value(config).unwrap());
-            let connection=ModelConnection::Http(HttpModelConnection {protocol:ModelProtocol::Gemini,base_url:server.url.clone(),network:Default::default(),headers:Default::default(),bearer:None,api_key:None,preset:None});
+            let connection = ModelConnection::Http(HttpModelConnection {
+                protocol: ModelProtocol::Gemini,
+                base_url: server.url.clone(),
+                network: Default::default(),
+                headers: Default::default(),
+                bearer: None,
+                api_key: None,
+                preset: None,
+            });
             let before=server.endpoint.requests.lock().unwrap().len();
             match host.0.invoke(Arc::new(request),connection,CancellationToken::new()).await {
                 Ok(mut stream)=> {
@@ -3469,7 +3535,11 @@ async fn native_model_switch_keeps_stored_thinking_for_its_protocol() {
         let events = chain_events(&session, "main", ..).await.unwrap();
         assert!(
             matches!(
-                events.iter().rfind(|event| matches!(event.kind, EventKind::TurnEnd(_))).unwrap().kind,
+                events
+                    .iter()
+                    .rfind(|event| matches!(event.kind, EventKind::TurnEnd(_)))
+                    .unwrap()
+                    .kind,
                 EventKind::TurnEnd(TurnEndData {
                     outcome: TurnOutcome::Completed { .. },
                     ..
@@ -3519,7 +3589,11 @@ async fn native_model_switch_keeps_stored_thinking_for_its_protocol() {
         let events = chain_events(&session, "main", ..).await.unwrap();
         assert!(
             matches!(
-                events.iter().rfind(|event| matches!(event.kind, EventKind::TurnEnd(_))).unwrap().kind,
+                events
+                    .iter()
+                    .rfind(|event| matches!(event.kind, EventKind::TurnEnd(_)))
+                    .unwrap()
+                    .kind,
                 EventKind::TurnEnd(TurnEndData {
                     outcome: TurnOutcome::Completed { .. },
                     ..
@@ -3555,7 +3629,11 @@ async fn native_model_switch_keeps_stored_thinking_for_its_protocol() {
         let events = chain_events(&session, "main", ..).await.unwrap();
         assert!(
             matches!(
-                events.iter().rfind(|event| matches!(event.kind, EventKind::TurnEnd(_))).unwrap().kind,
+                events
+                    .iter()
+                    .rfind(|event| matches!(event.kind, EventKind::TurnEnd(_)))
+                    .unwrap()
+                    .kind,
                 EventKind::TurnEnd(TurnEndData {
                     outcome: TurnOutcome::Completed { .. },
                     ..
@@ -3762,15 +3840,32 @@ async fn tool_result_images_become_references_in_every_native_protocol() {
         for kind in ["openai-chat", "openai-responses", "anthropic", "gemini"] {
             let server = NativeServer::start(kind).await;
             let models = server.models();
-            let agent = model_agent(models.clone(), Some(builder(models, Arc::new(ImageEcho)))).await;
+            let agent =
+                model_agent(models.clone(), Some(builder(models, Arc::new(ImageEcho)))).await;
             let session = agent.create_session(server.session_config()).await.unwrap();
             session.submit("call the tool".into(), InputMode::Queue, "main").await.unwrap();
             session.idle("main").await.unwrap();
             let events = chain_events(&session, "main", ..).await.unwrap();
             assert!(
-                matches!(events.iter().rfind(|event| matches!(event.kind, EventKind::TurnEnd(_))).unwrap().kind, EventKind::TurnEnd(TurnEndData { outcome: TurnOutcome::Completed { .. }, .. })),
+                matches!(
+                    events
+                        .iter()
+                        .rfind(|event| matches!(event.kind, EventKind::TurnEnd(_)))
+                        .unwrap()
+                        .kind,
+                    EventKind::TurnEnd(TurnEndData {
+                        outcome: TurnOutcome::Completed { .. },
+                        ..
+                    })
+                ),
                 "{kind}: {:?}",
-                events.iter().filter_map(|event| match &event.kind { EventKind::ModelOutputEnd(data) => Some(&data.outcome), _ => None }).collect::<Vec<_>>()
+                events
+                    .iter()
+                    .filter_map(|event| match &event.kind {
+                        EventKind::ModelOutputEnd(data) => Some(&data.outcome),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
             );
             for content in tool_result_events(&events) {
                 assert!(
@@ -3850,7 +3945,10 @@ async fn a_model_without_image_input_gets_references_and_unreferenceable_image_p
                 provider_id: "local".into(),
                 model_id: server.model_id().into(),
             },
-            capabilities: ModelCapabilities { vision: false, ..ModelCapabilities::with_limits(128_000, 4_096) },
+            capabilities: ModelCapabilities {
+                vision: false,
+                ..ModelCapabilities::with_limits(128_000, 4_096)
+            },
             reasoning: None,
             service_tier: None,
         });
@@ -3858,7 +3956,17 @@ async fn a_model_without_image_input_gets_references_and_unreferenceable_image_p
         session.submit("call the tool".into(), InputMode::Queue, "main").await.unwrap();
         session.idle("main").await.unwrap();
         let events = chain_events(&session, "main", ..).await.unwrap();
-        assert!(matches!(events.iter().rfind(|event| matches!(event.kind, EventKind::TurnEnd(_))).unwrap().kind, EventKind::TurnEnd(TurnEndData { outcome: TurnOutcome::Completed { .. }, .. })));
+        assert!(matches!(
+            events
+                .iter()
+                .rfind(|event| matches!(event.kind, EventKind::TurnEnd(_)))
+                .unwrap()
+                .kind,
+            EventKind::TurnEnd(TurnEndData {
+                outcome: TurnOutcome::Completed { .. },
+                ..
+            })
+        ));
         for content in tool_result_events(&events) {
             assert!(
                 matches!(content, ToolContent::Blocks(blocks) if blocks.iter().any(|block| matches!(block, ContentBlock::Image { .. }))),

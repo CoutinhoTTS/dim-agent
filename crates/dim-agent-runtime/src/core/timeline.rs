@@ -9,7 +9,6 @@ use dim_agent_types::{
     ResumePoint, TimelinePosition,
 };
 use rutis::events::SyncCall;
-#[allow(unused_imports)]
 use rutis::host::{CtxHost, ErrorKind, InstanceId};
 use rutis::service;
 use rutis::{Ctx, Disposer, Event};

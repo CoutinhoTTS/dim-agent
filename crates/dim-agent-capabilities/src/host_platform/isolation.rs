@@ -179,7 +179,14 @@ fn toolchain_roots(platform: &HostPlatform) -> Vec<PathBuf> {
 /// helper reads them without the switch.
 pub(super) async fn baseline_read_paths(
     platform: &HostPlatform,
-    #[cfg_attr(not(target_os = "macos"), allow(unused_variables))] env: &[(OsString, OsString)],
+    #[cfg_attr(
+        not(target_os = "macos"),
+        expect(
+            unused_variables,
+            reason = "only the macOS branch reads the environment"
+        )
+    )]
+    env: &[(OsString, OsString)],
 ) -> Result<Vec<PathBuf>, String> {
     let mut installed = Vec::new();
     for path in &platform.platform_roots {

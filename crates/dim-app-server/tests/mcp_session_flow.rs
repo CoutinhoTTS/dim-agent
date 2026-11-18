@@ -2586,11 +2586,16 @@ async fn mcp_image_tool_results_reach_the_model_and_the_session_keeps_working() 
         mcp::install(&mut builder);
         mcp_host_rows(&mut builder, &home);
         let database = home.join("dimcode.sqlite");
-        builder.plugin(move |_| Ok(Box::new(dim_app_server::storage::SqliteStoragePlugin::new(database.clone()))));
+        builder.plugin(move |_| {
+            let storage = dim_app_server::storage::SqliteStoragePlugin::new(database.clone());
+            Ok(Box::new(storage))
+        });
         builder.plugin(|_| {
             let catalog = dim_app_server::catalog();
             let build = Build::default();
-            Ok(Box::new(dim_app_server::storage::SessionStorePlugin::new(&Names::copy(&catalog, &build), 0)?))
+            let names = Names::copy(&catalog, &build);
+            let plugin = dim_app_server::storage::SessionStorePlugin::new(&names, 0)?;
+            Ok(Box::new(plugin))
         });
         builder
             .plugin(|names| Ok(Box::new(AimuxPlugin::with_files(names.key()?))))
@@ -2623,8 +2628,16 @@ async fn mcp_image_tool_results_reach_the_model_and_the_session_keeps_working() 
             })
             .await
             .unwrap();
-        agent.root().get::<dim_app_server::storage::SessionStore>().unwrap()
-            .timeline_store().create_session(session.id(), &SessionConfig::default()).await.unwrap();
+        let store = agent
+            .root()
+            .get::<dim_app_server::storage::SessionStore>()
+            .unwrap();
+        let default = SessionConfig::default();
+        store
+            .timeline_store()
+            .create_session(session.id(), &default)
+            .await
+            .unwrap();
         // The tool enters the request once its source is adopted.
         ready(&session).await;
         let mut ran = false;
@@ -2635,13 +2648,30 @@ async fn mcp_image_tool_results_reach_the_model_and_the_session_keeps_working() 
                 .unwrap();
             session.idle("main").await.unwrap();
             let events = chain_events(&session, "main", ..).await.unwrap();
+            let ended = events
+                .iter()
+                .rev()
+                .find(|event| matches!(event.kind, EventKind::TurnEnd(_)))
+                .unwrap();
             assert!(
-                matches!(events.iter().rev().find(|event| matches!(event.kind, EventKind::TurnEnd(_))).unwrap().kind,
-                    EventKind::TurnEnd(TurnEndData { outcome: TurnOutcome::Completed { .. }, .. })),
+                matches!(
+                    ended.kind,
+                    EventKind::TurnEnd(TurnEndData { outcome: TurnOutcome::Completed { .. }, .. })
+                ),
                 "{:?}",
-                events.iter().filter_map(|event| match &event.kind { EventKind::ModelOutputEnd(data) => Some(&data.outcome), _ => None }).collect::<Vec<_>>()
+                events
+                    .iter()
+                    .filter_map(|event| match &event.kind {
+                        EventKind::ModelOutputEnd(data) => Some(&data.outcome),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
             );
-            ran = events.iter().any(|event| matches!(&event.kind, EventKind::ToolResult(data) if matches!(&data.results[0].result.content, ToolContent::Blocks(blocks) if blocks.iter().any(|block| matches!(block, ContentBlock::Image { .. })))));
+            ran = events.iter().any(|event| {
+                matches!(&event.kind, EventKind::ToolResult(data)
+                    if matches!(&data.results[0].result.content, ToolContent::Blocks(blocks)
+                        if blocks.iter().any(|block| matches!(block, ContentBlock::Image { .. }))))
+            });
             if ran {
                 break;
             }

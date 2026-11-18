@@ -56,6 +56,7 @@ pub(super) async fn http(address: &str, request: String) -> (u16, String, String
 fn get(address: &str, path: &str) -> String {
     format!("GET {path} HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n")
 }
+
 pub(super) fn post(address: &str, path: &str, origin: &str, body: &str) -> String {
     format!(
         "POST {path} HTTP/1.1\r\nHost: {address}\r\nOrigin: {origin}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -928,7 +929,12 @@ async fn closing_a_web_generation_settles_concurrent_upgrades_and_preserves_othe
             loop {
                 match stream.next().await {
                     None | Some(Ok(Message::Close(_))) => break,
-                    Some(Err(WsError::ConnectionClosed | WsError::AlreadyClosed | WsError::Io(_) | WsError::Protocol(ProtocolError::ResetWithoutClosingHandshake))) => break,
+                    Some(Err(
+                        WsError::ConnectionClosed
+                        | WsError::AlreadyClosed
+                        | WsError::Io(_)
+                        | WsError::Protocol(ProtocolError::ResetWithoutClosingHandshake),
+                    )) => break,
                     Some(Err(error)) => panic!("unexpected closing WebSocket error: {error}"),
                     Some(Ok(Message::Text(reply))) => {
                         let reply: Value = serde_json::from_str(&reply).unwrap();
@@ -942,8 +948,13 @@ async fn closing_a_web_generation_settles_concurrent_upgrades_and_preserves_othe
         loop {
             match stream.next().await {
                 None | Some(Ok(Message::Close(_))) => break,
-                    Some(Err(WsError::ConnectionClosed | WsError::AlreadyClosed | WsError::Io(_) | WsError::Protocol(ProtocolError::ResetWithoutClosingHandshake))) => break,
-                    Some(Err(error)) => panic!("unexpected closing WebSocket error: {error}"),
+                Some(Err(
+                    WsError::ConnectionClosed
+                    | WsError::AlreadyClosed
+                    | WsError::Io(_)
+                    | WsError::Protocol(ProtocolError::ResetWithoutClosingHandshake),
+                )) => break,
+                Some(Err(error)) => panic!("unexpected closing WebSocket error: {error}"),
                 _ => {}
             }
         }

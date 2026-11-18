@@ -16,9 +16,10 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from contextlib import ExitStack
 sys.path.insert(0, sys.argv[1])
 import build
-from train import begin, finish, terminate
+from train import begin, finish, terminate, tui
 
 with tempfile.TemporaryDirectory(prefix='dim-layout-test-') as temporary:
     root = Path(temporary)
@@ -92,6 +93,48 @@ int main(void) { printf("%d\\n", first() + second() + shared_name() + discarded_
     finally:
         terminate(process)
         process.stdout.close()
+
+    terminal_source = root / 'terminal.c'
+    terminal_source.write_text('''#define _DEFAULT_SOURCE
+#include <stdio.h>
+#include <string.h>
+#include <termios.h>
+#include <unistd.h>
+int main(void) {
+    struct termios mode;
+    if (tcgetattr(STDIN_FILENO, &mode)) return 10;
+    cfmakeraw(&mode);
+    if (tcsetattr(STDIN_FILENO, TCSANOW, &mode)) return 11;
+    char command[32], byte;
+    unsigned length = 0, cycles = 0;
+    while (read(STDIN_FILENO, &byte, 1) == 1) {
+        if (byte == 27) continue;
+        if (byte == '\\r') {
+            command[length] = 0;
+            if (!strcmp(command, "/models")) {
+                ++cycles;
+                puts("Models  Enter select");
+                fflush(stdout);
+            } else if (!strcmp(command, "/exit")) {
+                return cycles == 3 ? 0 : 12;
+            } else return 13;
+            length = 0;
+        } else {
+            if (length + 1 >= sizeof(command)) return 14;
+            command[length++] = byte;
+        }
+    }
+    return 15;
+}
+''')
+    terminal = root / 'terminal'
+    subprocess.run(['cc', '-Wall', '-Wextra', '-Werror', str(terminal_source), '-o', str(terminal)], check=True)
+    tui_profile = root / 'tui.smaps'
+    with ExitStack() as stack:
+        tui(terminal, root, stack, probe, tui_profile)
+    assert str(terminal) in tui_profile.read_text(), 'training must sample the live TUI before its explicit exit'
+    with ExitStack() as stack:
+        tui(terminal, root, stack, None, None)
 
     project = root / 'rust'
     project.mkdir()
