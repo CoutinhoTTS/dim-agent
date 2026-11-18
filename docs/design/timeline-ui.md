@@ -277,6 +277,8 @@ The notification shares the existing bottom border in both TUI modes. Narrow wid
 ## Proposed current activity in the composer
 
 [CLI current activity](cli-current-activity.md) uses the existing live composer
-status in both modes. Committed tool history keeps its existing detail and
-scrolling behavior. The background task strip continues to show task lifetimes
-independently of the selected branch's foreground activity.
+status at the top of the scrollback composer and in the fullscreen lower dock.
+The bottom-border place and unread label keep their existing priorities.
+Committed tool history keeps its existing detail and scrolling behavior. The
+background task strip continues to show task lifetimes independently of the
+selected branch’s foreground activity.
