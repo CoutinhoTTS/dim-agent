@@ -306,7 +306,7 @@ WorkspaceTools 不变。
 - **提交。** 用户可以向任一条未结束的线提交（带 `branchId` 的 `session.submit`）。不传 `branchId` 的调用送给当前主线。
 - **中断。** 中断一条线只结束它当前这一轮，不结束这条线。不传 `branchId` 的停止停的是当前主线。
 - **结束。** 除根、当前主线、以及主线的每一条祖先以外，用户可以结束任一条线（`session.branch_end`，§10）。
-- **移动主线。** 用户可以把主线移到任意一条开着的对话线（工具线或用户线）上，用一个方法（`session.branch_primary`，§14）。插件线不能作为目标。旧主线照旧开着，并保留它开过的线；什么也不拷贝，历史也不移动。移动在根上写下事实，并只给两条线状态说明：新主线和旧主线（§12.1）。之后旧主线不再能开线，新主线可以。
+- **移动主线。** 用户可以把主线移到任意一条开着的对话线（工具线或用户线）上，也可以移回根，用一个方法（`session.branch_primary`，§14）。根只要不是当前主线就是合法目标；插件线永远不是。旧主线照旧开着，并保留它开过的线；什么也不拷贝，历史也不移动。移动在根上写下事实，并只给两条线状态说明：新主线和旧主线（§12.1）。之后旧主线不再能开线，新主线可以。
 - **移动不做什么。** 它改变的是这个 Session 的对话在哪条线上。它不碰工作区，所以上一条主线改过的文件保持已改；它不移动 `/fork`，fork 仍然只把根拷到某个停顿点（[fork](appserver/session-deletion-and-fork.md)）；它也不结束任何一条线。
 
 ## 10. 结束一条线
@@ -537,14 +537,14 @@ WorkspaceTools 不变。
 - `/lines` 列出这个 Session 的每条线，各自缩进在打开它的那条线之下，每条带状态：工作中、等待中、自行结束、被某个操作结束、随 X 结束，或创建失败。主线标作“主线”，根标作“起点”。
 - Enter 显示所选线的对话。输入框向正在显示的线提交，输入框的下边框标出这条线，用 id 的前八个字符。
 - `x` 再 `y` 结束所选线；根、主线以及主线的每一条祖先上被拒绝。
-- `p` 把主线移到所选线上（“从这里继续”）；根、插件线、以及已经是主线的线上被拒绝。面板写明旧主线照旧开着。
+- `p` 把主线移到所选线上（“从这里继续”）；插件线、以及已经是主线的线上被拒绝，根在不是当前主线时同样是合法目标。面板写明旧主线照旧开着。
 - 提问和审批都带线的标签，两条线问同一件事也能分辨（提问显示 `(branch NAME)`，审批显示 `Permission on branch NAME`）。
 - 两条线之间的消息，在发送方读作已发出（它的 `branch` 工具调用），在接收方读作已收到（`◂ from C`）。
 - 切换显示的线就在一条边界行（`line C`）之下换一份记录，和切换 Session 一样，因为终端的回滚缓冲只追加。发现分支时只保留任务目录和分支历史状态，不保留每条线的完整对话。首次从 `/lines` 或侧边视图打开一条线时，读取并保留它的[有限对话窗口](../../design/clients.md#opening-a-conversation-with-a-bounded-window)，此前发现失败也一样。窗口之外仍可操作的工作通过状态所有者接口恢复。选中线时另行请求显示详情。
 
 **分支目录。** `session.branches {sessionId}`（v3，按与 `session.history` 相同的准入规则，在 `hello.features` 里与其他会话方法一起列出）为每条线回答一条记录：它的身份（`branchId`，有的话还有 `parentBranchId`、`branchPoint` 和 `createEvent`）、按 `TimelineInfo.source` 给出的 `source`、`state`（`open`、`ending` 或 `ended`）、`head`，处于结束中或已结束的线还有 `endEvent`。回复还带上一个顶层 `primaryBranchId`，即当前主线，而不是每行一个标记：顶层字段表达不出“零条或两条主线”这种非法状态，不认得这个字段的客户端会忽略它。`main` 排第一，其余按 `branchId` 顺序。回复不分页：它随线的数量增长，而线的数量由 Session 自己的使用决定，不随历史增长。答案归 `TimelineTree`（`directory()`）；`branches()` 列出尚未结束的线（`open` 和 `ending`），供持有活动线的调用方使用。
 
-`session.branch_primary {sessionId, branchId}`（v3，在 `hello.features` 里与其他会话方法一起列出）移动主线：根（本来就是默认）、插件线、已结束的线、以及已经是主线的线都被拒绝；其余情况下它在根上写 `branch/primary`，并写两条状态说明（§12.1）。它回新的 `primaryBranchId`。这就是“从这里继续”这个动作：不写任何 Session 级配置，也不碰其他线。
+`session.branch_primary {sessionId, branchId}`（v3，在 `hello.features` 里与其他会话方法一起列出）移动主线。目标是开着的对话线：工具线、用户线，以及根——根只要不是当前主线就是合法目标，于是用户能把主线移回这个 Session 的起点。插件线永远不是目标。除此之外只拒绝一种目标：已经是主线的线，不管那条线是哪条，拒绝码 `branch_already_primary`；其余情况下它在根上写 `branch/primary`，并写两条状态说明（§12.1）。它回新的 `primaryBranchId`。这就是“从这里继续”这个动作：不写任何 Session 级配置，也不碰其他线。
 
 目录读取不访问历史，显示字段为空或省略。`session.branch.get {sessionId, branchId}`（v3，在 `hello.features` 单独声明）读取一条线的目录记录和显示详情：`purpose` 为创建提示的首行；`cutMessages` 为该分叉点继承的用户输入数，排除截止位置前已删除的输入；`end` 为可用的 `BranchEndData`。根的前两项为空，没有可读结束事实时 `end` 为空。该读取由 TimelineTree 完成点查与固定前缀计数；未知分支和读取失败在本次详情调用中报错，不阻断目录列举，不写事实，也不重新打开结束的线。CLI 在选中一条线时才读取详情。
 
@@ -720,7 +720,7 @@ Goal 流程，放在 `crates/dim-goal/tests` 的流程测试中（§7.4）：
 主线：
 
 20. 只一条线的 Session 就在根上，这次恢复不为它查任何东西。有多条线的 Session 在根上只读一条事实，回答最新一条 `branch/primary` 的目标；两类里最新的是 `session/forked` 时，或者什么也没时，回答根。目标已结束、或者目标是插件线时，回答根。
-21. `session.branch_primary` 移动主线：`branch/primary` 写在根上，恰好写两条状态说明（新主线和旧主线），其他每条线什么也收不到。根、插件线、已结束的线、已经是主线的线被拒绝，且什么也不写。
+21. `session.branch_primary` 移动主线：`branch/primary` 写在根上，恰好写两条状态说明（新主线和旧主线），其他每条线什么也收不到。拒绝时什么也不写：插件线、已结束的线、未知的线，以及已经是主线的那条线，后者取 `branch_already_primary`，所以根在主线上时被拒绝、在别的线当主线时作为目标被接受。
 22. 移动之后，`session.submit`、`session.stop`、`session.idle`、`approval.respond`、`session.goal.*`、`shell.run`、目录的运行状态与最近活动、以及新建的定时任务，都解析到新主线。已记录 `branch_id` 的定时任务保留它。
 23. 旧主线仍能给它开过的线发消息、读它们、结束它们；不是主线的线 `create` 被 `branch_not_primary` 拒绝。原来是工具线而现在成为主线的线停发空闲通知，对自己 `end` 被拒绝。
 24. 主线不在根上的 Session 被 fork 后，fork 出来的会话的主线是根，因为拷进来的每一条 `branch/primary` 都比它的 `session/forked` 旧。

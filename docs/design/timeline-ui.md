@@ -224,8 +224,9 @@ Unchanged from #427 §14: a switch writes a `⑂ name · id` boundary and the sh
 
 主線 is the primary line and 起点 is the root. `p` moves the primary line to the selected line
 ("continue from here"): the Session's conversation, its default targets and its centring follow, and the
-old primary line stays open with the lines it opened. It is refused on the root, on a line a plugin
-opened, and on the line that is already primary; the panel states that the old primary line stays open.
+old primary line stays open with the lines it opened. It is refused on a line a plugin opened and on the line
+that is already primary; the root is a valid target whenever it is not the primary line. The panel states that
+the old primary line stays open.
 `x` is refused on the root and on the primary line, and on every line above the primary line, because
 ending a line ends everything below it.
 

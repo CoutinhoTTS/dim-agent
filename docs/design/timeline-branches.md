@@ -317,7 +317,7 @@ WorkspaceTools is unchanged.
 - **Submitting.** The user submits to any open line (`session.submit` with `branchId`). A call that omits `branchId` goes to the current primary line.
 - **Interrupting.** Interrupting a line ends its turn, not the line. A stop that omits `branchId` stops the current primary line.
 - **Ending.** The user ends any line except the root, the current primary line and every ancestor of the primary line (`session.branch_end`, §10).
-- **Moving the primary line.** The user moves it to any open conversation line, a tool line or a user line, with one method (`session.branch_primary`, §14). A plugin line cannot be the target. The old primary line stays open and keeps the lines it opened; nothing is copied and no history moves. The move writes the fact on the root and gives exactly two lines a status note: the new primary line and the old one (§12.1). The previous primary line may then no longer open lines, and the new one may.
+- **Moving the primary line.** The user moves it to any open conversation line, a tool line or a user line, or back to the root, with one method (`session.branch_primary`, §14). The root is a valid target whenever it is not the current primary line, and a plugin line never is. The old primary line stays open and keeps the lines it opened; nothing is copied and no history moves. The move writes the fact on the root and gives exactly two lines a status note: the new primary line and the old one (§12.1). The previous primary line may then no longer open lines, and the new one may.
 - **What a move does not do.** It changes which line the Session's conversation is on. It does not touch the workspace, so a file the earlier primary line changed stays changed; it does not move `/fork`, which still copies only the root to a rest point ([fork](appserver/session-deletion-and-fork.md)); and it does not end either line.
 
 ## 10. Ending a line
@@ -556,7 +556,7 @@ The policy texts are judged together, as one family, in the change that first pu
 - `/lines` lists every line of the Session, each indented under the line that opened it, with its state: working, waiting, ended itself, ended by an operation, ended with X, or creation failed. The primary line is marked 主线 and the root 起点.
 - Enter shows the selected line's conversation. The composer submits to the line shown, and the composer's bottom border names it, with the first eight characters of its id.
 - `x`, then `y`, ends the selected line, refused on the root, on the primary line and on every ancestor of the primary line.
-- `p` moves the primary line to the selected line ("continue from here"), refused on the root, on a plugin line and on a line that is already primary. The panel states that the old primary line stays open.
+- `p` moves the primary line to the selected line ("continue from here"), refused on a plugin line and on the line that is already primary, the root included when it is not the current primary line. The panel states that the old primary line stays open.
 - Questions and approvals carry the line's label, so two lines asking for the same thing are told apart (`(branch NAME)` on a question, `Permission on branch NAME` on an approval).
 - A message between two lines reads as sent on the sender (its `branch` tool call) and as received on the receiver (`◂ from C`).
 - Switching the shown line starts another transcript under a boundary row (`line C`), as a session switch does, because terminal scrollback is append-only. Discovery retains task inventory and branch-history state, not a full transcript for every line. The first open, through `/lines` or a side view, retains that line's [bounded transcript window](clients.md#opening-a-conversation-with-a-bounded-window), including when discovery previously failed. Owner-state reads recover actionable work outside the window. Selecting a line separately requests its display details below. Later opens reuse the retained transcript, which continues folding live events even while another line is shown.
@@ -595,10 +595,12 @@ the answer (`directory()`); `branches()` lists the lines that have not ended (op
 hold a live line.
 
 `session.branch_primary {sessionId, branchId}` (v3, listed in `hello.features` with the other Session methods) moves
-the primary line: it refuses the root (already the default), a plugin line, an ended line and the line that is
-already primary, and otherwise writes `branch/primary` on the root and the two status notes (§12.1). It answers the
-new `primaryBranchId`. This is the "continue from here" action; it writes no Session-level configuration and touches
-no other line.
+the primary line. The target is an open conversation line: a tool line, a user line, or the root, which is a valid
+target whenever it is not the current primary line, so the user can move the primary line back to where the Session
+started. A plugin line is never a target. Besides those, the method refuses only a target that is already the primary
+line, whatever line that is, with `branch_already_primary`; otherwise it writes `branch/primary` on the root and the
+two status notes (§12.1), answers the new `primaryBranchId`, and touches no other line. This is the "continue from
+here" action; it writes no Session-level configuration.
 
 The directory read performs no history I/O. Its display fields are null or absent.
 `session.branch.get {sessionId, branchId}` (v3, separately listed in
@@ -767,7 +769,7 @@ The branch directory:
 The primary line:
 
 20. A Session with one line is on its root, and its restore performs no query for it. A Session with more lines reads exactly one fact on the root and answers the target of the newest `branch/primary`, or the root when the newest of the two kinds is a `session/forked`, or when there is none. A target that has ended, and a target that is a plugin line, answer the root.
-21. `session.branch_primary` moves the primary line: `branch/primary` is written on the root, exactly two status notes are written, the new and the old primary line, and every other line receives nothing. A refusal writes nothing: the root, a plugin line, an ended line and the line that is already primary. Both notes are `<dim-branch-line>` blocks whose `primary` attribute says which role the line holds, and each restates the identity it replaces, down to the parent and the source, so a compaction of a switched line replays a block that still names it and its opener.
+21. `session.branch_primary` moves the primary line: `branch/primary` is written on the root, exactly two status notes are written, the new and the old primary line, and every other line receives nothing. A refusal writes nothing: a plugin line, an ended line, an unknown line and whatever line is already primary, refused `branch_already_primary`, so the root is refused while it is primary and accepted as a target once another line holds the role. Both notes are `<dim-branch-line>` blocks whose `primary` attribute says which role the line holds, and each restates the identity it replaces, down to the parent and the source, so a compaction of a switched line replays a block that still names it and its opener.
 22. After the move, `session.submit`, `session.stop`, `session.idle`, `approval.respond`, `session.goal.*`, `shell.run`, the catalog's running state and recent activity, and a newly created scheduled job resolve to the new primary line. A scheduled job that recorded a `branch_id` keeps it.
 23. A line that was the primary line can still message, read and end the lines it opened, and a line that is not the primary line is refused `create` with `branch_not_primary`. A line that was a tool line and became primary stops sending its idle notice and is refused `end` on itself.
 24. A fork of a Session whose primary line was not the root answers the root as its primary line, because every `branch/primary` it copied is older than its `session/forked`.
