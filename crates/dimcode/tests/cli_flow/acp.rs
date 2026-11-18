@@ -4104,3 +4104,178 @@ fn acp_load_materializes_user_and_tool_file_images_in_order() {
     peer.close();
     daemon.join().unwrap();
 }
+
+#[test]
+fn acp_stdio_names_each_tool_call_with_its_object_kind_and_location() {
+    let home = Home::new();
+    let cwd = fs::canonicalize(&home.0).unwrap();
+    let daemon = home.daemon(move |wire| {
+        wire.hello(METHODS);
+        wire.created();
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, json!({}));
+        let history = wire.read("session.history");
+        wire.reply(&history, json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+        let fact = |wire: &mut Wire, value: Value| {
+            wire.notice(
+                "session.event",
+                json!({"sessionId":"session","branchId":"main","event":value}),
+            )
+        };
+        let submit = wire.read("session.submit");
+        let input = event(
+            9,
+            "input",
+            "input",
+            "message",
+            json!({"submission_id":submit["params"]["submissionId"],"user":submit["params"]["user"],"mode":"queue"}),
+        );
+        wire.reply(&submit, json!({"event":input}));
+        fact(wire, input);
+        fact(wire, event(10, "start", "turn", "start", json!({"turn_id":"turn"})));
+        fact(wire, event(11, "consumed", "input", "consumed", json!({"input_id":"input"})));
+        // Dim announces a call as the model starts writing it, so the first
+        // message names only the tool; the arguments arrive with the next one.
+        fact(wire, event(12, "read-start", "step", "tool-use-start", json!({"turn_id":"turn","request_id":"model","call_id":"read","name":"read"})));
+        fact(wire, event(13, "read-use", "step", "tool-use", json!({"turn_id":"turn","request_id":"model","call":{"id":"read","name":"read","input":{"path":"src/parser.rs","offset":42,"limit":20}}})));
+        fact(wire, event(14, "edit", "step", "tool-use", json!({"turn_id":"turn","request_id":"model","call":{"id":"edit","name":"edit","input":{"path":"src/parser.rs","edits":[{"oldText":"let a = 1;","newText":"let a = 2;"},{"oldText":"let b = 3;","newText":"let b = 4;"}]}}})));
+        fact(wire, event(15, "edit-done", "step", "tool-result", json!({"turn_id":"turn","request_id":"model","call_event_id":"edit","results":[{"call_id":"edit","result":{"content":"Edited src/parser.rs"}}]})));
+        fact(wire, event(29, "write", "step", "tool-use", json!({"turn_id":"turn","request_id":"model","call":{"id":"write","name":"write","input":{"path":"notes.md","content":"new file\n"}}})));
+        fact(wire, event(30, "write-done", "step", "tool-result", json!({"turn_id":"turn","request_id":"model","call_event_id":"write","results":[{"call_id":"write","result":{"content":"Wrote notes.md","structuredContent":{"path":"notes.md","bytesWritten":9,"revision":"r1","diff":"--- /dev/null\n+++ notes.md\n@@ -0,0 +1 @@\n+new file\n"}}}]})));
+        fact(wire, event(31, "exec", "step", "tool-use", json!({"turn_id":"turn","request_id":"model","call":{"id":"exec","name":"exec","input":{"command":"cargo test --locked\n  -p dim-acp","title":"Run dim-acp tests"}}})));
+        fact(wire, event(32, "grep", "step", "tool-use", json!({"turn_id":"turn","request_id":"model","call":{"id":"grep","name":"grep","input":{"pattern":"Projection","path":"crates/dim-acp"}}})));
+        fact(wire, event(33, "fetch", "step", "tool-use", json!({"turn_id":"turn","request_id":"model","call":{"id":"fetch","name":"web_fetch","input":{"url":"https://example.com/doc"}}})));
+        fact(wire, event(34, "unknown", "step", "tool-use", json!({"turn_id":"turn","request_id":"model","call":{"id":"unknown","name":"image_understand","input":{"image":"x"}}})));
+        fact(wire, event(35, "rewrite", "step", "tool-use", json!({"turn_id":"turn","request_id":"model","call":{"id":"rewrite","name":"write","input":{"path":"notes.md","content":"newer text\n"}}})));
+        fact(wire, event(36, "rewrite-done", "step", "tool-result", json!({"turn_id":"turn","request_id":"model","call_event_id":"rewrite","results":[{"call_id":"rewrite","result":{"content":"Wrote notes.md","structuredContent":{"path":"notes.md","bytesWritten":11,"revision":"r2","diff":"--- notes.md\n+++ notes.md\n@@ -1 +1 @@\n-new file\n+newer text\n"}}}]})));
+        fact(wire, event(37, "huge", "step", "tool-use", json!({"turn_id":"turn","request_id":"model","call":{"id":"huge","name":"read","input":{"path":"src/parser.rs","offset":4294967296u64}}})));
+        fact(wire, event(38, "overflow", "step", "tool-use", json!({"turn_id":"turn","request_id":"model","call":{"id":"overflow","name":"read","input":{"path":"src/parser.rs","offset":u64::MAX,"limit":2}}})));
+        fact(wire, event(39, "after", "step", "text", json!({"turn_id":"turn","request_id":"model","delta":"still here"})));
+        fact(wire, event(40, "end", "turn", "end", json!({"turn_id":"turn","status":"completed","reason":"end_turn"})));
+        detached_eof(wire);
+    });
+    let mut peer = Peer::start(&home);
+    peer.initialize();
+    peer.send(2, "session/new", json!({"cwd":home.0,"mcpServers":[]}));
+    peer.response(2);
+    peer.send(
+        3,
+        "session/prompt",
+        json!({"sessionId":"session","prompt":[{"type":"text","text":"Read the parser"}]}),
+    );
+    let response = peer.response(3);
+    assert_eq!(response["result"]["stopReason"], "end_turn", "{response}");
+    let updates: Vec<_> = peer
+        .updates
+        .iter()
+        .map(|frame| &frame["params"]["update"])
+        .filter(|update| update["toolCallId"].is_string())
+        .collect();
+    let id = |name: &str| json!(["main", "model", name]).to_string();
+    // The message that carries a call's input is the one that names it.
+    let announced = |name: &str| {
+        updates
+            .iter()
+            .find(|update| {
+                update["toolCallId"] == json!(id(name)) && update["rawInput"].is_object()
+            })
+            .unwrap_or_else(|| panic!("no announced call for {name}: {updates:?}"))
+    };
+    let result = |name: &str| {
+        updates
+            .iter()
+            .find(|update| {
+                update["toolCallId"] == json!(id(name))
+                    && matches!(update["status"].as_str(), Some("completed" | "failed"))
+            })
+            .unwrap_or_else(|| panic!("no result for {name}: {updates:?}"))
+    };
+    let path = cwd.join("src/parser.rs").to_str().unwrap().to_owned();
+
+    let first = updates
+        .iter()
+        .find(|update| update["toolCallId"] == json!(id("read")))
+        .unwrap();
+    assert_eq!(
+        first["title"], "read",
+        "no call has its object yet: the arguments are still streaming"
+    );
+    let with_arguments = announced("read");
+    assert_eq!(with_arguments["title"], "Read src/parser.rs:42-61");
+    assert_eq!(with_arguments["kind"], "read");
+    assert_eq!(
+        with_arguments["locations"],
+        json!([{"path":path,"line":42}]),
+        "a line range names the file at its first line"
+    );
+    assert_eq!(with_arguments["rawInput"]["offset"], 42);
+
+    assert_eq!(announced("edit")["title"], "Edit src/parser.rs");
+    assert_eq!(announced("edit")["kind"], "edit");
+    assert_eq!(announced("edit")["locations"], json!([{"path":path}]));
+    let edited = result("edit");
+    assert_eq!(
+        edited["content"],
+        json!([
+            {"type":"diff","path":path,"oldText":"let a = 1;","newText":"let a = 2;"},
+            {"type":"diff","path":path,"oldText":"let b = 3;","newText":"let b = 4;"},
+            {"type":"content","content":{"type":"text","text":"Edited src/parser.rs"}}
+        ]),
+        "each replacement is its own diff, before the tool's own output"
+    );
+    assert_eq!(announced("write")["title"], "Write notes.md");
+    assert_eq!(announced("write")["kind"], "edit");
+    let written = cwd.join("notes.md").to_str().unwrap().to_owned();
+    assert_eq!(
+        result("write")["content"],
+        json!([
+            {"type":"diff","path":written,"newText":"new file\n"},
+            {"type":"content","content":{"type":"text","text":"Wrote notes.md"}}
+        ]),
+        "a created file is a diff with no old text, as ACP defines a new file"
+    );
+    assert_eq!(
+        result("rewrite")["content"],
+        json!([{"type":"content","content":{"type":"text","text":"Wrote notes.md"}}]),
+        "an overwrite states no old text, so it must not read as a new file"
+    );
+    assert_eq!(
+        announced("huge")["locations"],
+        json!([{"path":path}]),
+        "a line ACP cannot carry as a u32 is left out, not truncated to another line"
+    );
+    let overflow = announced("overflow");
+    assert_eq!(
+        overflow["title"],
+        format!("Read src/parser.rs:{}", u64::MAX),
+        "an end past the largest offset is left out, not wrapped"
+    );
+    assert_eq!(overflow["locations"], json!([{"path":path}]));
+    assert!(
+        peer.updates.iter().any(|frame| {
+            let update = &frame["params"]["update"];
+            update["sessionUpdate"] == "agent_message_chunk"
+                && update["content"]["text"] == "still here"
+        }),
+        "a read at the largest offset leaves the projection answering: {:?}",
+        peer.updates
+    );
+    assert_eq!(announced("exec")["title"], "Run dim-acp tests");
+    assert_eq!(announced("exec")["kind"], "execute");
+    assert_eq!(
+        announced("grep")["title"],
+        "Search Projection in crates/dim-acp",
+        "a search names its pattern and the place it searches"
+    );
+    assert_eq!(announced("grep")["kind"], "search");
+    assert_eq!(
+        announced("grep")["locations"],
+        json!([{"path":cwd.join("crates/dim-acp").to_str().unwrap()}])
+    );
+    assert_eq!(announced("fetch")["title"], "https://example.com/doc");
+    assert_eq!(announced("fetch")["kind"], "fetch");
+    assert_eq!(announced("unknown")["title"], "image_understand");
+    assert_eq!(announced("unknown")["kind"], "other");
+    peer.close();
+    daemon.join().unwrap();
+}

@@ -250,13 +250,19 @@ impl DynPlugin for ProbePlugin {
                 // Holds the child's build open until the test releases it, then
                 // fails the apply: creation fails in debug and release alike.
                 if probe.delay_child.load(Ordering::SeqCst) {
-                    tokio::select! { _ = probe.child_release.notified() => {}, _ = ctx.cancelled() => {} }
+                    tokio::select! {
+                        _ = probe.child_release.notified() => {}
+                        _ = ctx.cancelled() => {}
+                    }
                     return Err(rutis::Error::from(ErrorKind::PluginFailed(
                         "test.branch-probe: the held child fails its apply".into(),
                     )));
                 }
                 if probe.fail_child.load(Ordering::SeqCst) {
-                    tokio::select! { _ = probe.writer_ready.notified() => {}, _ = ctx.cancelled() => {} }
+                    tokio::select! {
+                        _ = probe.writer_ready.notified() => {}
+                        _ = ctx.cancelled() => {}
+                    }
                     return Err(rutis::Error::from(ErrorKind::ServiceNotFound(
                         "/private/agent-secret/rejected-candidate".into(),
                     )));
@@ -627,7 +633,7 @@ fn create_event(events: &[Arc<AgentEvent>]) -> Arc<AgentEvent> {
 /// Appends a completed turn to a hand-built Timeline and returns its end.
 /// A later turn of `main` a line must hear about: the operator tells `main`
 /// something, then the turn runs and ends. The operator input is what counts
-/// as new activity ([timeline branches §7.1.1](../../docs/design/timeline-branches.md#711-the-parent-block-branchparent)).
+/// as new activity ([timeline branches §7.1.1](../../../docs/design/timeline-branches.md#711-the-parent-block-branchparent)).
 fn moved_turn(timeline: &Timeline, turn: &str) -> Arc<AgentEvent> {
     timeline
         .append(
@@ -1221,7 +1227,7 @@ async fn a_restart_completes_an_interrupted_descendants_end_first() {
 /// that a restored line is read by selections alone; an [armed](TestStore::arm)
 /// store fails one line's opening query, so a creation can be made to fail at
 /// that read
-/// ([§7.1.1](../../docs/design/timeline-branches.md#711-the-parent-block-branchparent)).
+/// ([§7.1.1](../../../docs/design/timeline-branches.md#711-the-parent-block-branchparent)).
 /// Every other read, like the boundary checks a creation makes of a line,
 /// keeps working, so a refusal lands on the read it was aimed at.
 #[derive(Default)]
@@ -3987,7 +3993,7 @@ async fn system_at(session: &Session, branch: &str, sequence: u64) -> String {
 
 /// A child's first request reuses its parent's cached prefix: its System is
 /// the parent's System in the request that opened it, byte for byte
-/// ([§7.3](../../docs/design/timeline-branches.md#73-cache-prefix)).
+/// ([§7.3](../../../docs/design/timeline-branches.md#73-cache-prefix)).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_childs_first_system_is_its_parents_at_the_cut() {
     let probe = Arc::new(Probe::default());
@@ -4229,13 +4235,18 @@ async fn a_message_reaches_its_receiver_in_the_mode_it_asked_for() {
         })
         .unwrap();
     assert_eq!(mode, InputMode::Append);
-    assert!(blocks_with(&events, "<dim-branch-message").last().unwrap().starts_with(
-        &format!("<dim-branch-message from=\"main\" to=\"{child}\">\ntests are green\n</dim-branch-message>")
-    ));
     assert!(
-        !events
-            .iter()
-            .any(|event| matches!(event.kind, EventKind::TurnStart(_)) && event.sequence > sequence),
+        blocks_with(&events, "<dim-branch-message")
+            .last()
+            .unwrap()
+            .starts_with(&format!(
+                "<dim-branch-message from=\"main\" to=\"{child}\">\ntests are green\n</dim-branch-message>"
+            ))
+    );
+    assert!(
+        !events.iter().any(|event| {
+            matches!(event.kind, EventKind::TurnStart(_)) && event.sequence > sequence
+        }),
         "an append starts no turn"
     );
     tool_call(
@@ -4566,7 +4577,7 @@ async fn an_after_below_the_cut_is_raised_to_it() {
 
 /// An `after` past the target's head is a mistake, so the read refuses it and
 /// stores nothing, keeping the stored cursor valid by construction
-/// ([§20.11](../../docs/design/timeline-branches.md#20-acceptance)).
+/// ([§20.11](../../../docs/design/timeline-branches.md#20-acceptance)).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_after_past_the_targets_head_is_refused_and_the_cursor_stays() {
     let probe = Arc::new(Probe::default());
@@ -5062,7 +5073,7 @@ async fn second_parent_block(session: &Session, branch: &str, after: u64) -> Vec
 
 /// A parent move that lands while a block is held is written once the line
 /// consumes that block, with no later parent turn
-/// ([§20.12](../../docs/design/timeline-branches.md#20-acceptance)).
+/// ([§20.12](../../../docs/design/timeline-branches.md#20-acceptance)).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_move_while_a_block_is_held_is_written_after_the_block_is_consumed() {
     let probe = Arc::new(Probe::default());
@@ -5398,7 +5409,7 @@ async fn a_nested_line_is_told_its_own_parent_at_open() {
 /// gets the error, the line the child was cut from records
 /// `branch/create-failed` for it, and that line keeps dispatching, so a later
 /// create under it opens
-/// ([§7.1.1](../../docs/design/timeline-branches.md#711-the-parent-block-branchparent)).
+/// ([§7.1.1](../../../docs/design/timeline-branches.md#711-the-parent-block-branchparent)).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_nested_line_whose_opening_read_fails_is_a_failed_create() {
     let store = Arc::new(TestStore::default());
@@ -6257,7 +6268,11 @@ async fn a_tool_line_without_idle_notices_stays_quiet_after_restore() {
         .id;
     until_events(&session, &child, |events| {
         events.iter().any(|event| {
-            matches!(&event.kind, EventKind::TurnEnd(data) if matches!(&data.outcome, TurnOutcome::Completed { .. }))
+            matches!(
+                &event.kind,
+                EventKind::TurnEnd(data)
+                    if matches!(&data.outcome, TurnOutcome::Completed { .. })
+            )
         })
     })
     .await;
@@ -6282,7 +6297,11 @@ async fn a_tool_line_without_idle_notices_stays_quiet_after_restore() {
     until_events(&session, &child, |events| {
         events.iter().any(|event| {
             event.sequence > before
-                && matches!(&event.kind, EventKind::TurnEnd(data) if matches!(&data.outcome, TurnOutcome::Completed { .. }))
+                && matches!(
+                    &event.kind,
+                    EventKind::TurnEnd(data)
+                        if matches!(&data.outcome, TurnOutcome::Completed { .. })
+                )
         })
     })
     .await;
@@ -6374,7 +6393,9 @@ async fn a_stop_with_a_held_steer_still_tells_main_the_line_stopped() {
         .unwrap();
     until_events(&session, &child, |events| {
         events.iter().any(
-            |event| matches!(&event.kind, EventKind::InputApplied(data) if data.input_id == steer.id),
+            |event| {
+                matches!(&event.kind, EventKind::InputApplied(data) if data.input_id == steer.id)
+            },
         )
     })
     .await;
@@ -6390,9 +6411,12 @@ async fn a_stop_with_a_held_steer_still_tells_main_the_line_stopped() {
     .await;
     let events = local_events(&session, &child).await;
     assert!(
-        !events.iter().any(
-            |event| matches!(&event.kind, EventKind::InputConsumed(data) if data.input_id == steer.id)
-        ),
+        !events.iter().any(|event| {
+            matches!(
+                &event.kind,
+                EventKind::InputConsumed(data) if data.input_id == steer.id
+            )
+        }),
         "the stop leaves the steer unconsumed"
     );
     soon(agent.close()).await.unwrap();

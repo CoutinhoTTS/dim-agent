@@ -1335,6 +1335,7 @@ async fn the_tool_schedules_a_wakeup_for_the_caller_and_refuses_elsewhere() {
     clock(home.path()).advance_to(at.parse::<jiff::Timestamp>().unwrap());
     step(home.path(), 1).await;
     wait_state(home.path(), &wakeup_id, "fired").await;
+    wait_for("the wakeup turn", || model.count() >= 2).await;
     wait_turn_ends(&mut client, &session, 2).await;
 
     // A non-interactive Session gets the same refusal the `schedule` tool

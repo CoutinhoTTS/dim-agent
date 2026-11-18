@@ -1284,7 +1284,12 @@ impl Connection {
             Call::Idle(params) => match self.session(rpc, &params.session_id) {
                 Ok(session) => {
                     let branch = params.branch_id.as_deref().unwrap_or("main");
-                    let result = tokio::select! {biased;_=self.closed.cancelled()=>return None,_=rpc.unloading.cancelled()=>Err(RpcError::reloading()),result=session.idle(branch)=>result.map_err(RpcError::from)};
+                    let result = tokio::select! {
+                        biased;
+                        _ = self.closed.cancelled() => return None,
+                        _ = rpc.unloading.cancelled() => Err(RpcError::reloading()),
+                        result = session.idle(branch) => result.map_err(RpcError::from),
+                    };
                     match result {
                         Ok(sequence) => self.barrier(sequence, delivery, &rpc.unloading).await,
                         Err(error) => Err(error),
