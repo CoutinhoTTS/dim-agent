@@ -4724,6 +4724,7 @@ async fn start_with_helper(home: std::path::PathBuf, helper: std::path::PathBuf)
     let config = ServerConfig {
         product_home: Some(home.clone()),
         target_home: Some(home.join("native")),
+        startup_timeout: Duration::from_secs(60),
         ..Default::default()
     };
     launch_with(
