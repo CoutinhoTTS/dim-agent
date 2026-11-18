@@ -911,8 +911,8 @@
       "model": "BranchEligibility",
       "description": "The root is a valid move target again, and the cap counts a new child of the default branch: one open from the root leaves no room for a second",
       "state": "State 344:\ns = [ parent |-> \"P1\",\n  primary |-> TRUE,\n  source |-> \"tool\",\n  ended |-> FALSE,\n  ending |-> FALSE,\n  ancestorEnding |-> FALSE,\n  descendantDefault |-> FALSE,\n  peers |-> 1,\n  children |-> {1},\n  notice |-> FALSE,\n  note |-> \"default\",\n  head |-> 1,\n  opening |-> 1,\n  cut |-> 0,\n  cursor |-> 0,\n  reported |-> 1,\n  held |-> FALSE,\n  turn |-> FALSE,\n  steered |-> FALSE,\n  ownEnd |-> FALSE,\n  pending |-> FALSE,\n  recovery |-> FALSE,\n  idle |-> 0,\n  blocks |-> <<>>,\n  roster |-> {1, 2},\n  endedNotice |-> {},\n  externalEnds |-> {} ]",
-      "module_sha256": "365ea8cfa56eef720462b0e66ec0869e0d05dea025ac4aa36c55ebaa0c951e25",
-      "config_sha256": "4e4fae8d7979a7ab3b04f923f3e99fc26b8c3471b6e700a9612214808c050337",
+      "module_sha256": "786ea72c4b26481db9ce6e7019b09a367647b438b4d3f6c46ae150caa6d3463f",
+      "config_sha256": "02b307395de137d5598172ff4958339afa0da810bbff64eec4e42ca08e35666e",
       "command": "java -XX:+UseParallelGC -Xmx2g -cp \"$TLA_JAR\" tlc2.TLC -workers 1 -metadir /tmp/BranchEligibility-meta -dump /tmp/BranchEligibility -config docs/design/examples/capability-models/BranchEligibility.cfg docs/design/examples/capability-models/BranchEligibility.tla"
     },
     {
