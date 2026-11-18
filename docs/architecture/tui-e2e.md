@@ -120,8 +120,9 @@ Inside tmux the OSC 7501 records stop at tmux and are not forwarded to the outer
 terminal; the app writes them to the pane, so the tap sees them while the outer
 terminal does not. Terminal-negotiation behavior that tmux cannot exhibit — the
 startup color/DA probe, kitty flag stacks on a negotiating terminal, and the
-theme choice from the terminal background — stays at the component level in
-`crates/dimcode/tests/cli_flow/exit.rs` and the `tui_default_theme_*` flow.
+theme choice from the terminal background — stays with the `dim-cli` component
+tests in `crates/dim-cli/src/ui/terminal/` and the local
+`tui_default_theme_respects_background_and_saved_choice` case.
 
 ## Coverage mapping
 
@@ -129,22 +130,22 @@ theme choice from the terminal background — stays at the component level in
 | --- | --- | --- |
 | Scrollback and fullscreen | `scrollback_streams_and_exits_cleanly`, `fullscreen_switches_screens_and_restores_the_terminal` | `cli_flow/exit.rs`, `dim-cli` render tests |
 | Mode switching | `fullscreen_switches_screens_and_restores_the_terminal` | `exit::keyboard_protocol_follows_the_screen_and_restores_both_stacks_on_exit` |
-| Resizing | `resize_rewraps_history_without_losing_rows` | `tui_resizing_during_thinking_preserves_multiline_history` (CI) |
-| History and resume | `daemon_stop_reports_disconnect_and_resume_replays_history` | `catalog::tui_resume_*` (CI) |
-| Normal exit and interruption | `scrollback_streams_and_exits_cleanly`, `npm_launcher_streams_and_passes_interrupts`, `streaming_status_reports_and_interrupts` | `exit::ctrl_c_*` (CI) |
+| Resizing | `resize_rewraps_history_without_losing_rows` | `tui_resizing_during_thinking_preserves_multiline_history` (local-only) |
+| History and resume | `daemon_stop_reports_disconnect_and_resume_replays_history` | `catalog::tui_resume_*` (local-only) |
+| Normal exit and interruption | `scrollback_streams_and_exits_cleanly`, `npm_launcher_streams_and_passes_interrupts`, `streaming_status_reports_and_interrupts` | `exit::ctrl_c_*` (local-only) |
 | Composer editing and paste | `composer_edits_multiline_and_stores_a_large_paste` | `interactive_composer_preserves_multiline_pastes_and_edits_atomic_markers` (CI) |
-| File mentions and attachments | `file_mention_inserts_a_workspace_link`, `composer_edits_multiline_and_stores_a_large_paste` | `tui_at_mentions_pick_files_from_the_working_directory`, paste flows (CI) |
-| Slash commands and panels | `slash_palette_lists_curated_commands_and_settings`, `palette_tab_completes_and_enter_runs_the_command` | palette and panel flows in `session_management`, `skills`, `workflow`, `mcp` (CI) |
+| File mentions and attachments | `file_mention_inserts_a_workspace_link`, `composer_edits_multiline_and_stores_a_large_paste` | `tui_at_mentions_pick_files_from_the_working_directory` (local-only), paste flows (CI) |
+| Slash commands and panels | `slash_palette_lists_curated_commands_and_settings`, `palette_tab_completes_and_enter_runs_the_command` | palette and panel flows in `session_management`, `skills`, `workflow`, `mcp` (local-only) |
 | Missing session | `home_commands_without_a_session_answer_and_send_nothing` | `tui_home_commands_without_a_session_answer_and_send_nothing` (now local-only, see below) |
 | Hook rows | `hook_context_and_stop_follow_up_stay_status_rows` | `tui_draws_a_prompt_hooks_context_as_a_status_row`, `tui_draws_a_stop_hooks_follow_up_as_one_row` (now local-only) |
 | Input suggestions | `prompt_suggestion_offers_and_takes_the_next_message` | `prompt_suggestion::*` (now local-only) |
-| Streaming and status | `streaming_status_reports_and_interrupts`, `scrollback_streams_and_exits_cleanly` | `tui_reports_the_run_state_to_the_terminal_and_clears_it_on_exit` (CI) |
-| Queue controls | `queue_holds_steers_and_deletes` | `tui_queue_*` (CI) |
-| Permissions and questions | `approval_panel_allows_one_command`, `question_panel_answer_reaches_the_next_request` | `permission::*`, `question::*` (CI) |
-| Task and subagent controls | `background_task_row_and_tasks_panel`, `member_conversation_and_stop_all` | `tasks::*` (CI) |
-| Provider and account panels | `provider_panel_adds_and_keeps_a_custom_provider` | `accounts::*`, `models::*` (CI) |
+| Streaming and status | `streaming_status_reports_and_interrupts`, `scrollback_streams_and_exits_cleanly` | `tui_reports_the_run_state_to_the_terminal_and_clears_it_on_exit` (local-only) |
+| Queue controls | `queue_holds_steers_and_deletes` | `tui_queue_*` (local-only) |
+| Permissions and questions | `approval_panel_allows_one_command`, `question_panel_answer_reaches_the_next_request` | `permission::*`, `question::*` (local-only) |
+| Task and subagent controls | `background_task_row_and_tasks_panel`, `member_conversation_and_stop_all` | `tasks::*` (local-only) |
+| Provider and account panels | `provider_panel_adds_and_keeps_a_custom_provider` | `accounts::*`, `models::*` (local-only) |
 | Daemon disconnect/restart | `daemon_stop_reports_disconnect_and_resume_replays_history` | `daemon_replace::*` (CI) |
-| Production launcher and App Server | `npm_launcher_streams_and_passes_interrupts`; every scenario runs the production daemon | ignored production flows in `cli_flow` (CI) |
+| Production launcher and App Server | `npm_launcher_streams_and_passes_interrupts`; every scenario runs the production daemon | the 12 production flows the CI `--ignored` step names |
 
 Every retained TUI case from #1802 now has a tmux scenario except the ones listed
 below. Those are the known gaps: their behavior has no tmux scenario, and the
@@ -178,12 +179,13 @@ the verdict and where its behavior lives afterwards.
 | Coverage to account for | `tui_resizing_during_thinking_preserves_multiline_history`, `tui_stays_up_when_the_daemon_leaves_and_restores_the_terminal_on_exit`, `unix_npm_wrapper_preserves_the_native_terminal_and_interrupt_flow`, `tui_provider_management_uses_the_production_daemon_and_survives_restart`, `question::native_tui_question_answer_reaches_the_next_model_request` and `tasks::native_tui_stop_all_settles_the_member_and_reports_cancellation_to_the_leader` are kept |
 | Startup routing carry-forward | `fresh_native_startup_uses_workspace_and_ask_without_policy_file` moves with the line-mode production flows, not the TUI suite; see [Line-mode routing exception](#line-mode-routing-exception) |
 
-The no-session gate, the hook rows and the input-suggestion flows survive as
-CI cases. None of them has a tmux scenario yet, so none may leave CI in the
-TUI-only migration until a scenario covers its surviving assertions: the merged
-no-session flow's "daemon receives no request" gate, the prompt-hook row's
-singular body and the stop-hook row, and Tab/Right accepting an offer in both
-layouts.
+The no-session gate, the hook rows and the input-suggestion flows are the groups
+this PR moved: `home_commands_without_a_session_answer_and_send_nothing`,
+`hook_context_and_stop_follow_up_stay_status_rows` and
+`prompt_suggestion_offers_and_takes_the_next_message` cover their user-visible
+flows, and the remaining assertions in those groups (the singular hook body, the
+operator's own marker and the request-suppression cases) stay in the ignored
+local cases listed under [Coverage mapping](#coverage-mapping).
 
 ## Existing terminal E2E cases
 
