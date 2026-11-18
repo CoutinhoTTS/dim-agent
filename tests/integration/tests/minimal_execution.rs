@@ -1366,6 +1366,36 @@ async fn execute_declares_the_command_it_ran_in_the_digest() {
     harness.shutdown().await;
 }
 
+/// Drives [`SettleWait`] with synthetic totals: the poll at index `k`
+/// (zero-based) grows while `k <= grows_through`, and reports `k + 1` bytes;
+/// otherwise it reports zero, which never grows.
+fn drive(grows_through: Option<u32>) -> (SettleDecision, SettleWait) {
+    let mut wait = SettleWait::new();
+    loop {
+        let poll = wait.polls;
+        let grows = grows_through.is_some_and(|last| poll <= last);
+        let total = if grows { u64::from(poll) + 1 } else { 0 };
+        match wait.observe(total) {
+            SettleDecision::KeepWaiting => {}
+            decision => return (decision, wait),
+        }
+    }
+}
+
+/// A stall inside the last idle window: growth through zero-based poll 2501,
+/// then flat for good. Only 498 unchanged polls follow, short of the 500 the
+/// idle exit needs, so it reaches the ceiling — and the ceiling text must
+/// report the 9.96 s of silence rather than claim the shell was still writing.
+#[test]
+fn a_stall_inside_the_last_idle_window_still_exits_at_the_ceiling() {
+    let (decision, wait) = drive(Some(2501));
+    assert_eq!(decision, SettleDecision::Ceiling);
+    assert_eq!(wait.since_growth(), 498);
+    let text = settle_timeout("exec wake", decision, &wait);
+    assert!(text.contains("last growth 498 polls (9.96 s)"), "{text}");
+    assert!(!text.contains("still writing"), "{text}");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn restoring_shell_exec_prefixes_settles_orphans_and_reposts_only_missing_wakes() {
     let harness = Harness::new(platform(&[]).await).await;
