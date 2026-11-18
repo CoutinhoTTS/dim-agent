@@ -186,6 +186,73 @@
       ]
     },
     {
+      "config": "docs/design/examples/capability-models/BranchCapSwitch.cfg",
+      "module": "docs/design/examples/capability-models/BranchCapSwitch.tla",
+      "module_sha256": "24fb7b0f9d49898956c6c08ae31fe41c506124a2b89982b47a2b20c8a5548852",
+      "config_sha256": "e8b0c8a334d7b4b776d5db44531aa3a13794a94245f14d7c3f27fbaf7b8a2e0d",
+      "exit": 0,
+      "seconds": 5.0,
+      "expected_exit": 0,
+      "generated": 50,
+      "distinct": 12,
+      "queue_remaining": 0,
+      "depth": 2,
+      "fingerprint": 94,
+      "seed": 8853310156106251253,
+      "finished": "Finished in 05s at (2026-11-18 21:44:48)",
+      "invariants": [],
+      "properties": [
+        "CreateStaysWithinCap",
+        "SwitchClosesNothing"
+      ]
+    },
+    {
+      "config": "docs/design/examples/capability-models/BranchCapSwitch-BackToRoot.cfg",
+      "module": "docs/design/examples/capability-models/BranchCapSwitch.tla",
+      "module_sha256": "24fb7b0f9d49898956c6c08ae31fe41c506124a2b89982b47a2b20c8a5548852",
+      "config_sha256": "56cf73380901eec693afdbed198c600fda5193af0c8eb54992804f16648f2536",
+      "exit": 0,
+      "seconds": 5.0,
+      "expected_exit": 0,
+      "generated": 3,
+      "distinct": 2,
+      "queue_remaining": 0,
+      "depth": 2,
+      "fingerprint": 82,
+      "seed": -5005776968953601198,
+      "finished": "Finished in 05s at (2026-11-18 21:44:53)",
+      "invariants": [],
+      "properties": [
+        "TheSwitchIsAdmitted",
+        "BothNestedLinesStartCounting",
+        "TheSwitchSpendsEverySlot",
+        "TheSwitchLeavesNoRoom",
+        "NoOpenAfterTheSwitch"
+      ]
+    },
+    {
+      "config": "docs/design/examples/capability-models/BranchCapSwitch-OverCap.cfg",
+      "module": "docs/design/examples/capability-models/BranchCapSwitch.tla",
+      "module_sha256": "24fb7b0f9d49898956c6c08ae31fe41c506124a2b89982b47a2b20c8a5548852",
+      "config_sha256": "be798d69995202f6f9e397c4e47427301c297954506c1361b86957f075b7f85c",
+      "exit": 0,
+      "seconds": 5.0,
+      "expected_exit": 0,
+      "generated": 3,
+      "distinct": 2,
+      "queue_remaining": 0,
+      "depth": 2,
+      "fingerprint": 116,
+      "seed": 2336174489557636540,
+      "finished": "Finished in 05s at (2026-11-18 21:44:59)",
+      "invariants": [],
+      "properties": [
+        "SwitchClosesNothing",
+        "TheSwitchIsAdmitted",
+        "OverCapAfterTheSwitch"
+      ]
+    },
+    {
       "config": "docs/design/examples/capability-models/BroadcastRecords.cfg",
       "module": "docs/design/examples/capability-models/BroadcastRecords.tla",
       "module_sha256": "6aa3891b2005317cd8616cd765beda341eeaa0f8826c1c2042bfe5e8ce86641c",
