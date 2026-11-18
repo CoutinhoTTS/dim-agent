@@ -387,7 +387,6 @@ fn assert_raw(pty: &Pty) {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn normal_dimcode_is_the_leaf_until_it_leaves() {
     let home = Home::new("normal-leaf");
     let pty = Pty::new();
@@ -495,7 +494,6 @@ fn normal_dimcode_is_the_leaf_until_it_leaves() {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn the_daemon_closes_leaves_and_restores_their_terminals() {
     let home = Home::new("ui-leaf");
 
@@ -555,7 +553,6 @@ fn the_daemon_closes_leaves_and_restores_their_terminals() {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn a_home_the_daemon_fits_also_fits_its_leaf() {
     let limit = std::mem::size_of::<libc::sockaddr_un>()
         - std::mem::offset_of!(libc::sockaddr_un, sun_path)
@@ -577,7 +574,6 @@ fn a_home_the_daemon_fits_also_fits_its_leaf() {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn exiting_home_leaves_no_session_or_ui_registration() {
     for fullscreen in [false, true] {
         let home = Home::new("lazy-home");

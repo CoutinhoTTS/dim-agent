@@ -459,7 +459,6 @@ fn workflow_enable_refuses_a_name_the_owner_does_not_list_as_a_project() {
 /// `edit` and `set` answer with the file to edit, and `history` reads its
 /// detail instead of refusing the name.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn workflow_edit_set_and_history_find_a_disabled_project_definition() {
     // `edit`: the editor is never opened, since there is no document to give
     // it; the answer names the definition's file.
@@ -992,7 +991,6 @@ const WRITES_A_NEW_DEFINITION: &str = "printf '%s' '{\"source\":\"user\",\"docum
 /// `/workflow` lists the definitions by source, and the selected entry's
 /// detail and kinds, in both terminal modes.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_workflow_panel_lists_definitions() {
     for fullscreen in [false, true] {
         let home = Home::new();
@@ -1045,7 +1043,6 @@ fn tui_workflow_panel_lists_definitions() {
 /// carries the workspace and no revision, and the note says it stays
 /// disabled.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_workflow_save_command_writes_a_definition() {
     for fullscreen in [false, true] {
         let home = Home::new();
@@ -1113,7 +1110,6 @@ fn started_run() -> Value {
 /// and starts the run addressed to the Session's line; `/tasks` finds it
 /// through the discovery read.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_workflow_panel_starts_a_run_with_parameters() {
     for fullscreen in [false, true] {
         let home = Home::new();
@@ -1237,7 +1233,6 @@ fn cut_default() -> Value {
 /// Ctrl+T on another definition opens that definition's template and starts
 /// it, and the refused one still reopens its own kept text.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_workflow_panel_keeps_a_runs_parameters_for_its_own_definition() {
     for fullscreen in [false, true] {
         let home = Home::new();
@@ -1363,7 +1358,6 @@ fn tui_workflow_panel_keeps_a_runs_parameters_for_its_own_definition() {
 /// default to a parameter the request leaves out. A value the user changed
 /// is sent as typed.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_workflow_run_leaves_a_listed_default_unsent() {
     let home = Home::new();
     // The user keeps `target` as the template filled it and changes `style`.
@@ -1426,7 +1420,6 @@ fn tui_workflow_run_leaves_a_listed_default_unsent() {
 /// user focused `line-1` before they opened `/workflow`, so the start is
 /// addressed to it, not to `main`.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_workflow_panel_starts_a_run_on_the_shown_line() {
     let home = Home::new();
     let (shown, wait_shown) = mpsc::channel();
@@ -1516,7 +1509,6 @@ fn tui_workflow_panel_starts_a_run_on_the_shown_line() {
 /// `/workflow` after `/new`, before the first message, has no Session and
 /// so no line to report to: the start carries no `report_to`.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_workflow_starts_without_a_session_and_reports_nowhere() {
     let home = Home::new();
     let launch_cwd = fs::canonicalize(&home.0).unwrap();
@@ -1584,7 +1576,6 @@ fn tui_workflow_starts_without_a_session_and_reports_nowhere() {
 /// A stale revision writes nothing: the toggle and the edit both read the
 /// area again and say so, and the edit keeps the user's text.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_workflow_panel_reports_a_conflict_and_rereads() {
     for fullscreen in [false, true] {
         let home = Home::new();
@@ -1651,7 +1642,6 @@ fn tui_workflow_panel_reports_a_conflict_and_rereads() {
 /// The panel refuses a rename before it writes: the owner keys by the
 /// document's name, so nothing is sent and the text stays.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_workflow_panel_refuses_a_rename_and_keeps_the_draft() {
     for fullscreen in [false, true] {
         let home = Home::new();
@@ -1686,7 +1676,6 @@ fn tui_workflow_panel_refuses_a_rename_and_keeps_the_draft() {
 /// A daemon without `workflow.save` cannot serve `/workflow:save`: the
 /// panel stays on its list with the support check's sentence.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_workflow_save_is_refused_when_the_daemon_cannot_write() {
     let home = Home::new();
     let (shown, wait_shown) = mpsc::channel();
@@ -1723,7 +1712,6 @@ fn tui_workflow_save_is_refused_when_the_daemon_cannot_write() {
 /// A save the owner refuses shows its issues and keeps the draft, which the
 /// next Ctrl+N reopens as the user's text, not the create template.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_workflow_save_reports_an_invalid_definition_and_keeps_the_draft() {
     for fullscreen in [false, true] {
         let home = Home::new();
@@ -1769,7 +1757,6 @@ fn tui_workflow_save_reports_an_invalid_definition_and_keeps_the_draft() {
 /// Without `settings.read` and `settings.update` the panel offers no toggle
 /// and no edit: the view carries neither kind, and the hint says so.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_workflow_panel_offers_no_write_without_the_settings_methods() {
     let home = Home::new();
     let (shown, wait_shown) = mpsc::channel();

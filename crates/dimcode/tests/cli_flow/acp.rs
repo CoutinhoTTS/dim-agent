@@ -3682,7 +3682,6 @@ fn acp_stdio_load_coalesces_fixed_head_replay_and_rejects_unsupported_inputs() {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_reports_max_tokens_action_and_accepts_the_next_prompt() {
     for same_failure in [true, false] {
         let home = Home::new();

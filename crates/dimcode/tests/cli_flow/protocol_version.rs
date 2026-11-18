@@ -399,7 +399,6 @@ fn refuse_session_version(wire: &mut Wire, request: &Value, message: &str) {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn a_resumed_session_of_a_newer_protocol_names_both_versions_and_offers_no_retry() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {

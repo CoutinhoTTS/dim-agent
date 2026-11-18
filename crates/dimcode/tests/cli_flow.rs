@@ -5296,7 +5296,6 @@ fn interactive_configuration_commands_route_and_recover_without_submitting_comma
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn explicit_model_selection_uses_protocol_field_names_from_tui_and_line_client() {
     for (tui, leaf) in [(true, true), (true, false), (false, false)] {
         for (environment, argument, stated) in [
@@ -5430,7 +5429,6 @@ fn invalid_startup_effort_fails_without_starting_a_daemon() {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn fullscreen_session_attached_before_the_first_frame_shows_one_banner() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
@@ -5465,7 +5463,6 @@ fn fullscreen_session_attached_before_the_first_frame_shows_one_banner() {
 /// The model label carries the reasoning effort the Session adopted, in both
 /// terminal modes, and no suffix when the configuration carries none.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn the_model_label_shows_the_adopted_reasoning_effort_in_both_modes() {
     for fullscreen in [false, true] {
         for (preferences, expected) in [
@@ -5515,7 +5512,6 @@ fn the_model_label_shows_the_adopted_reasoning_effort_in_both_modes() {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn a_new_session_shows_the_effort_its_creation_adopted() {
     for fullscreen in [false, true] {
         let home = Home::new();
@@ -5665,7 +5661,6 @@ fn the_model_label_shows_a_configured_profile_effort() {
 /// `/new` returns home: the status line keeps the provider and model it
 /// showed and drops the effort, because nothing has been adopted there yet.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn home_after_new_drops_the_previous_sessions_effort() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
@@ -5888,7 +5883,6 @@ fn tui_resizing_during_thinking_preserves_multiline_history() {
 /// Re-picking the model the label already shows keeps its effort: an
 /// `unchanged` adoption publishes no `context/configured` fact to redraw it.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn repicking_the_current_model_keeps_the_effort() {
     let home = Home::new();
     let (calls, observed) = std::sync::mpsc::channel::<Value>();
@@ -5995,7 +5989,6 @@ fn repicking_the_current_model_keeps_the_effort() {
 /// A resumed Session draws the model and effort its history adopted, not the
 /// model its `session.attach` record names.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn a_resumed_session_draws_the_adopted_model_and_effort() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
@@ -6027,7 +6020,6 @@ fn a_resumed_session_draws_the_adopted_model_and_effort() {
 
 /// An adoption written by another client reaches the label as it arrives.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn another_clients_adoption_redraws_the_model_label() {
     let home = Home::new();
     let (adopt, adopting) = std::sync::mpsc::channel();
@@ -6082,7 +6074,6 @@ fn sized(command: &mut Command, cols: u16, rows: u16) {
 /// A composer too narrow for the whole label sheds the effort first and the
 /// model second.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn a_narrow_composer_drops_the_effort_before_the_model() {
     for cols in [80, 26, 18] {
         let home = Home::new();
@@ -6133,7 +6124,6 @@ fn a_narrow_composer_drops_the_effort_before_the_model() {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_escape_sends_the_reason_that_records_the_interruption() {
     for fullscreen in [false, true] {
         let home = Home::new();
@@ -6197,7 +6187,6 @@ fn tui_escape_sends_the_reason_that_records_the_interruption() {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_shell_mode_runs_through_session_methods_and_shows_the_recorded_run() {
     let home = Home::new();
     let (release, wait_release) = std::sync::mpsc::channel();
@@ -6272,7 +6261,6 @@ fn tui_shell_mode_runs_through_session_methods_and_shows_the_recorded_run() {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_effort_dialog_selects_the_current_models_effort_and_cancels_without_writing() {
     fn catalog(wire: &mut Wire) {
         let request = wire.read("provider.catalog");
@@ -6366,7 +6354,6 @@ fn tui_effort_dialog_selects_the_current_models_effort_and_cancels_without_writi
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_mcp_and_configuration_commands_use_session_methods() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
@@ -6512,7 +6499,6 @@ fn tui_home_commands_without_a_session_answer_and_send_nothing() {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_shell_session_creation_failure_settles_with_the_no_session_notice() {
     let home = Home::new();
     let (quieted, quiet_done) = std::sync::mpsc::channel();
@@ -6540,7 +6526,6 @@ fn tui_shell_session_creation_failure_settles_with_the_no_session_notice() {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_pasted_images_and_long_text_submit_as_user_content() {
     let home = Home::new();
     let image = home.0.join("shot.png");
@@ -6668,7 +6653,6 @@ fn catalog_entry(name: &str, enabled: bool, shadowed_by: Option<&str>) -> Value 
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_skill_rows_come_from_the_catalog_and_complete_without_sending() {
     for fullscreen in [false, true] {
         let home = Home::new();
@@ -6733,7 +6717,6 @@ fn tui_skill_rows_come_from_the_catalog_and_complete_without_sending() {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn reloading_skills_changes_the_palette_rows() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
@@ -6792,7 +6775,6 @@ fn reloading_skills_changes_the_palette_rows() {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn a_daemon_without_skill_catalog_keeps_a_working_command_palette() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
@@ -6889,7 +6871,6 @@ fn tui_palette_tab_only_completes_and_enter_still_runs() {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_sends_dropped_files_as_links_and_images_by_model_capability() {
     let home = Home::new();
     let image = home.0.join("shot.png");
@@ -6945,7 +6926,6 @@ fn tui_sends_dropped_files_as_links_and_images_by_model_capability() {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn fullscreen_login_releases_mouse_for_the_link_and_restores_the_preference_on_close() {
     const MOUSE_ON: &str = "\x1b[?1002h\x1b[?1003h\x1b[?1006h";
     const MOUSE_OFF: &str = "\x1b[?1006l\x1b[?1003l\x1b[?1002l";
@@ -8032,7 +8012,6 @@ fn mcp_list_says_when_no_server_is_configured() {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_mcp_says_when_no_server_is_configured() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
@@ -8073,7 +8052,6 @@ fn tui_mcp_says_when_no_server_is_configured() {
 /// `/mcp` shows those under the server's row, sanitized, and the catalog
 /// error once. `auth_required` keeps its single sign-in hint.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_mcp_shows_failure_reasons_rejections_and_the_catalog_error() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
@@ -8135,7 +8113,6 @@ fn tui_mcp_shows_failure_reasons_rejections_and_the_catalog_error() {
 /// `disable` sends, report the same text, and the next `/mcp` lists the new
 /// state.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_mcp_enables_and_disables_a_project_server() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
@@ -8926,7 +8903,6 @@ fn web_install_refuses_for_a_build_from_source() {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_web_toggles_the_daemon_switch_without_leaving() {
     for manual in [true, false] {
         let home = Home::new();
@@ -9569,7 +9545,6 @@ fn tui_provider_management_uses_the_production_daemon_and_survives_restart() {
 /// after attaching, detaches from a Session it leaves, and leaves with its
 /// reason on screen when the daemon asks it to; the Session is not closed.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_registers_with_the_ui_registry_and_leaves_when_asked() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
@@ -9648,7 +9623,6 @@ fn tui_registers_with_the_ui_registry_and_leaves_when_asked() {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_export_dialog_matches_the_subcommand_and_cancel_sends_nothing() {
     for (fullscreen, locale) in [
         (false, "en"),
@@ -9864,7 +9838,6 @@ fn tui_queue_panel_deletes_steers_and_moves_applied_inputs_to_the_transcript() {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_rapid_queue_controls_settle_each_held_input_once() {
     for fullscreen in [false, true] {
         for shortcut in ["enter", "ctrl-s", "panel", "delete", "recall", "not-held"] {
@@ -9984,7 +9957,6 @@ fn tui_rapid_queue_controls_settle_each_held_input_once() {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_queue_recall_refuses_attachments_and_steering_preserves_all_content() {
     for (fullscreen, locale) in [
         (false, "en"),
@@ -10062,7 +10034,6 @@ fn tui_queue_recall_refuses_attachments_and_steering_preserves_all_content() {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_queue_shows_held_messages_and_steers_or_withdraws_them() {
     let home = Home::queued();
     let daemon = home.daemon(|wire| {
@@ -10161,7 +10132,6 @@ fn tui_queue_shows_held_messages_and_steers_or_withdraws_them() {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_ctrl_enter_interrupts_the_run_and_starts_a_new_one_with_the_draft() {
     let home = Home::queued();
     let (done, checked) = std::sync::mpsc::channel();
@@ -10220,7 +10190,6 @@ fn tui_ctrl_enter_interrupts_the_run_and_starts_a_new_one_with_the_draft() {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_ctrl_s_steers_the_draft_while_a_run_is_in_progress() {
     let home = Home::queued();
     let daemon = home.daemon(|wire| {
@@ -10256,7 +10225,6 @@ fn tui_ctrl_s_steers_the_draft_while_a_run_is_in_progress() {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_escape_withdraws_the_queue_before_the_run_stops() {
     for fullscreen in [false, true] {
         for (draft, content, expected) in [
@@ -10371,7 +10339,6 @@ fn tui_escape_withdraws_the_queue_before_the_run_stops() {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_command_output_refreshes_one_read_and_preserves_its_branch_and_terminal_result() {
     let home = Home::new();
     let (ready, readiness) = std::sync::mpsc::channel();
@@ -10488,7 +10455,6 @@ fn tui_command_output_refreshes_one_read_and_preserves_its_branch_and_terminal_r
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_command_output_errors_stop_refresh_and_reopening_retries() {
     for (app_error, expected) in [
         ("unknown_method", "Live output unavailable in this profile"),
@@ -10632,7 +10598,6 @@ fn tui_tasks_panel_stops_the_selected_command_or_member() {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_permissions_keep_pending_file_and_member_questions_and_save_command_rules() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
@@ -10760,7 +10725,6 @@ fn tui_permissions_keep_pending_file_and_member_questions_and_save_command_rules
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_approval_alias_selects_presets_and_remembers_them() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
@@ -10838,7 +10802,6 @@ fn tui_approval_alias_selects_presets_and_remembers_them() {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_shift_tab_cycles_permissions_and_preserves_the_draft_in_both_modes() {
     for fullscreen in [false, true] {
         let home = Home::new();
@@ -11135,7 +11098,6 @@ fn tui_reports_the_run_state_to_the_terminal_and_clears_it_on_exit() {
 /// record of the run itself, so the interface sends only the record: the
 /// title stops carrying a mark and the progress bar (OSC 9;4) is not drawn.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_yields_the_title_and_the_bar_to_a_terminal_that_keeps_the_record() {
     let report = |pairs: &str| format!("\x1b]7501;{pairs}\x1b\\");
     let home = Home::new();
@@ -11202,7 +11164,6 @@ fn tui_yields_the_title_and_the_bar_to_a_terminal_that_keeps_the_record() {
 /// its window once attached, and reads it again when a run on main ends, in
 /// both interface modes.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_composer_shows_context_use_and_refreshes_it_when_a_run_ends() {
     for fullscreen in [false, true] {
         let home = Home::new();
@@ -11273,7 +11234,6 @@ fn tui_composer_shows_context_use_and_refreshes_it_when_a_run_ends() {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_compaction_row_runs_then_shows_the_summary_it_recorded() {
     let home = Home::new();
     let (shown, wait_shown) = std::sync::mpsc::channel();
@@ -11413,7 +11373,6 @@ fn tui_compaction_row_runs_then_shows_the_summary_it_recorded() {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_compact_displays_committed_outcomes_and_reports_an_unsupported_daemon() {
     let home = Home::new();
     let daemon = home.daemon(move |wire| {
@@ -11486,7 +11445,6 @@ fn tui_compact_displays_committed_outcomes_and_reports_an_unsupported_daemon() {
 /// The gauge warns at 90% of the threshold the server returned — not below —
 /// and a compaction result outside a run reads the gauge again (§7.5).
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_context_warning_starts_at_the_threshold_share_and_a_compaction_refreshes_it() {
     let home = Home::new();
     let (shown, wait_shown) = std::sync::mpsc::channel();
@@ -11570,7 +11528,6 @@ fn no_catalog(wire: &mut Wire) {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn cold_hosted_tui_opens_without_reading_the_session_catalog() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
@@ -11594,7 +11551,6 @@ fn cold_hosted_tui_opens_without_reading_the_session_catalog() {
 /// #556: a resume by id takes the model from the attach record, so opening
 /// the Session reads no other Session.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn resume_by_id_takes_its_model_from_the_attach_record() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
@@ -11626,7 +11582,6 @@ fn resume_by_id_takes_its_model_from_the_attach_record() {
 /// A resume by id against a server whose attach reply has no record finds
 /// the model in the catalog and still becomes ready.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn resume_by_id_finds_the_model_in_the_catalog_when_the_attach_reply_is_empty() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
@@ -11666,7 +11621,6 @@ fn resume_by_id_finds_the_model_in_the_catalog_when_the_attach_reply_is_empty() 
 
 /// A resumed session rebuilds its compaction rows from history.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_rebuilds_compaction_rows_from_history_on_resume() {
     let home = Home::new();
     let daemon = home.daemon(move |wire| {
@@ -11880,7 +11834,6 @@ fn tui_draws_a_stop_hooks_follow_up_as_one_row() {
 /// #1380: the first block is always the operator's. A message that opens a
 /// hook marker themselves is drawn as they typed it, and gets no status row.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_draws_an_operators_own_hook_marker_verbatim() {
     let home = Home::new();
     let typed = "<dim-hooks kind=\"prompt-submit\">typed by hand</dim-hooks>";
@@ -12019,7 +11972,6 @@ fn export_writes_the_timeline_without_starting_a_daemon() {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_provider_create_recovery_preserves_changed_draft_until_confirmation() {
     let home = Home::new();
     let (release, wait_release) = std::sync::mpsc::channel();
@@ -12092,7 +12044,6 @@ fn tui_provider_create_recovery_preserves_changed_draft_until_confirmation() {
 /// methods only: a stale save rereads instead of overwriting, cancel writes
 /// nothing, and neither the Session's model nor the provider default moves.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_models_picker_edits_only_the_subagent_model_policy() {
     let home = Home::new();
     let (calls, observed) = std::sync::mpsc::channel::<Value>();
@@ -12219,7 +12170,6 @@ fn tui_models_picker_edits_only_the_subagent_model_policy() {
 /// models with missing limits once, and its other unavailable and disabled
 /// models beside them.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_models_picker_hides_manage_models_without_management_methods() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
@@ -12295,7 +12245,6 @@ fn tui_models_picker_hides_manage_models_without_management_methods() {
 /// when the model can turn reasoning off. Enter saves the cycled effort and
 /// adopts the model with that effort plus the other saved preferences.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_models_picker_cycles_reasoning_effort() {
     let home = Home::new();
     let (calls, observed) = std::sync::mpsc::channel::<Value>();
@@ -12402,7 +12351,6 @@ fn tui_models_picker_cycles_reasoning_effort() {
 /// notice names the scope. The attached Session reports a workspace of its
 /// own, which the write must ignore.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_models_picker_writes_the_default_the_launch_workspace_reads() {
     for workspace_default in [true, false] {
         let home = Home::new();
@@ -12506,7 +12454,6 @@ fn tui_models_picker_writes_the_default_the_launch_workspace_reads() {
 /// In a non-English interface the picker draws the translated hint: `t` is
 /// applied where the hint is handed to the list, which does not translate it.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_models_picker_draws_its_hint_in_the_interface_language() {
     let home = Home::new();
     fs::write(
@@ -12564,7 +12511,6 @@ fn tui_models_picker_draws_its_hint_in_the_interface_language() {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_models_picker_reads_pages_on_demand_and_reopens_without_a_cache() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
@@ -12605,7 +12551,6 @@ fn tui_models_picker_reads_pages_on_demand_and_reopens_without_a_cache() {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_models_picker_names_every_provider_with_no_selectable_model() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
@@ -12663,7 +12608,6 @@ fn tui_models_picker_names_every_provider_with_no_selectable_model() {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn member_tool_approval_requires_trusted_details_in_both_terminal_modes() {
     for fullscreen in [false, true] {
         let home = Home::new();
@@ -12726,7 +12670,6 @@ fn member_tool_approval_requires_trusted_details_in_both_terminal_modes() {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn member_approval_without_the_detail_method_offers_only_rejection() {
     for fullscreen in [false, true] {
         let home = Home::new();
@@ -12844,7 +12787,6 @@ fn recording_reports_whether_it_is_on() {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_default_theme_respects_background_and_saved_choice() {
     for (program, term, signal, background, saved, expected) in [
         ("ghostty", "xterm-256color", None, None, None, "Dim Dark"),

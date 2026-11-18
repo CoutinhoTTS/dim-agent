@@ -18,7 +18,6 @@ fn branch() -> Value {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_resume_requires_the_explicit_permission_before_attaching() {
     for fullscreen in [false, true] {
         for leaf in [false, true] {
@@ -144,7 +143,6 @@ fn line_permission_controls_keep_tool_lists_report_conflicts_and_reject_unknown_
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_permission_flag_overrides_saved_controls_and_invalid_defaults_are_ignored() {
     for fullscreen in [false, true] {
         for explicit in [false, true] {
@@ -212,7 +210,6 @@ fn tui_permission_flag_overrides_saved_controls_and_invalid_defaults_are_ignored
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_home_remembers_permissions_without_login_and_applies_them_to_the_first_message() {
     for initial_setup in [false, true] {
         for fullscreen in [false, true] {
@@ -1734,7 +1731,6 @@ fn rules_editor(home: &Home) -> PathBuf {
 /// their states and detail, and Esc returns to the Permissions panel. A
 /// command wider than the panel is readable in full in the entry's detail.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_permissions_panel_lists_command_rules_and_returns() {
     for fullscreen in [false, true] {
         let home = Home::new();
@@ -1799,7 +1795,6 @@ fn tui_permissions_panel_lists_command_rules_and_returns() {
 /// Ctrl+N opens one rule in the editor and appends it; Ctrl+X asks, then
 /// removes the selected rule.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_permissions_panel_adds_and_removes_command_rules() {
     for fullscreen in [false, true] {
         let home = Home::new();
@@ -1914,7 +1909,6 @@ fn inplace_editor(home: &Home, seen: &std::path::Path) -> PathBuf {
 /// Ctrl+N opens a template nobody would keep, so saving it unchanged is
 /// plainly the example: the panel says `No change.` and nothing is written.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_permissions_panel_opens_a_placeholder_template() {
     for fullscreen in [false, true] {
         let home = Home::new();
@@ -1970,7 +1964,6 @@ fn tui_permissions_panel_opens_a_placeholder_template() {
 /// A raced write writes nothing: the panel reports the conflict and shows
 /// the list read when it was found.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_permissions_panel_reports_a_raced_remove() {
     let home = Home::new();
     let (shown, wait_shown) = std::sync::mpsc::channel();
@@ -2016,7 +2009,6 @@ fn tui_permissions_panel_reports_a_raced_remove() {
 
 /// A rule another surface writes appears on the next read, not before it.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_permissions_panel_shows_a_rule_written_elsewhere_on_the_next_read() {
     let home = Home::new();
     let (shown, wait_shown) = std::sync::mpsc::channel();
@@ -2074,7 +2066,6 @@ fn tui_permissions_panel_shows_a_rule_written_elsewhere_on_the_next_read() {
 /// slower than any notice keeps the line: the panel owns it, and it is drawn
 /// again with the list.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_permissions_arguments_open_the_panel_and_are_not_ignored() {
     for fullscreen in [false, true] {
         let home = Home::new();

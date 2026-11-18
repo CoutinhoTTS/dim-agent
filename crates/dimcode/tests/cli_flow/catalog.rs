@@ -5,7 +5,6 @@ fn rows(start: usize, end: usize) -> Value {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_resume_catalog_pages_searches_and_closes_without_waiting_for_a_read() {
     let home = Home::new();
     let workspace = std::fs::canonicalize(&home.0).unwrap();
@@ -75,7 +74,6 @@ fn tui_resume_catalog_pages_searches_and_closes_without_waiting_for_a_read() {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_resume_labels_origins_and_shows_acp_sessions_when_asked() {
     let home = Home::new();
     let workspace = std::fs::canonicalize(&home.0).unwrap();
@@ -165,7 +163,6 @@ fn tui_resume_labels_origins_and_shows_acp_sessions_when_asked() {
 /// Ctrl+S widens the picker like a new query: every workspace, with each row
 /// naming the one it lives in.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_resume_ctrl_s_widens_to_every_workspace_and_names_the_workspace_of_a_row() {
     let home = Home::new();
     let workspace = std::fs::canonicalize(&home.0).unwrap();
@@ -221,7 +218,6 @@ fn tui_resume_ctrl_s_widens_to_every_workspace_and_names_the_workspace_of_a_row(
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_resume_says_when_the_workspace_has_no_saved_sessions() {
     let home = Home::new();
     let workspace = std::fs::canonicalize(&home.0).unwrap();
@@ -258,7 +254,6 @@ fn tui_resume_says_when_the_workspace_has_no_saved_sessions() {
 /// A daemon before `session.catalog` is listed through `session.summaries`,
 /// and the client applies the workspace scope to the rows it receives.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_resume_hides_other_workspaces_on_the_summaries_fallback() {
     let home = Home::new();
     let workspace = std::fs::canonicalize(&home.0).unwrap();
@@ -630,7 +625,6 @@ fn real_git() -> String {
 /// local one is the repository git detected, naming the same relative
 /// directory in each worktree, and it returns as itself.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_resume_toggles_between_the_repository_and_all_workspaces() {
     let home = Home::new();
     let scratch = Scratch::new();
@@ -731,7 +725,6 @@ fn tui_resume_toggles_between_the_repository_and_all_workspaces() {
 /// receives: the launch workspace and the same directory in each linked
 /// worktree, not another workspace.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_resume_keeps_the_repository_rows_on_the_summaries_fallback() {
     let home = Home::new();
     let scratch = Scratch::new();
@@ -794,7 +787,6 @@ fn tui_resume_keeps_the_repository_rows_on_the_summaries_fallback() {
 /// One worktree still names the local scope the repository; it changes only
 /// the title, and the cycle keeps its two states.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_resume_names_a_one_worktree_repository() {
     let home = Home::new();
     let (repo, _) = scratch_repository(&home.0, false);
@@ -848,7 +840,6 @@ fn tui_resume_names_a_one_worktree_repository() {
 /// workspace at once, and the scope key widens the list while the read runs.
 #[cfg(unix)]
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_resume_draws_the_workspace_while_a_slow_git_runs() {
     use std::os::unix::fs::PermissionsExt;
     let home = Home::new();
@@ -913,7 +904,6 @@ fn tui_resume_draws_the_workspace_while_a_slow_git_runs() {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_resume_skips_the_repository_scope_a_daemon_cannot_read() {
     let home = Home::new();
     let (repo, linked) = scratch_repository(&home.0, true);
@@ -969,7 +959,6 @@ fn two_sessions() -> Value {
 /// Ctrl+X deletes the selected row: the row leaves on the reply, the picker
 /// stays open, and nothing is detached.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_resume_ctrl_x_deletes_the_selected_row_and_keeps_the_shown_session() {
     let home = Home::new();
     let workspace = std::fs::canonicalize(&home.0).unwrap();
@@ -1028,7 +1017,6 @@ fn tui_resume_ctrl_x_deletes_the_selected_row_and_keeps_the_shown_session() {
 /// reply is outstanding and the outcome is still reported in the transcript
 /// afterwards.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_resume_esc_leaves_the_picker_while_the_delete_is_in_flight() {
     let home = Home::new();
     let workspace = std::fs::canonicalize(&home.0).unwrap();
@@ -1085,7 +1073,6 @@ fn tui_resume_esc_leaves_the_picker_while_the_delete_is_in_flight() {
 /// order), and the queued notices then match no Session and are ignored. The
 /// draft typed before the delete is gone, as after `/new`.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_resume_deletes_the_shown_session_and_returns_home() {
     for fullscreen in [false, true] {
         let home = Home::new();
@@ -1174,7 +1161,6 @@ fn tui_resume_deletes_the_shown_session_and_returns_home() {
 
 /// A daemon without `session.delete`: the picker says so and sends nothing.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_resume_delete_keeps_the_row_when_the_daemon_cannot_delete() {
     let home = Home::new();
     let workspace = std::fs::canonicalize(&home.0).unwrap();
@@ -1217,7 +1203,6 @@ fn tui_resume_delete_keeps_the_row_when_the_daemon_cannot_delete() {
 /// A failed delete keeps the row; a `{deleted:false}` reply re-reads the
 /// first page and reports that nothing was removed.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_resume_delete_keeps_the_row_on_a_failure_and_refreshes_when_nothing_removed() {
     let home = Home::new();
     let workspace = std::fs::canonicalize(&home.0).unwrap();
@@ -1268,7 +1253,6 @@ fn tui_resume_delete_keeps_the_row_on_a_failure_and_refreshes_when_nothing_remov
 /// A shown Session's delete answering `-32603` lands Home: the close already
 /// ran, and the queued `session.closed` must not produce a disconnect report.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_resume_delete_after_the_close_lands_home() {
     let home = Home::new();
     let workspace = std::fs::canonicalize(&home.0).unwrap();
@@ -1321,7 +1305,6 @@ fn tui_resume_delete_after_the_close_lands_home() {
 
 /// The picker's hint is drawn translated in a non-English locale.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn the_resume_hint_is_drawn_translated() {
     let home = Home::new();
     fs::write(home.0.join("config.json"), r#"{"locale":"zh-CN"}"#).unwrap();

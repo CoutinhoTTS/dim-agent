@@ -94,7 +94,6 @@ fn resume(home: &Home) -> Terminal {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn title_notice_after_the_first_message_updates_the_window_title() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
@@ -111,7 +110,6 @@ fn title_notice_after_the_first_message_updates_the_window_title() {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn resuming_a_titled_session_shows_its_title_and_never_its_first_message() {
     let home = Home::new();
     let (ready, readiness) = mpsc::channel();
@@ -141,7 +139,6 @@ fn resuming_a_titled_session_shows_its_title_and_never_its_first_message() {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn an_older_or_equal_title_revision_is_ignored() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
@@ -176,7 +173,6 @@ fn an_older_or_equal_title_revision_is_ignored() {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn stored_titles_are_trimmed_and_placeholders_are_no_title() {
     let home = Home::new();
     let (ready, readiness) = mpsc::channel();
@@ -233,7 +229,6 @@ fn stored_titles_are_trimmed_and_placeholders_are_no_title() {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn a_rename_from_another_client_updates_the_window_title() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
@@ -254,7 +249,6 @@ fn a_rename_from_another_client_updates_the_window_title() {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn a_cleared_title_falls_back_to_the_first_message() {
     let home = Home::new();
     let (proceed, control) = mpsc::channel();
@@ -278,7 +272,6 @@ fn a_cleared_title_falls_back_to_the_first_message() {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn new_returns_the_window_title_to_the_product() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
@@ -295,7 +288,6 @@ fn new_returns_the_window_title_to_the_product() {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn a_title_notice_for_a_session_the_client_left_changes_nothing() {
     let home = Home::new();
     let (proceed, control) = mpsc::channel();

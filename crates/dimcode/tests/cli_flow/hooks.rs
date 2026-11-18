@@ -273,7 +273,6 @@ fn hooks_enable_reports_the_toggle_when_the_read_after_it_fails() {
 /// the area again, as a save's conflict does: the subcommand exits 1 with the
 /// conflict, and the panel shows it over the view it reads again.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn hooks_toggle_conflict_reads_the_area_again() {
     let home = Home::new();
     let project = home.0.join("work");
@@ -678,7 +677,6 @@ fn drains_without_saving(wire: &mut Wire) {
 /// `hooks edit` hands the user document to `$EDITOR` and writes what it
 /// leaves, with the revision the document was read at.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn hooks_edit_writes_what_the_editor_leaves() {
     let home = Home::new();
     let script = editor(
@@ -713,7 +711,6 @@ fn hooks_edit_writes_what_the_editor_leaves() {
 
 /// An editor that leaves the text as it was writes nothing.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn hooks_edit_writes_nothing_when_the_editor_changes_nothing() {
     let home = Home::new();
     let script = editor(&home, "editor.sh", "exit 0");
@@ -741,7 +738,6 @@ fn hooks_edit_writes_nothing_when_the_editor_changes_nothing() {
 /// Text that does not parse is not written: the error names the file that
 /// keeps the user's text.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn hooks_edit_keeps_the_users_text_when_it_does_not_parse() {
     let home = Home::new();
     let script = editor(&home, "editor.sh", "printf '%s' '{broken' > \"$1\"");
@@ -769,7 +765,6 @@ fn hooks_edit_keeps_the_users_text_when_it_does_not_parse() {
 
 /// A stale revision writes nothing and keeps the user's text.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn hooks_edit_keeps_the_users_text_when_the_revision_is_stale() {
     let home = Home::new();
     let script = editor(
@@ -835,7 +830,6 @@ fn hooks_edit_keeps_the_users_text_when_the_revision_is_stale() {
 /// Each edit keeps its own file: a second refused edit does not overwrite
 /// the text the first one kept.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn hooks_edit_keeps_one_file_per_edit() {
     let home = Home::new();
     for (name, text) in [("first.sh", "{first"), ("second.sh", "{second")] {
@@ -865,7 +859,6 @@ fn hooks_edit_keeps_one_file_per_edit() {
 /// An editor that exits non-zero writes nothing: the message names the
 /// status and the file that keeps the text.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn hooks_edit_writes_nothing_when_the_editor_exits_non_zero() {
     let home = Home::new();
     let script = editor(&home, "editor.sh", "exit 1");
@@ -899,7 +892,6 @@ fn hooks_edit_writes_nothing_when_the_editor_exits_non_zero() {
 
 /// The editor value may quote a path with a space, as git allows.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn hooks_edit_runs_an_editor_path_with_a_space() {
     let home = Home::new();
     let directory = home.0.join("ed itors");
@@ -1042,7 +1034,6 @@ fn hooks_set_reads_stdin_and_keeps_it_when_the_write_is_refused() {
 /// `/hooks` lists every source as an entry, turns the project's on, and a
 /// plugin's source offers no write.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_hooks_panel_lists_the_sources_and_toggles_the_project() {
     let home = Home::new();
     let (shown, wait_shown) = std::sync::mpsc::channel();
@@ -1123,7 +1114,6 @@ fn missing_catalog() -> Value {
 /// an invalid one: both surfaces name its path and say there is no hooks file
 /// there, and neither calls it invalid.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn a_missing_source_shows_its_path_and_says_there_is_no_hooks_file() {
     let home = Home::new();
     let (shown, wait_shown) = std::sync::mpsc::channel();
@@ -1195,7 +1185,6 @@ fn a_missing_source_shows_its_path_and_says_there_is_no_hooks_file() {
 /// Ctrl+E hands the user document to `$EDITOR` and writes what it leaves
 /// with the revision the panel read, in both terminal modes.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_hooks_panel_edits_the_user_document() {
     for fullscreen in [false, true] {
         let home = Home::new();
@@ -1260,7 +1249,6 @@ fn tui_hooks_panel_edits_the_user_document() {
 /// A daemon that reports no user document offers no edit: the user source
 /// has no Ctrl+E, and the key does nothing, in both terminal modes.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_hooks_panel_offers_no_edit_without_a_user_document() {
     for fullscreen in [false, true] {
         let home = Home::new();
@@ -1313,7 +1301,6 @@ fn tui_hooks_panel_offers_no_edit_without_a_user_document() {
 
 /// Both verbs refuse before reading their input: no editor, no draft.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn hooks_edit_and_set_refuse_a_daemon_without_a_user_document() {
     let home = Home::new();
     let script = editor(
@@ -1479,7 +1466,6 @@ const ANSWERS_STORED: &str = "case \"$(cat \"$1\")\" in\n\
 
 /// The failed read leaves no view and no draft.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_hooks_panel_settles_a_write_whose_read_fails() {
     for fullscreen in [false, true] {
         let home = Home::new();
@@ -1648,7 +1634,6 @@ fn tui_hooks_panel_settles_a_write_whose_read_fails() {
 /// nothing was written, shows the read error once, keeps no view, and the
 /// next edit opens the stored document, in both terminal modes.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_hooks_panel_drops_the_draft_when_the_conflict_read_fails() {
     for fullscreen in [false, true] {
         let home = Home::new();
@@ -1755,7 +1740,6 @@ const WITH_MEMORY: &str = "case \"$(cat \"$1\")\" in\n\
 /// A stale revision writes nothing, says so, reads the area again, and the
 /// next edit opens the document as it now is, in both terminal modes.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_hooks_panel_keeps_the_users_text_when_the_write_is_refused() {
     for fullscreen in [false, true] {
         let home = Home::new();
@@ -1845,7 +1829,6 @@ fn tui_hooks_panel_keeps_the_users_text_when_the_write_is_refused() {
 /// revision through a toggle on another entry, so the next Ctrl+E reopens
 /// the user's text and writes it again.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_hooks_panel_reopens_the_users_text_after_a_refusal() {
     let home = Home::new();
     let script = editor(&home, "editor.sh", WITH_MEMORY);
@@ -1929,7 +1912,6 @@ fn tui_hooks_panel_reopens_the_users_text_after_a_refusal() {
 /// A refused editor exit writes nothing: the panel names the status and
 /// keeps the file.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_hooks_panel_writes_nothing_when_the_editor_exits_non_zero() {
     let home = Home::new();
     let script = editor(&home, "editor.sh", "exit 1");
@@ -1978,7 +1960,6 @@ fn tui_hooks_panel_writes_nothing_when_the_editor_exits_non_zero() {
 /// surface, never read from a file — and a daemon that lists the catalog
 /// but cannot write refuses before the editor opens.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn hooks_commands_refuse_a_daemon_that_does_not_advertise_them() {
     for verb in ["list", "enable", "set"] {
         let home = Home::new();
@@ -2070,7 +2051,6 @@ fn hooks_commands_refuse_a_daemon_that_does_not_advertise_them() {
 /// A daemon without the Hooks methods leaves the panel open on the
 /// unsupported-daemon error rather than an empty list.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_hooks_panel_says_when_the_daemon_cannot_manage_them() {
     let home = Home::new();
     let (shown, wait_shown) = std::sync::mpsc::channel();

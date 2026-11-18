@@ -35,7 +35,6 @@ fn event_on(wire: &mut Wire, branch: &str, sequence: u64, name: &str, data: Valu
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_display_details_use_one_typed_reply_and_retry_after_collapse() {
     for fullscreen in [false, true] {
         let home = Home::new();
@@ -115,7 +114,6 @@ fn tui_display_details_use_one_typed_reply_and_retry_after_collapse() {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_displays_history_and_handles_input_while_context_usage_is_pending() {
     for fullscreen in [false, true] {
         let home = Home::new();
@@ -163,7 +161,6 @@ fn tui_displays_history_and_handles_input_while_context_usage_is_pending() {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_discards_a_previous_sessions_delayed_context_report() {
     for fullscreen in [false, true] {
         let home = Home::new();
@@ -229,7 +226,6 @@ fn tui_discards_a_previous_sessions_delayed_context_report() {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_compaction_reports_committed_failures_once_and_keeps_call_errors() {
     for fullscreen in [false, true] {
         let home = Home::new();
@@ -316,7 +312,6 @@ fn tui_compaction_reports_committed_failures_once_and_keeps_call_errors() {
 /// the daemon answers it: the border shows `input / window` once the Session
 /// is entered and reads it again when a turn on `main` ends.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_shows_context_usage_the_hello_does_not_list() {
     let home = Home::new();
     let (shown, wait_shown) = mpsc::channel();
@@ -394,7 +389,6 @@ fn tui_shows_context_usage_the_hello_does_not_list() {
 /// border without a reading and prints nothing into the transcript, and the
 /// next message still goes through.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_shows_no_reading_and_keeps_working_when_context_usage_fails() {
     let home = Home::new();
     let daemon = home.daemon(move |wire| {
@@ -498,7 +492,6 @@ fn history_usage(sequence: u64, cache_read: f64) -> Value {
 /// reading, follows a newer request's usage, and drops the segment when the
 /// newest usage reports no cache field.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_usage_shows_the_last_requests_cache_hit_rate() {
     for fullscreen in [false, true] {
         let home = Home::new();
@@ -588,7 +581,6 @@ fn tui_usage_shows_the_last_requests_cache_hit_rate() {
 /// below it, an integer down to `1%`, `<1%` for a positive share under one
 /// percent, and no segment when the counters cannot produce one.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_usage_rounds_the_cache_hit_rate_down_and_hides_an_impossible_usage() {
     let home = Home::new();
     let (shown, wait_shown) = mpsc::channel();
@@ -671,7 +663,6 @@ fn tui_usage_rounds_the_cache_hit_rate_down_and_hides_an_impossible_usage() {
 /// A resumed Session shows the share of the last request it recorded before
 /// any new request: the attach history folds like the live events do.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_usage_shows_the_cache_hit_rate_a_resumed_session_recorded() {
     let home = Home::new();
     let daemon = home.daemon(move |wire| {
@@ -717,7 +708,6 @@ fn tui_usage_shows_the_cache_hit_rate_a_resumed_session_recorded() {
 
 /// A `model/usage` on another branch never touches the figure `main` shows.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_usage_cache_hit_rate_ignores_events_off_main() {
     let home = Home::new();
     let (shown, wait_shown) = mpsc::channel();
@@ -799,7 +789,6 @@ fn tui_usage_cache_hit_rate_ignores_events_off_main() {
 /// it never reports a page's older request; the second page's newer usage is
 /// what the next read shows.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_usage_withholds_the_cache_hit_rate_until_main_history_loads() {
     let home = Home::new();
     let (read, wait_read) = mpsc::channel();
@@ -896,7 +885,6 @@ fn tui_usage_withholds_the_cache_hit_rate_until_main_history_loads() {
 /// end still reads it; and a replayed history page that carries finished
 /// requests spends no read of its own (§4).
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_context_reading_follows_each_finished_model_request_on_main() {
     let home = Home::new();
     let (shown, wait_shown) = mpsc::channel();

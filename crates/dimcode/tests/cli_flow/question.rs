@@ -636,7 +636,6 @@ fn exec_without_a_terminal_stops_at_a_question_with_exit_code_3() {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_questions_keep_structured_answers_and_the_leader_draft() {
     for fullscreen in [false, true] {
         let home = Home::new();
@@ -698,7 +697,6 @@ fn tui_questions_keep_structured_answers_and_the_leader_draft() {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_questions_retry_and_keep_call_identity_across_late_replies() {
     let home = Home::new();
     let (proceed, control) = mpsc::channel();
@@ -757,7 +755,6 @@ fn tui_questions_retry_and_keep_call_identity_across_late_replies() {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_questions_restore_a_child_and_interrupt_its_branch() {
     let home = Home::new();
     let (continue_shell, shell_completion) = mpsc::channel();
@@ -843,7 +840,6 @@ fn tui_questions_restore_a_child_and_interrupt_its_branch() {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_member_questions_stay_read_only_and_a_leader_question_takes_the_prompt() {
     let home = Home::new();
     let (proceed, control) = mpsc::channel();
@@ -934,7 +930,6 @@ fn tui_member_questions_stay_read_only_and_a_leader_question_takes_the_prompt() 
 /// question back with its answer, and `Esc` in the palette returns to the
 /// question instead of declining it.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_commands_run_over_a_pending_question() {
     for fullscreen in [false, true] {
         let home = Home::new();
@@ -1036,7 +1031,6 @@ fn tui_commands_run_over_a_pending_question() {
 /// carries the server id to the daemon, nothing answers the question before
 /// its confirmation, and the question then answers normally.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_command_arguments_run_over_a_pending_question() {
     for fullscreen in [false, true] {
         let home = Home::new();
@@ -1129,7 +1123,6 @@ fn tui_command_arguments_run_over_a_pending_question() {
 /// path; and a question answered elsewhere while the palette is open leaves
 /// the palette as the ordinary one, over which a message still submits.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_free_text_answers_keep_their_slashes_and_the_palette_survives_a_dropped_question() {
     let home = Home::new();
     let (proceed, control) = mpsc::channel();

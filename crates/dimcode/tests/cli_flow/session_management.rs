@@ -308,7 +308,6 @@ fn session_rename_reports_an_unknown_session() {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_rename_sets_and_clears_the_title_without_submitting_it() {
     for fullscreen in [false, true] {
         let home = Home::new();
@@ -337,7 +336,6 @@ fn tui_rename_sets_and_clears_the_title_without_submitting_it() {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_palette_rename_waits_for_the_title() {
     for fullscreen in [false, true] {
         for key in [b"\r".as_slice(), b"\t".as_slice()] {
@@ -368,7 +366,6 @@ fn tui_palette_rename_waits_for_the_title() {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_rename_alone_is_refused_with_the_needs_notice() {
     for fullscreen in [false, true] {
         let home = Home::new();
@@ -398,7 +395,6 @@ fn tui_rename_alone_is_refused_with_the_needs_notice() {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_rename_during_a_running_turn_is_a_command_not_a_queued_input() {
     for fullscreen in [false, true] {
         let home = Home::new();
@@ -472,7 +468,6 @@ fn tui_rename_during_a_running_turn_is_a_command_not_a_queued_input() {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_rename_without_a_session_sends_nothing() {
     for fullscreen in [false, true] {
         let home = Home::new();
@@ -506,7 +501,6 @@ fn tui_rename_without_a_session_sends_nothing() {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_rename_reports_a_daemon_without_the_method() {
     for fullscreen in [false, true] {
         let home = Home::new();
@@ -945,7 +939,6 @@ fn session_cleanup_says_what_the_selector_kept() {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn session_cleanup_asks_on_a_terminal() {
     for answer in ["n", "y"] {
         let home = Home::new();

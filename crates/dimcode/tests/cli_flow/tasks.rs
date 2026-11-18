@@ -1,7 +1,6 @@
 use super::*;
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_shows_the_transcript_and_submits_input_before_owner_inventory_finishes() {
     let home = Home::new();
     let (ready, readiness) = std::sync::mpsc::channel();
@@ -64,7 +63,6 @@ fn tui_shows_the_transcript_and_submits_input_before_owner_inventory_finishes() 
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn opening_a_discovered_line_loads_its_transcript_through_the_task_history_queue() {
     let home = Home::new();
     let (ready, readiness) = std::sync::mpsc::channel();
@@ -529,7 +527,6 @@ fn event(wire: &mut Wire, branch: &str, event: Value) {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_task_history_resume_windows_complete_main_pages_and_preserves_the_draft() {
     for resume_on_launch in [true, false] {
         let home = Home::new();
@@ -653,7 +650,6 @@ fn tui_task_history_resume_windows_complete_main_pages_and_preserves_the_draft()
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_titled_silent_command_details_keep_the_command() {
     for fullscreen in [false, true] {
         let home = Home::new();
@@ -701,7 +697,6 @@ fn tui_titled_silent_command_details_keep_the_command() {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_fullscreen_resize_cancels_a_task_release_before_reflow() {
     let home = Home::new();
     let (sent, received) = std::sync::mpsc::channel();
@@ -775,7 +770,6 @@ fn tui_fullscreen_resize_cancels_a_task_release_before_reflow() {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_task_inventory_restores_branch_pages_and_retries_only_on_reopen() {
     let home = Home::new();
     let (ready, readiness) = std::sync::mpsc::channel();
@@ -862,7 +856,6 @@ fn tui_task_inventory_restores_branch_pages_and_retries_only_on_reopen() {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_task_inventory_discards_old_pages_and_queued_retries_after_resuming_the_same_session() {
     let home = Home::new();
     let workspace = std::fs::canonicalize(std::env::current_dir().unwrap()).unwrap();
@@ -1016,7 +1009,6 @@ fn tui_task_inventory_discards_old_pages_and_queued_retries_after_resuming_the_s
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_task_stop_all_keeps_its_finite_targets_and_waits_only_for_replies() {
     let home = Home::new();
     let (ready, readiness) = std::sync::mpsc::channel();
@@ -1095,7 +1087,6 @@ fn tui_task_stop_all_keeps_its_finite_targets_and_waits_only_for_replies() {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_task_stop_all_excludes_delayed_discovery_and_settles_failed_branch_reads() {
     let home = Home::new();
     let (ready, readiness) = std::sync::mpsc::channel();
@@ -1150,7 +1141,6 @@ fn tui_task_stop_all_excludes_delayed_discovery_and_settles_failed_branch_reads(
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_task_controls_queued_before_a_replacement_never_retarget_it() {
     let home = Home::new();
     let (ready, readiness) = std::sync::mpsc::channel();
@@ -1200,7 +1190,6 @@ fn tui_task_controls_queued_before_a_replacement_never_retarget_it() {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_task_stop_all_keeps_admitted_targets_after_a_session_switch() {
     let home = Home::new();
     let (ready, readiness) = std::sync::mpsc::channel();
@@ -1266,7 +1255,6 @@ fn tui_task_stop_all_keeps_admitted_targets_after_a_session_switch() {
 /// notification follows; the end the live stream carries after attach raises
 /// exactly one, and a stop reports as stopped.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_task_end_restored_by_history_is_not_notified_but_a_live_one_is() {
     let home = Home::new();
     // The test releases the delayed history reply and then the live end.
@@ -1360,7 +1348,6 @@ fn now_ms() -> u64 {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_task_inventory_keeps_fifty_terminal_facts_and_their_original_results() {
     let home = Home::new();
     let daemon = home.daemon(move |wire| {
@@ -1425,7 +1412,6 @@ fn tui_task_inventory_keeps_fifty_terminal_facts_and_their_original_results() {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_member_conversation_is_read_only_and_preserves_the_leader_draft() {
     let home = Home::new();
     fs::write(
@@ -1562,7 +1548,6 @@ wire.reply(&second, json!({"events":[fact("member-input",1,1000,"input","message
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_member_conversation_settles_old_attach_or_page_before_observing_a_replacement() {
     for close_during_attach in [true, false] {
         let home = Home::new();
@@ -1634,7 +1619,6 @@ fn tui_member_conversation_settles_old_attach_or_page_before_observing_a_replace
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_member_conversation_keeps_errors_local_and_reopens_from_a_fresh_history() {
     for outcome in 0..4 {
         let home = Home::new();
@@ -1736,7 +1720,6 @@ fn tui_member_conversation_keeps_errors_local_and_reopens_from_a_fresh_history()
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_member_conversation_yields_to_a_leader_approval_and_cleans_up_its_held_page() {
     let home = Home::new();
     let daemon = home.daemon(move |wire| {
@@ -1801,7 +1784,6 @@ fn tui_member_conversation_yields_to_a_leader_approval_and_cleans_up_its_held_pa
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_main_history_failure_is_visible_and_disables_submission() {
     for malformed in [false, true] {
         let home = Home::new();
@@ -1974,7 +1956,6 @@ fn workflow_facts(wire: &mut Wire) {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_workflow_runs_are_discovered_from_facts_and_stopped_through_their_owner() {
     let home = Home::new();
     let (stop_read, stop_seen) = std::sync::mpsc::channel();
@@ -2057,7 +2038,6 @@ fn tui_workflow_runs_are_discovered_from_facts_and_stopped_through_their_owner()
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_workflow_inventory_errors_block_stop_all_until_reopen_and_stops_follow_other_targets() {
     let home = Home::new();
     let daemon = home.daemon(move |wire| {
@@ -2238,7 +2218,6 @@ fn member_event(wire: &mut Wire, member: &str, event: Value) {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_reused_temporary_agents_keep_their_names_after_a_public_directory_read() {
     for fullscreen in [false, true] {
         let home = Home::new();
@@ -2295,7 +2274,6 @@ fn tui_reused_temporary_agents_keep_their_names_after_a_public_directory_read() 
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_member_cards_share_observations_and_show_the_members_actual_model() {
     let home = Home::new();
     let (opened, wait_opened) = std::sync::mpsc::channel();
@@ -2397,7 +2375,6 @@ fn tui_member_cards_share_observations_and_show_the_members_actual_model() {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_member_cards_attach_only_unfinished_members_and_keep_a_failed_read_unavailable() {
     let home = Home::new();
     let daemon = home.daemon(move |wire| {
@@ -2443,7 +2420,6 @@ fn tui_member_cards_attach_only_unfinished_members_and_keep_a_failed_read_unavai
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_member_cards_read_agent_names_once_for_ids_the_list_does_not_return() {
     let home = Home::new();
     fs::write(
@@ -2498,7 +2474,6 @@ fn tui_member_cards_read_agent_names_once_for_ids_the_list_does_not_return() {
 /// `agent.list` is a built-in method, so no `hello` advertises it: the card
 /// still asks for the Agent's name.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_member_cards_name_a_native_agent_the_hello_does_not_announce() {
     let home = Home::new();
     let (named, wait_named) = std::sync::mpsc::channel();
@@ -2553,7 +2528,6 @@ fn tui_member_cards_name_a_native_agent_the_hello_does_not_announce() {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_earlier_member_cards_use_cached_and_newly_discovered_agent_names() {
     for outcome in ["cached", "resolved", "missing", "failed", "temporary"] {
         let cached = outcome == "cached";
@@ -2665,7 +2639,6 @@ fn tui_earlier_member_cards_use_cached_and_newly_discovered_agent_names() {
 /// A failed shared read keeps the id on the card it covered, a later card for
 /// the same Agent asks nothing again, and the transcript keeps drawing.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_member_cards_keep_the_id_when_the_shared_agent_list_read_fails() {
     let home = Home::new();
     let (drawn, wait_drawn) = std::sync::mpsc::channel();
@@ -2740,7 +2713,6 @@ fn tui_member_cards_keep_the_id_when_the_shared_agent_list_read_fails() {
 /// and its card names the target and the refusal instead of a failure and a
 /// model.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_rejected_delegations_are_not_agents_the_leader_worked_with() {
     let home = Home::new();
     fs::write(
@@ -2869,7 +2841,6 @@ fn tui_rejected_delegations_are_not_agents_the_leader_worked_with() {
 /// `/new` goes home without a Session; the first message creates one on the
 /// model shown, leaves the old Session and only then submits.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_new_creates_the_session_on_the_first_message() {
     let home = Home::new();
     let (ready, readiness) = std::sync::mpsc::channel();
@@ -2995,7 +2966,6 @@ fn top_paged_message(text: &str) -> String {
 
 /// #1476.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_page_up_at_the_top_draws_the_branch_from_its_first_message() {
     let home = Home::new();
     let (ready, readiness) = std::sync::mpsc::channel();
@@ -3121,7 +3091,6 @@ fn tui_page_up_at_the_top_draws_the_branch_from_its_first_message() {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn earlier_on_an_ended_line_keeps_the_oldest_loaded_message() {
     let home = Home::new();
     let (ready, readiness) = std::sync::mpsc::channel();
@@ -3226,7 +3195,6 @@ fn earlier_on_an_ended_line_keeps_the_oldest_loaded_message() {
 /// the settled delegations the window left out, and `/tasks` lists the batch
 /// in the model's call order however the results arrived.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_resume_restores_settled_delegations_outside_the_window_in_dispatch_order() {
     for include_starts in [false, true] {
         let home = Home::new();

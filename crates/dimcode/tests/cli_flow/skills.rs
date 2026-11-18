@@ -4,7 +4,6 @@ use super::*;
 use std::sync::mpsc;
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn skill_discovery_reports_failures_and_a_failed_reload_keeps_the_palette() {
     let home = Home::new();
     let workspace = fs::canonicalize(std::env::current_dir().unwrap()).unwrap();
@@ -416,7 +415,6 @@ fn a_daemon_without_skill_enablement_lists_but_refuses_a_change() {
 /// serves only `skills.catalog` answers the retry, and the panel never asks
 /// for a rescan.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_skills_panel_reads_again_after_a_failed_read() {
     let home = Home::new();
     let (shown, wait_shown) = mpsc::channel();
@@ -470,7 +468,6 @@ fn tui_skills_panel_reads_again_after_a_failed_read() {
 /// `/skills` opens the panel on the catalog and Enter toggles the selected
 /// entry; `/reload-skills` rescans without a panel and reports what it found.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_skills_panel_lists_toggles_and_reloads() {
     let home = Home::new();
     let (shown, wait_shown) = mpsc::channel();
@@ -553,7 +550,6 @@ fn tui_skills_panel_lists_toggles_and_reloads() {
 /// An empty area still rescans: reload belongs to the area, so Ctrl+R works
 /// with nothing to select.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_skills_panel_reloads_an_empty_catalog() {
     let home = Home::new();
     let (shown, wait_shown) = std::sync::mpsc::channel();
@@ -624,7 +620,6 @@ fn tui_skills_panel_reloads_an_empty_catalog() {
 /// A daemon without the Skills methods leaves the panel open on the
 /// unsupported-daemon error rather than an empty list.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_skills_panel_says_when_the_daemon_cannot_manage_them() {
     let home = Home::new();
     let (shown, wait_shown) = mpsc::channel();

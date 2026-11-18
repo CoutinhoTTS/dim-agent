@@ -3,7 +3,6 @@ use super::*;
 use std::sync::mpsc;
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn resumed_mcp_line_commands_use_the_session_workspace_in_both_clients() {
     for tui in [false, true] {
         let home = Home::new();
@@ -204,7 +203,6 @@ fn started(wire: &mut Wire) {
 /// design names: Enter toggles, Ctrl+T tests, Tab inspects, Ctrl+X removes;
 /// a plugin entry offers no write.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_mcp_panel_lists_manages_and_tests_entries() {
     let home = Home::new();
     let (shown, wait_shown) = mpsc::channel();
@@ -369,7 +367,6 @@ const EDITS_THE_ENTRY: &str = "case \"$(cat \"$1\")\" in\n\
 /// document, and each writes with the method its kind names, in both
 /// terminal modes.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_mcp_panel_edits_and_creates_entries() {
     for fullscreen in [false, true] {
         let home = Home::new();
@@ -432,7 +429,6 @@ fn tui_mcp_panel_edits_and_creates_entries() {
 /// header names and the stored values stay out of it. A patch that changes
 /// another field keeps the stored header, which the next read reports.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_mcp_panel_seeds_a_remote_patch_without_stored_values() {
     let home = Home::new();
     let script = editor(
@@ -497,7 +493,6 @@ fn tui_mcp_panel_seeds_a_remote_patch_without_stored_values() {
 /// One entry's configuration read fails: that entry shows the error, and the
 /// entries beside it keep their detail.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_mcp_panel_shows_one_entries_failed_configuration_read() {
     let home = Home::new();
     let (shown, wait_shown) = mpsc::channel();
@@ -534,7 +529,6 @@ fn tui_mcp_panel_shows_one_entries_failed_configuration_read() {
 /// A daemon older than `mcp.configuration` lists its entries from the
 /// catalog: no detail, no error, and no entry marked invalid.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_mcp_panel_lists_entries_when_the_read_is_absent() {
     let home = Home::new();
     let (shown, wait_shown) = mpsc::channel();
@@ -596,7 +590,6 @@ fn tui_mcp_panel_lists_entries_when_the_read_is_absent() {
 /// A stale revision writes nothing, says so, reads the area again, and the
 /// next edit opens the stored entry, in both terminal modes.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_mcp_panel_keeps_the_users_text_when_the_revision_is_stale() {
     for fullscreen in [false, true] {
         let home = Home::new();
@@ -665,7 +658,6 @@ fn tui_mcp_panel_keeps_the_users_text_when_the_revision_is_stale() {
 /// A write the owner refuses keeps the draft's revision, so the next edit
 /// opens the user's text and writes it again.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_mcp_panel_reports_a_refused_write() {
     let home = Home::new();
     let script = editor(&home, "editor.sh", EDITS_THE_ENTRY);
@@ -718,7 +710,6 @@ fn tui_mcp_panel_reports_a_refused_write() {
 /// Tool text is third-party: an escape sequence and a line break in a
 /// description are drawn sanitized, on one row.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_mcp_panel_draws_tool_text_sanitized() {
     let home = Home::new();
     let (shown, wait_shown) = mpsc::channel();
@@ -760,7 +751,6 @@ fn tui_mcp_panel_draws_tool_text_sanitized() {
 /// A failed catalog read on opening `/mcp` is not an applied reload: the
 /// panel shows the error where the list would be, and no `Reloaded.`.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_mcp_panel_shows_a_failed_catalog_read() {
     let home = Home::new();
     let (shown, wait_shown) = mpsc::channel();
@@ -1429,7 +1419,6 @@ fn mcp_import_takes_one_source() {
 /// `mcp edit` opens the patch the configuration read seeds, without a
 /// stored argument or value, and writes it at that revision.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn mcp_edit_opens_the_patch_without_stored_values() {
     let home = Home::new();
     let script = editor(
@@ -2198,7 +2187,6 @@ fn mcp_list_keeps_a_fields_breaks_on_its_row() {
 /// The Session's report keeps each server's state, message and refusal on
 /// its own line, with the Session's catalog error after them.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_mcp_list_keeps_a_session_state_on_one_line() {
     let home = Home::new();
     let (shown, wait_shown) = mpsc::channel();
@@ -2412,7 +2400,6 @@ fn mcp_enable_keeps_its_existing_output() {
 /// method and reports them closed; the line command does the same, and an
 /// unknown id is refused before any request.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn mcp_disconnect_closes_the_entry_connections() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
@@ -2495,7 +2482,6 @@ fn mcp_disconnect_closes_the_entry_connections() {
 /// A create the owner refuses over a newer document keeps the user's text
 /// and reads the area again; the next add writes it at the newer revision.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_mcp_panel_keeps_the_users_text_when_a_create_finds_a_conflict() {
     let home = Home::new();
     let script = editor(&home, "editor.sh", EDITS_THE_ENTRY);
@@ -2854,7 +2840,6 @@ fn mcp_enable_refuses_a_broken_entry_with_its_error() {
 /// `/mcp` marks a broken entry invalid, shows its error, and offers only
 /// removal: Enter and Ctrl+T send nothing, and Ctrl+X removes it.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_mcp_panel_marks_a_broken_entry_invalid_and_offers_removal() {
     let home = Home::new();
     let (shown, wait_shown) = mpsc::channel();
@@ -2954,7 +2939,6 @@ fn plugin_and_broken_catalog() -> Value {
 /// broken project row removes the project entry: the user entry of the same
 /// id is untouched.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_mcp_panel_removes_the_row_of_the_source_it_names() {
     let home = Home::new();
     let (shown, wait_shown) = mpsc::channel();
@@ -3112,7 +3096,6 @@ fn mcp_remove_refuses_a_source_that_does_not_list_the_id() {
 /// id more than one source lists is refused without it, and with it the
 /// named source's entry is the one written.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_mcp_line_commands_take_the_source_that_picks_the_entry() {
     let home = Home::new();
     let (shown, wait_shown) = mpsc::channel();
