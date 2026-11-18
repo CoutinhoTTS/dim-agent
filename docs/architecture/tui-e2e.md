@@ -122,7 +122,7 @@ screen cannot show:
 | --- | --- |
 | Alternate-screen entry and exit | `CSI ? 1049 h` before the fullscreen composer, `CSI ? 1049 l` when leaving |
 | Cursor restoration | `CSI ? 25 h` after exit or after the daemon leaves |
-| Keyboard protocol | The multiplexer branch tmux selects: `CSI > 4 ; 2 m` enables `ModifyOtherKeys` and `CSI > 4 ; 0 m` resets it, both counted and balanced. tmux answers the kitty probe without negotiating it, so `CSI > 5 u` never appears; the kitty flag stacks stay in the dedicated component protocol flow |
+| Keyboard protocol | The multiplexer branch tmux selects: `CSI > 4 ; 2 m` enables `ModifyOtherKeys` and `CSI > 4 ; 0 m` resets it, both counted and balanced. tmux answers the kitty probe without negotiating it, so `CSI > 5 u` never appears; actual kitty negotiation and the per-screen flag stacks stay with `exit::keyboard_protocol_follows_the_screen_and_restores_both_stacks_on_exit` in CI |
 | Program Status Protocol | `OSC 7501` records: `state=idle`, `state=working`, `state=blocked:kind=permission`, and `state=clear` on exit |
 | Process exit status and signals | `pane_dead_status` and `pane_dead_signal` from `remain-on-exit`: a clean exit is status 0 with no signal, the second interrupt is 130, and a signal death or an empty status fails the case instead of reading as 0 |
 
@@ -140,7 +140,7 @@ CI (#1810).
 | Required behavior | tmux scenario | Also asserted by |
 | --- | --- | --- |
 | Scrollback and fullscreen | `scrollback_streams_and_exits_cleanly`, `fullscreen_switches_screens_and_restores_the_terminal` | `cli_flow/exit.rs`, `dim-cli` render tests (CI) |
-| Mode switching | `fullscreen_switches_screens_and_restores_the_terminal` | `exit::keyboard_protocol_follows_the_screen_and_restores_both_stacks_on_exit` (moved) |
+| Mode switching | `fullscreen_switches_screens_and_restores_the_terminal` | `exit::keyboard_protocol_follows_the_screen_and_restores_both_stacks_on_exit` (CI: negotiates kitty and restores each screen's flag stack) |
 | Resizing | `resize_rewraps_history_without_losing_rows`, `resize_during_a_stream_rewraps_and_finishes`, `resize_during_thinking_rewraps_multiline_history` | `tui_resizing_during_thinking_preserves_multiline_history` (moved) |
 | History and resume | `daemon_stop_reports_disconnect_and_resume_replays_history` | `daemon_replace::*` (CI) |
 | Normal exit and interruption | `scrollback_streams_and_exits_cleanly`, `npm_launcher_streams_and_passes_interrupts`, `streaming_status_reports_and_interrupts` | `exit::ctrl_c_*` (CI, admitted: backpressure has no tmux equivalent) |
@@ -209,10 +209,10 @@ local cases listed under [Coverage mapping](#coverage-mapping).
 launcher that passes through to it) through a PTY, spread over 26 modules; the
 inventory below lists each one with the disposition #1802 gave it. #1805 is
 merged, so the five cases it merged are gone and its no-session survivor is in
-their place. Of those 299, 18 are now `#[ignore]`d with the reason "TUI E2E runs
+their place. Of those 299, 17 are now `#[ignore]`d with the reason "TUI E2E runs
 in the local tmux suite" because a tmux scenario proves their behavior; 8 were
 already ignored as production flows (4 of them now have a scenario); the other
-273 stay selected by CI until #1810 replaces them. `tests/ui_leaf.rs` adds 4 UI
+274 stay selected by CI until #1810 replaces them. `tests/ui_leaf.rs` adds 4 UI
 leaf cases, all still selected by CI.
 
 States (the #1802 disposition, not the current routing):
@@ -242,8 +242,7 @@ States (the #1802 disposition, not the current routing):
 
 **`exit`** — 3 cases
 
-- tmux `fullscreen_switches_screens_and_restores_the_terminal` — keep — `keyboard_protocol_follows_the_screen_and_restores_both_stacks_on_exit`
-- keep (#1802), CI — `ctrl_c_ends_the_interface_when_the_terminal_stops_reading_after_the_goodbye_panel`, `ctrl_c_ends_the_interface_when_the_output_queue_is_already_full`
+- keep (#1802), CI — `keyboard_protocol_follows_the_screen_and_restores_both_stacks_on_exit`, `ctrl_c_ends_the_interface_when_the_terminal_stops_reading_after_the_goodbye_panel`, `ctrl_c_ends_the_interface_when_the_output_queue_is_already_full`
 
 **`goal`** — 4 cases
 
@@ -343,7 +342,7 @@ flows.
 - rewrite (#1802), CI — `tui_queue_shows_held_messages_and_steers_or_withdraws_them`
 - unreviewed (#1802), CI — `explicit_model_selection_uses_protocol_field_names_from_tui_and_line_client`, `fullscreen_session_attached_before_the_first_frame_shows_one_banner`, `the_model_label_shows_the_adopted_reasoning_effort_in_both_modes`, `a_new_session_shows_the_effort_its_creation_adopted`, `the_model_label_shows_a_configured_profile_effort` (ignored, production), `home_after_new_drops_the_previous_sessions_effort`, `repicking_the_current_model_keeps_the_effort`, `a_resumed_session_draws_the_adopted_model_and_effort`, `another_clients_adoption_redraws_the_model_label`, `a_narrow_composer_drops_the_effort_before_the_model`, `tui_escape_sends_the_reason_that_records_the_interruption`, `tui_shell_mode_runs_through_session_methods_and_shows_the_recorded_run`, `tui_effort_dialog_selects_the_current_models_effort_and_cancels_without_writing`, `tui_mcp_and_configuration_commands_use_session_methods`, `tui_pasted_images_and_long_text_submit_as_user_content`, `tui_skill_rows_come_from_the_catalog_and_complete_without_sending`, `reloading_skills_changes_the_palette_rows`, `a_daemon_without_skill_catalog_keeps_a_working_command_palette`, `tui_palette_tab_only_completes_and_enter_still_runs`, `tui_sends_dropped_files_as_links_and_images_by_model_capability`, `fullscreen_login_releases_mouse_for_the_link_and_restores_the_preference_on_close`, `tui_mcp_says_when_no_server_is_configured`, `tui_mcp_shows_failure_reasons_rejections_and_the_catalog_error`, `tui_mcp_enables_and_disables_a_project_server`, `tui_web_toggles_the_daemon_switch_without_leaving`, `tui_registers_with_the_ui_registry_and_leaves_when_asked`, `tui_export_dialog_matches_the_subcommand_and_cancel_sends_nothing`, `tui_ctrl_enter_interrupts_the_run_and_starts_a_new_one_with_the_draft`, `tui_ctrl_s_steers_the_draft_while_a_run_is_in_progress`, `tui_escape_withdraws_the_queue_before_the_run_stops`, `tui_command_output_refreshes_one_read_and_preserves_its_branch_and_terminal_result`, `tui_command_output_errors_stop_refresh_and_reopening_retries`, `tui_permissions_keep_pending_file_and_member_questions_and_save_command_rules`, `tui_approval_alias_selects_presets_and_remembers_them`, `tui_shift_tab_cycles_permissions_and_preserves_the_draft_in_both_modes`, `tui_yields_the_title_and_the_bar_to_a_terminal_that_keeps_the_record`, `cold_hosted_tui_opens_without_reading_the_session_catalog`, `resume_by_id_takes_its_model_from_the_attach_record`, `resume_by_id_finds_the_model_in_the_catalog_when_the_attach_reply_is_empty`, `tui_provider_create_recovery_preserves_changed_draft_until_confirmation`, `tui_models_picker_edits_only_the_subagent_model_policy`, `tui_models_picker_cycles_reasoning_effort`, `tui_models_picker_writes_the_default_the_launch_workspace_reads`, `member_tool_approval_requires_trusted_details_in_both_terminal_modes`, `member_approval_without_the_detail_method_offers_only_rejection`, `tui_default_theme_respects_background_and_saved_choice`
 
-Modules: 26; cases: 299; moved to the tmux suite: 22 (18 newly ignored, 4 already ignored production flows); selected by CI: 277 (273 in `cli_flow` plus the 4 `ui_leaf` cases).
+Modules: 26; cases: 299; moved to the tmux suite: 21 (17 newly ignored, 4 already ignored production flows); selected by CI: 278 (274 in `cli_flow` plus the 4 `ui_leaf` cases).
 
 The `cli_flow` target also holds the line-mode, ACP, daemon and production flows
 that CI keeps: 411 cases, of which 399 run by default and 12 are `--ignored`
@@ -373,11 +372,11 @@ server are removed. `--keep` keeps them meanwhile and still writes the captures.
 
 ## CI
 
-No CI job runs a **migrated** TUI flow. The 18 cases whose behavior a tmux
+No CI job runs a **migrated** TUI flow. The 17 cases whose behavior a tmux
 scenario proves are `#[ignore]`d with the reason "TUI E2E runs in the local tmux
 suite", so the ordinary `cargo test --workspace` selection compiles them and
 runs none of them; the production `--ignored` step names only the flows CI
-keeps. The other 273 `cli_flow` TUI cases and the 4 `ui_leaf` cases have no
+keeps. The other 274 `cli_flow` TUI cases and the 4 `ui_leaf` cases have no
 replacement yet and stay selected by CI, because dropping them would remove
 runtime coverage that only they assert (#1810). Terminal E2E coverage that has
 moved is a local verification step: a display-less runner and the suite's
@@ -391,7 +390,7 @@ CI keeps:
 - Ordinary workspace tests: the `dim-cli` component render and keyboard tests,
   `dim-app-server` protocol and transport flows, the 399 non-TUI `cli_flow`
   cases (`--no-tui`, `exec`, piped prompts, ACP and the scripted daemon flows),
-  and the 277 TUI cases #1810 still tracks.
+  and the 278 TUI cases #1810 still tracks.
 - The explicit `cli_flow` step that names the 12 `--ignored` production and
   line-mode flows one by one: the production App Server, the account and
   permission presets, the real-owner MCP/hooks/workflow writes, and the

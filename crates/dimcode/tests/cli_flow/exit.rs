@@ -3,7 +3,6 @@
 use super::*;
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn keyboard_protocol_follows_the_screen_and_restores_both_stacks_on_exit() {
     let check = |transcript: &str, fullscreen: bool, enabled: bool| {
         let mut screen = 0;
