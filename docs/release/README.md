@@ -157,7 +157,10 @@ ordering and uninstrumented acceptance. The dispatch input `measure` adds
 alternating measurements using those binaries. If ordering fails after capture,
 the diagnostic artifact includes `capture.tar`. Extract it beside the baseline
 executable and map at the original output path on a matching build host.
-Restore executable permissions on macOS files downloaded from Actions. It does not build or
+Use a capture from a trusted build because replay runs its recorded linker.
+The checkout, build target directory and SDK/toolchain must also be available
+at the absolute paths recorded by the original build. Restore executable
+permissions on macOS files downloaded from Actions. It does not build or
 publish release packages; the opt-in command is documented in the
 [build environment](../architecture/build.md#native-executable-layout).
 
