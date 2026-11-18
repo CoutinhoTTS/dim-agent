@@ -627,7 +627,7 @@ fn create_event(events: &[Arc<AgentEvent>]) -> Arc<AgentEvent> {
 /// Appends a completed turn to a hand-built Timeline and returns its end.
 /// A later turn of `main` a line must hear about: the operator tells `main`
 /// something, then the turn runs and ends. The operator input is what counts
-/// as new activity ([timeline branches §7.1.1](../../docs/design/timeline-branches.md#711-the-parent-block-branchparent)).
+/// as new activity ([timeline branches §7.1.1](../../../docs/design/timeline-branches.md#711-the-parent-block-branchparent)).
 fn moved_turn(timeline: &Timeline, turn: &str) -> Arc<AgentEvent> {
     timeline
         .append(
@@ -1221,7 +1221,7 @@ async fn a_restart_completes_an_interrupted_descendants_end_first() {
 /// that a restored line is read by selections alone; an [armed](TestStore::arm)
 /// store fails one line's opening query, so a creation can be made to fail at
 /// that read
-/// ([§7.1.1](../../docs/design/timeline-branches.md#711-the-parent-block-branchparent)).
+/// ([§7.1.1](../../../docs/design/timeline-branches.md#711-the-parent-block-branchparent)).
 /// Every other read, like the boundary checks a creation makes of a line,
 /// keeps working, so a refusal lands on the read it was aimed at.
 #[derive(Default)]
@@ -3987,7 +3987,7 @@ async fn system_at(session: &Session, branch: &str, sequence: u64) -> String {
 
 /// A child's first request reuses its parent's cached prefix: its System is
 /// the parent's System in the request that opened it, byte for byte
-/// ([§7.3](../../docs/design/timeline-branches.md#73-cache-prefix)).
+/// ([§7.3](../../../docs/design/timeline-branches.md#73-cache-prefix)).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_childs_first_system_is_its_parents_at_the_cut() {
     let probe = Arc::new(Probe::default());
@@ -4566,7 +4566,7 @@ async fn an_after_below_the_cut_is_raised_to_it() {
 
 /// An `after` past the target's head is a mistake, so the read refuses it and
 /// stores nothing, keeping the stored cursor valid by construction
-/// ([§20.11](../../docs/design/timeline-branches.md#20-acceptance)).
+/// ([§20.11](../../../docs/design/timeline-branches.md#20-acceptance)).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_after_past_the_targets_head_is_refused_and_the_cursor_stays() {
     let probe = Arc::new(Probe::default());
@@ -5062,7 +5062,7 @@ async fn second_parent_block(session: &Session, branch: &str, after: u64) -> Vec
 
 /// A parent move that lands while a block is held is written once the line
 /// consumes that block, with no later parent turn
-/// ([§20.12](../../docs/design/timeline-branches.md#20-acceptance)).
+/// ([§20.12](../../../docs/design/timeline-branches.md#20-acceptance)).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_move_while_a_block_is_held_is_written_after_the_block_is_consumed() {
     let probe = Arc::new(Probe::default());
@@ -5398,7 +5398,7 @@ async fn a_nested_line_is_told_its_own_parent_at_open() {
 /// gets the error, the line the child was cut from records
 /// `branch/create-failed` for it, and that line keeps dispatching, so a later
 /// create under it opens
-/// ([§7.1.1](../../docs/design/timeline-branches.md#711-the-parent-block-branchparent)).
+/// ([§7.1.1](../../../docs/design/timeline-branches.md#711-the-parent-block-branchparent)).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_nested_line_whose_opening_read_fails_is_a_failed_create() {
     let store = Arc::new(TestStore::default());

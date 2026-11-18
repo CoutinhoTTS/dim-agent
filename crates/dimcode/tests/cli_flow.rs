@@ -6473,7 +6473,7 @@ fn tui_home_commands_without_a_session_answer_and_send_nothing() {
             command.arg("--fullscreen");
         }
         let mut terminal = Terminal::launch_tui(command);
-        terminal.until("Git branch");
+        terminal.until("Ask anything...");
         terminal.write(b"/export\r");
         terminal.until("/export needs a session");
         terminal.write(b"/queue\r");
