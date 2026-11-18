@@ -10923,7 +10923,6 @@ fn tui_shift_tab_cycles_permissions_and_preserves_the_draft_in_both_modes() {
 /// cleared on `/exit`, in both interface modes. So does the progress bar (OSC 9;4) where it is
 /// drawn, which is repeated while it shows and removed on `/exit`.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_reports_the_run_state_to_the_terminal_and_clears_it_on_exit() {
     let report = |pairs: &str| format!("\x1b]7501;{pairs}\x1b\\");
     let (busy, paused, removed) = ("\x1b]9;4;3\x07", "\x1b]9;4;4;100\x07", "\x1b]9;4;0\x07");
