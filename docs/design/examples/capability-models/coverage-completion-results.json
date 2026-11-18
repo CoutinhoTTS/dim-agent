@@ -66,18 +66,18 @@
     {
       "config": "docs/design/examples/capability-models/BranchEligibility.cfg",
       "module": "docs/design/examples/capability-models/BranchEligibility.tla",
-      "module_sha256": "cfa8f0127ab9f6adc8d54faeb8c932abd0c26a90ba3068d80667add5d6de499b",
-      "config_sha256": "18a3b1302445a062fad63d549802214405dee2c13dbcece47d96f088f1e9e3cd",
+      "module_sha256": "030c6e7213c023081843532f75fbe2c55c9c39b34c280e72c87333e502dbe405",
+      "config_sha256": "d4eb044eb798fef6ffa08fe70406a98b412e750530203c6d7363007aa3160285",
       "exit": 0,
-      "seconds": 32.0,
+      "seconds": 45.0,
       "expected_exit": 0,
-      "generated": 5012036,
-      "distinct": 267400,
+      "generated": 7145266,
+      "distinct": 377472,
       "queue_remaining": 0,
-      "depth": 16,
-      "fingerprint": 49,
-      "seed": 9165117685716476853,
-      "finished": "Finished in 31s at (2026-11-18 18:28:19)",
+      "depth": 18,
+      "fingerprint": 116,
+      "seed": 3654962512678523396,
+      "finished": "Finished in 45s at (2026-11-18 19:50:20)",
       "invariants": [
         "ParentBlockHasNewActivity",
         "NoRootParentBlock",
@@ -86,12 +86,15 @@
         "UserLineNeverEndsItself",
         "PluginNeverDefault",
         "UpgradedHostLineNeverDefault",
-        "DefaultIsOpenConversationLine"
+        "DefaultIsOpenConversationLine",
+        "RootGetsNoNote",
+        "ReturnToRootAdmitted"
       ],
       "properties": [
         "IdleEligibility",
         "RestoreNoOldIdle",
         "ExplicitReadCanReset",
+        "MoveWritesOneNote",
         "MoveKeepsRoster",
         "MoveNeedsOpenAncestry",
         "EndNeedsNoDefaultBelow"
@@ -875,10 +878,10 @@
     },
     {
       "model": "BranchEligibility",
-      "description": "Explicit read can move below an earlier notified/read head while notification history remains",
-      "state": "State 736:\ns = [ role |-> \"tool\",\n  notice |-> FALSE,\n  head |-> 3,\n  opening |-> 1,\n  cut |-> 0,\n  cursor |-> 2,\n  reported |-> 3,\n  held |-> TRUE,\n  ended |-> FALSE,\n  turn |-> FALSE,\n  steered |-> FALSE,\n  ownEnd |-> FALSE,\n  pending |-> FALSE,\n  recovery |-> FALSE,\n  idle |-> 0,\n  blocks |-> <<[head |-> 3, opening |-> 1, cursor |-> 0]>>,\n  roster |-> {1, 2},\n  endedNotice |-> {},\n  externalEnds |-> {} ]",
-      "module_sha256": "2b1b2c67a4be11dd956b2cf0db8d8e85667bd1605c33e091fa8337d5b9a6d02e",
-      "config_sha256": "35e28b1e25c0c04729250ffd3eaad031bbf448fe93513ccb3a98eb29645ba369",
+      "description": "The root is a valid move target again: another line holds the role, the root keeps no status note, and a move back to it is admitted",
+      "state": "State 111:\ns = [ parent |-> \"none\",\n  primary |-> FALSE,\n  source |-> \"root\",\n  ended |-> FALSE,\n  ending |-> FALSE,\n  ancestorEnding |-> FALSE,\n  descendantDefault |-> FALSE,\n  notice |-> FALSE,\n  note |-> \"none\",\n  head |-> 1,\n  opening |-> 1,\n  cut |-> 0,\n  cursor |-> 0,\n  reported |-> 1,\n  held |-> FALSE,\n  turn |-> FALSE,\n  steered |-> FALSE,\n  ownEnd |-> FALSE,\n  pending |-> FALSE,\n  recovery |-> FALSE,\n  idle |-> 0,\n  blocks |-> <<>>,\n  roster |-> {1, 2},\n  endedNotice |-> {},\n  externalEnds |-> {} ]",
+      "module_sha256": "030c6e7213c023081843532f75fbe2c55c9c39b34c280e72c87333e502dbe405",
+      "config_sha256": "d4eb044eb798fef6ffa08fe70406a98b412e750530203c6d7363007aa3160285",
       "command": "java -XX:+UseParallelGC -Xmx2g -cp \"$TLA_JAR\" tlc2.TLC -workers 1 -metadir /tmp/BranchEligibility-meta -dump /tmp/BranchEligibility -config docs/design/examples/capability-models/BranchEligibility.cfg docs/design/examples/capability-models/BranchEligibility.tla"
     },
     {
