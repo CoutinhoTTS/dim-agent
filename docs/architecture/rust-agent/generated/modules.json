@@ -18912,6 +18912,9 @@
       "to": "dim_agent_types::events",
       "references": [
         "path AgentEvent",
+        "path EventKind::InputApplied",
+        "path EventKind::InputConsumed",
+        "path EventKind::InputDeleted",
         "path EventKind::InputMessage",
         "path EventKind::TurnEnd",
         "path EventKind::TurnStart",
