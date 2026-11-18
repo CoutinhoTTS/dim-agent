@@ -55,7 +55,9 @@ These needs are not branches:
 | Delegate to a specialist with its own instructions | It is another identity | Collaboration member |
 | Judge whether to approve a tool call | It is a decision about one action, not a line of work | A capability with a host port ([ADR 003](../adr/003-approval-scope.md)) |
 | Rewind the conversation to an earlier point | It changes how the line sees its own history; it is not a new line | A separate requirement. Today the answer is `session.fork` |
-| Make edits in parallel, in isolation | Lines share the Session's workspace, and no per-line workspace exists | A fork, or a member with its own working directory |
+| Make edits in parallel, in isolation | Lines share the Session's workspace, and no per-line workspace exists, which is also why two lines must not write the same files | A fork, or a member with its own working directory |
+| Run one long command, or wait for something outside the session | A single command is background work, and an external event is a signal the current line can wait on; neither needs a second line of reasoning | A background command, or an event subscription |
+| Pursue one task to completion, however many turns it takes | That is continuation of this line, not a second line beside it | This line, or a goal |
 
 ## 4. Tree and roles
 
