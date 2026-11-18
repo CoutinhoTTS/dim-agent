@@ -824,7 +824,10 @@ async fn run_connection(
                                         if hub.config().database_path.is_some()
                                             && hub.config().product_home.is_some()
                                         {
-                                            features.push("session.create.worktree");
+                                            features.extend([
+                                                "session.create.worktree",
+                                                "sessions.launch.worktree",
+                                            ]);
                                         }
                                         if params.protocol_version >= 3 {
                                             features.extend([
