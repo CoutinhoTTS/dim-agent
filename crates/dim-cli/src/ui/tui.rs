@@ -12427,6 +12427,7 @@ mod tests {
 
     #[test]
     fn permissions_focus_tracks_hints_and_survives_policy_updates_and_submenus() {
+        use crate::ui::render::panel::strip_escapes;
         use dim_agent_types::{PermissionPolicy, PermissionPreset};
 
         for fullscreen in [false, true] {
@@ -12449,20 +12450,13 @@ mod tests {
                     }
                     let render = |drawn: &mut Drawn| {
                         let frame = drawn.app.frame(size);
-                        let bytes = if fullscreen {
-                            FullScreen::new(size, true).render(
-                                &frame,
-                                size,
-                                &drawn.app.palette,
-                                &drawn.app,
-                            )
-                        } else {
-                            Screen::new(size, true).render(&frame, size)
-                        };
-                        let mut emu =
-                            crate::ui::render::testterm::Emu::new(size.0 as usize, size.1 as usize);
-                        emu.feed(&bytes);
-                        emu.rows_text()
+                        frame
+                            .overlay
+                            .as_ref()
+                            .map_or(&frame.live, |overlay| &overlay.rows)
+                            .iter()
+                            .map(|row| strip_escapes(row))
+                            .collect::<Vec<_>>()
                             .join("\n")
                             .replace('│', " ")
                             .split_whitespace()
