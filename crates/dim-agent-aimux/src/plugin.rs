@@ -1,4 +1,4 @@
-use crate::{AimuxModels, driver::AimuxDriver};
+use crate::{AimuxModels, driver::AimuxDriver, identity};
 use dim_agent_capabilities::host::*;
 use dim_agent_runtime::{Names, SessionConfig, SessionIdentity};
 use dim_agent_types::{Message, SystemPrompt, ToolDefinition};
@@ -26,6 +26,8 @@ impl DynPlugin for AimuxPlugin {
     }
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            identity::install_environment()
+                .map_err(|reason| rutis::Error::from(ErrorKind::PluginFailed(reason.into())))?;
             let files = self
                 .files
                 .as_ref()

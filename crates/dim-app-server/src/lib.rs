@@ -27,6 +27,7 @@ pub mod prompt_settings;
 pub mod prompt_suggestion_settings;
 pub mod protocol;
 pub mod provider;
+pub mod provider_settings;
 pub mod runtime_manager;
 pub mod session_grants;
 pub mod session_language;
@@ -873,6 +874,11 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
             Ok(Box::new(web::WebPlugin::new(names)?))
         })?);
         if config.model_catalog.is_some() || product_root.is_some() {
+            rows.push(register_part(&mut builtins, builder.catalog(), |names| {
+                Ok(Box::new(provider_settings::ProviderSettingsPlugin::new(
+                    names,
+                )?))
+            })?);
             rows.push(register_part(
                 &mut builtins,
                 builder.catalog(),

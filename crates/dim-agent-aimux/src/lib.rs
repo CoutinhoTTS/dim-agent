@@ -2,6 +2,7 @@
 mod auxiliary;
 pub mod config;
 mod driver;
+mod identity;
 mod models;
 mod plugin;
 pub mod recording;
@@ -10,6 +11,10 @@ mod stream;
 
 pub use models::AimuxModels;
 pub use plugin::{AimuxPlugin, ConfiguredModelPlugin, ConfiguredModelsPlugin};
+
+/// The override of dim's identity on its model requests: the App Server's
+/// `provider` settings source publishes it, and the driver reads it.
+pub use identity::{set_configured_user_agent, set_environment_user_agent, user_agent};
 
 /// The transport a media call uses, with the connection facts and redirect
 /// policy a chat call to the same model gets.
