@@ -9,14 +9,19 @@ EXTENDS Naturals, Sequences, FiniteSets, TLC
 \* opening policy is not modelled here.
 VARIABLE s
 Init == \E source\in{"tool","user","plugin"},primary\in BOOLEAN,notice\in BOOLEAN:
- s=[root|->FALSE,primary|->primary,opener|->FALSE,source|->source,notice|->notice,head|->1,opening|->1,cut|->0,cursor|->0,reported|->1,held|->FALSE,
+ /\ (source="plugin" => ~primary)
+ /\ s=[root|->FALSE,primary|->primary,opener|->FALSE,source|->source,notice|->notice,head|->1,opening|->1,cut|->0,cursor|->0,reported|->1,held|->FALSE,
  ended|->FALSE,turn|->FALSE,steered|->FALSE,ownEnd|->FALSE,pending|->FALSE,recovery|->FALSE,idle|->0,notes|->0,blocks|-><<>>,roster|->{1,2},opened|->{},endedNotice|->{},externalEnds|->{}]
-RootInit == \E notice\in BOOLEAN:
- s=[root|->TRUE,primary|->TRUE,opener|->TRUE,source|->"root",notice|->notice,head|->1,opening|->1,cut|->0,cursor|->0,reported|->1,held|->FALSE,
+\* The root is not primary in every state: a move to another line leaves it open
+\* and no longer primary, and that is the state in which it is a valid target.
+RootInit == \E primary\in BOOLEAN,notice\in BOOLEAN:
+ s=[root|->TRUE,primary|->primary,opener|->TRUE,source|->"root",notice|->notice,head|->1,opening|->1,cut|->0,cursor|->0,reported|->1,held|->FALSE,
  ended|->FALSE,turn|->FALSE,steered|->FALSE,ownEnd|->FALSE,pending|->FALSE,recovery|->FALSE,idle|->0,notes|->0,blocks|-><<>>,roster|->{1,2},opened|->{},endedNotice|->{},externalEnds|->{}]
 CanOpen == s.primary /\ s.source#"plugin"
 CanEndSelf == ~s.root /\ ~s.primary
-CanBeMovedTo == ~s.root /\ ~s.primary /\ s.source#"plugin" /\ ~s.ended
+\* The root is a target whenever it is not the primary line, so the move back to
+\* where the Session started is a `Move` like any other; a plugin line never is.
+CanBeMovedTo == ~s.primary /\ s.source#"plugin" /\ ~s.ended
 Move == /\ CanBeMovedTo /\ s'=[s EXCEPT !.primary=TRUE, !.notes=@+1]
 ParentAdvance == /\ s.head<3 /\ s'=[s EXCEPT !.head=@+1]
 Read(after,through,ok) == /\ after<=s.head /\ through<=s.head /\ through>=after
@@ -53,8 +58,11 @@ ExplicitReadCanReset == [][\A a,t\in 0..3:Read(a,t,TRUE)=>s.cursor'=t]_s
 \* out of scope here: an end cascaded from an ancestor. The design's guard for
 \* that is the ancestor check on the end entry, not this model.
 RootAndPrimaryEndNotThemselves == (s.root\/s.primary)=>~s.ended
-\* A plugin line never opens a line and never becomes primary.
+\* A plugin line never opens a line and never becomes primary. The two together
+\* are what the design says of a plugin-only line: its creator owns it, and the
+\* primary line is a conversation line of the tool or the user.
 PluginLineIsLeaf == s.source="plugin"=>Cardinality(s.opened)=0
+PluginLineNeverPrimary == s.source="plugin"=>~s.primary
 \* Only the primary line opens lines, and never a plugin line.
 OnlyPrimaryOpens == [][Cardinality(s.opened')>Cardinality(s.opened)=>s.primary /\ s.source#"plugin"]_s
 \* Moving the primary line writes one status note and changes no roster: the
