@@ -5317,7 +5317,8 @@
       "file": "crates/dim-cli/src/ui/mod.rs",
       "unexpandedMacros": [
         "cfg",
-        "format"
+        "format",
+        "matches"
       ]
     },
     {
@@ -24374,13 +24375,6 @@
         "path settings::SettingsPlugin::native",
         "path settings::SettingsPlugin::new",
         "path settings::SettingsService"
-      ]
-    },
-    {
-      "from": "dim_app_server",
-      "to": "dim_app_server::settings::declared",
-      "references": [
-        "path settings::Settings"
       ]
     },
     {
@@ -57187,6 +57181,10 @@
     },
     {
       "module": "dim_cli::ui::tui::tests",
+      "path": "Component::Prefix"
+    },
+    {
+      "module": "dim_cli::ui::tui::tests",
       "path": "ManagementView::default"
     },
     {
@@ -57256,6 +57254,14 @@
     {
       "module": "dim_cli::ui::tui::tests",
       "path": "PluginAction::Enable"
+    },
+    {
+      "module": "dim_cli::ui::tui::tests",
+      "path": "Prefix::VerbatimDisk"
+    },
+    {
+      "module": "dim_cli::ui::tui::tests",
+      "path": "Prefix::VerbatimUNC"
     },
     {
       "module": "dim_cli::ui::tui::tests",
