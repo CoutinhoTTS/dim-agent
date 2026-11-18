@@ -363,12 +363,16 @@ impl UpgradeLine {
 pub(crate) fn daemon_notice(locale: locale::Locale, notice: &client::DaemonNotice) -> String {
     let (server, counts) = match notice {
         client::DaemonNotice::Kept { server, counts } => (server, counts),
-        client::DaemonNotice::Build(build) => {
-            let server = sanitize::safe(&build.server);
-            let command = sanitize::safe(&build.command);
+        client::DaemonNotice::Build {
+            server,
+            kind,
+            command,
+        } => {
+            let server = sanitize::safe(server);
+            let command = sanitize::safe(command);
             return crate::ui::i18n::tf_in(
                 locale,
-                match build.kind {
+                match kind {
                     client::BuildKind::Different => DAEMON_BUILD_DIFFERENT,
                     client::BuildKind::Unverified => DAEMON_BUILD_UNVERIFIED,
                 },

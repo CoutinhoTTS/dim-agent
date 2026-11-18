@@ -649,19 +649,14 @@ pub enum DaemonNotice {
         counts: Option<BusyCounts>,
     },
     /// A daemon of this same version and protocol whose artifact stamp says
-    /// another build.
-    Build(BuildNotice),
-}
-
-/// What the artifact stamps of a reused daemon and this client say about each
-/// other.
-pub struct BuildNotice {
-    /// The version both report, the same on both sides: the daemon's, from
-    /// `hello`.
-    pub server: String,
-    pub kind: BuildKind,
-    /// The command that stops this home's daemon, for the user's shell.
-    pub command: String,
+    /// another build, or none.
+    Build {
+        /// The version both report: the same on both sides, from `hello`.
+        server: String,
+        kind: BuildKind,
+        /// The command that stops this home's daemon, for the user's shell.
+        command: String,
+    },
 }
 
 /// How the daemon's stamp compares with this client's.
@@ -796,11 +791,11 @@ async fn adopt(
         };
         return Ok(Some(Link {
             client,
-            notice: Some(DaemonNotice::Build(BuildNotice {
+            notice: Some(DaemonNotice::Build {
                 server: version,
                 kind,
                 command: stop_command.to_owned(),
-            })),
+            }),
         }));
     }
     // A daemon of another version or of a lower protocol is replaced only while
