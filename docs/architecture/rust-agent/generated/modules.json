@@ -651,6 +651,15 @@
       ]
     },
     {
+      "id": "dim_agent_capabilities::file_storage::face",
+      "crate": "dim_agent_capabilities",
+      "parent": "dim_agent_capabilities::file_storage",
+      "file": "crates/dim-agent-capabilities/src/file_storage/face.rs",
+      "unexpandedMacros": [
+        "serde_json::json"
+      ]
+    },
+    {
       "id": "dim_agent_capabilities::file_storage::native",
       "crate": "dim_agent_capabilities",
       "parent": "dim_agent_capabilities::file_storage",
@@ -662,6 +671,13 @@
         "matches",
         "unreachable"
       ]
+    },
+    {
+      "id": "dim_agent_capabilities::file_storage::testing",
+      "crate": "dim_agent_capabilities",
+      "parent": "dim_agent_capabilities::file_storage",
+      "file": "crates/dim-agent-capabilities/src/file_storage.rs",
+      "unexpandedMacros": []
     },
     {
       "id": "dim_agent_capabilities::file_storage::unsupported",
@@ -12522,6 +12538,17 @@
     },
     {
       "from": "dim_agent_capabilities::file_storage",
+      "to": "dim_agent_capabilities::file_storage::face",
+      "references": [
+        "mod face",
+        "path FsHost",
+        "path FsHost::new",
+        "use face::FsHost",
+        "use face::OpenRead"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::file_storage",
       "to": "dim_agent_capabilities::file_storage::native",
       "references": [
         "mod native",
@@ -12555,6 +12582,13 @@
         "path native::sync_directory",
         "path native::sync_replacement",
         "path native::target_name"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::file_storage",
+      "to": "dim_agent_capabilities::file_storage::testing",
+      "references": [
+        "mod testing"
       ]
     },
     {
@@ -12635,6 +12669,26 @@
       ]
     },
     {
+      "from": "dim_agent_capabilities::file_storage::face",
+      "to": "dim_agent_capabilities::file_storage",
+      "references": [
+        "path FileReader",
+        "path FileStorage",
+        "path FileStorageError",
+        "path FileStorageError::Cancelled",
+        "path FileStorageError::Closed",
+        "path FileStorageError::InvalidPath",
+        "path FileStorageError::Io",
+        "path FileStorageError::Locked",
+        "path FileStorageError::Unsupported",
+        "path Result",
+        "use super::FileReader",
+        "use super::FileStorage",
+        "use super::FileStorageError",
+        "use super::Result"
+      ]
+    },
+    {
       "from": "dim_agent_capabilities::file_storage::native",
       "to": "dim_agent_capabilities::file_storage",
       "references": [
@@ -12651,6 +12705,16 @@
         "path Tree::Business",
         "path Tree::Leftover",
         "path account_lock"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::file_storage::testing",
+      "to": "dim_agent_capabilities::file_storage",
+      "references": [
+        "path FileReader",
+        "path FileStorage",
+        "use super::FileReader",
+        "use super::FileStorage"
       ]
     },
     {
@@ -18839,6 +18903,9 @@
       "to": "dim_agent_types::events",
       "references": [
         "path AgentEvent",
+        "path EventKind::InputApplied",
+        "path EventKind::InputConsumed",
+        "path EventKind::InputDeleted",
         "path EventKind::InputMessage",
         "path EventKind::TurnEnd",
         "path EventKind::TurnStart",
