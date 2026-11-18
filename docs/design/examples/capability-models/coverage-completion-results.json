@@ -66,18 +66,18 @@
     {
       "config": "docs/design/examples/capability-models/BranchEligibility.cfg",
       "module": "docs/design/examples/capability-models/BranchEligibility.tla",
-      "module_sha256": "66439219e93a5a93a3771455c4b7751e094822c1cca10f2bcb0e4a2e8beef08a",
-      "config_sha256": "f7d44e91e1f94d8adea6c258994a16b0f44dcb1b8c4a5a602698451043cfae1d",
+      "module_sha256": "786ea72c4b26481db9ce6e7019b09a367647b438b4d3f6c46ae150caa6d3463f",
+      "config_sha256": "02b307395de137d5598172ff4958339afa0da810bbff64eec4e42ca08e35666e",
       "exit": 0,
-      "seconds": 295.0,
+      "seconds": 193.0,
       "expected_exit": 0,
-      "generated": 33784230,
-      "distinct": 1776672,
+      "generated": 27174604,
+      "distinct": 1428840,
       "queue_remaining": 0,
       "depth": 20,
-      "fingerprint": 91,
-      "seed": -4325755215634162221,
-      "finished": "Finished in 04min 55s at (2026-11-18 20:14:50)",
+      "fingerprint": 41,
+      "seed": 2167729440882419376,
+      "finished": "Finished in 03min 13s at (2026-11-18 20:23:05)",
       "invariants": [
         "ParentBlockHasNewActivity",
         "NoRootParentBlock",
@@ -89,7 +89,7 @@
         "DefaultIsOpenConversationLine",
         "RootGetsNoNote",
         "ReturnToRootAdmitted",
-        "SlotsStayWithinCap"
+        "PeersStayWithinCap"
       ],
       "properties": [
         "IdleEligibility",
@@ -100,11 +100,35 @@
         "MoveWritesOneNote",
         "MoveKeepsRoster",
         "CapOnlyRefusesNewOpens",
-        "MoveTakesNoSlot",
+        "ANewChildSpendsASlot",
         "MoveClosesNothing",
-        "OpenOffPathSpendsSlot",
         "MoveNeedsOpenAncestry",
         "EndNeedsNoDefaultBelow"
+      ]
+    },
+    {
+      "config": "docs/design/examples/capability-models/BranchEligibility-CapBoundary.cfg",
+      "module": "docs/design/examples/capability-models/BranchEligibility.tla",
+      "module_sha256": "786ea72c4b26481db9ce6e7019b09a367647b438b4d3f6c46ae150caa6d3463f",
+      "config_sha256": "d450f425ef54da37c12848657e4cefc09bfd1309d449213e9f3a52ad2f98b27e",
+      "exit": 0,
+      "seconds": 5.0,
+      "expected_exit": 0,
+      "generated": 16082,
+      "distinct": 960,
+      "queue_remaining": 0,
+      "depth": 11,
+      "fingerprint": 82,
+      "seed": 5559870648957376578,
+      "finished": "Finished in 05s at (2026-11-18 20:23:16)",
+      "invariants": [
+        "PeersStayWithinCap",
+        "RootGetsNoNote"
+      ],
+      "properties": [
+        "OneSlotIsSpent",
+        "ANewChildSpendsASlot",
+        "OnlyRootAndDefaultOpen"
       ]
     },
     {
@@ -887,8 +911,8 @@
       "model": "BranchEligibility",
       "description": "The root is a valid move target again, and the cap counts a new child of the default branch: one open from the root leaves no room for a second",
       "state": "State 344:\ns = [ parent |-> \"P1\",\n  primary |-> TRUE,\n  source |-> \"tool\",\n  ended |-> FALSE,\n  ending |-> FALSE,\n  ancestorEnding |-> FALSE,\n  descendantDefault |-> FALSE,\n  peers |-> 1,\n  children |-> {1},\n  notice |-> FALSE,\n  note |-> \"default\",\n  head |-> 1,\n  opening |-> 1,\n  cut |-> 0,\n  cursor |-> 0,\n  reported |-> 1,\n  held |-> FALSE,\n  turn |-> FALSE,\n  steered |-> FALSE,\n  ownEnd |-> FALSE,\n  pending |-> FALSE,\n  recovery |-> FALSE,\n  idle |-> 0,\n  blocks |-> <<>>,\n  roster |-> {1, 2},\n  endedNotice |-> {},\n  externalEnds |-> {} ]",
-      "module_sha256": "66439219e93a5a93a3771455c4b7751e094822c1cca10f2bcb0e4a2e8beef08a",
-      "config_sha256": "f7d44e91e1f94d8adea6c258994a16b0f44dcb1b8c4a5a602698451043cfae1d",
+      "module_sha256": "365ea8cfa56eef720462b0e66ec0869e0d05dea025ac4aa36c55ebaa0c951e25",
+      "config_sha256": "4e4fae8d7979a7ab3b04f923f3e99fc26b8c3471b6e700a9612214808c050337",
       "command": "java -XX:+UseParallelGC -Xmx2g -cp \"$TLA_JAR\" tlc2.TLC -workers 1 -metadir /tmp/BranchEligibility-meta -dump /tmp/BranchEligibility -config docs/design/examples/capability-models/BranchEligibility.cfg docs/design/examples/capability-models/BranchEligibility.tla"
     },
     {

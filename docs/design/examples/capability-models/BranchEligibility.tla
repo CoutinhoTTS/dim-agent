@@ -22,12 +22,16 @@ EXTENDS Naturals, Sequences, FiniteSets, TLC
 \* reach this line: an ancestor's end can commit first, or a descendant can
 \* become the default branch first. Exactly one of the two is admitted.
 \*
-\* `openSlots` is the Session's room for one more line that the tool opened and
-\* that counts: the cap counts open tool lines except those on the protected
-\* path, which the default branch and its ancestors are. So this line's own
-\* opening a line consumes a slot only when the line would count, and becoming
-\* the default branch, or being on that path, frees no slot and closes nothing;
-\* it only changes what a later open would cost.
+\* The cap counts the open tool lines of the Session that are not on the
+\* protected path, which is the default branch and its ancestors, because a
+\* line on that path cannot be closed. `counted` says whether this line is one
+\* of them, and `peers` counts the others, so the Session's room is
+\* `Cap - counted - peers` for an open from any line. A new child of any line
+\* is off that path: it is neither the default branch, which a move sets on a
+\* line that already exists, nor an ancestor of it, because it is new and below
+\* this one. So an open spends a slot, and the room changes only when the role
+\* moves: onto this line, which stops it counting, or off it, which starts it
+\* counting again.
 VARIABLE s
 NoParent == "none"
 Cap == 2
@@ -61,35 +65,40 @@ CanEndSelf == HasOpener /\ ~s.primary /\ ~s.descendantDefault /\ ~s.ancestorEndi
 \* An end asked for from outside the line: the user's, a creator's or a
 \* cascade's. The end entry checks the target only, whoever asks.
 CanBeEnded == HasOpener /\ ~s.primary /\ ~s.descendantDefault /\ ~s.ended /\ ~s.ending
-\* An open from this line: it must be allowed to open one, the Session must have
-\* a slot left, and the line is not ending. The caller's own state decides what
-\* the open costs, because a line opened by a caller on the protected path sits
-\* on it too: that path is the default branch and every ancestor of it, and it is
-\* exactly what the cap does not count. `children` is bounded at two so the model
-\* stays finite; nothing in the rules depends on that number.
-CanCreate == CanOpen /\ ~s.ending /\ ~s.ended /\ s.openSlots>0 /\ Cardinality(s.children)<2
+\* This line is on the protected path when it is the default branch or some
+\* descendant of it is, and a line opened with the tool counts against the cap
+\* while it is open and off that path.
+Counts == s.source="tool" /\ ~s.primary /\ ~s.descendantDefault
+\* An open from this line: it must be allowed to open one, the line is not
+\* ending, the Session must have a slot, and this line holds fewer than two
+\* children, which is the model's bound and not a rule. The child is off the
+\* protected path, so the open spends a slot however the caller is placed.
+RoomLeft == Cap - (IF Counts THEN 1 ELSE 0) - s.peers
+CanCreate == CanOpen /\ ~s.ending /\ ~s.ended /\ RoomLeft>0 /\ Cardinality(s.children)<2
 \* A line that has an opener, which is every line but the root. The root is
 \* `RootInit` alone: a parentless tool, user, plugin or upgraded line is not a
 \* state the tree can hold, and starting one here would not exercise the root.
 \* A new line is never the default branch and holds no note: it becomes one by
 \* a move, which is where the note is written. It counts against the cap unless
-\* it is a user or plugin line.
-Init == \E source\in{"tool","user","plugin","hostOld"},notice\in BOOLEAN,openSlots\in 0..Cap:
- /\ s=[parent|->"P1",source|->source,primary|->FALSE,note|->NoNote,notice|->notice,
+\* it is a user or plugin line, so `peers` starts inside the cap this line's own
+\* membership leaves.
+Init == \E source\in{"tool","user","plugin","hostOld"},notice\in BOOLEAN,peers\in 0..Cap:
+ /\ (source="tool" => peers<Cap)
+ /\ s=[parent|->"P1",source|->source,primary|->FALSE,note|->NoNote,notice|->notice,peers|->peers,
      head|->1,opening|->1,cut|->0,cursor|->0,reported|->1,held|->FALSE,
      ended|->FALSE,ending|->FALSE,turn|->FALSE,steered|->FALSE,ownEnd|->FALSE,pending|->FALSE,recovery|->FALSE,idle|->0,
      blocks|-><<>>,roster|->{1,2},endedNotice|->{},externalEnds|->{},
-     ancestorEnding|->FALSE,descendantDefault|->FALSE,openSlots|->openSlots,children|->{}]
+     ancestorEnding|->FALSE,descendantDefault|->FALSE,children|->{}]
 \* The Session starts on its root, so the root is the default branch here. That
 \* it later holds no role is a reachable state, not an initial one:
 \* `AnotherLineTakesRole` leaves it open and no longer the default branch, which
 \* is the state in which it is a target again.
-RootInit == \E notice\in BOOLEAN,openSlots\in 0..Cap:
- /\ s=[parent|->NoParent,source|->"root",primary|->TRUE,note|->NoNote,notice|->notice,
+RootInit == \E notice\in BOOLEAN,peers\in 0..Cap:
+ /\ s=[parent|->NoParent,source|->"root",primary|->TRUE,note|->NoNote,notice|->notice,peers|->peers,
      head|->1,opening|->1,cut|->0,cursor|->0,reported|->1,held|->FALSE,
      ended|->FALSE,ending|->FALSE,turn|->FALSE,steered|->FALSE,ownEnd|->FALSE,pending|->FALSE,recovery|->FALSE,idle|->0,
      blocks|-><<>>,roster|->{1,2},endedNotice|->{},externalEnds|->{},
-     ancestorEnding|->FALSE,descendantDefault|->FALSE,openSlots|->openSlots,children|->{}]
+     ancestorEnding|->FALSE,descendantDefault|->FALSE,children|->{}]
 \* Becoming the default branch. A target whose ancestor is already ending is
 \* refused, because the cascade will reach it, and so is the line that already
 \* holds the position, whatever line it is: the root is refused while it is the
@@ -112,13 +121,11 @@ AnotherLineTakesRole == /\ s.primary
  /\ s'=[s EXCEPT !.primary=FALSE, !.note=IF IsRoot THEN @ ELSE NotDefaultNote]
 \* The two tree facts. Each can arrive at any time, and only the admission
 \* rules decide what follows from it.
-\* Opening a line. The opener's own slot accounting is the Session's: a line it
-\* opens while it is on the protected path is on that path too, so that open
-\* costs nothing, and one it opens otherwise costs a slot.
+\* Opening a line. The child is a new open tool line off the protected path, so
+\* it spends one slot whichever line opened it, and the Session's other counted
+\* lines stay where they were.
 Create == /\ CanCreate
- /\ LET costs == IF s.primary \/ s.descendantDefault THEN FALSE ELSE TRUE
-    IN s'=[s EXCEPT !.children=@\cup{Cardinality(s.children)+1},
-                       !.openSlots=IF costs THEN @-1 ELSE @]
+ /\ s'=[s EXCEPT !.children=@\cup{Cardinality(s.children)+1}, !.peers=@+1]
 \* The root has no ancestor, so no ancestor's end can be on its way to it.
 BeginAncestorEnd == /\ HasOpener /\ ~s.ancestorEnding /\ ~s.ended /\ s'=[s EXCEPT !.ancestorEnding=TRUE]
 BeginDescendantDefault == /\ ~s.descendantDefault /\ ~s.primary /\ ~s.ended
@@ -192,20 +199,33 @@ RootGetsNoNote == IsRoot=>s.note=NoNote
 \* the Session on its root and `AnotherLineTakesRole` is the reachable state this
 \* reads, so the root's own case is the one checked, not a parentless tool line.
 ReturnToRootAdmitted == IsRoot /\ ~s.primary=>CanBeMovedTo
-\* The cap. A line that counts is a line the tool opened, is still open, and is
-\* not on the protected path; an open is admitted only while a slot remains, and
-\* a move or a switch takes no slot and closes nothing.
-\* The cap only ever refuses a new open: an admitted open has room by
-\* `CanCreate`, and an open that costs a slot spends exactly one.
-CapOnlyRefusesNewOpens == [][Create=>s.openSlots>0 /\ s.openSlots'<=s.openSlots]_s
-MoveTakesNoSlot == [][Move=>s.openSlots'=s.openSlots]_s
-SlotsStayWithinCap == s.openSlots\in 0..Cap
-\* A switch never closes a line: the roster and the lines are untouched by it.
+\* The cap refuses a new open and nothing else. An open is admitted only while
+\* the Session has room, and it spends exactly one, because the line it opens
+\* is off the protected path however the opener is placed. A move closes no
+\* line: it only decides whether this line counts, so a move that puts a line
+\* back on the counted side can leave the Session over the cap with no room
+\* left for a later open.
+CapOnlyRefusesNewOpens == [][Create=>RoomLeft>0]_s
+ANewChildSpendsASlot == [][Create=>s.peers'=s.peers+1]_s
 MoveClosesNothing == [][Move=>s.roster'=s.roster /\ s.ended'=s.ended]_s
-\* A line that opens nothing is not on the protected path, so its open costs a
-\* slot: the counting rule is what keeps a user who keeps continuing on tool
-\* children from filling the cap with the line they are working on.
-OpenOffPathSpendsSlot == [][Create /\ ~s.primary /\ ~s.descendantDefault=>s.openSlots'=s.openSlots-1]_s
+\* `peers` never exceeds the cap, because an open needs room: it is admitted
+\* only while `Cap - counted - peers > 0`, and it adds one to `peers` and
+\* closes nothing. The Session's total can exceed the cap after a switch, when
+\* a line that held the role and opened up to the cap starts counting again on
+\* losing it, so `counted + peers` becomes `peers + 1 > Cap`;
+\* `CapOnlyRefusesNewOpens` is what answers that state, refusing the next open
+\* and closing nothing.
+PeersStayWithinCap == s.peers<=Cap
+\* The boundary the review named, as its own specification: the root is the
+\* default branch and one counted line is already open, so one slot is left.
+\* `Next` admits the first open and refuses the second, and nothing closes a
+\* line to make room.
+BoundaryInit == RootInit /\ s.peers=Cap-1
+BoundarySpec == BoundaryInit /\ [][Next]_s
+\* From the boundary state, an open leaves no room, so the next one is refused.
+\* This is what separates the old model, where a child of the default spent no
+\* slot and two opens were admitted, from the corrected one.
+OneSlotIsSpent == [][Create=>s.peers'=Cap]_s
 \* Admission in one order, first case: a line becomes the default branch only
 \* while no ancestor's end is on its way down, so an end that already started
 \* wins and the move is refused.
