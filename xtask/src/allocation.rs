@@ -44,7 +44,10 @@ pub fn live() -> usize {
 pub fn peak() -> usize {
     PEAK.load(Ordering::Relaxed)
 }
-#[allow(dead_code)]
+#[allow(
+    dead_code,
+    reason = "examples `include!` this file without resetting the peak, so an expectation is unfulfilled there"
+)]
 pub fn reset_peak_now() {
     PEAK.store(live(), Ordering::Relaxed);
 }

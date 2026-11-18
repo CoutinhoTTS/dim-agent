@@ -1167,7 +1167,9 @@ impl Service {
             _ = self.stopping.cancelled() => Err(OAuthError::Closed),
             _ = caller.cancelled() => Err(OAuthError::Closed),
             _ = attempt.cancelled() => Err(OAuthError::AttemptClosed),
-            _ = tokio::time::sleep(Duration::from_millis(expires.saturating_sub(Self::now()))) => Err(OAuthError::AttemptClosed),
+            _ = tokio::time::sleep(Duration::from_millis(expires.saturating_sub(Self::now()))) => {
+                Err(OAuthError::AttemptClosed)
+            }
             result = operation => result,
         }
     }

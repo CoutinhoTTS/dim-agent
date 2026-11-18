@@ -260,14 +260,22 @@ async fn process_model_and_home_storage_serve_independent_sessions() {
         let cancel = CancellationToken::new();
         let stop = cancel.clone();
         let model_server = tokio::spawn(async move {
-            axum::serve(listener, router).with_graceful_shutdown(stop.cancelled_owned()).await.unwrap();
+            axum::serve(listener, router)
+                .with_graceful_shutdown(stop.cancelled_owned())
+                .await
+                .unwrap();
         });
-        let models = Arc::new(AimuxModels::from_config(serde_json::from_value::<ModelConfigFile>(json!({
+        let configuration = serde_json::from_value::<ModelConfigFile>(json!({
             "defaultModel":{"providerId":"local","modelId":"test"},
             "providers":[{"id":"local","kind":"openai-compatible","baseUrl":endpoint,"models":[{"id":"test","contextWindow":128000,"maxOutputTokens":4096,"config":{"maxTokens":64}}]}]
-        })).unwrap()).unwrap());
+        }));
+        let models = Arc::new(AimuxModels::from_config(configuration.unwrap()).unwrap());
         let home = std::path::PathBuf::from("/tmp").join(format!("dim-l0-{}", uuid::Uuid::new_v4()));
-        let mut builder = AgentBuilder::new(AgentConfig { model: models.default_model().clone(), ..Default::default() });
+        let model = models.default_model().clone();
+        let mut builder = AgentBuilder::new(AgentConfig {
+            model,
+            ..Default::default()
+        });
         defaults::install_with_process_model(&mut builder);
         builder.session_value(Arc::new(HistoryRenderer::default()))
             .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
@@ -276,10 +284,21 @@ async fn process_model_and_home_storage_serve_independent_sessions() {
         dim_agent_aimux::install(&mut builder);
         dim_agent_capabilities::defaults::tool_host(&mut builder, Arc::new(MockTools));
         dim_app_server::collaboration::install(&mut builder);
+        let selected = dim_agent_types::ModelSelection {
+            provider_id: models.default_model().provider_id.clone(),
+            model_id: models.default_model().model_id.clone(),
+            capability_snapshot: None,
+            config: None,
+            metadata: None,
+        };
+        let defaults = dim_agent_runtime::SessionConfig {
+            model: selected,
+            ..Default::default()
+        };
         let config = ServerConfig {
             target_home: Some(home.clone()), model_catalog: Some(models.clone()),
             unix_path: Some(home.join("ipc/server.sock")),
-            session_defaults: dim_agent_runtime::SessionConfig { model: dim_agent_types::ModelSelection { provider_id: models.default_model().provider_id.clone(), model_id: models.default_model().model_id.clone(), capability_snapshot: None, config: None, metadata: None }, ..Default::default() },
+            session_defaults: defaults,
             ..Default::default()
         };
         let server = serve(builder, config).await.unwrap();

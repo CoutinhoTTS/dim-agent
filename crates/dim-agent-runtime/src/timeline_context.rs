@@ -149,7 +149,10 @@ impl TimelineContext {
     }
 
     /// Starts dispatch once every capability of the subtree is Active.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one parameter per handle a branch's TimelineContext is built from"
+    )]
     pub(crate) fn start(
         id: String,
         ctx: Ctx,
@@ -232,10 +235,18 @@ impl TimelineContext {
                 drop(inner);
                 signal = match phase.as_mut() {
                     Some(rx) => {
-                        tokio::select! {_=stop.cancelled()=>return,_=rx.changed()=>true,_=dispatcher.changed()=>true}
+                        tokio::select! {
+                            _ = stop.cancelled() => return,
+                            _ = rx.changed() => true,
+                            _ = dispatcher.changed() => true,
+                        }
                     }
                     None => {
-                        tokio::select! {_=stop.cancelled()=>return,_=dispatcher.changed()=>true,_=tokio::time::sleep(LOOP_RETURN_POLL)=>false}
+                        tokio::select! {
+                            _ = stop.cancelled() => return,
+                            _ = dispatcher.changed() => true,
+                            _ = tokio::time::sleep(LOOP_RETURN_POLL) => false,
+                        }
                     }
                 };
             }

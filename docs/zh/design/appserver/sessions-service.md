@@ -46,7 +46,7 @@ spike 改变了三处设计：服务由谁提供（第 5 条）、生命周期�
 | D3 | 上限取较低的预设、`disallowedTools` 的并集，并且只保留双方都无条件允许的 `allowedTools` 条目 | 只取较低的预设；拒绝比上限更宽的请求 | 只取预设时，请求的 `allowedTools` 条目可能越过上限，不安全。合同规定对更宽的请求取上限，而不是拒绝 |
 | D4 | 没有启动方时，上限是宿主的 Session 默认值（`ServerConfig.session_defaults.permission_policy`） | 新增一个自动化专用的宿主设置 | 它是宿主现有的答案：没人选择策略时 Session 能做什么。不增加任何配置，以后需要单独设置时可以增量添加，不破坏任何东西 |
 | D5 | 读不到启动方时启动失败：启动方已不存在时为 `session_closed` 或 `branch_missing`，无法恢复时为 `failed`，其 Permission 重载期间为 `reloading` | 退回到宿主上限 | 失败即关闭：宿主上限可能比启动方的策略更宽 |
-| D6 | `launch` 回复 `{sessionId, policy}`，带生效策略 | 只回复 `{sessionId}` | 调用方不必再读一次，就能记录一次运行得到的权限，并看出上限是否生效 |
+| D6 | `launch` 回复 `{sessionId, policy, worktree?}`，带生效策略以及请求时的[托管 worktree 回复](../../../design/worktree-management.md#3-创建) | 只回复 `{sessionId}` | 调用方不必再读一次，就能记录一次运行得到的权限，并看出上限是否生效 |
 | D7 | `LaunchRequest.model` 为 `{providerId, modelId}` | 单独的模型 id 字符串 | 模型 id 只在其 provider 内唯一。`{providerId, modelId}` 即 `ModelId`，Agent profile 与 `session.create` 的显式模型都用这个类型 |
 | D8 | `input` 在发布后回复 | 提交时回复 | 回复后立即调用 `history {atLeast: sequence}` 必须成功（第 7 条） |
 | D9 | `lookup` 先等待待发布事件再扫描；Rpc 的 `session.input_lookup` 使用同一份代码 | 立即扫描；另写一个扫描器 | 已提交但尚未发布的输入会读成 `unknown`，Scheduler 就会把一条正在运行的输入记为 `lost` |
@@ -122,9 +122,12 @@ spike 改变了三处设计：服务由谁提供（第 5 条）、生命周期�
   "policy?": { /* PermissionPolicy */ },
   "starter?": { "sessionId": "string", "branchId": "string" },
   "origin?": "automation",                             // 缺省：调用方自己的工作，`internal`
-  "title?": "string" }                                  // 缺省：无；由 SessionTitle 写入
+  "title?": "string",                                  // 缺省：无；由 SessionTitle 写入
+  "worktree?": { "base?": "string", "branch?": "string" } }
 // 回复
-{ "sessionId": "string", "policy": { /* 生效的 PermissionPolicy */ } }
+{ "sessionId": "string", "policy": { /* 生效的 PermissionPolicy */ },
+  "worktree?": { "taskId": "string", "root": "string", "cwd": "string",
+                 "repository": "string", "base": "string", "branch": "string" } }
 ```
 
 **策略。** 启动方的当前策略是启动方分支的 `PermissionState`：Permission 已分发的状态，由 Session 配置的策略加上该分支及其祖先上的 `permission/changed` 事实折叠而成。Agents 在持有启动方租约时读取一次。
@@ -155,7 +158,7 @@ spike 改变了三处设计：服务由谁提供（第 5 条）、生命周期�
 | --- | --- |
 | Agent | `agent`，否则为默认 Agent。未知 id 以 `agent_unknown` 失败 |
 | 系统提示词、工具 | Agent profile 覆盖宿主 Session 默认值（`session_config`），与不带覆盖的 `session.create` 相同 |
-| `cwd` | 绝对路径、UTF-8、规范化：沿用 `session.create` 的规则，作为同一个检查共用 |
+| `cwd` | 绝对路径、UTF-8、规范化：沿用 `session.create` 的规则，作为同一个检查共用。带 `worktree` 时这是源工作区，保存的 Session cwd 是新 worktree 内的映射子树 |
 | `model` | 请求的 `model`，否则为 profile 的模型。有模型选择宿主时（产品配置），经 Agents 每次调用查找的宿主（`AgentIndex::model_selection`）解析，与 Collaboration 成员相同；宿主未激活时为 `reloading`。否则用这两个 id 替换默认值 |
 | `permissionPolicy` | 生效策略 |
 | `interactive` | `false` |
@@ -165,7 +168,9 @@ spike 改变了三处设计：服务由谁提供（第 5 条）、生命周期�
 | 协议版本 | `PROTOCOL_VERSION`（3）：写入记录，并在创建后用 `insert_version` 登记，与 `session.create` 和 Collaboration 相同。Rpc 只在版本已登记后才服务已装载的 Session，当前客户端也才能列出它。创建与登记在同一个任务中进行，即使调用方不再等待，两者也一起完成 |
 | 记录 | 预备创建（`AgentIndex::create_session`）：先项目授权，再写拥有者记录，与 `session.create` 相同 |
 
-错误：`rejected`（结构、`cwd`、`policy` 中的空工具名、`automation` 以外的 `origin`、不是字符串的 `title`）、`agent_unknown`、`session_closed` 或 `branch_missing`（启动方）、`reloading`（启动方的 Permission 重载期间也是）、`failed`（模型解析、项目授权、存储、已存储但不可用的 Agent、无法恢复的启动方、Session 构建）。
+**托管 worktree。** 可选 `worktree` 请求与回复复用 `session.create` 的所有者类型及创建、关联、失败清除路径；语义见[托管 Worktree §3](../../../design/worktree-management.md#3-创建)。调用方只在 `hello.features` 宣告 `sessions.launch.worktree` 时发送（要求原生存储与产品 home）。不传时创建与回复不变。Git 创建在已接管的自持创建任务内开始，丢弃调用结果不能留下失去所有者的半成品。Session 创建失败后，由所有者以未取消且不强制的清理路径处理；无法安全移除的残留仍可由 `worktree.list` 查看。既有策略上限、origin 和非交互语义不变。
+
+错误：`rejected`（结构、`cwd`、`policy` 中的空工具名、`automation` 以外的 `origin`、不是字符串的 `title`）、`agent_unknown`、`session_closed` 或 `branch_missing`（启动方）、`reloading`（启动方的 Permission 重载期间也是）、`failed`（模型解析、项目授权、存储、已存储但不可用的 Agent、无法恢复的启动方、Session 构建或托管 worktree 创建）。托管 worktree 错误的信息保留所有者的 `worktree_*` 代号；清理不替换原始错误。
 
 启动不是幂等的。回复丢失时，可能留下一个没有调用方知道的空 Session。它是非交互的，并像其他 Session 一样被列出：`session.summaries` 列出它，`session.catalog` 在它创建时所属类别的过滤器下也列出它。不为这种无害情况增加启动查找。
 
@@ -408,7 +413,7 @@ S2 不需要为此改动。每次调用都持有租约，`sessions` 不在已装
 | `future_sequence` | `history` | `atLeast` 或 `through` 超过已发布 head | false |
 | `ambiguous` | `input`、`lookup` | 不止一条输入使用该 `submissionId`，写于分支只接受一次之前；未写入 | false |
 | `publication_unknown` | `input`、`withdraw` | 已提交，发布未确认；恢复后重新提交、`lookup` 或 `history` | true |
-| `failed` | 全部 | Session 故障、存储、模型解析、项目授权、Session 构建；对 `delete` 指 Session 的命令输出或行无法删除（§6.8） | false |
+| `failed` | 全部 | Session 故障、存储、模型解析、项目授权、Session 构建、[托管 worktree 创建](../../../design/worktree-management.md#3-创建)；对 `delete` 指 Session 的命令输出或行无法删除（§6.8） | false |
 
 ## 10. 时序与冲突
 
@@ -440,11 +445,11 @@ S2 不需要为此改动。每次调用都持有租约，`sessions` 不在已装
 [Session 访问](../contracts/session-access.md)（中英文），只改 `sessions` 部分：
 
 - **引言、§4、附录 B、§8（D3）。** Agents 重载让进行中的调用以 `reloading` 失败；调用方不重载（D1，#35）。
-- **§3.1。** `launch` 箭头去掉 `source`，回复加上 `policy`。
+- **§3.1。** `launch` 箭头去掉 `source` 并增加可选 `worktree`；回复加上 `policy` 和可选 `worktree`。
 - **§7。** 策略上限是给受信任调用方用的约定，不是安全边界（§11）。
 - **A.1。**
   - 删除“调用方的 `source` 由 Agents 固定……”一句：rutis 不传递调用方身份，§9.3 也已撤回该需求。
-  - `launch` 回复 `{sessionId, policy}`，新增错误 `agent_unknown`、`session_closed` 与 `branch_missing`。
+  - `launch` 回复 `{sessionId, policy, worktree?}`，新增错误 `agent_unknown`、`session_closed` 与 `branch_missing`。可选 `worktree` 请求与回复链接到[托管 worktree §3](../../../design/worktree-management.md#3-创建)。
   - `model` 改为 `{providerId, modelId}`。
   - `stop` 新增 `reason?`。
   - `HistoryRequest` 新增 `limit?`，`HistoryPage.events` 为该分支的 `AgentEvent` 记录。
@@ -621,7 +626,7 @@ bridge 或 rutis 合同；Scheduler 与 Workflow 继续使用现有 S2 接口。
 
 ## 附录 A. Rust 绑定
 
-类型放在 [agents/sessions.rs](../../../../crates/dim-app-server/src/agents/sessions.rs) 中 `AgentIndex` 旁边。其他 crate 中的 Rust 插件使用具名服务。
+类型放在 [agents/sessions.rs](../../../../crates/dim-app-server/src/agents/sessions.rs) 中 `AgentIndex` 旁边。其他 crate 中的 Rust 插件使用具名服务。以下是绑定摘录，不是完整的 DTO 定义；请求与回复的全部字段由链接的源文件定义。
 
 ```rust
 pub struct SessionRef { pub session_id: String, pub branch_id: String }

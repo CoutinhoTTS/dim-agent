@@ -231,7 +231,10 @@ pub fn generate(workspace: &Path) -> Result<Vec<(&'static str, String)>> {
 }
 
 impl SourceGraph {
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one parameter per part of the module entry being read"
+    )]
     fn read_module(
         &mut self,
         id: &str,

@@ -1,7 +1,10 @@
 //! A raw rutis root with EventHub, the real plugin files and a fixture
 //! `sessions` service, so a test can observe every input write, fail one on
 //! demand, and hold deliveries in flight together.
-#![allow(dead_code)]
+#![expect(
+    dead_code,
+    reason = "the three flow binaries share this fixture; each uses the parts it needs"
+)]
 use super::wait_for;
 use dim_agent_capabilities::file_storage::FileStoragePlugin;
 use dim_agent_capabilities::host::{

@@ -56,6 +56,7 @@ pub(super) async fn http(address: &str, request: String) -> (u16, String, String
 fn get(address: &str, path: &str) -> String {
     format!("GET {path} HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n")
 }
+
 pub(super) fn post(address: &str, path: &str, origin: &str, body: &str) -> String {
     format!(
         "POST {path} HTTP/1.1\r\nHost: {address}\r\nOrigin: {origin}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -439,6 +440,7 @@ async fn web_entry_admits_token_holders_to_sessions_and_safe_management() {
     let features = web.features.as_array().unwrap();
     for method in [
         "session.create",
+        "session.model.preview",
         "session.branch_create",
         "session.branch_end",
         "session.permission.update",
@@ -628,6 +630,36 @@ async fn web_entry_admits_token_holders_to_sessions_and_safe_management() {
         assert_ok(&reply);
         assert!(!reply.to_string().contains("fixture-secret"), "{method}");
     }
+    let preview = web.rpc("session.model.preview", json!({"cwd":home})).await;
+    assert_ok(&preview);
+    assert_eq!(
+        preview["result"]["model"],
+        json!({"providerId":"018ec73f-0000-7000-8000-000000000011","modelId":"alpha"}),
+        "the web entry previews what its own session.create resolves"
+    );
+    assert!(!preview.to_string().contains("fixture-secret"));
+    assert_eq!(
+        web.rpc(
+            "session.model.preview",
+            json!({"cwd":home,"startup":{"contextWindow":64000}})
+        )
+        .await["error"]["data"]["appError"],
+        "local_transport_required",
+        "model startup stays a protected-local launch channel"
+    );
+    let mut bare = Client::new_version(&server, true, 3).await;
+    assert!(
+        !bare
+            .features
+            .as_array()
+            .unwrap()
+            .contains(&json!("session.model.preview"))
+    );
+    assert_eq!(
+        bare.rpc("session.model.preview", json!({"cwd":home})).await["error"]["data"]["appError"],
+        "local_transport_required",
+        "an unauthenticated connection keeps today's rules"
+    );
     let refused = web
         .rpc(
             "skills.preview",
@@ -897,7 +929,12 @@ async fn closing_a_web_generation_settles_concurrent_upgrades_and_preserves_othe
             loop {
                 match stream.next().await {
                     None | Some(Ok(Message::Close(_))) => break,
-                    Some(Err(WsError::ConnectionClosed | WsError::AlreadyClosed | WsError::Io(_) | WsError::Protocol(ProtocolError::ResetWithoutClosingHandshake))) => break,
+                    Some(Err(
+                        WsError::ConnectionClosed
+                        | WsError::AlreadyClosed
+                        | WsError::Io(_)
+                        | WsError::Protocol(ProtocolError::ResetWithoutClosingHandshake),
+                    )) => break,
                     Some(Err(error)) => panic!("unexpected closing WebSocket error: {error}"),
                     Some(Ok(Message::Text(reply))) => {
                         let reply: Value = serde_json::from_str(&reply).unwrap();
@@ -911,8 +948,13 @@ async fn closing_a_web_generation_settles_concurrent_upgrades_and_preserves_othe
         loop {
             match stream.next().await {
                 None | Some(Ok(Message::Close(_))) => break,
-                    Some(Err(WsError::ConnectionClosed | WsError::AlreadyClosed | WsError::Io(_) | WsError::Protocol(ProtocolError::ResetWithoutClosingHandshake))) => break,
-                    Some(Err(error)) => panic!("unexpected closing WebSocket error: {error}"),
+                Some(Err(
+                    WsError::ConnectionClosed
+                    | WsError::AlreadyClosed
+                    | WsError::Io(_)
+                    | WsError::Protocol(ProtocolError::ResetWithoutClosingHandshake),
+                )) => break,
+                Some(Err(error)) => panic!("unexpected closing WebSocket error: {error}"),
                 _ => {}
             }
         }

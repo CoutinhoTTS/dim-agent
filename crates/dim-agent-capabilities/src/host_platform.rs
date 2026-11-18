@@ -284,10 +284,8 @@ pub enum SandboxBackend {
 
 /// What a consumer keeps for a process that
 /// [`HostPlatform::prepare_isolated_process`] sandboxed.
-#[cfg_attr(windows, allow(dead_code))]
 pub(crate) struct Isolation;
 
-#[cfg_attr(windows, allow(dead_code))]
 impl Isolation {
     /// The note for a failed command whose output shows a typical denial.
     /// Backends report a denial only as an ordinary error inside the command,
@@ -323,7 +321,6 @@ impl Isolation {
 
 /// The host-owned TMPDIR of one isolated process tree; the tree handle that
 /// holds it removes it when dropped.
-#[cfg_attr(windows, allow(dead_code))]
 pub(crate) struct TemporaryDirectory(PathBuf);
 impl Drop for TemporaryDirectory {
     fn drop(&mut self) {

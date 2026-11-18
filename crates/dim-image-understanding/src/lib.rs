@@ -175,35 +175,69 @@ impl ImageUnderstanding {
                 let cancelled = cancel.clone();
                 let auxiliary = self.auxiliary.clone();
                 let answer = async move {
+                    let parts = vec![
+                        MessagePart::Image { source },
+                        MessagePart::Text {
+                            text: key.question,
+                            provider_metadata: None,
+                            start_time: None,
+                            end_time: None,
+                        },
+                    ];
                     let request = AuxiliaryRequest {
                         system: Some(INSTRUCTION.into()),
-                        messages: vec![Message { role: Role::User, content: MessageContent::Parts(vec![MessagePart::Image { source }, MessagePart::Text { text: key.question, provider_metadata: None, start_time: None, end_time: None }]) }],
+                        messages: vec![Message {
+                            role: Role::User,
+                            content: MessageContent::Parts(parts),
+                        }],
                         max_output_tokens: Some(2048),
                     };
                     let reply = tokio::select! {
                         biased;
-                        _ = cancelled.cancelled() => return Err(HostError::Cancelled("Image request cancelled".into())),
-                        reply = auxiliary.0.complete(target.clone(), request, cancelled.clone()) => reply,
+                        _ = cancelled.cancelled() => {
+                            return Err(HostError::Cancelled("Image request cancelled".into()));
+                        }
+                        reply = auxiliary.0.complete(target.clone(), request, cancelled.clone()) =>
+                            reply,
                     };
                     match reply {
                         Ok(reply) => {
                             let mut result = ToolResult::text(reply.text);
                             match reply.stop_reason {
                                 ModelStopReason::MaxTokens => {
-                                    let dim_agent_types::ToolContent::Text(text) = &mut result.content else { unreachable!() };
+                                    let dim_agent_types::ToolContent::Text(text) =
+                                        &mut result.content
+                                    else {
+                                        unreachable!()
+                                    };
                                     text.push_str(INCOMPLETE);
                                 }
                                 ModelStopReason::EndTurn | ModelStopReason::StopSequence => {
-                                    result.structured_content = Some(json!({"imageUnderstanding": AnswerStamp { version: VERSION, target }}).as_object().unwrap().clone());
+                                    let answer = AnswerStamp {
+                                        version: VERSION,
+                                        target,
+                                    };
+                                    let stamp = json!({"imageUnderstanding": answer});
+                                    result.structured_content =
+                                        Some(stamp.as_object().unwrap().clone());
                                 }
-                                ModelStopReason::ToolUse => return Ok(failed("image_understand_failed", "The image model requested a tool instead of answering.")),
+                                ModelStopReason::ToolUse => {
+                                    return Ok(failed(
+                                        "image_understand_failed",
+                                        "The image model requested a tool instead of answering.",
+                                    ));
+                                }
                             }
                             Ok(result)
                         }
-                        Err(error) if error.code == AuxiliaryErrorCode::Cancelled => Err(HostError::Cancelled(error.message)),
+                        Err(error) if error.code == AuxiliaryErrorCode::Cancelled => {
+                            Err(HostError::Cancelled(error.message))
+                        }
                         Err(error) => Ok(failed("image_understand_failed", error)),
                     }
-                }.boxed().shared();
+                }
+                .boxed()
+                .shared();
                 let flight = Arc::new(Flight { answer, cancel });
                 *entry = Arc::downgrade(&flight);
                 flight

@@ -152,6 +152,8 @@ impl Drop for StartupProgress {
     }
 }
 
+/// One copy of a Rust plugin, as a part registry builds it.
+type PartResult = rutis::Result<Box<dyn DynPlugin>>;
 /// A Rust plugin whose dependencies are names ([`Names`]), built for one copy.
 type PartMake =
     Arc<dyn Fn(&Names<'_>) -> std::result::Result<Box<dyn DynPlugin>, Error> + Send + Sync>;
@@ -950,7 +952,7 @@ impl DynPlugin for ProcessValuesPlugin {
 pub fn register_part(
     builtins: &mut Modules,
     catalog: &rutis_loader::ServiceCatalog,
-    make: impl Fn(&Names<'_>) -> std::result::Result<Box<dyn DynPlugin>, Error> + Send + Sync + 'static,
+    make: impl Fn(&Names<'_>) -> PartResult + Send + Sync + 'static,
 ) -> Result<String> {
     let sample = make(&Names::check(catalog, &[], None))
         .map_err(|error| AgentError::Build(format!("a process part: {error}")))?;
@@ -1153,7 +1155,9 @@ impl DynPlugin for SessionScopePlugin {
             if let Some(extension) = extension {
                 let cancel = ctx.cancellation_token();
                 let created = tokio::select! {
-                    created = (extension.configure)(owner.loader.create_instance(ctx, &extension.group)) => created
+                    created = (extension.configure)(
+                        owner.loader.create_instance(ctx, &extension.group),
+                    ) => created
                         .map_err(|error| ErrorKind::PluginFailed(loader_error(error).into()))?,
                     _ = cancel.cancelled() => return Ok(Effect::Done),
                 };
@@ -1347,10 +1351,14 @@ impl TimelineFactory {
                 session_id: parent.id.clone(),
                 branch_id: id.clone(),
             };
+            let head =
+                tokio::time::timeout(self.startup_timeout(), parent.assembly.store.head(&key));
             let sequence = tokio::select! {
-                result = tokio::time::timeout(self.startup_timeout(), parent.assembly.store.head(&key)) =>
+                result = head =>
                     result.map_err(|_| AgentError::Build("branch opening timed out".into()))??,
-                _ = cancel.cancelled() => return Err(AgentError::Cancelled("branch creation".into()).into()),
+                _ = cancel.cancelled() => {
+                    return Err(AgentError::Cancelled("branch creation".into()).into());
+                }
             };
             let owner = Arc::new(BranchAssembly {
                 session: parent.clone(),
@@ -1489,7 +1497,10 @@ pub(crate) struct Opening {
 ///
 /// `instance` reads what the creation has to wait for and the identity that
 /// locates an instance whose creation is still running.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one parameter per input an instance creation waits on"
+)]
 async fn create_instance(
     loader: &Loader,
     ctx: &Ctx,
@@ -2018,7 +2029,7 @@ fn timed_out(ctx: &Ctx, views: &[FiberView]) -> AgentError {
 pub enum AssemblyRule {
     /// A required row or view, or a plugin below one, is not `Active`.
     Ready,
-    /// A plugin reads an external service it does not declare.
+    /// A plugin requires a service it does not declare.
     UndeclaredRead,
     /// A plugin read a service generation its resolved dependencies lack.
     Generation,
@@ -2083,7 +2094,10 @@ impl std::fmt::Display for AssemblyFinding {
 /// once, by the innermost scope that contains it: a nested scope's subtree is
 /// left to that scope's own pass. A required row or view that has left the
 /// tree is reported too: nothing in the snapshot would otherwise remember it.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one parameter per part of the scope snapshot `check_scope` compares"
+)]
 pub(crate) fn check_scope(
     snapshot: &rutis::host::diagnostics::RuntimeDiagnostics,
     rows: &std::collections::HashMap<rutis::host::InstanceId, Vec<EntryInfo>>,
@@ -2152,7 +2166,8 @@ pub(crate) fn check_scope(
             );
         }
         for access in &plugin.accesses {
-            if access.external && !access.declared {
+            if access.strict && access.failure == Some(rutis::host::ServiceReadFailure::Undeclared)
+            {
                 report(
                     plugin.name.clone(),
                     AssemblyRule::UndeclaredRead,

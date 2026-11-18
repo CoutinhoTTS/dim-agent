@@ -762,7 +762,10 @@ fn exit_drains_output_even_when_offload_is_slow() {
             let (entered, ready) = tokio::sync::oneshot::channel();
             let occupied = tokio::task::spawn_blocking(move || {
                 entered.send(()).unwrap();
-                let _ = blocker.1.wait_timeout_while(blocker.0.lock().unwrap(), Duration::from_secs(5), |done| !*done).unwrap();
+                let (done, wait) = &*blocker;
+                let _ = wait
+                    .wait_timeout_while(done.lock().unwrap(), Duration::from_secs(5), |done| !*done)
+                    .unwrap();
             });
             ready.await.unwrap();
             std::fs::write(harness.cwd.join(format!("go-{attempt}")), "go").unwrap();
