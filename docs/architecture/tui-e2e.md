@@ -167,7 +167,7 @@ CI (#1810).
 | Task and subagent controls | `background_task_row_and_tasks_panel`, `member_conversation_and_stop_all` | `tui_tasks_panel_stops_the_selected_command_or_member` (CI: the scenario stops the selected command, this case also selects a member row and stops it); `tasks::native_tui_stop_all_…` (moved); member cards (CI) |
 | Provider and account panels | `provider_panel_adds_and_keeps_a_custom_provider` | `tui_provider_management_uses_the_production_daemon_and_survives_restart` (moved); the account and model panels (CI) |
 | Daemon disconnect/restart | `daemon_stop_reports_disconnect_and_resume_replays_history` | `tui_stays_up_when_the_daemon_leaves_and_restores_the_terminal_on_exit` (CI: the interface staying up, raw mode and a resize while disconnected need a daemon that leaves without shutting down); `daemon_replace::*` (CI) |
-| Embedded daemon of another build | `daemon_build_mismatch_notice_scrollback`, `daemon_build_mismatch_notice_fullscreen` | `daemon_replace::build_identity::*` (CI: the decision and the exact command for each stamp case, no shutdown of an idle daemon, and an explicit `--server` outside the notice) |
+| Embedded daemon of another build | `daemon_build_mismatch_notice_scrollback`, `daemon_build_mismatch_notice_fullscreen` | `daemon_replace::build_identity::*` (CI: reuse for each stamp case, the pasted stop command with shell metacharacters and a launch-only `DIMCODE_HOME`, and an explicit `--server` outside the notice) |
 | Production launcher and App Server | `npm_launcher_streams_and_passes_interrupts`; every scenario runs the production daemon | `unix_npm_wrapper_…` (moved); the 12 production flows the CI `--ignored` step names |
 
 ## Per-gap outcome

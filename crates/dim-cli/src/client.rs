@@ -757,7 +757,7 @@ async fn adopt(
     startup_note: &Path,
     desired: u32,
     locale: crate::locale::Locale,
-    stop_command: &str,
+    home: &Path,
 ) -> Result<Option<Link>> {
     let version = client.server_version().to_owned();
     let protocol = client.connection_config().protocol_version;
@@ -794,7 +794,7 @@ async fn adopt(
             notice: Some(DaemonNotice::Build {
                 server: version,
                 kind,
-                command: stop_command.to_owned(),
+                command: daemon_stop_command(&server.program, home),
             }),
         }));
     }
@@ -833,34 +833,23 @@ async fn adopt(
     }))
 }
 
-/// The command that stops this home's daemon, as the user's shell runs it: the
-/// installation's own entry point when this copy came from an npm package, else
-/// this executable, and `--home` when the command line named the home.
-fn daemon_stop_command(options: &Options) -> String {
-    let program = std::env::current_exe()
-        .ok()
-        .map(|exe| crate::update::entry(&exe))
-        .unwrap_or_else(|| "dimcode".to_owned());
-    let program = shell_word(&program);
-    if options.home_explicit {
-        format!(
-            "{program} --home {} daemon stop",
-            shell_word(&options.home.display().to_string())
-        )
-    } else {
-        format!("{program} daemon stop")
-    }
+/// The command that stops the selected home's daemon in a POSIX shell.
+fn daemon_stop_command(executable: &Path, home: &Path) -> String {
+    let program = shell_word(&crate::update::entry(executable));
+    let home = shell_word(&home.display().to_string());
+    format!("{program} --home {home} daemon stop")
 }
 
 /// `word` as a POSIX shell takes it whole.
 fn shell_word(word: &str) -> String {
-    if word.is_empty()
-        || word
-            .contains(|character: char| character.is_whitespace() || "'\"$`\\".contains(character))
+    if !word.is_empty()
+        && word
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"_./-".contains(&byte))
     {
-        format!("'{}'", word.replace('\'', "'\\''"))
-    } else {
         word.to_owned()
+    } else {
+        format!("'{}'", word.replace('\'', "'\\''"))
     }
 }
 
@@ -943,7 +932,8 @@ pub async fn connect_inner(
             None => DaemonProfile::Product,
         })
     };
-    let native_home = options.home.join("rust");
+    let home = std::path::absolute(options.home.join("."))?;
+    let native_home = home.join("rust");
     if start {
         let mut builder = std::fs::DirBuilder::new();
         builder.recursive(true);
@@ -1025,7 +1015,6 @@ pub async fn connect_inner(
         None
     };
     let found = connect_negotiating(&connection, false, negotiate, &mut wait).await?;
-    let stop_command = daemon_stop_command(options);
     if let Some(client) = found
         && let Some(link) = adopt(
             client,
@@ -1034,7 +1023,7 @@ pub async fn connect_inner(
             &startup_note,
             desired,
             locale,
-            &stop_command,
+            &home,
         )
         .await?
     {
@@ -1157,7 +1146,7 @@ pub async fn connect_inner(
                 &startup_note,
                 desired,
                 locale,
-                &stop_command,
+                &home,
             )
             .await?
             {

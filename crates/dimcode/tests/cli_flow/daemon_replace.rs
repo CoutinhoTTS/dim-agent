@@ -536,6 +536,65 @@ mod build_identity {
     }
 
     #[test]
+    fn the_build_notice_stop_command_targets_the_home_selected_by_environment() {
+        let launch_dir = Home::new();
+        let other_home = Home::new();
+        for (relative_home, daemon_build) in [
+            ("home;&|<>()*?[x]", Some("other-build")),
+            ("home with a 'quote'", None),
+        ] {
+            let home = Home::at(launch_dir.0.join(relative_home));
+            let native_home = home.0.join("rust");
+            fs::create_dir_all(&native_home).unwrap();
+            fs::set_permissions(&native_home, fs::Permissions::from_mode(0o700)).unwrap();
+            fs::write(home.0.join("config.json"), r#"{"locale":"en"}"#).unwrap();
+
+            let daemon = daemon_of_build(&home, daemon_build);
+            let output = Command::new(env!("CARGO_BIN_EXE_dimcode"))
+                .current_dir(&launch_dir.0)
+                .env("DIMCODE_HOME", relative_home)
+                .env("DIMCODE_UPDATE_CHECK", "0")
+                .env("DIM_TEST_BUILD_ID", "client-build")
+                .args(["models", "fixture"])
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                describe_client(&home, &output)
+            );
+            daemon.join().unwrap();
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let command = stderr
+                .split('`')
+                .find(|part| part.ends_with(" daemon stop"))
+                .unwrap_or_else(|| panic!("the notice must include a stop command: {stderr}"));
+
+            fs::remove_file(native_home.join("daemon.sock")).unwrap();
+            let daemon = home.daemon(move |wire| {
+                let hello = wire.read("hello");
+                wire.reply(&hello, same_version_hello(daemon_build));
+                let shutdown = wire.read("daemon.shutdown");
+                assert_eq!(shutdown["params"], json!({}));
+                wire.reply(&shutdown, json!({}));
+            });
+            let output = Command::new("/bin/sh")
+                .current_dir(&other_home.0)
+                .env("DIMCODE_HOME", &other_home.0)
+                .env("DIMCODE_UPDATE_CHECK", "0")
+                .args(["-c", command])
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success() && output.stdout == b"Daemon stopped.\n",
+                "the pasted command {command:?} must stop the selected daemon: {}",
+                describe_client(&home, &output)
+            );
+            daemon.join().unwrap();
+        }
+    }
+
+    #[test]
     fn a_daemon_of_this_build_is_reused_silently() {
         let home = Home::new();
         let daemon = daemon_of_build(&home, Some("build-2026-11-18"));
