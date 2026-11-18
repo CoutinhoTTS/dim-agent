@@ -68,7 +68,7 @@
 - **根。** `main` 是没有父分支、也没有来源的那条线：这个字面量 id、它的编号，以及所有已存下的 `branch_id: "main"`，本设计都不改。它永不结束，Session 关闭不算结束。它是唯一能用工具开线的线。界面上它叫“起点”。
 - **默认分支。** 这个 Session 的对话所在的那条线：请求不传 `branchId` 时采用的目标，也是客户端居中显示的那条线。它是树上的一个位置，不是 id，也不是一种树关系：开局就是根，只在用户动作下移动（§9、§14）。唯一权威的事实不是模型可见的块，而是写在根线上的一条 `branch/default {branch}`（根线比其它线都活得久，且不能结束）（§16）。告诉各条线这件事的键控块从来不是权威。没有这条事实的 Session 就在根上。
 - **根和开线方来自树。** 一条线没有父分支，它就是根。一条线的开线方，就是它自己 `branch/create` 里记的父分支。“谁开了这条线”“谁收到它的汇报”“谁协调它”都是这一条边，从树里读出来：本设计不新增角色标记、不新增加协调者字段、也不新增存储关系。
-- **协调。** 开过线的线协调它们：它带名册（§7.1），也只有它能给自己开的线发消息、读它们、结束它们，但要除去线的来源所禁止的：插件线按创建者的协议走，用户开的线由用户结束（§11）。协调关系沿父子关系走，从不随默认分支移动。
+- **协调。** 开过线的线协调它们：它带名册（§7.1），也只有它能给自己开的线发消息、读它们、结束它们，但要除去线的来源所禁止的：插件线按创建者的协议走，用户开的线由用户结束（§11）。协调关系沿父子关系走，从不随默认分支移动。失去开线权的线保留它已经开出的线，并继续协调它们。
 - **agent 的工具。** `branch` 工具只接受两类调用方，其余一律拒绝（§11）：
   - **根**，永远可以，不论它是不是默认分支。这个权利从不改变，所以它永远收不到关于角色的状态说明（§12.1）；
   - **当前默认分支**，在它持有这个位置期间可以。
@@ -105,18 +105,11 @@
 | TimelineTree | Session | 否 | 线的生命周期：每个子分支开启输入里的身份块、`TimelineInfo.source`、一条线的结束（`branch/end` → `branch/ended`）、线进入结束后拒绝输入、恢复规则、读已结束线的历史、默认分支及其 `branch/default` 事实，以及分支目录（§14） |
 | TreeTimeline | 分支 | 是 | 把 `branch/end` 转给 TimelineTree，就像现在转 `branch/create`。对由工具调用发出的结束，它还转交关闭要等的那一轮结束 |
 | BranchTool | Session | 否 | 按动作区分的 `branch` 工具（§11）。它每次调用时取调用方那条线的 BranchLine，与 WorkspaceTools 取 FileReads 的方式相同 |
-| **BranchLine**（新） | 分支 | 是 | 一条线对自己相关各线的视图。它的角色（根、工具线或插件线）和父分支来自 `TreeCommands.info(自己的 id)`。它从自己的事实折叠出未结束的工具线和当前这一轮的状态。它写名册、空闲通知和结束通知，以及线成为默认分支或不再是默认分支时它收到的那条状态说明 |
+| **BranchLine**（新） | 分支 | 是 | 一条线对自己相关各线的视图。它的角色（根、工具线、用户线或插件线）和父分支来自 `TreeCommands.info(自己的 id)`。它从自己的事实折叠出未结束的工具线和当前这一轮的状态。它写名册、空闲通知和结束通知，以及线成为默认分支或不再是默认分支时它收到的那条状态说明 |
 
 BranchLine 注入 `B:Dispatcher`、`B:TimelineIdentity`、`B:BranchLifecycle` 和 `S:TreeCommands`，提供 `B:BranchLine`。
 
 它的决定方式与 Goal 相同：依据已消费的状态，通过一个写入前会复核的自有写任务，并且只对加载截点之后的实时事件作决定。所以重载时什么都不会写两次，只有一个例外：如果加载时自己的历史里最后有一个仍在生效的名册键，而与折叠出的名册不一致，它就把名册写一次——因为补完一条已结束线的重启（§20.7）在根重放之前就记下了 `branch/ended`，之后没有实时事件跟随（§6.2）。
-
-**线的来源。** TimelineTree 依据父分支的 `branch/create` 填写 `TimelineInfo.source`：
-
-- 创建时，取自这次创建本身；
-- 恢复时，取自恢复中的父分支对自己历史的读取。
-
-这次读取已经存在。恢复中的父分支在构建时把历史读到它的头部，并报告它记录为失败的创建（[timeline_tree.rs](../../../crates/dim-agent-capabilities/src/timeline_tree.rs) 中 `Opening::Resume` 的 `failed_creates`）。现在它还报告每次创建的来源，以及每条 `branch/ended`，恢复规则会用到它们（§10）。存储的目录行不变（[存储格式](../../design/appserver/native-storage-format.md#427-v20-格式决定)）。
 
 **默认分支的恢复。** 目录里只有一条线的 Session 就在根上，不为它读任何事实。有多条线的 Session 只读一条事实：在根自己的事件里，最新的一条 `branch/default` 或 `session/forked`，走现有的 `timeline_events_by_kind` 索引。目标仍未结束且可以被选中的 `branch/default` 指明默认分支；最新的一条是 `session/forked` 时，默认分支就是根，因为 fork 拷过来的所有 `branch/default` 都写在它的 `session/forked` 之前、一律失效；什么也没记就是根。目标已经不再是开着的线、指向插件线、以及指向升级前经客户端开出的线时，都回退到根（§4）。
 
@@ -149,7 +142,7 @@ BranchLine 注入 `B:Dispatcher`、`B:TimelineIdentity`、`B:BranchLifecycle` �
   - 这一轮调用了 `end`；
   - 这条线还有待处理的驱动输入。
 
-  第三条让一条已经是默认分支的线不再每轮都去唤醒根：用户在它上面说话时，它在回答用户，不是在向开它的那条线汇报。再切走一次就自动恢复通知，因为这个条件读的是当前事实，不是某条说明。这样，一条线一声不响地停下时，开它的那条线不会一直等下去；已经 steer 过 `main` 的线，也不会重复通知它。通知带这一轮的状态（`completed`、`failed` 或 `cancelled`）。
+  第二条让一条已经是默认分支的线不再每轮都去唤醒根：用户在它上面说话时，它在回答用户，不是在向开它的那条线汇报。再切走一次就自动恢复通知，因为这个条件读的是当前事实，不是某条说明。这样，一条线一声不响地停下时，开它的那条线不会一直等下去；已经 steer 过 `main` 的线，也不会重复通知它。通知带这一轮的状态（`completed`、`failed` 或 `cancelled`）。
 - **等待。** 一条线用现有的 `wait` 工具等它开的线。steer 消息、空闲通知或结束通知都会唤醒它（[wait.rs](../../../crates/dim-agent-capabilities/src/wait.rs)）。
 
 ### 6.1 资源与限制
@@ -213,9 +206,9 @@ BranchLine 注入 `B:Dispatcher`、`B:TimelineIdentity`、`B:BranchLifecycle` �
   - 从这里起它并行工作；
   - 上面那些发给父分支的消息（例如名册）属于父分支。
 
-  工具线的身份块还带上它的目的（`create` 的 prompt）和线协议。在用户线和插件线上，创建者的 prompt 仍是开启输入的 `user` 内容，排在块之后。
-- **开线方上：名册。** 开过线的线，其 BranchLine 依据自己的事实写一条带 key 的 Append，key 为 `branch:roster`：
-  - 工具线或用户线的 `branch/create`；
+  工具线的身份块还带上它的目的（`create` 的 prompt）和线协议。`idleNotice: none` 时，TimelineTree 在这条开启输入的身份块上带 `idle-notice="none"`。BranchLine 在考虑空闲通知时从这条线自己的开启输入里读它；恢复不重放输入。缺少这个属性就选 `steer`，包括这个选项出现之前写下的历史。这个设置只管自动的空闲通知。在用户线和插件线上，创建者的 prompt 仍是开启输入的 `user` 内容，排在块之后。
+- **`main` 上：名册。** `main` 上的 BranchLine 依据 `main` 自己的事实写一条带 key 的 Append：
+  - 来源为工具的 `branch/create`；
   - `branch/create-failed`；
   - `branch/ended`。
 
@@ -394,12 +387,12 @@ WorkspaceTools 不变。
 
 | 动作 | 输入 | 谁 | 作用 | 结果文本 |
 | --- | --- | --- | --- | --- |
-| `create` | `prompt`、`at?` | `main`，不论它是不是默认分支 | 开一条切在 `at` 的工具线（默认与现在相同：在本次请求的模型开始之前） | `Line created: C` |
+| `create` | `prompt`、`at?`、`idleNotice?`（`steer` \| `none`） | `main`，不论它是不是默认分支 | 开一条切在 `at` 的工具线（默认与现在相同：在本次请求的模型开始之前）。空闲通知默认是 `steer` | `Line created: C` |
 | `message` | `to`、`content`、`mode?`（`append` \| `steer`） | `main` → 它未结束的工具线；工具线 → 它的父分支 | 在 `to` 上写一条 `input/message` | `Sent to C.` |
 | `read` | `branch`、`after?`、`limit?`（1–200） | `main`，读它的工具线；一条线，读它被切出来的那条线 | 从存储读一页；不给 `after` 时从调用方的游标开始（§6） | 这一页的 JSON：items、`nextCursor`、`done` |
 | `end` | `content` | 不是默认分支的工具线，对它自己 | 先给父分支发最终消息（steer），再调用 `TreeCommands.end(C, source)`，`source` 就是这次调用 | `Line C is ending; your final message was sent to P.` |
 
-输入 schema 为 `{action, prompt?, at?, to?, content?, mode?, branch?, after?, limit?}`，`action` 必填，`additionalProperties: false`。
+输入 schema 为 `{action, prompt?, at?, idleNotice?, to?, content?, mode?, branch?, after?, limit?}`，`action` 必填，`additionalProperties: false`。`idleNotice` 只对 `create` 有效。
 
 拒绝以错误结果返回（代码在 `structuredContent`），什么也不写：
 
@@ -660,7 +653,7 @@ BranchLine 的服务只由同一插件里的工具读取。轮次结束信号是
 | §4.2 交接后不撤回 | 已提交的消息属于接收方。`branch/end` 不撤回 |
 | §4.3 before 回调 | 无 |
 | §4.4 核心不带业务含义 | Dispatcher、`before` 和批次不变；Timeline 的准入检查是通用的（§17 R1）。身份文本属于 TimelineTree 自己的领域，即一个 Session 的各条线。工具线的协议写在 `first_input` 现在写工具专用文本的地方，也就是拥有该工具的模块里 |
-| §4.5 批次 | `branch/end` 单独一个批次。`branch/ended` 在关闭之后最后写入。名册和结束通知是同一条输入。根上的 `branch/default` 单独一个批次，两条状态说明各是它之后的一条 Append |
+| §4.5 批次 | `branch/end` 单独一个批次。`branch/ended` 在关闭之后最后写入。名册和结束通知是同一条输入。根上的 `branch/default` 单独一个批次，每条状态说明都是它之后的一条 Append |
 | §4.6 上下文 | 身份、名册、消息、通知和状态说明都是被采用的输入。`read` 返回工具结果。没有别的东西进入上下文 |
 | §4.7 公开事件与服务 | BranchLine 折叠的是它自己那条线的公开事件。工具读 BranchLine（同一插件）和 TreeCommands。`read` 像 Collaboration 的 `read` 一样，把已提交的事件作为工具结果返回，没有哪个部件折叠另一条线的事实。Goal 按它自己公开的 A5 约定判定开启输入（§7.4）。BranchLine 和 Goal 经公开服务 TreeCommands 读取 `TimelineInfo.source` |
 | §4.8 基础设施 | 门面和格式的改动即 R1（§17）。需求来自线的生命周期本身，在运行时内闭环。默认分支的那条事实、它的读和它的写也是同类基础设施：一种事件、一次 `TreeCommands` 读和一次写，绑定里没有业务规则 |
@@ -711,7 +704,7 @@ Goal 流程，放在 `crates/dim-goal/tests` 的流程测试中（§7.4）：
 默认分支：
 
 20. 只有一条线的 Session 就在根上，恢复它不为此做任何查询。有多条线的 Session 在根上只读一条事实，回答最新的 `branch/default` 的目标；两种事实里最新的是 `session/forked` 时，或者根本没有时，就是根。已经结束的目标、插件线目标，以及创建来源是客户端 `host` 行的目标，都回答根。
-21. `session.branch_set_default` 选择默认分支：在根上写 `branch/default`，两条状态说明各写一次，给新的和旧的默认分支，其他线什么也不收。选中的是根时，根不收到说明，原默认分支收到那条说它的规则重新成立的说明。移回根时只写事实、不写任何说明，因为根的规则一条也没变。被拒绝时什么也不写：插件线和升级前客户端开的线以 `branch_not_selectable` 拒绝，已结束或未知的线被拒绝，祖先仍处于 `ending` 的目标以 `branch_target_protected` 拒绝，已经是默认分支的线以 `branch_already_default` 拒绝，所以根在它是默认分支时被拒、在另一条线持有这个位置时被接受。
+21. `session.branch_set_default` 选择默认分支：在根上写 `branch/default`，规则因这次移动而改变的两条线各收到一条状态说明，其他线什么也不收。根在两个方向上都不收说明，所以从根移出写一条、移回根一条也不写：根的规则一条都不随角色改变。被拒绝时什么也不写：插件线和升级前客户端开的线以 `branch_not_selectable` 拒绝，已结束或未知的线被拒绝，祖先仍处于 `ending` 的目标以 `branch_target_protected` 拒绝，已经是默认分支的线以 `branch_already_default` 拒绝，所以根在它是默认分支时被拒、在另一条线持有这个位置时被接受。
 22. 不传 `branchId` 的请求到达事实指明的那条线，已经绑定在某条线上的工作留在原处。`session.submit`、`session.stop`、`session.idle`、`session.goal.*` 和 `shell.run` 指向新的默认分支；新建的排期任务记下它；已经记下 `branch_id` 的任务保留它。已挂起的审批留在提问的那条线上，并在那里答复，移动默认分支之前和之后都一样，因为 `approval.respond` 用的是它通知里带的 `branchId`。
 23. `session.model.update`、`session.agent.update` 和 `session.prompt.refresh` 作用于请求指名的那条线，没指名时作用于默认分支，而不是拒绝不是根的线。曾经是工具线、后来成为默认分支的线可以开线、不向开线方发空闲通知，且对自己 `end` 时以 `branch_cannot_end` 被拒绝；另一条线接手这个位置后，它什么也不开、又发空闲通知、也能结束自己。用户开的线对自己 `end` 时用同一个拒绝码，插件线也一样。既不是根也不是默认分支的线上 `create` 回答 `branch_not_opener`，而根在任何状态下都能 `create`。annot_end` 被拒绝；一旦另一条线持有这个位置，它又开始发空闲通知。用户开的线对自己 `end` 时用同一个拒绝码，插件线也一样，而在任何不是根的线上 `create` 仍回答 `branch_not_opener`、`branch_limit_reached`。
 24. 默认分支不是根的 Session，fork 之后回答根是它的默认分支，因为它复制来的每条 `branch/default` 都早于它的 `session/forked`。
@@ -746,7 +739,7 @@ Goal 流程，放在 `crates/dim-goal/tests` 的流程测试中（§7.4）：
 | `TimelineInfo.source` | 开线的一方不用解析 prompt 文本就能找到自己的线 |
 | 一个表示用户开线的来源变体 | 核心必须在不解析 `operation_id` 的前提下分辨对话线与插件线，而客户端写下的已存 `host` 行也要能与插件写下的区分开 |
 | 根上的 `branch/default` | 一条权威的、与模型无关的事实：App Server、存储的写线程和恢复都读它，不需要模型或带 key 的块，而根不能结束 |
-| 两条状态说明，根没有 | 规则改变的那两条线各得知一次，其他线一概不动，所以其他线的缓存前缀都不移动。根的规则不随角色改变，给它写说明等于什么也没说 |
+| 每次移动一条状态说明，根不收 | 规则改变的那两条线各得知一次，其他线一概不动，所以其他线的缓存前缀都不移动。根的权项不随角色改变，写给它的说明什么也说不了 |
 | 默认分支不发空闲通知、也不能 `end` | 没有这两条，用户接着用的那条线会每轮都唤醒开它的线，还能结束 Session 对话所在的那条线 |
 | 目录里的 `endEvent` 与 `ending` 状态 | 没有 `endEvent`，客户端无法指出级联结束那条线的结束；这条线自己的 `branch/end` 只隔一页。没有 `ending`，从一条线自己的 `branch/end`——工具结束、host 结束或级联结束——到它的已结束记录之间的窗口会读作未结束，客户端分不清一条线还能收输入，还是已经拒绝输入 |
 | 工具由根和当前默认分支开，其他线不开 | 根保留它今天的权利，用户才能在另一条线持有这个位置时仍让它开线；默认分支能从用户接着用的那份工作里长出树；其他线仍是叶子，所以开线方只有两个，每条线创建时得到的协调关系也不移动 |

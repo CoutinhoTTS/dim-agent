@@ -8,7 +8,7 @@ Code correspondence: `ec43222ab`; relevant source hashes, model/config hashes, a
 | --- | ---: | ---: | ---: |
 | [ApprovalRequests](ApprovalRequests.cfg) | 289,488 | 16 | 0 |
 | [ApprovalRequests-Branches](ApprovalRequests-Branches.cfg) | 277,460 | 16 | 0 |
-| [BranchEligibility](BranchEligibility.cfg) | 1,008,528 | 17 | 0 |
+| [BranchEligibility](BranchEligibility.cfg) | 1,776,672 | 20 | 0 |
 | [BroadcastRecords](BroadcastRecords.cfg) | 3,759 | 14 | 0 |
 | [CollaborationIdentity](CollaborationIdentity.cfg) | 148,360 | 22 | 0 |
 | [CollaborationIdentity-Members](CollaborationIdentity-Members.cfg) | 199,784 | 22 | 0 |
@@ -31,8 +31,8 @@ Code correspondence: `ec43222ab`; relevant source hashes, model/config hashes, a
 | [UndispatchedTools](UndispatchedTools.cfg) | 75 | 8 | 0 |
 | [UsageSources](UsageSources.cfg) | 123,864 | 14 | 0 |
 
-Fresh checks explored 3,578,624 distinct states in total across independent configurations. State counts are not unique whole-system behaviors or requirement coverage. No symmetry or state-constraint filters were used. All final model/config files predate their completed runs. Development parser errors and stopped larger drafts are not counted as passing runs.
+Fresh checks explored 4,346,768 distinct states in total across independent configurations. State counts are not unique whole-system behaviors or requirement coverage. No symmetry or state-constraint filters were used. All final model/config files predate their completed runs. Development parser errors and stopped larger drafts are not counted as passing runs.
 
-Five separate complete state dumps confirm the positive scenarios recorded in JSON: post-Closed Notice/Fence, old input joining a new driven request, explicit cursor backtracking, two distinct failed tool-argument states, and execution through an old handler pin after replacement. These are reachable states, not claims that every execution reaches them.
+Five separate complete state dumps confirm the positive scenarios recorded in JSON: post-Closed Notice/Fence, old input joining a new driven request, the root as a valid move target again, two distinct failed tool-argument states, and execution through an old handler pin after replacement. These are reachable states, not claims that every execution reaches them.
 
 Reproduce each configuration using the README command, selecting the module before any configuration suffix (for example `CollaborationIdentity-Members.cfg` uses `CollaborationIdentity.tla`). State directories and dumps belong outside the repository. The Shell failures remain in the original record and #1633; no runtime fix or crash reproduction is claimed.
