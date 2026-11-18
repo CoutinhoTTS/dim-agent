@@ -4024,15 +4024,12 @@ mod tests {
                             )
                         });
                         let frame = Frame {
-                            commits: Vec::new(),
                             live,
-                            task_rows: Vec::new(),
-                            thought_rows: Vec::new(),
-                            model_label: None,
                             cursor,
                             dock,
                             anchor: dock,
                             overlay,
+                            ..Frame::default()
                         };
                         screen.render(&frame, size, &palette, &doc);
                     }

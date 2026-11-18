@@ -858,13 +858,8 @@ mod tests {
         Frame {
             commits: commits.iter().map(|s| s.to_string()).collect(),
             live: live.iter().map(|s| s.to_string()).collect(),
-            task_rows: Vec::new(),
-            thought_rows: Vec::new(),
-            model_label: None,
             cursor,
-            dock: 0,
-            anchor: 0,
-            overlay: None,
+            ..Frame::default()
         }
     }
 
