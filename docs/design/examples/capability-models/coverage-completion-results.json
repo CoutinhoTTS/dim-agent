@@ -66,18 +66,18 @@
     {
       "config": "docs/design/examples/capability-models/BranchEligibility.cfg",
       "module": "docs/design/examples/capability-models/BranchEligibility.tla",
-      "module_sha256": "786ea72c4b26481db9ce6e7019b09a367647b438b4d3f6c46ae150caa6d3463f",
-      "config_sha256": "02b307395de137d5598172ff4958339afa0da810bbff64eec4e42ca08e35666e",
+      "module_sha256": "64e4c3c9045747e45d717211f677e9d1bd1dfa13b33c2c6c90974737d51e877e",
+      "config_sha256": "51e27b954de733e5b85a4778c3b43e530d0c3e6172b640b3f8dc1c9979c5d323",
       "exit": 0,
-      "seconds": 193.0,
+      "seconds": 182.0,
       "expected_exit": 0,
-      "generated": 27174604,
-      "distinct": 1428840,
+      "generated": 25833868,
+      "distinct": 1341216,
       "queue_remaining": 0,
       "depth": 20,
-      "fingerprint": 41,
-      "seed": 2167729440882419376,
-      "finished": "Finished in 03min 13s at (2026-11-18 20:23:05)",
+      "fingerprint": 30,
+      "seed": 3222557102336737557,
+      "finished": "Finished in 03min 02s at (2026-11-18 21:30:46)",
       "invariants": [
         "ParentBlockHasNewActivity",
         "NoRootParentBlock",
@@ -89,6 +89,7 @@
         "DefaultIsOpenConversationLine",
         "RootGetsNoNote",
         "ReturnToRootAdmitted",
+        "OneRolePosition",
         "PeersStayWithinCap"
       ],
       "properties": [
@@ -100,6 +101,7 @@
         "MoveWritesOneNote",
         "MoveKeepsRoster",
         "CapOnlyRefusesNewOpens",
+        "CreateLeavesAtMostTheCap",
         "ANewChildSpendsASlot",
         "MoveClosesNothing",
         "MoveNeedsOpenAncestry",
@@ -109,19 +111,20 @@
     {
       "config": "docs/design/examples/capability-models/BranchEligibility-CapBoundary.cfg",
       "module": "docs/design/examples/capability-models/BranchEligibility.tla",
-      "module_sha256": "786ea72c4b26481db9ce6e7019b09a367647b438b4d3f6c46ae150caa6d3463f",
-      "config_sha256": "d450f425ef54da37c12848657e4cefc09bfd1309d449213e9f3a52ad2f98b27e",
+      "module_sha256": "64e4c3c9045747e45d717211f677e9d1bd1dfa13b33c2c6c90974737d51e877e",
+      "config_sha256": "98c364d3c9868ec711bdfe100519866f8d91526cd5f172205747eac03c547002",
       "exit": 0,
       "seconds": 5.0,
       "expected_exit": 0,
-      "generated": 16082,
-      "distinct": 960,
+      "generated": 12362,
+      "distinct": 720,
       "queue_remaining": 0,
-      "depth": 11,
-      "fingerprint": 82,
-      "seed": 5559870648957376578,
-      "finished": "Finished in 05s at (2026-11-18 20:23:16)",
+      "depth": 10,
+      "fingerprint": 110,
+      "seed": -5882462653977724978,
+      "finished": "Finished in 05s at (2026-11-18 21:27:43)",
       "invariants": [
+        "OneRolePosition",
         "PeersStayWithinCap",
         "RootGetsNoNote"
       ],
@@ -129,6 +132,57 @@
         "OneSlotIsSpent",
         "ANewChildSpendsASlot",
         "OnlyRootAndDefaultOpen"
+      ]
+    },
+    {
+      "config": "docs/design/examples/capability-models/BranchEligibility-MoveToChild.cfg",
+      "module": "docs/design/examples/capability-models/BranchEligibility.tla",
+      "module_sha256": "64e4c3c9045747e45d717211f677e9d1bd1dfa13b33c2c6c90974737d51e877e",
+      "config_sha256": "1f659773066361edc15583adca427a8b21bd08e6c3d2ef07c7707b63aa2badba",
+      "exit": 0,
+      "seconds": 5.0,
+      "expected_exit": 0,
+      "generated": 2,
+      "distinct": 2,
+      "queue_remaining": 0,
+      "depth": 2,
+      "fingerprint": 56,
+      "seed": -4200409160353312952,
+      "finished": "Finished in 05s at (2026-11-18 21:27:32)",
+      "invariants": [
+        "TheLineStaysOpen",
+        "OneRolePosition",
+        "PeersStayWithinCap"
+      ],
+      "properties": [
+        "TheChildBecomesTheDefault",
+        "TheCountGoesFromOneToZero",
+        "MoveFreesTheSlot"
+      ]
+    },
+    {
+      "config": "docs/design/examples/capability-models/BranchEligibility-AtCapBelow.cfg",
+      "module": "docs/design/examples/capability-models/BranchEligibility.tla",
+      "module_sha256": "64e4c3c9045747e45d717211f677e9d1bd1dfa13b33c2c6c90974737d51e877e",
+      "config_sha256": "247bd40e3354b1f03c90f80c004239934027c52944fe2e78d33680203986efdb",
+      "exit": 0,
+      "seconds": 5.0,
+      "expected_exit": 0,
+      "generated": 2,
+      "distinct": 2,
+      "queue_remaining": 0,
+      "depth": 2,
+      "fingerprint": 94,
+      "seed": 7234379205318935605,
+      "finished": "Finished in 05s at (2026-11-18 21:27:37)",
+      "invariants": [
+        "PeersStayWithinCap",
+        "NoOpenInAnOverCapSession"
+      ],
+      "properties": [
+        "TheSwitchIsAdmitted",
+        "TheSwitchLeavesTheSessionOverTheCap",
+        "TheSwitchLeavesNoRoom"
       ]
     },
     {
@@ -909,10 +963,10 @@
     },
     {
       "model": "BranchEligibility",
-      "description": "The root is a valid move target again, and the cap counts a new child of the default branch: one open from the root leaves no room for a second",
-      "state": "State 344:\ns = [ parent |-> \"P1\",\n  primary |-> TRUE,\n  source |-> \"tool\",\n  ended |-> FALSE,\n  ending |-> FALSE,\n  ancestorEnding |-> FALSE,\n  descendantDefault |-> FALSE,\n  peers |-> 1,\n  children |-> {1},\n  notice |-> FALSE,\n  note |-> \"default\",\n  head |-> 1,\n  opening |-> 1,\n  cut |-> 0,\n  cursor |-> 0,\n  reported |-> 1,\n  held |-> FALSE,\n  turn |-> FALSE,\n  steered |-> FALSE,\n  ownEnd |-> FALSE,\n  pending |-> FALSE,\n  recovery |-> FALSE,\n  idle |-> 0,\n  blocks |-> <<>>,\n  roster |-> {1, 2},\n  endedNotice |-> {},\n  externalEnds |-> {} ]",
-      "module_sha256": "786ea72c4b26481db9ce6e7019b09a367647b438b4d3f6c46ae150caa6d3463f",
-      "config_sha256": "02b307395de137d5598172ff4958339afa0da810bbff64eec4e42ca08e35666e",
+      "description": "The root is a valid move target again; the cap charges a new child of the default branch; a switch back to the root leaves the Session over the cap with no room left",
+      "state": "State 344:\ns = [ parent |-> \"P1\",\n  primary |-> TRUE,\n  source |-> \"tool\",\n  ended |-> FALSE,\n  ending |-> FALSE,\n  ancestorEnding |-> FALSE,\n  descendantDefault |-> FALSE,\n  peers |-> 1,\n  children |-> {1},\n  notice |-> FALSE,\n  note |-> \"default\",\n  head |-> 1,\n  opening |-> 1,\n  cut |-> 0,\n  cursor |-> 0,\n  reported |-> 1,\n  held |-> FALSE,\n  turn |-> FALSE,\n  steered |-> FALSE,\n  ownEnd |-> FALSE,\n  pending |-> FALSE,\n  recovery |-> FALSE,\n  idle |-> 0,\n  blocks |-> <<>>,\n  roster |-> {1, 2},\n  endedNotice |-> {},\n  externalEnds |-> {} ]\n\nState 4299:\ns = [ parent |-> \"P1\",\n  primary |-> FALSE,\n  source |-> \"tool\",\n  ended |-> FALSE,\n  ending |-> FALSE,\n  ancestorEnding |-> FALSE,\n  descendantDefault |-> FALSE,\n  peers |-> 2,\n  children |-> {1},\n  notice |-> FALSE,\n  note |-> \"notDefault\",\n  head |-> 1,\n  opening |-> 1,\n  cut |-> 0,\n  cursor |-> 0,\n  reported |-> 1,\n  held |-> FALSE,\n  turn |-> FALSE,\n  steered |-> FALSE,\n  ownEnd |-> FALSE,\n  pending |-> FALSE,\n  recovery |-> FALSE,\n  idle |-> 0,\n  blocks |-> <<>>,\n  roster |-> {1, 2},\n  endedNotice |-> {},\n  externalEnds |-> {} ]",
+      "module_sha256": "64e4c3c9045747e45d717211f677e9d1bd1dfa13b33c2c6c90974737d51e877e",
+      "config_sha256": "51e27b954de733e5b85a4778c3b43e530d0c3e6172b640b3f8dc1c9979c5d323",
       "command": "java -XX:+UseParallelGC -Xmx2g -cp \"$TLA_JAR\" tlc2.TLC -workers 1 -metadir /tmp/BranchEligibility-meta -dump /tmp/BranchEligibility -config docs/design/examples/capability-models/BranchEligibility.cfg docs/design/examples/capability-models/BranchEligibility.tla"
     },
     {

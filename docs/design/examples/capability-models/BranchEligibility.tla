@@ -24,14 +24,15 @@ EXTENDS Naturals, Sequences, FiniteSets, TLC
 \*
 \* The cap counts the open tool lines of the Session that are not on the
 \* protected path, which is the default branch and its ancestors, because a
-\* line on that path cannot be closed. `counted` says whether this line is one
-\* of them, and `peers` counts the others, so the Session's room is
-\* `Cap - counted - peers` for an open from any line. A new child of any line
+\* line on that path cannot be closed. `Counts` says whether this line is one
+\* of them, `Counted` is the slot it spends, and `peers` counts the others, so
+\* the Session's room is `Cap - Counted - peers` for an open from any line. A new child of any line
 \* is off that path: it is neither the default branch, which a move sets on a
 \* line that already exists, nor an ancestor of it, because it is new and below
 \* this one. So an open spends a slot, and the room changes only when the role
-\* moves: onto this line, which stops it counting, or off it, which starts it
-\* counting again.
+\* moves: onto this line, which stops it counting; off it, which starts it
+\* counting again; or away from below this line, which leaves this line off the
+\* protected path too and starts it counting again (`DefaultLeavesBelow`).
 VARIABLE s
 NoParent == "none"
 Cap == 2
@@ -69,11 +70,15 @@ CanBeEnded == HasOpener /\ ~s.primary /\ ~s.descendantDefault /\ ~s.ended /\ ~s.
 \* descendant of it is, and a line opened with the tool counts against the cap
 \* while it is open and off that path.
 Counts == s.source="tool" /\ ~s.primary /\ ~s.descendantDefault
+\* This line's own contribution to the Session's counted total, and that total:
+\* its own slot plus the slots its peers hold.
+Counted == IF Counts THEN 1 ELSE 0
+CountedTotal == Counted + s.peers
 \* An open from this line: it must be allowed to open one, the line is not
 \* ending, the Session must have a slot, and this line holds fewer than two
 \* children, which is the model's bound and not a rule. The child is off the
 \* protected path, so the open spends a slot however the caller is placed.
-RoomLeft == Cap - (IF Counts THEN 1 ELSE 0) - s.peers
+RoomLeft == Cap - Counted - s.peers
 CanCreate == CanOpen /\ ~s.ending /\ ~s.ended /\ RoomLeft>0 /\ Cardinality(s.children)<2
 \* A line that has an opener, which is every line but the root. The root is
 \* `RootInit` alone: a parentless tool, user, plugin or upgraded line is not a
@@ -99,17 +104,27 @@ RootInit == \E notice\in BOOLEAN,peers\in 0..Cap:
      ended|->FALSE,ending|->FALSE,turn|->FALSE,steered|->FALSE,ownEnd|->FALSE,pending|->FALSE,recovery|->FALSE,idle|->0,
      blocks|-><<>>,roster|->{1,2},endedNotice|->{},externalEnds|->{},
      ancestorEnding|->FALSE,descendantDefault|->FALSE,children|->{}]
+\* One line's state, for the specifications that start from a named state
+\* instead of exploring every line the tree can hold.
+LineState(source,primary,descendantDefault,peers) ==
+  [parent|->"P1",source|->source,primary|->primary,note|->NoNote,notice|->FALSE,peers|->peers,
+   head|->1,opening|->1,cut|->0,cursor|->0,reported|->1,held|->FALSE,
+   ended|->FALSE,ending|->FALSE,turn|->FALSE,steered|->FALSE,ownEnd|->FALSE,pending|->FALSE,recovery|->FALSE,idle|->0,
+   blocks|-><<>>,roster|->{1,2},endedNotice|->{},externalEnds|->{},
+   ancestorEnding|->FALSE,descendantDefault|->descendantDefault,children|->{}]
 \* Becoming the default branch. A target whose ancestor is already ending is
 \* refused, because the cascade will reach it, and so is the line that already
 \* holds the position, whatever line it is: the root is refused while it is the
-\* default branch and accepted once another line holds the role. A move writes
-\* one status note, under the identity's own key, to the line that gains the
-\* role and to the one that loses it; the root gets none in either direction,
-\* because its two rules, that it opens lines and that it never ends, are the
-\* same whether or not it holds the role. A move closes no line, so the room it
-\* changes is the room its own placement changes.
+\* default branch and accepted once another line holds the role. The role is one
+\* position, so a line that takes it has nothing below it holding the role: a
+\* default descendant is the line that now loses it. A move writes one status
+\* note, under the identity's own key, to the line that gains the role and to
+\* the one that loses it; the root gets none in either direction, because its
+\* two rules, that it opens lines and that it never ends, are the same whether
+\* or not it holds the role. A move closes no line, so the room it changes is
+\* the room its own placement changes.
 Move == /\ CanBeMovedTo
- /\ s'=[s EXCEPT !.primary=TRUE, !.note=IF IsRoot THEN @ ELSE DefaultNote]
+ /\ s'=[s EXCEPT !.primary=TRUE, !.descendantDefault=FALSE, !.note=IF IsRoot THEN @ ELSE DefaultNote]
 \* Another line becomes the default branch, so this one stops holding the role.
 \* The move is that line's own action and its own note; this line records only
 \* what it loses, and the root records nothing, as when it gains the role. This
@@ -130,6 +145,14 @@ Create == /\ CanCreate
 BeginAncestorEnd == /\ HasOpener /\ ~s.ancestorEnding /\ ~s.ended /\ s'=[s EXCEPT !.ancestorEnding=TRUE]
 BeginDescendantDefault == /\ ~s.descendantDefault /\ ~s.primary /\ ~s.ended
  /\ s'=[s EXCEPT !.descendantDefault=TRUE]
+\* The role leaves this line's subtree: the line that held it is no longer the
+\* default branch, so this line is off the protected path again and counts again
+\* when it was opened with the tool, whether or not the Session still has room.
+\* Nothing closes a line to make room, and a later open is what the cap refuses.
+\* This is the tree fact a switch back to the root leaves on every tool ancestor
+\* of the line the conversation moved away from.
+DefaultLeavesBelow == /\ s.descendantDefault /\ ~s.primary /\ ~s.ended
+ /\ s'=[s EXCEPT !.descendantDefault=FALSE]
 ParentAdvance == /\ s.head<2 /\ s'=[s EXCEPT !.head=@+1]
 Read(after,through,ok) == /\ after<=s.head /\ through<=s.head /\ through>=after
  /\ LET floor==IF IsRoot THEN after ELSE IF after<s.cut THEN s.cut ELSE after
@@ -153,7 +176,7 @@ Restore == /\ ~s.recovery /\ s'=[s EXCEPT !.recovery=TRUE, !.turn=FALSE]
 \* default branch may end the lines it opened; no line ever ends itself this way.
 ChildEnd(i,own) == /\ HasOpener /\ i\in s.roster
  /\ s'=[s EXCEPT !.roster=@\{i}, !.endedNotice=IF own THEN @ ELSE @\cup{i}, !.externalEnds=IF own THEN @ ELSE @\cup{i}]
-Next == Move\/AnotherLineTakesRole\/Create\/BeginAncestorEnd\/BeginDescendantDefault\/ParentAdvance
+Next == Move\/AnotherLineTakesRole\/Create\/BeginAncestorEnd\/BeginDescendantDefault\/DefaultLeavesBelow\/ParentAdvance
  \/(\E a,t\in 0..2,b\in BOOLEAN:Read(a,t,b))\/Block\/ConsumeBlock\/Start
  \/(\E b\in BOOLEAN:Steer(b)\/Pending(b))\/OwnEnd\/EndFromOutside\/FinishEnd\/EndTurn\/Restore
  \/(\E i\in 1..2,b\in BOOLEAN:ChildEnd(i,b))
@@ -199,6 +222,10 @@ RootGetsNoNote == IsRoot=>s.note=NoNote
 \* the Session on its root and `AnotherLineTakesRole` is the reachable state this
 \* reads, so the root's own case is the one checked, not a parentless tool line.
 ReturnToRootAdmitted == IsRoot /\ ~s.primary=>CanBeMovedTo
+\* The role is one position, so a line that holds it has no descendant that
+\* does: a move takes it from wherever it was, and the tree facts below never
+\* add one under a line that already holds it.
+OneRolePosition == ~(s.primary /\ s.descendantDefault)
 \* The cap refuses a new open and nothing else. An open is admitted only while
 \* the Session has room, and it spends exactly one, because the line it opens
 \* is off the protected path however the opener is placed. A move closes no
@@ -206,13 +233,17 @@ ReturnToRootAdmitted == IsRoot /\ ~s.primary=>CanBeMovedTo
 \* back on the counted side can leave the Session over the cap with no room
 \* left for a later open.
 CapOnlyRefusesNewOpens == [][Create=>RoomLeft>0]_s
+\* An open leaves the Session at most at its cap. It is admitted only with room,
+\* and it spends exactly one, so the cap never refuses what it has admitted; a
+\* later switch is what can put the total above the cap.
+CreateLeavesAtMostTheCap == [][Create=>CountedTotal'<=Cap]_s
 ANewChildSpendsASlot == [][Create=>s.peers'=s.peers+1]_s
 MoveClosesNothing == [][Move=>s.roster'=s.roster /\ s.ended'=s.ended]_s
 \* `peers` never exceeds the cap, because an open needs room: it is admitted
-\* only while `Cap - counted - peers > 0`, and it adds one to `peers` and
+\* only while `Cap - Counted - peers > 0`, and it adds one to `peers` and
 \* closes nothing. The Session's total can exceed the cap after a switch, when
 \* a line that held the role and opened up to the cap starts counting again on
-\* losing it, so `counted + peers` becomes `peers + 1 > Cap`;
+\* losing it, so `Counted + peers` becomes `peers + 1 > Cap`;
 \* `CapOnlyRefusesNewOpens` is what answers that state, refusing the next open
 \* and closing nothing.
 PeersStayWithinCap == s.peers<=Cap
@@ -226,6 +257,39 @@ BoundarySpec == BoundaryInit /\ [][Next]_s
 \* This is what separates the old model, where a child of the default spent no
 \* slot and two opens were admitted, from the corrected one.
 OneSlotIsSpent == [][Create=>s.peers'=Cap]_s
+\* The two switches the review named, each as its own specification.
+\*
+\* First: a cap-two Session with one open tool line, and the root is the default
+\* branch, so that line is the Session's only counted line. Making it the default
+\* branch stops it counting, so the counted total goes from one to zero, and
+\* nothing is closed to get there.
+MoveToChildInit == s = LineState("tool",FALSE,FALSE,0)
+MoveToChildSpec == MoveToChildInit /\ [][Move]_s /\ WF_s(Move)
+TheLineStaysOpen == ~s.ended
+TheChildBecomesTheDefault == <>(s.primary)
+\* The whole scenario in one statement: the Session starts with this one counted
+\* line, and the switch takes the counted total to zero.
+TheCountGoesFromOneToZero == (CountedTotal=1) ~> (CountedTotal=0)
+\* The room BranchTool reads is the same number: the slot the line cost as an
+\* open tool line off the path is free once the line holds the role.
+MoveFreesTheSlot == [][Move=>RoomLeft'=Cap]_s
+\* Second, the over-cap one: the Session is at its cap with two counted lines
+\* elsewhere, and this line is an open tool line that is an ancestor of the
+\* default branch, so the protected path runs through it and it spends no slot.
+\* The role moving back to the root leaves it off that path, so it counts again:
+\* the switch is admitted, the Session is over the cap, and no opening from it is
+\* left. Nothing closes a line to make room, and the switch itself is decided by
+\* the tree, not by the cap.
+AtCapBelowInit == s = LineState("tool",FALSE,TRUE,Cap)
+AtCapBelowSpec == AtCapBelowInit /\ [][DefaultLeavesBelow \/ Create]_s /\ WF_s(DefaultLeavesBelow)
+TheSwitchIsAdmitted == <>(~s.descendantDefault)
+TheSwitchLeavesTheSessionOverTheCap == [][DefaultLeavesBelow=>CountedTotal'>Cap]_s
+\* The refusal is the same room every open reads, so no opener is left: the
+\* root's own `create` and the default branch's would answer `branch_limit_reached`.
+TheSwitchLeavesNoRoom == [][DefaultLeavesBelow=>RoomLeft'<0]_s
+\* `Create` is a step of this specification so that the refusal is checked rather
+\* than assumed: a model that let the switch leave room would be able to take it.
+NoOpenInAnOverCapSession == ~s.descendantDefault=>RoomLeft<0
 \* Admission in one order, first case: a line becomes the default branch only
 \* while no ancestor's end is on its way down, so an end that already started
 \* wins and the move is refused.
