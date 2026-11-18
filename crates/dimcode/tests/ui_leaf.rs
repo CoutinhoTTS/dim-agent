@@ -7,7 +7,7 @@
 //! Home owns neither a Session nor a registered UI leaf.
 
 #[path = "support/daemon.rs"]
-#[allow(dead_code)]
+#[expect(dead_code, reason = "the test uses part of the shared daemon helper")]
 mod daemon_cleanup;
 
 use serde_json::{Value, json};

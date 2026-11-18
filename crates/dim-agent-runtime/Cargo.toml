@@ -27,3 +27,6 @@ testing = []
 
 [dev-dependencies]
 dim-agent-runtime = { path = ".", features = ["testing"] }
+
+[lints]
+workspace = true

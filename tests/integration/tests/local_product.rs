@@ -177,7 +177,10 @@ async fn workspace_write_asks_for_each_external_mutation() {
         )
         .await
         .unwrap();
-    #[allow(unused_mut)]
+    #[cfg_attr(
+        not(unix),
+        expect(unused_mut, reason = "only the unix case appends the symlink target")
+    )]
     let mut targets = vec![
         (
             "../work-sibling/new/note.txt".to_owned(),

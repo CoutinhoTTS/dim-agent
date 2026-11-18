@@ -39,7 +39,10 @@ pub(crate) fn convert(
         let lease = lease;
         let message_id = uuid::Uuid::new_v4().to_string();
         let mut calls = HashMap::<String, String>::new();
-        let preserve = !matches!(protocol, ModelProtocol::OpenaiChat | ModelProtocol::OpenaiCompatible);
+        let preserve = !matches!(
+            protocol,
+            ModelProtocol::OpenaiChat | ModelProtocol::OpenaiCompatible
+        );
         let mut parts = Vec::new();
         let mut blocks = HashMap::new();
         let mut tool_blocks = HashMap::new();
@@ -47,6 +50,7 @@ pub(crate) fn convert(
         let mut ended_inputs = HashSet::new();
         let mut completed_calls = HashSet::new();
         let mut thinking = HashMap::<String, String>::new();
+        let mut answered = false;
         let terminal = loop {
             let next = tokio::select! {
                 biased;
@@ -69,9 +73,10 @@ pub(crate) fn convert(
                     for warning in warnings {
                         match warning {
                             Warning::Unsupported { feature, .. } => {
-                                unsupported = Some(HostError::classified(HostErrorKind::Unsupported, format!(
-                                    "Unsupported model parameter: {feature}"
-                                )));
+                                unsupported = Some(HostError::classified(
+                                    HostErrorKind::Unsupported,
+                                    format!("Unsupported model parameter: {feature}"),
+                                ));
                                 break;
                             }
                             Warning::Compatibility { .. } => {
@@ -93,29 +98,60 @@ pub(crate) fn convert(
                 StreamPart::TextStart { id, provider_metadata } => {
                     block_active.insert((false, id.clone()));
                     if preserve {
-                        let metadata = match content::metadata(protocol, provider_metadata.as_ref()) { Ok(metadata) => metadata, Err(error) => break Some(Err(error)) };
+                        let metadata =
+                            match content::metadata(protocol, provider_metadata.as_ref()) {
+                                Ok(metadata) => metadata,
+                                Err(error) => break Some(Err(error)),
+                            };
                         blocks.insert((false, id), parts.len());
-                        parts.push(MessagePart::Text { text: String::new(), start_time: None, end_time: None, provider_metadata: metadata });
+                        parts.push(MessagePart::Text {
+                            text: String::new(),
+                            start_time: None,
+                            end_time: None,
+                            provider_metadata: metadata,
+                        });
                     }
                 }
                 StreamPart::ReasoningStart { id, provider_metadata } => {
                     block_active.insert((true, id.clone()));
                     thinking.insert(id.clone(), String::new());
                     if preserve {
-                        let metadata = match reasoning_metadata(protocol, provider_metadata.as_ref()) { Ok(metadata) => metadata, Err(error) => break Some(Err(error)) };
+                        let metadata =
+                            match reasoning_metadata(protocol, provider_metadata.as_ref()) {
+                                Ok(metadata) => metadata,
+                                Err(error) => break Some(Err(error)),
+                            };
                         blocks.insert((true, id), parts.len());
-                        parts.push(MessagePart::Thinking { thinking: String::new(), start_time: None, end_time: None, provider_metadata: metadata });
+                        parts.push(MessagePart::Thinking {
+                            thinking: String::new(),
+                            start_time: None,
+                            end_time: None,
+                            provider_metadata: metadata,
+                        });
                     }
                 }
                 StreamPart::TextDelta { id, delta, provider_metadata } => {
                     if preserve {
-                        let metadata = match content::metadata(protocol, provider_metadata.as_ref()) { Ok(metadata) => metadata, Err(error) => break Some(Err(error)) };
-                        let Some(part) = blocks.get(&(false, id)).and_then(|index| parts.get_mut(*index)) else {
-                            break Some(Err(error(AiMuxError::invalid_response_data("Missing text block"), &cancel)));
+                        let metadata =
+                            match content::metadata(protocol, provider_metadata.as_ref()) {
+                                Ok(metadata) => metadata,
+                                Err(error) => break Some(Err(error)),
+                            };
+                        let Some(part) = blocks
+                            .get(&(false, id))
+                            .and_then(|index| parts.get_mut(*index))
+                        else {
+                            break Some(Err(error(
+                                AiMuxError::invalid_response_data("Missing text block"),
+                                &cancel,
+                            )));
                         };
-                        if let MessagePart::Text { text, .. } = part { text.push_str(&delta); }
+                        if let MessagePart::Text { text, .. } = part {
+                            text.push_str(&delta);
+                        }
                         content::update(part, metadata);
                     }
+                    if !delta.trim().is_empty() { answered = true; }
                     if !delta.is_empty() { yield Ok(ModelChunk::Text(delta)); }
                 }
                 StreamPart::ReasoningDelta { id, delta, provider_metadata } => {
@@ -124,42 +160,89 @@ pub(crate) fn convert(
                     };
                     thought.push_str(&delta);
                     if preserve {
-                        let metadata = match content::metadata(protocol, provider_metadata.as_ref()) { Ok(metadata) => metadata, Err(error) => break Some(Err(error)) };
-                        let Some(part) = blocks.get(&(true, id)).and_then(|index| parts.get_mut(*index)) else {
-                            break Some(Err(error(AiMuxError::invalid_response_data("Missing reasoning content"), &cancel)));
+                        let metadata =
+                            match content::metadata(protocol, provider_metadata.as_ref()) {
+                                Ok(metadata) => metadata,
+                                Err(error) => break Some(Err(error)),
+                            };
+                        let Some(part) = blocks
+                            .get(&(true, id))
+                            .and_then(|index| parts.get_mut(*index))
+                        else {
+                            break Some(Err(error(
+                                AiMuxError::invalid_response_data("Missing reasoning content"),
+                                &cancel,
+                            )));
                         };
-                        if let MessagePart::Thinking { thinking, .. } = part { thinking.push_str(&delta); }
+                        if let MessagePart::Thinking { thinking, .. } = part {
+                            thinking.push_str(&delta);
+                        }
                         content::update(part, metadata);
                     }
                     if !delta.is_empty() { yield Ok(ModelChunk::Thinking(delta)); }
                 }
                 end @ (StreamPart::TextEnd { .. } | StreamPart::ReasoningEnd { .. }) => {
                     let reasoning = matches!(&end, StreamPart::ReasoningEnd { .. });
-                    let (id, provider_metadata) = match end { StreamPart::TextEnd { id, provider_metadata } | StreamPart::ReasoningEnd { id, provider_metadata } => (id, provider_metadata), _ => unreachable!() };
+                    let (id, provider_metadata) = match end {
+                        StreamPart::TextEnd { id, provider_metadata }
+                        | StreamPart::ReasoningEnd {
+                            id,
+                            provider_metadata,
+                        } => (id, provider_metadata),
+                        _ => unreachable!(),
+                    };
                     block_active.remove(&(reasoning, id.clone()));
                     if preserve {
-                        let metadata = match content::metadata(protocol, provider_metadata.as_ref()) { Ok(metadata) => metadata, Err(error) => break Some(Err(error)) };
-                        let Some(part) = blocks.remove(&(reasoning, id.clone())).and_then(|index| parts.get_mut(index)) else {
-                            break Some(Err(error(AiMuxError::invalid_response_data("Missing ended block"), &cancel)));
+                        let metadata =
+                            match content::metadata(protocol, provider_metadata.as_ref()) {
+                                Ok(metadata) => metadata,
+                                Err(error) => break Some(Err(error)),
+                            };
+                        let Some(part) = blocks
+                            .remove(&(reasoning, id.clone()))
+                            .and_then(|index| parts.get_mut(index))
+                        else {
+                            break Some(Err(error(
+                                AiMuxError::invalid_response_data("Missing ended block"),
+                                &cancel,
+                            )));
                         };
                         content::update(part, metadata);
                     }
                     if reasoning {
-                        yield Ok(ModelChunk::ThinkingEnd { thinking: thinking.remove(&id).unwrap_or_default() });
+                        yield Ok(ModelChunk::ThinkingEnd {
+                            thinking: thinking.remove(&id).unwrap_or_default(),
+                        });
                     } else {
                         yield Ok(ModelChunk::TextEnd);
                     }
                 }
-                StreamPart::ToolInputStart { id, tool_name, provider_executed, provider_metadata, .. } => {
+                StreamPart::ToolInputStart {
+                    id,
+                    tool_name,
+                    provider_executed,
+                    provider_metadata,
+                    ..
+                } => {
                     if provider_executed == Some(true) {
                         break Some(Err(HostError::failed("Provider-executed tools are not supported")));
                     }
                     let name = tool_names.original(&tool_name).to_owned();
                     calls.insert(id.clone(), name.clone());
                     if preserve {
-                        let metadata = match content::metadata(protocol, provider_metadata.as_ref()) { Ok(metadata) => metadata, Err(error) => break Some(Err(error)) };
+                        let metadata = match content::metadata(protocol, provider_metadata.as_ref())
+                        {
+                            Ok(metadata) => metadata,
+                            Err(error) => break Some(Err(error)),
+                        };
                         tool_blocks.insert(id.clone(), parts.len());
-                        parts.push(MessagePart::ToolUse { id: id.clone(), name: name.clone(), input: Default::default(), start_time: None, provider_metadata: metadata });
+                        parts.push(MessagePart::ToolUse {
+                            id: id.clone(),
+                            name: name.clone(),
+                            input: Default::default(),
+                            start_time: None,
+                            provider_metadata: metadata,
+                        });
                     }
                     yield Ok(ModelChunk::ToolStart { id, name });
                 }
@@ -173,10 +256,24 @@ pub(crate) fn convert(
                     ended_inputs.insert(id);
                 }
                 StreamPart::ToolCall(raw) => {
-                    let RawToolCall { tool_call_id, tool_name, input, provider_executed, dynamic, provider_metadata } = raw;
+                    let RawToolCall {
+                        tool_call_id,
+                        tool_name,
+                        input,
+                        provider_executed,
+                        dynamic,
+                        provider_metadata,
+                    } = raw;
                     let name = tool_names.original(&tool_name).to_owned();
-                    if completed_calls.contains(&tool_call_id) || calls.get(&tool_call_id).is_some_and(|started| started != &name) {
-                        break Some(Err(error(AiMuxError::invalid_response_data("Duplicate or mismatched tool call"), &cancel)));
+                    if completed_calls.contains(&tool_call_id)
+                        || calls
+                            .get(&tool_call_id)
+                            .is_some_and(|started| started != &name)
+                    {
+                        break Some(Err(error(
+                            AiMuxError::invalid_response_data("Duplicate or mismatched tool call"),
+                            &cancel,
+                        )));
                     }
                     if provider_executed == Some(true) {
                         break Some(Err(HostError::failed("Provider-executed tools are not supported")));
@@ -196,13 +293,28 @@ pub(crate) fn convert(
                     ended_inputs.remove(&id);
                     completed_calls.insert(id.clone());
                     if preserve {
-                        let metadata = match content::metadata(protocol, raw.provider_metadata.as_ref()) { Ok(metadata) => metadata, Err(error) => break Some(Err(error)) };
+                        let metadata =
+                            match content::metadata(protocol, raw.provider_metadata.as_ref()) {
+                                Ok(metadata) => metadata,
+                                Err(error) => break Some(Err(error)),
+                            };
                         if let Some(index) = tool_blocks.remove(&id) {
                             let part = &mut parts[index];
-                            if let MessagePart::ToolUse { input: arguments, .. } = part { *arguments = input.clone(); }
+                            if let MessagePart::ToolUse {
+                                input: arguments, ..
+                            } = part
+                            {
+                                *arguments = input.clone();
+                            }
                             content::update(part, metadata);
                         } else {
-                            parts.push(MessagePart::ToolUse { id: id.clone(), name: name.clone(), input: input.clone(), start_time: None, provider_metadata: metadata });
+                            parts.push(MessagePart::ToolUse {
+                                id: id.clone(),
+                                name: name.clone(),
+                                input: input.clone(),
+                                start_time: None,
+                                provider_metadata: metadata,
+                            });
                         }
                     }
                     drop(raw);
@@ -226,8 +338,20 @@ pub(crate) fn convert(
                             break Some(Err(HostError::failed("Model returned an unsupported finish reason")));
                         }
                     };
-                    if reason != ModelStopReason::MaxTokens && (!block_active.is_empty() || !calls.is_empty() || !ended_inputs.is_empty()) {
-                        break Some(Err(error(AiMuxError::invalid_response_data("Model finished with incomplete blocks or tool calls"), &cancel)));
+                    if reason != ModelStopReason::MaxTokens
+                        && (!block_active.is_empty()
+                            || !calls.is_empty()
+                            || !ended_inputs.is_empty())
+                    {
+                        break Some(Err(error(
+                            AiMuxError::invalid_response_data(
+                                "Model finished with incomplete blocks or tool calls",
+                            ),
+                            &cancel,
+                        )));
+                    }
+                    if reason == ModelStopReason::EndTurn && !answered && completed_calls.is_empty() {
+                        break Some(Err(empty_reply()));
                     }
                     break Some(Ok((usage_chunk(usage), reason)));
                 }
@@ -259,7 +383,9 @@ pub(crate) fn convert(
 
         match terminal {
             Some(Ok((usage, reason))) => {
-                if preserve && reason != ModelStopReason::MaxTokens { yield Ok(ModelChunk::Content(parts)); }
+                if preserve && reason != ModelStopReason::MaxTokens {
+                    yield Ok(ModelChunk::Content(parts));
+                }
                 if let Some(usage) = usage {
                     yield Ok(ModelChunk::Usage(usage));
                 }
@@ -304,6 +430,33 @@ fn usage_chunk(usage: NativeUsage) -> Option<Usage> {
         cost: None,
         currency: None,
     })
+}
+
+/// The one failure the converter builds itself: a reply that completed with
+/// neither text nor a tool call. The provider's structured error, which
+/// carries every other failure, has nothing to say about a reply it called
+/// successful, so the bridge names this defect here.
+fn empty_reply() -> HostError {
+    let reason = "the response had no text and no tool call";
+    HostError::Failed {
+        message: ModelFailureKind::MalformedResponse.line(Some(reason)),
+        budget: None,
+        kind: HostErrorKind::Other,
+        model: Some(Box::new(ModelFailureFacts {
+            kind: ModelFailureKind::MalformedResponse,
+            reason: Some(reason.to_owned()),
+            status: None,
+            provider_code: None,
+            request_id: None,
+            cause: Vec::new(),
+            retry_after: None,
+            attempts: 1,
+            waited: std::time::Duration::ZERO,
+            retry_after_stop: None,
+            retry_forbidden: false,
+        })),
+        presentation: None,
+    }
 }
 
 pub(crate) fn error(failure: AiMuxError, cancel: &CancellationToken) -> HostError {
@@ -496,77 +649,95 @@ fn source_diagnosis(cause: &ErrorCause) -> Option<String> {
 }
 
 /// The user-facing kind, from the origin, status and normalized codes only.
+///
+/// A condition code decides at any status, a non-retried condition before a
+/// retried one; then a transport failure is `network`; then an error status on
+/// the response decides; then a class label, in practice for a stream event,
+/// whose status is the provider's mapping of the event's own strings.
 fn classify_kind(
     origin: ApiCallErrorOrigin,
     status: Option<u16>,
     codes: &[Option<&str>],
 ) -> ModelFailureKind {
-    if let Some(kind) = codes.iter().flatten().find_map(|code| permanent_kind(code)) {
+    let mut condition = None;
+    let mut label = None;
+    for role in codes.iter().flatten().filter_map(|code| code_role(code)) {
+        match role {
+            CodeRole::Condition(kind) if !kind.retried() => return kind,
+            CodeRole::Condition(kind) => {
+                condition.get_or_insert(kind);
+            }
+            CodeRole::ClassLabel(kind) => {
+                label.get_or_insert(kind);
+            }
+        }
+    }
+    if let Some(kind) = condition {
         return kind;
-    }
-    if origin != ApiCallErrorOrigin::StreamEvent && matches!(status, Some(409 | 501 | 505)) {
-        // These statuses were never retried, whatever code came with them.
-        return ModelFailureKind::InvalidRequest;
-    }
-    let transient = codes.iter().flatten().find_map(|code| transient_kind(code));
-    if origin == ApiCallErrorOrigin::StreamEvent {
-        // A stream-event failure carries the response's status, not the
-        // event's; only the event's code may decide.
-        return transient.unwrap_or(ModelFailureKind::Unknown);
     }
     if origin == ApiCallErrorOrigin::Transport {
         return ModelFailureKind::Network;
     }
-    if let Some(kind) = transient {
+    if origin != ApiCallErrorOrigin::StreamEvent
+        && let Some(kind) = status.and_then(status_kind)
+    {
         return kind;
     }
-    status_kind(status)
+    label.unwrap_or(ModelFailureKind::Unknown)
 }
 
-fn permanent_kind(code: &str) -> Option<ModelFailureKind> {
+/// What a normalized provider string says: a condition the status alone cannot
+/// express, or a label that only restates an HTTP class.
+enum CodeRole {
+    Condition(ModelFailureKind),
+    ClassLabel(ModelFailureKind),
+}
+
+fn code_role(code: &str) -> Option<CodeRole> {
     Some(match code {
         "insufficient_quota" | "quota_exceeded" | "billing_error" | "credit_exhausted" => {
-            ModelFailureKind::QuotaExhausted
+            CodeRole::Condition(ModelFailureKind::QuotaExhausted)
         }
-        "invalid_api_key" | "authentication_error" => ModelFailureKind::AuthRejected,
-        "invalid_request_error" | "max_tokens_exceeded" => ModelFailureKind::InvalidRequest,
-        "context_length_exceeded" | "context_too_long" => ModelFailureKind::ContextTooLong,
+        "invalid_api_key" => CodeRole::Condition(ModelFailureKind::AuthRejected),
+        "context_length_exceeded" | "context_too_long" => {
+            CodeRole::Condition(ModelFailureKind::ContextTooLong)
+        }
         "content_policy_violation" | "safety_block" | "moderation_block" => {
-            ModelFailureKind::ContentFiltered
+            CodeRole::Condition(ModelFailureKind::ContentFiltered)
         }
+        "max_tokens_exceeded" => CodeRole::Condition(ModelFailureKind::InvalidRequest),
+        "rate_limit_exceeded" | "rate_limit_error" => {
+            CodeRole::Condition(ModelFailureKind::RateLimited)
+        }
+        "engine_overloaded" | "model_overloaded" | "server_busy" | "overloaded_error" => {
+            CodeRole::Condition(ModelFailureKind::ServerError)
+        }
+        "api_error" | "server_error" | "service_unavailable" | "request_timeout" | "timeout" => {
+            CodeRole::ClassLabel(ModelFailureKind::ServerError)
+        }
+        "invalid_request_error" => CodeRole::ClassLabel(ModelFailureKind::InvalidRequest),
+        "authentication_error" => CodeRole::ClassLabel(ModelFailureKind::AuthRejected),
         _ => return None,
     })
 }
 
-fn transient_kind(code: &str) -> Option<ModelFailureKind> {
-    Some(match code {
-        "rate_limit_exceeded" | "rate_limit_error" => ModelFailureKind::RateLimited,
-        "request_timeout"
-        | "timeout"
-        | "server_error"
-        | "api_error"
-        | "service_unavailable"
-        | "engine_overloaded"
-        | "model_overloaded"
-        | "server_busy"
-        | "overloaded_error" => ModelFailureKind::ServerError,
+/// The kind an error status decides, or `None` for a status that is not one: a
+/// 2xx response whose body failed to parse or carried a provider-declared
+/// error, and a redirect that could not be followed, say nothing about the
+/// failure's kind.
+fn status_kind(status: u16) -> Option<ModelFailureKind> {
+    Some(match status {
+        401 | 403 => ModelFailureKind::AuthRejected,
+        402 => ModelFailureKind::QuotaExhausted,
+        404 => ModelFailureKind::NotFound,
+        408 => ModelFailureKind::ServerError,
+        413 => ModelFailureKind::ContextTooLong,
+        429 => ModelFailureKind::RateLimited,
+        501 | 505 => ModelFailureKind::InvalidRequest,
+        500..=599 => ModelFailureKind::ServerError,
+        400..=499 => ModelFailureKind::InvalidRequest,
         _ => return None,
     })
-}
-
-fn status_kind(status: Option<u16>) -> ModelFailureKind {
-    match status {
-        Some(401 | 403) => ModelFailureKind::AuthRejected,
-        Some(402) => ModelFailureKind::QuotaExhausted,
-        Some(404) => ModelFailureKind::NotFound,
-        Some(408) => ModelFailureKind::ServerError,
-        Some(413) => ModelFailureKind::ContextTooLong,
-        Some(429) => ModelFailureKind::RateLimited,
-        Some(400 | 409 | 422 | 501 | 505) => ModelFailureKind::InvalidRequest,
-        Some(500..=599) => ModelFailureKind::ServerError,
-        Some(400..=499) => ModelFailureKind::InvalidRequest,
-        _ => ModelFailureKind::Unknown,
-    }
 }
 
 /// The cause chain, outermost first: the failure's own message, then the

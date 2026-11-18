@@ -79,9 +79,9 @@ sequenceDiagram
   participant S as Session（非交互）
   participant TL as 分支 Timeline
   participant L as InputQueue, Loop
-  C->>AI: launch {policy, starter}
+  C->>AI: launch {policy, starter, worktree?}
   AI->>AI: 以启动方当前策略为上限限制策略
-  AI-->>C: {sessionId, policy}
+  AI-->>C: {sessionId, policy, worktree?}
   C->>AI: input {sessionId, main, queue, marker dim-scheduler, submissionId}
   AI->>S: input
   S->>TL: input/message
@@ -147,7 +147,7 @@ Queue 输入在 Loop 启动它所驱动的 turn 时被消费。Steer 输入在�
 
 | 接口 | 模式 | 用途 |
 | --- | --- | --- |
-| `sessions.launch(LaunchRequest) -> {sessionId, policy}` | async | 为自动化创建非交互 Session，策略受上限约束 |
+| `sessions.launch(LaunchRequest) -> {sessionId, policy, worktree?}` | async | 为自动化创建非交互 Session，策略受上限约束 |
 | `sessions.input(InputWrite) -> {inputId, sequence}` | async | 写入带来源 raw 块的输入 |
 | `sessions.lookup({sessionId, branchId, submissionId}) -> LookupReply` | async | 在结果不确定后查找已提交的输入 |
 | `sessions.history(HistoryRequest) -> HistoryPage` | async | 读取历史，可选为以已发布 head 为界的固定前缀 |
@@ -224,7 +224,7 @@ Queue 输入在 Loop 启动它所驱动的 turn 时被消费。Steer 输入在�
 
 | 方法 | 模式 | 请求 | 回复 | 错误 |
 | --- | --- | --- | --- | --- |
-| `launch` | async | `LaunchRequest` | `{sessionId, policy}` | `rejected`、`agent_unknown`、`session_closed`、`branch_missing`（启动方）、`branch_ended`（启动方）、`reloading`、`failed` |
+| `launch` | async | `LaunchRequest` | `{sessionId, policy, worktree?}` | `rejected`、`agent_unknown`、`session_closed`、`branch_missing`（启动方）、`branch_ended`（启动方）、`reloading`、`failed` |
 | `input` | async | `InputWrite` | `{inputId, sequence}` | `rejected`、`ambiguous`、`session_closed`、`branch_missing`、`branch_ended`、`reloading`、`publication_unknown`、`failed` |
 | `lookup` | async | `{sessionId, branchId, submissionId}` | `LookupReply` | `ambiguous`、`session_closed`、`branch_missing`、`branch_ended`、`reloading` |
 | `exists` | async | `{sessionId}` | `{exists}` | `rejected`、`reloading` |
@@ -241,7 +241,8 @@ Queue 输入在 Loop 启动它所驱动的 turn 时被消费。Steer 输入在�
   "cwd": "string",
   "model?": { "providerId": "string", "modelId": "string" },  // 优先于 profile 的模型
   "policy?": { /* PermissionPolicy 数据 */ },  // 收窄后的请求；缺省：启动方策略或只读默认值
-  "starter?": { "sessionId": "string", "branchId": "string" } } // 上限；缺省：以宿主配置为界
+  "starter?": { "sessionId": "string", "branchId": "string" }, // 上限；缺省：以宿主配置为界
+  "worktree?": { /* 托管 worktree §3 的请求 */ } }
 // InputWrite
 { "sessionId": "string", "branchId": "string",
   "mode": "queue" | "steer" | "append",
@@ -286,6 +287,8 @@ Queue 输入在 Loop 启动它所驱动的 turn 时被消费。Steer 输入在�
 每个方法也都可能以 `failed` 失败（A.6）。取消：调用方丢弃 `idle` 或 `history` 调用即结束它，没有任何效果。在回复前丢弃 `input` 会使结果不确定；调用方用 `lookup` 确认。
 
 `launch` 创建一个 `interactive = false` 的 Session。生效策略是请求的策略，并以启动方的当前策略为上限；该策略是启动时读取的 Timeline 事实。没有启动方时，由管理方法启动的运行除非请求声明了策略，否则默认只读，并始终受宿主配置约束。
+
+请求和回复中的可选 `worktree` 成员遵循[托管 worktree §3](../../../design/worktree-management.md#3-创建)；其结构、能力门槛、缺省及无效输入行为由该文档定义。
 
 `delete` 即 Agents 的 Session 删除（S5c）：Session 已装载时先关闭它，再删除它的行与文件。不存在或已删除的 Session 回复 `{}`，因此调用方在任何错误后都可再次删除（[sessions 服务 §6.8](../appserver/sessions-service.md#68-delete)）。启动 Session 的调用方在删掉最后一条指向它的记录时删除它（[§8.7](../appserver/sessions-service.md#87-删除运行用的-session)）。
 
@@ -458,6 +461,8 @@ InputQueue 仍是拥有决定的分支 Capability；InputMethods 仍是 Session 
 | `delete` | `AgentIndex::delete(id)`（S5c，crate 内部使用）：准入闸门、关闭、`SessionStore::delete_session`、遗忘 |
 | `SessionConfig` | 下方的 Rust 结构体 |
 | 错误 | 带 A.6 错误码的 `SessionsError`，由 `AgentError` 映射：`Closed` → `session_closed`，`UnknownBranch` → `branch_missing`，`BranchEnded` → `branch_ended`，`Reloading` → `reloading`，`InvalidInput` → `rejected`，其余 → `failed` |
+
+以下是绑定摘录，不是完整的 DTO 定义。请求与回复的全部字段见 [agents/sessions.rs](../../../../crates/dim-app-server/src/agents/sessions.rs)。
 
 ```rust
 pub struct LaunchRequest {

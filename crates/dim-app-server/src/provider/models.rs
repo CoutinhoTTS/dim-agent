@@ -571,26 +571,47 @@ impl ProviderService {
             db.run(move |connection| {
                 Ok((|| -> Result<_, ProviderError> {
                     let tx = connection.transaction()?;
-                    let record = read_model_record(&tx, &provider_id, &model_id)?.ok_or(ProviderError::NotFound)?;
+                    let record = read_model_record(&tx, &provider_id, &model_id)?
+                        .ok_or(ProviderError::NotFound)?;
                     let (catalog, version, body, static_record) = match record {
                         PersistedProviderRecord::Static(mut record) => {
-                            if record.version != expected_version { return Err(ProviderError::Conflict("Provider version changed; reread before retrying".into())); }
-                            let catalog = static_catalog(&bundled,&provider_id,&record,available);
-                            record.version = record.version.checked_add(1).ok_or(ProviderError::Failed)?;
+                            if record.version != expected_version {
+                                return Err(ProviderError::Conflict(
+                                    "Provider version changed; reread before retrying".into(),
+                                ));
+                            }
+                            let catalog =
+                                static_catalog(&bundled, &provider_id, &record, available);
+                            let next = record
+                                .version
+                                .checked_add(1)
+                                .ok_or(ProviderError::Failed)?;
+                            record.version = next;
                             let body = serde_json::to_string(&record)?;
-                            (catalog,record.version,body,Some(record))
+                            (catalog, record.version, body, Some(record))
                         }
                         PersistedProviderRecord::Managed(mut record) => {
-                            record.check_write(&provider_id,expected_version,account.as_ref().ok_or(ProviderError::AuthRequired)?)?;
+                            let account = account.as_ref().ok_or(ProviderError::AuthRequired)?;
+                            record.check_write(&provider_id, expected_version, account)?;
                             let catalog = record.catalog(&bundled);
-                            record.version = record.version.checked_add(1).ok_or(ProviderError::Failed)?;
+                            let next = record
+                                .version
+                                .checked_add(1)
+                                .ok_or(ProviderError::Failed)?;
+                            record.version = next;
                             let body = serde_json::to_string(&record)?;
-                            (catalog,record.version,body,None)
+                            (catalog, record.version, body, None)
                         }
                     };
-                    let model = catalog.models.iter().find(|m|m.id==model_id).ok_or(ProviderError::NotFound)?;
-                    if model.unavailable_reason.is_some() { return Err(ProviderError::Unsupported("Unavailable model enablement cannot be changed".into())); }
-                    let first_configuration = persistence::write_header(&tx,&provider_id,version,&body)?;
+                    let found = catalog.models.iter().find(|m| m.id == model_id);
+                    let model = found.ok_or(ProviderError::NotFound)?;
+                    if model.unavailable_reason.is_some() {
+                        return Err(ProviderError::Unsupported(
+                            "Unavailable model enablement cannot be changed".into(),
+                        ));
+                    }
+                    let first_configuration =
+                        persistence::write_header(&tx, &provider_id, version, &body)?;
                     if let Some(record) = &static_record && first_configuration {
                         persistence::admit_base(&tx,&provider_id,record,&bundled)?;
                     }

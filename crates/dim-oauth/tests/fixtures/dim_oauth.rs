@@ -1,7 +1,10 @@
 //! A local account service and relay for DimOAuth flows: device and browser
 //! token grants, refresh rotation, userinfo, the `type=dim` model list, usage
 //! and a streaming chat endpoint.
-#![allow(dead_code)]
+#![expect(
+    dead_code,
+    reason = "the fixture serves every account flow; each test uses part of it"
+)]
 use axum::{
     Json, Router,
     body::Body,

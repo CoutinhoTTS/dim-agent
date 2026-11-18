@@ -1,11 +1,12 @@
 use crate::{
     ProcessActivity, ProcessHold, ServerConfig,
     agent_records::AgentRecords,
-    protocol::{AgentInfo, SessionOrigin},
+    protocol::{AgentInfo, CreateWorktree, SessionOrigin},
     settings::SettingsService,
     storage::{PreparedWorktree, SessionMetadataService, SessionStore, SqliteStorage, Store},
+    worktrees::{CreatedWorktree, ManagedWorktrees, WorktreeError},
 };
-use dim_agent_capabilities::host::ModelSelectionHost;
+use dim_agent_capabilities::{host::ModelSelectionHost, methods::RpcError};
 use dim_agent_runtime::{
     AGENT_GROUP, Agent, AgentBuilder, AgentError, CollaborationRole, InUse, Modules, Names,
     NoConfig, QueryFilter, QueryOperand, QueryOutput, QueryPage, QueryPick, QuerySelect, QuerySpec,
@@ -25,6 +26,7 @@ use rutis_loader::resolve::Build;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     num::NonZeroU64,
+    path::Path,
     sync::{
         Arc, Mutex, OnceLock,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
@@ -39,6 +41,19 @@ pub(crate) const SESSION_NAMESPACE: &str = "session.agent";
 
 mod sessions;
 pub use sessions::{SessionPermissions, SessionRef, SessionsError};
+
+pub(crate) enum CreateSessionError {
+    Agent(AgentError),
+    Worktree(WorktreeError),
+}
+impl From<CreateSessionError> for RpcError {
+    fn from(error: CreateSessionError) -> Self {
+        match error {
+            CreateSessionError::Agent(error) => error.into(),
+            CreateSessionError::Worktree(error) => error.rpc(),
+        }
+    }
+}
 
 /// The member a `sessions.launch` caller's title is stored under in a stored
 /// `SessionConfig`, whose serde form is camelCase.
@@ -1376,6 +1391,59 @@ impl AgentIndex {
                 step.await
             }),
         )
+    }
+
+    pub(crate) async fn create_with_worktree(
+        &self,
+        host: &AgentHost,
+        mut config: SessionConfig,
+        version: u32,
+        origin: SessionOrigin,
+        request: Option<CreateWorktree>,
+        cancel: &CancellationToken,
+    ) -> Result<(Session, Option<CreatedWorktree>), CreateSessionError> {
+        let managed = self.ctx.get().and_then(|ctx| ctx.get::<ManagedWorktrees>());
+        let worktree = match (request, &managed) {
+            (Some(request), Some(managed)) => Some(
+                managed
+                    .create(
+                        Path::new(&config.cwd),
+                        request.base.as_deref(),
+                        request.branch.as_deref(),
+                        cancel,
+                    )
+                    .await
+                    .map_err(CreateSessionError::Worktree)?,
+            ),
+            (Some(_), None) => {
+                return Err(CreateSessionError::Worktree(WorktreeError::Unavailable(
+                    "This daemon has no managed worktree root".into(),
+                )));
+            }
+            (None, _) => None,
+        };
+        if let Some(created) = &worktree {
+            config.cwd = created.prepared.subtree.to_string_lossy().into_owned();
+        }
+        match self
+            .create_session(
+                host,
+                config,
+                version,
+                None,
+                origin,
+                worktree.as_ref().map(|created| created.prepared.clone()),
+            )
+            .await
+        {
+            Ok(session) => Ok((session, worktree)),
+            Err(error) => {
+                if let (Some(created), Some(managed)) = (&worktree, &managed) {
+                    managed.discard(created, cancel).await;
+                }
+                Err(CreateSessionError::Agent(error))
+            }
+        }
     }
 
     /// A new Session of `host` under protocol `version`, recorded for it.

@@ -681,13 +681,24 @@ impl DynPlugin for PromptSourcesBranchPlugin {
                 }
                 loop {
                     let mut changed = Vec::new();
-                    for target in targets(CHECKED).into_iter().filter(|target| target.source != LANGUAGE) {
+                    for target in targets(CHECKED)
+                        .into_iter()
+                        .filter(|target| target.source != LANGUAGE)
+                    {
                         let current = tokio::select! {
                             _ = lifecycle.cancelled() => return,
                             loaded = host.load(target.clone(), lifecycle.child_token()) => loaded,
                         };
                         match current {
-                            Ok(current) if current.as_ref() != prompts.borrow().entries.get(&(target.source.clone(), target.scope.clone())) => changed.push((target, current)),
+                            Ok(current)
+                                if current.as_ref()
+                                    != prompts
+                                        .borrow()
+                                        .entries
+                                        .get(&(target.source.clone(), target.scope.clone())) =>
+                            {
+                                changed.push((target, current));
+                            }
                             Ok(_) => {}
                             Err(error) => tracing::warn!(%error, source = target.source, "prompt source was not checked"),
                         }
@@ -700,7 +711,13 @@ impl DynPlugin for PromptSourcesBranchPlugin {
                     };
                     let mut language_changed = false;
                     match current {
-                        Ok(current) if current.as_ref() != prompts.borrow().entries.get(&(target.source.clone(), target.scope.clone())) => {
+                        Ok(current)
+                            if current.as_ref()
+                                != prompts
+                                    .borrow()
+                                    .entries
+                                    .get(&(target.source.clone(), target.scope.clone())) =>
+                        {
                             changed.push((target, current));
                             language_changed = true;
                         }
@@ -711,9 +728,11 @@ impl DynPlugin for PromptSourcesBranchPlugin {
                     if !changed.is_empty() {
                         tokio::select! {
                             _ = lifecycle.cancelled() => return,
-                            result = configure.clone().configure_loaded(None, changed) => if let Err(error) = result {
-                                tracing::warn!(%error, "changed prompt sources were not adopted");
-                            },
+                            result = configure.clone().configure_loaded(None, changed) => {
+                                if let Err(error) = result {
+                                    tracing::warn!(%error, "changed prompt sources were not adopted");
+                                }
+                            }
                         }
                     }
                     drop(_language_gate);

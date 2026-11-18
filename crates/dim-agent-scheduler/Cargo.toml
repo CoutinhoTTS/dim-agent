@@ -39,3 +39,6 @@ tokio.workspace = true
 serde_json.workspace = true
 dim-client.workspace = true
 futures-util.workspace = true
+
+[lints]
+workspace = true

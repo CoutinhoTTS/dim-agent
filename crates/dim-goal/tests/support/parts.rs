@@ -2,7 +2,10 @@
 //! TimelineTree, SessionMethods, ToolRegistry, PromptGuide, storage and
 //! Settings, with only the parts Goal needs. The facts the Loop, InputQueue
 //! and TimelineTree would write are the test's.
-#![allow(dead_code)]
+#![expect(
+    dead_code,
+    reason = "each test binary uses the helpers it needs; the rest are shared"
+)]
 use dim_agent_capabilities::host::ToolExecutionContext;
 use dim_agent_capabilities::methods::RpcError;
 use dim_agent_capabilities::timeline_tree::TreeCommands;

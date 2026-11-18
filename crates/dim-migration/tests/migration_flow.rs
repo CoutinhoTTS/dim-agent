@@ -2002,7 +2002,10 @@ async fn migration_converts_providers_and_selections_through_the_provider_mappin
     fn legacy_model(id: &str) -> Value {
         json!({"modelId":id,"displayName":id,"status":"active","capabilities":dim_agent_types::ModelCapabilities::with_limits(128_000, 16_384),"metadata":{"raw":{"inputTokenLimit":128_000,"outputTokenLimit":16_384}}})
     }
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one parameter per column the legacy provider row writes"
+    )]
     fn insert_legacy_row(
         db: &Connection,
         id: &str,

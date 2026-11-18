@@ -1,0 +1,380 @@
+#!/usr/bin/env python3
+"""Build and train a native Windows executable, then reorder its functions.
+
+An initial build needs a new output directory. Resume and measurement reuse
+the existing directory. Cargo's executable is left unchanged; only
+an independently smoke-tested relink is published as OUTPUT/dimcode.exe.
+"""
+
+import argparse
+import json
+import os
+from pathlib import Path
+import platform
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+
+from layout import select, unique_functions, validate_sizes
+import pe
+from replay import file_hash as digest, load_baseline, measure_artifacts, original_inputs, preserve_cargo, run_link, save_baseline
+from samples import read as read_sample
+from toolchain import rustc as rustc_command
+
+HERE = Path(__file__).resolve().parent
+REPO = HERE.parent.parent
+TARGETS = {"AMD64": "x86_64-pc-windows-msvc", "ARM64": "aarch64-pc-windows-msvc"}
+
+
+def split_response(text):
+    arguments = []
+    index = 0
+    while index < len(text):
+        while index < len(text) and text[index] in " \t\r\n":
+            index += 1
+        if index >= len(text):
+            break
+        argument = []
+        quoted = False
+        while index < len(text) and (quoted or text[index] not in " \t\r\n"):
+            if text[index] == "\\":
+                count = 0
+                while index < len(text) and text[index] == "\\":
+                    count += 1
+                    index += 1
+                if index < len(text) and text[index] == '"':
+                    argument.append("\\" * (count // 2))
+                    if count % 2:
+                        argument.append('"')
+                        index += 1
+                else:
+                    argument.append("\\" * count)
+            elif text[index] == '"':
+                quoted = not quoted
+                index += 1
+            else:
+                argument.append(text[index])
+                index += 1
+        arguments.append("".join(argument))
+    return arguments
+
+
+def expand(arguments):
+    result = []
+    for argument in arguments:
+        if argument.startswith("@"):
+            result.extend(expand(split_response(Path(argument[1:]).read_text())))
+        else:
+            result.append(argument)
+    return result
+
+
+def option(arguments, name, value):
+    prefix = name.lower()
+    found = False
+    for index, argument in enumerate(arguments):
+        if argument.lower().startswith(prefix):
+            arguments[index] = f"{name}{value}"
+            found = True
+    return found
+
+
+def quote(argument):
+    return subprocess.list2cmdline([argument])
+
+
+def relink(record, output, order_file=None, map_path=None, strict=False, preserve_pdb=False):
+    arguments = record["arguments"].copy()
+    if not any(argument.lower().startswith("/out:") for argument in arguments):
+        raise RuntimeError("the captured link has no /OUT option")
+    if output != Path(record["output"]):
+        option(arguments, "/OUT:", str(output))
+    if record.get("pdb") and not preserve_pdb:
+        option(arguments, "/PDB:", str(output.with_suffix(".pdb")))
+    if map_path and not option(arguments, "/lldmap:", str(map_path)):
+        arguments.append(f"/lldmap:{map_path}")
+    if order_file:
+        arguments.append(f"/order:@{order_file}")
+    if strict:
+        arguments.append("/WX")
+    response = output.with_name(output.name + ".rsp")
+    response.write_text("\n".join(quote(argument) for argument in arguments) + "\n")
+    env = dict(os.environ, PATH=record["path"])
+    for key, value in record["linkEnv"].items():
+        if value is None:
+            env.pop(key, None)
+        else:
+            env[key] = value
+    try:
+        with original_inputs(record["inputs"]):
+            result = run_link([*record["compiler"], "@" + str(response)], cwd=record["cwd"], env=env)
+    finally:
+        response.unlink(missing_ok=True)
+    if result.returncode:
+        raise RuntimeError(f"native link failed ({result.returncode}):\n{result.stderr}")
+    return result.stderr
+
+
+def capture(arguments):
+    root = Path(os.environ["DIM_LAYOUT_CAPTURE"])
+    linker = json.loads(os.environ["DIM_LAYOUT_LINKER"])
+    arguments = list(arguments)
+    if not any(argument.lower() == "/brepro" for argument in expand(arguments)):
+        arguments.append("/Brepro")
+    arguments.extend(["/demangle:no", f"/lldmap:{root / 'baseline.map'}"])
+    expanded = expand(arguments)
+    inputs = []
+    output = None
+    pdb = None
+    for index, argument in enumerate(expanded):
+        lower = argument.lower()
+        if lower.startswith("/out:"):
+            output = str(Path(argument[5:]).resolve())
+        elif lower.startswith("/pdb:"):
+            pdb = str(Path(argument[5:]).resolve())
+        elif lower.startswith("/natvis:") or (
+                not argument.startswith(("/", "-")) and Path(argument).is_file()):
+            source = argument[8:] if lower.startswith("/natvis:") else argument
+            target = root / f"{index}-{Path(source).name}"
+            shutil.copy2(source, target)
+            inputs.append({"file": str(target), "source": str(Path(source).absolute()),
+                           "sha256": digest(target)})
+    if not output or (root / "link.json").exists():
+        raise RuntimeError("expected exactly one final executable link")
+    record = {"arguments": expanded, "cwd": os.getcwd(), "compiler": linker,
+              "output": output, "pdb": pdb, "inputs": inputs, "path": os.environ["PATH"],
+              "linkEnv": {key: os.environ.get(key) for key in ("LIB", "INCLUDE")}}
+    (root / "link.json").write_text(json.dumps(record, indent=2) + "\n")
+    subprocess.run([*linker, *arguments], check=True)
+
+
+def replay_baseline(record, work, output):
+    baseline = output / "baseline.exe"
+    baseline_map = output / "baseline.map"
+    shutil.copyfile(work / "baseline.map", baseline_map)
+    cargo = Path(record["output"])
+    backup = work / "cargo.exe"
+    backup_pdb = work / "cargo.pdb"
+    pdb = Path(record["pdb"]) if record.get("pdb") else cargo.with_suffix(".pdb")
+    with preserve_cargo([(cargo, backup), (pdb, backup_pdb)]):
+        relink(record, cargo, preserve_pdb=True)
+        original_hash, replay_hash = digest(backup), digest(cargo)
+        if replay_hash != original_hash:
+            shutil.copyfile(backup, output / "cargo-original.exe")
+            shutil.copyfile(cargo, output / "baseline-replay.exe")
+            if backup_pdb.exists():
+                shutil.copyfile(backup_pdb, output / "cargo-original.pdb")
+                shutil.copyfile(pdb, output / "baseline-replay.pdb")
+            (output / "replay.json").write_text(json.dumps(record, indent=2) + "\n")
+            raise RuntimeError(
+                "captured inputs did not reproduce Cargo's executable: "
+                f"original={original_hash}, replay={replay_hash}")
+        shutil.copyfile(cargo, baseline)
+    return baseline, baseline_map
+
+
+def ordered_link(record, output, order_file, map_path):
+    diagnostics = relink(record, output, order_file, map_path, strict=False)
+    names = order_file.read_text(encoding="utf-8", errors="surrogateescape").splitlines()
+    omitted = set()
+    for line in diagnostics.splitlines():
+        if not line.strip():
+            continue
+        match = re.fullmatch(r"(?:lld-link|rust-lld): warning: .*: missing symbol: (\S+) \[LNK4037\]", line)
+        if not match or match[1] not in names:
+            raise RuntimeError(f"unexpected native link diagnostic:\n{diagnostics}")
+        omitted.add(match[1])
+    if omitted:
+        order_file.write_text("\n".join(name for name in names if name not in omitted) + "\n",
+                              encoding="utf-8", errors="surrogateescape")
+        relink(record, output, order_file, map_path, strict=True)
+    return sorted(omitted)
+
+
+def order(baseline_map, profiles, output):
+    functions, _, input_sections = pe.symbols(baseline_map)
+    page_size, footprints = None, []
+    for profile in profiles:
+        observed, pages = read_sample(profile)
+        if page_size is None:
+            page_size = observed
+        elif observed != page_size:
+            raise ValueError("training samples use different page sizes")
+        footprints.append(pages)
+    names = select(unique_functions(functions), footprints, page_size)
+    sections = {name: section for (_, _, name), section in zip(functions, input_sections)}
+    names.sort(key=sections.__getitem__)
+    output.write_text("\n".join(names) + "\n", encoding="utf-8", errors="surrogateescape")
+    return {"pages": [len(pages) for pages in footprints], "pageSize": page_size,
+            "orderedFunctions": len(names), "functionSymbols": len(functions)}
+
+
+def validate(baseline_map, candidate_map, order_file):
+    before, before_sizes, _ = pe.symbols(baseline_map)
+    after, after_sizes, _ = pe.symbols(candidate_map)
+    return validate_sizes(before, after, before_sizes, after_sizes,
+                          order_file.read_text(encoding="utf-8", errors="surrogateescape").splitlines(),
+                          "PE function")
+
+
+def lld_linker(host):
+    found = shutil.which("lld-link")
+    if found:
+        return [found]
+    for root in (
+        Path(os.environ.get("ProgramFiles", r"C:\Program Files")),
+        Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")),
+    ):
+        for candidate in root.glob("Microsoft Visual Studio/2022/*/VC/Tools/Llvm/*/bin/lld-link.exe"):
+            return [str(candidate)]
+        for candidate in root.glob("LLVM/bin/lld-link.exe"):
+            return [str(candidate)]
+    rustc = rustc_command()
+    sysroot = Path(subprocess.check_output(
+        [rustc, "--print", "sysroot"], cwd=REPO, text=True).strip())
+    for candidate in (
+        sysroot / "lib/rustlib" / host / "bin" / "rust-lld.exe",
+        sysroot / "bin" / "rust-lld.exe",
+    ):
+        if candidate.is_file():
+            return [str(candidate), "-flavor", "link"]
+    return None
+
+
+def msvc_linker(host):
+    key = "CARGO_TARGET_" + host.upper().replace("-", "_") + "_LINKER"
+    if os.environ.get(key):
+        return os.environ[key]
+    compiler = shutil.which("cl")
+    if compiler:
+        candidate = Path(compiler).with_name("link.exe")
+        if candidate.is_file():
+            return str(candidate)
+    return None
+
+
+def cargo_link(work, host, jobs):
+    linker = lld_linker(host)
+    if not linker:
+        raise RuntimeError("lld-link or the Rust toolchain's rust-lld is required")
+    version = subprocess.run([*linker, "--version"], capture_output=True, text=True)
+    if version.returncode or "LLD" not in version.stdout + version.stderr:
+        raise RuntimeError(f"cannot use the LLD linker at {linker[0]}")
+    wrapper = work / "linker.exe"
+    rustc = rustc_command()
+    host_linker = msvc_linker(host)
+    if not host_linker:
+        raise RuntimeError("the MSVC link.exe is required to compile the capture wrapper")
+    subprocess.run(
+        [rustc, "--edition", "2021", "-O", "-Clinker=" + host_linker,
+         str(HERE / "link_capture.rs"), "-o", str(wrapper)],
+        check=True)
+    env = dict(
+        os.environ,
+        RUSTC=rustc,
+        DIM_LAYOUT_CAPTURE=str(work),
+        DIM_LAYOUT_LINKER=json.dumps(linker),
+        DIM_LAYOUT_PYTHON=sys.executable,
+        DIM_LAYOUT_SCRIPT=str(HERE / "build_windows.py"),
+        **{"CARGO_TARGET_" + host.upper().replace("-", "_") + "_LINKER": host_linker},
+    )
+    if host == "aarch64-pc-windows-msvc":
+        env.setdefault("CC_aarch64_pc_windows_msvc", "clang-cl")
+        env.setdefault("CXX_aarch64_pc_windows_msvc", "clang-cl")
+    command = [
+        "cargo", "rustc", "--release", "--locked", "-p", "dimcode", "--bin", "dimcode",
+        "--jobs", str(jobs), "--target", host,
+    ]
+    command.extend(["--", f"-Clinker={wrapper}"])
+    subprocess.run(command, cwd=REPO, env=env, check=True)
+    record = json.loads((work / "link.json").read_text())
+    record["rustc"] = subprocess.check_output([rustc, "-vV"], cwd=REPO, text=True)
+    return record
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--target", choices=sorted(TARGETS.values()))
+    parser.add_argument("--jobs", type=int, default=2)
+    parser.add_argument("--pairs", type=int, default=2)
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--resume", action="store_true", help="retry sorting a verified baseline in OUTPUT")
+    mode.add_argument("--measure-only", action="store_true", help="measure the validated executables in OUTPUT")
+    args = parser.parse_args()
+    machine = platform.machine().upper()
+    if sys.platform != "win32" or machine not in TARGETS:
+        parser.error("requires native Windows x86-64 or ARM64")
+    host = TARGETS[machine]
+    if args.target and args.target != host:
+        parser.error("only the native Windows architecture is supported")
+    if args.jobs < 1:
+        parser.error("jobs must be positive")
+    if args.pairs < 1:
+        parser.error("pairs must be positive")
+    if os.environ.get("CARGO_BUILD_TARGET") not in (None, host):
+        parser.error("cross compilation is not supported")
+    output = args.output.resolve()
+    if output.exists() and not (args.resume or args.measure_only):
+        parser.error("the output directory must not exist")
+    from train_windows import measure, train
+
+    with tempfile.TemporaryDirectory(prefix="dim-layout-") as temporary:
+        work = Path(temporary)
+        baseline = output / "baseline.exe"
+        executable = output / "dimcode.exe"
+        if args.measure_only:
+            measure_artifacts(output, host, baseline, executable,
+                              lambda: measure(baseline, executable, work / "measure", args.pairs))
+            return
+        baseline_map = output / "baseline.map"
+        if args.resume:
+            if executable.exists():
+                parser.error("the output already contains a validated executable")
+            record = load_baseline(output, baseline, host)
+        else:
+            archive = output / "capture"
+            archive.mkdir(parents=True)
+            capture = Path(tempfile.mkdtemp(dir=archive))
+            record = cargo_link(capture, host, args.jobs)
+            replay_baseline(record, capture, output)
+            save_baseline(output, baseline, record, host, REPO)
+        profiles = train(baseline, work / "training", sampling=True)
+        for profile in profiles:
+            shutil.copyfile(profile, output / profile.name)
+        order_file = output / "symbols.order"
+        measurement = order(baseline_map, profiles, order_file)
+        candidate = output / "candidate.exe"
+        candidate_map = output / "candidate.map"
+        measurement["unorderableSymbols"] = ordered_link(
+            record, candidate, order_file, candidate_map)
+        measurement["orderedFunctions"] = len(order_file.read_text(
+            encoding="utf-8", errors="surrogateescape").splitlines())
+        measurement.update(validate(baseline_map, candidate_map, order_file))
+        train(candidate, work / "acceptance", sampling=False)
+        manifest = {
+            "platform": "windows", "target": host, "pageSize": pe_page_size(),
+            "lto": record["lto"], "source": record["source"], "dirty": record["dirty"],
+            "rustc": record["rustc"],
+            "baselineSha256": digest(baseline),
+            "candidateSha256": digest(candidate),
+            "orderSha256": digest(order_file),
+            "inputs": record["inputs"], "training": measurement,
+        }
+        (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+        candidate.rename(output / "dimcode.exe")
+        print(f"Validated executable: {output / 'dimcode.exe'}", flush=True)
+
+
+def pe_page_size():
+    import win32
+    return win32.page_size()
+
+
+if __name__ == "__main__":
+    if sys.argv[1:2] == ["--capture"]:
+        capture(sys.argv[2:])
+    else:
+        main()

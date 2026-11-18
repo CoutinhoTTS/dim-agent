@@ -629,7 +629,10 @@ async fn configure(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one parameter per piece of the turn the interactive loop drives"
+)]
 async fn wait_turn(
     client: &mut Client,
     session_id: &str,

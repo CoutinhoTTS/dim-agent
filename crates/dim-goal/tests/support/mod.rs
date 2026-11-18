@@ -1,5 +1,7 @@
-// Every test binary uses the helpers it needs; the rest are shared.
-#![allow(dead_code)]
+#![expect(
+    dead_code,
+    reason = "each test binary uses the helpers it needs; the rest are shared"
+)]
 pub mod parts;
 pub mod texts;
 use dim_agent_capabilities::{

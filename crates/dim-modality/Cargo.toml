@@ -36,3 +36,6 @@ serde_json.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 tokio-tungstenite.workspace = true
 uuid.workspace = true
+
+[lints]
+workspace = true
