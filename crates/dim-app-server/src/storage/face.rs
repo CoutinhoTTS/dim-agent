@@ -100,7 +100,10 @@ impl Store {
     ) -> impl Future<Output = Result<Option<String>>> {
         self.0.session_config_text(session_id)
     }
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the face mirrors the owner's signature, one parameter per field the Session is created with"
+    )]
     pub fn create_owned_session(
         &self,
         session_id: &str,

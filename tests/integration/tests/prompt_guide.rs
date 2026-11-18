@@ -1886,7 +1886,6 @@ impl DynPlugin for BranchGuideProbe {
 
 /// The agent the branch-probe flows run on: the workspace tools, a branch
 /// probe on every branch, and the store the flow hands it.
-#[allow(clippy::too_many_arguments)]
 async fn branch_probe_agent(
     dirs: &Dirs,
     store: Option<Arc<HoldingStore>>,

@@ -2452,7 +2452,10 @@ pub(super) async fn execute(
 /// the background, or stops it, and returns the result with the exit it
 /// observed, when it observed one. The caller declares the call's effect
 /// (session boundary A.6).
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one parameter per input a process run carries"
+)]
 async fn run_process(
     tools: &WorkspaceTools,
     branch: &Branch,

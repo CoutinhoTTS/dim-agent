@@ -6746,7 +6746,6 @@ impl App {
 
     /// Commits owed this frame and the live rows (unclosed streaming tail,
     /// the reasoning preview and running tools, in transcript order).
-    #[allow(clippy::type_complexity)]
     fn transcript(&mut self, width: usize) -> (Vec<String>, Vec<(Block, Placement)>, Vec<String>) {
         self.tail_thoughts.clear();
         if !self.arm_window() {

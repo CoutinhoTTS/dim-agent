@@ -799,7 +799,6 @@ async fn release_owned_runs(shared: &Shared, job: &Job) -> Result<(), SchedulerE
 /// write is based on, so an admission bound and the write share one read.
 /// `make` builds the saved input from the job it replaces, if any. Returns
 /// the saved job and the one it replaced.
-#[allow(clippy::too_many_arguments)]
 async fn save_job(
     shared: &Shared,
     cancel: &CancellationToken,

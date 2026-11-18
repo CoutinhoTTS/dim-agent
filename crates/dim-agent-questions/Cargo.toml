@@ -18,3 +18,6 @@ tokio-util.workspace = true
 [dev-dependencies]
 dim-agent-runtime = { workspace = true, features = ["testing"] }
 futures-util.workspace = true
+
+[lints]
+workspace = true

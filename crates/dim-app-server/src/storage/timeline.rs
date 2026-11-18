@@ -1300,7 +1300,10 @@ impl SessionStore {
     pub async fn session_config_text(&self, session_id: &str) -> Result<Option<String>> {
         self.timeline.session_config_text(session_id).await
     }
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one parameter per field the owned Session is created with"
+    )]
     pub async fn create_owned_session(
         &self,
         session_id: &str,

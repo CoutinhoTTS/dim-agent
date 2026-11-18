@@ -41,3 +41,6 @@ tokio-util.workspace = true
 uuid.workspace = true
 # The relay's socket is tungstenite 0.24, through aimux, not the workspace's 0.29.
 tungstenite = { version = "0.24", default-features = false }
+
+[lints]
+workspace = true

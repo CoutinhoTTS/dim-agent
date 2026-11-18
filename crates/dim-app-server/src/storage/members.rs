@@ -575,7 +575,6 @@ pub(super) fn event(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn event_profiles(
     connection: &Connection,
     session: &str,
@@ -1063,7 +1062,6 @@ pub(super) struct Candidates<'a> {
     pub positions: Vec<u64>,
 }
 
-#[cfg_attr(feature = "testing", allow(clippy::too_many_arguments))]
 pub(super) fn candidates<'a>(
     connection: &Connection,
     scope: &TimelineReadScope,
@@ -1105,7 +1103,13 @@ pub(super) fn candidates<'a>(
     )
 }
 
-#[cfg_attr(feature = "testing", allow(clippy::too_many_arguments))]
+#[cfg_attr(
+    feature = "testing",
+    expect(
+        clippy::too_many_arguments,
+        reason = "the `testing` feature adds the statistics collector as an eighth parameter"
+    )
+)]
 fn candidates_for<'a>(
     connection: &Connection,
     scope: &TimelineReadScope,

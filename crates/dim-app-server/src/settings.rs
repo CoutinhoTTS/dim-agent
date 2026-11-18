@@ -433,7 +433,10 @@ impl SettingsService {
     }
     /// CAS on the revision. `check` sees the current and the new document
     /// under the same lease (or native transaction) as the revision check.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one parameter per part of the compare-and-set write"
+    )]
     async fn replace<F: Format>(
         self: &Arc<Self>,
         format: Arc<F>,
