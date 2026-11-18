@@ -285,9 +285,16 @@ impl Dispatcher {
                 return;
             }
             let event = tokio::select! {
-                _=stop.cancelled()=>return,
-                _=changed.changed()=>continue,
-                value=reader.next()=>match value{Ok(Some(e))=>e,Ok(None)=>return,Err(error)=>{self.fail(error);return;}},
+                _ = stop.cancelled() => return,
+                _ = changed.changed() => continue,
+                value = reader.next() => match value {
+                    Ok(Some(event)) => event,
+                    Ok(None) => return,
+                    Err(error) => {
+                        self.fail(error);
+                        return;
+                    }
+                },
             };
             let committed = Committed {
                 name: committed_name(self.instance),
