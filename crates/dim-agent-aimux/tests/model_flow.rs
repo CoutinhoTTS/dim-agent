@@ -971,35 +971,6 @@ async fn before_committed_request_controls_model_settings_and_tool_admission() {
     }).await.unwrap();
 }
 
-/// The environment override is one process-wide value, and cargo runs the
-/// tests of this binary at once, so a test that sets it or asserts the value it
-/// replaces holds this lock for its whole body.
-static IDENTITY: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-/// Holds [`IDENTITY`] for one test and withdraws the override afterwards, even
-/// when an assertion fails in between.
-struct Identity {
-    _lock: tokio::sync::MutexGuard<'static, ()>,
-}
-
-impl Identity {
-    async fn take() -> Self {
-        let guard = IDENTITY.lock().await;
-        dim_agent_aimux::set_environment_user_agent(None);
-        Self { _lock: guard }
-    }
-
-    fn set(&self, user_agent: &str) {
-        dim_agent_aimux::set_environment_user_agent(Some(user_agent.to_owned()));
-    }
-}
-
-impl Drop for Identity {
-    fn drop(&mut self) {
-        dim_agent_aimux::set_environment_user_agent(None);
-    }
-}
-
 static RECORDING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Holds the process recorder for one test, resets it and removes the file

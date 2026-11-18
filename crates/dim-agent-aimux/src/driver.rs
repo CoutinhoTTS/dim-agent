@@ -1,4 +1,4 @@
-use crate::{identity, request, stream};
+use crate::{identity::ModelIdentity, request, stream};
 use aimux_core::{AbortSignal, AiMuxError, language_model::LanguageModel};
 use aimux_provider_utils::{
     Fetch, FetchError, FetchFunction, FetchRequest, FetchResponse, HeaderMapOpt, ProxyConfig,
@@ -328,8 +328,8 @@ fn no_credential(header: &str) -> HeaderMapOpt {
 /// `ai-sdk-provider-utils/<v>`), which a per-call User-Agent would replace.
 /// A per-call header still wins over this layer, so a Provider that names its
 /// own User-Agent keeps it.
-fn provider_headers(credential: Option<&str>) -> HeaderMapOpt {
-    let mut headers = identity::headers();
+fn provider_headers(identity: &ModelIdentity, credential: Option<&str>) -> HeaderMapOpt {
+    let mut headers = identity.headers();
     if let Some(credential) = credential {
         headers.extend(no_credential(credential));
     }
@@ -342,6 +342,7 @@ fn build_model(
     protocol: &ModelProtocol,
     preset: Option<&str>,
     model_id: &str,
+    identity: &ModelIdentity,
     fetch: FetchFunction,
 ) -> Result<Arc<dyn LanguageModel>, AiMuxError> {
     if matches!(connection, ModelConnection::Local) {
@@ -357,7 +358,7 @@ fn build_model(
         if impersonated {
             credential.map_or_else(HeaderMapOpt::new, no_credential)
         } else {
-            provider_headers(credential)
+            provider_headers(identity, credential)
         }
     };
     let base_url = base_url.to_owned();
@@ -504,6 +505,9 @@ fn build_model(
 
 pub(crate) struct AimuxDriver {
     files: Option<Arc<dim_agent_capabilities::host::SessionFiles>>,
+    /// The identity this driver's model requests carry, owned by the Aimux
+    /// part that built it.
+    identity: ModelIdentity,
     /// The transport every connection without a proxy reuses, so their
     /// clients share one connection pool.
     transport: ReqwestFetch,
@@ -517,10 +521,12 @@ impl AimuxDriver {
     pub fn with_files(
         generation: CancellationToken,
         files: Option<Arc<dim_agent_capabilities::host::SessionFiles>>,
+        identity: ModelIdentity,
     ) -> Result<Arc<Self>, HostError> {
         let transport = ReqwestFetch::default();
         Ok(Arc::new(Self {
             files,
+            identity,
             fetch: Arc::new(DimFetch {
                 transport: transport.clone(),
                 timeout: None,
@@ -687,6 +693,7 @@ impl ModelDriver for AimuxDriver {
                 &protocol,
                 preset,
                 &request.model_id,
+                &self.identity,
                 fetch,
             ) {
                 Ok(model) => model,

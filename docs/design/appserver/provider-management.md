@@ -60,10 +60,14 @@ continues to exclude private account implementations and credentials from this r
 
 ### Model request identity
 
-Every model request carries dim's own identity in the Provider layer of
-[`build_model`](../../../crates/dim-agent-aimux/src/driver.rs): the header layer
-whose User-Agent the library's own `ai-sdk-<package>/<version>` and
-`ai-sdk-provider-utils/<version>` parts follow. The default is
+Every chat model request dim builds through
+[`build_model`](../../../crates/dim-agent-aimux/src/driver.rs) carries dim's own
+identity in its Provider layer: the header layer whose User-Agent the library's
+own `ai-sdk-<package>/<version>` and `ai-sdk-provider-utils/<version>` parts
+follow. Media requests do not carry it yet: the media adapters build their
+providers directly
+([`dim-modality-aimux`](../../../crates/dim-modality-aimux/src/media.rs)) and
+send none of the three headers. The default is
 `User-Agent: dim/<version> DimAgent/<version>`, `X-Title: DimCode` and
 `HTTP-Referer: https://dimagent.com/`. `dim` comes first because a gateway that
 identifies its client by the first token names the entry Dim publishes;
@@ -77,26 +81,28 @@ that Provider alone. Precedence, highest first: an impersonating path, a
 Provider's own header, the override below, the built-in default, the library's
 parts.
 
-Two paths speak as another client instead, and carry no identity of dim's own:
+Two paths keep their own headers instead of this default identity:
 
-- The managed `openai-codex` Provider sends the Codex CLI's per-call
-  `User-Agent`, `originator` and `OAI-Product-Sku`. Its token request sends the
-  Codex CLI's `User-Agent` and `originator`. Being overridden is not enough for
-  this one: `X-Title` and `HTTP-Referer` would still reach the wire from the
-  provider layer, so its model is built without the identity headers at all.
+- The managed `openai-codex` Provider sends the Codex CLI's own per-call
+  `User-Agent`, `originator` and `OAI-Product-Sku` instead of this identity. Its
+  token request sends the Codex CLI's `User-Agent` and `originator`. Being
+  overridden is not enough for this one: `X-Title` and `HTTP-Referer` would
+  still reach the wire from the provider layer, so its model is built without
+  the identity headers at all.
   Its version is the Codex release the request must appear to come from; the
   numbers in `provider.rs` and `managed_oauth.rs` change together.
-- The Dim OAuth relay keeps its own per-call `DimCode/<version>`, `X-Title` and
-  `HTTP-Referer` ([`dim-oauth`](../../../crates/dim-oauth/src/http.rs)); its wire
-  does not change.
+- The Dim OAuth relay keeps its own `DimCode/<version>`, `X-Title` and
+  `HTTP-Referer` headers instead of the default identity
+  ([`dim-oauth`](../../../crates/dim-oauth/src/http.rs)); its wire does not
+  change.
 
 The managed Grok Provider (`grok-build`) does not impersonate: it sends the
 default identity like any other Provider.
 
 | Override | Where | Notes |
 | --- | --- | --- |
-| `provider` settings source, `userAgent` | `provider.json`, user scope, owned by the Provider part | Replaces the whole User-Agent string; 1–512 printable ASCII characters, refused by the source's schema otherwise |
-| `DIM_USER_AGENT` | Environment of the process that hosts models | The same validation; wins over the setting. Read once when that process mounts its model host, so a value a request cannot carry fails startup |
+| `provider` settings source, `userAgent` | `provider.json`, user scope, owned by the Provider part | Replaces the whole User-Agent string; 1–512 printable ASCII characters, refused by the source's schema otherwise. The part serving one App Server holds it, so two Servers in one process keep theirs apart |
+| `DIM_USER_AGENT` | Environment of the process that hosts models | The same validation; wins over the setting. Read once by the App Server command line, beside the other startup inputs, and passed to each Server it builds, so a value a request cannot carry fails that process's startup |
 
 `DIM_USER_AGENT` wins over the setting because it is set for one run of the
 process that hosts models, as environment overrides do elsewhere. A shared
@@ -104,6 +110,8 @@ daemon keeps the environment it was started with, so a new value takes effect
 when the daemon restarts.
 
 Both go in the provider layer too, so the library's parts still follow them.
+The settings row serializes its read and its publish, so an older document
+cannot replace a newer one.
 There is no short mode: a value the request cannot carry is refused rather than
 trimmed.
 

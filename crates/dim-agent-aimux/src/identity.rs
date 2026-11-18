@@ -4,15 +4,22 @@
 //! The headers go in the provider layer of [`crate::driver`], so the library's
 //! own User-Agent parts follow them, and a provider's per-call header still
 //! overrides them.
+//!
+//! The override belongs to the Aimux part that serves one App Server, not to
+//! the process: two embedded App Servers, each with its own product home, hold
+//! their own, and one closing leaves the other's in place.
 use aimux_provider_utils::HeaderMapOpt;
-use std::{collections::HashMap, sync::RwLock};
+use std::{
+    collections::HashMap,
+    sync::{Arc, RwLock},
+};
 
 /// The title dim sends with its requests.
 const X_TITLE: &str = "DimCode";
 /// The attribution URL dim sends with its requests.
 const REFERER: &str = "https://dimagent.com/";
-/// The variable that replaces the built-in User-Agent for one process.
-const ENVIRONMENT_VARIABLE: &str = "DIM_USER_AGENT";
+/// The variable a host process reads once and passes to its model hosts.
+pub const ENVIRONMENT_VARIABLE: &str = "DIM_USER_AGENT";
 /// The longest override [`checked_user_agent`] accepts.
 const MAX_USER_AGENT: usize = 512;
 
@@ -31,86 +38,108 @@ fn checked_user_agent(value: &str) -> Option<String> {
     .then(|| value.to_owned())
 }
 
-/// The overrides in effect, highest scope first.
+/// A value a request cannot carry, with the message the startup inputs use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidUserAgent;
+
+impl std::fmt::Display for InvalidUserAgent {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("DIM_USER_AGENT must be 1 to 512 printable ASCII characters")
+    }
+}
+
+impl std::error::Error for InvalidUserAgent {}
+
+/// The overrides in effect for one model host, highest scope first.
 #[derive(Default)]
-struct Overrides {
-    /// [`ENVIRONMENT_VARIABLE`], read by the process that hosts models.
+struct Identity {
+    /// [`ENVIRONMENT_VARIABLE`]'s value, as the host process read it.
     environment: Option<String>,
     /// The `provider` settings source's `userAgent`.
     configured: Option<String>,
 }
 
-/// Process state, as a model connection carries no owner that could hold it:
-/// the driver builds a model per call and the App Server holds the setting.
-static OVERRIDES: RwLock<Overrides> = RwLock::new(Overrides {
-    environment: None,
-    configured: None,
-});
-
-/// The User-Agent every model request carries: the environment's override,
-/// then the configured one, then [`default_user_agent`].
-pub fn user_agent() -> String {
-    let overrides = OVERRIDES.read().unwrap_or_else(|error| error.into_inner());
-    overrides
-        .environment
-        .clone()
-        .or_else(|| overrides.configured.clone())
-        .unwrap_or_else(default_user_agent)
-}
-
-/// The three headers dim adds at the provider layer.
-pub fn headers() -> HeaderMapOpt {
-    HashMap::from([
-        ("user-agent".into(), Some(user_agent())),
-        ("x-title".into(), Some(X_TITLE.into())),
-        ("http-referer".into(), Some(REFERER.into())),
-    ])
-}
-
-/// Publishes [`ENVIRONMENT_VARIABLE`], which wins over a configured value.
-pub fn set_environment_user_agent(user_agent: Option<String>) {
-    let mut overrides = OVERRIDES.write().unwrap_or_else(|error| error.into_inner());
-    overrides.environment = user_agent;
-}
-
-/// Publishes the configured override: the `provider` settings source's
-/// `userAgent`.
-pub fn set_configured_user_agent(user_agent: Option<String>) {
-    let mut overrides = OVERRIDES.write().unwrap_or_else(|error| error.into_inner());
-    overrides.configured = user_agent;
-}
-
-/// [`ENVIRONMENT_VARIABLE`]'s value, as where the model host mounts reads it.
-/// `None` when it is unset; a value a request cannot carry is refused in the
-/// words the startup inputs use.
-fn environment_user_agent(variable: Option<String>) -> Result<Option<String>, &'static str> {
-    let Some(value) = variable else {
-        return Ok(None);
-    };
-    checked_user_agent(&value)
-        .map(Some)
-        .ok_or("DIM_USER_AGENT must be 1 to 512 printable ASCII characters")
-}
-
-/// Reads [`ENVIRONMENT_VARIABLE`] where the model host mounts and publishes
-/// it when it is set. A value a request cannot carry fails that mount, which
-/// fails the startup of the process that hosts models.
-///
-/// The environment does not change under a running process, so a row that
-/// remounts reads the same value. An unset variable publishes nothing: a host
-/// that sets the identity in code keeps what it set.
-pub fn install_environment() -> Result<(), &'static str> {
-    let variable = match std::env::var(ENVIRONMENT_VARIABLE) {
-        Ok(value) => Some(value),
-        Err(std::env::VarError::NotPresent) => None,
-        Err(std::env::VarError::NotUnicode(_)) => {
-            return Err("DIM_USER_AGENT must be valid Unicode");
-        }
-    };
-    if let Some(user_agent) = environment_user_agent(variable)? {
-        set_environment_user_agent(Some(user_agent));
+impl Identity {
+    /// The User-Agent every model request carries: the environment's
+    /// override, then the configured one, then [`default_user_agent`].
+    fn user_agent(&self) -> String {
+        self.environment
+            .clone()
+            .or_else(|| self.configured.clone())
+            .unwrap_or_else(default_user_agent)
     }
-    Ok(())
+}
+
+/// The identity one Aimux part serves: the value its own model requests carry,
+/// shared with the `provider` settings row that writes the configured
+/// override.
+///
+/// Cloning shares the state, so a row holds the same one the driver reads.
+#[derive(Clone)]
+pub struct ModelIdentity(Arc<RwLock<Identity>>);
+
+impl Default for ModelIdentity {
+    /// The built-in identity: no override from the environment or a setting.
+    fn default() -> Self {
+        Self::new(None)
+    }
+}
+
+impl ModelIdentity {
+    /// The identity with `environment`'s override, if the host process set
+    /// one.
+    pub fn new(environment: Option<String>) -> Self {
+        Self(Arc::new(RwLock::new(Identity {
+            environment,
+            configured: None,
+        })))
+    }
+
+    /// The User-Agent every model request through this part carries.
+    pub fn user_agent(&self) -> String {
+        self.0
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .user_agent()
+    }
+
+    /// The three headers this part adds at the provider layer.
+    pub(crate) fn headers(&self) -> HeaderMapOpt {
+        HashMap::from([
+            ("user-agent".into(), Some(self.user_agent())),
+            ("x-title".into(), Some(X_TITLE.into())),
+            ("http-referer".into(), Some(REFERER.into())),
+        ])
+    }
+
+    /// Publishes the configured override: the `provider` settings source's
+    /// `userAgent`. The environment's value still wins over it.
+    pub fn set_configured(&self, user_agent: Option<String>) {
+        self.0
+            .write()
+            .unwrap_or_else(|error| error.into_inner())
+            .configured = user_agent;
+    }
+}
+
+impl std::fmt::Debug for ModelIdentity {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ModelIdentity")
+            .field("user_agent", &self.user_agent())
+            .finish()
+    }
+}
+
+/// [`ENVIRONMENT_VARIABLE`]'s value as a host process reads it: `None` when it
+/// is unset, and a value a request cannot carry is refused before the process
+/// serves anything.
+pub fn environment_user_agent(
+    variable: Option<String>,
+) -> Result<Option<String>, InvalidUserAgent> {
+    variable
+        .map(|value| checked_user_agent(&value).ok_or(InvalidUserAgent))
+        .transpose()
 }
 
 #[cfg(test)]
@@ -129,8 +158,8 @@ mod tests {
         for refused in ["", "dim\u{e9}", "a\nb", "a\u{7f}b"] {
             let error = environment_user_agent(Some(refused.into())).unwrap_err();
             assert!(
-                error.contains("DIM_USER_AGENT") && !error.contains(refused) || refused.is_empty(),
-                "{refused:?}: the refusal names no value: {error}"
+                !error.to_string().contains(refused) || refused.is_empty(),
+                "{refused:?}: the refusal names no value"
             );
         }
     }
@@ -152,5 +181,25 @@ mod tests {
             None,
             "a value one over the limit is refused, not trimmed"
         );
+    }
+
+    #[test]
+    fn the_environment_override_wins_over_the_configured_one() {
+        let identity = ModelIdentity::new(Some("private-client/7".into()));
+        identity.set_configured(Some("gateway-client/9".into()));
+        assert_eq!(identity.user_agent(), "private-client/7");
+        assert_eq!(identity.headers()["x-title"].as_deref(), Some("DimCode"));
+
+        identity.set_configured(None);
+        assert_eq!(identity.user_agent(), "private-client/7");
+
+        // Two parts of one process hold their own override.
+        let other = ModelIdentity::new(None);
+        other.set_configured(Some("first-client/1".into()));
+        assert_eq!(other.user_agent(), "first-client/1");
+        assert_eq!(identity.user_agent(), "private-client/7");
+        other.set_configured(None);
+        assert_eq!(other.user_agent(), default_user_agent());
+        assert_eq!(identity.user_agent(), "private-client/7");
     }
 }

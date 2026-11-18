@@ -10620,3 +10620,6 @@ async fn measure_on_demand_provider_reads() {
 
 #[path = "provider_flow/indexed.rs"]
 mod indexed;
+
+#[path = "provider_flow/identity.rs"]
+mod identity;

@@ -16,7 +16,6 @@ fn bedrock_frame(name: &str, payload: Value) -> Vec<u8> {
 
 #[tokio::test]
 async fn bedrock_native_auth_stream_and_continuation_are_first_party() {
-    let _identity = Identity::take().await;
     use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
 
     let credentials: AwsCredentials = serde_json::from_value(json!({
@@ -213,13 +212,15 @@ async fn bedrock_native_auth_stream_and_continuation_are_first_party() {
             ])
         );
         assert_eq!(sent[1].headers["x-tenant"], "tenant-A");
-        assert_eq!(
-            sent[1].headers["user-agent"],
-            format!(
-                "{} ai-sdk-amazon-bedrock/5.0.100 ai-sdk-provider-utils/5.0.51 ai-sdk-amazon-bedrock/5.0.100",
-                expected_default_user_agent()
-            ),
-            "bedrock carries dim's identity before the library's parts"
+        assert_identity_before(
+            sent[1].headers["user-agent"].to_str().unwrap(),
+            "bedrock",
+            &[
+                "ai-sdk-amazon-bedrock/",
+                "ai-sdk-provider-utils/",
+                "ai-sdk-amazon-bedrock/",
+            ],
+            3,
         );
         assert_eq!(sent[1].headers["x-title"], "DimCode");
         assert_eq!(sent[1].headers["http-referer"], "https://dimagent.com/");
@@ -1129,9 +1130,13 @@ async fn codex_request_profile_is_isolated_to_responses() {
     assert_eq!(sent_headers["chatgpt-account-id"], "account-1");
     assert_eq!(sent_headers["oai-product-sku"], "codex");
     assert_eq!(sent_headers["originator"], "codex-tui");
-    assert_eq!(
-        sent_headers["user-agent"],
-        "dimagent/0.144.1 ai-sdk-provider-utils/5.0.53"
+    let user_agent = sent_headers["user-agent"].to_str().unwrap();
+    let library = user_agent
+        .strip_prefix("dimagent/0.144.1 ai-sdk-provider-utils/")
+        .unwrap_or_else(|| panic!("the connection's own User-Agent leads: {user_agent}"));
+    assert!(
+        !library.is_empty(),
+        "The library part carries a version: {user_agent}"
     );
     assert_eq!(body["store"], false);
     assert!(body.get("max_output_tokens").is_none());
@@ -5069,46 +5074,64 @@ fn http_connection(
     })
 }
 
+/// The library parts after dim's identity: each package by name and any
+/// version the dependency ships, so a routine bump does not fail the test.
+fn assert_identity_before(user_agent: &str, kind: &str, packages: &[&str], library_parts: usize) {
+    let Some(library) = user_agent
+        .strip_prefix(&expected_default_user_agent())
+        .and_then(|rest| rest.strip_prefix(' '))
+    else {
+        panic!("{kind}: dim's identity does not lead: {user_agent}");
+    };
+    let parts: Vec<&str> = library.split(' ').collect();
+    assert_eq!(parts.len(), library_parts, "{kind}: {user_agent}");
+    for (part, package) in parts.iter().zip(packages) {
+        let Some(version) = part.strip_prefix(package) else {
+            panic!("{kind}: {part} is not {package}");
+        };
+        assert!(!version.is_empty(), "{kind}: {part} carries a version");
+    }
+}
+
 /// Every protocol carries dim's own identity in the provider layer, so the
 /// library's parts follow it.
 #[tokio::test]
 async fn every_protocol_sends_dims_own_identity_before_the_library_parts() {
-    let _identity = Identity::take().await;
-    for (kind, protocol, library) in [
+    for (kind, protocol, packages) in [
         (
             "openai-chat",
             ModelProtocol::OpenaiChat,
-            "ai-sdk-openai/4.0.83 ai-sdk-provider-utils/5.0.53",
+            &["ai-sdk-openai/", "ai-sdk-provider-utils/"],
         ),
         (
             "openai-compatible",
             ModelProtocol::OpenaiCompatible,
-            "ai-sdk-openai-compatible/3.0.62 ai-sdk-provider-utils/5.0.53",
+            &["ai-sdk-openai-compatible/", "ai-sdk-provider-utils/"],
         ),
         (
             "openai-responses",
             ModelProtocol::OpenaiResponses,
-            "ai-sdk-openai/4.0.83 ai-sdk-provider-utils/5.0.53",
+            &["ai-sdk-openai/", "ai-sdk-provider-utils/"],
         ),
         (
             "openai-compatible",
             ModelProtocol::Xai,
-            "ai-sdk-openai-compatible/3.0.62 ai-sdk-provider-utils/5.0.53",
+            &["ai-sdk-openai-compatible/", "ai-sdk-provider-utils/"],
         ),
         (
             "openai-responses",
             ModelProtocol::XaiResponses,
-            "ai-sdk-xai/5.0.12 ai-sdk-provider-utils/5.0.51",
+            &["ai-sdk-xai/", "ai-sdk-provider-utils/"],
         ),
         (
             "anthropic",
             ModelProtocol::Anthropic,
-            "ai-sdk-anthropic/4.0.71 ai-sdk-provider-utils/5.0.53",
+            &["ai-sdk-anthropic/", "ai-sdk-provider-utils/"],
         ),
         (
             "gemini",
             ModelProtocol::Gemini,
-            "ai-sdk-google/4.0.87 ai-sdk-provider-utils/5.0.53",
+            &["ai-sdk-google/", "ai-sdk-provider-utils/"],
         ),
     ] {
         let server = NativeServer::start(kind).await;
@@ -5122,10 +5145,11 @@ async fn every_protocol_sends_dims_own_identity_before_the_library_parts() {
         )
         .await;
         let headers = sent_headers(&server);
-        assert_eq!(
-            headers["user-agent"],
-            format!("{} {library}", expected_default_user_agent()),
-            "{kind}"
+        assert_identity_before(
+            headers["user-agent"].to_str().unwrap(),
+            kind,
+            packages,
+            packages.len(),
         );
         assert_eq!(headers["x-title"], "DimCode", "{kind}");
         assert_eq!(headers["http-referer"], "https://dimagent.com/", "{kind}");
@@ -5138,7 +5162,6 @@ async fn every_protocol_sends_dims_own_identity_before_the_library_parts() {
 /// identity.
 #[tokio::test]
 async fn a_preset_connection_sends_dims_own_identity() {
-    let _identity = Identity::take().await;
     let server = NativeServer::start("openai-compatible").await;
     let root = rutis::Ctx::root().unwrap();
     root.plugin(AimuxPlugin::default()).await.unwrap();
@@ -5193,11 +5216,13 @@ async fn the_openai_codex_preset_carries_no_identity_of_dims_own() {
     let headers = sent_headers(&server);
     assert_eq!(headers["originator"], "codex-tui");
     assert_eq!(headers["oai-product-sku"], "codex");
-    assert_eq!(
-        headers["user-agent"],
-        format!("{codex} ai-sdk-provider-utils/5.0.53"),
-        "only the library part follows the impersonated User-Agent"
-    );
+    let user_agent = headers["user-agent"].to_str().unwrap();
+    let library = user_agent
+        .strip_prefix(&format!("{codex} ai-sdk-provider-utils/"))
+        .unwrap_or_else(|| {
+            panic!("only the library part follows the impersonated User-Agent: {user_agent}")
+        });
+    assert!(!library.is_empty(), "{user_agent}");
     for absent in ["x-title", "http-referer"] {
         assert!(!headers.contains_key(absent), "{absent} must not leak");
     }
@@ -5242,11 +5267,15 @@ async fn a_providers_own_headers_win_over_dims_identity() {
 /// follow it.
 #[tokio::test]
 async fn an_override_replaces_the_user_agent_and_keeps_the_library_parts() {
-    let identity = Identity::take().await;
     let server = NativeServer::start("openai-compatible").await;
     let root = rutis::Ctx::root().unwrap();
-    identity.set("private-client/7");
-    root.plugin(AimuxPlugin::default()).await.unwrap();
+    root.plugin(
+        AimuxPlugin::default().with_identity(dim_agent_aimux::ModelIdentity::new(Some(
+            "private-client/7".into(),
+        ))),
+    )
+    .await
+    .unwrap();
     let host = root.get::<ModelHost>().unwrap();
     send_over(
         &host,
@@ -5260,10 +5289,21 @@ async fn an_override_replaces_the_user_agent_and_keeps_the_library_parts() {
     )
     .await;
     let headers = sent_headers(&server);
-    assert_eq!(
-        headers["user-agent"],
-        "private-client/7 ai-sdk-openai-compatible/3.0.62 ai-sdk-provider-utils/5.0.53"
-    );
+    let user_agent = headers["user-agent"].to_str().unwrap();
+    let library = user_agent
+        .strip_prefix("private-client/7 ")
+        .unwrap_or_else(|| panic!("the override leads: {user_agent}"));
+    let parts: Vec<&str> = library.split(' ').collect();
+    assert_eq!(parts.len(), 2, "{user_agent}");
+    for (part, package) in parts
+        .iter()
+        .zip(["ai-sdk-openai-compatible/", "ai-sdk-provider-utils/"])
+    {
+        let version = part
+            .strip_prefix(package)
+            .unwrap_or_else(|| panic!("{part} is not {package}"));
+        assert!(!version.is_empty(), "{user_agent}");
+    }
     assert_eq!(
         headers["x-title"], "DimCode",
         "an override leaves the other identity headers alone"

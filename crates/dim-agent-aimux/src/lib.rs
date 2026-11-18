@@ -12,9 +12,14 @@ mod stream;
 pub use models::AimuxModels;
 pub use plugin::{AimuxPlugin, ConfiguredModelPlugin, ConfiguredModelsPlugin};
 
-/// The override of dim's identity on its model requests: the App Server's
-/// `provider` settings source publishes it, and the driver reads it.
-pub use identity::{set_configured_user_agent, set_environment_user_agent, user_agent};
+/// The identity one Aimux part puts on its model requests. The host process
+/// passes `DIM_USER_AGENT`'s value to [`ModelIdentity::new`]; the App Server's
+/// `provider` settings source writes the configured override into the same
+/// value.
+pub use identity::{ModelIdentity, environment_user_agent};
+
+/// The variable a host process reads once and passes to its model hosts.
+pub use identity::ENVIRONMENT_VARIABLE;
 
 /// The transport a media call uses, with the connection facts and redirect
 /// policy a chat call to the same model gets.

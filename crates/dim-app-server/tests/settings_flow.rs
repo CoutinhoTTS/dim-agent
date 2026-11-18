@@ -23,31 +23,6 @@ use serde_json::{Value as Json, json};
 use std::{fs, sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
 
-/// The environment override is one process-wide value, and cargo runs the
-/// tests of this binary at once, so a test that sets it or asserts the value it
-/// replaces holds this lock for its whole body.
-static IDENTITY: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-/// Holds [`IDENTITY`] for one test and withdraws the override afterwards, even
-/// when an assertion fails in between.
-struct Identity {
-    _lock: tokio::sync::MutexGuard<'static, ()>,
-}
-
-impl Identity {
-    async fn take() -> Self {
-        let guard = IDENTITY.lock().await;
-        dim_agent_aimux::set_environment_user_agent(None);
-        Self { _lock: guard }
-    }
-}
-
-impl Drop for Identity {
-    fn drop(&mut self) {
-        dim_agent_aimux::set_environment_user_agent(None);
-    }
-}
-
 /// Settings keyed from the App Server's catalog, mounted on a test root.
 fn settings_part(home_root: usize, project_roots: Vec<usize>) -> SettingsPlugin {
     let catalog = dim_app_server::catalog();
@@ -186,7 +161,6 @@ fn change(scope: SettingsScope, revision: &str) -> impl Fn(&SettingsChanged) -> 
 
 #[tokio::test]
 async fn server_reload_preserves_project_root_identity_and_settings() {
-    let _identity = Identity::take().await;
     use dim_agent_capabilities::defaults;
     use dim_agent_runtime::{AgentBuilder, AgentConfig, Feature, SessionConfig};
     use dim_app_server::{ServerConfig, mcp::config::McpSettings, serve};
@@ -1329,22 +1303,28 @@ async fn model_log_switch_starts_the_recorder() {
     fs::remove_dir_all(home).unwrap();
 }
 
-/// The `provider` source holds the model request User-Agent override: it is
-/// published when written, refused by its schema when a request could not
-/// carry the value, and withdrawn with the plugin that registers it.
+/// The `provider` source holds the model request User-Agent override. The
+/// source is declared and listed, a written document publishes on the Aimux
+/// part serving the same root, clearing it falls back, and the schema refuses
+/// a value a request cannot carry.
 #[tokio::test]
 async fn provider_identity_override_comes_from_the_settings_source() {
-    let _identity = Identity::take().await;
     let home = home();
     let root = Ctx::root().unwrap();
+    let identity = dim_agent_aimux::ModelIdentity::new(None);
     let views = vec![
         root.plugin(FileStoragePlugin::new(vec![home.clone()])),
         root.plugin(settings_part(0, vec![])),
+        root.plugin(ManagementMethodsPlugin::typed(&dim_app_server::catalog()).unwrap()),
         root.plugin(
-            dim_app_server::provider_settings::ProviderSettingsPlugin::new(&Names::copy(
-                &dim_app_server::catalog(),
-                &Build::default(),
-            ))
+            SettingsMethodsPlugin::new(&Names::copy(&dim_app_server::catalog(), &Build::default()))
+                .unwrap(),
+        ),
+        root.plugin(
+            dim_app_server::provider_settings::ProviderSettingsPlugin::new(
+                &Names::copy(&dim_app_server::catalog(), &Build::default()),
+                identity.clone(),
+            )
             .unwrap(),
         ),
     ];
@@ -1353,6 +1333,17 @@ async fn provider_identity_override_comes_from_the_settings_source() {
         .await
         .unwrap();
     let settings = root.get::<SettingsService>().unwrap();
+    let listed = client_call(&root, "settings.sources", json!({}))
+        .await
+        .unwrap();
+    let provider = listed["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|source| source["source"] == "provider")
+        .unwrap_or_else(|| panic!("settings.sources lists provider: {listed}"));
+    assert_eq!(provider["scopes"], json!(["user"]));
+    assert_eq!(provider["userOnly"], json!(["/userAgent"]));
     let current = settings
         .read_declared("provider", SettingsScope::User, &cancel)
         .await
@@ -1374,17 +1365,43 @@ async fn provider_identity_override_comes_from_the_settings_source() {
         .await
         .unwrap();
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while dim_agent_aimux::user_agent() != "private-client/7" {
+    while identity.user_agent() != "private-client/7" {
         assert!(
             std::time::Instant::now() < deadline,
             "the override was not published: {}",
-            dim_agent_aimux::user_agent()
+            identity.user_agent()
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let current = settings
+        .read_declared("provider", SettingsScope::User, &cancel)
+        .await
+        .unwrap();
+    settings
+        .update_declared(
+            "provider",
+            SettingsScope::User,
+            &current.revision,
+            json!({}),
+            Writer::Client,
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while identity.user_agent().starts_with("private-client/") {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "clearing the setting falls back to the built-in identity: {}",
+            identity.user_agent()
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     for refused in [
         json!({"userAgent": ""}),
         json!({"userAgent": "a".repeat(513)}),
+        json!({"userAgent": "a\nb"}),
+        json!({"userAgent": "dím/1.0"}),
     ] {
         let current = settings
             .read_declared("provider", SettingsScope::User, &cancel)

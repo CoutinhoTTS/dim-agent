@@ -8529,9 +8529,9 @@
       "to": "dim_agent_aimux::identity",
       "references": [
         "mod identity",
-        "use identity::set_configured_user_agent",
-        "use identity::set_environment_user_agent",
-        "use identity::user_agent"
+        "use identity::ENVIRONMENT_VARIABLE",
+        "use identity::ModelIdentity",
+        "use identity::environment_user_agent"
       ]
     },
     {
@@ -8685,8 +8685,8 @@
       "from": "dim_agent_aimux::driver",
       "to": "dim_agent_aimux::identity",
       "references": [
-        "path identity::headers",
-        "use crate::identity"
+        "path ModelIdentity",
+        "use crate::identity::ModelIdentity"
       ]
     },
     {
@@ -8761,6 +8761,7 @@
       "from": "dim_agent_aimux::identity::tests",
       "to": "dim_agent_aimux::identity",
       "references": [
+        "path ModelIdentity::new",
         "path environment_user_agent"
       ]
     },
@@ -8877,9 +8878,8 @@
       "from": "dim_agent_aimux::plugin",
       "to": "dim_agent_aimux::identity",
       "references": [
-        "path identity",
-        "path identity::install_environment",
-        "use crate::identity"
+        "path ModelIdentity",
+        "use crate::identity::ModelIdentity"
       ]
     },
     {
@@ -23983,6 +23983,13 @@
     },
     {
       "from": "dim_app_server",
+      "to": "dim_agent_aimux::identity",
+      "references": [
+        "path dim_agent_aimux::ModelIdentity::new"
+      ]
+    },
+    {
+      "from": "dim_app_server",
       "to": "dim_agent_aimux::models",
       "references": [
         "path dim_agent_aimux::AimuxModels"
@@ -25714,6 +25721,14 @@
       "references": [
         "path ModelConfigFile",
         "use dim_agent_aimux::config::ModelConfigFile"
+      ]
+    },
+    {
+      "from": "dim_app_server::cli",
+      "to": "dim_agent_aimux::identity",
+      "references": [
+        "path dim_agent_aimux::ENVIRONMENT_VARIABLE",
+        "path dim_agent_aimux::environment_user_agent"
       ]
     },
     {
@@ -32730,7 +32745,8 @@
       "from": "dim_app_server::provider_settings",
       "to": "dim_agent_aimux::identity",
       "references": [
-        "path dim_agent_aimux::set_configured_user_agent"
+        "path ModelIdentity",
+        "use dim_agent_aimux::ModelIdentity"
       ]
     },
     {
