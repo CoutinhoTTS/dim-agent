@@ -1260,6 +1260,45 @@ mod tests {
     }
 
     #[test]
+    fn the_barrier_advances_over_the_settled_prefix_only() {
+        // Three exclusive calls: one step each.
+        let (turn, _, mut waiters) = waiters(&[
+            ToolConcurrency::Exclusive,
+            ToolConcurrency::Exclusive,
+            ToolConcurrency::Exclusive,
+        ]);
+        assert_eq!(turn.head.borrow().clone(), 0);
+        // Step 1 settles first because its call was refused during admission
+        // while step 0 still runs. The prefix does not move.
+        settle(&turn, 1);
+        assert_eq!(
+            *turn.head.borrow(),
+            0,
+            "a later step settling first leaves the prefix alone"
+        );
+        assert!(
+            waiters[1]
+                .wait_for(|head| *head > 0)
+                .now_or_never()
+                .is_none(),
+            "step 1 still waits for step 0"
+        );
+        // Step 0 settles: the prefix runs over steps 0 and 1.
+        settle(&turn, 0);
+        assert_eq!(*turn.head.borrow(), 2);
+        assert!(
+            waiters[1]
+                .wait_for(|head| *head > 0)
+                .now_or_never()
+                .is_some(),
+            "step 1 starts once step 0 settled"
+        );
+        // Step 2 settles last.
+        settle(&turn, 2);
+        assert_eq!(*turn.head.borrow(), 3);
+    }
+
+    #[test]
     fn a_step_advances_the_prefix_only_when_all_of_its_calls_settled() {
         use ToolConcurrency::{Concurrent as C, Exclusive as X};
         // Steps: call 0 alone, calls 1 and 2 together.
