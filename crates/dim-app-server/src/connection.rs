@@ -735,12 +735,23 @@ impl Connection {
                 }
                 (None, None)
             }
-            Call::ModelPreview(_) => {
-                if self.entry != Entry::Local {
+            // The authenticated Web entry creates Sessions, so it may preview the
+            // model its own creation would adopt. The startup channel stays local:
+            // a browser holds no launch inputs, and it carries a connection
+            // admission.
+            Call::ModelPreview(p) => {
+                if self.entry == Entry::Bare {
                     return Err(RpcError::app(
                         -32000,
                         "local_transport_required",
                         "Model preview requires a protected local connection",
+                    ));
+                }
+                if p.startup.is_some() && self.entry != Entry::Local {
+                    return Err(RpcError::app(
+                        -32000,
+                        "local_transport_required",
+                        "Model startup preview requires a protected local connection",
                     ));
                 }
                 (None, None)
