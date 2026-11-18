@@ -541,13 +541,20 @@ const scenarios = [
             ? {text: 'slow answer. '.repeat(80), chunkSize: 8, chunkDelayMs: 120}
             : {text: ANSWER},
       });
-      const terminal = await tui.launch([], {waitForComposer: true});
+      const terminal = await tui.launch([], {
+        // The bar is suppressed inside tmux by default; turn it on to prove the
+        // run draws it and takes it down again.
+        env: {DIM_TERMINAL_PROGRESS: 'on'},
+        waitForComposer: true,
+      });
+      const bar = (code) => `\u001b]9;4;${code}\u0007`;
 
       terminal.send('slow run');
       terminal.key('Enter');
       await terminal.waitFor('working…');
       await terminal.waitFor('esc interrupt');
       await terminal.waitForRaw((raw) => raw.includes('state=working'), {describe: 'the working status'});
+      await terminal.waitForRaw((raw) => raw.includes(bar('3')), {describe: 'the working progress bar'});
 
       terminal.key('Escape');
       await terminal.waitFor('User interrupted the run.');
@@ -556,9 +563,15 @@ const scenarios = [
       await terminal.waitForRaw((raw) => raw.includes('state=idle') || raw.includes('state=error'), {
         describe: 'the settled status',
       });
+      await terminal.waitForRaw((raw) => raw.includes(bar('0')), {describe: 'the removed progress bar'});
 
       await exitWith(terminal);
-      assert(terminal.raw().includes('\u001b]7501;state=clear'), 'leaving clears the status record');
+      const raw = terminal.raw();
+      assert(raw.includes('\u001b]7501;state=clear'), 'leaving clears the status record');
+      assert(raw.includes(bar('3')), 'the run reports its work through OSC 9;4');
+      assert(raw.includes(bar('0')), 'settling and leaving take the progress bar down');
+      const last = raw.lastIndexOf('\u001b]9;4;');
+      assert.equal(raw.slice(last, last + bar('0').length), bar('0'), 'no progress bar remains after exit');
     },
   },
   {

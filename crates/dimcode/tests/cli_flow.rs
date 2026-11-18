@@ -6429,7 +6429,6 @@ fn no_session_daemon(home: &Home, quieted: std::sync::mpsc::Sender<()>) -> threa
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_mcp_without_a_session_reports_the_catalog_only() {
     let home = Home::new();
     let (quieted, quiet_done) = std::sync::mpsc::channel();
