@@ -6465,7 +6465,6 @@ fn tui_mcp_without_a_session_reports_the_catalog_only() {
 /// Session, `/agent` names the sign-in, and a valued `/effort` names the
 /// missing model.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_home_commands_without_a_session_answer_and_send_nothing() {
     for fullscreen in [false, true] {
         let home = Home::new();
