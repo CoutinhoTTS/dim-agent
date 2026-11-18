@@ -9622,7 +9622,7 @@ fn tui_export_and_queue_require_an_open_session() {
             command.arg("--fullscreen");
         }
         let mut terminal = Terminal::launch_tui(command);
-        terminal.until("Git branch");
+        terminal.until("Ask anything...");
         terminal.write(b"/export\r");
         terminal.until("/export needs a session");
         terminal.write(b"/queue\r");

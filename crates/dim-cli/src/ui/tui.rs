@@ -5699,7 +5699,9 @@ impl App {
         let cols = size.0 as usize;
         let width = cols.saturating_sub(2 + MARGIN).max(1);
         let mut frame = Frame::default();
-        if !self.banner_committed {
+        let fullscreen_home_visible =
+            self.fullscreen && self.session_id.is_empty() && self.failure.is_none();
+        if !self.banner_committed && !fullscreen_home_visible {
             let text = banner(
                 cols,
                 &self.palette,
@@ -6435,6 +6437,9 @@ impl App {
             }),
         };
         frame.live = live;
+        if fullscreen_home_visible {
+            frame.home = fullscreen_home(cols, p);
+        }
         self.sync_compaction_details();
         if self.shows_member() {
             self.project_member(cols);
@@ -8780,6 +8785,58 @@ fn pad_block(rows: &[String]) -> String {
         .collect::<Vec<_>>()
         .join("\n")
         + "\n"
+}
+
+fn fullscreen_home(cols: usize, p: &Palette) -> Vec<String> {
+    let cols = cols.saturating_sub(1).min(72);
+    let inner = cols.saturating_sub(6 + MARGIN);
+    if inner < 13 {
+        return vec![fg("DIM", &p.accent)];
+    }
+    let logo = inner >= 56;
+    let text_width = if logo {
+        inner - STARTUP_LOGO_WIDTH - STARTUP_LOGO_GAP
+    } else {
+        inner
+    };
+    let heading = tf(
+        "Welcome to DIM {version}!",
+        &[("version", env!("CARGO_PKG_VERSION"))],
+    );
+    let heading = if width_of(&heading) <= text_width {
+        heading
+    } else {
+        "DIM".to_owned()
+    };
+    let mut rows = vec![heading, String::new()];
+    rows.extend(
+        [
+            (t("Commands"), "Ctrl+O"),
+            (t("Resume"), "/resume"),
+            (t("Models"), "/models"),
+            (t("scrollback"), "/tui"),
+            (t("Exit"), "/exit"),
+        ]
+        .into_iter()
+        .map(|(label, key)| {
+            let (label, cells) = clip(label, text_width - key.len() - 1);
+            format!(
+                "{label}{:padding$}{key}",
+                "",
+                padding = text_width - cells - key.len()
+            )
+        }),
+    );
+    if logo {
+        rows = startup_header(&rows, inner);
+    }
+    boxed(
+        &rows,
+        cols,
+        &|edge| fg(edge, &p.border),
+        &|index, body| fg(body, if index == 0 { &p.accent } else { &p.text }),
+        None,
+    )
 }
 
 fn banner(cols: usize, p: &Palette, branch: &str) -> String {
