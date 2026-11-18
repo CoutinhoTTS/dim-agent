@@ -18615,8 +18615,7 @@
       "from": "dim_agent_capabilities::tool_executor::tests",
       "to": "dim_agent_capabilities::tool_registry",
       "references": [
-        "path ToolConcurrency",
-        "path ToolConcurrency::Exclusive"
+        "path ToolConcurrency"
       ]
     },
     {
