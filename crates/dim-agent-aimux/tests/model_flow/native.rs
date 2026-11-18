@@ -1996,8 +1996,8 @@ async fn a_reset_after_headers_is_a_network_failure() {
     root.shutdown().await.unwrap();
 }
 
-/// A stream-event failure whose code is neither permanent nor transient is not
-/// retried: the event's code decides, not the status the tag synthesizes.
+/// A stream-event failure whose code is neither a condition nor a class label is
+/// not retried: the event's code decides, not the status it carries.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_stream_event_failure_with_an_unknown_code_is_not_retried() {
     let responses = NativeServer::start("openai-responses").await;
@@ -2025,6 +2025,51 @@ async fn a_stream_event_failure_with_an_unknown_code_is_not_retried() {
     );
     responses.close().await;
     root.shutdown().await.unwrap();
+}
+
+/// A gateway's generic `api_error` label beside a 422 does not make the
+/// failure retryable: the status decides, and the request is tried once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_4xx_with_a_server_class_label_is_rejected_once() {
+    let responses = NativeServer::start("openai-responses").await;
+    let agent = model_agent(responses.models(), None).await;
+    let session = agent
+        .create_session(responses.session_config())
+        .await
+        .unwrap();
+    session
+        .submit("gateway-rejected".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
+    let failure = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::ModelOutputEnd(data) => match &data.outcome {
+                ModelOutputOutcome::Failed {
+                    failure: Some(failure),
+                    ..
+                } => Some(failure.clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .expect("a failed model output");
+    assert_eq!(failure.kind, ModelFailureKind::InvalidRequest);
+    assert_eq!(failure.status, Some(422));
+    assert_eq!(
+        failure.reason.as_deref(),
+        Some("the upstream refused the request's shape")
+    );
+    assert_eq!(failure.attempts, 1, "a rejected request is not retried");
+    assert_eq!(
+        responses.endpoint.requests.lock().unwrap().len(),
+        1,
+        "a rejected request is not sent again"
+    );
+    agent.close().await.unwrap();
+    responses.close().await;
 }
 
 async fn respond_native(
@@ -2056,6 +2101,23 @@ async fn respond_native(
                 json!({
                     "error": {
                         "message": format!("fixture {status}"),
+                        "fixture": "raw-body-must-not-cross"
+                    }
+                })
+                .to_string(),
+            ))
+            .unwrap();
+    }
+    if request_text.contains("gateway-rejected") {
+        return Response::builder()
+            .status(422)
+            .header("content-type", "application/json")
+            .header("x-request-id", "request-rejected")
+            .body(Body::from(
+                json!({
+                    "error": {
+                        "type": "api_error",
+                        "message": "the upstream refused the request's shape",
                         "fixture": "raw-body-must-not-cross"
                     }
                 })

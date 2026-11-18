@@ -643,6 +643,124 @@ async fn a_text_block_can_reopen_after_its_end() {
 }
 
 #[test]
+fn a_failure_kind_follows_one_precedence_rule() {
+    use aimux_core::ApiCallErrorOrigin::{HttpResponse as Http, StreamEvent as Event, Transport};
+
+    let cases: [(ApiCallErrorOrigin, Option<u16>, &[&str], ModelFailureKind); 22] = [
+        // A condition code decides at any status.
+        (
+            Http,
+            Some(400),
+            &["context_length_exceeded"],
+            ModelFailureKind::ContextTooLong,
+        ),
+        (
+            Http,
+            Some(400),
+            &["server_busy"],
+            ModelFailureKind::ServerError,
+        ),
+        (
+            Http,
+            Some(503),
+            &["engine_overloaded"],
+            ModelFailureKind::ServerError,
+        ),
+        (
+            Http,
+            Some(401),
+            &["invalid_api_key"],
+            ModelFailureKind::AuthRejected,
+        ),
+        // A non-retried condition wins over a retried one beside it.
+        (
+            Http,
+            Some(429),
+            &["insufficient_quota", "rate_limit_error"],
+            ModelFailureKind::QuotaExhausted,
+        ),
+        // An error status decides once no condition does; a 2xx or 3xx one,
+        // which says nothing about the kind, lets the class label decide.
+        (
+            Http,
+            Some(422),
+            &["api_error"],
+            ModelFailureKind::InvalidRequest,
+        ),
+        (
+            Http,
+            Some(501),
+            &["server_error", "api_error"],
+            ModelFailureKind::InvalidRequest,
+        ),
+        (
+            Http,
+            Some(500),
+            &["invalid_request_error"],
+            ModelFailureKind::ServerError,
+        ),
+        (Http, Some(429), &["timeout"], ModelFailureKind::RateLimited),
+        (Http, Some(422), &[], ModelFailureKind::InvalidRequest),
+        (Http, Some(503), &[], ModelFailureKind::ServerError),
+        (
+            Http,
+            Some(200),
+            &["invalid_request_error"],
+            ModelFailureKind::InvalidRequest,
+        ),
+        (
+            Http,
+            Some(200),
+            &["api_error"],
+            ModelFailureKind::ServerError,
+        ),
+        (Http, Some(200), &[], ModelFailureKind::Unknown),
+        (Http, Some(302), &[], ModelFailureKind::Unknown),
+        // A transport failure is a network failure once no condition decides.
+        (Transport, None, &[], ModelFailureKind::Network),
+        (Transport, None, &["api_error"], ModelFailureKind::Network),
+        (
+            Transport,
+            None,
+            &["rate_limit_exceeded"],
+            ModelFailureKind::RateLimited,
+        ),
+        // A stream event's status is the provider's mapping of the event's own
+        // strings, not a response status, so only its codes decide. The empty
+        // row with 500 is OpenAI's default guess for an unmatched event.
+        (Event, Some(500), &[], ModelFailureKind::Unknown),
+        (
+            Event,
+            Some(400),
+            &["invalid_request_error"],
+            ModelFailureKind::InvalidRequest,
+        ),
+        (
+            Event,
+            Some(200),
+            &["server_error"],
+            ModelFailureKind::ServerError,
+        ),
+        (
+            Event,
+            Some(200),
+            &["unrecognized_failure"],
+            ModelFailureKind::Unknown,
+        ),
+    ];
+    let mismatched: Vec<String> = cases
+        .iter()
+        .filter_map(|(origin, status, codes, want)| {
+            let codes: Vec<Option<&str>> = codes.iter().copied().map(Some).collect();
+            let got = classify_kind(*origin, *status, &codes);
+            (got != *want)
+                .then(|| format!("{origin:?} {status:?} {codes:?}: got {got:?}, want {want:?}"))
+        })
+        .collect();
+    assert!(mismatched.is_empty(), "{mismatched:#?}");
+}
+
+#[test]
 fn a_timeout_is_unknown_and_not_retried() {
     let failure = error(
         AiMuxError::Timeout("model response timed out".into()),

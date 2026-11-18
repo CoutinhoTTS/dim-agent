@@ -9300,6 +9300,7 @@
       "from": "dim_agent_aimux::stream::tests",
       "to": "dim_agent_aimux::stream",
       "references": [
+        "path classify_kind",
         "path convert",
         "path error"
       ]
@@ -9315,6 +9316,21 @@
         "path ModelChunk::Text",
         "path ModelChunk::Usage",
         "path ModelStream"
+      ]
+    },
+    {
+      "from": "dim_agent_aimux::stream::tests",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path ModelFailureKind",
+        "path ModelFailureKind::AuthRejected",
+        "path ModelFailureKind::ContextTooLong",
+        "path ModelFailureKind::InvalidRequest",
+        "path ModelFailureKind::Network",
+        "path ModelFailureKind::QuotaExhausted",
+        "path ModelFailureKind::RateLimited",
+        "path ModelFailureKind::ServerError",
+        "path ModelFailureKind::Unknown"
       ]
     },
     {

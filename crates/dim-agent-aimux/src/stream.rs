@@ -496,77 +496,95 @@ fn source_diagnosis(cause: &ErrorCause) -> Option<String> {
 }
 
 /// The user-facing kind, from the origin, status and normalized codes only.
+///
+/// A condition code decides at any status, a non-retried condition before a
+/// retried one; then a transport failure is `network`; then an error status on
+/// the response decides; then a class label, in practice for a stream event,
+/// whose status is the provider's mapping of the event's own strings.
 fn classify_kind(
     origin: ApiCallErrorOrigin,
     status: Option<u16>,
     codes: &[Option<&str>],
 ) -> ModelFailureKind {
-    if let Some(kind) = codes.iter().flatten().find_map(|code| permanent_kind(code)) {
+    let mut condition = None;
+    let mut label = None;
+    for role in codes.iter().flatten().filter_map(|code| code_role(code)) {
+        match role {
+            CodeRole::Condition(kind) if !kind.retried() => return kind,
+            CodeRole::Condition(kind) => {
+                condition.get_or_insert(kind);
+            }
+            CodeRole::ClassLabel(kind) => {
+                label.get_or_insert(kind);
+            }
+        }
+    }
+    if let Some(kind) = condition {
         return kind;
-    }
-    if origin != ApiCallErrorOrigin::StreamEvent && matches!(status, Some(409 | 501 | 505)) {
-        // These statuses were never retried, whatever code came with them.
-        return ModelFailureKind::InvalidRequest;
-    }
-    let transient = codes.iter().flatten().find_map(|code| transient_kind(code));
-    if origin == ApiCallErrorOrigin::StreamEvent {
-        // A stream-event failure carries the response's status, not the
-        // event's; only the event's code may decide.
-        return transient.unwrap_or(ModelFailureKind::Unknown);
     }
     if origin == ApiCallErrorOrigin::Transport {
         return ModelFailureKind::Network;
     }
-    if let Some(kind) = transient {
+    if origin != ApiCallErrorOrigin::StreamEvent
+        && let Some(kind) = status.and_then(status_kind)
+    {
         return kind;
     }
-    status_kind(status)
+    label.unwrap_or(ModelFailureKind::Unknown)
 }
 
-fn permanent_kind(code: &str) -> Option<ModelFailureKind> {
+/// What a normalized provider string says: a condition the status alone cannot
+/// express, or a label that only restates an HTTP class.
+enum CodeRole {
+    Condition(ModelFailureKind),
+    ClassLabel(ModelFailureKind),
+}
+
+fn code_role(code: &str) -> Option<CodeRole> {
     Some(match code {
         "insufficient_quota" | "quota_exceeded" | "billing_error" | "credit_exhausted" => {
-            ModelFailureKind::QuotaExhausted
+            CodeRole::Condition(ModelFailureKind::QuotaExhausted)
         }
-        "invalid_api_key" | "authentication_error" => ModelFailureKind::AuthRejected,
-        "invalid_request_error" | "max_tokens_exceeded" => ModelFailureKind::InvalidRequest,
-        "context_length_exceeded" | "context_too_long" => ModelFailureKind::ContextTooLong,
+        "invalid_api_key" => CodeRole::Condition(ModelFailureKind::AuthRejected),
+        "context_length_exceeded" | "context_too_long" => {
+            CodeRole::Condition(ModelFailureKind::ContextTooLong)
+        }
         "content_policy_violation" | "safety_block" | "moderation_block" => {
-            ModelFailureKind::ContentFiltered
+            CodeRole::Condition(ModelFailureKind::ContentFiltered)
         }
+        "max_tokens_exceeded" => CodeRole::Condition(ModelFailureKind::InvalidRequest),
+        "rate_limit_exceeded" | "rate_limit_error" => {
+            CodeRole::Condition(ModelFailureKind::RateLimited)
+        }
+        "engine_overloaded" | "model_overloaded" | "server_busy" | "overloaded_error" => {
+            CodeRole::Condition(ModelFailureKind::ServerError)
+        }
+        "api_error" | "server_error" | "service_unavailable" | "request_timeout" | "timeout" => {
+            CodeRole::ClassLabel(ModelFailureKind::ServerError)
+        }
+        "invalid_request_error" => CodeRole::ClassLabel(ModelFailureKind::InvalidRequest),
+        "authentication_error" => CodeRole::ClassLabel(ModelFailureKind::AuthRejected),
         _ => return None,
     })
 }
 
-fn transient_kind(code: &str) -> Option<ModelFailureKind> {
-    Some(match code {
-        "rate_limit_exceeded" | "rate_limit_error" => ModelFailureKind::RateLimited,
-        "request_timeout"
-        | "timeout"
-        | "server_error"
-        | "api_error"
-        | "service_unavailable"
-        | "engine_overloaded"
-        | "model_overloaded"
-        | "server_busy"
-        | "overloaded_error" => ModelFailureKind::ServerError,
+/// The kind an error status decides, or `None` for a status that is not one: a
+/// 2xx response whose body failed to parse or carried a provider-declared
+/// error, and a redirect that could not be followed, say nothing about the
+/// failure's kind.
+fn status_kind(status: u16) -> Option<ModelFailureKind> {
+    Some(match status {
+        401 | 403 => ModelFailureKind::AuthRejected,
+        402 => ModelFailureKind::QuotaExhausted,
+        404 => ModelFailureKind::NotFound,
+        408 => ModelFailureKind::ServerError,
+        413 => ModelFailureKind::ContextTooLong,
+        429 => ModelFailureKind::RateLimited,
+        501 | 505 => ModelFailureKind::InvalidRequest,
+        500..=599 => ModelFailureKind::ServerError,
+        400..=499 => ModelFailureKind::InvalidRequest,
         _ => return None,
     })
-}
-
-fn status_kind(status: Option<u16>) -> ModelFailureKind {
-    match status {
-        Some(401 | 403) => ModelFailureKind::AuthRejected,
-        Some(402) => ModelFailureKind::QuotaExhausted,
-        Some(404) => ModelFailureKind::NotFound,
-        Some(408) => ModelFailureKind::ServerError,
-        Some(413) => ModelFailureKind::ContextTooLong,
-        Some(429) => ModelFailureKind::RateLimited,
-        Some(400 | 409 | 422 | 501 | 505) => ModelFailureKind::InvalidRequest,
-        Some(500..=599) => ModelFailureKind::ServerError,
-        Some(400..=499) => ModelFailureKind::InvalidRequest,
-        _ => ModelFailureKind::Unknown,
-    }
 }
 
 /// The cause chain, outermost first: the failure's own message, then the

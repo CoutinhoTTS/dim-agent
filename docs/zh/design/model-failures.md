@@ -8,16 +8,16 @@ aimux 桥接层是唯一持有提供方结构化错误的地方，因此由它�
 
 | kind | 依据 | 是否重试 | 含义 | 动作 |
 | --- | --- | --- | --- | --- |
-| `network` | `ApiCall`，origin 为 Transport，无 HTTP 状态 | 是 | 无法连接提供方，或连接中断 | 检查网络或代理 |
-| `rate_limited` | 429、限流 code | 是；`Retry-After` 在等待预算内时用作延迟 | 提供方正在限流 | 等待后重试 |
-| `server_error` | 408、除 501 和 505 外的 5xx、server 和 overload code、可重试的流事件 code | 是 | 提供方报告服务器错误 | 稍后重试或换一个模型 |
+| `network` | 在无条件码决定时，origin 为 Transport | 是 | 无法连接提供方，或连接中断 | 检查网络或代理 |
+| `rate_limited` | 429；条件码 `rate_limit_exceeded`、`rate_limit_error` | 是；`Retry-After` 在等待预算内时用作延迟 | 提供方正在限流 | 等待后重试 |
+| `server_error` | 408、除 501 和 505 外的 5xx；类别标签 `api_error`、`server_error`、`service_unavailable`、`request_timeout`、`timeout`；条件码 `engine_overloaded`、`model_overloaded`、`server_busy`、`overloaded_error` | 是 | 提供方报告服务器错误 | 稍后重试或换一个模型 |
 | `malformed_response` | `InvalidResponseData`、`JsonParse`、`InvalidToolInput`、`NoSuchTool`、`TypeValidation`、无法解码的流、始终没有完成的工具参数 | 一次 | 提供方发来的响应 Dim 无法使用 | 重试；若反复出现，换一个模型或检查代理或网关 |
-| `auth_rejected` | 401、403、无效 key/认证 code | 否（保留现有的一次凭据恢复） | 提供方拒绝了凭据 | 重新登录或检查 API key |
-| `quota_exhausted` | 402、配额/计费 code | 否 | 账户没有配额了 | 检查套餐或计费 |
+| `auth_rejected` | 401、403；条件码 `invalid_api_key`；类别标签 `authentication_error` | 否（保留现有的一次凭据恢复） | 提供方拒绝了凭据 | 重新登录或检查 API key |
+| `quota_exhausted` | 402；条件码 `insufficient_quota`、`quota_exceeded`、`billing_error`、`credit_exhausted` | 否 | 账户没有配额了 | 检查套餐或计费 |
 | `not_found` | 404 | 否 | 提供方找不到模型或端点 | 检查模型和提供方 base URL |
-| `context_too_long` | 413、上下文长度 code | 否 | 对话超过模型可接受的长度 | 压缩对话或新开会话 |
-| `content_filtered` | 内容策略 code | 否 | 提供方的内容过滤拦截了响应 | 改写请求 |
-| `invalid_request` | 400、409、422、501、505、其他 4xx、invalid-request code（含 `max_tokens_exceeded`）、`InvalidArgument`、`InvalidPrompt`、`UnsupportedFunctionality` | 否 | 提供方拒绝了请求 | 查看详情 |
+| `context_too_long` | 413；条件码 `context_length_exceeded`、`context_too_long` | 否 | 对话超过模型可接受的长度 | 压缩对话或新开会话 |
+| `content_filtered` | 条件码 `content_policy_violation`、`safety_block`、`moderation_block` | 否 | 提供方的内容过滤拦截了响应 | 改写请求 |
+| `invalid_request` | 400、409、422、501、505、其他 4xx；类别标签 `invalid_request_error`；条件码 `max_tokens_exceeded`；`InvalidArgument`、`InvalidPrompt`、`UnsupportedFunctionality` | 否 | 提供方拒绝了请求 | 查看详情 |
 | `output_limit` | `max_tokens` 停止 | 否 | 模型达到输出上限 | 提高输出 token 上限后重试 |
 | `unknown` | 其他 | 否 | 模型请求失败 | 查看详情 |
 
@@ -25,8 +25,26 @@ HTTP 连接或流的超时以传输 `ApiCall` 到达桥接层，是 `network`。
 
 code 比较前先 trim 并转 ASCII 小写。
 
-- 409、501、505 无论随带什么可重试 code 都是 `invalid_request`；永久 code 仍然决定自己的 kind。
-- 流事件失败携带的是响应的状态而不是事件的状态，因此只由 code 决定：可重试 code 映射为 `rate_limited` 或 `server_error`，永久 code 映射到其 kind，其余为 `unknown`。
+### 提供方字符串的两种角色
+
+字符串出现在哪个字段不影响它说的是什么，取决于字符串本身。Anthropic 的 `type` 常是条件码，OpenAI 的常是类别标签，而网关会在任何状态下转发其中任一种。
+
+- **条件码**（condition code）描述状态本身无法表达的特定条件：`insufficient_quota`、`context_length_exceeded`、`rate_limit_exceeded`、`engine_overloaded`、`invalid_api_key`、`content_policy_violation`、`max_tokens_exceeded`。这是状态不携带的信息，所以由它决定。
+- **类别标签**（class label）只重述一个 HTTP 类别：`api_error`、`server_error`、`invalid_request_error`、`authentication_error`。网关或中转会把这类标签加在它转发的错误上，无论状态是什么。响应带错误状态时，标签只能与之一致或相悖；相悖时，状态才是事实。
+
+### 规则
+
+一条规则决定所有协议的失败：
+
+1. 条件码决定，不重试的条件码优先于重试的，因此 `insufficient_quota` 与 `rate_limit_error` 同时出现时是 `quota_exhausted`；
+2. 否则 origin 为 Transport 的失败是 `network`；
+3. 否则由响应上的错误状态（4xx 或 5xx）决定，按上表；
+4. 否则由类别标签决定，实际上只发生在流事件上；
+5. 否则 kind 为 `unknown`。
+
+4xx、5xx 以外的状态不是错误状态，不说明失败的 kind，第 3 步跳过它，交由类别标签决定。2xx 到达桥接层的情形：成功响应体过大或解析失败，或提供方在 2xx 响应体内报告了错误；3xx 的情形：无法跟随的重定向。
+
+流事件的状态是提供方对事件自身字符串的映射，不是响应状态：事件带显式 4xx 或 5xx 时用它，否则 aimux 由事件的 code 与 type 猜测，提供方什么都匹配不上时得到 500。Dim 无法区分显式状态与猜测值，因此流事件跳过第 3 步，由第 1、4 步决定；读那个状态会把每个无法识别的事件变成可重试的 `server_error`。501 和 505 是 `invalid_request` 出自第 3 步的状态表，不是本规则的例外；同时出现的条件码仍然决定。规则带来两处 kind 变化：只带服务器类别标签的 4xx 不再重试；带 `invalid_request_error` 的 5xx 成为 `server_error` 并被重试。
 
 桥接层产生的每个 `HostError::Failed` 都带事实，包括 `AiMuxError::Timeout`、`InvalidResponseData`/`JsonParse`、`InvalidArgument`/`InvalidPrompt` 和 `UnsupportedFunctionality`。
 
