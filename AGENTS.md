@@ -69,6 +69,7 @@ Every public service is a data face. The contract is [service faces](docs/design
 - Verify that the remaining necessary changes satisfy the user flow, reusing relevant tests first; after integration, check the interfaces and flows actually affected. Reuse evidence that still applies; only expand or repeat verification for new changes, failures or unresolved doubts. Progress is not measured by test count, failure count or number of runs.
 - Automated tests only protect architectural flows, public interfaces, cross-crate contracts, persistence formats, user flows and release artifacts. Assertions about private modules, helper functions, single functions, internal call order or mock configuration belong in the nearest flow test, not in standalone tests.
 - Scenarios involving security, data loss, data migration, protocol compatibility or release artifacts may keep a dedicated test if they cannot be triggered reliably in a flow test.
+- Run terminal-interaction E2E tests for the native TUI through the local tmux suite. Keep those E2E scenarios out of CI. CI may run focused component and protocol tests for TUI behavior, along with line-mode CLI flows. See [Terminal end-to-end suite](docs/architecture/tui-e2e.md).
 
 ### Verification commands
 
@@ -81,6 +82,7 @@ Run at the workspace root:
 | `cargo test --workspace --locked` | Before merging |
 | `cargo run --locked -p xtask -- check` | After changing capabilities, assembly or crate dependencies |
 | `node --test scripts/*.test.mjs` | After changing development or release scripts |
+| `cargo build --locked -p dimcode && node scripts/tui-tmux/run.mjs` | Before and after changing terminal UI behavior; local only, never in CI ([suite](docs/architecture/tui-e2e.md)) |
 
 The full CI sequence, including the ignored CLI profile and Node-backed flow tests, is in `.github/workflows/ci.yml`. Release preparation and draft publication follow [.agents/skills/dim-release/SKILL.md](.agents/skills/dim-release/SKILL.md).
 
