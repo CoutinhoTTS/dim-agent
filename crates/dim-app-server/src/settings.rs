@@ -355,10 +355,12 @@ impl SettingsService {
         }
     }
     fn path<D: BusinessDocument>(&self, scope: SettingsScope) -> Result<FilePath> {
-        match self.sources.get(D::NAMESPACE) {
-            Some(registered) if matches!(registered.value.kind, Kind::Rust(id) if id == TypeId::of::<D>()) =>
-                {}
-            _ => return Err(SettingsError::UnknownSource),
+        let Some(registered) = self.sources.get(D::NAMESPACE) else {
+            return Err(SettingsError::UnknownSource);
+        };
+        let rust = matches!(registered.value.kind, Kind::Rust(id) if id == TypeId::of::<D>());
+        if !rust {
+            return Err(SettingsError::UnknownSource);
         }
         self.locate(D::USER_FILE, D::PROJECT_FILE, scope)
     }
@@ -433,7 +435,10 @@ impl SettingsService {
     }
     /// CAS on the revision. `check` sees the current and the new document
     /// under the same lease (or native transaction) as the revision check.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one parameter per part of the compare-and-set write"
+    )]
     async fn replace<F: Format>(
         self: &Arc<Self>,
         format: Arc<F>,

@@ -23,3 +23,6 @@ uuid.workspace = true
 dim-agent-questions.workspace = true
 dim-agent-runtime = { workspace = true, features = ["testing"] }
 futures-util.workspace = true
+
+[lints]
+workspace = true

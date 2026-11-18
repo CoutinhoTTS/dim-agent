@@ -272,6 +272,7 @@ pub(crate) struct Gateway {
     auth_methods: Vec<crate::auth::Method>,
     authenticating: std::collections::HashSet<String>,
     subagent_events: bool,
+    compaction_updates: bool,
     recovering: bool,
     recovering_sessions: usize,
     outbox: Outbox,
@@ -301,7 +302,10 @@ fn establishment(cwd: &Path, roots: usize) -> Result<(), Error> {
 
 impl Gateway {
     // Keep the owned connection, task and host inputs explicit at composition.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one parameter per handle the gateway is composed from"
+    )]
     pub(crate) fn new(
         rpc: Rpc,
         cx: ConnectionTo<Client>,
@@ -332,6 +336,7 @@ impl Gateway {
             auth_methods: Vec::new(),
             authenticating: std::collections::HashSet::new(),
             subagent_events: false,
+            compaction_updates: false,
             recovering: false,
             recovering_sessions: 0,
             outbox,
@@ -368,7 +373,7 @@ impl Gateway {
         };
         for path in paths {
             if let Some(file_id) = update
-                .pointer(&format!("{path}/fileId"))
+                .pointer(&format!("{path}/_meta/fileId"))
                 .and_then(Value::as_str)
                 .map(str::to_owned)
             {
@@ -403,7 +408,14 @@ impl Gateway {
                     .pointer_mut(&path)
                     .and_then(Value::as_object_mut)
                     .ok_or_else(Error::internal_error)?;
-                content.remove("fileId");
+                let meta = content
+                    .get_mut("_meta")
+                    .and_then(Value::as_object_mut)
+                    .ok_or_else(Error::internal_error)?;
+                meta.remove("fileId");
+                if meta.is_empty() {
+                    content.remove("_meta");
+                }
                 content.insert("data".into(), Value::String(STANDARD.encode(bytes)));
             }
         }
@@ -472,6 +484,11 @@ impl Gateway {
                 .elicitation
                 .as_ref()
                 .is_some_and(|capabilities| capabilities.supports_form());
+            self.compaction_updates = initialize
+                .client_capabilities
+                .session
+                .as_ref()
+                .is_some_and(|capabilities| capabilities.compaction.is_some());
             if ![
                 "session.create",
                 "session.attach",
@@ -1322,15 +1339,16 @@ impl Gateway {
                 if reply.cancellation().is_cancelled() {
                     return reply.respond_with_error(Error::request_cancelled());
                 }
-                if !matches!(self.sessions.get(&id), Some(Slot::Ready(_))) {
+                let Some(Slot::Ready(session)) = self.sessions.get(&id) else {
                     return reply.respond_with_error(Error::resource_not_found(Some(id)));
-                }
+                };
+                let cwd = session.cwd.clone();
                 match result {
                     Ok(page) => {
                         let next = page
                             .next(before, through)
                             .map_err(|_| Error::internal_error())?;
-                        let mut projection = Projection::default();
+                        let mut projection = Projection::new(cwd, self.compaction_updates);
                         for event in page.events {
                             for update in projection.event(&decode_native(event)?) {
                                 self.update(&id, update).await?;
@@ -1370,8 +1388,8 @@ impl Gateway {
                                 && !waiter.reply.cancellation().is_cancelled()
                         });
                         let mut session = Session {
-                            cwd: loading.cwd,
-                            projection: Projection::default(),
+                            cwd: loading.cwd.clone(),
+                            projection: Projection::new(loading.cwd, self.compaction_updates),
                             prompt: None,
                             command: None,
                             config: prepared.config,
@@ -1605,6 +1623,7 @@ impl Gateway {
                                     &id,
                                     json!({
                                         "sessionUpdate":"agent_message_chunk",
+                                        "messageId":crate::projection::notice_id("refusal", &prompt.submission),
                                         "content":{"type":"text","text":error.message},
                                     }),
                                 )
@@ -1792,7 +1811,15 @@ impl Gateway {
                     },
                 };
                 if let Some(text) = text {
-                    self.update(&id, json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":text}})).await?;
+                    self.update(
+                        &id,
+                        json!({
+                            "sessionUpdate":"agent_message_chunk",
+                            "messageId":crate::projection::notice_id("command", &command_id.to_string()),
+                            "content":{"type":"text","text":text},
+                        }),
+                    )
+                    .await?;
                 }
                 command
                     .reply
@@ -1845,7 +1872,8 @@ impl Gateway {
                         prompt_turn,
                     }) => {
                         let previous_through = session.projection.through;
-                        session.projection = Projection::default();
+                        session.projection =
+                            Projection::new(session.cwd.clone(), self.compaction_updates);
                         session.questions = dim_client::question::Pending::default();
                         session.question_through.clear();
                         let title = prepared.title;

@@ -77,7 +77,10 @@ use std::{
     time::Instant,
 };
 
-#[allow(dead_code)]
+#[expect(
+    dead_code,
+    reason = "the example uses part of the shared product fixture"
+)]
 #[path = "support/product.rs"]
 mod product_support;
 use product_support::{product, product_hosts};

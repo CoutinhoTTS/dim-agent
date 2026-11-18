@@ -9,3 +9,6 @@ publish = false
 rutis.workspace = true
 dim-agent-runtime.workspace = true
 test-extension-a = { path = "../extension-a" }
+
+[lints]
+workspace = true

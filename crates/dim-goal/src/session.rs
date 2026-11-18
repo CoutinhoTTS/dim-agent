@@ -118,11 +118,16 @@ impl DynPlugin for GoalSession {
                             return tokio::select! {
                                 result = async {
                                     match owner.tree.get(&id) {
-                                        Ok(_) => owner.changes.current(&TimelineKey {
-                                            session_id: owner.identity.session_id.clone(),
-                                            branch_id: id,
-                                        }).await,
-                                        Err(dim_agent_runtime::AgentError::BranchEnded(_)) => crate::read::current(&owner.tree, &id, &cancel).await,
+                                        Ok(_) => {
+                                            let key = TimelineKey {
+                                                session_id: owner.identity.session_id.clone(),
+                                                branch_id: id,
+                                            };
+                                            owner.changes.current(&key).await
+                                        }
+                                        Err(dim_agent_runtime::AgentError::BranchEnded(_)) => {
+                                            crate::read::current(&owner.tree, &id, &cancel).await
+                                        }
                                         Err(error) => Err(error),
                                     }
                                 } => reply(result?),

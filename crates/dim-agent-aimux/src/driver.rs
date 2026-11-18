@@ -687,7 +687,9 @@ impl ModelDriver for AimuxDriver {
                         Some(capture) => capture.scope(model.do_stream(&options)).await,
                         None => model.do_stream(&options).await,
                     }
-                } => match result.map_err(|error| stream::error(name_redirect_target(error), &cancel)) {
+                } => match result
+                    .map_err(|error| stream::error(name_redirect_target(error), &cancel))
+                {
                     Ok(result) => result,
                     Err(error) => {
                         if let Some(pending) = pending.as_mut() {

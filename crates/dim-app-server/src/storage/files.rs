@@ -335,10 +335,11 @@ impl SessionFiles {
                 let mut kept = Vec::new();
                 for candidate in candidates {
                     let text = candidate.to_string_lossy().into_owned();
+                    let prefix = like_prefix(&candidate, std::path::MAIN_SEPARATOR);
                     let shared: bool = connection
                         .query_row(
                             "SELECT EXISTS(SELECT 1 FROM session_output_owners WHERE session_id <> ?1 AND (path = ?2 OR path LIKE ?3 ESCAPE '\\'))",
-                            params![session, text, like_prefix(&candidate, std::path::MAIN_SEPARATOR)],
+                            params![session, text, prefix],
                             |row| row.get(0),
                         )
                         .map_err(error)?;

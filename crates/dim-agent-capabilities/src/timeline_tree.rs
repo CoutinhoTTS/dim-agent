@@ -813,8 +813,12 @@ impl TimelineTree {
                     }
                 }
                 if let Some((timeline, through)) = &validate {
+                    let validation = tokio::time::timeout(
+                        owner.factory.startup_timeout(),
+                        crate::history::validate_context_boundary_at(timeline, *through),
+                    );
                     let boundary = tokio::select! {
-                        result = tokio::time::timeout(owner.factory.startup_timeout(), crate::history::validate_context_boundary_at(timeline, *through)) =>
+                        result = validation =>
                             result.map_err(|_| AgentError::Build("branch opening timed out".into()))??,
                         _ = owner.cancel.cancelled() => return Err(AgentError::Cancelled("branch creation".into())),
                     };
@@ -855,8 +859,12 @@ impl TimelineTree {
                     // through the existing path and the parent keeps
                     // dispatching.
                     let key = parent_key();
+                    let live = tokio::time::timeout(
+                        owner.factory.startup_timeout(),
+                        owner.keyed_live(parent, timeline, *cut, &key),
+                    );
                     let carried = tokio::select! {
-                        result = tokio::time::timeout(owner.factory.startup_timeout(), owner.keyed_live(parent, timeline, *cut, &key)) =>
+                        result = live =>
                             result.map_err(|_| AgentError::Build("branch opening timed out".into()))??,
                         _ = owner.cancel.cancelled() => return Err(AgentError::Cancelled("branch creation".into())),
                     };
@@ -866,8 +874,12 @@ impl TimelineTree {
                 }
                 let opened = context.timeline().append(opening.into())?;
                 tokio::select! {
-                    result = context.finish_opening(opened.sequence, owner.factory.startup_timeout()) => result?,
-                    _ = owner.cancel.cancelled() => return Err(AgentError::Cancelled("branch creation".into())),
+                    result = context.finish_opening(
+                        opened.sequence,
+                        owner.factory.startup_timeout(),
+                    ) => result?,
+                    _ = owner.cancel.cancelled() =>
+                        return Err(AgentError::Cancelled("branch creation".into())),
                 }
                 if let Some(first) = first {
                     context.branch().input(first).await?;
@@ -1172,8 +1184,11 @@ impl TimelineTree {
                     unreachable!("input block projections retain array positions")
                 };
                 for (found, retire) in keys.iter().zip(retires).rev() {
-                    if matches!(found, QueryValue::Value { value: serde_json::Value::String(found) } if found == key)
-                    {
+                    let selected = match found {
+                        QueryValue::Value { value } => value.as_str() == Some(key),
+                        _ => false,
+                    };
+                    if selected {
                         return Ok(!matches!(
                             retire,
                             QueryValue::Value {
@@ -2733,8 +2748,10 @@ impl BranchLine {
             unreachable!("branch block projections")
         };
         for ((found, text), retire) in keys.iter().zip(texts).zip(retires).rev() {
-            if matches!(found, QueryValue::Value { value: serde_json::Value::String(found) } if found == key)
-            {
+            if matches!(
+                found,
+                QueryValue::Value { value: serde_json::Value::String(found) } if found == key
+            ) {
                 let QueryValue::Value {
                     value: serde_json::Value::String(text),
                 } = text

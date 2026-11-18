@@ -597,10 +597,12 @@ async fn node_process_typescript_owner_reload_keeps_native_session_work_running(
         .await;
         let session = server.agent().unwrap().get_session(&id).unwrap();
         assert!(chain_events(&session, "main", ..).await.unwrap().iter().any(|event| {
-            matches!(&event.kind, EventKind::ToolResult(batch) if batch.results.iter().any(|result| {
-                result.result.content == dim_agent_types::ToolContent::Text("native survives owner reload".into())
-                    && result.result.is_error != Some(true)
-            }))
+            matches!(&event.kind, EventKind::ToolResult(batch)
+                if batch.results.iter().any(|result| {
+                    result.result.content
+                        == dim_agent_types::ToolContent::Text("native survives owner reload".into())
+                        && result.result.is_error != Some(true)
+                }))
         }));
     }
     server.shutdown();

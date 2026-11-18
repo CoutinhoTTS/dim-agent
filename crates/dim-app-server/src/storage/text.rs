@@ -70,8 +70,14 @@ fn document(
     text: &str,
 ) -> Result<()> {
     let (session, branch) = location;
-    let id: i64 = connection.prepare_cached("INSERT INTO timeline_text(session_id,branch_id,sequence,physical_sequence,property,partition_key) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(session_id,branch_id,sequence,property) DO UPDATE SET physical_sequence=excluded.physical_sequence,partition_key=excluded.partition_key RETURNING id")
-        .map_err(error)?.query_row(params![session,branch,sequence as i64,physical as i64,field,key], |row|row.get(0)).map_err(error)?;
+    let id: i64 = connection
+        .prepare_cached("INSERT INTO timeline_text(session_id,branch_id,sequence,physical_sequence,property,partition_key) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(session_id,branch_id,sequence,property) DO UPDATE SET physical_sequence=excluded.physical_sequence,partition_key=excluded.partition_key RETURNING id")
+        .map_err(error)?
+        .query_row(
+            params![session, branch, sequence as i64, physical as i64, field, key],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
     connection
         .prepare_cached("DELETE FROM timeline_text_fts WHERE rowid=?1")
         .map_err(error)?

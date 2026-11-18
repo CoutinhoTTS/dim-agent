@@ -505,8 +505,11 @@ impl DynPlugin for Progressing {
             let mut completed = self.completed.subscribe();
             while *completed.borrow_and_update() < self.step {
                 tokio::select! {
-                    result = completed.changed() => result.map_err(|error| ErrorKind::PluginFailed(error.into()))?,
-                    _ = ctx.cancelled() => return Err(ErrorKind::PluginFailed("opening cancelled".into()).into()),
+                    result = completed.changed() =>
+                        result.map_err(|error| ErrorKind::PluginFailed(error.into()))?,
+                    _ = ctx.cancelled() => {
+                        return Err(ErrorKind::PluginFailed("opening cancelled".into()).into());
+                    }
                 }
             }
             tokio::select! {

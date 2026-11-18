@@ -8,3 +8,6 @@ publish = false
 [dependencies]
 rutis.workspace = true
 dim-agent-runtime.workspace = true
+
+[lints]
+workspace = true
