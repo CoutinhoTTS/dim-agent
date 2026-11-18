@@ -94,7 +94,7 @@ Source reviewed against `077892025020a2875a559b432dfa3256878422ff`.
   Track the top-level batch for the composer. Nested batches have their own
   identities and do not replace it. Model-streamed call arguments are separate
   from dispatch. [Loop](../architecture/rust-agent/plugins/Loop.md#the-continuations-tool-boundary),
-  [ToolExecution](../architecture/rust-agent/plugins/ToolExecution.md#events-and-lifetime),
+  [ToolExecution](../architecture/rust-agent/plugins/ToolExecution.md#events-and-lifetime-1),
   [v3/v4 event visibility](../../crates/dim-app-server/src/tree_protocol.rs),
   [v1 event view](../../crates/dim-agent-types/src/v1.rs)
 - The public schema also has `step/tool-start` and `step/tool-completed`.
