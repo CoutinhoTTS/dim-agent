@@ -154,13 +154,13 @@ Leaving a cap on messages out is safe because a line adds no new kind of resourc
 - RPC admission is bounded per connection ([architecture](../architecture/README.md)).
 - Collaboration has no member cap either.
 
-Open lines are capped. The cap is a total over the Session: the lines the `branch` tool opened that are still open, counted across the whole tree, not per roster and not from the root's lines alone. A plugin line and a user line do not count. BranchTool owns the limit and refuses `create` with its own code when the total is reached, so the model reads a refusal it can act on instead of a line that fails to open. The check runs inside the ancestor walk a creation already does, under the same tree lock, so two lines creating at the same time cannot both pass it. The depth of the tree is not capped separately: it grows only when the user moves the primary line, and the total bounds the work either way. The number is set by measurement (§12.3) and carried in the implementing PR.
+Open tool lines are capped. The cap is a total over the Session: the lines the `branch` tool opened that are still open, counted across the whole tree, not per roster and not from the root's lines alone. A client-opened line and a plugin line never count, so neither is refused by this cap. BranchTool owns the limit and refuses `create` with its own code when the total is reached, so the model reads a refusal it can act on instead of a line that fails to open. The check runs inside the ancestor walk a creation already does, under the same tree lock, so two lines creating at the same time cannot both pass it. The depth of the tree is not capped separately: it grows only when the user moves the primary line, and the total bounds the work either way. The number is set by measurement (§12.3) and carried in the implementing PR.
 
 If further limits are ever needed, each one already has an owner, and none of them needs a mechanism change:
 
 | Limit | Owner |
 | --- | --- |
-| Open lines | BranchTool, as a total over the Session, checked under the tree lock at creation |
+| Open tool lines | BranchTool, as a total over the Session, checked under the tree lock at creation; a client-opened line never counts |
 | Steer frequency | BranchLine on the sender counts the steer messages on its own Timeline |
 | Model cost or concurrency across a Session | The model-call layer. This limit is not specific to branches: it applies equally to members and forks |
 
@@ -384,7 +384,7 @@ The tool takes one action-based input, which replaces `{prompt, at?}`. Its risk 
 
 | Action | Input | Who | Effect | Result text |
 | --- | --- | --- | --- | --- |
-| `create` | `prompt`, `at?`, `idleNotice?` (`steer` \| `none`) | The current primary line | Opens a tool line cut at `at` (default: before this request's model start). The idle notice defaults to `steer`. Refused when the Session already holds the cap of open lines the tool and clients opened (§6.1) | `Line created: C` |
+| `create` | `prompt`, `at?`, `idleNotice?` (`steer` \| `none`) | The current primary line | Opens a tool line cut at `at` (default: before this request's model start). The idle notice defaults to `steer`. Refused when the Session already holds the cap of open tool lines (§6.1) | `Line created: C` |
 | `message` | `to`, `content`, `mode?` (`append` \| `steer`) | A line to a line it opened; a line to the line it was cut from | One `input/message` on `to` | `Sent to C.` |
 | `read` | `branch`, `after?`, `limit?` (1–200) | A line on the line it was cut from or on a line it opened | One page from the store, from the caller's cursor when `after` is absent (§6) | The page as JSON: items, `nextCursor`, `done` |
 | `end` | `content` | A line that is not the current primary line, on itself | A final message (steer) to the line that opened it, then `TreeCommands.end(C, source)`, where `source` is this call | `Line C is ending; your final message was sent to P.` |
@@ -396,7 +396,7 @@ Refusals come back as error results (code in `structuredContent`) and write noth
 | Case | Text | Code |
 | --- | --- | --- |
 | `create` on a line that is not the current primary line | `Only the primary line opens lines.` | `branch_not_primary` |
-| `create` when the Session holds the cap of open lines | A refusal naming the cap | `branch_limit_reached` |
+| `create` when the Session holds the cap of open tool lines | A refusal naming the cap | `branch_limit_reached` |
 | `message` or `read` outside kinship | `You can message or read only the lines you opened and the line you were cut from.` | `branch_not_kin` |
 | `message` on a plugin line, or a line's `read` of one | `Line C was not opened with this tool; it follows its own protocol.` | `branch_not_tool_line` |
 | `message` to an ended line, or a race with an end | `Line C has ended. Read it to see what it did.` | `branch_ended` |
@@ -636,7 +636,7 @@ Three rules about `head` decide what a client may do with it:
 | [Design rules §2](../architecture/rust-agent/principles.md#2-作用域的含义) | Rewritten: lines of one subject, shared facts, parent and child as the only communication and reading relation, and the shared interaction surface. Relations row: "only between parent and child", reading the parent's committed events through a tool result. Session row: adds "end" | The current text, "equal lines, the relation only records the source", has no communication relation |
 | TimelineTree | The identity block in `first_input` for every source. `TreeCommands.end(id, source)` and `TreeCommands.page(id, after, limit)`. `TimelineInfo.source`, filled from the parent's `branch/create` (§5). The end flow and its guards, refusing input once a line is ending, `branch/ended`, the restore rule, reads of ended lines, and the primary line: `branch/primary` on the root, its restore read, and the fact a move writes. Its `directory()` reports an open line, an ending line (its own `branch/end` committed, from a tool, a user end or a cascade, until its ended row is written) and an ended line, with the ending line's live head, and the current `primaryBranchId`. Its node publishes the sequence of the line's latest turn end to its children (§7.1.1) | It owns the line lifecycle, the opening input and the primary line's one authoritative fact |
 | TreeTimeline | Consumes `branch/end`, plus the line's next turn end for an end issued by a tool call, and routes them to TimelineTree. It reports every `turn/end` to TimelineTree, which publishes it for the line's children | It routes `branch/create` the same way |
-| BranchTool | The action-based tool, plus the new BranchLine branch part. `create` is guarded on the caller being the current primary line and on the Session's open-line cap. `read` and `message` reach the line the caller was cut from and the lines it opened, with one cursor rule | The tool's actions and one line's view of its lines |
+| BranchTool | The action-based tool, plus the new BranchLine branch part. `create` is guarded on the caller being the current primary line and on the Session's open tool-line cap. `read` and `message` reach the line the caller was cut from and the lines it opened, with one cursor rule | The tool's actions and one line's view of its lines |
 | Session facade | `Session::end_branch(id, source)`, `Session::primary(id)` and `Session::set_primary(id, source)`. An ended line's head is `Session::sequence`; its history is read at that fixed head through `TreeCommands.page` | §17 |
 | App Server | `session.branch_end` (v3, a user end with a minted `operation_id`, listed in `hello.features` with the other Session methods when `session_execution` is on and the connection's entry is not bare or the daemon profile is not protected). `session.branch_primary` (v3, the same admission). `session.history` on an ended line returns immediately, at its stored head. `session.branches` reads the tree's directory and carries `primaryBranchId` (§14). Every Session-level default target that today names `main` reads the primary line instead: `session.submit`, `session.stop`, `session.idle`, `approval.respond`, `session.goal.*`, `shell.run`, the Session catalog's running state and recent activity, and a newly created scheduled job. `session.model.update`, `session.agent.update` and `session.prompt.refresh` act on the line the request names rather than refusing every line but the root. `ProductEvent::new` carries the new kinds in v3 and leaves them out of v1 and v2 | Two entries and three reads, no business logic |
 | dim-agent-types | `branch/end` and `branch/ended` in `EventKind` and the v1 exclusion list, then `branch/primary`, registered in the contract tests. `BranchSource` gains a kind for a line the user opened, distinct from a plugin's. The frozen fixtures are unchanged | Core facts (§16) |
@@ -773,7 +773,7 @@ The primary line:
 22. After the move, `session.submit`, `session.stop`, `session.idle`, `approval.respond`, `session.goal.*`, `shell.run`, the catalog's running state and recent activity, and a newly created scheduled job resolve to the new primary line. A scheduled job that recorded a `branch_id` keeps it.
 23. A line that was the primary line can still message, read and end the lines it opened, and a line that is not the primary line is refused `create` with `branch_not_primary`. A line that was a tool line and became primary stops sending its idle notice and is refused `end` on itself.
 24. A fork of a Session whose primary line was not the root answers the root as its primary line, because every `branch/primary` it copied is older than its `session/forked`.
-25. Opening a line is refused with `branch_limit_reached` once the Session holds the cap of open lines the tool and clients opened, and a plugin line or a user line does not count toward it.
+25. Opening a line is refused with `branch_limit_reached` once the Session holds the cap of open tool lines, counted across the whole tree. A client-opened line and a plugin line never count toward the cap, and neither is refused by it.
 
 ## 21. Ablation review
 
@@ -793,7 +793,7 @@ What is left, and why each piece is needed:
 | `TimelineInfo.source` | An opener finds its own lines without parsing prompt text |
 | `branch/primary` on the root | One authoritative, non-model fact: the App Server, the store's writer thread and restore all read it without a model or a keyed block, and the root cannot end |
 | The two status notes | Each of the two lines whose rule changed learns it once; no other line is touched, so no other line's cache prefix moves |
-| The open-line cap | The tree can grow deeper only when the user moves the primary line, and a total keeps the work bounded without a depth number that would forbid a legitimate third move |
+| The open tool-line cap | The tree can grow deeper only when the user moves the primary line, and a total keeps the work bounded without a depth number that would forbid a legitimate third move |
 | The directory's `primaryBranchId` and its `endEvent` and `ending` state | Without `primaryBranchId` a client cannot centre the right line; without `endEvent` a client cannot name a cascaded line's end; without `ending` the window between a line's own `branch/end` and its ended row reads as open |
 | The tool restricted to the primary line, and to the lines a caller opened | One line carries the Session's conversation and may grow the tree; creators keep their own protocols, and coordination stays where it was made |
 | The prompt rules on files | The only guard is FileReads; the rest is protocol |

@@ -10,7 +10,8 @@ part below.
 `create` passes the optional idle notice policy to TimelineTree. The child
 restores it from its opening identity before BranchLine handles turn ends. `create` also
 checks two guards of its own: the calling line must be the current primary line, and the
-Session's total of open lines the tool and clients opened must be below the cap.
+Session's total of open tool lines must be below the cap. A client-opened line never
+counts toward it, and is never refused by it.
 
 ## Dependencies
 

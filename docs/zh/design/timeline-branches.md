@@ -151,13 +151,13 @@ BranchLine 注入 `B:Dispatcher`、`B:TimelineIdentity`、`B:BranchLifecycle` �
 - RPC 准入按连接设有上限（[架构](../../architecture/README.md)）。
 - Collaboration 的成员也没有数量上限。
 
-开着的线有上限。这个上限是整个 Session 的总数：`branch` 工具开过、仍然开着的线，在全树范围内统计，不是每条名册各自一份，也不只算根线上的。插件线和用户线不计入。BranchTool 拥有这个限制；达到总数时它用自己的拒绝码拒绝 `create`，于是模型读到的是一个能应对的拒绝，而不是一条开不出来的线。这项检查放在创建时本来就要做的祖先回溯里，在同一把树锁下完成，所以两条线同时创建不会都通过。树深不单独设上限：它只在用户移动主线时增长，而总数已经限住了工作量。数值由测量（§12.3）决定，并在实现 PR 里报告。
+开着的工具线有上限。这个上限是整个 Session 的总数：`branch` 工具开过、仍然开着的线，在全树范围内统计，不是每条名册各自一份，也不只算根线上的。客户端开的线和插件线从不计入，所以它们也不会被这个上限拒绝。BranchTool 拥有这个限制；达到总数时它用自己的拒绝码拒绝 `create`，于是模型读到的是一个能应对的拒绝，而不是一条开不出来的线。这项检查放在创建时本来就要做的祖先回溯里，在同一把树锁下完成，所以两条线同时创建不会都通过。树深不单独设上限：它只在用户移动主线时增长，而总数已经限住了工作量。数值由测量（§12.3）决定，并在实现 PR 里报告。
 
 如果以后还需要别的限制，每一项都已有归属，而且都不需要改机制：
 
 | 限制 | 归属 |
 | --- | --- |
-| 开着的线数 | BranchTool，按整个 Session 的总数，在创建时于树锁下检查 |
+| 开着的工具线数 | BranchTool，按整个 Session 的总数，在创建时于树锁下检查；客户端开的线从不计入 |
 | steer 频率 | 发送方的 BranchLine 统计它自己 Timeline 上的 steer 消息 |
 | 整个 Session 的模型成本或并发 | 归模型调用层。这不是分支特有的限制：它同样适用于成员和 fork |
 
@@ -374,7 +374,7 @@ WorkspaceTools 不变。
 
 | 动作 | 输入 | 谁 | 作用 | 结果文本 |
 | --- | --- | --- | --- | --- |
-| `create` | `prompt`、`at?`、`idleNotice?`（`steer` \| `none`） | 当前主线 | 开一条切在 `at` 的工具线（默认与现在相同：在本次请求的模型开始之前）。空闲通知默认 `steer`。这个 Session 已经把工具和客户端开的线开到上限时拒绝（§6.1） | `Line created: C` |
+| `create` | `prompt`、`at?`、`idleNotice?`（`steer` \| `none`） | 当前主线 | 开一条切在 `at` 的工具线（默认与现在相同：在本次请求的模型开始之前）。空闲通知默认 `steer`。这个 Session 已经把工具开着的线开到上限时拒绝（§6.1） | `Line created: C` |
 | `message` | `to`、`content`、`mode?`（`append` \| `steer`） | 一条线 → 它开过的线；一条线 → 它被切出来的那条线 | 在 `to` 上写一条 `input/message` | `Sent to C.` |
 | `read` | `branch`、`after?`、`limit?`（1–200） | 一条线，读它被切出来的那条线或它开过的线 | 从存储读一页；不给 `after` 时从调用方的游标开始（§6） | 这一页的 JSON：items、`nextCursor`、`done` |
 | `end` | `content` | 一条不是当前主线的线，对它自己 | 先给开它的那条线发最终消息（steer），再调用 `TreeCommands.end(C, source)`，`source` 就是这次调用 | `Line C is ending; your final message was sent to P.` |
@@ -386,7 +386,7 @@ WorkspaceTools 不变。
 | 情形 | 文本 | 代码 |
 | --- | --- | --- |
 | 在不当前主线的线上 `create` | `Only the primary line opens lines.` | `branch_not_primary` |
-| 这个 Session 已经把开着的线开到上限时 `create` | 写明上限的拒绝 | `branch_limit_reached` |
+| 这个 Session 已经把工具开着的线开到上限时 `create` | 写明上限的拒绝 | `branch_limit_reached` |
 | 在亲缘之外 `message` 或 `read` | `You can message or read only the lines you opened and the line you were cut from.` | `branch_not_kin` |
 | 对插件线 `message`、或读插件线 | `Line C was not opened with this tool; it follows its own protocol.` | `branch_not_tool_line` |
 | 向已结束的线发消息，或与结束发生竞争 | `Line C has ended. Read it to see what it did.` | `branch_ended` |
@@ -586,7 +586,7 @@ WorkspaceTools 不变。
 | [设计规则 §2](../../architecture/rust-agent/principles.md#2-作用域的含义) | 改写：同一主体的多条线、共享事实、父子是唯一的通信和读取关系、共用交互面。关系表一行改为"只在父子之间"，读取父线已提交的事件经工具结果；Session 一行加上"结束" | 现在的文本是"平等的线，父子只记录来源"，没有通信关系 |
 | TimelineTree | 对每种来源都在 `first_input` 里写身份块。新增 `TreeCommands.end(id, source)` 和 `TreeCommands.page(id, after, limit)`。`TimelineInfo.source`，依据父分支的 `branch/create` 填写（§5）。结束流程及其守卫、线进入结束后拒绝输入、`branch/ended`、恢复规则、读已结束的线，以及主线：根上的 `branch/primary`、它的恢复读取，和一次移动写下的事实。它的 `directory()` 报告未结束、结束中和已结束的线：结束中的线从工具、用户或级联写入它自己的 `branch/end` 起，到它的已结束记录被写入为止，带该事件与活头部，并带上当前 `primaryBranchId`。它的节点把这条线最新轮次结束的序号发布给它开出的线（§7.1.1） | 它拥有线的生命周期、开启输入，以及主线唯一那条权威事实 |
 | TreeTimeline | 消费 `branch/end`，以及由工具调用发出的结束时这条线的下一次轮次结束，并转给 TimelineTree。它把每一次 `turn/end` 报告给 TimelineTree，后者为这条线的子线发布 | 它现在就这样转 `branch/create` |
-| BranchTool | 按动作区分的工具，加上新的 BranchLine 分支部件。`create` 受两道守卫：调用方是当前主线，以及这个 Session 的开线上限。`read` 和 `message` 既能读、写调用方被切出来的那条线，也能读写它开过的线，共用一条游标规则 | 工具的各个动作，以及一条线对自己相关各线的视图 |
+| BranchTool | 按动作区分的工具，加上新的 BranchLine 分支部件。`create` 受两道守卫：调用方是当前主线，以及这个 Session 的工具开线上限。`read` 和 `message` 既能读、写调用方被切出来的那条线，也能读写它开过的线，共用一条游标规则 | 工具的各个动作，以及一条线对自己相关各线的视图 |
 | Session 门面 | `Session::end_branch(id, source)`、`Session::primary(id)` 与 `Session::set_primary(id, source)`。已结束线的头部由 `Session::sequence` 给出；其历史在固定的头部经 `TreeCommands.page` 读取 | §17 |
 | App Server | `session.branch_end`（v3，用户的结束，带生成的 `operation_id`；`session_execution` 打开、且连接的入口不是裸入口或守护进程 profile 未受保护时，`hello.features` 把它和其他会话方法一起列出）。`session.branch_primary`（v3，同样的准入）。对已结束的线，`session.history` 立即返回，截到它存储的头部。`session.branches` 读树的目录并带上 `primaryBranchId`（§14）。今天写成 `main` 的每一处 Session 级缺省目标改读主线：`session.submit`、`session.stop`、`session.idle`、`approval.respond`、`session.goal.*`、`shell.run`、会话目录的运行状态与最近活动，以及新建的定时任务。`session.model.update`、`session.agent.update` 和 `session.prompt.refresh` 作用于请求指明的那条线，而不再拒绝根以外的每条线。`ProductEvent::new` 在 v3 里带上新的事件种类，v1、v2 里不带 | 两个入口和三条读取路径，没有业务逻辑 |
 | dim-agent-types | 在 `EventKind` 和 v1 排除列表里加入 `branch/end` 和 `branch/ended`，随后加入 `branch/primary`，并在契约测试中登记。`BranchSource` 新增用户开线的种类，与插件区开。冻结样本不变 | 核心事实（§16） |
@@ -724,7 +724,7 @@ Goal 流程，放在 `crates/dim-goal/tests` 的流程测试中（§7.4）：
 22. 移动之后，`session.submit`、`session.stop`、`session.idle`、`approval.respond`、`session.goal.*`、`shell.run`、目录的运行状态与最近活动、以及新建的定时任务，都解析到新主线。已记录 `branch_id` 的定时任务保留它。
 23. 旧主线仍能给它开过的线发消息、读它们、结束它们；不是主线的线 `create` 被 `branch_not_primary` 拒绝。原来是工具线而现在成为主线的线停发空闲通知，对自己 `end` 被拒绝。
 24. 主线不在根上的 Session 被 fork 后，fork 出来的会话的主线是根，因为拷进来的每一条 `branch/primary` 都比它的 `session/forked` 旧。
-25. 这个 Session 把工具和客户端开的线开到上限后，再开线被 `branch_limit_reached` 拒绝；插件线和用户线不计入上限。
+25. 这个 Session 把工具开着的线开到上限后，再开线被 `branch_limit_reached` 拒绝；上限按全树统计所有仍开着的工具线；客户端开的线和插件线从不计入，也不被上限拒绝。
 
 ## 21. 消融审查
 
@@ -744,7 +744,7 @@ Goal 流程，放在 `crates/dim-goal/tests` 的流程测试中（§7.4）：
 | `TimelineInfo.source` | 开线的一方不用解析 prompt 文本就能找到自己的线 |
 | 根上的 `branch/primary` | 一条唯一权威、非模型的事实：App Server、存储写线程和恢复都读它，不经过模型或键控块，而根又不能结束 |
 | 两条状态说明 | 规则变了的只有两条线，各得知一次；其它线一概不碰，所以其它线的缓存前缀不移动 |
-| 开线上限 | 树只在用户移动主线时才会变深，总数能限住工作量，又不用一个会禁掉第三次合理移动的深度上限 |
+| 开着的工具线上限 | 树只在用户移动主线时才会变深，总数能限住工作量，又不用一个会禁掉第三次合理移动的深度上限 |
 | 目录里的 `primaryBranchId`、`endEvent` 与 `ending` 状态 | 没有 `primaryBranchId`，客户端居中不到正确的线；没有 `endEvent`，客户端无法指出级联结束那条线的结束；没有 `ending`，从一条线自己的 `branch/end` 到它的已结束记录之间的窗口会读作未结束 |
 | 工具限于当前主线、以及调用方开过的线 | 一条线承载会话对话、能长树；创建者保有各自协议，协调留在它被建立的地方 |
 | 关于文件的提示词规则 | 唯一的保护是 FileReads，其余靠协议 |
