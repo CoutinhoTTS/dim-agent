@@ -8807,7 +8807,17 @@ fn fullscreen_home(cols: usize, p: &Palette) -> Vec<String> {
     } else {
         "DIM".to_owned()
     };
-    let mut rows = vec![heading, String::new()];
+    let mut rows = vec![
+        paint(
+            &heading,
+            Paint {
+                fg: Some(&p.text),
+                bold: true,
+                ..Paint::default()
+            },
+        ),
+        String::new(),
+    ];
     rows.extend(
         [
             (t("Commands"), "Ctrl+O"),
@@ -8820,20 +8830,28 @@ fn fullscreen_home(cols: usize, p: &Palette) -> Vec<String> {
         .map(|(label, key)| {
             let (label, cells) = clip(label, text_width - key.len() - 1);
             format!(
-                "{label}{:padding$}{key}",
+                "{}{:padding$}{}",
+                fg(&label, &p.text_soft),
                 "",
+                fg(key, &p.keybind),
                 padding = text_width - cells - key.len()
             )
         }),
     );
     if logo {
-        rows = startup_header(&rows, inner);
+        for (row, mark) in rows
+            .iter_mut()
+            .zip(STARTUP_LOGO.into_iter().chain(std::iter::repeat("")))
+        {
+            let gap = " ".repeat(STARTUP_LOGO_WIDTH + STARTUP_LOGO_GAP - width_of(mark));
+            *row = format!("{}{gap}{row}", fg(mark, &p.accent));
+        }
     }
     boxed(
         &rows,
         cols,
         &|edge| fg(edge, &p.border),
-        &|index, body| fg(body, if index == 0 { &p.accent } else { &p.text }),
+        &|_, body| body.to_owned(),
         None,
     )
 }
@@ -16111,6 +16129,12 @@ mod tests {
         assert!(drawn.app.frame(drawn.size).home.is_empty());
         drawn.app.set_fullscreen(true);
         drawn.app.set_notice("fixture notice");
+        let home = drawn.app.frame(drawn.size).home;
+        let palette = &drawn.app.palette;
+        for (row, mark) in home.iter().skip(1).zip(STARTUP_LOGO) {
+            assert!(row.contains(&fg(mark, &palette.accent)), "{row:?}");
+        }
+        assert!(home[3].contains(&fg("Ctrl+O", &palette.keybind)));
         let render_frame = |app: &mut App, size: (u16, u16)| {
             let frame = app.frame(size);
             let mut screen = FullScreen::new(size, true);
