@@ -66,10 +66,10 @@ These needs are not branches:
 - **The root.** `main` is the line with no parent and no source: the literal id, its numbering and every stored `branch_id: "main"` are unchanged by this design. It never ends, and the Session's close is not an end. In the UI it is 起点.
 - **The primary line.** The line the Session's conversation is on: the target a client names when it omits `branchId`, and the line a client centres. It is a role, not an id: it starts as the root and moves only by a user action (§9, §14). One authoritative non-model fact records it, `branch/primary {branch}`, written on the root line, which outlives every other line and cannot end (§16). A keyed block that tells a line about the change is never the authority. A Session with no such fact is on its root.
 - **An opener.** Any line that has opened lines coordinates them: it carries its own roster (§7.1) and is the only line that messages, reads and ends the lines it opened. Coordination follows the parent-child relation and never moves with the primary line.
-- **The agent's tool.** The `branch` tool opens lines only from the current primary line. A line that is not the primary line gets a refusal, and a line the tool did not open is never on a roster and never becomes primary. The depth of the tree grows only when the user moves the primary line to a line that opens lines of its own. The total number of open lines the agent opened in a Session is capped (§6.1).
+- **The agent's tool.** The `branch` tool opens lines only from the current primary line. A line that is not the primary line gets a refusal. Only a plugin line can never become the primary line: a tool line, a user line and the root are all valid targets (§14, the root whenever it is not the primary line). The depth of the tree grows only when the user moves the primary line to a line that opens lines of its own. The total number of open lines the tool opened in a Session is capped (§6.1).
 - **Sources.** Every line has a source, recorded in its parent's `branch/create`:
-  - A **tool line** was opened by the `branch` tool.
-  - A **user line** was opened by a client through `session.branch_create`. Its opener is the user, and it is a conversation line: it can become primary and, when it is primary, open lines.
+  - A **tool line** was opened by the `branch` tool. It is a conversation line: it can become primary and, when it is primary, open lines.
+  - A **user line** was opened by a client through `session.branch_create`. Its opener is the user, and it is a conversation line too: it can become primary and, when it is primary, open lines.
   - A **plugin line** was opened by a plugin (`TreeCommands.create`). Its creator owns its protocol, and it can neither become primary nor open lines.
 
   The source can be read as `TimelineInfo.source`, returned for active lines by `TreeCommands.list` and `info` and absent on `main` (§5). Ended directory entries may omit it; opening their display detail reads the creation source at its known position. A plugin line's source is `{kind: "host", operation_id}`: the opener's opaque tag, which the core never interprets. A user line's source is `{kind: "user", operation_id}`, its own kind, so a reader that must tell a conversation line from a plugin line does not parse an `operation_id`. An opener finds its own lines by its own operation-id convention, for example Goal's `goal:evaluate:` prefix.
@@ -79,11 +79,11 @@ These needs are not branches:
 | Line | Opens lines with the tool | Messages and reads, with the tool | Ended by, by convention |
 | --- | --- | --- | --- |
 | `main`, the root | While it is the primary line | The lines it opened | Never; the Session's close is not an end |
-| The current primary line | Yes | The line it was cut from and the lines it opened | The user, the line that opened it, or an ancestor's end; never itself |
+| The current primary line | Yes | The line it was cut from and the lines it opened | Nobody while it is primary, whoever asks; the user moves the primary line elsewhere first and then ends it |
 | Any other conversation line (tool or user line) | No (the tool result refuses) | Its parent and the lines it opened | Itself (`end`), the user, or an ancestor's end |
 | Plugin line | No | — (its creator's protocol) | Its creator (Goal ends its evaluator, [Pursuit §13](plugins/Pursuit.md#13-ending-the-evaluator-with-427)), the user, or an ancestor's end |
 
-Who ends which line is a convention among callers. The runtime checks only the target: it exists, it is open, and it is neither the root, the current primary line, nor an ancestor of the primary line, because ending a line ends every line below it (§10).
+Who ends which line is a convention among callers. The runtime checks only the target, whoever asks, the user included: it exists, it is open, and it is neither the root, the current primary line, nor an ancestor of the primary line, because ending a line ends every line below it (§10).
 
 ## 5. Parts
 
@@ -184,7 +184,7 @@ A line that never ends is the responsibility of its own protocol (`end`) and of 
 - **A restart can lose an idle notice.** If the process stops between a tool line's turn end and its idle notice, the notice is never written, because BranchLine decides only on live events after load. Pursuit §4.2 leaves the same window open. The opener still has the line on its roster and can `read` it, and the user sees it idle.
 - **A restart can lose the ended notice.** The same window between `branch/ended` and the roster input drops the ended notice a line's outside end would have written. The load heal writes the roster alone, so the opener learns it from the roster's retirement rather than from a notice.
 - **A roster is short after compaction.** After a line compacts, its roster keeps only each line's id and the first line of its purpose. What the opener told a line survives only in the compaction summary or through `read`, and `read` brings that line's raw events into the opener's context, one page at a time.
-- **A line that became primary keeps its history.** Moving the primary line to a line the agent opened changes what the line is told from then on (§9), but nothing it already recorded. Its earlier identity block and its purpose stay in its history, and the status note that says it is primary now restates that identity under the same key, purpose and end rule included (§12.1), so the two never disagree and a compaction replays the note.
+- **A line that became primary keeps its history.** Moving the primary line to a conversation line changes what the line is told from then on (§9), but nothing it already recorded. Its earlier identity block and its purpose stay in its history, and the status note that says it is primary now restates that identity under the same key, purpose and end rule included (§12.1), so the two never disagree and a compaction replays the note.
 
 ## 7. Identity and context
 
@@ -316,7 +316,7 @@ WorkspaceTools is unchanged.
 - **Nothing is relayed through the primary line.** It is the same subject asking its own user.
 - **Submitting.** The user submits to any open line (`session.submit` with `branchId`). A call that omits `branchId` goes to the current primary line.
 - **Interrupting.** Interrupting a line ends its turn, not the line. A stop that omits `branchId` stops the current primary line.
-- **Ending.** The user ends any line except the root, the current primary line and every ancestor of the primary line (`session.branch_end`, §10).
+- **Ending.** The user ends any line except the root, the current primary line and every ancestor of the primary line (`session.branch_end`, §10). No caller can end the current primary line, the user included: to end it, the user moves the primary line to another line first.
 - **Moving the primary line.** The user moves it to any open conversation line, a tool line or a user line, or back to the root, with one method (`session.branch_primary`, §14). The root is a valid target whenever it is not the current primary line, and a plugin line never is. The old primary line stays open and keeps the lines it opened; nothing is copied and no history moves. The move writes the fact on the root and gives exactly two lines a status note: the new primary line and the old one (§12.1). The previous primary line may then no longer open lines, and the new one may.
 - **What a move does not do.** It changes which line the Session's conversation is on. It does not touch the workspace, so a file the earlier primary line changed stays changed; it does not move `/fork`, which still copies only the root to a rest point ([fork](appserver/session-deletion-and-fork.md)); and it does not end either line.
 
@@ -338,7 +338,7 @@ This pair mirrors `branch/create` and `branch/create-failed`: a command on one T
 
 `ancestor` names the line whose own end started the cascade: the end that carries no `ancestor` of its own. Every descendant the cascade ends carries that line, `source` is copied from that same end, and the pair therefore names one end operation: who asked, and on which line. A line ended at its own request has a `source` and no `ancestor`, and a descendant whose own end was already committed keeps that pair when the cascade reaches it. `branch/ended` copies `source` and `ancestor` from the line's `branch/end`, and is always written on the ending line's own parent, taken from the directory.
 
-**A general operation.** `TreeCommands.end(id, source)` and `Session::end_branch(id, source)` check only the target: it exists, it is open, it is not the root, it is not the current primary line, and it is not an ancestor of the current primary line. Ending the root would close the Session, and ending a line ends every line below it, so the primary line's whole chain is protected. These checks are about the target, not the caller. They never check who calls.
+**A general operation.** `TreeCommands.end(id, source)` and `Session::end_branch(id, source)` check only the target: it exists, it is open, it is not the root, it is not the current primary line, and it is not an ancestor of the current primary line. Ending the root would close the Session, and ending a line ends every line below it, so the primary line's whole chain is protected. These checks are about the target, not the caller. They never check who calls: the user, an opener and a plugin meet the same guards, and ending the current primary line always takes a move of the primary line first.
 
 - Ending a line that has already ended writes nothing, and the reply is `branch_ended`.
 - A line still opening is not a line yet: its creation can still fail, and one terminal fact per line is the rule, so `end` answers `unknown_branch` until the line is published. An opener that ends at load waits for the Session, which publishes after its restore (§17 R1).
@@ -400,7 +400,7 @@ Refusals come back as error results (code in `structuredContent`) and write noth
 | `message` or `read` outside kinship | `You can message or read only the lines you opened and the line you were cut from.` | `branch_not_kin` |
 | `message` on a plugin line, or a line's `read` of one | `Line C was not opened with this tool; it follows its own protocol.` | `branch_not_tool_line` |
 | `message` to an ended line, or a race with an end | `Line C has ended. Read it to see what it did.` | `branch_ended` |
-| `end` on the root, the current primary line, or a plugin line | `Only a line that opened this one, and that is not the primary line, can end it with this call.` | `branch_cannot_end` |
+| `end` on the root, the current primary line, an ancestor of the primary line, or a plugin line | `Only a line that opened this one, and that is not the primary line, can end it with this call.` | `branch_cannot_end` |
 | `read` with an `after` past the target's head | `after A is past line T's head H; a read starts at or below H` | none: an error result with no code |
 
 These refusal texts state the rule and nothing more. What a model should do after a refusal is policy and is decided with the prompt design (§12) together with the guidance of the other branch texts.

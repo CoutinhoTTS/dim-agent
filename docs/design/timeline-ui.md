@@ -228,7 +228,8 @@ old primary line stays open with the lines it opened. It is refused on a line a 
 that is already primary; the root is a valid target whenever it is not the primary line. The panel states that
 the old primary line stays open.
 `x` is refused on the root and on the primary line, and on every line above the primary line, because
-ending a line ends everything below it.
+ending a line ends everything below it. The primary line is refused whoever asks, so ending it takes moving the
+primary line first.
 
 Forks are other Sessions and belong to `/resume`; a fork's own primary line is its root. Keys stay as #427 §14 defines them, with `p` added.
 
