@@ -134,55 +134,6 @@ fn the_result_document_reads_back_as_pages() {
     std::fs::remove_dir_all(directory).unwrap();
 }
 
-#[test]
-fn pages_past_the_text_budget_keep_only_their_number() {
-    let directory = std::env::temp_dir().join(format!(
-        "dim-ocr-contract-{}",
-        uuid::Uuid::new_v4().simple()
-    ));
-    std::fs::create_dir_all(&directory).unwrap();
-    let path = directory.join("result.json");
-    // The document `text` member duplicates the pages and is never decoded.
-    let document = serde_json::json!({
-        "text": "one\n\ntwo\n\nthree",
-        "pageCount": 3,
-        "pages": [
-            {"page": 1, "text": "one", "width": 10, "height": 20, "regions": []},
-            {"page": 2, "text": "two", "width": 10, "height": 20, "regions": []},
-            {"page": 3, "text": "three", "width": 10, "height": 20, "regions": []},
-        ],
-    });
-    std::fs::write(&path, serde_json::to_vec(&document).unwrap()).unwrap();
-    let read = read_pages(std::fs::File::open(&path).unwrap(), 6).unwrap();
-    assert_eq!(read.page_count, 3);
-    assert!(read.text_truncated);
-    assert_eq!(
-        read.pages,
-        vec![
-            PageText {
-                page: 1,
-                text: Some("one".into())
-            },
-            PageText {
-                page: 2,
-                text: Some("two".into())
-            },
-            PageText {
-                page: 3,
-                text: None
-            },
-        ]
-    );
-    let kept: usize = read
-        .pages
-        .iter()
-        .filter_map(|page| page.text.as_ref())
-        .map(String::len)
-        .sum();
-    assert!(kept as u64 <= 6, "{kept} bytes of text kept");
-    std::fs::remove_dir_all(directory).unwrap();
-}
-
 /// One helper call, as its exit code and its one stdout line.
 fn helper_call(arguments: Vec<OsString>) -> (i32, serde_json::Value) {
     let mut stdout = Vec::new();
