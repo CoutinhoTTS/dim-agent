@@ -47442,7 +47442,9 @@
       "to": "dim_cli::ui::i18n",
       "references": [
         "path t",
-        "use crate::ui::i18n::t"
+        "path tf",
+        "use crate::ui::i18n::t",
+        "use crate::ui::i18n::tf"
       ]
     },
     {
@@ -47459,6 +47461,7 @@
       "to": "dim_cli::ui::render::panel",
       "references": [
         "path bordered",
+        "path crate::ui::render::panel::wrap_words",
         "path follow_window",
         "path wrap",
         "use crate::ui::render::panel::bordered",
