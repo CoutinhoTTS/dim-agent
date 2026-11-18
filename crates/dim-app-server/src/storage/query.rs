@@ -2118,7 +2118,11 @@ fn sources<'a>(
             .enumerate()
             .map(|(index, filter)| {
                 let predicate = compiler.physical_filter(filter, true).unwrap_or("1".into());
-                if index == 0 && compiler.relation_scope && let Some((ordinal, sequence, descending)) = compiler.position_after {
+                let position = compiler.position_after;
+                if index == 0
+                    && compiler.relation_scope
+                    && let Some((ordinal, sequence, descending)) = position
+                {
                     let ordinal = compiler.bind(ordinal as i64);
                     let sequence = compiler.bind(sequence as i64);
                     let (op, field) = if descending { ("<", "e.sequence") } else { (">", "e.last_sequence") };
@@ -2678,7 +2682,6 @@ fn selected_properties(
         .collect()
 }
 
-#[cfg_attr(feature = "testing", allow(clippy::too_many_arguments))]
 fn kind_positions(
     connection: &Connection,
     scope: &TimelineReadScope,
@@ -2880,7 +2883,6 @@ fn kind_positions(
     }))
 }
 
-#[cfg_attr(feature = "testing", allow(clippy::too_many_arguments))]
 fn position_events(
     connection: &Connection,
     scope: &TimelineReadScope,
@@ -2958,7 +2960,6 @@ fn position_events(
     }))
 }
 
-#[cfg_attr(feature = "testing", allow(clippy::too_many_arguments))]
 pub(super) fn execute(
     connection: &mut Connection,
     scope: &TimelineReadScope,

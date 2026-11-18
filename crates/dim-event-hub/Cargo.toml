@@ -36,3 +36,6 @@ dim-client.workspace = true
 futures-util.workspace = true
 rutis-loader.workspace = true
 tokio-tungstenite.workspace = true
+
+[lints]
+workspace = true

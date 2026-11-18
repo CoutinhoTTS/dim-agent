@@ -476,7 +476,6 @@ impl ToolReload {
     }
     /// The next restart keeps everything downstream unloaded until the
     /// returned gate is notified.
-    #[allow(dead_code)]
     fn hold_next(&self) -> Arc<tokio::sync::Notify> {
         let gate = Arc::new(tokio::sync::Notify::new());
         *self.1.lock().unwrap() = Some(gate.clone());
@@ -2257,7 +2256,12 @@ async fn configured_binary_shares_public_execution_and_persists_settings() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = listener.local_addr().unwrap();
         let stop = CancellationToken::new(); let cancel = stop.clone();
-        let http = tokio::spawn(async move { axum::serve(listener, router).with_graceful_shutdown(cancel.cancelled_owned()).await.unwrap(); });
+        let http = tokio::spawn(async move {
+            axum::serve(listener, router)
+                .with_graceful_shutdown(cancel.cancelled_owned())
+                .await
+                .unwrap();
+        });
         let directory = std::path::PathBuf::from("/tmp").join(format!("dim-aimux-server-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&directory).unwrap();
         let socket = directory.join("ipc/server.sock"); let configuration = directory.join("models.json");
@@ -2286,7 +2290,13 @@ async fn configured_binary_shares_public_execution_and_persists_settings() {
             let transport = if ws {
                 Transport::Ws(Box::new(tokio_tungstenite::connect_async(format!("ws://{}/ws", address["websocketAddress"].as_str().unwrap())).await.unwrap().0))
             } else { Transport::Unix(BufReader::new(UnixStream::connect(&socket).await.unwrap())) };
-            let mut client = Client { transport, id: 0, notices: vec![], instance: Value::Null, features: Value::Null };
+            let mut client = Client {
+                transport,
+                id: 0,
+                notices: vec![],
+                instance: Value::Null,
+                features: Value::Null,
+            };
             assert_ok(&client.rpc("hello", json!({"protocolVersion":1,"clientKind":"other"})).await);
             if ws {
                 assert_eq!(client.rpc("session.create", create(json!([]))).await["error"]["data"]["appError"], "local_transport_required");
@@ -2307,7 +2317,15 @@ async fn configured_binary_shares_public_execution_and_persists_settings() {
             assert!(events.iter().any(|event| event["data"]["delta"] == "native server answer"));
             assert_ok(&client.rpc("session.idle", json!({"sessionId":sid})).await);
         }
-        let mut client = Client { transport: Transport::Unix(BufReader::new(UnixStream::connect(&socket).await.unwrap())), id:0, notices:vec![], instance:Value::Null, features:Value::Null };
+        let socket = UnixStream::connect(&socket).await.unwrap();
+        let transport = Transport::Unix(BufReader::new(socket));
+        let mut client = Client {
+            transport,
+            id: 0,
+            notices: vec![],
+            instance: Value::Null,
+            features: Value::Null,
+        };
         let hello = client.rpc("hello", json!({"protocolVersion":3,"clientKind":"other"})).await;
         assert_ok(&hello);
         let features = hello["result"]["features"].as_array().unwrap();

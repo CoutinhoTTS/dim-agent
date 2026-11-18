@@ -1257,10 +1257,13 @@ async fn tool_reload_cancels_a_pending_approval_fails_the_turn_and_the_session_c
         assert_eq!(
             events
                 .iter()
-                .filter(|event| matches!(
-                    &event.kind,
-                    EventKind::ToolResult(data) if data.results.iter().all(|r| r.result.is_error == Some(true))
-                ))
+                .filter(|event| {
+                    matches!(
+                        &event.kind,
+                        EventKind::ToolResult(data)
+                            if data.results.iter().all(|r| r.result.is_error == Some(true))
+                    )
+                })
                 .count(),
             1,
             "exactly one terminal for the reloaded batch"

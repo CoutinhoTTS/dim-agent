@@ -302,7 +302,10 @@ fn establishment(cwd: &Path, roots: usize) -> Result<(), Error> {
 
 impl Gateway {
     // Keep the owned connection, task and host inputs explicit at composition.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one parameter per handle the gateway is composed from"
+    )]
     pub(crate) fn new(
         rpc: Rpc,
         cx: ConnectionTo<Client>,

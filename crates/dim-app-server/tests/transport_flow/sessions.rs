@@ -15,6 +15,9 @@ use std::sync::OnceLock;
 #[path = "workflow_reports.rs"]
 mod workflow_reports;
 
+#[path = "sessions_launch_worktree.rs"]
+mod managed_launch;
+
 #[path = "idle_unload.rs"]
 pub(super) mod idle_unload;
 
@@ -175,6 +178,7 @@ struct Setup {
     loads: Option<idle_unload::Loads>,
     /// The model instead of the echo model.
     model: Option<Arc<dyn dim_agent_capabilities::host::ModelDriver>>,
+    creation: Option<managed_launch::CreationControl>,
     dispatch_gate: Option<Arc<PendingDispatchGate>>,
 }
 
@@ -311,6 +315,9 @@ async fn serve_with(setup: Setup) -> Served {
         }),
     );
     sessions.install(&mut builder);
+    if let Some(creation) = setup.creation {
+        creation.install(&mut builder);
+    }
     if let Some(gate) = setup.dispatch_gate {
         builder.require_feature(Feature::new("pending-dispatch-gate").branch(
             "pending-dispatch-gate",

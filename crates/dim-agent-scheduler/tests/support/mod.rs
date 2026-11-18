@@ -1,5 +1,8 @@
 //! A real App Server with the Scheduler installed and a scripted model.
-#![allow(dead_code)]
+#![expect(
+    dead_code,
+    reason = "each test binary uses the helpers it needs; the rest are shared"
+)]
 use dim_agent_capabilities::{defaults, history::HistoryRenderer, host::*};
 use dim_agent_runtime::{AgentBuilder, AgentConfig, SessionConfig};
 use dim_agent_types::*;

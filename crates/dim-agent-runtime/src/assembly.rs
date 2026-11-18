@@ -1489,7 +1489,10 @@ pub(crate) struct Opening {
 ///
 /// `instance` reads what the creation has to wait for and the identity that
 /// locates an instance whose creation is still running.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one parameter per input an instance creation waits on"
+)]
 async fn create_instance(
     loader: &Loader,
     ctx: &Ctx,
@@ -2083,7 +2086,10 @@ impl std::fmt::Display for AssemblyFinding {
 /// once, by the innermost scope that contains it: a nested scope's subtree is
 /// left to that scope's own pass. A required row or view that has left the
 /// tree is reported too: nothing in the snapshot would otherwise remember it.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one parameter per part of the scope snapshot `check_scope` compares"
+)]
 pub(crate) fn check_scope(
     snapshot: &rutis::host::diagnostics::RuntimeDiagnostics,
     rows: &std::collections::HashMap<rutis::host::InstanceId, Vec<EntryInfo>>,

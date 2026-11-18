@@ -30,7 +30,6 @@ pub enum DraftPart {
     Block(dim_agent_types::ContentBlock),
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GrantRequest {
     pub path: String,
@@ -898,7 +897,10 @@ pub enum OauthEvent {
         user_code: String,
     },
     Exchanging,
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "no producer: the login flow never reports a slow-down"
+    )]
     SlowDown(u64),
     ModelsRefreshed {
         after_login: bool,
@@ -1006,7 +1008,10 @@ pub struct ProviderEntry {
     pub status: String,
     pub is_current: bool,
     pub enabled: bool,
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "set from the provider's source; no panel reads it"
+    )]
     pub custom: bool,
     pub base_url: Option<String>,
     pub api_key_preview: Option<String>,
@@ -1232,7 +1237,6 @@ impl DeleteOutcome {
     }
 }
 
-#[allow(dead_code)]
 pub enum Update {
     Reportable {
         error: crate::report::Captured,
@@ -1289,6 +1293,10 @@ pub enum Update {
         model: Option<String>,
     },
     /// How many files the run that just ended changed.
+    #[expect(
+        dead_code,
+        reason = "no producer: nothing reports a changed-file count"
+    )]
     FilesChanged(usize),
     /// The active session changed; snapshots that follow belong to it.
     Switched {
