@@ -6458,36 +6458,41 @@ fn tui_mcp_without_a_session_reports_the_catalog_only() {
     assert!(!terminal.transcript.contains("session_closed"));
 }
 
+/// At home, before any Session exists, every command that needs one answers
+/// its own notice and sends nothing: `/export` and `/queue` name the missing
+/// Session, `/agent` names the sign-in, and a valued `/effort` names the
+/// missing model.
 #[test]
-fn tui_agent_without_a_session_answers_the_no_session_notice_and_sends_nothing() {
-    let home = Home::new();
-    let (quieted, quiet_done) = std::sync::mpsc::channel();
-    let daemon = no_session_daemon(&home, quieted);
-    let mut terminal = Terminal::launch_tui(home.command());
-    terminal.until("Ask anything...");
-    terminal.write(b"/agent ghost\r");
-    terminal.until("Sign in with /login");
-    quiet_done.recv_timeout(PATIENCE).unwrap();
-    home.kill(&terminal);
-    terminal.wait();
-    daemon.join().unwrap();
-    assert!(!terminal.transcript.contains("session_closed"));
-}
-
-#[test]
-fn tui_valued_effort_at_home_without_a_model_says_what_to_do_and_sends_nothing() {
-    let home = Home::new();
-    let (quieted, quiet_done) = std::sync::mpsc::channel();
-    let daemon = no_session_daemon(&home, quieted);
-    let mut terminal = Terminal::launch_tui(home.command());
-    terminal.until("Ask anything...");
-    terminal.write(b"/effort high\r");
-    terminal.until("No model to configure");
-    quiet_done.recv_timeout(PATIENCE).unwrap();
-    home.kill(&terminal);
-    terminal.wait();
-    daemon.join().unwrap();
-    assert!(!terminal.transcript.contains("session_closed"));
+fn tui_home_commands_without_a_session_answer_and_send_nothing() {
+    for fullscreen in [false, true] {
+        let home = Home::new();
+        let (quieted, quiet_done) = std::sync::mpsc::channel();
+        let daemon = no_session_daemon(&home, quieted);
+        let mut command = home.command();
+        if fullscreen {
+            command.arg("--fullscreen");
+        }
+        let mut terminal = Terminal::launch_tui(command);
+        terminal.until("Git branch");
+        terminal.write(b"/export\r");
+        terminal.until("/export needs a session");
+        terminal.write(b"/queue\r");
+        terminal.until("/queue needs a session");
+        terminal.write(b"/agent ghost\r");
+        terminal.until("Sign in with /login");
+        terminal.write(b"/effort high\r");
+        terminal.until("No model to configure");
+        quiet_done.recv_timeout(PATIENCE).unwrap();
+        home.kill(&terminal);
+        terminal.wait();
+        daemon.join().unwrap();
+        assert!(!terminal.transcript.contains("session_closed"));
+        assert!(
+            !terminal.transcript.contains("Export session"),
+            "a refused export opened its dialog: {}",
+            terminal.transcript
+        );
+    }
 }
 
 #[test]
@@ -9341,7 +9346,9 @@ fn tui_provider_management_uses_the_production_daemon_and_survives_restart() {
     );
     terminal.write(b"/models\r");
     terminal.until("Provider flow /");
-    terminal.write(b"Provider flow\r");
+    terminal.write(b"Provider flow");
+    terminal.until("1 provider");
+    terminal.write(b"\r");
     terminal.until("Default for new sessions: Provider flow / fixture-model");
     terminal.write(b"stale-effort-message\r");
     terminal.until("provider-updated-reply");
@@ -9358,6 +9365,7 @@ fn tui_provider_management_uses_the_production_daemon_and_survives_restart() {
     terminal.write(b"/models\r");
     terminal.until("Provider flow /");
     terminal.write(b"Provider flow");
+    terminal.until("1 provider");
     assert!(
         rpc(
             &mut wire,
@@ -9606,30 +9614,6 @@ fn tui_registers_with_the_ui_registry_and_leaves_when_asked() {
         "{}",
         terminal.transcript
     );
-}
-
-#[test]
-fn tui_export_and_queue_require_an_open_session() {
-    for fullscreen in [false, true] {
-        let home = Home::new();
-        let (quieted, quiet_done) = std::sync::mpsc::channel();
-        let daemon = no_session_daemon(&home, quieted);
-        let mut command = home.command();
-        if fullscreen {
-            command.arg("--fullscreen");
-        }
-        let mut terminal = Terminal::launch_tui(command);
-        terminal.until("Git branch");
-        terminal.write(b"/export\r");
-        terminal.until("/export needs a session");
-        terminal.write(b"/queue\r");
-        terminal.until("/queue needs a session");
-        quiet_done.recv_timeout(PATIENCE).unwrap();
-        home.kill(&terminal);
-        terminal.wait();
-        daemon.join().unwrap();
-        assert!(!terminal.transcript.contains("Export session"));
-    }
 }
 
 #[test]
@@ -10119,31 +10103,7 @@ fn tui_queue_shows_held_messages_and_steers_or_withdraws_them() {
     terminal.until("Held · third");
     terminal.write(b"\x1b[1;2D");
     terminal.until("third");
-    let plain = {
-        let mut out = String::new();
-        let mut rest = terminal.transcript.as_str();
-        while let Some(start) = rest.find('\u{1b}') {
-            out.push_str(&rest[..start]);
-            let tail = &rest[start + 1..];
-            let skipped = match tail.chars().next() {
-                Some('[') => tail
-                    .char_indices()
-                    .skip(1)
-                    .find(|(_, c)| c.is_ascii_alphabetic())
-                    .map_or(tail.len(), |(i, c)| i + c.len_utf8()),
-                Some(']') => [("\u{7}", 1), ("\u{1b}\\", 2)]
-                    .iter()
-                    .filter_map(|(end, len)| tail.find(end).map(|i| i + len))
-                    .min()
-                    .unwrap_or(tail.len()),
-                Some(c) => c.len_utf8(),
-                None => 0,
-            };
-            rest = &tail[skipped..];
-        }
-        out.push_str(rest);
-        out
-    };
+    let plain = strip_ansi(&terminal.transcript);
     assert!(!plain.contains("Queue (0)"), "{plain}");
     assert!(plain.contains("┃ first"), "{plain}");
     assert!(plain.contains("┃ second"), "{plain}");
@@ -11711,7 +11671,8 @@ fn tui_rebuilds_compaction_rows_from_history_on_resume() {
 /// #1380: context a prompt hook appended to the operator's message is not
 /// their words. The row carries what they sent, and the hook's block becomes
 /// one muted row naming its size, `▸` closed; its body opens with the detail
-/// setting, `/tools`, exactly as a compaction body does.
+/// setting, `/tools`, exactly as a compaction body does. One stored line is
+/// named in the singular, so the row never says `1 lines`.
 #[test]
 fn tui_draws_a_prompt_hooks_context_as_a_status_row() {
     let home = Home::new();
@@ -11732,8 +11693,15 @@ fn tui_draws_a_prompt_hooks_context_as_a_status_row() {
                      {"type":"text","text":"<dim-hooks kind=\"prompt-submit\">\nSEARCH-MEMORY-FIRST\nis required here\n(third line)\n</dim-hooks>"}
                  ]},"mode":"queue"}},
                 {"id":"hooked-applied","sequence":10,"create_at":1,"type":"input","name":"applied",
-                 "data":{"input_id":"hooked","mode":"queue"}}],
-                "through":10,"nextAfter":10,"done":true}),
+                 "data":{"input_id":"hooked","mode":"queue"}},
+                {"id":"one-line","sequence":11,"create_at":1,"type":"input","name":"message",
+                 "data":{"user":{"content":[
+                     {"type":"text","text":"translate this"},
+                     {"type":"text","text":"<dim-hooks kind=\"prompt-submit\">\nONE-LINE-BODY\n</dim-hooks>"}
+                 ]},"mode":"queue"}},
+                {"id":"one-line-applied","sequence":12,"create_at":1,"type":"input","name":"applied",
+                 "data":{"input_id":"one-line","mode":"queue"}}],
+                "through":12,"nextAfter":12,"done":true}),
         );
         wire.no_context();
         wire.hold();
@@ -11743,27 +11711,38 @@ fn tui_draws_a_prompt_hooks_context_as_a_status_row() {
     let mut terminal = Terminal::launch_tui(command);
     terminal.until(operator);
     terminal.until("Hook context · 3 lines ▸");
+    terminal.until("Hook context · 1 line ▸");
+    assert!(
+        !terminal.transcript.contains("1 lines"),
+        "a one-line body is named in the singular:\n{}",
+        terminal.transcript
+    );
     assert!(
         !terminal.transcript.contains("<dim-hooks"),
         "the marker is the model's, not the transcript's:\n{}",
         terminal.transcript
     );
     assert!(
-        !terminal.transcript.contains("SEARCH-MEMORY-FIRST"),
+        !terminal.transcript.contains("SEARCH-MEMORY-FIRST")
+            && !terminal.transcript.contains("ONE-LINE-BODY"),
         "a closed hook context keeps its body out of the transcript:\n{}",
         terminal.transcript
     );
     // The detail setting opens the body, as it does for a compaction's summary.
     terminal.write(b"/tools\r");
     terminal.until("Hook context · 3 lines ▸");
+    terminal.until("Hook context · 1 line ▸");
     assert!(
-        !terminal.transcript.contains("SEARCH-MEMORY-FIRST"),
+        !terminal.transcript.contains("SEARCH-MEMORY-FIRST")
+            && !terminal.transcript.contains("ONE-LINE-BODY"),
         "the summary form keeps the hook body closed:\n{}",
         terminal.transcript
     );
     terminal.write(b"/tools\r");
     terminal.until("Hook context · 3 lines ▾");
     terminal.until("SEARCH-MEMORY-FIRST");
+    terminal.until("Hook context · 1 line ▾");
+    terminal.until("ONE-LINE-BODY");
     terminal.write(b"/exit\r");
     terminal.until("Bye!");
     assert!(terminal.wait().success());
@@ -11835,48 +11814,6 @@ fn tui_draws_a_stop_hooks_follow_up_as_one_row() {
     terminal.until("fix parser::tests");
     terminal.write(b"/tools\r");
     terminal.until("Stop hook follow-up · 3 lines ▸");
-    terminal.write(b"/exit\r");
-    terminal.until("Bye!");
-    assert!(terminal.wait().success());
-    daemon.join().unwrap();
-}
-
-/// #1380: one stored line reads in the singular, so the row never says
-/// `1 lines`.
-#[test]
-fn tui_names_a_one_line_hook_context_in_the_singular() {
-    let home = Home::new();
-    let daemon = home.daemon(|wire| {
-        wire.2 = true;
-        let hello = wire.read("hello");
-        wire.reply(&hello, json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.input.pending.blockPresence","session.methods"]}));
-        let attach = wire.read("session.attach");
-        wire.reply(&attach, attach_record(&attach));
-        let history = wire.read("session.history");
-        wire.reply(
-            &history,
-            json!({"events":[
-                {"id":"one","sequence":9,"create_at":1,"type":"input","name":"message",
-                 "data":{"user":{"content":[
-                     {"type":"text","text":"translate this"},
-                     {"type":"text","text":"<dim-hooks kind=\"prompt-submit\">\nONE-LINE-BODY\n</dim-hooks>"}
-                 ]},"mode":"queue"}},
-                {"id":"one-applied","sequence":10,"create_at":1,"type":"input","name":"applied",
-                 "data":{"input_id":"one","mode":"queue"}}],
-                "through":10,"nextAfter":10,"done":true}),
-        );
-        wire.no_context();
-        wire.hold();
-    });
-    let mut command = home.command();
-    command.args(["--resume", "session"]);
-    let mut terminal = Terminal::launch_tui(command);
-    terminal.until("Hook context · 1 line ▸");
-    assert!(
-        !terminal.transcript.contains("1 lines"),
-        "a one-line body is named in the singular:\n{}",
-        terminal.transcript
-    );
     terminal.write(b"/exit\r");
     terminal.until("Bye!");
     assert!(terminal.wait().success());
