@@ -24,7 +24,7 @@
 | 1 | 支持哪些场景，按什么顺序 | 三个，依次是（§3）：插件开的线（已交付）、agent 从主线开的线（本设计）、用户从历史某点开线、再比较和采纳（以后） |
 | 2 | 分支、Collaboration 成员、fork 怎么区分 | 见 §2。分支是同一个 agent；成员和 fork 是另一个 Session |
 | 3 | 分支结束时，谁需要它的结果，以什么形式 | 没有哪条线欠另一条线结果。各线在工作过程中把要紧的事告诉对方（§6）。agent 开的线结束时给开它的那条线一条最终消息（§10）。插件开的线按创建者的协议办，例如 Pursuit 的结论 |
-| 4 | 分支什么时候算结束，结束后还能看到吗 | 它自己结束、它上面的线结束它，或者用户结束它（§10）。结束的线留在分支目录里，客户端和开它的那条线仍能读到它的历史 |
+| 4 | 分支什么时候算结束，结束后还能看到吗 | 它自己结束（只有工具线这样结束）、它上面的线结束它，或者用户结束它（§10）。结束的线留在分支目录里，客户端和开它的那条线仍能读到它的历史 |
 | 5 | 用户能看到什么、做什么 | 跟随任一条线、与它对话、回答它的提问和审批、结束它（§9、§14）。比较和采纳随场景 3 一起做 |
 | 6 | 怎样算"完成" | 验收流程（§20）通过，评估场景（§12.3）已在本地用真实模型跑过，并在实现 PR 里报告。发布演示（[#439](https://github.com/arcships/dim/issues/439)）可以展示它 |
 
@@ -65,25 +65,26 @@
 - **亲缘。** 父子是分支之间唯一可以通信的关系。父分支和它的每个子分支互相写输入，一条线还会读它被切出来的那条线（§6）。兄弟分支、更远的亲属之间既不发消息也不读。这条规则约束的是一条线作用于另一条线，在这里就是 `branch` 工具。能力按自己的决定行事，属于能力影响分支，不受这条规则限制（[设计规则 §2](../../architecture/rust-agent/principles.md#2-作用域的含义)）。例如 Goal 写入评审结果，或插件在任意切点开线。
 - **根。** `main` 是没有父分支、也没有来源的那条线：这个字面量 id、它的编号，以及所有已存下的 `branch_id: "main"`，本设计都不改。它永不结束，Session 关闭不算结束。界面上它叫“起点”。
 - **主线。** 这个 Session 的对话所在的那条线：客户端不传 `branchId` 时采用的目标，也是客户端居中显示的那条线。它是一个角色，不是 id：开局就是根，只在用户动作下移动（§9、§14）。唯一权威的事实不是模型可见的块，而是写在根线上的一条 `branch/primary {branch}`（根线比其它线都活得久，且不能结束）（§16）。告诉各条线这件事的键控块从来不是权威。没有这条事实的 Session 就在根上。
-- **开线方。** 开过线的线就协调这些线：它有自己的名册（§7.1），也只有它能给自己开的线发消息、读它们、结束它们。协调关系沿父子关系走，从不随主线移动。
+- **开线方。** 开过线的线就协调这些线：它有自己的名册（§7.1），也只有它能给自己开的线发消息、读它们、结束它们，但要除去线的来源所禁止的：插件线按创建者的协议走，用户开的线由用户结束（§11）。协调关系沿父子关系走，从不随主线移动。
 - **agent 的工具。** `branch` 工具只能从当前主线开线。不是主线的线会被拒绝。只有插件线永远不能成为主线：工具线、用户线和根都是合法目标（§14；根在它不是主线时即可）。树的深度只在用户把主线移到一条会自己开线的线时才增长。一个 Session 里工具开着的线总数有上限（§6.1）。
 - **来源。** 每条线都有来源，记在父分支的 `branch/create` 里：
-  - **工具线**由 `branch` 工具开出。它是对话线：可以成为主线，当了主线就能开线。
-  - **用户线**由客户端经 `session.branch_create` 开出。它的开线方是用户，它同样是对话线：可以成为主线，当了主线就能开线。
+  - **工具线**由 `branch` 工具开出。它是对话线：可以成为主线，当了主线就能开线；不在主线时它用 `end` 结束自己。
+  - **用户线**由客户端经 `session.branch_create` 开出。它的开线方是用户，它同样是对话线：可以成为主线，当了主线就能开线。它由用户结束，不能结束自己。
   - **插件线**由插件（`TreeCommands.create`）开出。它的协议归创建者，既不能成为主线，也不能开线。
 
   来源可以从 `TimelineInfo.source` 读到，由 `TreeCommands.list` 和 `info` 返回，根上没有（§5）。插件线的来源是 `{kind: "host", operation_id}`：开线一方的不透明标签，核心从不解释它。用户线有它自己的种类 `{kind: "user", operation_id}`，所以需要分辨对话线与插件线的读者不用去解析 `operation_id`。开线一方按自己的 operation id 约定找到自己的线，例如 Goal 的 `goal:evaluate:` 前缀。
-- **工具的作用范围。** 工具的 `read` 读调用方被切出来的那条线，也读它开过的线；`message` 和 `end` 也在这两对之间生效。插件线不在任何名册上，工具不给它发消息，也不结束它。
+- **工具的作用范围。** 工具的 `read` 读调用方被切出来的那条线，也读它开过的线；`message` 和 `end` 也在这两对之间生效。插件线不在任何名册上，工具不给它发消息，也不结束它。用户线在开它的那条线的名册上，工具会给它发消息、会读它，但它自己的 `end` 会被拒绝，因为它由用户结束（§9、§11）。
 - **父线块。** 一条线的 BranchLine 在父线结束一轮、且父线在 `max(读取游标, 上次告知的头部, 开启点)` 之后有新活动时，在这条线自己身上写一个带 key 的 `<dim-branch-parent>` 块（§7.1.1、§12.1）。块只报位置，是状态而不是请求；内容仍留在读取返回的页里。
 
 | 线 | 用工具开线 | 用工具发消息、读 | 由谁结束（按约定） |
 | --- | --- | --- | --- |
 | `main`，根 | 当它是主线时能 | 它开过的线 | 永不结束；Session 关闭不算结束 |
 | 当前主线 | 能 | 它被切出来的那条线，以及它开过的线 | 它在主线期间谁都不能结束它，用户也不行：要结束它，用户先把主线移到另一条线上 |
-| 其它对话线（工具线或用户线） | 不能（工具结果拒绝） | 它的父分支以及它开过的线 | 它自己（`end`）、用户，或祖先结束时连带 |
+| 其它工具线 | 不能（工具结果拒绝） | 它的父分支以及它开过的线 | 它自己（`end`）、用户，或祖先结束时连带 |
+| 其它用户线 | 不能（工具结果拒绝） | 它的父分支以及它开过的线 | 用户，或祖先结束时连带；不是它自己 |
 | 插件线 | 不能 | —（按创建者的协议） | 它的创建者（Goal 结束它的评审者，[Pursuit §13](plugins/Pursuit.md#13-结束评审者随-427)）、用户，或祖先结束时连带 |
 
-谁结束哪条线，是调用方之间的约定。运行时只检查目标，不管是谁在请求，用户也一样：它存在、未结束，且既不是根、也不是当前主线、也不在主线的祖先链上，因为结束一条线会连带结束它下面的每一条（§10）。
+谁结束哪条线，是调用方之间的约定，但要除去工具不让线替自己结束的那两类：插件线按创建者的协议走，用户线由用户结束（§11）。运行时只检查目标，不管是谁在请求，用户也一样：它存在、未结束，且既不是根、也不是当前主线、也不在主线的祖先链上，因为结束一条线会连带结束它下面的每一条（§10）。
 
 ## 5. 部件
 
@@ -305,7 +306,7 @@ WorkspaceTools 不变。
 - **不经主线转达。** 这是同一个主体在问它自己的用户。
 - **提交。** 用户可以向任一条未结束的线提交（带 `branchId` 的 `session.submit`）。不传 `branchId` 的调用送给当前主线。
 - **中断。** 中断一条线只结束它当前这一轮，不结束这条线。不传 `branchId` 的停止停的是当前主线。
-- **结束。** 除根、当前主线、以及主线的每一条祖先以外，用户可以结束任一条线（`session.branch_end`，§10）。当前主线谁也不能结束，用户也一样：要结束它，先把主线移到另一条线上。
+- **结束。** 除根、当前主线、以及主线的每一条祖先以外，用户可以结束任一条线（`session.branch_end`，§10）。当前主线谁也不能结束，用户也一样：要结束它，先把主线移到另一条线上。用户开的线就是由用户这样结束，从不由它自己的 `end` 结束。
 - **移动主线。** 用户可以把主线移到任意一条开着的对话线（工具线或用户线）上，也可以移回根，用一个方法（`session.branch_primary`，§14）。根只要不是当前主线就是合法目标；插件线永远不是。旧主线照旧开着，并保留它开过的线；什么也不拷贝，历史也不移动。移动在根上写下事实，并只给两条线状态说明：新主线和旧主线（§12.1）。之后旧主线不再能开线，新主线可以。
 - **移动不做什么。** 它改变的是这个 Session 的对话在哪条线上。它不碰工作区，所以上一条主线改过的文件保持已改；它不移动 `/fork`，fork 仍然只把根拷到某个停顿点（[fork](appserver/session-deletion-and-fork.md)）；它也不结束任何一条线。
 
@@ -334,7 +335,7 @@ WorkspaceTools 不变。
 - 还在打开的线还不是线：它的创建仍可能失败，而一条线只能有一个终结事实，所以在它发布之前 `end` 回答 `unknown_branch`。在加载时结束一条线的开线方等 Session，而 Session 在恢复完成后才发布（§17 R1）。
 - 关闭 Session 不算结束。
 - "开线的一方管理它的线"是调用方之间的约定，不是运行时规则：
-  - `branch` 工具的 `end` 不带目标，所以结束的是调用它的那条线，这是工具的设计；而当前主线会被拒绝，因为 Session 的对话在它上面；
+  - `branch` 工具的 `end` 不带目标，所以结束的是调用它的那条线，这是工具的设计；当前主线会被拒绝，因为 Session 的对话在它上面，用户开的线也会被拒绝，因为它由用户结束；
   - 一条线想让它开过的某条线结束，就用 steer 请它结束，这是工具的约定。
 
 顺序：
@@ -377,7 +378,7 @@ WorkspaceTools 不变。
 | `create` | `prompt`、`at?`、`idleNotice?`（`steer` \| `none`） | 当前主线 | 开一条切在 `at` 的工具线（默认与现在相同：在本次请求的模型开始之前）。空闲通知默认 `steer`。这个 Session 已经把工具开着的线开到上限时拒绝（§6.1） | `Line created: C` |
 | `message` | `to`、`content`、`mode?`（`append` \| `steer`） | 一条线 → 它开过的线；一条线 → 它被切出来的那条线 | 在 `to` 上写一条 `input/message` | `Sent to C.` |
 | `read` | `branch`、`after?`、`limit?`（1–200） | 一条线，读它被切出来的那条线或它开过的线 | 从存储读一页；不给 `after` 时从调用方的游标开始（§6） | 这一页的 JSON：items、`nextCursor`、`done` |
-| `end` | `content` | 一条不是当前主线的线，对它自己 | 先给开它的那条线发最终消息（steer），再调用 `TreeCommands.end(C, source)`，`source` 就是这次调用 | `Line C is ending; your final message was sent to P.` |
+| `end` | `content` | 一条不是当前主线的工具线，对它自己 | 先给开它的那条线发最终消息（steer），再调用 `TreeCommands.end(C, source)`，`source` 就是这次调用 | `Line C is ending; your final message was sent to P.` |
 
 输入 schema 为 `{action, prompt?, at?, idleNotice?, to?, content?, mode?, branch?, after?, limit?}`，`action` 必填，`additionalProperties: false`。`idleNotice` 只对 `create` 有效。
 
@@ -390,7 +391,9 @@ WorkspaceTools 不变。
 | 在亲缘之外 `message` 或 `read` | `You can message or read only the lines you opened and the line you were cut from.` | `branch_not_kin` |
 | 对插件线 `message`、或读插件线 | `Line C was not opened with this tool; it follows its own protocol.` | `branch_not_tool_line` |
 | 向已结束的线发消息，或与结束发生竞争 | `Line C has ended. Read it to see what it did.` | `branch_ended` |
-| 在根、当前主线、主线的祖先或插件线上 `end` | `Only a line that opened this one, and that is not the primary line, can end it with this call.` | `branch_cannot_end` |
+| 在根、当前主线或主线的祖先上 `end` | `Only a line that opened this one, and that is not the primary line, can end it with this call.` | `branch_cannot_end` |
+| 从插件线上 `end` | `Only a line opened with create can end itself.` | `branch_cannot_end` |
+| 从用户开的线上 `end` | `Line C was opened by the user, who ends it.` | `branch_user_ends` |
 | `read` 的 `after` 超过目标的头部 | `after A is past line T's head H; a read starts at or below H` | 无：带错误结果，不带代码 |
 
 这些拒绝文本只陈述规则，不多写。模型在收到拒绝后该怎么做属于策略，与其余分支文本的指引一起，留给提示词设计（§12）决定。
@@ -500,7 +503,7 @@ WorkspaceTools 不变。
 - **通知的事实句。** "Line C's turn ended (<status>) without a message to you, and C is waiting." 与 "Line C was ended from outside its own line, by the user or a host operation. It no longer receives messages"。
 - **主线状态说明的事实句。** 给新主线的说明写出它的 id、父线和来源（取自它重复的出生块）、出生块带有目的时的目的、它切自哪条线，以及在这段块是该线最新块期间成立的规则：它可以开线，它不向开它的线发自动空闲通知，它不能对自己 `end`。给旧主线的说明写出现在是哪条线是主线、这条线继续开着并保留它开过的线、它不能再开线，以及它按自己情形适用的结束规则：新主线的祖先不能 `end`，因为 `end` 会级联向下，说明写明这一点；不是祖先的线逐字保留来源给它的结束规则：工具线用 `end` 结束自己，用户开的线则被告知它不能对自己 `end`、由用户来结束；根永不结束。每段说明都是同一个 `branch:line` 键的后续块，因此替换出生身份：它逐字重复那份身份的句子，只改动挪动真正改变的部分（§12.1）。
 - **branch 工具的动作与模式。** 动作 `create`、`message`、`read`、`end` 及各自做什么；`mode` 为 `append` 或 `steer` 及它对接收方的作用；每个动作接收的字段，`action` 必填且不接受别的字段；`read` 的目标规则及其游标规则（"With no after, a read continues after your last read of that line"）；以及陈述保证的句子："Returns the line's id"、"Pass after to read from another point"、"It is your last action"、"A line reads the line it was cut from, and the lines it opened. Messages pass only between a line and the lines it opened."。
-- **结果与拒绝。** `Line created: C`、`Sent to C.`、页 `{items, nextCursor, done}`、`Line C is ending; your final message was sent to P.` 与 `Line C ends with this message.`；拒绝码 `branch_not_primary`、`branch_limit_reached`、`branch_not_kin`、`branch_not_tool_line`、`branch_ended`、`branch_cannot_end` 及各自的文本，以及切换方法返回的 `branch_already_primary`；`after A is past line T's head H; a read starts at or below H`，即读取在 `after` 超过目标头部时返回的错误结果，不带代码；以及 `Invalid branch arguments: …`。
+- **结果与拒绝。** `Line created: C`、`Sent to C.`、页 `{items, nextCursor, done}`、`Line C is ending; your final message was sent to P.` 与 `Line C ends with this message.`；拒绝码 `branch_not_primary`、`branch_limit_reached`、`branch_not_kin`、`branch_not_tool_line`、`branch_ended`、`branch_cannot_end`、`branch_user_ends` 及各自的文本，以及切换方法返回的 `branch_already_primary`；`after A is past line T's head H; a read starts at or below H`，即读取在 `after` 超过目标头部时返回的错误结果，不带代码；以及 `Invalid branch arguments: …`。
 - **指南条目。** 每个条目标明它的标记是什么、承载谁的话或哪些事实，以及它是状态或信息、绝不是请求。`<dim-branch-line>` 的条目说明后出现的同名块会取代它、带 `primary` 的块就是主线移动时写下的那段说明，并且它归 TimelineTree——每段身份块都由它写——所以在任何执行配置下都在位。`<dim-branch-lines>` 的条目写明它的 key 是 `branch:roster`，所以读者不会把它当成 `branch:line` 下的身份。`<dim-branch-idle>` 和 `<dim-branch-ended>` 的条目归 BranchLine，两条通知都由它写；`<dim-branch-message>` 的条目与它们一起注册，因为 BranchLine 恰好在写消息的 BranchTool 所在之处加载。名册条目和消息条目在每条线上都在。
 
 **策略。**
@@ -687,7 +690,7 @@ BranchLine 的服务只由同一插件里的工具读取。轮次结束信号是
 
 1. 主线开两条线，名册列出这两条。每个子分支的身份（`branch:line`）不碰它继承的名册，自己又开过线的子分支两者都保留。开线方和某个子分支各自压缩后，带 key 的基线分别重放每份名册和每份身份。
 2. 子分支给它的开线方发一条 Append：它不唤醒开线方，开线方在下一次请求时看到。Steer 唤醒开线方的 `wait`，或在开线方空闲时开启新的一轮。来自开线方的 Steer 唤醒空闲的子分支。
-3. 下列操作被拒绝，什么也不写：给兄弟分支发消息或读取、一条线和它的祖父级、在不当前主线的线上 `create`、对插件线 `message`、读插件线、在根上、主线上或主线的祖先上 `end`。
+3. 下列操作被拒绝，什么也不写：给兄弟分支发消息或读取、一条线和它的祖父级、在不当前主线的线上 `create`、对插件线 `message`、读插件线、在根上、主线上或主线的祖先上 `end`，以及从插件线或用户开的线上 `end`。
 4. 子分支的一轮没有发 steer 就结束时，开它的那条线收到一条带这一轮状态的空闲通知。这一轮 steer 过它的开线方、调用了 `end`、留下了待处理的驱动输入，或者这条线就是当前主线时，不写通知。
 5. 工具线结束自己：写入最终消息（steer）和带 `tool` 来源的 `branch/end`，在这一轮结束时关闭，然后在它的开线方上写 `branch/ended` 并更新名册，不写结束通知。之后的消息被拒绝（`branch_ended`）。工具的 `read` 和 `session.history` 都能返回已结束线的历史。
 6. 经 `session.branch_end` 由用户结束：`branch/end` 带 App Server id 的用户来源，这条线当前这一轮被中断，它的开线方以 steer 收到结束通知。根、主线、以及主线的祖先都不能被结束。再次结束返回 `branch_ended`。向已结束的线提交返回 `branch_ended`。
@@ -722,7 +725,7 @@ Goal 流程，放在 `crates/dim-goal/tests` 的流程测试中（§7.4）：
 20. 只一条线的 Session 就在根上，这次恢复不为它查任何东西。有多条线的 Session 在根上只读一条事实，回答最新一条 `branch/primary` 的目标；两类里最新的是 `session/forked` 时，或者什么也没时，回答根。目标已结束、或者目标是插件线时，回答根。
 21. `session.branch_primary` 移动主线：`branch/primary` 写在根上，恰好写两条状态说明（新主线和旧主线），其他每条线什么也收不到。拒绝时什么也不写：插件线、已结束的线、未知的线，以及已经是主线的那条线，后者取 `branch_already_primary`，所以根在主线上时被拒绝、在别的线当主线时作为目标被接受。
 22. 移动之后，`session.submit`、`session.stop`、`session.idle`、`approval.respond`、`session.goal.*`、`shell.run`、目录的运行状态与最近活动、以及新建的定时任务，都解析到新主线。已记录 `branch_id` 的定时任务保留它。
-23. 旧主线仍能给它开过的线发消息、读它们、结束它们；不是主线的线 `create` 被 `branch_not_primary` 拒绝。原来是工具线而现在成为主线的线停发空闲通知，对自己 `end` 被拒绝。
+23. 旧主线仍能给它开过的线发消息、读它们、结束它们；不是主线的线 `create` 被 `branch_not_primary` 拒绝。原来是工具线而现在成为主线的线停发空闲通知，对自己 `end` 被拒绝。用户开的线对自己 `end` 被 `branch_user_ends` 拒绝，插件线被 `branch_not_tool_line` 拒绝。
 24. 主线不在根上的 Session 被 fork 后，fork 出来的会话的主线是根，因为拷进来的每一条 `branch/primary` 都比它的 `session/forked` 旧。
 25. 这个 Session 把工具开着的线开到上限后，再开线被 `branch_limit_reached` 拒绝；上限按全树统计所有仍开着的工具线；客户端开的线和插件线从不计入，也不被上限拒绝。
 

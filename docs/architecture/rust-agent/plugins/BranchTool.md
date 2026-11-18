@@ -13,6 +13,10 @@ checks two guards of its own: the calling line must be the current primary line,
 Session's total of open tool lines must be below the cap. A client-opened line never
 counts toward it, and is never refused by it.
 
+`end` ends the calling line and nothing else, so it guards the caller as well as the
+target: only a tool line ends itself, a plugin line follows its own protocol, and a line
+the user opened is ended by the user.
+
 ## Dependencies
 
 | Service | Purpose |
@@ -31,7 +35,7 @@ after?, limit?}`, with `action` required and no other properties; risk stays
 `session`, and Approval admits each call like any tool
 ([event-driven flows](../event-driven-flows.md)). A refusal is an error result
 whose `structuredContent` carries a code (`branch_not_primary`, `branch_limit_reached`, `branch_not_kin`,
-`branch_not_tool_line`, `branch_ended`, `branch_cannot_end`) and writes
+`branch_not_tool_line`, `branch_ended`, `branch_cannot_end`, `branch_user_ends`) and writes
 nothing. The tools registry and the calling line's BranchLine are found per
 call; the registration is withdrawn when this part unloads, and a reloaded
 TimelineTree reloads it with the services it injects.

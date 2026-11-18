@@ -18,7 +18,9 @@ RootInit == \E primary\in BOOLEAN,notice\in BOOLEAN:
  s=[root|->TRUE,primary|->primary,opener|->TRUE,source|->"root",notice|->notice,head|->1,opening|->1,cut|->0,cursor|->0,reported|->1,held|->FALSE,
  ended|->FALSE,turn|->FALSE,steered|->FALSE,ownEnd|->FALSE,pending|->FALSE,recovery|->FALSE,idle|->0,notes|->0,blocks|-><<>>,roster|->{1,2},opened|->{},endedNotice|->{},externalEnds|->{}]
 CanOpen == s.primary /\ s.source#"plugin"
-CanEndSelf == ~s.root /\ ~s.primary
+\* Only a tool line ends itself. A line the user opened is ended by the user, and
+\* a plugin line by its creator's protocol; the end entry refuses both.
+CanEndSelf == ~s.root /\ ~s.primary /\ s.source="tool"
 \* The root is a target whenever it is not the primary line, so the move back to
 \* where the Session started is a `Move` like any other; a plugin line never is.
 CanBeMovedTo == ~s.primary /\ s.source#"plugin" /\ ~s.ended
@@ -58,6 +60,8 @@ ExplicitReadCanReset == [][\A a,t\in 0..3:Read(a,t,TRUE)=>s.cursor'=t]_s
 \* out of scope here: an end cascaded from an ancestor. The design's guard for
 \* that is the ancestor check on the end entry, not this model.
 RootAndPrimaryEndNotThemselves == (s.root\/s.primary)=>~s.ended
+\* A line the user opened is never ended by its own `end`: the user ends it.
+UserLineNeverEndsItself == s.source="user"=>~s.ownEnd
 \* A plugin line never opens a line and never becomes primary. The two together
 \* are what the design says of a plugin-only line: its creator owns it, and the
 \* primary line is a conversation line of the tool or the user.
