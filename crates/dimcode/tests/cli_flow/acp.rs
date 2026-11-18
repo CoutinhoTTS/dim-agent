@@ -1763,6 +1763,36 @@ fn acp_stdio_cancels_a_held_input_after_a_late_submit_reply() {
     daemon.join().unwrap();
 }
 
+/// The `elicitation/create` params a question form of one shape is expected to
+/// carry, spelled out here rather than built from the gateway's own code.
+fn question_form(request: &str, multi_select: bool, allow_custom: bool) -> Value {
+    let options = json!([
+        {"const":"A","title":"A","description":null},
+        {"const":"B","title":"B","description":null},
+    ]);
+    let q0 = if multi_select {
+        json!({"type":"array","title":"Choose","description":"Choose","minItems":1,"maxItems":2,"items":{"anyOf":options}})
+    } else {
+        json!({"type":"string","title":"Choose","description":"Choose","oneOf":options})
+    };
+    let mut params = json!({
+        "mode":"form",
+        "sessionId":"session",
+        "toolCallId":format!("[\"main\",\"{request}\",\"question\"]"),
+        "message":"Answer the agent's questions",
+        "requestedSchema":{
+            "type":"object",
+            "properties":{"q0":q0},
+            "required":if allow_custom { json!([]) } else { json!(["q0"]) }
+        }
+    });
+    if allow_custom {
+        params["requestedSchema"]["properties"]["custom0"] =
+            json!({"type":"string","title":"Custom answer: Choose"});
+    }
+    params
+}
+
 #[test]
 fn acp_stdio_routes_modes_permissions_and_question_forms_through_native_owners() {
     let home = Home::new();
@@ -1875,24 +1905,45 @@ fn acp_stdio_routes_modes_permissions_and_question_forms_through_native_owners()
     loop {
         let frame = peer.frame();
         match frame["method"].as_str() {
-            Some("session/request_permission") => peer.answer(
-                &frame,
-                json!({"outcome":{"outcome":"selected","optionId":"reject_once"}}),
-            ),
+            Some("session/request_permission") => {
+                assert_eq!(
+                    frame["params"],
+                    json!({
+                        "sessionId":"session",
+                        "toolCall":{
+                            "toolCallId":"[\"approval\",\"session\",\"child\",\"approval\",\"\"]",
+                            "title":"Run command?",
+                            "kind":"other",
+                            "status":"pending",
+                            "rawInput":{"command":"echo test"}
+                        },
+                        "options":[
+                            {"optionId":"allow_once","name":"Allow once","kind":"allow_once"},
+                            {"optionId":"reject_once","name":"Reject once","kind":"reject_once"}
+                        ]
+                    }),
+                    "{frame}"
+                );
+                peer.answer(
+                    &frame,
+                    json!({"outcome":{"outcome":"selected","optionId":"reject_once"}}),
+                )
+            }
             Some("elicitation/create") => {
                 let _: acp::CreateElicitationRequest =
                     serde_json::from_value(frame["params"].clone()).unwrap();
-                let schema = &frame["params"]["requestedSchema"];
-                if schema["properties"]["q0"]["type"] == "array" {
-                    assert_eq!(schema["properties"]["q0"]["minItems"], 1);
-                }
-                assert_eq!(
-                    schema["required"]
-                        .as_array()
-                        .unwrap()
-                        .contains(&json!("q0")),
-                    elicitation == 7
-                );
+                let expected = match elicitation {
+                    0 => question_form("model", true, true),
+                    _ => {
+                        let index = elicitation - 1;
+                        question_form(
+                            &format!("model-{index}"),
+                            index != 3 && index != 7,
+                            index != 6,
+                        )
+                    }
+                };
+                assert_eq!(frame["params"], expected, "{frame}");
                 if elicitation == 0 {
                     peer.answer(
                         &frame,
