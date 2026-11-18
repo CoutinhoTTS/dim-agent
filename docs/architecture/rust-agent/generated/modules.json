@@ -7007,6 +7007,7 @@
       "file": "crates/dim-cli/src/ui/tui.rs",
       "unexpandedMacros": [
         "debug_assert",
+        "env",
         "eprintln",
         "format",
         "matches",
