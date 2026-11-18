@@ -7952,7 +7952,12 @@
       "to": "dim_agent_types::permission",
       "references": [
         "path PermissionPolicy",
-        "use dim_agent_types::PermissionPolicy"
+        "path PermissionPreset",
+        "path PermissionPreset::FullAccess",
+        "path PermissionPreset::ReadOnly",
+        "path PermissionPreset::WorkspaceWrite",
+        "use dim_agent_types::PermissionPolicy",
+        "use dim_agent_types::PermissionPreset"
       ]
     },
     {
@@ -8022,6 +8027,7 @@
       "from": "dim_acp::gateway",
       "to": "dim_acp::commands",
       "references": [
+        "path crate::commands::available",
         "path crate::commands::parse",
         "path crate::commands::run"
       ]
@@ -8032,6 +8038,7 @@
       "references": [
         "path Config",
         "path Config::read",
+        "path crate::config::mode",
         "path crate::config::models",
         "use crate::config::Config"
       ]
@@ -8058,6 +8065,7 @@
       "to": "dim_acp::lody",
       "references": [
         "path crate::lody::Subagents",
+        "path crate::lody::capabilities",
         "path crate::lody::controls"
       ]
     },
@@ -8086,6 +8094,8 @@
       "references": [
         "path Projection",
         "path Projection::new",
+        "path crate::projection::notice_id",
+        "path crate::projection::notification",
         "use crate::projection::Projection"
       ]
     },
@@ -8462,6 +8472,7 @@
         "path Client",
         "path Client::connect",
         "path dim_client::Error",
+        "path dim_client::RequestTooLarge",
         "path dim_client::RpcError",
         "use dim_client::Client",
         "use dim_client::Message"
