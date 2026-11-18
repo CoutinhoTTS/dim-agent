@@ -44,7 +44,7 @@ async fn endpoint(
 
 fn identity_home(name: &str) -> PathBuf {
     let directory =
-        PathBuf::from("/tmp").join(format!("dim-{name}-{}", uuid::Uuid::new_v4().simple()));
+        std::env::temp_dir().join(format!("dim-{name}-{}", uuid::Uuid::new_v4().simple()));
     std::fs::create_dir_all(&directory).unwrap();
     directory.canonicalize().unwrap()
 }
@@ -77,7 +77,7 @@ async fn launch_identity_server(home: &Path) -> RunningServer {
         ServerConfig {
             product_home: Some(home.to_owned()),
             target_home: Some(home.join("rust")),
-            unix_path: Some(home.join("rust/daemon.sock")),
+            websocket_address: Some(([127, 0, 0, 1], 0).into()),
             ..Default::default()
         },
     )
@@ -193,7 +193,7 @@ async fn the_environment_value_wins_over_the_configured_identity() {
             ServerConfig {
                 product_home: Some(home.clone()),
                 target_home: Some(home.join("rust")),
-                unix_path: Some(home.join("rust/daemon.sock")),
+                websocket_address: Some(([127, 0, 0, 1], 0).into()),
                 user_agent: Some("private-client/7".into()),
                 ..Default::default()
             },
