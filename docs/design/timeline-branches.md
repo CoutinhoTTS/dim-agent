@@ -85,7 +85,7 @@ These needs are not branches:
 
   The source can be read as `TimelineInfo.source`, returned for active lines by `TreeCommands.list` and `info` and absent on `main` (§5). Ended directory entries may omit it; opening their display detail reads the creation source at its known position. A plugin line's source is `{kind: "host", operation_id}`: the opener's opaque tag, which the core never interprets. A user line's source is `{kind: "user", operation_id}`, its own kind, so a reader that must tell a conversation line from a plugin line does not parse an `operation_id`. An opener finds its own lines by its own operation-id convention, for example Goal's `goal:evaluate:` prefix. The kind says where the line was created from, and nothing about a role.
 - **Lines created before the upgrade.** `session.branch_create` persists `{kind: "host", operation_id}` today ([connection/tree.rs](../../crates/dim-app-server/src/connection/tree.rs)), and this design rewrites no stored row. A line the user opened through a client before the upgrade, Web `/branch` under `FORMAT` 52 included, therefore stays `host` and is not a valid switch target afterwards, while the same action on a line opened after the upgrade works. This change accepts that limit instead of migrating the fact: `FORMAT` 53 is a marker-only bump that adds no data (§15, §16), and an upgrade case states it (§20).
-- **Reach of the tool.** A line messages and reads the line it was cut from and each open line it opened, and a line the user opened is on its opener's roster like a tool line; `end {content}` takes no target, so it ends the calling line and no other (§6, §10, §11). A plugin line is not on any roster, and the tool neither messages it nor ends it.
+- **Reach of the tool.** A line messages and reads the line it was cut from and each open line it opened. A line the user opened stands on both sides of that rule: it messages the line it was cut from and reads it from its cut, and it coordinates the lines opened under it; the line it was cut from neither messages nor reads it, because the user opened it (§6). `end {content}` takes no target, so it ends the calling line and no other (§6, §10, §11). A plugin line is not on any roster, and the tool neither messages it nor ends it.
 - **The parent block.** A line's BranchLine writes one keyed `<dim-branch-parent>` block on the line itself when the line it was cut from ends a turn and has new activity past the line's last read, the last head the line was told and the line's opening (§7.1.1, §12.1). The block reports positions and is state, not a request; the content stays in the pages a read returns.
 
 | Line | Opens lines with the tool | Messages and reads, with the tool | Ended by, by convention |
@@ -93,7 +93,7 @@ These needs are not branches:
 | `main`, the root | Yes, whether or not it is the default branch | The lines it opened | Never; the Session's close is not an end |
 | The default branch | Yes, while it holds the role | The line it was cut from and the open lines it opened | Nobody while it is the default branch, whoever asks; the user moves the default branch elsewhere first and then ends it |
 | Any other tool line | No (the tool result refuses), but it keeps the lines it opened | Its parent and the lines it opened | Itself (`end`), the user, or an ancestor's end |
-| Any other user line | No (the tool result refuses) | Its parent and the lines it opened | The user or an ancestor's end; not itself |
+| Any other user line | No (the tool result refuses), but it keeps the lines it opened | The line it was cut from, which it messages and reads from its cut, and the lines it opened. The line it was cut from neither messages nor reads it (`branch_not_kin`) | The user or an ancestor's end; not itself |
 | Plugin line | No | — (its creator's protocol) | Its creator (Goal ends its evaluator, [Pursuit §13](plugins/Pursuit.md#13-ending-the-evaluator-with-427)), the user, or an ancestor's end |
 
 Who ends which line is a convention among callers, apart from the lines the tool refuses to end on their own behalf: a plugin line follows its creator's protocol, and a user line is ended by the user (§11). The runtime checks only the target, whoever asks, the user included: it exists, it is open, and it is neither the root, the default branch, nor an ancestor of the default branch, because ending a line ends every line below it (§10).
@@ -141,15 +141,17 @@ Queue is not exposed. The only Queue input one line gives another is the opening
 These are Collaboration's message modes and words (`append`, `steer`), with the same meaning, because both are InputQueue's modes.
 
 - **Marker.** `<dim-branch-message from="C" to="P">`. The receiver tells a message from the user's words by its marker. RPC accepts only operator content, never blocks, so a client cannot forge a message.
-- **Allowed pairs.** One rule, with the line that opened the target, whatever it is, where the earlier change said `main`:
+- **Allowed pairs.** One rule, applied to the edge a line stands on: the line that opened a target, whatever it is, where the earlier change said `main`.
 
   | Pair | Message | Read | Refusal |
   | --- | --- | --- | --- |
   | The opener and each open line it opened | Each may message the other | Each may read the other: the opener reads the line it opened, and that line reads the opener from its cut | none |
+  | A line the user opened and the line it was cut from | The line the user opened may message it | The line the user opened reads it from its cut; the line it was cut from neither messages nor reads it, because the user opened that line and it did not | the line it was cut from messaging or reading it: `branch_not_kin` |
+  | The opener and a conversation line it opened that has ended | Refused: it takes no input, and it answers nothing itself | The opener reads it, open or ended, because reading it is how the opener gets its result | `branch_ended` |
   | A plugin line and the line that opened it | Neither direction | The plugin line reads the line it was cut from; no line reads the plugin line through the tool | the message, and the opener's read: `branch_not_tool_line` |
-  | Any other pair: siblings, a line and its grandparent, ended lines | No | No | `branch_not_kin`, or `branch_ended` for an ended line |
+  | Any other pair: siblings, a line and its grandparent | No | No | `branch_not_kin` |
 
-  A line the user opened is a conversation line like a tool line, so the first two rows apply to it unchanged. `end` is not part of any pair: `end {content}` has no target, so it always ends the calling line (§10, §11). Coordination follows the parent-child relation, so it stays with the line that opened a line and never moves when the default branch moves, and a former default branch keeps the lines it opened and still messages and reads them.
+  A line the user opened is a conversation line like a tool line, and the row it falls under is decided by the edge it stands on: as a line that was opened it has the second row, whose opener is the user and not the line it was cut from, and as an opener it has the first row like any other opener. An ended conversation line keeps the row it had, with its message refused: its opener still reads it, which is how the opener gets a result the line never sent. An ended plugin line stays under the plugin row, where no line reads it through the tool. `end` is not part of any pair: `end {content}` has no target, so it always ends the calling line (§10, §11). Coordination follows the parent-child relation, so it stays with the line that opened a line and never moves when the default branch moves, and a former default branch keeps the lines it opened and still messages and reads them.
 - **Read.** `read {branch, after?, limit?}` returns one page of the target's committed history, open or ended, read from the store through `TreeCommands.page` and rendered the way Collaboration's `read` renders a member's page: inputs, text, tool calls and results, and turn ends, with `nextCursor`; a tool result item carries the effects its tool declared on that result (session boundary A.6), present only when the result declared at least one, a path verbatim and a command cut at its 200th character with the cut marked. The target is the line the caller was cut from, or a line the caller opened. One cursor rule covers both directions:
   - With no `after`, a read continues after the caller's last successful read of that line: the `nextCursor` of the latest read that returned a page. With no earlier read, a read of the line the caller was cut from starts at the caller's cut, and a read of a line the caller opened starts at that line's first event.
   - An explicit `after` reads from that point. A read of the line the caller was cut from raises a value below the cut to the cut, because the events up to the cut are already the caller's own history. A read of a line the caller opened uses the value as given, so `after: 0` re-reads that line from its start.
@@ -179,7 +181,7 @@ Leaving caps out is safe because a line adds no new kind of resource:
 
 Open tool lines are capped. The cap is a total over the Session, and one rule decides what it counts:
 
-- it counts the lines the `branch` tool opened that are still open, across the whole tree;
+- it counts the lines the `branch` tool opened that are still open, across the whole tree, and the tool reservations that will become them (§6.1, "A reservation spends the slot");
 - it does not count a line on the path a close cannot take: the current default branch and every ancestor of it. That path is protected from `end` anyway (§10), so counting it would spend slots on lines that cannot be closed, and a user who keeps continuing on tool children would fill the cap with the very line they are working on;
 - a line the user opened through `session.branch_create` never counts, and is never refused by this cap. A plugin line never counts either.
 
@@ -187,11 +189,13 @@ What the counting rule means for one open is decided by the new line, not by its
 
 BranchTool owns the limit and refuses `create` with `branch_limit_reached` when an open would cross it. The refusal is about the new open only: a switch that leaves the Session over the cap closes no line and refuses nothing except later opens, since a line the user continued on did not become protected by anything the user asked to close. The refusal text says both things, so a model that meets it can report the state rather than retry.
 
+**A reservation spends the slot.** A `create` reserves its line, under the tree lock, and that step is where the cap is charged: one lock covers the caller's eligibility (§4), the open tool lines and the admitted tool reservations. The reservation then waits for the build on it ([timeline_tree.rs](../../crates/dim-agent-capabilities/src/timeline_tree.rs)), and a caller that stops waiting leaves that build running. Counting published lines alone would let two calls take the last slot, one of them on a line that has not published yet. Publication turns a reservation into an open line and charges nothing a second time; a creation that definitively fails releases it; a caller that only stops waiting keeps it, because the build goes on. A check therefore reports the same counted total before and after a publication: the slot is spent once, at the step that admits the call.
+
 If limits are ever needed for anything else, each one already has an owner, and none of them needs a mechanism change:
 
 | Limit | Owner |
 | --- | --- |
-| Open tool lines | BranchTool, as a total over the Session, checked under the tree lock at creation; the default branch and its ancestors do not count (§6.1) |
+| Open tool lines | BranchTool, as a total over the Session: the caller's eligibility, the open tool lines and the admitted tool reservations are charged together under the tree lock when the creation is reserved, and publication charges nothing again (§6.1); the default branch and its ancestors do not count |
 | Steer frequency | BranchLine on the sender counts the steer messages on its own Timeline |
 | Model cost or concurrency across a Session | The model-call layer. This limit is not specific to branches: it applies equally to members and forks |
 
@@ -361,7 +365,7 @@ WorkspaceTools is unchanged.
 | `branch/end` | The line that ends | `{source, ancestor?}` | Command |
 | `branch/ended` | Its parent | `{branch, endEvent, source, ancestor?}` | Result, written by TimelineTree |
 
-This pair mirrors `branch/create` and `branch/create-failed`: a command on one Timeline, routed by TreeTimeline, and a result from the tree. `endEvent` is the sequence of `branch/end` on the ending line.
+This pair mirrors `branch/create` and `branch/create-failed`: a command on one Timeline, routed by TreeTimeline, and a result from the tree. `endEvent` is the sequence of `branch/end` on the ending line. `branch/ended` carries this result on the line that opened the ending line, `main` when `main` opened it, so a case that names a line holds below an opener that is not the root.
 
 `source` is the existing `BranchSource`, the same type `branch/create` uses, so a create and an end record their issuer the same way:
 
@@ -432,9 +436,9 @@ The tool takes one action-based input, which replaces `{prompt, at?}`. Its risk 
 
 | Action | Input | Who | Effect | Result text |
 | --- | --- | --- | --- | --- |
-| `create` | `prompt`, `at?`, `idleNotice?` (`steer` \| `none`) | The root, and the current default branch | Opens a tool line cut at `at` (default: before this request's model start), which reports to the caller. Refused with `branch_limit_reached` when the open would cross the Session's cap (§6.1). The idle notice defaults to `steer`. | `Line created: C` |
-| `message` | `to`, `content`, `mode?` (`append` \| `steer`) | A line to a line it opened; a line to the line it was cut from | One `input/message` on `to` | `Sent to C.` |
-| `read` | `branch`, `after?`, `limit?` (1–200) | A line on the line it was cut from or on a line it opened | One page from the store, from the caller's cursor when `after` is absent (§6) | The page as JSON: items, `nextCursor`, `done` |
+| `create` | `prompt`, `at?`, `idleNotice?` (`steer` \| `none`) | The root, and the current default branch | Opens a tool line cut at `at` (default: before this request's model start), which reports to the caller. Refused with `branch_limit_reached` when the open would cross the Session's cap, charged at the reservation (§6.1). The idle notice defaults to `steer`. | `Line created: C` |
+| `message` | `to`, `content`, `mode?` (`append` \| `steer`) | A line to a line it opened, of any source; a line to the line it was cut from | One `input/message` on `to` | `Sent to C.` |
+| `read` | `branch`, `after?`, `limit?` (1–200) | A line on the line it was cut from or on a line it opened, open or ended. A line the user opened reads the line it was cut from on those terms; that line neither messages nor reads it, because the user opened it | One page from the store, from the caller's cursor when `after` is absent (§6) | The page as JSON: items, `nextCursor`, `done` |
 | `end` | `content` | A tool line that is not the default branch, on itself | One `TreeCommands.end(C, source, final_message)` under the tree lock: it checks the guards, writes `branch/end` on C carrying the final message, then delivers that message (steer) to the parent under the submission id derived from `source` (§10). A refused end writes no final message | `Line C is ending; your final message was sent to P.` |
 
 The input schema is `{action, prompt?, at?, idleNotice?, to?, content?, mode?, branch?, after?, limit?}`, with `action` required and `additionalProperties: false`. `idleNotice` is valid only for `create`.
@@ -444,7 +448,7 @@ Refusals come back as error results (code in `structuredContent`) and write noth
 | Case | Text | Code |
 | --- | --- | --- |
 | `create` on a line that is neither the root nor the default branch | `Only the root and the default branch open lines. Tell one of them if more parallel work is needed.` | `branch_not_opener` |
-| `create` when the Session already holds its cap of open tool lines | `This Session holds its limit of open lines. Continue on this line, or end one of its open lines first.` | `branch_limit_reached` |
+| `create` when the Session already holds its cap of open tool lines, counting the admitted reservations | `This Session holds its limit of open lines. Continue on this line, or end one of its open lines first.` | `branch_limit_reached` |
 | `message` or `read` outside kinship | `You can message or read only the lines you opened and the line you were cut from.` | `branch_not_kin` |
 | `message` on a plugin line, or a line's `read` of one | `Line C was not opened with this tool; it follows its own protocol.` | `branch_not_tool_line` |
 | `message` to an ended line, or a race with an end | `Line C has ended. Read it to see what it did.` | `branch_ended` |
@@ -776,9 +780,9 @@ These are flows with a fake model, in `branch_flow.rs`, `flows.rs` and the App S
 
 1a. A child cut after its parent wrote a roster inherits that block, and its opening input retires it. A child that opens no line of its own writes only `branch:line`, and a compaction of that child replays its identity and no roster: the inherited block was retired at its open, so it never tells the child that it opened its parent's lines or that it may coordinate them. A child cut before its parent wrote a roster gets no such block and is byte for byte what it was.
 2. A child sends its opener an Append: it does not wake the opener, which sees it at its next request. A Steer wakes the opener's `wait`, or starts a turn when the opener is idle. A Steer from an opener wakes an idle child.
-3. These are refused and write nothing: a sibling message or read, a line and its grandparent, `create` on a line that is neither the root nor the default branch, a message to or from a plugin line, any line's read of a plugin line through the tool, `end` on the root, the default branch or an ancestor of the default branch, and `end` from a plugin line or from a line the user opened.
+3. These are refused and write nothing: a sibling message or read, a line and its grandparent, `create` on a line that is neither the root nor the default branch, a message to or from a plugin line, any line's read of a plugin line through the tool, `end` on the root, the default branch or an ancestor of the default branch, and `end` from a plugin line or from a line the user opened. The line a user-opened line was cut from messages and reads it neither (`branch_not_kin`), while that line itself messages and reads the line it was cut from.
 4. When a child's turn ends without a steer, one idle notice reaches the line that opened it, with the turn's status. None is written when the turn steered its opener, called `end`, left a driving input pending, or when the line is the default branch.
-5. A tool line ends itself: `branch/end` with a `tool` source is written carrying the final message, then the parent's steer under the id derived from that source, the close comes at the turn end, then `branch/ended` on `main` and the roster update, with no ended notice. A later message is refused (`branch_ended`). The tool's `read` and `session.history` return the ended line's history.
+5. A tool line ends itself: `branch/end` with a `tool` source is written carrying the final message, then the parent's steer under the id derived from that source, the close comes at the turn end, then `branch/ended` on the line that opened it and the roster update, with no ended notice. A later message is refused (`branch_ended`), and the opener still reads the ended line's history: the tool's `read` and `session.history` both return it.
 6. User end through `session.branch_end`: `branch/end` has a user source with App Server's id, the line's turn is interrupted, and its opener gets the ended notice as a steer. The root and the default branch cannot be ended, and neither can an ancestor of the default branch. A second end returns `branch_ended`. Submitting to an ended line returns `branch_ended`.
 7. Restore: an ended line is not opened, and neither are its descendants. A `branch/end` without a `branch/ended` gets its result written at restart.
 8. A Pursuit evaluator gets the plugin line's identity, can read the worker's work after its cut, and the existing Pursuit flows pass unchanged.
@@ -835,6 +839,8 @@ Who may open a line, and the cap:
 
 34. A switch that frees a slot admits the next open. The cap is two, one open tool line is off the protected path, and the root holds the role, so the counted total is one. The user makes that line the default branch, which is the case the review named: the line stops counting, the total becomes zero, and the root's next `create` is admitted because both slots are free. Nothing is closed to free the slot, and the line the user continued on is still open. The recorded model run `BranchEligibility-MoveToChild` covers exactly this.
 
+35. A reservation holds the last slot. The cap is two, one open tool line is off the protected path, the root holds the role, and one slot is left. `main` reserves a tool child and its build stays paused before publication, and the caller stops waiting for it: the build goes on and the reservation is kept. The default branch's `create` from the same state of the tree answers `branch_limit_reached` and writes nothing, because the reservation is charged with the open lines. When `main`'s child publishes, the counted total is the cap, not the cap plus one: the reservation turned into an open line and was not charged a second time. A creation that definitively fails instead releases its reservation, and the slot is free again.
+
 ## 21. Ablation review
 
 What is left, and why each piece is needed:
@@ -857,6 +863,7 @@ What is left, and why each piece is needed:
 | The directory's `endEvent` and its `ending` state | Without `endEvent` a client cannot name a cascaded line's end, and the line's own `branch/end` is one page away. Without `ending` the window between a line's own `branch/end` — a tool end, a user end or a cascade end — and its ended row reads as open, and a client cannot tell a line that takes input from one that already refuses it. With `defaultBranchId` a client also centres and labels the right line |
 | The tool opened by the root and by the current default branch, and by no other line | The root keeps the ability it has today, which is what lets the user ask it for a line while another line holds the role; the default branch can grow the tree from the work the user continued on; and every other line stays a leaf, so the openers are two and the coordination each line was given at its creation does not move |
 | The cap's counting rule | Counting the protected path would spend slots on lines that cannot be closed, so a user who keeps continuing on tool children would fill the cap with the line they are working on. A new child is off that path, so an open always spends a slot and the cap has one rule rather than one per opener. The rule is read from the tree in both directions of a move, which is what the `DefaultLeavesBelow` fact carries: a line below the one that loses the role counts again, and the cap answers with a refusal rather than a close |
+| The cap charged at the reservation | A reservation outlives a caller that stops waiting, so a check over published lines alone lets two calls take the last slot. Charging it once, where the line is reserved under the tree lock, is what makes the count the same before and after a publication |
 | The prompt rules on files | The only guard is FileReads; the rest is protocol |
 
 Removed:
