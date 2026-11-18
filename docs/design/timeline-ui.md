@@ -273,3 +273,10 @@ The notification shares the existing bottom border in both TUI modes. Narrow wid
 2. `b` and `f` carry the picked message into the composer, as `e` does.
 3. R4 waits for a format decision.
 4. Opening a line keeps the screen on its parent; the line answers in the side panel (§4.7).
+
+## Proposed current activity in the composer
+
+[CLI current activity](cli-current-activity.md) uses the existing live composer
+status in both modes. Committed tool history keeps its existing detail and
+scrolling behavior. The background task strip continues to show task lifetimes
+independently of the selected branch's foreground activity.
