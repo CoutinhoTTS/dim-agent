@@ -493,7 +493,9 @@ export class Terminal {
         if (dead !== '1') return false;
         return {
           status: status === '' ? null : Number(status),
-          signal: signal === '' ? null : signal,
+          // Before tmux 3.3 the field is unknown and the format prints itself,
+          // so only a real signal name counts.
+          signal: /^SIG[A-Z0-9]+$/.test(signal) ? signal : null,
         };
       },
       {timeout, describe: `${this.session} to exit`},
