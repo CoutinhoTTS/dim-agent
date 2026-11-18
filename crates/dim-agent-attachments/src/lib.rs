@@ -147,33 +147,80 @@ impl DynPlugin for AttachmentsPlugin {
             methods.register(
                 ctx,
                 NAMESPACE,
-                vec![MethodDecl::new("attachment.put", true, Interruption::Drain), MethodDecl::new("attachment.import", true, Interruption::Drain), MethodDecl::new("attachment.read", false, Interruption::Report)],
+                vec![
+                    MethodDecl::new("attachment.put", true, Interruption::Drain),
+                    MethodDecl::new("attachment.import", true, Interruption::Drain),
+                    MethodDecl::new("attachment.read", false, Interruption::Report),
+                ],
                 Arc::new(move |call, cancel, _| {
-                    let MethodCall { params: value, method, .. } = call;
+                    let MethodCall {
+                        params: value,
+                        method,
+                        ..
+                    } = call;
                     let (files, session_id) = (files.clone(), session_id.clone());
                     Box::pin(async move {
                         if method == "attachment.read" {
                             use base64::Engine;
                             let input: ReadParams = methods::params(value)?;
-                            if input.session_id != session_id { return Err(RpcError::invalid("Session identity mismatch")); }
-                            let bytes = files.0.read(session_id, input.file_id, input.offset, cancel).await.map_err(put_error)?;
-                            return methods::reply(serde_json::json!({"data": base64::engine::general_purpose::STANDARD.encode(&bytes), "eof": bytes.is_empty()}));
+                            if input.session_id != session_id {
+                                return Err(RpcError::invalid("Session identity mismatch"));
+                            }
+                            let bytes = files
+                                .0
+                                .read(session_id, input.file_id, input.offset, cancel)
+                                .await
+                                .map_err(put_error)?;
+                            let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                            return methods::reply(serde_json::json!({
+                                "data": encoded,
+                                "eof": bytes.is_empty(),
+                            }));
                         }
                         if method == "attachment.import" {
                             let input: ImportParams = methods::params(value)?;
-                            if input.session_id != session_id { return Err(RpcError::invalid("Session identity mismatch")); }
-                            let name = input.name.unwrap_or_else(|| if input.image { "image".into() } else { "attachment".into() });
+                            if input.session_id != session_id {
+                                return Err(RpcError::invalid("Session identity mismatch"));
+                            }
+                            let fallback = if input.image { "image" } else { "attachment" };
+                            let name = input.name.unwrap_or_else(|| fallback.into());
                             let prepared = if input.image {
                                 let path = input.path.clone();
-                                Some(tokio::task::spawn_blocking(move || prepare_image(path)).await.map_err(|e| RpcError::invalid(e.to_string()))??)
-                            } else { None };
-                            let path = prepared.as_ref().map(|(file, _)| file.path().to_string_lossy().into_owned()).unwrap_or(input.path);
-                            let stored = files.0.import(session_id.clone(), name, path, cancel.clone()).await.map_err(put_error)?;
-                            let image = prepared.as_ref().map(|(_, media)| dim_agent_types::ImageSource {
-                                source_type: dim_agent_types::ImageSourceType::File,
-                                file_id: Some(stored.file_id.clone()), media_type: (*media).into(), data: None, url: None,
-                            });
-                            return methods::reply(serde_json::json!({ "attachmentId": stored.file_id, "path": stored.path, "bytes": stored.bytes, "image": image }));
+                                let prepared =
+                                    tokio::task::spawn_blocking(move || prepare_image(path));
+                                Some(
+                                    prepared
+                                        .await
+                                        .map_err(|e| RpcError::invalid(e.to_string()))??,
+                                )
+                            } else {
+                                None
+                            };
+                            let path = prepared
+                                .as_ref()
+                                .map(|(file, _)| file.path().to_string_lossy().into_owned())
+                                .unwrap_or(input.path);
+                            let stored = files
+                                .0
+                                .import(session_id.clone(), name, path, cancel.clone())
+                                .await
+                                .map_err(put_error)?;
+                            let image =
+                                prepared
+                                    .as_ref()
+                                    .map(|(_, media)| dim_agent_types::ImageSource {
+                                        source_type: dim_agent_types::ImageSourceType::File,
+                                        file_id: Some(stored.file_id.clone()),
+                                        media_type: (*media).into(),
+                                        data: None,
+                                        url: None,
+                                    });
+                            return methods::reply(serde_json::json!({
+                                "attachmentId": stored.file_id,
+                                "path": stored.path,
+                                "bytes": stored.bytes,
+                                "image": image,
+                            }));
                         }
                         let PutParams { name, text, .. } = methods::params(value)?;
                         if text.is_empty() {

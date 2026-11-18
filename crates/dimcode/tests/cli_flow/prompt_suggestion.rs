@@ -109,6 +109,7 @@ fn responds(wire: &mut Wire, turn: &str, action: &str) {
 }
 
 #[test]
+#[ignore = "TUI E2E runs in the local tmux suite"]
 fn a_completed_turn_asks_for_the_next_message_and_draws_the_offer() {
     for fullscreen in [false, true] {
         let home = Home::new();
@@ -159,6 +160,7 @@ fn a_daemon_that_does_not_list_the_method_is_never_asked() {
 }
 
 #[test]
+#[ignore = "TUI E2E runs in the local tmux suite"]
 fn a_draft_keeps_the_interface_from_asking() {
     let home = Home::new();
     let (arm, ready) = std::sync::mpsc::channel();
@@ -276,6 +278,7 @@ fn an_active_goal_keeps_the_interface_from_asking() {
 }
 
 #[test]
+#[ignore = "TUI E2E runs in the local tmux suite"]
 fn right_takes_the_offer_into_the_draft_without_sending() {
     let home = Home::new();
     let (settled, settle) = std::sync::mpsc::channel();
@@ -307,6 +310,7 @@ fn right_takes_the_offer_into_the_draft_without_sending() {
 /// Tab takes the offer in scrollback; in fullscreen it keeps the focus in the
 /// composer, so only Right takes it.
 #[test]
+#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tab_keeps_the_fullscreen_focus_and_right_still_takes_the_offer() {
     for fullscreen in [false, true] {
         let home = Home::new();
@@ -371,6 +375,7 @@ fn enter_on_an_empty_composer_leaves_the_offer() {
 }
 
 #[test]
+#[ignore = "TUI E2E runs in the local tmux suite"]
 fn escape_and_an_edit_withdraw_the_offer() {
     let home = Home::new();
     let daemon = home.daemon(move |wire| {

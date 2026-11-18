@@ -74,6 +74,7 @@ This index is navigation. Delivery status lives in issues, not here.
 - [Timeline-first TUI](design/timeline-ui.md): the TUI's Timeline as the primary surface, opening lines and forks from a point of it, line markers and cuts（[中文](zh/design/timeline-ui.md)）
 - [Local-execution plugin contracts](architecture/rust-agent/plugins/README.md)
 - [Build environment](architecture/build.md)
+- [Terminal end-to-end suite](architecture/tui-e2e.md): the local tmux suite, its scenarios, the raw-output evidence for escapes, and the inventory of PTY cases still in CI
 - [Local development and managed provider boundary](architecture/development.md)
 - [内存快速增长与不释放：分析方案](architecture/memory-investigation.md)（中文）：同版本隔离复现、进程内存与存活分配分析
 - [Clients](design/clients.md): which clients exist, what they share, capability coverage per client, gaps and open decisions（[中文](zh/design/clients.md)）

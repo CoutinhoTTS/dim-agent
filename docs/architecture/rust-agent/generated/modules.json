@@ -8376,6 +8376,7 @@
       "from": "dim_acp::projection",
       "to": "dim_agent_types::model",
       "references": [
+        "path CompactionTrigger",
         "use dim_agent_types::CompactionTrigger"
       ]
     },
@@ -24532,6 +24533,14 @@
     },
     {
       "from": "dim_app_server::agents",
+      "to": "dim_agent_capabilities::methods",
+      "references": [
+        "path RpcError",
+        "use dim_agent_capabilities::methods::RpcError"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents",
       "to": "dim_agent_capabilities::timeline_tree",
       "references": [
         "path dim_agent_capabilities::timeline_tree::TreeCommands"
@@ -24757,6 +24766,7 @@
       "to": "dim_app_server::protocol",
       "references": [
         "path AgentInfo",
+        "path CreateWorktree",
         "path SessionOrigin",
         "path crate::protocol::Catalog",
         "path crate::protocol::CatalogResult",
@@ -24764,6 +24774,7 @@
         "path crate::protocol::SessionInfo",
         "path crate::protocol::check_session_id",
         "use crate::protocol::AgentInfo",
+        "use crate::protocol::CreateWorktree",
         "use crate::protocol::SessionOrigin"
       ]
     },
@@ -24828,6 +24839,19 @@
         "path SessionStore",
         "use crate::storage::PreparedWorktree",
         "use crate::storage::SessionStore"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents",
+      "to": "dim_app_server::worktrees",
+      "references": [
+        "path CreatedWorktree",
+        "path ManagedWorktrees",
+        "path WorktreeError",
+        "path WorktreeError::Unavailable",
+        "use crate::worktrees::CreatedWorktree",
+        "use crate::worktrees::ManagedWorktrees",
+        "use crate::worktrees::WorktreeError"
       ]
     },
     {
@@ -25122,6 +25146,9 @@
       "to": "dim_app_server::agents",
       "references": [
         "path AgentIndex",
+        "path super::CreateSessionError",
+        "path super::CreateSessionError::Agent",
+        "path super::CreateSessionError::Worktree",
         "path super::session_config",
         "use super::AgentIndex"
       ]
@@ -25143,12 +25170,20 @@
         "path SessionOrigin",
         "path SessionOrigin::Automation",
         "path SessionOrigin::Internal",
+        "path crate::protocol::CreateWorktree",
         "path session_cwd",
         "use crate::protocol::Empty",
         "use crate::protocol::PROTOCOL_VERSION",
         "use crate::protocol::SessionId",
         "use crate::protocol::SessionOrigin",
         "use crate::protocol::session_cwd"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents::sessions",
+      "to": "dim_app_server::worktrees",
+      "references": [
+        "path crate::worktrees::CreatedWorktreeReply"
       ]
     },
     {
@@ -27242,13 +27277,6 @@
     },
     {
       "from": "dim_app_server::connection",
-      "to": "dim_app_server::storage::face",
-      "references": [
-        "path crate::storage::Store"
-      ]
-    },
-    {
-      "from": "dim_app_server::connection",
       "to": "dim_app_server::storage::metadata",
       "references": [
         "path crate::storage::TitleFields::default"
@@ -27280,7 +27308,6 @@
       "from": "dim_app_server::connection",
       "to": "dim_app_server::worktrees",
       "references": [
-        "path crate::worktrees::CreatedWorktree",
         "path crate::worktrees::ManagedWorktrees"
       ]
     },
@@ -51281,6 +51308,7 @@
         "path Prompt::Tasks",
         "path QUEUE_HINT",
         "path QUEUE_HINT_MORE",
+        "path STARTUP_LOGO",
         "path TASK_FADE",
         "path WebOpened",
         "path apply_jump",

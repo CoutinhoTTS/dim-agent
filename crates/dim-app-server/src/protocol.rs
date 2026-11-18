@@ -543,10 +543,10 @@ pub struct ModelSelection {
     #[serde(default, deserialize_with = "optional_non_null")]
     pub model_id: Option<String>,
 }
-/// `session.create`'s optional managed-worktree request: `cwd` is the source
-/// workspace the repository is resolved from, and the reply names the worktree
-/// and the Session's starting directory (#1451). Sent only when `hello.features`
-/// carries `session.create.worktree`.
+/// The optional managed-worktree request for `session.create` and `sessions.launch`:
+/// `cwd` is the source workspace, and the reply names the worktree and the Session's
+/// starting directory. Sent only when `hello.features` carries the entry's
+/// `session.create.worktree` or `sessions.launch.worktree` feature.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateWorktree {
@@ -607,7 +607,7 @@ pub struct Create {
     #[serde(default, deserialize_with = "optional_non_null")]
     pub language: Option<dim_agent_runtime::ReplyLanguage>,
     /// The managed worktree to create with the Session; absent keeps `cwd`.
-    #[serde(default, deserialize_with = "optional_non_null")]
+    #[serde(default, deserialize_with = "optional_worktree")]
     pub worktree: Option<CreateWorktree>,
 }
 #[derive(Debug, Deserialize)]
@@ -1636,6 +1636,16 @@ fn protocol_version<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result
         ));
     }
     Ok(value as u32)
+}
+
+pub(crate) fn optional_worktree<'de, D>(deserializer: D) -> Result<Option<CreateWorktree>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let fields = serde_json::Map::<String, serde_json::Value>::deserialize(deserializer)?;
+    CreateWorktree::deserialize(serde_json::Value::Object(fields))
+        .map(Some)
+        .map_err(serde::de::Error::custom)
 }
 
 pub(crate) fn optional_non_null<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>

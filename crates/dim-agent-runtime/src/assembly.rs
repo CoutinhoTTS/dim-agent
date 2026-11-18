@@ -152,6 +152,8 @@ impl Drop for StartupProgress {
     }
 }
 
+/// One copy of a Rust plugin, as a part registry builds it.
+type PartResult = rutis::Result<Box<dyn DynPlugin>>;
 /// A Rust plugin whose dependencies are names ([`Names`]), built for one copy.
 type PartMake =
     Arc<dyn Fn(&Names<'_>) -> std::result::Result<Box<dyn DynPlugin>, Error> + Send + Sync>;
@@ -950,7 +952,7 @@ impl DynPlugin for ProcessValuesPlugin {
 pub fn register_part(
     builtins: &mut Modules,
     catalog: &rutis_loader::ServiceCatalog,
-    make: impl Fn(&Names<'_>) -> std::result::Result<Box<dyn DynPlugin>, Error> + Send + Sync + 'static,
+    make: impl Fn(&Names<'_>) -> PartResult + Send + Sync + 'static,
 ) -> Result<String> {
     let sample = make(&Names::check(catalog, &[], None))
         .map_err(|error| AgentError::Build(format!("a process part: {error}")))?;
@@ -1153,7 +1155,9 @@ impl DynPlugin for SessionScopePlugin {
             if let Some(extension) = extension {
                 let cancel = ctx.cancellation_token();
                 let created = tokio::select! {
-                    created = (extension.configure)(owner.loader.create_instance(ctx, &extension.group)) => created
+                    created = (extension.configure)(
+                        owner.loader.create_instance(ctx, &extension.group),
+                    ) => created
                         .map_err(|error| ErrorKind::PluginFailed(loader_error(error).into()))?,
                     _ = cancel.cancelled() => return Ok(Effect::Done),
                 };
@@ -1347,10 +1351,14 @@ impl TimelineFactory {
                 session_id: parent.id.clone(),
                 branch_id: id.clone(),
             };
+            let head =
+                tokio::time::timeout(self.startup_timeout(), parent.assembly.store.head(&key));
             let sequence = tokio::select! {
-                result = tokio::time::timeout(self.startup_timeout(), parent.assembly.store.head(&key)) =>
+                result = head =>
                     result.map_err(|_| AgentError::Build("branch opening timed out".into()))??,
-                _ = cancel.cancelled() => return Err(AgentError::Cancelled("branch creation".into()).into()),
+                _ = cancel.cancelled() => {
+                    return Err(AgentError::Cancelled("branch creation".into()).into());
+                }
             };
             let owner = Arc::new(BranchAssembly {
                 session: parent.clone(),
