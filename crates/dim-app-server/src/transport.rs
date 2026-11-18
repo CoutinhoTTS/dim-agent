@@ -416,10 +416,12 @@ impl DynPlugin for TransportPlugin {
                             Ok(accepted) => accepted,
                             Err(error) => {
                                 tracing::warn!(%error, "Unix accept failed; retrying");
+                                let retry =
+                                    tokio::time::sleep(std::time::Duration::from_millis(100));
                                 tokio::select! {
                                     biased;
                                     _ = closing() => return Ok(()),
-                                    _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {},
+                                    _ = retry => {}
                                 }
                                 continue;
                             }
@@ -654,7 +656,14 @@ async fn run_connection(
     let timeout = hub.config().write_timeout;
     let writer_task = tokio::spawn(async move {
         loop {
-            let mut frame = tokio::select! {biased;_=closed.cancelled()=>break,frame=outbound.recv()=>match frame{Some(frame)=>frame,None=>break}};
+            let mut frame = tokio::select! {
+                biased;
+                _ = closed.cancelled() => break,
+                frame = outbound.recv() => match frame {
+                    Some(frame) => frame,
+                    None => break,
+                },
+            };
             let bytes = std::mem::take(&mut frame.bytes);
             let result = tokio::time::timeout(timeout, writer.write(bytes)).await;
             if !matches!(result, Ok(Ok(()))) {

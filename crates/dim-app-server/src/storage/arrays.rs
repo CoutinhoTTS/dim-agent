@@ -77,8 +77,15 @@ pub(super) fn encode(
         id,
         length: u64::try_from(values.len()).map_err(error)?,
     };
-    let existing:Option<(i64,Option<i64>)>=connection.prepare_cached("SELECT element_index,array_length FROM timeline_array_elements WHERE session_id=?1 AND array_id=?2 ORDER BY element_index LIMIT 1").map_err(error)?
-        .query_row(params![session,reference.id],|row|Ok((row.get(0)?,row.get(1)?))).optional().map_err(error)?;
+    let mut header = connection
+        .prepare_cached("SELECT element_index,array_length FROM timeline_array_elements WHERE session_id=?1 AND array_id=?2 ORDER BY element_index LIMIT 1")
+        .map_err(error)?;
+    let existing: Option<(i64, Option<i64>)> = header
+        .query_row(params![session, reference.id], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .optional()
+        .map_err(error)?;
     if let Some((index, length)) = existing {
         if index != 0 || length != Some(i64::try_from(reference.length).map_err(error)?) {
             return Err(error("existing array has an invalid header"));
@@ -129,9 +136,18 @@ pub(super) fn content_ref(
     if index >= array.length {
         return Ok(None);
     }
-    connection.prepare_cached("SELECT content_ref FROM timeline_array_elements WHERE session_id=?1 AND array_id=?2 AND element_index=?3").map_err(error)?
-        .query_row(params![session,array.id,i64::try_from(index).map_err(error)?],|row|row.get(0)).optional().map_err(error)?
-        .ok_or_else(||error(format!("missing array element {}/{index}",array.id))).map(Some)
+    let mut statement = connection
+        .prepare_cached("SELECT content_ref FROM timeline_array_elements WHERE session_id=?1 AND array_id=?2 AND element_index=?3")
+        .map_err(error)?;
+    statement
+        .query_row(
+            params![session, array.id, i64::try_from(index).map_err(error)?],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?
+        .ok_or_else(|| error(format!("missing array element {}/{index}", array.id)))
+        .map(Some)
 }
 
 pub(super) fn check(connection: &Connection, session: &str, array: &Reference) -> Result<()> {

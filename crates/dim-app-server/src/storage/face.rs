@@ -379,10 +379,19 @@ impl HostDispatch for Store {
         Ok(Value::future(async move {
             let result: dim_agent_runtime::Result<serde_json::Value> = async {
                 Ok(match request {
-                    Request::SessionConfig(p) => json!({"config":owner.session_config(&p.session_id).await?}),
-                    Request::Query(p) => serde_json::to_value(owner.query(&p.scope, &p.query, p.page.as_ref()).await?).map_err(|error| AgentError::Storage(error.to_string()))?,
+                    Request::SessionConfig(p) => {
+                        json!({"config": owner.session_config(&p.session_id).await?})
+                    }
+                    Request::Query(p) => {
+                        let page = p.page.as_ref();
+                        let result = owner.query(&p.scope, &p.query, page).await?;
+                        serde_json::to_value(result)
+                            .map_err(|error| AgentError::Storage(error.to_string()))?
+                    }
                     Request::AddGrant(p) => {
-                        owner.add_grant(&p.session_id, p.path.into(), p.kind, p.mode).await?;
+                        owner
+                            .add_grant(&p.session_id, p.path.into(), p.kind, p.mode)
+                            .await?;
                         json!({})
                     }
                     Request::RemoveGrant(p) => {
@@ -391,7 +400,9 @@ impl HostDispatch for Store {
                     }
                     Request::Grants(p) => json!({"grants":owner.grants(&p.session_id).await?}),
                     Request::SetSessionLanguage(p) => {
-                        owner.set_session_language(&p.session_id, p.language).await?;
+                        owner
+                            .set_session_language(&p.session_id, p.language)
+                            .await?;
                         json!({})
                     }
                     Request::CreationRecord(p) => {
@@ -399,35 +410,89 @@ impl HostDispatch for Store {
                         json!({"origin":origin,"leaderSessionId":leader})
                     }
                     Request::Owner(p) => json!({"agentId":owner.owner(&p.session_id).await?}),
-                    Request::HasRecords(p) => json!({"exists":owner.has_records(&p.session_id).await?}),
-                    Request::Delete(p) => json!({"removed":owner.delete_session(&p.session_id).await?}),
+                    Request::HasRecords(p) => {
+                        json!({"exists":owner.has_records(&p.session_id).await?})
+                    }
+                    Request::Delete(p) => {
+                        json!({"removed":owner.delete_session(&p.session_id).await?})
+                    }
                     Request::Fork(p) => {
-                        owner.fork_session(&p.source_session_id, &p.session_id, p.at, &p.config_text).await?;
+                        owner
+                            .fork_session(&p.source_session_id, &p.session_id, p.at, &p.config_text)
+                            .await?;
                         json!({})
                     }
-                    Request::SessionConfigText(p) => json!({"configText":owner.session_config_text(&p.session_id).await?}),
+                    Request::SessionConfigText(p) => {
+                        json!({"configText":owner.session_config_text(&p.session_id).await?})
+                    }
                     Request::CreateOwnedSession(p) => {
                         let worktree = p.worktree.map(|worktree| PreparedWorktree {
-                            directory: WorktreeDirectory { repository: worktree.repository.into(), root: worktree.root.into() },
+                            directory: WorktreeDirectory {
+                                repository: worktree.repository.into(),
+                                root: worktree.root.into(),
+                            },
                             subtree: worktree.subtree.into(),
                         });
-                        owner.create_owned_session(&p.session_id, &p.config, &p.agent_id, p.protocol_version, p.leader_session_id.as_deref(), p.origin, worktree).await?;
+                        owner
+                            .create_owned_session(
+                                &p.session_id,
+                                &p.config,
+                                &p.agent_id,
+                                p.protocol_version,
+                                p.leader_session_id.as_deref(),
+                                p.origin,
+                                worktree,
+                            )
+                            .await?;
                         json!({})
                     }
                     Request::WorktreeDirectories(_) => {
-                        let directories: Vec<_> = owner.worktree_directories().await?.into_iter().map(|entry| json!({
-                            "repository":entry.directory.repository,"root":entry.directory.root,"lastUsedAtMs":entry.last_used_at_ms,
-                        })).collect();
+                        let directories: Vec<_> = owner
+                            .worktree_directories()
+                            .await?
+                            .into_iter()
+                            .map(|entry| {
+                                json!({
+                                    "repository":entry.directory.repository,
+                                    "root":entry.directory.root,
+                                    "lastUsedAtMs":entry.last_used_at_ms,
+                                })
+                            })
+                            .collect();
                         json!({"directories":directories})
                     }
-                    Request::SessionsUnderWorkspace(p) => json!({"sessionIds":owner.sessions_under_workspace(std::path::Path::new(&p.root)).await?}),
-                    Request::RemoveWorktreeDirectory(p) => json!({"removed":owner.remove_worktree_directory(WorktreeDirectory {repository:p.repository.into(),root:p.root.into()}).await?}),
+                    Request::SessionsUnderWorkspace(p) => {
+                        let root = std::path::Path::new(&p.root);
+                        let ids = owner.sessions_under_workspace(root).await?;
+                        json!({"sessionIds":ids})
+                    }
+                    Request::RemoveWorktreeDirectory(p) => {
+                        let removed = owner
+                            .remove_worktree_directory(WorktreeDirectory {
+                                repository: p.repository.into(),
+                                root: p.root.into(),
+                            })
+                            .await?;
+                        json!({"removed":removed})
+                    }
                     Request::WorktreeUsages(p) => {
-                        let usages: Vec<_> = owner.worktree_usages(WorktreeDirectory {repository:p.repository.into(),root:p.root.into()}).await?.into_iter().map(|entry| json!({"sessionId":entry.session_id,"subtree":entry.subtree})).collect();
+                        let directory = WorktreeDirectory {
+                            repository: p.repository.into(),
+                            root: p.root.into(),
+                        };
+                        let usages: Vec<_> = owner
+                            .worktree_usages(directory)
+                            .await?
+                            .into_iter()
+                            .map(|entry| {
+                                json!({"sessionId":entry.session_id,"subtree":entry.subtree})
+                            })
+                            .collect();
                         json!({"usages":usages})
                     }
                 })
-            }.await;
+            }
+            .await;
             result.map(Value::from).map_err(failure)
         }))
     }

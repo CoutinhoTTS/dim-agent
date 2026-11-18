@@ -502,7 +502,8 @@ fn missing_instance_names(catalog: &ServiceCatalog, code: &record::Code) -> Vec<
         .filter(|(service, group)| {
             !matches!(
                 dim_agent_runtime::names::registered_key(catalog, service),
-                Err(LoaderError::OutsideInstance { group: held, .. }) if Some(held.as_str()) == group.as_str()
+                Err(LoaderError::OutsideInstance { group: held, .. })
+                    if Some(held.as_str()) == group.as_str()
             )
         })
         .map(|(service, _)| service.clone())

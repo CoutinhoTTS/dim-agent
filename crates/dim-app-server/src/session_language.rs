@@ -143,7 +143,9 @@ async fn change(
     let applied = language_cell.replace(language);
     let adoption = branch.configure(prompt_sources::language_update());
     let outcome = tokio::select! {
-        result = adoption => crate::connection::configuration_outcome(result.map_err(RpcError::from)?)?,
+        result = adoption => {
+            crate::connection::configuration_outcome(result.map_err(RpcError::from)?)?
+        }
         _ = cancel.cancelled() => return Err(RpcError::interrupted()),
     };
     // Every loaded branch adopts the value before this reply, so a request on
