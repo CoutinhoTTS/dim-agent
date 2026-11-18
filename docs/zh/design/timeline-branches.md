@@ -68,12 +68,12 @@
 - **根。** `main` 是没有父分支、也没有来源的那条线：这个字面量 id、它的编号，以及所有已存下的 `branch_id: "main"`，本设计都不改。它永不结束，Session 关闭不算结束。在任何状态下它都能用工具开线，它是工具接受的两类调用方之一（§4、§11）。界面上它叫“起点”。
 - **默认分支。** 这个 Session 的对话所在的那条线：请求不传 `branchId` 时采用的目标，也是客户端居中显示的那条线。它是树上的一个位置，不是 id，也不是一种树关系：开局就是根，只在用户动作下移动（§9、§14）。唯一权威的事实不是模型可见的块，而是写在根线上的一条 `branch/default {branch}`（根线比其它线都活得久，且不能结束）（§16）。告诉各条线这件事的键控块从来不是权威。没有这条事实的 Session 就在根上。
 - **根和开线方来自树。** 一条线没有父分支，它就是根。一条线的开线方，就是它自己 `branch/create` 里记的父分支。“谁开了这条线”“谁收到它的汇报”“谁协调它”都是这一条边，从树里读出来：本设计不新增角色标记、不新增加协调者字段、也不新增存储关系。
-- **协调。** 开过线的线协调它们：它带名册（§7.1），也只有它能给自己开的线发消息、读它们。它不结束它们：`end` 不接受目标，结束的是调用方自己，所以开线方要某条线结束时，用 steer 请它自己结束，或者由用户结束它（§10、§11）；线的来源另有限制：插件线按创建者的协议走，用户开的线由用户结束。协调关系沿父子关系走，从不随默认分支移动。失去开线权的线保留它已经开出的线，并继续协调它们。
+- **协调。** 一条线协调它用工具开出的线：它带名册（§7.1），名册只列这些线，也只有它能给它们发消息、读它们。用户开出的线不在任何名册上，所以开出它的那条线既不给它发消息、也不读它（§6）；它协调自己开出的工具线，依据是它自己的名册。开线方不结束它们：`end` 不接受目标，结束的是调用方自己，所以开线方要某条线结束时，用 steer 请它自己结束，或者由用户结束它（§10、§11）；线的来源另有限制：插件线按创建者的协议走，用户开的线由用户结束。协调关系沿父子关系走，从不随默认分支移动。失去开线权的线保留它已经开出的线，并继续协调它们。
 - **agent 的工具。** `branch` 工具只接受两类调用方，其余一律拒绝（§11）：
   - **根**，永远可以，不论它是不是默认分支。这个权利从不改变，所以它永远收不到关于角色的状态说明（§12.1）；
   - **当前默认分支**，在它持有这个位置期间可以。
 
-  两者都不是的线以 `branch_not_opener` 被拒绝，拒绝文本说出这个 Session 里哪两条线能开线。插件线永远不开线。曾经的默认分支保留它开过的线并继续协调它们，只是不能再开新线。任何时刻最多两条线能开线；默认分支就是根的 Session 只有一条。
+  两者都不是的线以 `branch_not_opener` 被拒绝，拒绝文本说出这个 Session 里哪两条线能开线。插件线永远不开线。曾经的默认分支保留它开出的工具线并继续协调它们，只是不能再开新线。任何时刻最多两条线能开线；默认分支就是根的 Session 只有一条。
 
   这正是根仍能响应用户自己的请求的原因：当某条线是默认分支时，用户仍可以让根开一条线，那条线从根的历史开始，并向根汇报。只让默认分支开线的守卫会拒绝这个请求，而把同样的请求发给默认分支，开出的线从默认分支的历史开始，那里没有根在切点之后做的事。
 - **来源。** 每条线都有来源，记在父分支的 `branch/create` 里。来源记录这条线从哪里开出来，它不是角色标记：
@@ -83,15 +83,15 @@
 
   来源可以从 `TimelineInfo.source` 读到，由 `TreeCommands.list` 和 `info` 返回，根上没有（§5）。已结束的目录条目可以不带它；打开显示详情时按已知位置读取创建来源。插件线的来源是 `{kind: "host", operation_id}`：开线一方的不透明标签，核心从不解释它。用户线有它自己的种类 `{kind: "user", operation_id}`，所以需要分辨对话线与插件线的读者不用去解析 `operation_id`。开线一方按自己的 operation id 约定找到自己的线，例如 Goal 的 `goal:evaluate:` 前缀。种类只说明这条线从哪里开出来，不携带角色。
 - **升级前已经存在的线。** 今天 `session.branch_create` 写的是 `{kind: "host", operation_id}`（[connection/tree.rs](../../crates/dim-app-server/src/connection/tree.rs)），本设计不改写任何已存的行。用户在升级前经客户端开出的线，包括 `FORMAT` 52 下用 Web `/branch` 开的线，升级后仍是 `host`，因此不再是合法的切换目标；升级后新开的同样一条线则可以。本次接受这个限制，而不迁移这条事实：`FORMAT` 53 只是升标记、不写数据（§15、§16），并且有一条验收用例写明它（§20）。
-- **工具的作用范围。** 一条线读、也发消息给它被切出来的那条线和它开过的每条未结束的线。用户开出的线同时站在这条规则的两侧：它给被切出来的那条线发消息、也从自己的切点读它，并协调开在它下面的线；而被它切出来的那条线既不给它发消息、也不读它，因为它是用户开出的（§6）。`end {content}` 不接受目标，所以它只结束调用方自己，不结束别的线（§6、§10、§11）。插件线不在任何名册上，工具不给它发消息，也不结束它。
+- **工具的作用范围。** 一条线读、也发消息给它被切出来的那条线和它开过的每条未结束的工具线。用户开出的线同时站在这条规则的两侧：它给被切出来的那条线发消息、也从自己的切点读它，并协调开在它下面的工具线；而被它切出来的那条线既不给它发消息、也不读它，因为它是用户开出的（§6）。`end {content}` 不接受目标，所以它只结束调用方自己，不结束别的线（§6、§10、§11）。插件线不在任何名册上，工具不给它发消息，也不结束它。
 - **父线块。** 一条线的 BranchLine 在父线结束一轮、且父线在 `max(读取游标, 上次告知的头部, 开启点)` 之后有新活动时，在这条线自己身上写一个带 key 的 `<dim-branch-parent>` 块（§7.1.1、§12.1）。块只报位置，是状态而不是请求；内容仍留在读取返回的页里。
 
 | 线 | 用工具开线 | 用工具发消息、读 | 由谁结束（按约定） |
 | --- | --- | --- | --- |
-| `main`，根 | 能，不论它是不是默认分支 | 它开过的线 | 永不结束；Session 关闭不算结束 |
-| 默认分支 | 不能，除非它就是根 | 它被切出来的那条线，以及它开过的线 | 它在默认分支期间谁都不能结束它，用户也不行：要结束它，用户先把默认分支移到另一条线上 |
-| 其它工具线 | 不能（工具结果拒绝） | 它的父分支以及它开过的线 | 它自己（`end`）、用户，或祖先结束时连带 |
-| 其它用户线 | 不能（工具结果拒绝），但它保留它开过的线 | 它给被切出来的那条线发消息、并从自己的切点读它，还读它开过的线；被切出来的那条线既不给它发消息、也不读它（`branch_not_kin`） | 用户，或祖先结束时连带；不是它自己 |
+| `main`，根 | 能，不论它是不是默认分支 | 它开出的工具线 | 永不结束；Session 关闭不算结束 |
+| 默认分支 | 不能，除非它就是根 | 它被切出来的那条线，以及它开出的工具线 | 它在默认分支期间谁都不能结束它，用户也不行：要结束它，用户先把默认分支移到另一条线上 |
+| 其它工具线 | 不能（工具结果拒绝），但它保留它开出的工具线 | 它的父分支以及它开出的工具线 | 它自己（`end`）、用户，或祖先结束时连带 |
+| 其它用户线 | 不能（工具结果拒绝），但它保留它开出的工具线 | 它给被切出来的那条线发消息、并从自己的切点读它，还读它开出的工具线；被切出来的那条线既不给它发消息、也不读它（`branch_not_kin`） | 用户，或祖先结束时连带；不是它自己 |
 | 插件线 | 不能 | —（按创建者的协议） | 它的创建者（Goal 结束它的评审者，[Pursuit §13](plugins/Pursuit.md#13-结束评审者随-427)）、用户，或祖先结束时连带 |
 
 谁结束哪条线，是调用方之间的约定，但要除去工具不让线替自己结束的那两类：插件线按创建者的协议走，用户线由用户结束（§11）。运行时只检查目标，不管是谁在请求，用户也一样：它存在、未结束，且既不是根、也不是默认分支、也不在默认分支的祖先链上，因为结束一条线会连带结束它下面的每一条（§10）。
@@ -105,7 +105,7 @@
 | TimelineTree | Session | 否 | 线的生命周期：每个子分支开启输入里的身份块、`TimelineInfo.source`、一条线的结束（`branch/end` → `branch/ended`）、线进入结束后拒绝输入、恢复规则、读已结束线的历史、默认分支及其 `branch/default` 事实，以及分支目录（§14） |
 | TreeTimeline | 分支 | 是 | 把 `branch/end` 转给 TimelineTree，就像现在转 `branch/create`。对由工具调用发出的结束，它还转交关闭要等的那一轮结束 |
 | BranchTool | Session | 否 | 按动作区分的 `branch` 工具（§11）。它每次调用时取调用方那条线的 BranchLine，与 WorkspaceTools 取 FileReads 的方式相同 |
-| **BranchLine**（新） | 分支 | 是 | 一条线对自己相关各线的视图。它的角色（根、工具线、用户线或插件线）和父分支来自 `TreeCommands.info(自己的 id)`。它从自己的事实折叠出未结束的工具线和当前这一轮的状态。它写名册、空闲通知和结束通知，以及线成为默认分支或不再是默认分支时它收到的那条状态说明 |
+| **BranchLine**（新） | 分支 | 是 | 一条线对自己相关各线的视图。它的角色（根、工具线、用户线或插件线）和父分支来自 `TreeCommands.info(自己的 id)`。它从自己的事实折叠出未结束的工具线和当前这一轮的状态。它写名册、空闲通知和结束通知，以及线成为默认分支或不再是默认分支时它收到的那条状态说明。名册是它自己的 key `branch:roster`，只列它开出的工具线（§7.1） |
 
 BranchLine 注入 `B:Dispatcher`、`B:TimelineIdentity`、`B:BranchLifecycle` 和 `S:TreeCommands`，提供 `B:BranchLine`。
 
@@ -131,13 +131,13 @@ BranchLine 注入 `B:Dispatcher`、`B:TimelineIdentity`、`B:BranchLifecycle` �
 
   | 组合 | 发消息 | 读取 | 拒绝 |
   | --- | --- | --- | --- |
-  | 开线方与它开出的每条未结束的线 | 双方都可以给对方发消息 | 双方都可以读对方：开线方读它开出的线，那条线从自己的切点读开线方 | 无 |
+  | 开线方与它开出的每条未结束的工具线 | 双方都可以给对方发消息 | 双方都可以读对方：开线方读它开出的线，那条线从自己的切点读开线方 | 无 |
   | 用户开出的线与它被切出来的那条线 | 用户开出的线可以给它发消息 | 用户开出的线从自己的切点读它；它被切出来的那条线既不给它发消息、也不读它，因为那条线是用户开出的，不是它开出的 | 它被切出来的那条线发消息或读取：`branch_not_kin` |
-  | 开线方与它开出、已经结束的对话线 | 拒绝：它不再接受输入，自己也什么都不回答 | 开线方读它，未结束或已结束都读，因为开线方正是靠读取拿到它的结果 | `branch_ended` |
+  | 开线方与它开出、已经结束的工具线 | 拒绝：它不再接受输入，自己也什么都不回答 | 开线方读它，未结束或已结束都读，因为开线方正是靠读取拿到它的结果 | `branch_ended` |
   | 插件线与其开线方 | 两个方向都不行 | 插件线读它被切出来的那条线；没有哪条线经工具读插件线 | 发消息，以及开线方的读取：`branch_not_tool_line` |
   | 其他任何组合：兄弟分支、相隔两代的线 | 不行 | 不行 | `branch_not_kin` |
 
-  用户开的线是像工具线一样的对话线，它落在哪一行由它所处的那条边决定：作为被开出的线，它属于第二行，那一行的开线方是用户，不是它被切出来的那条线；作为开线方，它与其他开线方一样属于第一行。已结束的对话线保留它原来的那一行，只是发消息被拒：开线方仍然读它，开线方就是这样拿到它没来得及发出的结果。已结束的插件线仍归插件那一行，没有哪条线经工具读它。`end` 不属于任何组合：`end {content}` 不接受目标，所以它永远结束调用方自己（§10、§11）。协调沿父子关系走，所以它留在开线的那条线上，默认分支移动时它不跟着动；曾经的默认分支保留它开出的线，并继续与它们互发消息、互读。
+  用户开的线是像工具线一样的对话线，它落在哪一行由它所处的那条边决定：作为被开出的线，它属于第二行，那一行的开线方是用户，不是它被切出来的那条线；作为工具线的开线方，它与其他开线方一样属于第一行。已结束的工具线保留它原来的那一行，只是发消息被拒：开线方仍然读它，开线方就是这样拿到它没来得及发出的结果。已结束的插件线仍归插件那一行，没有哪条线经工具读它。`end` 不属于任何组合：`end {content}` 不接受目标，所以它永远结束调用方自己（§10、§11）。协调沿父子关系走，所以它留在开线的那条线上，默认分支移动时它不跟着动；曾经的默认分支保留它开出的工具线，并继续与它们互发消息、互读。
 - **读取。** `read {branch, after?, limit?}` 返回目标已提交历史的一页，未结束或已结束都可以，经 `TreeCommands.page` 从存储读取，按 Collaboration 的 `read` 渲染成员页面的方式呈现：输入、文本、工具调用与结果、每轮结束，带 `nextCursor`；工具结果条目携带其工具在该结果上声明的效果（[工具契约 A.6](contracts/session-boundary.md#a6-工具效果)），仅当结果至少声明了一个时才存在，路径原样，命令在第 200 个字符处截断并标出截断。目标是被调用方切出来的那条线，或调用方开过的线。两个方向共用一条游标规则：
   - 不带 `after` 时，读取从调用方上一次成功读取该线的位置继续：最后一次返回了页的读取的 `nextCursor`。此前没有读过时，读被切出来的那条线从调用方的切点开始，读调用方开过的线从那条线的第一个事件开始。
   - 显式 `after` 从该点读取。读被切出来的那条线时，低于切点的值会抬到切点，因为切点之前的事件已经是这条线自己的历史。读自己开过的线时，值原样使用，所以 `after: 0` 会从一条线的开头重读。
@@ -198,7 +198,7 @@ BranchLine 注入 `B:Dispatcher`、`B:TimelineIdentity`、`B:BranchLifecycle` �
 - 重启时每条开着的线都会重新加载。Session 关闭和空闲卸载都不会结束一条线。
 - 开着的工具线会让开线方的名册变长，名册只列它开着的线。每次从线外结束这样一条线，开线方上就多一条通知。
 
-永不结束的线由它自己的协议（`end`）和用户负责，它的名册让它始终可见。Pursuit 的评审者由 Goal 结束（[Pursuit §13](plugins/Pursuit.md#13-结束评审者随-427)）。
+永不结束的工具线由它自己的协议（`end`）和用户负责，开线方的名册让它始终可见。Pursuit 的评审者由 Goal 结束（[Pursuit §13](plugins/Pursuit.md#13-结束评审者随-427)）。
 
 ### 6.2 已知代价
 
@@ -212,7 +212,7 @@ BranchLine 注入 `B:Dispatcher`、`B:TimelineIdentity`、`B:BranchLifecycle` �
 
 ### 7.1 带 key 的状态：`branch:line`、`branch:roster` 与 `branch:parent`
 
-每条线都用同一个 key `branch:line` 下的块，回答"我是哪条线"。这个 key 在每条线上都一样。开过线的线还用自己独立的 key `branch:roster` 下的块回答"哪些线是我的"。两个 key 分开，是因为现在开线的线不一定是根，它同时带着身份和名册：共用一个 key 会让名册写入让这条线自己的身份退役，也会让状态说明让名册退役。一条线还为自己被切出来的那条线保留一个带 key 的块 `branch:parent`（§7.1.1）。
+每条线都用同一个 key `branch:line` 下的块，回答"我是哪条线"。这个 key 在每条线上都一样。开过工具线的线还用自己独立的 key `branch:roster` 下的块回答"哪些线是我的"。两个 key 分开，是因为现在开线的线不一定是根，它同时带着身份和名册：共用一个 key 会让名册写入让这条线自己的身份退役，也会让状态说明让名册退役。一条线还为自己被切出来的那条线保留一个带 key 的块 `branch:parent`（§7.1.1）。
 
 - **子分支上：它的身份。** TimelineTree 在每个子分支上写入，无论工具线、用户线还是插件线。它是子分支开启 Queue 输入的第一个块，key 为 `branch:line`，写明：
   - 子分支的 id、父分支和切点；
@@ -221,12 +221,12 @@ BranchLine 注入 `B:Dispatcher`、`B:TimelineIdentity`、`B:BranchLifecycle` �
   - 上面那些发给父分支的消息（例如名册）属于父分支。
 
   工具线的身份块还带上它的目的（`create` 的 prompt）和线协议。`idleNotice: none` 时，TimelineTree 在这条开启输入的身份块上带 `idle-notice="none"`。BranchLine 在考虑空闲通知时从这条线自己的开启输入里读它；恢复不重放输入。缺少这个属性就选 `steer`，包括这个选项出现之前写下的历史。这个设置只管自动的空闲通知。在用户线和插件线上，创建者的 prompt 仍是开启输入的 `user` 内容，排在块之后。
-- **开线方上：名册。** 开过线的线上的 BranchLine 依据它自己的事实写一条带 key 的 Append：
+- **开线方上：名册。** 开过工具线的线上的 BranchLine 依据它自己的事实写一条带 key 的 Append：
   - 来源为工具的 `branch/create`；
-  - `branch/create-failed`；
-  - `branch/ended`。
+  - 其中某条线的 `branch/create-failed`；
+  - 其中某条线的 `branch/ended`。
 
-  名册列出它开的每条未结束的线，带线的 id 和目的的第一行；一条都不剩时这个 key 退役。插件线从不在名册上，所以 Goal 的评审者不会出现在任何名册里。
+  名册列出它用工具开出的每条未结束的线，带线的 id 和目的的第一行；一条都不剩时这个 key 退役。插件线从不在名册上，所以 Goal 的评审者不会出现在任何名册里。用户开出的线也不在名册上：它留在 Session 的分支目录里，用户和客户端在那里看得到它（§14），而它自己开出的工具线写进它自己的名册。
 - **覆盖。** 两个 key 各自退役，互不影响。子分支在继承的前缀里也带着父分支的名册；它自己写名册时替换的是自己 key 下的那个继承块，它的身份从不碰继承来的名册，继承来的名册也不会让它的身份退役。从子分支的开启输入起，子分支上最新的有效 `branch:line` 块就是它的身份，最新的有效 `branch:roster` 块就是它自己的名册。继承来的名册是被退役，而不是留着顶替它还没写的名册：TimelineTree 用读 `branch:parent` 时同样的方式（§7.1.1），从子分支继承的前缀的带 key 状态里读 `branch:roster` 是否还活着，还活着时就在开启输入里、身份块之后再带一个原始块，key 为 `branch:roster` 且已退役。所以一条不开线的子分支根本不持有名册，而不是持有父线那张它从没开过的线的清单；这条线压缩时重放的是那次退役，不是继承来的块。从 `main` 切出来、而 `main` 当时还没写名册的子分支什么都继承不到，也就没有这个块。
 - **状态说明是同一个 key 的后续块。** 一条线成为默认分支或不再是默认分支时，BranchLine 在这条线上、`branch:line` 这个 key 下写一条带 `default` 的 Append。因为它用的就是身份的 key，它会取代出生块，所以这条说明逐字重述那份身份，只改移动所改变的那几句（§12.1）。根不写说明：它开线和永不结束这两条规则都不随角色改变，所以根的名册独占这个 key，根日后压缩时也只重放名册。说明写在 `branch:line` 下、名册写在 `branch:roster` 下，所以说明永远不会让名册退役，不论名册在哪条线上。
 
@@ -387,7 +387,7 @@ WorkspaceTools 不变。
 5. `Branch::close()` 中断这条线、结算它的工作并卸载它（[branch.rs](../../../crates/dim-agent-runtime/src/branch.rs)）。
 6. TimelineTree 最后在父分支上写 `branch/ended`。
 
-在父分支上，BranchLine 只处理工具线；插件线归它们的创建者：
+在父分支上，BranchLine 只处理它开出的工具线；插件线归它们的创建者，而用户开出的线不在名册上、由用户结束，所以开出它的那条线不为它写任何东西（§6、§7.1）：
 
 - 工具线经工具结束自己时（`tool` 来源且没有 `ancestor`），只写名册更新。最终消息从这条线自己的 `branch/end` 送出，如上面几段所述；停机漏掉的那一条由恢复补送。
 - 工具线的其他任何结束，写名册更新加上结束通知（§12.1），以 steer 写在同一条输入里。
@@ -414,8 +414,8 @@ WorkspaceTools 不变。
 | 动作 | 输入 | 谁 | 作用 | 结果文本 |
 | --- | --- | --- | --- | --- |
 | `create` | `prompt`、`at?`、`idleNotice?`（`steer` \| `none`） | 根，以及当前的默认分支 | 开一条切在 `at` 的工具线（默认与现在相同：在本次请求的模型开始之前），它向调用方汇报。这次开线会越过 Session 上限时以 `branch_limit_reached` 被拒绝，名额在预留时扣除（§6.1）。空闲通知默认是 `steer` | `Line created: C` |
-| `message` | `to`、`content`、`mode?`（`append` \| `steer`） | 一条线给它开过的线，任何来源的线都可以；一条线给它被切出来的那条线 | 在 `to` 上写一条 `input/message` | `Sent to C.` |
-| `read` | `branch`、`after?`、`limit?`（1–200） | 一条线，读被切出来的那条线或它开过的线，未结束或已结束都可。用户开出的线按这一条读它被切出来的那条线；那条线不给它发消息、也不读它，因为它是用户开出的 | 从存储读一页；不给 `after` 时从调用方的游标开始（§6） | 这一页的 JSON：items、`nextCursor`、`done` |
+| `message` | `to`、`content`、`mode?`（`append` \| `steer`） | 一条线，给它开出的工具线，或给它被切出来的那条线 | 在 `to` 上写一条 `input/message` | `Sent to C.` |
+| `read` | `branch`、`after?`、`limit?`（1–200） | 一条线，读被切出来的那条线或它开出的工具线，未结束或已结束都可。用户开出的线按这一条读它被切出来的那条线；那条线不给它发消息、也不读它，因为它是用户开出的 | 从存储读一页；不给 `after` 时从调用方的游标开始（§6） | 这一页的 JSON：items、`nextCursor`、`done` |
 | `end` | `content` | 不是默认分支的工具线，对它自己 | 树锁下的一次 `TreeCommands.end(C, source, final_message)`：先检查守卫，在 C 上写带最终消息的 `branch/end`，再用由 `source` 推出的 submission id 把这条消息（steer）送到父线（§10）。被拒绝的结束不写最终消息 | `Line C is ending; your final message was sent to P.` |
 
 输入 schema 为 `{action, prompt?, at?, idleNotice?, to?, content?, mode?, branch?, after?, limit?}`，`action` 必填，`additionalProperties: false`。`idleNotice` 只对 `create` 有效。
@@ -452,8 +452,8 @@ WorkspaceTools 不变。
 | 父线块，嵌套线开启时 | `C`，开启输入，身份块之后，`branch:parent` | Queue | `<dim-branch-parent branch="P" head="H" after="H">` / `Line P has no new activity since you were cut from it at H. Parent blocks above this point were written for P and are not yours.` / `</dim-branch-parent>` |
 | 消息 | 接收方，无 key | `append` 或 `steer` | `<dim-branch-message from="C" to="P">` / `<content>` / `</dim-branch-message>` |
 | 最终消息 | `P`，无 key | Steer | `<dim-branch-message from="C" to="P" final="true">` / `<content>` / 空行 / `Line C ends with this message.` / `</dim-branch-message>` |
-| 空闲通知 | `P`，无 key | Steer | `<dim-branch-idle branch="C" status="completed\|failed\|cancelled">` / `Line C's turn ended (<status>) without a message to you, and C is waiting. Read it if you need its state; message it with mode "steer" to give it more work, or leave it.` / `</dim-branch-idle>` |
-| 结束通知 | `P`，无 key，与名册在同一条输入里；`P` 开过的线除自己的 `end` 之外的任何结束 | Steer | `<dim-branch-ended branch="C">` / `Line C was ended from outside its own line, by the user or a host operation. It no longer receives messages; read it if you need what it did.` / `</dim-branch-ended>` |
+| 空闲通知 | `P`，无 key，针对 `P` 开出的工具线 `C` | Steer | `<dim-branch-idle branch="C" status="completed\|failed\|cancelled">` / `Line C's turn ended (<status>) without a message to you, and C is waiting. Read it if you need its state; message it with mode "steer" to give it more work, or leave it.` / `</dim-branch-idle>` |
+| 结束通知 | `P`，无 key，与名册在同一条输入里；`P` 开出的工具线除自己的 `end` 之外的任何结束 | Steer | `<dim-branch-ended branch="C">` / `Line C was ended from outside its own line, by the user or a host operation. It no longer receives messages; read it if you need what it did.` / `</dim-branch-ended>` |
 | 状态说明，新的默认分支，工具线 | `C`，`branch:line` | Append | `<dim-branch-line branch="C" parent="P" source="tool" default="true">` / 逐字重述出生身份的句子，包括目的标签和目的本身，然后空行 / `This line is now the session's default branch, switched from line O. While this block is your latest one: answer the user here; you can open lines with create; you send no automatic idle notice to P; you cannot call end on yourself. Line O stays open and keeps the lines it opened.` / 空行 / `How you work here:` / `- The user switched here to continue directly from this line's context and approach, so the user's request takes precedence over the purpose above, which still says what this line is for.` / `- When your purpose is done, or cannot be done, message P with what you found, did, changed and left undone and keep working: while this line is the default branch you cannot call end on yourself.` / `- You share the workspace with P and its other lines. If edit or write fails because the file was modified after it was last read, another line may have changed that file: read it again before editing.` / `</dim-branch-line>` |
 | 状态说明，新的默认分支，用户开的线 | `C`，`branch:line` | Append | `<dim-branch-line branch="C" parent="P" source="user" default="true">` / 逐字重述出生身份的句子，然后空行 / `The user has now made this line the session's default branch, switched from line O. While this block is your latest one: answer the user here; you can open lines with create; you cannot call end on yourself; the user ends this line. Line O stays open and keeps the lines it opened.` / 空行 / `How you work here:` / `- Carry this line's work forward yourself; the user's request takes precedence over the prompt this line was opened with.` / `</dim-branch-line>` |
 | 状态说明，原来的默认分支 | `C`，`branch:line` | Append | `<dim-branch-line branch="C" parent="P" source="tool" default="false">`，或 `source="user"` 的同一条 / 逐字重述出生身份的句子，然后空行 / `Line O is now the session's default branch. This line stays open, reports to P as before and keeps coordinating the lines it opened; it can no longer open lines with create, and the rest of the rules above hold again.` / `</dim-branch-line>` |
@@ -597,7 +597,7 @@ WorkspaceTools 不变。
 | [设计规则 §2](../../architecture/rust-agent/principles.md#2-作用域的含义) | 改写：同一主体的多条线、共享事实、父子是唯一的通信和读取关系、共用交互面。关系表一行改为"只在父子之间"，读取父线已提交的事件经工具结果；Session 一行加上"结束" | 现在的文本是"平等的线，父子只记录来源"，没有通信关系 |
 | TimelineTree | 对每种来源都在 `first_input` 里写身份块。新增 `TreeCommands.end(id, source)` 和 `TreeCommands.page(id, after, limit)`。`TimelineInfo.source`，依据父分支的 `branch/create` 填写（§5）。结束流程及其守卫、线进入结束后拒绝输入、`branch/ended`、恢复规则、读已结束的线，以及默认分支：根上的 `branch/default`、它的恢复读取，和一次移动写下的那条事实。它的 `directory()` 报告未结束、结束中和已结束的线：结束中的线从工具、用户或级联写入它自己的 `branch/end` 起，到它的已结束记录被写入为止，带该事件与活头部，并带当前的 `defaultBranchId`。它的节点把这条线最新轮次结束的序号发布给它开出的线（§7.1.1）。它还送达工具结束记下的最终消息：工具结束的 `branch/end` 带着它（§10、§16），所以恢复在父线上没有带该指令推出的 id 的输入时写一条，已有则什么也不写 | 它拥有线的生命周期、开启输入，以及默认分支唯一的那条权威事实 |
 | TreeTimeline | 消费 `branch/end`，以及由工具调用发出的结束时这条线的下一次轮次结束，并转给 TimelineTree。它把每一次 `turn/end` 报告给 TimelineTree，后者为这条线的子线发布 | 它现在就这样转 `branch/create` |
-| BranchTool | 按动作区分的工具，加上新的 BranchLine 分支部件。`read` 和 `message` 读、写调用方被切出来的那条线和它开过的线，共用一条游标规则。`create` 接受根和当前默认分支，其余线以 `branch_not_opener` 拒绝，然后检查 Session 上限，超过时以 `branch_limit_reached` 拒绝 | 工具的各个动作，以及一条线对自己相关各线的视图 |
+| BranchTool | 按动作区分的工具，加上新的 BranchLine 分支部件。`read` 和 `message` 读、写调用方被切出来的那条线和它开出的工具线，共用一条游标规则。`create` 接受根和当前默认分支，其余线以 `branch_not_opener` 拒绝，然后检查 Session 上限，超过时以 `branch_limit_reached` 拒绝 | 工具的各个动作，以及一条线对自己相关各线的视图 |
 | Session 门面 | `Session::end_branch(id, source)`、`Session::default_branch(id)` 和 `Session::set_default_branch(id, source)`。已结束线的头部由 `Session::sequence` 给出；其历史在固定的头部经 `TreeCommands.page` 读取 | §17 |
 | App Server | `session.branch_end`（v3，用户来源，带生成的 `operation_id`；`session_execution` 打开、且连接的入口不是裸入口或守护进程 profile 未受保护时，`hello.features` 把它和其他会话方法一起列出）。`session.branch_set_default`（v3，同样的准入）。对已结束的线，`session.history` 立即返回，截到它存储的头部。`session.branches` 读树的目录并带 `defaultBranchId`（§14）。今天写死 `main` 的每个 Session 级缺省目标改读默认分支：`session.submit`、`session.stop`、`session.idle`、`session.goal.*` 和 `shell.run`，以及新建的排期任务。`session.model.update`、`session.agent.update` 和 `session.prompt.refresh` 作用于默认分支，而不是拒绝除根以外的每条线。`approval.respond` 仍用它通知里带的 `branchId`，所以已挂起的请求留在提问的那条线上。`ProductEvent::new` 在 v3 里带上新的事件种类，v1、v2 里不带 | 一个入口和三条读取路径，没有业务逻辑 |
 | dim-agent-types | 在 `EventKind` 和 v1 排除列表里加入 `branch/end`、`branch/ended`，再加入 `branch/default`，并在契约测试中登记。`BranchSource` 增加一个变体，表示用户开的线，与插件的区分开。冻结样本不变 | 核心事实（§16） |
@@ -701,9 +701,11 @@ BranchLine 的服务只由同一插件里的工具读取。轮次结束信号是
 1a. 在父线写过名册之后切出的子分支会继承那个块，它的开启输入会让它退役。自己不开线的子分支只写 `branch:line`，这条线压缩时重放它的身份、不重放名册：继承来的块在开启时就已退役，所以它永远不会告诉这条线它开过父线的线、或者它可以协调它们。在父线写名册之前切出的子分支拿不到这个块，它的开启输入逐字节不变。
 2. 子分支给开它的那条线发一条 Append：它不唤醒开线方，开线方在下一次请求时看到。Steer 唤醒开线方的 `wait`，或在开线方空闲时开启新的一轮。来自开线方的 Steer 唤醒空闲的子分支。
 3. 下列操作被拒绝，什么也不写：给兄弟分支发消息或读取、两条线互为祖父与孙分支、在既不是根也不是默认分支的线上 `create`、对插件线发消息或从插件线发消息、任何线经工具读插件线、在根或默认分支或默认分支的祖先上 `end`，以及插件线或用户线对自己 `end`。用户开出的线被切出来的那条线，既不给它发消息、也不读它，回答 `branch_not_kin`；而这条用户线自己可以给那条线发消息，也从自己的切点读它。
-4. 子分支的一轮没有发 steer 就结束时，开它的那条线收到一条带这一轮状态的空闲通知。这一轮 steer 过开线方、调用了 `end`、留下了待处理的驱动输入，或者这条线是默认分支时，不写通知。
+
+3a. 用户线不在任何名册上，也不归开出它的那条线协调。`session.branch_create` 从 `P` 开出 `U`：`P` 的名册不列 `U`，`U` 以来源 `{kind: "user"}` 出现在 Session 目录 `session.branches` 里，`P` 对 `U` 的 `read` 和 `message` 都回答 `branch_not_kin`，`U` 结束的一轮既不给 `P` 写空闲通知，也不写结束通知。随后用户把 `U` 选为默认分支，`U` 开出工具线 `T`：`U` 的名册列出 `T`，`U` 给 `T` 发消息、读 `T`，`T` 的通知也到达 `U`。
+4. 工具子线的一轮没有发 steer 就结束时，开它的那条线收到一条带这一轮状态的空闲通知。这一轮 steer 过开线方、调用了 `end`、留下了待处理的驱动输入，或者这条线是默认分支时，不写通知。
 5. 工具线结束自己：写入带 `tool` 来源、带着最终消息的 `branch/end`，然后用由该来源推出的 id 写父线上的 steer，在这一轮结束时关闭，然后在开出它的那条线上写 `branch/ended` 并更新名册，不写结束通知。之后的消息被拒绝（`branch_ended`），开线方仍然能读已结束线的历史：工具的 `read` 和 `session.history` 都能返回。
-6. 经 `session.branch_end` 由用户结束：`branch/end` 带用户来源和 App Server 的 id，这条线当前这一轮被中断，开它的那条线以 steer 收到结束通知。根和默认分支都不能被结束，默认分支的每条祖先也不能。再次结束返回 `branch_ended`。向已结束的线提交返回 `branch_ended`。
+6. 经 `session.branch_end` 由用户结束：`branch/end` 带用户来源和 App Server 的 id，这条线当前这一轮被中断；工具线由开它的那条线以 steer 收到结束通知，用户开出的线则只在它被切出来的那条线上写 `branch/ended`，那里不写通知。根和默认分支都不能被结束，默认分支的每条祖先也不能。再次结束返回 `branch_ended`。向已结束的线提交返回 `branch_ended`。
 7. 恢复：已结束的线不打开，它的后代也不打开。没有 `branch/ended` 的 `branch/end` 在重启时补写结果。
 8. Pursuit 的评审者得到插件线的身份块，能读到执行者在它的切点之后的工作，现有的 Pursuit 流程照常通过。
 9. 两条线编辑同一个文件：后编辑的那条得到 `file_modified_since_read`（已有行为）。
@@ -755,7 +757,7 @@ Goal 流程，放在 `crates/dim-goal/tests` 的流程测试中（§7.4）：
 
 31. 一次移动让 Session 越过上限时，拒绝新的开线、不关闭任何东西。上限为二，`main → A → B` 是仅有的未结束工具线。选中 `B` 时两条都受保护，计数为零；移回 `main` 时 `A` 和 `B` 同时计数，也就是二，之后 `create` 回答 `branch_limit_reached`，其文本说明这是上限。这样一条线落在计数一侧时，Session 就停在上限之上，两个方向都没有关闭任何线：移动前开着的线在移动后仍开着，目录也会这样报告。移动从不只算它的两个参与者，记录的运行把两半都写出来：`BranchCapSwitch-BackToRoot` 从两条嵌套线之下开始，接受这次用满全部名额的切换；`BranchCapSwitch-OverCap` 期间多开一条线，把 Session 留在上限之上；`BranchEligibility-AtCapBelow` 在单线模型里陈述同一条规则。
 
-32. 除两个开线方之外的每条线都被拒绝 `create`，什么也不写，并保留它开过的线：曾经的默认分支仍能给开过的线发消息、读它们，只是它自己的 `create` 回答 `branch_not_opener`。它的协调也不会结束任何别的线：`end {content}` 不接受目标，所以 B 结束的是自己，不连带它下面的线。用户要结束 C 时，要么经 `session.branch_end` 结束它，要么由 B 用一条 steer 消息请 C 自己结束，这就是 §10 写的约定；因祖先结束而结束的线是被那次连锁结束的，不是被这次工具调用结束的。
+32. 除两个开线方之外的每条线都被拒绝 `create`，什么也不写，并保留它开出的工具线：曾经的默认分支仍能给开出的工具线发消息、读它们，只是它自己的 `create` 回答 `branch_not_opener`。它的协调也不会结束任何别的线：`end {content}` 不接受目标，所以 B 结束的是自己，不连带它下面的线。用户要结束 C 时，要么经 `session.branch_end` 结束它，要么由 B 用一条 steer 消息请 C 自己结束，这就是 §10 写的约定；因祖先结束而结束的线是被那次连锁结束的，不是被这次工具调用结束的。
 
 33. 最后一个名额和默认分支的子线。上限为二，已经有一条不在受保护路径上的工具线，根是默认分支，所以正好还剩一个名额。根开一条线：新子线是默认分支的后代而不是祖先，所以它计数，名额被花掉。同一树状态下根再 `create` 一次回答 `branch_limit_reached`，什么也不写。两次开线都不因由默认分支发出而获免，也没有任何线被关闭来腾位置。记录的模型运行 `BranchEligibility-CapBoundary` 正是这个场景：`RootInit` 取 `peers=1`，一次开线被接受，没有任何状态接受第二次。
 
@@ -770,7 +772,7 @@ Goal 流程，放在 `crates/dim-goal/tests` 的流程测试中（§7.4）：
 | 部分 | 原因 |
 | --- | --- |
 | 每个子分支上的身份块，同一个 key | 没有它，一条线压缩后会忘记自己是哪条线，或把父分支的名册当成自己的 |
-| 自己的 key 下的名册，在每条开过线的线上 | 协调沿父子关系走，而现在任何线都可能是开线方，所以每个开线方都需要名册；与身份共用一个 key 会让名册写入让非根线自己的身份退役 |
+| 自己的 key 下的名册，在每条开过工具线的线上 | 协调沿父子关系走，而现在任何线都可能是开线方，所以每个开线方都需要名册；它只列工具开出的线，因为用户线被切出来的那条线既不能给它发消息、也不能读它；与身份共用一个 key 会让名册写入让非根线自己的身份退役 |
 | 消息是 `input/message`，带 append 和 steer | 这是线之间唯一的通道。模式是 InputQueue 的 |
 | 开线方的 `read` | 开线方不用开口问，就能检查一条线的工作 |
 | 空闲通知 | 没有它，开线方会一直等一条悄悄停下的线 |

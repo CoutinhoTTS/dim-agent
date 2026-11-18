@@ -82,8 +82,8 @@ specific target from its own `step/tool-use` and `step/tool-result` (design [§6
 ## BranchLine
 
 Owner: [timeline_tree.rs](../../../../crates/dim-agent-capabilities/src/timeline_tree.rs).
-Folds the line's own committed facts into its role, the lines it opened, the
-state of its current turn and the line's read cursors, and writes its roster,
+Folds the line's own committed facts into its role, the tool lines it opened,
+the state of its current turn and the line's read cursors, and writes its roster,
 the parent block, the idle notice, the ended notice and a status note through
 `S:TreeCommands`.
 
@@ -122,8 +122,8 @@ Consumes `branch/create`, `branch/create-failed`, `branch/ended`, `branch/end`,
 `input/message`, `input/consumed`, `input/deleted`, `turn/end`, `step/tool-use` and
 `step/tool-result`. It writes only `input/message`, through the tree's input path.
 
-- **Roster.** On a line that has opened lines, a keyed Append under `branch:roster` of `<dim-branch-lines>` lists the tool and user lines it opened that are still open, in the order it opened them, with the
-  first line of each purpose; when none is open the key is retired. A plugin line is never on a roster.
+- **Roster.** On a line that has opened tool lines, a keyed Append under `branch:roster` of `<dim-branch-lines>` lists the lines it opened with the tool that are still open, in the order it opened them, with the
+  first line of each purpose; when none is open the key is retired. A plugin line is never on a roster, and neither is a line the user opened: it stays in the Session's directory and coordinates its own tool lines.
 - **Parent block.** On a line that is not the root, one keyed Append of
   `<dim-branch-parent>` on the line itself when its opener ends a turn past
   the line's read cursor for it, the head the latest block reported, and the
@@ -145,7 +145,7 @@ Consumes `branch/create`, `branch/create-failed`, `branch/ended`, `branch/end`,
   accepted: a refused or denied call wrote nothing to the parent, which would
   otherwise wait on silence.
 - **Ended notice.** On the opener, the roster update and `<dim-branch-ended>` in one
-  Steer, for any end of a line it opened other than that line's own `end`.
+  Steer, for any end of a tool line it opened other than that line's own `end`.
 - **Status note.** On the new default branch and on the former one, one keyed Append of
   `<dim-branch-line>` under `branch:line`, carrying `default`, restating the identity it replaces
   and then the rules that hold while the line is, or is no longer, the default branch. The key is
