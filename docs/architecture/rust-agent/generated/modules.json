@@ -35548,6 +35548,13 @@
     },
     {
       "from": "dim_app_server::transport",
+      "to": "dim_agent_capabilities::build",
+      "references": [
+        "path dim_agent_capabilities::build::build_id"
+      ]
+    },
+    {
+      "from": "dim_app_server::transport",
       "to": "dim_agent_capabilities::environment_clients",
       "references": [
         "path ClientChannel::declared",
@@ -36578,7 +36585,12 @@
       "references": [
         "mod client",
         "path client",
+        "path client::BuildKind::Different",
+        "path client::BuildKind::Unverified",
+        "path client::BusyCounts",
         "path client::DaemonNotice",
+        "path client::DaemonNotice::Build",
+        "path client::DaemonNotice::Kept",
         "path client::NewerStore",
         "path client::StoreUpgrade",
         "path client::UpgradeStage",
@@ -37235,7 +37247,8 @@
       "from": "dim_cli::client",
       "to": "dim_agent_capabilities::build",
       "references": [
-        "path dim_agent_capabilities::build::RELEASE"
+        "path dim_agent_capabilities::build::RELEASE",
+        "path dim_agent_capabilities::build::build_id"
       ]
     },
     {
@@ -37295,6 +37308,13 @@
       "to": "dim_cli::locale",
       "references": [
         "path crate::locale::Locale"
+      ]
+    },
+    {
+      "from": "dim_cli::client",
+      "to": "dim_cli::update",
+      "references": [
+        "path crate::update::entry"
       ]
     },
     {
@@ -44465,6 +44485,8 @@
       "from": "dim_cli::ui::i18n::tests",
       "to": "dim_cli",
       "references": [
+        "path crate::DAEMON_BUILD_DIFFERENT",
+        "path crate::DAEMON_BUILD_UNVERIFIED",
         "path crate::DAEMON_BUSY",
         "path crate::DAEMON_BUSY_COUNTS",
         "path crate::DAEMON_TOO_OLD",
