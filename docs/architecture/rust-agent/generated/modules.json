@@ -141,6 +141,7 @@
         "format",
         "json",
         "matches",
+        "unreachable",
         "vec"
       ]
     },
@@ -7022,6 +7023,7 @@
       "file": "crates/dim-cli/src/ui/tui.rs",
       "unexpandedMacros": [
         "debug_assert",
+        "env",
         "eprintln",
         "format",
         "matches",
@@ -8083,7 +8085,7 @@
       "to": "dim_acp::projection",
       "references": [
         "path Projection",
-        "path Projection::default",
+        "path Projection::new",
         "use crate::projection::Projection"
       ]
     },
@@ -8347,10 +8349,12 @@
       "references": [
         "path ContentBlock::Image",
         "path ContentBlock::Text",
+        "path ImageSource",
         "path ToolContent",
         "path ToolContent::Blocks",
         "path ToolContent::Text",
         "use dim_agent_types::ContentBlock",
+        "use dim_agent_types::ImageSource",
         "use dim_agent_types::ToolContent"
       ]
     },
@@ -8396,6 +8400,14 @@
       "to": "dim_agent_types::skill_token",
       "references": [
         "path dim_agent_types::skill_token::tokens"
+      ]
+    },
+    {
+      "from": "dim_acp::projection",
+      "to": "dim_agent_types::tool",
+      "references": [
+        "path ToolResult",
+        "use dim_agent_types::ToolResult"
       ]
     },
     {
@@ -9304,6 +9316,7 @@
       "from": "dim_agent_aimux::stream::tests",
       "to": "dim_agent_aimux::stream",
       "references": [
+        "path classify_kind",
         "path convert",
         "path error"
       ]
@@ -9319,6 +9332,21 @@
         "path ModelChunk::Text",
         "path ModelChunk::Usage",
         "path ModelStream"
+      ]
+    },
+    {
+      "from": "dim_agent_aimux::stream::tests",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path ModelFailureKind",
+        "path ModelFailureKind::AuthRejected",
+        "path ModelFailureKind::ContextTooLong",
+        "path ModelFailureKind::InvalidRequest",
+        "path ModelFailureKind::Network",
+        "path ModelFailureKind::QuotaExhausted",
+        "path ModelFailureKind::RateLimited",
+        "path ModelFailureKind::ServerError",
+        "path ModelFailureKind::Unknown"
       ]
     },
     {
@@ -18328,6 +18356,7 @@
       "to": "dim_agent_capabilities::host",
       "references": [
         "path HostError",
+        "path HostError::Cancelled",
         "path HostError::failed",
         "path ToolExecutionContext"
       ]
@@ -55805,6 +55834,10 @@
     {
       "module": "dim_agent_capabilities::workspace_tools::files::codec",
       "path": "char::is_ascii_alphanumeric"
+    },
+    {
+      "module": "dim_agent_capabilities::workspace_tools::files::write",
+      "path": "BTreeMap::new"
     },
     {
       "module": "dim_agent_runtime::assembly",

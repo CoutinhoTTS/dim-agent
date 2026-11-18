@@ -1,5 +1,5 @@
 //! The `prompts` Settings source: user overrides of the built-in model-facing
-//! policy texts ([prompt overrides](../../docs/design/appserver/prompt-overrides.md)).
+//! policy texts ([prompt overrides](../../../docs/design/appserver/prompt-overrides.md)).
 //!
 //! The App Server owns the document because it owns Settings; each capability
 //! owns its text and reads only its field through the host port it declares.
