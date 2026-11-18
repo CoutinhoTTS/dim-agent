@@ -208,7 +208,9 @@ const MIGRATE_PROMPT_REFERENCES_USAGE: &str =
 
 /// `DIM_USER_AGENT`, read once here rather than inside the Aimux part: the
 /// environment does not change under a running process, and a value a request
-/// cannot carry must fail startup before anything is served.
+/// cannot carry must fail startup before anything is served. It is read after
+/// the arguments are parsed, so `--help` and a configuration error stay
+/// reachable with a value this process would refuse.
 pub fn user_agent_from_environment() -> Result<Option<String>, String> {
     let variable = match std::env::var(dim_agent_aimux::ENVIRONMENT_VARIABLE) {
         Ok(value) => Some(value),
@@ -344,10 +346,8 @@ pub fn run_with(
         .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
         .with_writer(std::io::stderr)
         .init();
-    let user_agent = user_agent_from_environment()?;
     let mut config = ServerConfig {
         websocket_address: Some(([127, 0, 0, 1], 8787).into()),
-        user_agent,
         ..Default::default()
     };
     let mut threads = 2usize;
@@ -529,6 +529,7 @@ pub fn run_with(
         };
         None
     };
+    config.user_agent = user_agent_from_environment()?;
     let mut agent_config = AgentConfig::default();
     if let Some(models) = &models {
         config.model_catalog = Some(models.clone());

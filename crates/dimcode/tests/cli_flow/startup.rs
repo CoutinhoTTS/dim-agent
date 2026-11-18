@@ -2140,7 +2140,9 @@ fn a_started_process_sends_the_dim_user_agent_from_its_environment() {
 }
 
 /// A value a request cannot carry fails the process that hosts models: exit
-/// code 1 and the validation message, before anything is served.
+/// code 1 and the validation message, before anything is served. `--help`
+/// stays reachable with the same value, because the override is read after
+/// the arguments are parsed.
 #[test]
 fn an_invalid_dim_user_agent_fails_startup() {
     for invalid in ["", "private client\u{1}/1", "dím/1.0"] {
@@ -2175,6 +2177,25 @@ fn an_invalid_dim_user_agent_fails_startup() {
         assert!(!error.contains(invalid) || invalid.is_empty(), "{error}");
         assert!(!socket.exists(), "nothing was served: {invalid:?}");
     }
+    let output = Command::new(env!("CARGO_BIN_EXE_dimcode"))
+        .args(["app-server", "--help"])
+        .env("DIM_USER_AGENT", "")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "--help does not validate the override: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let usage = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        usage.contains("dim-app-server (--product-home PATH"),
+        "--help prints usage: {usage}"
+    );
 }
 
 /// A startup connection's own `User-Agent` wins over dim's identity and over
