@@ -64,18 +64,34 @@ impl TextCursor {
 pub(crate) struct Projection {
     pub(crate) through: u64,
     cwd: PathBuf,
+    compaction_updates: bool,
     pub(crate) turn: Option<String>,
     pub(crate) silent_inputs: HashSet<String>,
     inputs: HashMap<String, UserInput>,
     texts: HashMap<String, TextCursor>,
     thoughts: HashMap<String, TextCursor>,
     calls: HashMap<String, Call>,
-    compactions: HashMap<u64, bool>,
+    /// Each open compaction start with the trigger it carried; the undeclared
+    /// path reports at its terminal whether that trigger was automatic.
+    compactions: HashMap<u64, CompactionTrigger>,
     closed_requests: HashSet<String>,
 }
 
 pub(crate) fn tool_id(branch: &str, request: &str, call: &str) -> String {
     json!([branch, request, call]).to_string()
+}
+
+/// A compaction's protocol identity: the `context/compaction-start` it began at,
+/// which names it both when it starts and when it ends.
+fn compaction_id(start: u64) -> String {
+    json!(["compaction", start]).to_string()
+}
+
+/// The message a gateway notice belongs to: the operation that produced it,
+/// under a namespace of its own, so it is never a model request id or an input
+/// event id. Those are bare UUIDs; this is an array.
+pub(crate) fn notice_id(kind: &str, operation: &str) -> String {
+    json!(["gateway", kind, operation]).to_string()
 }
 
 /// A message's `_meta`: the `lody` extension it carries, with the turn that
@@ -148,19 +164,34 @@ impl Messages {
         meta(lody, self.turn.as_deref())
     }
 
-    /// A streamed chunk of text: one of the three chunk variants.
-    fn chunk(&mut self, kind: fn(acp::ContentChunk) -> acp::SessionUpdate, text: String) {
+    /// A streamed chunk of text: one of the three chunk variants, each naming
+    /// the message it belongs to.
+    fn chunk(
+        &mut self,
+        kind: fn(acp::ContentChunk) -> acp::SessionUpdate,
+        message: &str,
+        text: String,
+    ) {
         if !text.is_empty() {
             let meta = self.meta(None);
             let block = acp::ContentBlock::Text(acp::TextContent::new(text));
-            self.push(kind(acp::ContentChunk::new(block).meta(meta)));
+            self.push(kind(
+                acp::ContentChunk::new(block).message_id(message).meta(meta),
+            ));
         }
     }
 
-    fn image(&mut self, kind: fn(acp::ContentChunk) -> acp::SessionUpdate, source: &ImageSource) {
+    fn image(
+        &mut self,
+        kind: fn(acp::ContentChunk) -> acp::SessionUpdate,
+        message: &str,
+        source: &ImageSource,
+    ) {
         if let Some(block) = image(source) {
             let meta = self.meta(None);
-            self.push(kind(acp::ContentChunk::new(block).meta(meta)));
+            self.push(kind(
+                acp::ContentChunk::new(block).message_id(message).meta(meta),
+            ));
         }
     }
 }
@@ -463,9 +494,12 @@ fn replacements(input: &Value) -> Vec<(&str, &str)> {
 
 impl Projection {
     /// `cwd` is the session directory a relative tool path resolves against.
-    pub(crate) fn new(cwd: impl Into<PathBuf>) -> Self {
+    /// `compaction_updates` says the client declared `session.compaction`, so a
+    /// compaction is sent as the standard entity rather than as a tool call.
+    pub(crate) fn new(cwd: impl Into<PathBuf>, compaction_updates: bool) -> Self {
         Self {
             cwd: cwd.into(),
+            compaction_updates,
             ..Self::default()
         }
     }
@@ -558,6 +592,27 @@ impl Projection {
         ));
     }
 
+    /// A compaction as the protocol's own entity, keyed by the start it belongs
+    /// to; the client declared `session.compaction`. It sends no `summary` by
+    /// choice: the replacement the completed fact carries is the model's new
+    /// context, stored exactly as produced, with `replacement_parts` locating
+    /// its strategy text, digest and pinned parts; it is not a summary written
+    /// for a user. The display compaction carries no text at all.
+    fn compaction(
+        &mut self,
+        start: u64,
+        status: acp::CompactionStatus,
+        error: Option<String>,
+        messages: &mut Messages,
+    ) {
+        let meta = messages.meta(None);
+        let mut update = acp::CompactionUpdate::new(compaction_id(start), status).meta(meta);
+        if let Some(error) = error {
+            update = update.error(error);
+        }
+        messages.push(acp::SessionUpdate::CompactionUpdate(update));
+    }
+
     fn tool_update(
         id: String,
         status: acp::ToolCallStatus,
@@ -626,17 +681,21 @@ impl Projection {
                             ContentBlock::Text { text } => match loaded_skill(index, &text) {
                                 Some(name) => messages.chunk(
                                     acp::SessionUpdate::UserMessageChunk,
+                                    &data.input_id,
                                     format!("\nSkill loaded: {name}"),
                                 ),
                                 None if markup::runtime_context(index, &text) => {}
                                 None => messages.chunk(
                                     acp::SessionUpdate::UserMessageChunk,
+                                    &data.input_id,
                                     with_tokens(&text),
                                 ),
                             },
-                            ContentBlock::Image { source } => {
-                                messages.image(acp::SessionUpdate::UserMessageChunk, &source)
-                            }
+                            ContentBlock::Image { source } => messages.image(
+                                acp::SessionUpdate::UserMessageChunk,
+                                &data.input_id,
+                                &source,
+                            ),
                         }
                     }
                 }
@@ -647,6 +706,7 @@ impl Projection {
             }
             EventContent::Text(data) => messages.chunk(
                 acp::SessionUpdate::AgentMessageChunk,
+                &data.request_id,
                 self.texts
                     .entry(data.request_id.clone())
                     .or_default()
@@ -654,6 +714,7 @@ impl Projection {
             ),
             EventContent::Thinking(data) => messages.chunk(
                 acp::SessionUpdate::AgentThoughtChunk,
+                &data.request_id,
                 self.thoughts
                     .entry(data.request_id.clone())
                     .or_default()
@@ -763,36 +824,57 @@ impl Projection {
             }
             EventContent::CompactionStart(data) => {
                 let automatic = !matches!(data.trigger, CompactionTrigger::Manual);
-                self.compactions.insert(event.sequence, automatic);
-                self.tool(
-                    json!(["compaction", event.sequence]).to_string(),
-                    "Context compaction",
-                    Value::Null,
-                    acp::ToolCallStatus::InProgress,
-                    ToolFields::default().lody(json!({"activity":{"version":1,"kind":"context_compaction","automatic":automatic}})),
-                    &mut messages,
-                );
+                self.compactions.insert(event.sequence, data.trigger);
+                if self.compaction_updates {
+                    self.compaction(
+                        event.sequence,
+                        acp::CompactionStatus::InProgress,
+                        None,
+                        &mut messages,
+                    );
+                } else {
+                    self.tool(
+                        compaction_id(event.sequence),
+                        "Context compaction",
+                        Value::Null,
+                        acp::ToolCallStatus::InProgress,
+                        ToolFields::default().lody(json!({"activity":{"version":1,"kind":"context_compaction","automatic":automatic}})),
+                        &mut messages,
+                    );
+                }
             }
             EventContent::CompactionSummary(data) => {
-                let automatic = data.start.and_then(|start| self.compactions.remove(&start));
+                let start = data.start.unwrap_or(event.sequence);
+                let automatic = data
+                    .start
+                    .and_then(|start| self.compactions.remove(&start))
+                    .map(|trigger| !matches!(trigger, CompactionTrigger::Manual));
                 let mut activity = json!({"version":1,"kind":"context_compaction"});
                 if let Some(automatic) = automatic {
                     activity["automatic"] = json!(automatic);
                 }
-                self.tool(
-                    json!(["compaction", data.start.unwrap_or(event.sequence)]).to_string(),
-                    "Context compaction",
-                    Value::Null,
-                    acp::ToolCallStatus::Completed,
-                    ToolFields::default().lody(json!({"activity":activity})),
-                    &mut messages,
-                );
+                if self.compaction_updates {
+                    self.compaction(start, acp::CompactionStatus::Completed, None, &mut messages);
+                } else {
+                    self.tool(
+                        compaction_id(start),
+                        "Context compaction",
+                        Value::Null,
+                        acp::ToolCallStatus::Completed,
+                        ToolFields::default().lody(json!({"activity":activity})),
+                        &mut messages,
+                    );
+                }
             }
             EventContent::Compaction(data) => {
-                let automatic = data.start.and_then(|start| self.compactions.remove(&start));
-                let (status, diagnostics, reason) = match &data.outcome {
+                let automatic = data
+                    .start
+                    .and_then(|start| self.compactions.remove(&start))
+                    .map(|trigger| !matches!(trigger, CompactionTrigger::Manual));
+                let (status, terminal, diagnostics, reason) = match &data.outcome {
                     ContextCompactionResult::Completed { diagnostics, .. } => (
                         acp::ToolCallStatus::Completed,
+                        acp::CompactionStatus::Completed,
                         Some(diagnostics.as_ref()),
                         None,
                     ),
@@ -801,16 +883,19 @@ impl Projection {
                         diagnostics,
                     } => (
                         acp::ToolCallStatus::Completed,
+                        acp::CompactionStatus::Completed,
                         Some(diagnostics.as_ref()),
                         Some(format!("Skipped: {reason}")),
                     ),
                     ContextCompactionResult::Failed { error, diagnostics } => (
                         acp::ToolCallStatus::Failed,
+                        acp::CompactionStatus::Failed,
                         diagnostics.as_deref(),
                         Some(error.clone()),
                     ),
                     ContextCompactionResult::Cancelled { reason } => (
                         acp::ToolCallStatus::Failed,
+                        acp::CompactionStatus::Cancelled,
                         None,
                         Some(format!("Cancelled: {reason}")),
                     ),
@@ -828,20 +913,31 @@ impl Projection {
                     activity["durationMs"] = json!(diagnostics.duration_ms);
                     fields = fields.raw_output(json!(diagnostics));
                 }
-                if let Some(reason) = reason {
+                if let Some(reason) = &reason {
                     if status == acp::ToolCallStatus::Failed {
                         activity["failureReason"] = json!(reason);
                     }
-                    fields = fields.content(vec![text_content(&reason)]);
+                    fields = fields.content(vec![text_content(reason)]);
                 }
-                self.tool(
-                    json!(["compaction", data.start.unwrap_or(event.sequence)]).to_string(),
-                    "Context compaction",
-                    Value::Null,
-                    status,
-                    fields.lody(json!({"activity":activity})),
-                    &mut messages,
-                );
+                let start = data.start.unwrap_or(event.sequence);
+                if self.compaction_updates {
+                    let error = match terminal {
+                        acp::CompactionStatus::Failed | acp::CompactionStatus::Cancelled => {
+                            reason.clone()
+                        }
+                        _ => None,
+                    };
+                    self.compaction(start, terminal, error, &mut messages);
+                } else {
+                    self.tool(
+                        compaction_id(start),
+                        "Context compaction",
+                        Value::Null,
+                        status,
+                        fields.lody(json!({"activity":activity})),
+                        &mut messages,
+                    );
+                }
             }
             EventContent::TurnEnd(_) => self.turn = None,
             EventContent::ModelEnd(data) => {
@@ -861,6 +957,7 @@ impl Projection {
             }
             messages.chunk(
                 acp::SessionUpdate::AgentMessageChunk,
+                &id,
                 self.texts
                     .entry(id.clone())
                     .or_default()
@@ -868,8 +965,9 @@ impl Projection {
             );
             messages.chunk(
                 acp::SessionUpdate::AgentThoughtChunk,
+                &id,
                 self.thoughts
-                    .entry(id)
+                    .entry(id.clone())
                     .or_default()
                     .progress(progress.thinking_offset, progress.thinking),
             );

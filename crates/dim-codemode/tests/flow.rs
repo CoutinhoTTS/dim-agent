@@ -435,7 +435,8 @@ async fn a_child_branch_records_the_child_call_as_its_source() {
         events.iter().any(|event| matches!(
             &event.kind,
             EventKind::BranchCreate(data)
-                if matches!(&data.source, BranchSource::Tool { call_id, .. } if call_id == &child_call)
+                if matches!(&data.source, BranchSource::Tool { call_id, .. }
+                    if call_id == &child_call)
         )),
         "branch/create names the child call"
     );

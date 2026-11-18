@@ -3,7 +3,10 @@
 //! subcommand, and as the OCR helper with the hidden `ocr-helper`
 //! subcommand.
 
-#![allow(linker_messages)]
+#![allow(
+    linker_messages,
+    reason = "Apple's ld prints the compact-unwind message only when the debug binary links, which a check build never does; an expectation would be unfulfilled there"
+)]
 
 /// The Dim account's OAuth client IDs, injected at build time so that they
 /// never enter the repository. With both set the executable is the account

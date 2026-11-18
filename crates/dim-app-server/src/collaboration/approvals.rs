@@ -292,8 +292,12 @@ impl CollaborationSession {
         tasks.spawn(async move {
             let input = source.input(false);
             let committed = leader.input(input.clone(), &leader_branch).await;
-            if !matches!(committed, Ok(ref event) if matches!(&event.kind, EventKind::InputMessage(data) if data == &input))
-            {
+            let accepted = matches!(
+                committed,
+                Ok(ref event)
+                    if matches!(&event.kind, EventKind::InputMessage(data) if data == &input)
+            );
+            if !accepted {
                 owner.end_approval(&branch_id, &source.descriptor.request_id);
                 owner.deny(&branch_id, &source.descriptor.request_id);
                 return;

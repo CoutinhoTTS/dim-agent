@@ -158,10 +158,12 @@ impl ManagedProvider for Provider {
     }
     fn catalog(&self, _: &str, _: CancellationToken) -> ManagedFuture<ManagedCatalog> {
         let entry: ModelEntry = serde_json::from_value(json!({"modelId":"fixture-model",
-            "displayName":"Fixture model","status":"active",
-            "metadata":{"reasoning":{"supported":true,"effortOptions":["low","high"]}},
-            "capabilities":dim_agent_types::CatalogCapabilities {
-                reasoning: true, ..dim_agent_types::CatalogCapabilities::with_limits(32_000, 128) }}))
+        "displayName":"Fixture model","status":"active",
+        "metadata":{"reasoning":{"supported":true,"effortOptions":["low","high"]}},
+        "capabilities":dim_agent_types::CatalogCapabilities {
+            reasoning: true,
+            ..dim_agent_types::CatalogCapabilities::with_limits(32_000, 128)
+        }}))
         .unwrap();
         let mut models = vec![ManagedModel {
             entry,

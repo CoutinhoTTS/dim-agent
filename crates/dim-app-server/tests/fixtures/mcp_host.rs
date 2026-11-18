@@ -8,12 +8,10 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 #[derive(Clone)]
-#[allow(dead_code)]
 pub struct Directory {
     service: std::sync::Arc<McpService>,
     owner: McpOwner,
 }
-#[allow(dead_code)]
 impl Directory {
     pub fn new(service: std::sync::Arc<McpService>, root: &Ctx, loader: Loader) -> Self {
         Self {

@@ -5,12 +5,17 @@ use rutis::host::CtxHost;
 use std::ops::RangeInclusive;
 
 type DeferredPublication = (Vec<StoredEvent>, PublishCallback, Result<()>);
+type HeldModelRecovery = (
+    tokio::sync::mpsc::UnboundedSender<u64>,
+    tokio::sync::oneshot::Receiver<Result<()>>,
+);
 
 /// A memory store that counts whole-branch reads and by-id queries, records
 /// the range of every event read and can fail, pause or defer chosen calls.
 #[derive(Default)]
 pub(super) struct CountContextReads {
     memory: MemoryTimelineStore,
+    model_recovery: std::sync::Mutex<Option<HeldModelRecovery>>,
     /// Reads that asked for the whole branch: a `read` or `read_segments`
     /// range with an open end. No path issues one.
     reads: AtomicUsize,
@@ -294,6 +299,14 @@ impl TimelineStore for CountContextReads {
                     .push((segment.branch_id.clone(), segment.from..=segment.through));
                 self.gate(&segment.branch_id, &(segment.from..=segment.through))
                     .await?;
+            }
+            if matches!(&query.select, QuerySelect::Fields { fields } if fields.iter().any(|field| field == "data.request.providerId"))
+            {
+                let gate = self.model_recovery.lock().unwrap().take();
+                if let Some((entered, release)) = gate {
+                    entered.send(scope.through).unwrap();
+                    release.await.expect("release model recovery query")?;
+                }
             }
             let result = self.memory.query(scope, query, page).await?;
             let hidden = self.hidden_consumptions.lock().unwrap().clone();
@@ -1539,7 +1552,8 @@ async fn recovery_reads_a_fixed_committed_prefix_before_publication() {
 async fn model_reload_recovers_the_old_terminal_before_its_publication() {
     for preparation in [false, true] {
         tokio::time::timeout(Duration::from_secs(5), async {
-        let (publication, mut publications) = tokio::sync::mpsc::unbounded_channel::<DeferredPublication>();
+        let (publication, mut publications) =
+            tokio::sync::mpsc::unbounded_channel::<DeferredPublication>();
         let terminal_committed = Arc::new(tokio::sync::Notify::new());
         let release_terminal = Arc::new(tokio::sync::Notify::new());
         let hold_terminal = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1549,7 +1563,9 @@ async fn model_reload_recovers_the_old_terminal_before_its_publication() {
             let hold_terminal = hold_terminal.clone();
             tokio::spawn(async move {
                 while let Some((events, publish, result)) = publications.recv().await {
-                    let terminal = events.iter().any(|stored| matches!(stored.event.kind, EventKind::ModelOutputEnd(_)));
+                    let terminal = events
+                        .iter()
+                        .any(|stored| matches!(stored.event.kind, EventKind::ModelOutputEnd(_)));
                     if hold_terminal.load(Ordering::SeqCst) && terminal {
                         terminal_committed.notify_one();
                         release_terminal.notified().await;
@@ -1641,7 +1657,8 @@ async fn model_reload_recovers_the_old_terminal_before_its_publication() {
         )), "the old generation must normalize its cancellation before handoff");
         assert!(first_turn.iter().any(|event| matches!(
             &event.kind,
-            EventKind::TurnEnd(data) if data.outcome == TurnOutcome::Failed { error: CAPABILITY_RELOADING.into() }
+            EventKind::TurnEnd(data)
+                if data.outcome == TurnOutcome::Failed { error: CAPABILITY_RELOADING.into() }
         )));
 
         let through = first_turn.last().unwrap().sequence;
@@ -1666,14 +1683,19 @@ async fn model_reload_recovers_the_old_terminal_before_its_publication() {
 #[tokio::test]
 async fn stop_waits_for_an_unpublished_turn_end_seen_by_a_reloaded_loop() {
     tokio::time::timeout(Duration::from_secs(5), async {
-        let (publication, mut publications) = tokio::sync::mpsc::unbounded_channel::<DeferredPublication>();
+        let (publication, mut publications) =
+            tokio::sync::mpsc::unbounded_channel::<DeferredPublication>();
         let (ended, mut ends) = tokio::sync::mpsc::unbounded_channel();
         let release = Arc::new(tokio::sync::Notify::new());
         let gate = release.clone();
         let publication_task = tokio::spawn(async move {
             let mut held = false;
             while let Some((events, publish, result)) = publications.recv().await {
-                if !held && let Some(end) = events.iter().find(|stored| matches!(stored.event.kind, EventKind::TurnEnd(_))) {
+                if !held
+                    && let Some(end) = events
+                        .iter()
+                        .find(|stored| matches!(stored.event.kind, EventKind::TurnEnd(_)))
+                {
                     held = true;
                     ended.send(end.event.sequence).unwrap();
                     gate.notified().await;
@@ -1696,10 +1718,12 @@ async fn stop_waits_for_an_unpublished_turn_end_seen_by_a_reloaded_loop() {
                     Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
                 }),
             )
-            .timeline_store(dim_agent_runtime::TimelineStoreBinding::new(Arc::new(CountContextReads {
-                publication: Some(publication),
-                ..Default::default()
-            })));
+            .timeline_store(dim_agent_runtime::TimelineStoreBinding::new(Arc::new(
+                CountContextReads {
+                    publication: Some(publication),
+                    ..Default::default()
+                },
+            )));
         reload.install(&mut builder, model.clone());
         defaults::install(&mut builder);
         let agent = MinimalHost::start(&builder).await.unwrap();
@@ -1719,7 +1743,9 @@ async fn stop_waits_for_an_unpublished_turn_end_seen_by_a_reloaded_loop() {
         reload.restart().await;
         loop {
             let plugin = generation();
-            if plugin.generation > before && plugin.state == rutis::host::FiberState::Active { break; }
+            if plugin.generation > before && plugin.state == rutis::host::FiberState::Active {
+                break;
+            }
             tokio::task::yield_now().await;
         }
         assert_eq!(session.service::<dyn LoopState>("main").unwrap().state().phase, LoopPhase::Idle);
@@ -3601,7 +3627,10 @@ async fn resuming_a_replacement_only_context_defers_missing_usage_until_a_reques
                 "reason":"manual","trigger":"manual","estimatedInputTokens":0,
                 "entriesReplaced":1,"modelCallCount":0,"durationMs":0,"strategy":{"kind":"migration"}
             })).unwrap(),
-            context_baseline: vec![], replacement_parts: None, pinned_inputs: None, digest_entries: None,
+            context_baseline: vec![],
+            replacement_parts: None,
+            pinned_inputs: None,
+            digest_entries: None,
         },
     })).with_id("migration-cut")).unwrap();
     dim_agent_runtime::core::close_timeline(&timeline)
@@ -4023,7 +4052,10 @@ async fn usage_upgrades_saved_numbers_or_initializes_once_without_historical_res
                         "reason":"auto","trigger":"threshold","estimatedInputTokens":1,
                         "entriesReplaced":1,"modelCallCount":1,"durationMs":1,"strategy":{"kind":"fixture"}
                     })).unwrap(),
-                    context_baseline: vec![], replacement_parts: None, pinned_inputs: None, digest_entries: None,
+                    context_baseline: vec![],
+            replacement_parts: None,
+            pinned_inputs: None,
+            digest_entries: None,
                 },
             }).into()).unwrap();
             dim_agent_runtime::core::close_timeline(&timeline)
@@ -4216,7 +4248,10 @@ async fn child_tool_results_do_not_change_usage_live_after_reload_or_compaction(
                 "reason":"auto","trigger":"threshold","estimatedInputTokens":1,
                 "entriesReplaced":1,"modelCallCount":1,"durationMs":1,"strategy":{"kind":"fixture"}
             })).unwrap(),
-            context_baseline: vec![], replacement_parts: None, pinned_inputs: None, digest_entries: None,
+            context_baseline: vec![],
+            replacement_parts: None,
+            pinned_inputs: None,
+            digest_entries: None,
         },
     }).into()).unwrap();
     dim_agent_runtime::core::close_timeline(&timeline)
@@ -5401,4 +5436,219 @@ async fn a_long_inherited_suffix_keeps_each_consumption_query_bounded() {
         );
     }
     agent.close().await.unwrap();
+}
+
+#[derive(Default)]
+struct PreparingAcrossReload {
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+    invocations: AtomicUsize,
+}
+impl PrepareContext for PreparingAcrossReload {
+    fn prepare(
+        &self,
+        request: Arc<ModelRequest>,
+        _: ContextSource,
+        cancel: CancellationToken,
+    ) -> HostFuture<'_, Arc<ModelRequest>> {
+        Box::pin(async move {
+            self.entered.notify_one();
+            self.release.notified().await;
+            assert!(
+                !cancel.is_cancelled(),
+                "ModelProvider restart must not cancel Preparation"
+            );
+            Ok(request)
+        })
+    }
+}
+impl ModelDriver for PreparingAcrossReload {
+    fn invoke(
+        &self,
+        request: Arc<ModelRequest>,
+        connection: ModelConnection,
+        cancel: CancellationToken,
+    ) -> HostFuture<'_, ModelStream> {
+        self.invocations.fetch_add(1, Ordering::SeqCst);
+        EchoModel.invoke(request, connection, cancel)
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn model_only_reload_hands_off_a_running_preparation_at_its_recovery_cut() {
+    for window in ["before-cut", "after-cut", "query-failure"] {
+        tokio::time::timeout(Duration::from_secs(15), async {
+            let (publication, mut publications) =
+                tokio::sync::mpsc::unbounded_channel::<DeferredPublication>();
+            let call_written = Arc::new(tokio::sync::Notify::new());
+            let release_call = Arc::new(tokio::sync::Notify::new());
+            let publication_task = {
+                let written = call_written.clone();
+                let release = release_call.clone();
+                tokio::spawn(async move {
+                    while let Some((events, publish, result)) = publications.recv().await {
+                        if window == "before-cut"
+                            && events
+                                .iter()
+                                .any(|e| matches!(e.event.kind, EventKind::ModelCall(_)))
+                        {
+                            written.notify_one();
+                            release.notified().await;
+                        }
+                        publish(result);
+                    }
+                })
+            };
+            let store = Arc::new(CountContextReads {
+                publication: Some(publication),
+                ..Default::default()
+            });
+            let host = Arc::new(PreparingAcrossReload::default());
+            let mut builder = builder_with_prepare(
+                host.clone(),
+                HistoryRenderer::default(),
+                Context::default(),
+                host.clone(),
+            );
+            builder.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(store.clone()));
+            let agent = MinimalHost::start(&builder).await.unwrap();
+            let session = agent
+                .create_session(SessionConfig::default())
+                .await
+                .unwrap();
+            let parts = session.branch_diagnostics("main").unwrap().plugins;
+            let provider = parts.iter().find(|p| p.name == "ModelProvider").unwrap();
+            let provider_view = agent.root().view(provider.id).unwrap();
+            let loop_generation = parts.iter().find(|p| p.name == "Loop").unwrap().generation;
+            let preparation_generation = parts
+                .iter()
+                .find(|p| p.name == "ContextPreparation")
+                .unwrap()
+                .generation;
+            session
+                .submit("preparation survives".into(), InputMode::Queue, "main")
+                .await
+                .unwrap();
+            host.entered.notified().await;
+            let (cut_tx, mut cuts) = tokio::sync::mpsc::unbounded_channel();
+            let (release_query, held_query) = tokio::sync::oneshot::channel();
+            *store.model_recovery.lock().unwrap() = Some((cut_tx, held_query));
+            if window == "before-cut" {
+                host.release.notify_one();
+                call_written.notified().await;
+            }
+            let restarting = provider_view.clone();
+            let restart = tokio::spawn(async move { restarting.restart().await });
+            let cut = cuts.recv().await.unwrap();
+            if window != "before-cut" {
+                host.release.notify_one();
+            }
+            let call = loop {
+                let events = store
+                    .memory
+                    .read(
+                        &TimelineKey {
+                            session_id: session.id().into(),
+                            branch_id: "main".into(),
+                        },
+                        1..=u64::MAX,
+                    )
+                    .await
+                    .unwrap();
+                if let Some(call) = events
+                    .into_iter()
+                    .find(|e| matches!(e.event.kind, EventKind::ModelCall(_)))
+                {
+                    break call.event;
+                }
+                tokio::task::yield_now().await;
+            };
+            assert_eq!(call.sequence <= cut, window == "before-cut");
+            let preparation = session
+                .branch_diagnostics("main")
+                .unwrap()
+                .plugins
+                .into_iter()
+                .find(|p| p.name == "ContextPreparation")
+                .unwrap();
+            assert_eq!(preparation.generation, preparation_generation);
+            assert_eq!(
+                session
+                    .branch_diagnostics("main")
+                    .unwrap()
+                    .plugins
+                    .iter()
+                    .find(|p| p.name == "Loop")
+                    .unwrap()
+                    .generation,
+                loop_generation
+            );
+            if window == "query-failure" {
+                release_query
+                    .send(Err(AgentError::Storage(
+                        "model recovery query failed".into(),
+                    )))
+                    .unwrap();
+                assert!(restart.await.unwrap().is_err());
+                assert_eq!(host.invocations.load(Ordering::SeqCst), 0);
+                assert!(
+                    session
+                        .branch_diagnostics("main")
+                        .unwrap()
+                        .plugins
+                        .iter()
+                        .any(|p| p.name == "ModelProvider"
+                            && p.state == rutis::host::FiberState::Failed)
+                );
+                provider_view.restart().await.unwrap();
+            } else {
+                release_query.send(Ok(())).unwrap();
+                restart.await.unwrap().unwrap();
+            }
+            release_call.notify_one();
+            loop {
+                match session.idle("main").await {
+                    Err(AgentError::Reloading(_)) => tokio::task::yield_now().await,
+                    result => {
+                        result.unwrap();
+                        break;
+                    }
+                }
+            }
+            let events = chain_events(&session, "main", ..).await.unwrap();
+            let EventKind::ModelCall(call_data) = &call.kind else {
+                unreachable!()
+            };
+            let ends: Vec<_> = events
+                .iter()
+                .filter_map(|e| match &e.kind {
+                    EventKind::ModelOutputEnd(d)
+                        if d.turn_id == call_data.turn_id
+                            && d.request_id == call_data.request_id =>
+                    {
+                        Some(d)
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                ends.len(),
+                1,
+                "{window}: one terminal for the handed-off request"
+            );
+            assert_eq!(
+                host.invocations.load(Ordering::SeqCst),
+                usize::from(window == "after-cut")
+            );
+            assert_eq!(
+                matches!(ends[0].outcome, ModelOutputOutcome::Completed { .. }),
+                window == "after-cut"
+            );
+            agent.close().await.unwrap();
+            publication_task.abort();
+            assert!(publication_task.await.unwrap_err().is_cancelled());
+        })
+        .await
+        .unwrap_or_else(|_| panic!("ModelProvider-only {window} handoff timed out"));
+    }
 }

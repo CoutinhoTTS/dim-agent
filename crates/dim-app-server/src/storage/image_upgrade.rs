@@ -54,7 +54,17 @@ pub(super) fn upgrade(
     loop {
         let row = connection.query_row(
             "SELECT e.rowid, e.session_id, e.branch_id, e.sequence, e.kind, e.body FROM timeline_events e JOIN agent_sessions s ON s.session_id=e.session_id WHERE e.rowid > ?1 ORDER BY e.rowid LIMIT 1",
-            [cursor], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, super::timeline::read_sequence(row, 3)?, row.get::<_, String>(4)?, row.get::<_, String>(5)?)),
+            [cursor],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    super::timeline::read_sequence(row, 3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                ))
+            },
         );
         let (id, session, branch, sequence, kind, body) = match row {
             Ok(row) => row,

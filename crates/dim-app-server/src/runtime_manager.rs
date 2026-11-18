@@ -1866,7 +1866,8 @@ impl DynPlugin for RuntimeManagerPlugin {
                                             }
                                             Err(broadcast::error::RecvError::Lagged(_)) => {
                                                 for kind in Kind::ALL {
-                                                    progress.send(watch_item(seq, runtime_item(kind.name())));
+                                                    let item = runtime_item(kind.name());
+                                                    progress.send(watch_item(seq, item));
                                                     seq += 1;
                                                 }
                                             }

@@ -577,7 +577,13 @@ async fn foreign_compaction_cursor_fails_recovery_without_another_model_call() {
         assert!(sources[1].recovery.is_some());
         assert_eq!(sources[0].through, sources[1].through);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
-        assert_eq!(events.iter().filter(|event| matches!(event.kind, EventKind::ModelCall(_))).count(), 1);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event.kind, EventKind::ModelCall(_)))
+                .count(),
+            1
+        );
         let compacted: Vec<_> = events
             .iter()
             .filter_map(|event| match &event.kind {
@@ -598,7 +604,12 @@ async fn foreign_compaction_cursor_fails_recovery_without_another_model_call() {
                 && matches!(&data.outcome, ModelOutputOutcome::Failed { error, .. } if error.contains("cut is outside the fixed context history"))
         )));
         assert!(matches!(
-            &events.iter().rev().find(|event| matches!(event.kind, EventKind::TurnEnd(_))).unwrap().kind,
+            &events
+                .iter()
+                .rev()
+                .find(|event| matches!(event.kind, EventKind::TurnEnd(_)))
+                .unwrap()
+                .kind,
             EventKind::TurnEnd(TurnEndData { outcome: TurnOutcome::Failed { error }, .. })
                 if error.contains("cut is outside the fixed context history")
         ));
@@ -648,7 +659,12 @@ async fn compressor_cursor_cannot_split_an_assistant_tool_use_from_its_result() 
             2
         );
         assert!(matches!(
-            &events.iter().rev().find(|event| matches!(event.kind, EventKind::TurnEnd(_))).unwrap().kind,
+            &events
+                .iter()
+                .rev()
+                .find(|event| matches!(event.kind, EventKind::TurnEnd(_)))
+                .unwrap()
+                .kind,
             EventKind::TurnEnd(TurnEndData { outcome: TurnOutcome::Failed { error }, .. })
                 if error == "Compaction cut separates a tool call from its results or context."
         ));
@@ -1619,6 +1635,15 @@ async fn restoring_each_preparation_handoff_settles_without_replaying_work() {
         ) {
             assert!(events.iter().any(|event| matches!(&event.kind, EventKind::ModelOutputEnd(data) if matches!(&data.outcome, ModelOutputOutcome::Failed { error, .. } if error == CAPABILITY_RELOADING))));
         }
+        let request_ends = events.iter().filter(|event| matches!(
+            &event.kind,
+            EventKind::ModelOutputEnd(data) if data.turn_id == "turn" && data.request_id == "request"
+        )).count();
+        assert_eq!(
+            request_ends,
+            usize::from(boundary != "input-consumed"),
+            "each accepted request has exactly one terminal across recovery owners at {boundary}"
+        );
         if matches!(
             boundary,
             "tool-use-start" | "tool-use" | "tool-call" | "undispatched-tool"

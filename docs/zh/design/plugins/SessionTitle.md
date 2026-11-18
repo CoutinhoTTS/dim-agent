@@ -186,6 +186,9 @@ SessionTitle 拥有分流与降级策略。显式配置的标题模型直接走 
 输入摘录折叠空白、去除首尾空白并按 Unicode 长度限制兜底，保留原文标点。标题仍以 auto 来源经原 revision 检查写入。
 超时先取消并等待活动调用结算；Session 关闭或任务取消时不启动备用请求、不写标题。
 只有 Settings、存储等导致无法完成写入的失败才消耗原有三次尝试预算，账号接口失败本身不消耗。
+以 end-turn 结束、既无非空白文本也无工具调用的模型回复是 `malformed_response`
+（[模型失败 §4](../model-failures.md#4-重试)）：辅助模型会先重试一次，因此一次空回复多花一次请求，
+重复出现则作为辅助错误回退到输入摘录。
 
 DimOAuth 自己判断 providerId 是否适用，并拥有专用接口、账号鉴权、刷新和上游错误分类；
 其[运行时契约](../../../../crates/dim-oauth/docs/runtime-contract.md#session-title-generation)定义账号请求。

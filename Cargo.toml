@@ -10,6 +10,9 @@ license = "MIT"
 rust-version = "1.100"
 repository = "https://github.com/arcships/dim"
 
+[workspace.lints.clippy]
+allow_attributes_without_reason = "warn"
+
 [workspace.dependencies]
 rutis = "0.19.3"
 rutis-loader = { version = "0.19.3", features = ["node"] }

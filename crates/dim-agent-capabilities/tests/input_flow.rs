@@ -431,11 +431,14 @@ impl TimelineStore for GatedStore {
         query: &'a QuerySpec,
         page: Option<&'a QueryPage>,
     ) -> BoxFuture<'a, Result<QueryResult>> {
-        let submission = matches!(&query.filter, Some(dim_agent_runtime::QueryFilter::And { conditions })
-            if conditions.iter().any(|condition| matches!(condition,
-                dim_agent_runtime::QueryFilter::Compare {
-                    left: dim_agent_runtime::QueryOperand::Field { path }, ..
-                } if path == "data.submission_id")));
+        let submission = matches!(
+            &query.filter,
+            Some(dim_agent_runtime::QueryFilter::And { conditions })
+                if conditions.iter().any(|condition| matches!(condition,
+                    dim_agent_runtime::QueryFilter::Compare {
+                        left: dim_agent_runtime::QueryOperand::Field { path }, ..
+                    } if path == "data.submission_id"))
+        );
         let gate = submission
             .then(|| self.query_gate.lock().unwrap().take())
             .flatten();

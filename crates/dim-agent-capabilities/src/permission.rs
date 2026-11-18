@@ -380,7 +380,14 @@ impl Permission {
             let facts = self.ctx.get_at(&self.facts);
             if let (Some(Ok((_, target))), Some(facts)) = (&target, facts) {
                 let facts = tokio::select! {
-                    result = facts.0.facts(&self.session_id, access, target, GrantMode::Write, cancel.clone()) => result,
+                    result = facts.0.facts(
+                        &self.session_id,
+                        access,
+                        target,
+                        GrantMode::Write,
+                        cancel.clone(),
+                    ) =>
+                        result,
                     _ = cancel.cancelled() => return Err(HostError::Cancelled(CANCELLED.into())),
                 };
                 let facts = match facts {
@@ -469,7 +476,14 @@ impl Permission {
                 }
             };
             let facts = tokio::select! {
-                result = facts.0.facts(&self.session_id, access, target, GrantMode::Read, cancel.clone()) => result,
+                result = facts.0.facts(
+                    &self.session_id,
+                    access,
+                    target,
+                    GrantMode::Read,
+                    cancel.clone(),
+                ) =>
+                    result,
                 _ = cancel.cancelled() => return Err(HostError::Cancelled(CANCELLED.into())),
             };
             let facts = match facts {

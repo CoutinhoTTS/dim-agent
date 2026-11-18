@@ -22,7 +22,14 @@ fn without_array_references(database: &Path) {
     let records = connection
         .prepare("SELECT session_id,branch_id,sequence,body FROM timeline_events WHERE json_extract(body,'$.encoding')='event'")
         .unwrap()
-        .query_map([], |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,i64>(2)?,row.get::<_,String>(3)?)))
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
         .unwrap()
         .collect::<rusqlite::Result<Vec<_>>>()
         .unwrap();
@@ -453,7 +460,9 @@ async fn timeline_export_reads_a_live_product_home_and_its_copies() {
                 "stopping the daemon preserves every exported fact"
             );
         }
-        let stored_markers: (i64, i64) = rusqlite::Connection::open_with_flags(&database, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        let readonly = OpenFlags::SQLITE_OPEN_READ_ONLY;
+        let stored_markers: (i64, i64) =
+            rusqlite::Connection::open_with_flags(&database, readonly)
             .unwrap()
             .query_row(
                 "SELECT (SELECT count(*) FROM providers WHERE record LIKE ?1), (SELECT count(*) FROM settings_documents WHERE document LIKE ?2)",

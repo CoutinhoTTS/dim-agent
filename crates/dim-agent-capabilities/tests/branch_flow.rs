@@ -250,13 +250,19 @@ impl DynPlugin for ProbePlugin {
                 // Holds the child's build open until the test releases it, then
                 // fails the apply: creation fails in debug and release alike.
                 if probe.delay_child.load(Ordering::SeqCst) {
-                    tokio::select! { _ = probe.child_release.notified() => {}, _ = ctx.cancelled() => {} }
+                    tokio::select! {
+                        _ = probe.child_release.notified() => {}
+                        _ = ctx.cancelled() => {}
+                    }
                     return Err(rutis::Error::from(ErrorKind::PluginFailed(
                         "test.branch-probe: the held child fails its apply".into(),
                     )));
                 }
                 if probe.fail_child.load(Ordering::SeqCst) {
-                    tokio::select! { _ = probe.writer_ready.notified() => {}, _ = ctx.cancelled() => {} }
+                    tokio::select! {
+                        _ = probe.writer_ready.notified() => {}
+                        _ = ctx.cancelled() => {}
+                    }
                     return Err(rutis::Error::from(ErrorKind::ServiceNotFound(
                         "/private/agent-secret/rejected-candidate".into(),
                     )));
@@ -4229,13 +4235,18 @@ async fn a_message_reaches_its_receiver_in_the_mode_it_asked_for() {
         })
         .unwrap();
     assert_eq!(mode, InputMode::Append);
-    assert!(blocks_with(&events, "<dim-branch-message").last().unwrap().starts_with(
-        &format!("<dim-branch-message from=\"main\" to=\"{child}\">\ntests are green\n</dim-branch-message>")
-    ));
     assert!(
-        !events
-            .iter()
-            .any(|event| matches!(event.kind, EventKind::TurnStart(_)) && event.sequence > sequence),
+        blocks_with(&events, "<dim-branch-message")
+            .last()
+            .unwrap()
+            .starts_with(&format!(
+                "<dim-branch-message from=\"main\" to=\"{child}\">\ntests are green\n</dim-branch-message>"
+            ))
+    );
+    assert!(
+        !events.iter().any(|event| {
+            matches!(event.kind, EventKind::TurnStart(_)) && event.sequence > sequence
+        }),
         "an append starts no turn"
     );
     tool_call(
@@ -6257,7 +6268,11 @@ async fn a_tool_line_without_idle_notices_stays_quiet_after_restore() {
         .id;
     until_events(&session, &child, |events| {
         events.iter().any(|event| {
-            matches!(&event.kind, EventKind::TurnEnd(data) if matches!(&data.outcome, TurnOutcome::Completed { .. }))
+            matches!(
+                &event.kind,
+                EventKind::TurnEnd(data)
+                    if matches!(&data.outcome, TurnOutcome::Completed { .. })
+            )
         })
     })
     .await;
@@ -6282,7 +6297,11 @@ async fn a_tool_line_without_idle_notices_stays_quiet_after_restore() {
     until_events(&session, &child, |events| {
         events.iter().any(|event| {
             event.sequence > before
-                && matches!(&event.kind, EventKind::TurnEnd(data) if matches!(&data.outcome, TurnOutcome::Completed { .. }))
+                && matches!(
+                    &event.kind,
+                    EventKind::TurnEnd(data)
+                        if matches!(&data.outcome, TurnOutcome::Completed { .. })
+                )
         })
     })
     .await;
@@ -6374,7 +6393,9 @@ async fn a_stop_with_a_held_steer_still_tells_main_the_line_stopped() {
         .unwrap();
     until_events(&session, &child, |events| {
         events.iter().any(
-            |event| matches!(&event.kind, EventKind::InputApplied(data) if data.input_id == steer.id),
+            |event| {
+                matches!(&event.kind, EventKind::InputApplied(data) if data.input_id == steer.id)
+            },
         )
     })
     .await;
@@ -6390,9 +6411,12 @@ async fn a_stop_with_a_held_steer_still_tells_main_the_line_stopped() {
     .await;
     let events = local_events(&session, &child).await;
     assert!(
-        !events.iter().any(
-            |event| matches!(&event.kind, EventKind::InputConsumed(data) if data.input_id == steer.id)
-        ),
+        !events.iter().any(|event| {
+            matches!(
+                &event.kind,
+                EventKind::InputConsumed(data) if data.input_id == steer.id
+            )
+        }),
         "the stop leaves the steer unconsumed"
     );
     soon(agent.close()).await.unwrap();

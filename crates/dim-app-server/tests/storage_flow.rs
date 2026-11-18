@@ -6528,7 +6528,8 @@ async fn a_cold_read_failure_preserves_the_record_and_other_session_progress() {
         let database = Database::new();
         let db = SqliteStorage::open(database.0.clone()).unwrap();
         let store = SqliteTimelineStore::new(db.clone());
-        let mut builder = dim_agent_runtime::AgentBuilder::new(dim_agent_runtime::AgentConfig::default());
+        let config = dim_agent_runtime::AgentConfig::default();
+        let mut builder = dim_agent_runtime::AgentBuilder::new(config);
         dim_agent_capabilities::defaults::mock_hosts(&mut builder);
         dim_agent_capabilities::defaults::install(&mut builder);
         builder.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(store.clone()));
@@ -8985,8 +8986,7 @@ async fn interleaved_histories(store: Arc<dyn TimelineStore>) -> Timeline {
 mod position_queries;
 
 #[tokio::test]
-async fn main_and_branch_formats_upgrade_to_the_current_format_without_reinterpreting_their_markers()
- {
+async fn main_and_branch_formats_upgrade_without_reinterpreting_their_markers() {
     for (version, main_layout) in [
         (37, true),
         (38, true),

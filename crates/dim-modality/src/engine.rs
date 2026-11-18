@@ -305,7 +305,10 @@ pub(crate) struct OcrParams {
     output_mode: dim_ocr::OutputMode,
     /// The record's reserved input metadata; present at run time, never read
     /// here.
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "deserialized so `deny_unknown_fields` accepts the record's reserved metadata; nothing reads it here"
+    )]
     #[serde(default)]
     files: Option<Value>,
 }
@@ -482,7 +485,10 @@ pub(crate) struct Shared {
 }
 
 impl Shared {
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one parameter per host handle the modality part is assembled from"
+    )]
     pub(crate) fn new(
         files: Arc<PluginFileTransactions>,
         settings: Arc<SettingsService>,
@@ -2101,7 +2107,13 @@ impl Shared {
             ProgressSink::new(move |progress| shared.report_progress(&slot, progress))
         };
         let output = tokio::select! {
-            output = adapter.0.wait(&record.task_id, handle.as_deref(), connection, progress, slot.cancel.child_token()) => output,
+            output = adapter.0.wait(
+                &record.task_id,
+                handle.as_deref(),
+                connection,
+                progress,
+                slot.cancel.child_token(),
+            ) => output,
             _ = slot.cancel.cancelled() => return,
         };
         if slot.cancel_requested() {
