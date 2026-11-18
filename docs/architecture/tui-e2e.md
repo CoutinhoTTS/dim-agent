@@ -66,10 +66,13 @@ Input is real terminal input: `tmux send-keys -l` for text, `send-keys` for keys
 (`C-j`, `Escape`, `BSpace`, `Down`), `send-keys -H` for bracketed pastes, and
 `tmux resize-window` for resizes. Assertions read the pane with
 `capture-pane -p -J` (the visible screen) and `capture-pane -p -J -S -` (the
-scrollback above it). Waits are for text the interface draws. A bounded settle
-appears only where the evidence is an absence: a key that must not send
-(`settleWithout`, 1.5 s of no request) and a repaint that must settle before it
-is captured.
+scrollback above it). Waits are for text the interface draws. A resize waits for
+the product's own reflow instead of a timer: the raw stream must show `CSI 3J`
+after the resize and a completed frame (`CSI ?25h`), tmux must report the target
+size, and a caller can name content the new frame must contain, so a clipped
+frame from the previous width is never read. A bounded settle appears only
+where the evidence is an absence: a key that must not send (`settleWithout`, 1.5
+s of no request).
 
 ## Determinism and teardown
 
@@ -91,7 +94,7 @@ and raw streams in place for inspection.
 | --- | --- | --- |
 | terminal-modes | `scrollback_streams_and_exits_cleanly` | The default scrollback mode, streamed answer, committed history, `/exit`, `Bye!`, exit 0, no alternate screen, cursor restored, OSC 7501 working/clear |
 | terminal-modes | `fullscreen_switches_screens_and_restores_the_terminal` | Fullscreen takes the alternate screen; `/tui` leaves and re-enters it; the multiplexer's `ModifyOtherKeys` enable/reset pair appears and balances; the last screen is the caller's |
-| terminal-modes | `resize_rewraps_history_without_losing_rows` | Resizing to 60x18 and 140x40 keeps the message and answer, rewraps rows, and draws to the new width: the capture is taken only after tmux reports the target pane size and a stable frame at the new width, never wider than the pane |
+| terminal-modes | `resize_rewraps_history_without_losing_rows` | Resizing to 60x18 and 140x40 keeps the message and answer, rewraps rows, and draws to the new width: the capture is taken only after the product's own `CSI 3J` reflow and completed frame, tmux reports the target pane size, and the new frame is stable at that width |
 | terminal-modes | `resize_during_a_stream_rewraps_and_finishes` | A resize while the fixture streams repaints the live output at the new width, keeps the streamed text, and the run still finishes |
 | terminal-modes | `resize_during_thinking_rewraps_multiline_history` | Expanded reasoning streams in a turn sent as three lines; five resizes (100x24, 60x24, 120x40, 45x18, 100x36) keep every user line and every reasoning line, the transcript settles as a thought, and the answer still arrives |
 | composer | `composer_edits_multiline_and_stores_a_large_paste` | `Ctrl+J` newline editing, backspace, a five-line bracketed paste stored as an attachment, and the exact prompt text the model receives |

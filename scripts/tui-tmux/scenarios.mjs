@@ -199,8 +199,13 @@ const scenarios = [
       await terminal.waitFor('working…');
       await terminal.waitFor('stream-marker', {describe: 'the streamed answer'});
 
-      const painted = await terminal.resizeTo(60, 18, {expectComposer: false, stable: false});
-      const widest = Math.max(0, ...painted.split('\n').map((line) => line.length));
+      const painted = await terminal.resizeTo(60, 18, {
+        expectComposer: false,
+        stable: false,
+        until: (text) => text.includes('stream-marker'),
+      });
+      const visible = terminal.capture({join: false});
+      const widest = Math.max(0, ...visible.split('\n').map((line) => line.length));
       assert(widest > 50 && widest <= 60, `the live stream was repainted at 60 columns (widest ${widest})`);
       assert(painted.includes('stream-marker'), 'the streamed text survived the resize');
 
@@ -244,15 +249,19 @@ const scenarios = [
       terminal.key('Enter');
       await terminal.waitFor('First thought', {history: true, describe: 'the streamed reasoning'});
       await terminal.waitFor('checking the resize barrier', {history: true, describe: 'the reasoning body'});
-
-      for (const [cols, rows] of [[100, 24], [60, 24], [120, 40], [45, 18], [100, 36]]) {
-        const painted = await terminal.resizeTo(cols, rows, {stable: false});
-        assert(painted.includes('Ask anything...'), `${cols}x${rows} keeps the composer`);
-        const transcript = terminal.screen({history: true});
-        const unwrapped = transcript
+      const unwrap = (text) =>
+        text
           .split('\n')
           .map((row) => row.replace(/^\s*[┃│]\s?/, ''))
           .join('');
+
+      for (const [cols, rows] of [[100, 24], [60, 24], [120, 40], [45, 18], [100, 36]]) {
+        const painted = await terminal.resizeTo(cols, rows, {
+          stable: false,
+          until: (text) => [...userLines, ...thoughts].every((line) => unwrap(text).includes(line)),
+        });
+        assert(painted.includes('Ask anything...'), `${cols}x${rows} keeps the composer`);
+        const unwrapped = unwrap(painted);
         for (const line of userLines) {
           assert(unwrapped.includes(line), `${cols}x${rows} keeps ${line}`);
         }

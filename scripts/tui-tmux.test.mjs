@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import {readdirSync, readFileSync} from 'node:fs';
 import test from 'node:test';
 import {replyFrames} from './tui-tmux/model.mjs';
+import {reflowComplete} from './tui-tmux/harness.mjs';
 import {scenarios} from './tui-tmux/scenarios.mjs';
 
 const document = readFileSync(new URL('../docs/architecture/tui-e2e.md', import.meta.url), 'utf8');
@@ -55,4 +56,12 @@ test('a scripted reply frames text and tool calls as an OpenAI stream', () => {
   assert.equal(delta.choices[0].delta.tool_calls[0].function.name, 'exec');
   assert.equal(delta.choices[0].delta.tool_calls[0].function.arguments, '{"command":"echo hi"}');
   assert(calls.at(-1).includes('"finish_reason":"tool_calls"'), 'a tool reply ends in tool_calls');
+});
+
+test('a resize waits for a reflow frame, not a cursor report from the old one', () => {
+  assert(!reflowComplete(''), 'no output is not a repaint');
+  assert(!reflowComplete('\u001b[?25h old frame'), 'a cursor report before the clear is the outgoing frame');
+  assert(!reflowComplete('\u001b[3J rows without a completed frame'), 'the clear alone is not the new frame');
+  assert(reflowComplete('\u001b[?25h old\u001b[3J rows\u001b[?25h'), 'the clear and the completed frame after it are');
+  assert(!reflowComplete('\u001b[3J rows\u001b[?25h\u001b[3J next rewrite'), 'a later clear restarts the wait');
 });

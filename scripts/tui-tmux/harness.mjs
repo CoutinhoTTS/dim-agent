@@ -46,6 +46,14 @@ export function tmuxVersion(tmux = 'tmux') {
   return {printed, major: Number(match[1]), minor: Number(match[2])};
 }
 
+/// The product's scrollback reflow clears with `CSI 3J` and shows the cursor
+/// (`CSI ?25h`) when the frame for the new size is complete. A cursor report
+/// before the clear belongs to the outgoing frame and does not count.
+export function reflowComplete(segment) {
+  const cleared = segment.lastIndexOf('\u001b[3J');
+  return cleared !== -1 && segment.indexOf('\u001b[?25h', cleared) !== -1;
+}
+
 /// One scenario's disposable state: a product home, a user home, a model
 /// fixture, a dedicated tmux server and socket, and its raw output tap.
 export class TmuxCase {
@@ -322,37 +330,47 @@ export class Terminal {
     this.owner.tmuxRun(['resize-window', '-t', this.session, '-x', String(cols), '-y', String(rows)]);
   }
 
-  /// Resizes the pane and waits for the settled layout. A capture alone cannot
-  /// tell a repainted screen from the pane's resized grid, so the barrier is
-  /// content: tmux must report the target size, the composer must be drawn, the
-  /// widest row must reach the new width (a repaint, not leftover cells), and two
-  /// consecutive captures must agree. The returned text is the settled capture,
-  /// so a caller never asserts against the frame before the rewrite.
-  async resizeTo(cols, rows, {timeout = DEFAULT_STEP_TIMEOUT_MS, expectComposer = true, stable = true} = {}) {
+  /// Resizes the pane and waits for the frame the product drew for that size.
+  /// A capture alone cannot tell a repainted screen from the pane's resized
+  /// grid: after a shrink the old, clipped frame still fits the new width, so
+  /// the barrier needs the product's own repaint. The scrollback reflow clears
+  /// and rewrites from `CSI 3J` and shows the cursor (`CSI ?25h`) when the frame
+  /// is complete; the wait requires both after the resize, tmux to report the
+  /// target size, the composer to be drawn, and the widest row to reach the new
+  /// width. A caller may pass `until` to wait for content tied to that frame;
+  /// the returned text is the capture that satisfied it, never the frame before
+  /// the rewrite.
+  async resizeTo(cols, rows, {timeout = DEFAULT_STEP_TIMEOUT_MS, expectComposer = true, stable = true, until} = {}) {
     const paneSize = () =>
       this.owner
         .tmuxRun(['display-message', '-p', '-t', this.session, '#{pane_width}x#{pane_height}'], {allowFailure: true})
         .trim();
     const target = `${cols}x${rows}`;
     const near = Math.max(1, cols - 10);
+    const before = this.raw().length;
     this.resize(cols, rows);
     const deadline = Date.now() + timeout;
     let settled = null;
     for (;;) {
       let text = '';
       let widest = 0;
-      if (paneSize() === target) {
+      const segment = this.raw().slice(before);
+      const repainted = reflowComplete(segment);
+      if (repainted && paneSize() === target) {
         text = this.capture({join: false});
         widest = Math.max(0, ...text.split('\n').map((line) => line.length));
-        const drawn = (!expectComposer || text.includes('Ask anything...')) && widest >= near && widest <= cols;
-        if (drawn && (!stable || settled === text)) return text;
+        const content = until ? this.capture({history: true}) : text;
+        const matched = !until || until(content);
+        const drawn =
+          (!expectComposer || text.includes('Ask anything...')) && widest >= near && widest <= cols && matched;
+        if (drawn && (!stable || settled === text)) return content;
         settled = drawn ? text : null;
       } else {
         settled = null;
       }
       if (Date.now() >= deadline) {
         throw new Error(
-          `pane did not settle at ${target} within ${timeout}ms: pane ${paneSize() || 'unknown'}, widest row ${widest}\n${this.capture({join: false})}\n--- output tail ---\n${tail(this.raw(), 2000)}`,
+          `pane did not settle at ${target} within ${timeout}ms: pane ${paneSize() || 'unknown'}, repainted ${repainted}, widest row ${widest}\n${this.capture({join: false})}\n--- output tail ---\n${tail(this.raw(), 2000)}`,
         );
       }
       await sleep(POLL_MS);
