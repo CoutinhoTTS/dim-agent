@@ -1,75 +1,125 @@
 -------------------- MODULE BranchEligibility --------------------
 EXTENDS Naturals, Sequences, FiniteSets, TLC
-\* One line's eligibility. The roles the primary line separates are all here:
-\* `root` is the line with no parent, `primary` says the line is the Session's
-\* conversation, `opener` says it has opened lines of its own, and `source`
-\* says whether the tool, the user or a plugin opened it. `Move` is the line
-\* becoming primary, which is the status note the Session writes for it.
-\* What this model checks is what a line may do, never when it should do it:
-\* opening policy is not modelled here.
+\* One line's eligibility, in a Session whose default branch is a position in
+\* the tree. Nothing here is a role marker: a line is the root when it has no
+\* parent, and its opener is that parent, so both are read from the tree
+\* (`IsRoot`, `HasOpener`). `primary` says the line is the Session's default
+\* branch: the line its conversation is on. `source` says where the line was
+\* created from, and only that.
+\*
+\* This model checks what a line may do, never when it should do it. Opening
+\* policy is not modelled, and in this design only the root opens lines, so no
+\* line here opens one.
+\*
+\* `ancestorEnding` and `descendantDefault` are the two tree facts the admission
+\* rules read: some ancestor's end is already on its way down, which the cascade
+\* will complete, and some descendant is the default branch. The environment
+\* sets each of them, and that is how the two conflicting orderings reach this
+\* line: an ancestor's end can commit first, or a descendant can become the
+\* default branch first. Exactly one of the two is admitted.
 VARIABLE s
-Init == \E source\in{"tool","user","plugin"},primary\in BOOLEAN,notice\in BOOLEAN:
+NoParent == "none"
+\* A line the user may choose as the default branch. A plugin line follows its
+\* creator's protocol, and a line a client created before the upgrade keeps its
+\* stored `host` row, so neither is selectable.
+Selectable == {"tool","user"}
+IsRoot == s.parent = NoParent
+HasOpener == ~IsRoot
+CanBeMovedTo == ~s.primary /\ s.source\in Selectable /\ ~s.ended /\ ~s.ending /\ ~s.ancestorEnding
+\* Only a tool line ends itself: a line the user opened is ended by the user, a
+\* plugin line by its creator's protocol, and the root never ends. A line that
+\* is the default branch, or that has a descendant which is, is refused too,
+\* because ending a line ends every line below it.
+CanEndSelf == HasOpener /\ ~s.primary /\ ~s.descendantDefault /\ ~s.ancestorEnding /\ s.source="tool"
+\* An end asked for from outside the line: the user's, a creator's or a
+\* cascade's. The end entry checks the target only, whoever asks.
+CanBeEnded == HasOpener /\ ~s.primary /\ ~s.descendantDefault /\ ~s.ended /\ ~s.ending
+Init == \E source\in{"tool","user","plugin","hostOld"},parent\in{NoParent,"P1"},
+   primary\in BOOLEAN,notice\in BOOLEAN:
  /\ (source="plugin" => ~primary)
- /\ s=[root|->FALSE,primary|->primary,opener|->FALSE,source|->source,notice|->notice,head|->1,opening|->1,cut|->0,cursor|->0,reported|->1,held|->FALSE,
- ended|->FALSE,turn|->FALSE,steered|->FALSE,ownEnd|->FALSE,pending|->FALSE,recovery|->FALSE,idle|->0,notes|->0,blocks|-><<>>,roster|->{1,2},opened|->{},endedNotice|->{},externalEnds|->{}]
-\* The root is not primary in every state: a move to another line leaves it open
-\* and no longer primary, and that is the state in which it is a valid target.
+ /\ (source="hostOld" => ~primary)
+ /\ s=[parent|->parent,source|->source,primary|->primary,notice|->notice,head|->1,opening|->1,cut|->0,cursor|->0,reported|->1,held|->FALSE,
+     ended|->FALSE,ending|->FALSE,turn|->FALSE,steered|->FALSE,ownEnd|->FALSE,pending|->FALSE,recovery|->FALSE,idle|->0,notes|->0,
+     blocks|-><<>>,roster|->{1,2},endedNotice|->{},externalEnds|->{},
+     ancestorEnding|->FALSE,descendantDefault|->FALSE]
+\* The root is not the default branch in every state: a move to another line
+\* leaves it open and no longer the default branch, which is the state in which
+\* it is a valid target again.
 RootInit == \E primary\in BOOLEAN,notice\in BOOLEAN:
- s=[root|->TRUE,primary|->primary,opener|->TRUE,source|->"root",notice|->notice,head|->1,opening|->1,cut|->0,cursor|->0,reported|->1,held|->FALSE,
- ended|->FALSE,turn|->FALSE,steered|->FALSE,ownEnd|->FALSE,pending|->FALSE,recovery|->FALSE,idle|->0,notes|->0,blocks|-><<>>,roster|->{1,2},opened|->{},endedNotice|->{},externalEnds|->{}]
-CanOpen == s.primary /\ s.source#"plugin"
-\* Only a tool line ends itself. A line the user opened is ended by the user, and
-\* a plugin line by its creator's protocol; the end entry refuses both.
-CanEndSelf == ~s.root /\ ~s.primary /\ s.source="tool"
-\* The root is a target whenever it is not the primary line, so the move back to
-\* where the Session started is a `Move` like any other; a plugin line never is.
-CanBeMovedTo == ~s.primary /\ s.source#"plugin" /\ ~s.ended
+ /\ s=[parent|->NoParent,source|->"root",primary|->primary,notice|->notice,head|->1,opening|->1,cut|->0,cursor|->0,reported|->1,held|->FALSE,
+     ended|->FALSE,ending|->FALSE,turn|->FALSE,steered|->FALSE,ownEnd|->FALSE,pending|->FALSE,recovery|->FALSE,idle|->0,notes|->0,
+     blocks|-><<>>,roster|->{1,2},endedNotice|->{},externalEnds|->{},
+     ancestorEnding|->FALSE,descendantDefault|->FALSE]
+\* Becoming the default branch. A target whose ancestor is already ending is
+\* refused, because the cascade will reach it, and so is the line that already
+\* holds the position, whatever line it is: the root is refused while it is the
+\* default branch and accepted once another line holds the role.
 Move == /\ CanBeMovedTo /\ s'=[s EXCEPT !.primary=TRUE, !.notes=@+1]
-ParentAdvance == /\ s.head<3 /\ s'=[s EXCEPT !.head=@+1]
+\* The two tree facts. Each can arrive at any time, and only the admission
+\* rules decide what follows from it.
+BeginAncestorEnd == /\ ~s.ancestorEnding /\ ~s.ended /\ s'=[s EXCEPT !.ancestorEnding=TRUE]
+BeginDescendantDefault == /\ ~s.descendantDefault /\ ~s.primary /\ ~s.ended
+ /\ s'=[s EXCEPT !.descendantDefault=TRUE]
+ParentAdvance == /\ s.head<2 /\ s'=[s EXCEPT !.head=@+1]
 Read(after,through,ok) == /\ after<=s.head /\ through<=s.head /\ through>=after
- /\ LET floor==IF s.root THEN after ELSE IF after<s.cut THEN s.cut ELSE after
+ /\ LET floor==IF IsRoot THEN after ELSE IF after<s.cut THEN s.cut ELSE after
  IN /\ through>=floor /\ s'=[s EXCEPT !.cursor=IF ok THEN through ELSE @]
-Block == /\ ~s.root /\ ~s.ended /\ ~s.held /\ s.head>s.opening /\ s.head>s.cursor /\ s.head>s.reported
+Block == /\ HasOpener /\ ~s.ended /\ ~s.held /\ Len(s.blocks)<2
+ /\ s.head>s.opening /\ s.head>s.cursor /\ s.head>s.reported
  /\ s'=[s EXCEPT !.held=TRUE, !.reported=s.head, !.blocks=Append(@,[head|->s.head,cursor|->s.cursor,opening|->s.opening])]
 ConsumeBlock == s'=[s EXCEPT !.held=FALSE]
 Start == /\ ~s.turn /\ ~s.ended /\ ~s.recovery /\ s.idle<1
  /\ s'=[s EXCEPT !.turn=TRUE, !.steered=FALSE, !.ownEnd=FALSE]
 Steer(ok) == /\ s.turn /\ s'=[s EXCEPT !.steered=@\/ok]
 Pending(b) == s'=[s EXCEPT !.pending=b]
-OwnEnd == /\ s.turn /\ CanEndSelf /\ s'=[s EXCEPT !.ownEnd=TRUE, !.ended=TRUE]
+OwnEnd == /\ s.turn /\ CanEndSelf /\ s'=[s EXCEPT !.ownEnd=TRUE, !.ending=TRUE]
+EndFromOutside == /\ CanBeEnded /\ s'=[s EXCEPT !.ending=TRUE, !.turn=FALSE]
+FinishEnd == /\ s.ending /\ s'=[s EXCEPT !.ending=FALSE, !.ended=TRUE]
 EndTurn == /\ s.turn /\ s.idle<1
- /\ s'=[s EXCEPT !.turn=FALSE, !.idle=IF s.source="tool" /\ ~s.primary /\ s.notice /\ ~s.steered /\ ~s.ownEnd /\ ~s.pending THEN @+1 ELSE @]
+ /\ s'=[s EXCEPT !.turn=FALSE,
+     !.idle=IF s.source="tool" /\ ~s.primary /\ s.notice /\ ~s.steered /\ ~s.ownEnd /\ ~s.pending THEN @+1 ELSE @]
 Restore == /\ ~s.recovery /\ s'=[s EXCEPT !.recovery=TRUE, !.turn=FALSE]
-\* The opener ends a line it opened; the roster is the opener's own. The root
-\* is an opener like any other line, and the primary line may end the lines it
-\* opened; neither ever ends itself (`OwnEnd`).
-ChildEnd(i,own) == /\ s.opener /\ i\in s.roster
+\* The opener ends a line it opened, and the roster is the opener's own. The
+\* default branch may end the lines it opened; no line ever ends itself this way.
+ChildEnd(i,own) == /\ HasOpener /\ i\in s.roster
  /\ s'=[s EXCEPT !.roster=@\{i}, !.endedNotice=IF own THEN @ ELSE @\cup{i}, !.externalEnds=IF own THEN @ ELSE @\cup{i}]
-Open(i) == /\ CanOpen /\ i\in 1..2 /\ i\notin s.opened
- /\ s'=[s EXCEPT !.opened=@\cup{i}, !.opener=TRUE]
-Next == Move\/ParentAdvance\/(\E a,t\in 0..3,b\in BOOLEAN:Read(a,t,b))\/Block\/ConsumeBlock\/Start
- \/(\E b\in BOOLEAN:Steer(b)\/Pending(b))\/OwnEnd\/EndTurn\/Restore\/(\E i\in 1..2,b\in BOOLEAN:ChildEnd(i,b))\/Open(1)\/Open(2)
+Next == Move\/BeginAncestorEnd\/BeginDescendantDefault\/ParentAdvance
+ \/(\E a,t\in 0..2,b\in BOOLEAN:Read(a,t,b))\/Block\/ConsumeBlock\/Start
+ \/(\E b\in BOOLEAN:Steer(b)\/Pending(b))\/OwnEnd\/EndFromOutside\/FinishEnd\/EndTurn\/Restore
+ \/(\E i\in 1..2,b\in BOOLEAN:ChildEnd(i,b))
 Spec == (Init\/RootInit) /\ [][Next]_s
 ParentBlockHasNewActivity == \A n\in 1..Len(s.blocks):s.blocks[n].head>s.blocks[n].cursor /\ s.blocks[n].head>s.blocks[n].opening
-NoRootParentBlock == s.root=>s.blocks= <<>>
+\* The root has nothing above it: a line with no opener gets no parent block.
+NoRootParentBlock == IsRoot=>s.blocks= <<>>
 EndNoticeAndRosterAtomic == s.endedNotice=s.externalEnds /\ s.endedNotice\cap s.roster={}
 IdleEligibility == [][s.idle'>s.idle=>s.source="tool" /\ ~s.primary /\ s.notice /\ ~s.steered /\ ~s.ownEnd /\ ~s.pending /\ s.turn]_s
 RestoreNoOldIdle == [][Restore=>s.idle'=s.idle]_s
-ExplicitReadCanReset == [][\A a,t\in 0..3:Read(a,t,TRUE)=>s.cursor'=t]_s
-\* A line never ends itself while it is the root or the primary line. What is
-\* out of scope here: an end cascaded from an ancestor. The design's guard for
-\* that is the ancestor check on the end entry, not this model.
-RootAndPrimaryEndNotThemselves == (s.root\/s.primary)=>~s.ended
+ExplicitReadCanReset == [][\A a,t\in 0..2:Read(a,t,TRUE)=>s.cursor'=t]_s
+\* A line never ends itself while it is the root or the default branch. Out of
+\* scope here: an end cascaded from an ancestor, which the ancestor check on the
+\* end entry guards, not this model.
+RootAndPrimaryEndNotThemselves == (IsRoot\/s.primary)=>~s.ended
 \* A line the user opened is never ended by its own `end`: the user ends it.
 UserLineNeverEndsItself == s.source="user"=>~s.ownEnd
-\* A plugin line never opens a line and never becomes primary. The two together
-\* are what the design says of a plugin-only line: its creator owns it, and the
-\* primary line is a conversation line of the tool or the user.
-PluginLineIsLeaf == s.source="plugin"=>Cardinality(s.opened)=0
-PluginLineNeverPrimary == s.source="plugin"=>~s.primary
-\* Only the primary line opens lines, and never a plugin line.
-OnlyPrimaryOpens == [][Cardinality(s.opened')>Cardinality(s.opened)=>s.primary /\ s.source#"plugin"]_s
-\* Moving the primary line writes one status note and changes no roster: the
-\* lines a line opened stay its own.
+\* A plugin line is never the default branch, and neither is a line a client
+\* created before the upgrade: nothing rewrites either kind.
+PluginNeverDefault == s.source="plugin"=>~s.primary
+UpgradedHostLineNeverDefault == s.source="hostOld"=>~s.primary
+\* The default branch is an open conversation line: it is the root, a tool line
+\* or a line the user opened, and it is open. An ended, ending or plugin line is
+\* never the line the Session's conversation is on.
+DefaultIsOpenConversationLine == s.primary=>((IsRoot \/ s.source\in Selectable) /\ ~s.ended /\ ~s.ending)
+\* A move writes one status note and changes no roster: the lines a line opened
+\* stay its own, because coordination follows the tree, not the default branch.
 MoveKeepsRoster == [][Move=>s.notes'=s.notes+1 /\ s.roster'=s.roster]_s
+\* Admission in one order, first case: a line becomes the default branch only
+\* while no ancestor's end is on its way down, so an end that already started
+\* wins and the move is refused.
+MoveNeedsOpenAncestry == [][s.primary' /\ ~s.primary => ~s.ancestorEnding]_s
+\* Admission in one order, second case: a line starts ending only while no
+\* descendant is the default branch, so a move that already happened wins and
+\* the end is refused.
+EndNeedsNoDefaultBelow == [][s.ending' /\ ~s.ending => ~s.descendantDefault]_s
+\* A refused end writes nothing: `ending` moves only through an admitted end.
+EndOnlyOnAllowedTarget == [][~CanBeEnded /\ ~CanEndSelf=>s.ending'=s.ending]_s
 =============================================================================

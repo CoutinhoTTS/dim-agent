@@ -212,7 +212,7 @@ Rpc 检查参数和 Session 的协议版本，然后调用 Agents。Agents 负�
 
 被否决：以相同的分支 id 复制子分支的祖先链，并在子分支的副本上继续。那样分叉会变成一个 `main` 不是它全部历史的 Session，此后对那条线的每次读取都会拼接两个编号空间。
 
-**分叉的主线是它的根。** 副本继承的每条 `branch/primary` 都是切点之前在源的 `main` 上写下的，所以它指名的线要么不在 F 中，要么只作为没有事件的目录行存在（§6.3）。因此 F 把它的主线记为 `main`：它在 `at + 1` 处的 `session/forked` 晚于每条复制来的 `branch/primary`，而决定一个 Session 主线的唯一一次查询（timeline branches §5）读取两者中较新的那条。切点为 `0` 时不写 `session/forked`，它同样因为没有任何复制来的事实指名别的线，主线是 `main`。
+**分叉的主线是它的根。** 副本继承的每条 `branch/default` 都是切点之前在源的 `main` 上写下的，所以它指名的线要么不在 F 中，要么只作为没有事件的目录行存在（§6.3）。因此 F 把它的主线记为 `main`：它在 `at + 1` 处的 `session/forked` 晚于每条复制来的 `branch/default`，而决定一个 Session 主线的唯一一次查询（timeline branches §5）读取两者中较新的那条。切点为 `0` 时不写 `session/forked`，它同样因为没有任何复制来的事实指名别的线，主线是 `main`。
 
 ### 6.3 分叉复制什么
 
