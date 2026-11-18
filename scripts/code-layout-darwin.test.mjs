@@ -135,7 +135,7 @@ fn main() { assert_eq!(layout_first(layout_second(layout_dependency::value())), 
     (project/'rust-toolchain.toml').write_text('[toolchain]\npath = '+json.dumps(sysroot)+'\n')
     (dependency/'rust-toolchain.toml').write_text('[toolchain]\npath = '+json.dumps(str(root/'unselected-toolchain'))+'\n')
     os.environ.pop('RUSTUP_TOOLCHAIN', None)
-    os.environ['RUSTC'] = str(Path(shutil.which('rustup')).with_name('rustc'))
+    os.environ['RUSTC'] = shutil.which(build_darwin.rustc_command())
     subprocess.run([str(Path(sysroot)/'bin/cargo'),'generate-lockfile','--offline'], cwd=project, check=True)
     build_darwin.REPO = project
     capture = root/'capture'; capture.mkdir()

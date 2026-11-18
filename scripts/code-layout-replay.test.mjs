@@ -18,6 +18,7 @@ from unittest.mock import patch
 sys.path.insert(0, sys.argv[1])
 import build_darwin
 import build_windows
+import replay
 
 with tempfile.TemporaryDirectory(prefix='dim-layout-capture-') as temporary:
     root = Path(temporary)
@@ -78,6 +79,22 @@ output.write_bytes(payload)
             else:
                 assert not corrupt, 'deterministically wrong capture must fail baseline validation'
                 assert baseline.read_bytes() == original
+                replay.save_baseline(output, baseline, record, 'fixture', Path(sys.argv[1]))
+                resumed = replay.load_baseline(output, baseline, 'fixture')
+                candidate = output/'sorted'
+                module.relink(resumed, candidate, map_path=output/'sorted.map')
+                assert candidate.read_bytes() == original
+                (output/'manifest.json').write_text(json.dumps(dict(target='fixture',
+                    baselineSha256=replay.file_hash(baseline), candidateSha256=replay.file_hash(candidate))))
+                replay.measure_artifacts(output, 'fixture', baseline, candidate, lambda: [42])
+                assert json.loads((output/'manifest.json').read_text())['measurements'] == [42]
+                candidate.write_bytes(b'changed')
+                try:
+                    replay.measure_artifacts(output, 'fixture', baseline, candidate, lambda: [])
+                except ValueError as error:
+                    assert 'validated layout manifest' in str(error), error
+                else:
+                    raise AssertionError('measurement used a different executable')
             assert cargo.read_bytes() == original, 'baseline validation must restore the original executable'
             if original_pdb is not None:
                 assert pdb.read_bytes() == original_pdb
@@ -214,7 +231,7 @@ raise AssertionError('interrupted replay returned a baseline')
   assert.equal(result.status,0,result.stdout+result.stderr);
 });
 
-test('native measurement records paired samples from separate disposable homes', {timeout:15_000},()=>{
+test('native measurement uses separate disposable homes without reverse DNS', {timeout:15_000},()=>{
   const result=spawnSync(python,['-',directory],{encoding:'utf8',timeout:10_000,input:String.raw`
 from contextlib import ExitStack, closing
 import faulthandler
@@ -285,6 +302,7 @@ with tempfile.TemporaryDirectory(prefix='dim-layout-measure-') as temporary:
             memory=lambda handle: {'workingSet':12288,'private':4096,'pagefile':4096},
             cpu=lambda handle: {'user':.01,'kernel':.02})
         with ExitStack() as stack:
+            stack.enter_context(patch('socket.gethostbyaddr',side_effect=AssertionError('loopback measurement must not require reverse DNS')))
             stack.enter_context(patch.object(trainer,'subprocess',SimpleNamespace(
                 Popen=Process,run=client,PIPE=subprocess.PIPE)))
             if trainer is train_windows:

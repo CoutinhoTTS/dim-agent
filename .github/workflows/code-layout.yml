@@ -9,6 +9,11 @@ on:
       - rust-toolchain.toml
       - .node-version
   workflow_dispatch:
+    inputs:
+      measure:
+        description: Compare validated baseline and ordered binaries
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -112,6 +117,8 @@ jobs:
           overwrite: true
 
   native-layout:
+    if: github.event_name == 'workflow_dispatch'
+    needs: [linux-artifact, platform-artifact]
     strategy:
       fail-fast: false
       matrix:
@@ -146,7 +153,6 @@ jobs:
           architecture: ${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}
           package-manager-cache: false
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
-        if: runner.os == 'Windows'
         with:
           python-version: '3.13'
           architecture: ${{ runner.arch == 'ARM64' && 'arm64' || 'x64' }}
@@ -210,11 +216,34 @@ jobs:
           output="$RUNNER_TEMP/dim-layout-$DIM_LAYOUT_PLATFORM"
           python3 scripts/code-layout/build.py --output "$output" --jobs 2
           cat "$output/manifest.json"
+      - name: Measure the validated executables
+        if: inputs.measure
+        shell: python
+        run: |
+          import os, subprocess, sys
+          from pathlib import Path
+          output = Path(os.environ["RUNNER_TEMP"]) / ("dim-layout-" + os.environ["DIM_LAYOUT_PLATFORM"])
+          subprocess.run([sys.executable, "scripts/code-layout/build.py", "--output", output, "--measure-only"], check=True)
+      - name: Preserve reusable baseline after a layout failure
+        if: failure()
+        shell: python
+        run: |
+          import os, tarfile
+          from pathlib import Path
+          output = Path(os.environ["RUNNER_TEMP"]) / ("dim-layout-" + os.environ["DIM_LAYOUT_PLATFORM"])
+          if (output / "capture.json").is_file() and not (output / "manifest.json").exists():
+              with tarfile.open(output / "capture.tar", "w") as archive:
+                  for name in ("capture", "capture.json"):
+                      archive.add(output / name, arcname=name)
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: layout-${{ matrix.platform }}
           path: |
+            ${{ runner.temp }}/dim-layout-${{ matrix.platform }}/capture.tar
+            ${{ runner.temp }}/dim-layout-${{ matrix.platform }}/dimcode*
+            ${{ runner.temp }}/dim-layout-${{ matrix.platform }}/baseline
+            ${{ runner.temp }}/dim-layout-${{ matrix.platform }}/baseline.exe
             ${{ runner.temp }}/dim-layout-${{ matrix.platform }}/manifest.json
             ${{ runner.temp }}/dim-layout-${{ matrix.platform }}/symbols.order
             ${{ runner.temp }}/dim-layout-${{ matrix.platform }}/*.pages

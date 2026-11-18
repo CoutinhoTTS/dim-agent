@@ -3,6 +3,7 @@
 import http.server
 import json
 import os
+import socketserver
 import subprocess
 import threading
 
@@ -36,6 +37,11 @@ class LocalModel:
     def __init__(self, stack):
         self.tool_seen = threading.Event()
         owner = self
+
+        class LoopbackServer(http.server.ThreadingHTTPServer):
+            def server_bind(self):
+                socketserver.TCPServer.server_bind(self)
+                self.server_name, self.server_port = self.server_address
 
         class Handler(http.server.BaseHTTPRequestHandler):
             def log_message(self, *_):
@@ -92,7 +98,7 @@ class LocalModel:
                 self.end_headers()
                 self.wfile.write(data)
 
-        self.http = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.http = LoopbackServer(("127.0.0.1", 0), Handler)
         thread = threading.Thread(target=self.http.serve_forever, daemon=True)
         thread.start()
         stack.callback(thread.join)

@@ -6,7 +6,6 @@ an independently smoke-tested relink is published as OUTPUT/dimcode.exe.
 """
 
 import argparse
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -19,17 +18,13 @@ import tempfile
 
 from layout import select, unique_functions, validate_sizes
 import pe
-from replay import original_inputs, preserve_cargo, run_link
+from replay import file_hash as digest, load_baseline, measure_artifacts, original_inputs, preserve_cargo, run_link, save_baseline
 from samples import read as read_sample
 from toolchain import rustc as rustc_command
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent.parent
 TARGETS = {"AMD64": "x86_64-pc-windows-msvc", "ARM64": "aarch64-pc-windows-msvc"}
-
-
-def digest(path):
-    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def split_response(text):
@@ -259,12 +254,54 @@ def msvc_linker(host):
     return None
 
 
+def cargo_link(work, host, jobs):
+    linker = lld_linker(host)
+    if not linker:
+        raise RuntimeError("lld-link or the Rust toolchain's rust-lld is required")
+    version = subprocess.run([*linker, "--version"], capture_output=True, text=True)
+    if version.returncode or "LLD" not in version.stdout + version.stderr:
+        raise RuntimeError(f"cannot use the LLD linker at {linker[0]}")
+    wrapper = work / "linker.exe"
+    rustc = rustc_command()
+    host_linker = msvc_linker(host)
+    if not host_linker:
+        raise RuntimeError("the MSVC link.exe is required to compile the capture wrapper")
+    subprocess.run(
+        [rustc, "--edition", "2021", "-O", "-Clinker=" + host_linker,
+         str(HERE / "link_capture.rs"), "-o", str(wrapper)],
+        check=True)
+    env = dict(
+        os.environ,
+        RUSTC=rustc,
+        DIM_LAYOUT_CAPTURE=str(work),
+        DIM_LAYOUT_LINKER=json.dumps(linker),
+        DIM_LAYOUT_PYTHON=sys.executable,
+        DIM_LAYOUT_SCRIPT=str(HERE / "build_windows.py"),
+        **{"CARGO_TARGET_" + host.upper().replace("-", "_") + "_LINKER": host_linker},
+    )
+    if host == "aarch64-pc-windows-msvc":
+        env.setdefault("CC_aarch64_pc_windows_msvc", "clang-cl")
+        env.setdefault("CXX_aarch64_pc_windows_msvc", "clang-cl")
+    command = [
+        "cargo", "rustc", "--release", "--locked", "-p", "dimcode", "--bin", "dimcode",
+        "--jobs", str(jobs), "--target", host,
+    ]
+    command.extend(["--", f"-Clinker={wrapper}"])
+    subprocess.run(command, cwd=REPO, env=env, check=True)
+    record = json.loads((work / "link.json").read_text())
+    record["rustc"] = subprocess.check_output([rustc, "-vV"], cwd=REPO, text=True)
+    return record
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--target", choices=sorted(TARGETS.values()))
     parser.add_argument("--jobs", type=int, default=2)
     parser.add_argument("--pairs", type=int, default=2)
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--resume", action="store_true", help="retry sorting a verified baseline in OUTPUT")
+    mode.add_argument("--measure-only", action="store_true", help="measure the validated executables in OUTPUT")
     args = parser.parse_args()
     machine = platform.machine().upper()
     if sys.platform != "win32" or machine not in TARGETS:
@@ -278,50 +315,31 @@ def main():
         parser.error("pairs must be positive")
     if os.environ.get("CARGO_BUILD_TARGET") not in (None, host):
         parser.error("cross compilation is not supported")
-    linker = lld_linker(host)
-    if not linker:
-        parser.error("lld-link or the Rust toolchain's rust-lld is required")
-    version = subprocess.run([*linker, "--version"], capture_output=True, text=True)
-    if version.returncode or "LLD" not in version.stdout + version.stderr:
-        parser.error(f"cannot use the LLD linker at {linker[0]}")
     output = args.output.resolve()
-    if output.exists():
+    if output.exists() and not (args.resume or args.measure_only):
         parser.error("the output directory must not exist")
     from train_windows import measure, train
 
     with tempfile.TemporaryDirectory(prefix="dim-layout-") as temporary:
         work = Path(temporary)
-        wrapper = work / "linker.exe"
-        rustc = rustc_command()
-        host_linker = msvc_linker(host)
-        if not host_linker:
-            parser.error("the MSVC link.exe is required to compile the capture wrapper")
-        subprocess.run(
-            [rustc, "--edition", "2021", "-O", "-Clinker=" + host_linker,
-             str(HERE / "link_capture.rs"), "-o", str(wrapper)],
-            check=True)
-        env = dict(
-            os.environ,
-            RUSTC=rustc,
-            DIM_LAYOUT_CAPTURE=str(work),
-            DIM_LAYOUT_LINKER=json.dumps(linker),
-            DIM_LAYOUT_PYTHON=sys.executable,
-            DIM_LAYOUT_SCRIPT=str(HERE / "build_windows.py"),
-            **{"CARGO_TARGET_" + host.upper().replace("-", "_") + "_LINKER": host_linker},
-        )
-        if host == "aarch64-pc-windows-msvc":
-            env.setdefault("CC_aarch64_pc_windows_msvc", "clang-cl")
-            env.setdefault("CXX_aarch64_pc_windows_msvc", "clang-cl")
-        command = [
-            "cargo", "rustc", "--release", "--locked", "-p", "dimcode", "--bin", "dimcode",
-            "--jobs", str(args.jobs), "--target", args.target or host,
-        ]
-        command.extend(["--", f"-Clinker={wrapper}"])
-        subprocess.run(command, cwd=REPO, env=env, check=True)
-        record = json.loads((work / "link.json").read_text())
-        record["rustc"] = subprocess.check_output([rustc, "-vV"], cwd=REPO, text=True)
-        output.mkdir(parents=True)
-        baseline, baseline_map = replay_baseline(record, work, output)
+        baseline = output / "baseline.exe"
+        executable = output / "dimcode.exe"
+        if args.measure_only:
+            measure_artifacts(output, host, baseline, executable,
+                              lambda: measure(baseline, executable, work / "measure", args.pairs))
+            return
+        baseline_map = output / "baseline.map"
+        if args.resume:
+            if executable.exists():
+                parser.error("the output already contains a validated executable")
+            record = load_baseline(output, baseline, host)
+        else:
+            archive = output / "capture"
+            archive.mkdir(parents=True)
+            capture = Path(tempfile.mkdtemp(dir=archive))
+            record = cargo_link(capture, host, args.jobs)
+            replay_baseline(record, capture, output)
+            save_baseline(output, baseline, record, host, REPO)
         profiles = train(baseline, work / "training", sampling=True)
         for profile in profiles:
             shutil.copyfile(profile, output / profile.name)
@@ -335,20 +353,14 @@ def main():
             encoding="utf-8", errors="surrogateescape").splitlines())
         measurement.update(validate(baseline_map, candidate_map, order_file))
         train(candidate, work / "acceptance", sampling=False)
-        measurements = measure(baseline, candidate, work / "measure", args.pairs)
         manifest = {
             "platform": "windows", "target": host, "pageSize": pe_page_size(),
-            "lto": os.environ.get("CARGO_PROFILE_RELEASE_LTO", "profile"),
-            "source": subprocess.check_output(
-                ["git", "rev-parse", "HEAD"], cwd=REPO, text=True).strip(),
-            "dirty": bool(subprocess.check_output(
-                ["git", "status", "--porcelain"], cwd=REPO)),
+            "lto": record["lto"], "source": record["source"], "dirty": record["dirty"],
             "rustc": record["rustc"],
             "baselineSha256": digest(baseline),
             "candidateSha256": digest(candidate),
             "orderSha256": digest(order_file),
             "inputs": record["inputs"], "training": measurement,
-            "measurements": measurements,
         }
         (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
         candidate.rename(output / "dimcode.exe")

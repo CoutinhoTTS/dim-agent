@@ -33,14 +33,24 @@ The command builds `dimcode` with the repository's release profile and
 preserves the build environment, including account build settings and the
 `CARGO_PROFILE_RELEASE_LTO` selection used by the release workflow. Every
 platform uses the same compiler selection: `RUSTC`, then `CARGO_BUILD_RUSTC`,
-then `rustc` from PATH; Cargo configuration's `build.rustc` is superseded. The output
-directory must be new. A failed build never produces its final executable.
-The release packaging workflow remains unchanged; this is opt-in build support.
+then `rustc` from PATH; Cargo configuration's `build.rustc` is superseded. Use a new output directory for the initial build. A failed build never produces its final executable.
+The release workflow uses its existing packaging command.
 
 ```sh
 python3 scripts/code-layout/build.py --output /tmp/dim-layout-build --jobs 2
 /tmp/dim-layout-build/dimcode --version
 ```
+
+On macOS and Windows the command retains the verified baseline, its map and
+captured linker inputs under the output directory. After a training, ordering
+or acceptance failure, retry on the same host and checkout with
+`--output DIR --resume`. Preserve the original paths, SDK and toolchain.
+The retry checks the target and baseline hashes and trains the original build,
+even if the layout scripts have since changed. Use a fresh directory for a new
+product build. Remove the output directory when finished to reclaim the captured
+object files. Run `--output DIR --measure-only --pairs 2` to compare the
+validated executables without compiling or linking. The command checks their
+hashes before replacing the manifest with the measured version.
 
 Training uses disposable homes and workspaces and a loopback model fixture. It
 runs the real App Server ready/shutdown path, opens and closes the TUI model
@@ -123,8 +133,9 @@ after linking on macOS. The baseline must reproduce Cargo's executable byte for
 byte before any training, then restores Cargo's original file. The native
 fixture builds a Rust release executable with LTO and debug stripping through
 this same capture/replay path. ld64's map records exact atom sizes, so
-function-name/size parity is checked directly. SDK and deployment-target
-environment values are captured for replay along with the tool loader paths.
+function-name/size parity is checked directly. Cargo passes the selected Rust deployment target to native dependencies.
+SDK and deployment-target environment values are captured for replay along with
+the tool loader paths.
 
 The training probe is a temporary dylib loaded with `DYLD_INSERT_LIBRARIES`.
 Its constructor locates the page-aligned `__TEXT,__text` range and removes
@@ -143,8 +154,9 @@ process `resident` and `physicalFootprint`.
 
 Functions whose pages were observed are ordered with ld64's `-order_file`.
 `-order_file_statistics` reports entries the linker cannot match; only those
-names are removed and the strict relink uses `-fatal_warnings`. Any other
-diagnostic fails the build. The candidate must keep the same atom name/size
+names and names explicitly reported as ambiguous between objects are removed.
+The final link checks diagnostics, allowing the exact duplicate `-lSystem`
+warning once if the baseline replay emitted it. Other warnings fail the check. The candidate must keep the same atom name/size
 multiset, the same function-start count and the selected addresses in the final
 order, and at least one selected address must move. Reordering can move
 alignment padding between functions, so the total `__text` size is recorded but
@@ -261,7 +273,7 @@ Both current Windows release targets use fat LTO. The layout command preserves
 
 ### Measurements and artifacts
 
-After uninstrumented acceptance, the macOS and Windows commands alternate baseline and candidate
+With `--measure-only`, the macOS and Windows commands alternate baseline and candidate
 samples from fresh disposable homes under the same platform sampling mechanism.
 It records wall time to App Server readiness, startup CPU, total resident
 memory, code-page residency and the wall time of a local-fixture tool
@@ -275,7 +287,7 @@ or treated as interchangeable with Linux `/proc` numbers.
 `baseline`, `symbols.order`, the linker maps, native page samples and
 `manifest.json` record the comparison inputs, platform, target, page size, LTO
 choice, source state, Rust version, artifact hashes, training counts and
-alternating measurement samples on macOS/Windows. The Linux manifest records
+alternating samples after the optional measurement on macOS/Windows. The Linux manifest records
 artifact/layout validation without these alternating measurements. Linker maps and native fixture maps are
 uploaded on failure, and a size mismatch reports bounded before-only and
 after-only symbol/size entries. The probe

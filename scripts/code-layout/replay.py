@@ -2,11 +2,13 @@
 
 from contextlib import ExitStack, contextmanager
 import hashlib
+import json
 import os
 from pathlib import Path
 import shutil
 import signal
 import subprocess
+import tempfile
 
 
 @contextmanager
@@ -15,7 +17,7 @@ def original_inputs(inputs):
         for item in inputs:
             source = Path(item["source"])
             if source.exists():
-                if hashlib.sha256(source.read_bytes()).hexdigest() != item["sha256"]:
+                if file_hash(source) != item["sha256"]:
                     raise RuntimeError(f"captured linker input changed: {source}")
                 continue
             missing = []
@@ -26,6 +28,8 @@ def original_inputs(inputs):
             for parent in reversed(missing):
                 parent.mkdir()
                 cleanup.callback(parent.rmdir)
+            if file_hash(Path(item["file"])) != item["sha256"]:
+                raise RuntimeError(f"archived linker input changed: {item['file']}")
             with source.open("xb") as destination:
                 cleanup.callback(source.unlink)
                 with Path(item["file"]).open("rb") as saved:
@@ -101,3 +105,40 @@ def run_link(command, *, cwd, env):
             process.wait()
             raise
         return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+
+
+def save_baseline(output, baseline, record, target, repo):
+    record.update(target=target, baselineSha256=file_hash(baseline),
+                  mapSha256=file_hash(output / "baseline.map"),
+                  source=subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip(),
+                  dirty=bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=repo)),
+                  lto=os.environ.get("CARGO_PROFILE_RELEASE_LTO", "profile"))
+    (output / "capture.json").write_text(json.dumps(record))
+
+
+def file_hash(path):
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def load_baseline(output, baseline, target):
+    record = json.loads((output / "capture.json").read_text())
+    if (record["target"] != target or file_hash(baseline) != record["baselineSha256"]
+            or file_hash(output / "baseline.map") != record["mapSha256"]):
+        raise ValueError("target, executable or map differs from the captured baseline")
+    return record
+
+
+def measure_artifacts(output, target, baseline, executable, sample):
+    manifest = json.loads((output / "manifest.json").read_text())
+    if (manifest["target"] != target or file_hash(baseline) != manifest["baselineSha256"]
+            or file_hash(executable) != manifest["candidateSha256"]):
+        raise ValueError("target or executable differs from the validated layout manifest")
+    manifest["measurements"] = sample()
+    with tempfile.NamedTemporaryFile(dir=output, mode="w", delete=False) as temp:
+        json.dump(manifest, temp, indent=2)
+        temp.write("\n")
+    Path(temp.name).replace(output / "manifest.json")

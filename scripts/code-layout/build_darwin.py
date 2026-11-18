@@ -6,7 +6,6 @@ an independently smoke-tested relink is published as OUTPUT/dimcode.
 """
 
 import argparse
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -20,7 +19,7 @@ import tempfile
 
 from layout import select, unique_functions, validate_sizes
 import macho
-from replay import original_inputs, preserve_cargo, run_link
+from replay import file_hash as digest, load_baseline, measure_artifacts, original_inputs, preserve_cargo, run_link, save_baseline
 from samples import read as read_sample
 from toolchain import rustc as rustc_command
 from train_darwin import measure, train
@@ -28,10 +27,6 @@ from train_darwin import measure, train
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent.parent
 TARGETS = {"arm64": "aarch64-apple-darwin", "x86_64": "x86_64-apple-darwin"}
-
-
-def digest(path):
-    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def cargo_link(work, compiler, jobs, target=None):
@@ -53,6 +48,12 @@ def cargo_link(work, compiler, jobs, target=None):
                DIM_LAYOUT_OBJCOPY=str(objcopy),
                RUSTC_WRAPPER=str(rustc_wrapper),
                DIM_LAYOUT_RUSTC_WRAPPER=os.environ.get("RUSTC_WRAPPER", ""))
+    deployment = subprocess.check_output(
+        [rustc, "--print", "deployment-target", "--target", host], cwd=REPO, text=True).strip()
+    key, value = deployment.split("=", 1)
+    if key != "MACOSX_DEPLOYMENT_TARGET":
+        raise RuntimeError(f"unexpected deployment target: {deployment}")
+    env[key] = value
     env["DYLD_LIBRARY_PATH"] = os.pathsep.join(filter(None, (
         str(sysroot / "lib"), env.get("DYLD_LIBRARY_PATH"))))
     env["DIM_LAYOUT_DYLD_LIBRARY_PATH"] = env["DYLD_LIBRARY_PATH"]
@@ -126,7 +127,7 @@ def relink(record, output, order_file=None, map_path=None, strict=False):
     if map_path:
         arguments = [argument for argument in arguments if not argument.startswith("-Wl,-map,")]
         arguments.append(f"-Wl,-map,{map_path}")
-    if strict:
+    if strict and not record.get("duplicateSystemWarning"):
         arguments.append("-Wl,-fatal_warnings")
     env = dict(os.environ, PATH=record["path"])
     for key, value in record["linkEnv"].items():
@@ -143,7 +144,13 @@ def relink(record, output, order_file=None, map_path=None, strict=False):
         stripped = run_link([record["objcopy"], flag, str(output)], cwd=record["cwd"], env=env)
         if stripped.returncode:
             raise RuntimeError(f"native stripping failed ({stripped.returncode}):\n{stripped.stderr}")
-    return result.stderr
+    diagnostics = result.stderr.splitlines()
+    warning = record.get("duplicateSystemWarning")
+    if order_file and warning in diagnostics:
+        diagnostics.remove(warning)
+    if strict and diagnostics:
+        raise RuntimeError(f"unexpected strict native link diagnostic:\n{result.stderr}")
+    return "\n".join(diagnostics)
 
 
 def replay_baseline(record, work, output):
@@ -153,7 +160,11 @@ def replay_baseline(record, work, output):
     baseline_map = output / "baseline.map"
     shutil.copyfile(work / "baseline.map", baseline_map)
     with preserve_cargo([(cargo, backup)]):
-        relink(record, cargo)
+        diagnostics = relink(record, cargo)
+        for line in diagnostics.splitlines():
+            if line in ("ld: warning: ignoring duplicate libraries: '-lSystem'",
+                        "ld64: warning: ignoring duplicate libraries: '-lSystem'"):
+                record["duplicateSystemWarning"] = line
         original_hash, replay_hash = digest(backup), digest(cargo)
         if replay_hash != original_hash:
             shutil.copy2(backup, output / "cargo-original")
@@ -175,6 +186,10 @@ def ordered_link(record, output, order_file, map_path):
             r"(?:ld|ld64): warning: can't find (?:match for|function/data for) "
             r"order_file entry: (\S+)", line
         )
+        if not match:
+            match = re.fullmatch(
+                r"(?:ld|ld64): warning: (\S+) specified in order_file but it exists in multiple "
+                r"\.o files\. Prefix symbol with \.o filename in order_file to disambiguate", line)
         if match and match[1] in names:
             omitted.add(match[1])
             continue
@@ -232,6 +247,9 @@ def main():
     parser.add_argument("--target", choices=sorted(TARGETS.values()))
     parser.add_argument("--jobs", type=int, default=2)
     parser.add_argument("--pairs", type=int, default=2)
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--resume", action="store_true", help="retry sorting a verified baseline in OUTPUT")
+    mode.add_argument("--measure-only", action="store_true", help="measure the validated executables in OUTPUT")
     args = parser.parse_args()
     if sys.platform != "darwin" or platform.machine() not in TARGETS:
         parser.error("requires native macOS arm64 or x86-64")
@@ -248,21 +266,36 @@ def main():
     if page_size not in (4096, 16384):
         parser.error("requires a 4 KiB or 16 KiB page size")
     output = args.output.resolve()
-    if output.exists():
+    if output.exists() and not (args.resume or args.measure_only):
         parser.error("the output directory must not exist")
     compiler = shutil.which("cc")
     if not compiler:
         parser.error("cc is required")
     with tempfile.TemporaryDirectory(prefix="dim-layout-", dir="/tmp") as temporary:
         work = Path(temporary)
-        record = cargo_link(work, compiler, args.jobs, args.target or host)
-        output.mkdir(parents=True)
-        baseline, baseline_map = replay_baseline(record, work, output)
         probe = work / "probe.dylib"
         subprocess.run(
             [compiler, "-dynamiclib", "-fPIC", "-O2", "-Wall", "-Wextra", "-Werror",
              str(HERE / "probe_darwin.c"), "-o", str(probe)],
             check=True)
+        baseline = output / "baseline"
+        executable = output / "dimcode"
+        if args.measure_only:
+            measure_artifacts(output, host, baseline, executable,
+                              lambda: measure(baseline, executable, work / "measure", probe, args.pairs))
+            return
+        baseline_map = output / "baseline.map"
+        if args.resume:
+            if executable.exists():
+                parser.error("the output already contains a validated executable")
+            record = load_baseline(output, baseline, host)
+        else:
+            archive = output / "capture"
+            archive.mkdir(parents=True)
+            capture = Path(tempfile.mkdtemp(dir=archive))
+            record = cargo_link(capture, compiler, args.jobs, host)
+            replay_baseline(record, capture, output)
+            save_baseline(output, baseline, record, host, REPO)
         profiles = train(baseline, work / "training", probe)
         for profile in profiles:
             shutil.copyfile(profile, output / profile.name)
@@ -277,21 +310,15 @@ def main():
         measurement.update(validate(
             baseline, candidate, baseline_map, candidate_map, order_file))
         train(candidate, work / "acceptance")
-        measurements = measure(baseline, candidate, work / "measure", probe, args.pairs)
         manifest = {
             "platform": "macos", "target": host, "pageSize": page_size,
             "codeResidencySource": "mincore-backing-pages",
-            "lto": os.environ.get("CARGO_PROFILE_RELEASE_LTO", "profile"),
-            "source": subprocess.check_output(
-                ["git", "rev-parse", "HEAD"], cwd=REPO, text=True).strip(),
-            "dirty": bool(subprocess.check_output(
-                ["git", "status", "--porcelain"], cwd=REPO)),
+            "lto": record["lto"], "source": record["source"], "dirty": record["dirty"],
             "rustc": record["rustc"],
             "baselineSha256": digest(baseline),
             "candidateSha256": digest(candidate),
             "orderSha256": digest(order_file),
             "inputs": record["inputs"], "training": measurement,
-            "measurements": measurements,
         }
         (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
         candidate.rename(output / "dimcode")

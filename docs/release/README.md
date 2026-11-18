@@ -149,11 +149,15 @@ The platform-independent `changes` and `ci-ok` jobs can run on any eligible self
 and macOS arm64/x86-64 runners run the native fixture test; Windows uses hosted
 `windows-2022` (x64) and `windows-11-arm` (ARM64) runners, with Python 3.13
 provisioned explicitly. Both select the MSVC Rust host toolchain matching the
-runner architecture and the version in `rust-toolchain.toml`. The same matrix also
+runner architecture and the version in `rust-toolchain.toml`. On manual dispatch, after the fixture jobs pass, a four-target matrix
 builds, trains and validates a real `dimcode` with the release LTO choice (thin
 for macOS ARM64, fat otherwise): Cargo capture and replay, native
 page-residency or working-set sampling, the real TUI model picker, function
-ordering, uninstrumented acceptance and alternating measurements. It does not build or
+ordering and uninstrumented acceptance. The dispatch input `measure` adds
+alternating measurements using those binaries. If ordering fails after capture,
+the diagnostic artifact includes `capture.tar`. Extract it beside the baseline
+executable and map at the original output path on a matching build host.
+Restore executable permissions on macOS files downloaded from Actions. It does not build or
 publish release packages; the opt-in command is documented in the
 [build environment](../architecture/build.md#native-executable-layout).
 
