@@ -1,11 +1,15 @@
 import assert from 'node:assert/strict';
-import {readFileSync} from 'node:fs';
+import {readdirSync, readFileSync} from 'node:fs';
 import test from 'node:test';
 import {replyFrames} from './tui-tmux/model.mjs';
 import {scenarios} from './tui-tmux/scenarios.mjs';
 
 const document = readFileSync(new URL('../docs/architecture/tui-e2e.md', import.meta.url), 'utf8');
-const workflow = readFileSync(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8');
+const workflowsDirectory = new URL('../.github/workflows/', import.meta.url);
+const workflows = readdirSync(workflowsDirectory)
+  .filter((name) => /\.ya?ml$/.test(name))
+  .map((name) => ({name, text: readFileSync(new URL(name, workflowsDirectory), 'utf8')}));
+const workflow = workflows.find((entry) => entry.name === 'ci.yml').text;
 
 test('every tmux scenario is unique and documented', () => {
   const names = scenarios.map((scenario) => scenario.name);
@@ -28,8 +32,10 @@ test('the CI selection names its ignored flows instead of the whole suite', () =
   assert(!workflow.includes('DIM_TEST_NPM_WRAPPER'), 'the TUI launcher flow left CI');
 });
 
-test('no CI job runs the tmux suite', () => {
-  assert(!workflow.includes('tui-tmux'), 'CI must not invoke the local TUI E2E suite');
+test('no workflow runs the tmux suite', () => {
+  for (const entry of workflows) {
+    assert(!entry.text.includes('tui-tmux'), `${entry.name} must not invoke the local TUI E2E suite`);
+  }
 });
 
 test('a scripted reply frames text and tool calls as an OpenAI stream', () => {

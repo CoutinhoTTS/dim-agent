@@ -114,9 +114,13 @@ export class TmuxCase {
       HOME: this.userHome,
       TMPDIR: path.join(this.root, 'tmp'),
       PATH: process.env.PATH ?? DEFAULT_PATH,
-      LANG: process.env.LANG ?? 'en_US.UTF-8',
+      LANG: 'en_US.UTF-8',
       TERM: 'screen-256color',
       SHELL: '/bin/sh',
+      // The pane is a real tmux pane, so the CLI must take the multiplexer
+      // branch: no synchronized-output negotiation of its own, and clipboard
+      // output through tmux.
+      TMUX: `${this.socket},0,0`,
       DIMCODE_UPDATE_CHECK: '0',
       ...extra,
     };
@@ -142,6 +146,10 @@ export class TmuxCase {
 
   /// Starts one CLI (or launcher) on its own tmux session and taps the pane's
   /// output stream, which is where escape sequences a pane cannot show live.
+  /// The pane is created with a shell, the tap is attached, and only then is
+  /// the program respawned in it: a `new-session` that runs the program first
+  /// would let it write its terminal probe and first frames before the pipe
+  /// exists.
   ///
   /// `modelConfig` runs the development model profile, whose daemon serves
   /// sessions but not provider management. `server` runs the managed
@@ -165,9 +173,10 @@ export class TmuxCase {
           : [this.binary, '--home', this.home]);
     const line = shellCommand(this.environment(env), [...program, ...argv]);
     this.log(`# launch ${session}: ${line}`);
-    this.tmuxRun(['new-session', '-d', '-s', session, '-x', String(cols), '-y', String(rows), line]);
+    this.tmuxRun(['new-session', '-d', '-s', session, '-x', String(cols), '-y', String(rows)]);
     const rawFile = path.join(this.root, `${session}.raw`);
     this.tmuxRun(['pipe-pane', '-o', '-t', session, `cat >> ${quote(rawFile)}`]);
+    this.tmuxRun(['respawn-pane', '-k', '-t', session, line]);
     const terminal = new Terminal(this, {session, rawFile});
     if (waitForComposer) await terminal.untilComposer();
     return terminal;
@@ -300,26 +309,37 @@ export class Terminal {
     this.owner.tmuxRun(['resize-window', '-t', this.session, '-x', String(cols), '-y', String(rows)]);
   }
 
-  /// Resizes the pane and waits for the settled layout: the interface pauses
-  /// frame painting until the resize debounce settles, so a screen still wider
-  /// than the pane is the frame before the rewrite.
-  async resizeTo(cols, rows, {timeout = DEFAULT_STEP_TIMEOUT_MS} = {}) {
+  /// Resizes the pane and waits for the settled layout. A capture alone cannot
+  /// tell a repainted screen from the pane's resized grid, so the barrier is
+  /// content: tmux must report the target size, the composer must be drawn, the
+  /// widest row must reach the new width (a repaint, not leftover cells), and two
+  /// consecutive captures must agree. The returned text is the settled capture,
+  /// so a caller never asserts against the frame before the rewrite.
+  async resizeTo(cols, rows, {timeout = DEFAULT_STEP_TIMEOUT_MS, expectComposer = true, stable = true} = {}) {
+    const paneSize = () =>
+      this.owner
+        .tmuxRun(['display-message', '-p', '-t', this.session, '#{pane_width}x#{pane_height}'], {allowFailure: true})
+        .trim();
+    const target = `${cols}x${rows}`;
+    const near = Math.max(1, cols - 10);
     this.resize(cols, rows);
     const deadline = Date.now() + timeout;
+    let settled = null;
     for (;;) {
-      const text = this.capture({join: false});
-      const widest = Math.max(0, ...text.split('\n').map((line) => line.length));
-      if (widest <= cols) {
-        this.untilComposer({timeout: Math.max(1000, deadline - Date.now())});
-        return text;
+      let text = '';
+      let widest = 0;
+      if (paneSize() === target) {
+        text = this.capture({join: false});
+        widest = Math.max(0, ...text.split('\n').map((line) => line.length));
+        const drawn = (!expectComposer || text.includes('Ask anything...')) && widest >= near && widest <= cols;
+        if (drawn && (!stable || settled === text)) return text;
+        settled = drawn ? text : null;
+      } else {
+        settled = null;
       }
       if (Date.now() >= deadline) {
-        const size = this.owner.tmuxRun(
-          ['display-message', '-p', '-t', this.session, '#{window_width}x#{window_height} pane #{pane_width}x#{pane_height}'],
-          {allowFailure: true},
-        ).trim();
         throw new Error(
-          `pane stayed ${widest} columns wide ${timeout}ms after resizing to ${cols}; tmux reports ${size}\n${text}`,
+          `pane did not settle at ${target} within ${timeout}ms: pane ${paneSize() || 'unknown'}, widest row ${widest}\n${this.capture({join: false})}\n--- output tail ---\n${tail(this.raw(), 2000)}`,
         );
       }
       await sleep(POLL_MS);
@@ -400,21 +420,32 @@ export class Terminal {
   }
 
   /// Waits for the CLI to end; `remain-on-exit` keeps the pane, its last screen
-  /// and its exit status.
+  /// and its exit status. A signal death is not a clean exit: the status is
+  /// empty and the signal names the cause, so both are reported.
   async waitForExit({timeout = DEFAULT_STEP_TIMEOUT_MS} = {}) {
-    const line = await waitUntil(
+    const ended = await waitUntil(
       () => {
         const listing = this.owner.tmuxRun(
           ['list-panes', '-t', this.session, '-F', '#{pane_dead} #{pane_dead_status} #{pane_dead_signal}'],
           {allowFailure: true},
         ).trim();
         if (!listing) return false;
-        const [dead, status] = listing.split(' ');
-        return dead === '1' ? {status: Number(status)} : false;
+        const [dead, status = '', signal = ''] = listing.split(' ');
+        if (dead !== '1') return false;
+        return {
+          status: status === '' ? null : Number(status),
+          signal: signal === '' ? null : signal,
+        };
       },
       {timeout, describe: `${this.session} to exit`},
     );
-    return line;
+    if (ended.signal) {
+      throw new Error(`${this.session} died from signal ${ended.signal}, not a clean exit\n${this.capture()}`);
+    }
+    if (ended.status === null || Number.isNaN(ended.status)) {
+      throw new Error(`${this.session} ended without an exit status\n${this.capture()}`);
+    }
+    return ended;
   }
 }
 

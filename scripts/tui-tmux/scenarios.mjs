@@ -51,10 +51,11 @@ async function waitForRequest(model, predicate, {timeout = 20_000, describe = 'a
 
 /// A rejected gesture has no event of its own, so the evidence is the window
 /// in which nothing reached the fixture.
-async function settleWithout(model, predicate, {timeout = 1500} = {}) {
+async function settleWithout(model, predicate, {timeout = 1500, after = 0} = {}) {
+  const matching = () => model.requests.filter((entry) => predicate(entry.body)).length;
   const deadline = Date.now() + timeout;
   for (;;) {
-    if (model.requests.some((entry) => predicate(entry.body))) return false;
+    if (matching() > after) return false;
     if (Date.now() >= deadline) return true;
     await sleep(100);
   }
@@ -134,9 +135,14 @@ const scenarios = [
       await exitWith(terminal);
 
       const raw = terminal.raw();
-      const pushes = (raw.match(/\u001b\[>\d+u/g) ?? []).length;
-      const pops = (raw.match(/\u001b\[<u/g) ?? []).length;
-      assert.equal(pops, pushes, `every keyboard-protocol push is popped (${pushes} pushes, ${pops} pops)`);
+      // tmux answers the kitty probe on the outer terminal's behalf without
+      // negotiating it, so the app keeps xterm's ModifyOtherKeys: the enable
+      // and reset pair must appear, and must balance.
+      const enables = (raw.match(/\u001b\[>4;2m/g) ?? []).length;
+      const resets = (raw.match(/\u001b\[>4;0m/g) ?? []).length;
+      assert(enables > 0, 'the multiplexer kept ModifyOtherKeys enabled');
+      assert.equal(resets, enables, `every ModifyOtherKeys enable is reset (${enables} enables, ${resets} resets)`);
+      assert(!raw.includes('\u001b[>5u'), 'tmux does not negotiate the kitty protocol');
       assert(raw.includes('\u001b[?25h'), 'the cursor is restored on exit');
       assert(raw.trimEnd().includes('\u001b[?1049l'), 'the last screen is the caller screen');
     },
@@ -156,14 +162,56 @@ const scenarios = [
       for (const [cols, rows] of [[60, 18], [140, 40]]) {
         await terminal.resizeTo(cols, rows);
         const transcript = terminal.screen({history: true});
-        assert(transcript.includes(marker), `${cols}x${rows} keeps the message`);
-        assert(transcript.includes('end-of-prompt'), `${cols}x${rows} keeps the message tail`);
+        // The interface wraps at a cell, so a long message continues on the next
+        // row behind its own prefix; joining the rows recovers the text.
+        const unwrapped = transcript
+          .split('\n')
+          .map((row) => row.replace(/^\s*┃\s?/, ''))
+          .join('');
+        assert(unwrapped.includes(marker), `${cols}x${rows} keeps the message`);
+        assert(unwrapped.includes('end-of-prompt'), `${cols}x${rows} keeps the message tail`);
         assert(transcript.includes(ANSWER), `${cols}x${rows} keeps the answer`);
         const visible = terminal.capture({join: false});
         const width = Math.max(0, ...visible.split('\n').map((line) => line.length));
         assert(width <= cols, `no visible row is wider than ${cols} columns (widest ${width})`);
+        assert(width > cols - 10, `${cols}x${rows} repainted at the new width (widest ${width})`);
       }
 
+      await exitWith(terminal);
+    },
+  },
+  {
+    name: 'resize_during_a_stream_rewraps_and_finishes',
+    area: 'terminal-modes',
+    title: 'Resizing while the answer streams rewraps the live output and the run still finishes',
+    async run(tui) {
+      const marker = 'stream-marker-0123456789';
+      const tail = 'STREAM-END';
+      const answer = `${marker} ${'streaming words keep arriving '.repeat(20)}${tail}`;
+      await tui.setup({
+        respond: (request) =>
+          (request.tools ?? []).length > 0 && userText(request).includes('resize-stream')
+            ? {text: answer, chunkSize: 6, chunkDelayMs: 90}
+            : {text: ANSWER},
+      });
+      const terminal = await tui.launch([], {waitForComposer: true});
+      await terminal.sendPrompt('resize-stream please');
+      await terminal.waitFor('working…');
+      await terminal.waitFor('stream-marker', {describe: 'the streamed answer'});
+
+      const painted = await terminal.resizeTo(60, 18, {expectComposer: false, stable: false});
+      const widest = Math.max(0, ...painted.split('\n').map((line) => line.length));
+      assert(widest > 50 && widest <= 60, `the live stream was repainted at 60 columns (widest ${widest})`);
+      assert(painted.includes('stream-marker'), 'the streamed text survived the resize');
+
+      await terminal.waitFor(tail, {timeout: 30_000});
+      const unwrapped = terminal
+        .screen({history: true})
+        .split('\n')
+        .map((row) => row.replace(/^\s*[┃│]\s?/, ''))
+        .join('');
+      assert(unwrapped.includes(marker), 'the whole streamed message is kept');
+      assert(unwrapped.includes(tail), 'the stream finished after the resize');
       await exitWith(terminal);
     },
   },
@@ -828,9 +876,44 @@ const scenarios = [
     },
   },
   {
+    name: 'suggestion_asks_nothing_while_a_draft_exists',
+    area: 'suggestions',
+    title: 'A draft withdraws the offer and asks for no other suggestion until the next turn completes',
+    async run(tui) {
+      const prediction = (request) => userText(request).startsWith('You predict the next message');
+      let next = 0;
+      await tui.setup({
+        respond: (request) => (prediction(request) ? {text: `draft offer #${(next += 1)}`} : {text: ANSWER}),
+        documents: {'rust/prompt-suggestion.json': {enabled: true, maxChars: 80}},
+      });
+      const predictions = () => tui.model.requests.filter((entry) => prediction(entry.body)).length;
+      const terminal = await tui.launch([], {waitForComposer: true});
+
+      await terminal.sendPrompt('offer me something');
+      await terminal.waitFor(ANSWER);
+      await terminal.waitFor('draft offer #1', {timeout: 30_000});
+      assert.equal(predictions(), 1, 'the completed turn asked once');
+
+      terminal.send('a draft of my own');
+      await terminal.waitFor('a draft of my own');
+      await terminal.waitForAbsent('draft offer #1');
+      assert(
+        await settleWithout(tui.model, (request) => prediction(request), {after: predictions()}),
+        'the draft asked for no other suggestion',
+      );
+      assert.equal(predictions(), 1, 'still one suggestion request while the draft exists');
+
+      terminal.key('Enter');
+      await terminal.waitFor(ANSWER);
+      await terminal.waitFor('draft offer #2', {timeout: 30_000});
+      assert.equal(predictions(), 2, 'the next completed turn asked again');
+      await exitWith(terminal);
+    },
+  },
+  {
     name: 'daemon_stop_reports_disconnect_and_resume_replays_history',
     area: 'daemon',
-    title: 'A stopped daemon keeps the draft, names the resume command and the resumed session replays history',
+    title: 'A stopped daemon keeps the draft in the same process, names the resume command, and the resumed session replays history',
     async run(tui) {
       await tui.setup({respond: () => ({text: ANSWER})});
       const terminal = await tui.launch([], {waitForComposer: true});
@@ -842,6 +925,10 @@ const scenarios = [
 
       tui.stopDaemon();
       await terminal.waitFor('Disconnected; draft kept');
+      assert(
+        terminal.capture().includes('unfinished follow-up'),
+        'the disconnected interface still shows the draft it kept',
+      );
       const screen = await terminal.waitFor('dimcode --resume');
       const resume = /dimcode --resume ([0-9a-f-]{36})/.exec(screen);
       assert(resume, `the notice names the resume command: ${screen}`);
@@ -871,7 +958,12 @@ const scenarios = [
         path.join(wrapper, 'node_modules', `dimcode-${platform}`, 'package.json'),
         JSON.stringify({name: `dimcode-${platform}`}),
       );
-      fs.linkSync(tui.binary, path.join(packageDir, 'dimcode'));
+      // The case's home lives on the system temporary directory, which need not
+      // share a filesystem with the checkout or `--binary`, so the platform
+      // package gets a copy that keeps the executable mode.
+      const packaged = path.join(packageDir, 'dimcode');
+      fs.copyFileSync(tui.binary, packaged);
+      fs.chmodSync(packaged, 0o755);
       const launcherDir = path.join(wrapper, 'bin');
       fs.mkdirSync(launcherDir, {recursive: true});
       fs.copyFileSync(path.join(repository, 'npm', 'bin', 'dimcode.mjs'), path.join(launcherDir, 'dimcode.mjs'));
@@ -886,8 +978,11 @@ const scenarios = [
       await terminal.waitFor(ANSWER);
       assert.equal(lastTurnText(tui.model), 'launcher prompt');
 
+      await terminal.waitForAbsent('esc interrupt', {describe: 'the settled run'});
       terminal.key('C-c');
-      await sleep(300);
+      await terminal.waitFor(/Press Ctrl\+C again to exit|Interrupt requested; Ctrl\+C again to exit/, {
+        describe: 'the interrupt confirmation',
+      });
       assert(terminal.alive(), 'the first interrupt keeps the interface');
       terminal.key('C-c');
       const status = await terminal.waitForExit();

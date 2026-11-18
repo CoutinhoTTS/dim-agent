@@ -151,7 +151,30 @@ async function main() {
   process.stderr.write(`tui-tmux: failure artifacts under ${artifactsRoot}\n\n`);
 
   let failed = 0;
+  let active = null;
+  let stopping = false;
+  const stop = async (code, why) => {
+    if (stopping) return;
+    stopping = true;
+    process.stderr.write(`tui-tmux: ${why}; closing ${active?.name ?? 'the run'}\n`);
+    try {
+      await active?.close();
+    } catch (error) {
+      process.stderr.write(`tui-tmux: cleanup failed: ${error.message}\n`);
+    }
+    process.exit(code);
+  };
+  for (const [signal, code] of [['SIGINT', 130], ['SIGTERM', 143]]) {
+    process.once(signal, () => stop(code, signal));
+  }
+  process.once('unhandledRejection', (error) => {
+    stop(1, `unhandled rejection: ${error?.stack ?? error}`);
+  });
+  process.once('uncaughtException', (error) => {
+    stop(1, `uncaught exception: ${error?.stack ?? error}`);
+  });
   for (const [index, scenario] of chosen.entries()) {
+    if (stopping) break;
     const started = Date.now();
     const caseRoot = path.join(root, String(index));
     const owner = new TmuxCase({
@@ -162,6 +185,7 @@ async function main() {
       keep: options.keep,
       verbose: options.verbose,
     });
+    active = owner;
     process.stderr.write(`RUN  ${scenario.name}\n`);
     let failure;
     try {
@@ -189,6 +213,7 @@ async function main() {
       process.stderr.write(`PASS ${scenario.name} (${((Date.now() - started) / 1000).toFixed(1)}s)\n\n`);
     }
     await owner.close();
+    active = null;
   }
   if (!options.keep) fs.rmSync(root, {recursive: true, force: true});
   process.stderr.write(`${chosen.length - failed}/${chosen.length} scenario(s) passed\n`);
