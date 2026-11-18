@@ -141,6 +141,7 @@
         "format",
         "json",
         "matches",
+        "unreachable",
         "vec"
       ]
     },
@@ -8068,7 +8069,7 @@
       "to": "dim_acp::projection",
       "references": [
         "path Projection",
-        "path Projection::default",
+        "path Projection::new",
         "use crate::projection::Projection"
       ]
     },
@@ -8332,10 +8333,12 @@
       "references": [
         "path ContentBlock::Image",
         "path ContentBlock::Text",
+        "path ImageSource",
         "path ToolContent",
         "path ToolContent::Blocks",
         "path ToolContent::Text",
         "use dim_agent_types::ContentBlock",
+        "use dim_agent_types::ImageSource",
         "use dim_agent_types::ToolContent"
       ]
     },
@@ -8381,6 +8384,14 @@
       "to": "dim_agent_types::skill_token",
       "references": [
         "path dim_agent_types::skill_token::tokens"
+      ]
+    },
+    {
+      "from": "dim_acp::projection",
+      "to": "dim_agent_types::tool",
+      "references": [
+        "path ToolResult",
+        "use dim_agent_types::ToolResult"
       ]
     },
     {
