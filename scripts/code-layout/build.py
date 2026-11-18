@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Build and train a native Linux x86-64 executable, then reorder its functions.
+"""Build and train a native executable, then reorder its functions.
 
-The output directory must not exist. Cargo's executable is left unchanged; only
-an independently smoke-tested relink is published as OUTPUT/dimcode.
+Use a new output directory for the initial build. On macOS and Windows,
+--resume and --measure-only reuse an existing build directory.
 """
 
 import argparse
@@ -21,6 +21,8 @@ import subprocess
 import sys
 import tempfile
 
+from toolchain import rustc as rustc_command
+
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent.parent
 
@@ -30,7 +32,7 @@ def digest(path):
 
 
 def cargo_link(work, compiler, jobs, target=None):
-    rustc = os.environ.get("RUSTC") or os.environ.get("CARGO_BUILD_RUSTC") or "rustc"
+    rustc = rustc_command()
     sysroot = Path(subprocess.check_output([rustc, "--print", "sysroot"], cwd=REPO, text=True).strip())
     linker_dir = sysroot / "lib/rustlib/x86_64-unknown-linux-gnu/bin/gcc-ld"
     if not (linker_dir / "ld.lld").is_file():
@@ -194,6 +196,12 @@ def validate_layout(baseline, candidate, order_file):
 
 
 def main():
+    if sys.platform == "darwin":
+        from build_darwin import main as platform_main
+        return platform_main()
+    if sys.platform == "win32":
+        from build_windows import main as platform_main
+        return platform_main()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--target", choices=["x86_64-unknown-linux-gnu"])
