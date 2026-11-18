@@ -150,10 +150,20 @@ ModelFailure {
   and no tool call writes `failure.kind = malformed_response` with the reason
   "the response had no text and no tool call". Thinking alone is not an answer,
   so a reply of thinking only counts as empty. The bridge decides it where the
-  stream completes, because it is the only part that sees the whole response;
-  the turn loop does not change, and its retry of `malformed_response` covers
-  it. The rule holds for every turn, driven Loop and Goal turns included: an
-  empty reply is not a step there either.
+  stream completes, because it is the only part that sees the whole response.
+  Whether the request is retried depends on what the attempt handed on: with
+  nothing but the message start handed on, it is retried once like any
+  `malformed_response`; once anything else has been handed on, a whitespace
+  text part included, the request is past the point where it may be retried
+  ([output.rs](../../crates/dim-agent-capabilities/src/output.rs) clears replay
+  safety on every chunk but the message start), so the turn ends with the
+  failure recorded and shown and the user resends by hand. A retry cannot
+  follow committed output: what the request committed must match the next
+  complete reply, thinking included
+  ([output.rs](../../crates/dim-agent-capabilities/src/output.rs)), and a second
+  attempt brings its own thinking.
+  The rule holds for every turn, driven Loop and Goal turns included: an empty
+  reply is not a step there either.
 - A failure from a host with no provider boundary gets kind `unknown` and the
   message it already carried.
 
@@ -205,8 +215,11 @@ line's `tried N times` is the persistent record.
 ## 4. Retry
 
 `invoke` is shared by ModelProvider, the auxiliary model and the summary
-strategy, so all three retry the same way; there is one implementation and no
-per-caller setting.
+strategy, so there is one policy and no per-caller setting, but not always the
+same outcome: replay safety is the consumer's to clear, and the auxiliary model
+and the summary strategy read the stream without handing anything on, so a
+reply that streamed only thinking or whitespace text is retried there, while
+a main turn ends on it.
 
 | item | value |
 | --- | --- |
@@ -216,7 +229,7 @@ per-caller setting.
 | backoff | the n-th retry sleeps 1 s × 2^(n−1), capped at 30 s, times a uniform jitter in [0.8, 1.0] |
 | `Retry-After` | used exactly as the delay, even above 30 s, while it fits in the budget left; if it does not fit, the request stops at once and records `retryAfterMs` |
 | wait budget | a request sleeps at most five minutes in all before it fails; a wait that does not fit in what is left stops the request at once |
-| unchanged | no retry after irreversible output; an interrupt cancels the sleep; one credential recovery with no delay, still within the 8 attempts; `ModelFailurePolicy::forbids_retry`; a terminal credential rejection is settled |
+| unchanged | no retry once the attempt handed anything but the message start on, thinking and whitespace text included; an interrupt cancels the sleep; one credential recovery with no delay, still within the 8 attempts; `ModelFailurePolicy::forbids_retry`; a terminal credential rejection is settled |
 
 The nominal backoff sleeps are 1, 2, 4, 8, 16, 30 and 30 s, about 91 s in all.
 The numbers follow the outage in #1197, which lasted tens of seconds: eight
