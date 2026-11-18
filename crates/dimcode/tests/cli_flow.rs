@@ -5798,6 +5798,7 @@ fn home_after_new_drops_the_previous_sessions_effort() {
 }
 
 #[test]
+#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_resizing_during_thinking_preserves_multiline_history() {
     let home = Home::new();
     fs::write(
@@ -6577,6 +6578,7 @@ fn tui_pasted_images_and_long_text_submit_as_user_content() {
 }
 
 #[test]
+#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_at_mentions_pick_files_from_the_working_directory() {
     let home = Home::new();
     let project = home.0.join("project");
@@ -6811,6 +6813,7 @@ fn a_daemon_without_skill_catalog_keeps_a_working_command_palette() {
 }
 
 #[test]
+#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_palette_tab_only_completes_and_enter_still_runs() {
     for fullscreen in [false, true] {
         let home = Home::new();
@@ -9729,6 +9732,7 @@ fn tui_export_dialog_matches_the_subcommand_and_cancel_sends_nothing() {
 }
 
 #[test]
+#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_queue_panel_deletes_steers_and_moves_applied_inputs_to_the_transcript() {
     for fullscreen in [false, true] {
         let home = Home::new();
@@ -11674,6 +11678,7 @@ fn tui_rebuilds_compaction_rows_from_history_on_resume() {
 /// setting, `/tools`, exactly as a compaction body does. One stored line is
 /// named in the singular, so the row never says `1 lines`.
 #[test]
+#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_draws_a_prompt_hooks_context_as_a_status_row() {
     let home = Home::new();
     let operator = "why does the parser stall?";
