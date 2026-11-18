@@ -349,7 +349,6 @@ fn tab_keeps_the_fullscreen_focus_and_right_still_takes_the_offer() {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn enter_on_an_empty_composer_leaves_the_offer() {
     let home = Home::new();
     let (settled, settle) = std::sync::mpsc::channel();

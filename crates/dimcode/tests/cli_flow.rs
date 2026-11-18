@@ -8970,7 +8970,6 @@ fn tui_web_toggles_the_daemon_switch_without_leaving() {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_stays_up_when_the_daemon_leaves_and_restores_the_terminal_on_exit() {
     let home = Home::new();
     let (release, wait_release) = std::sync::mpsc::channel();
@@ -10503,7 +10502,6 @@ fn tui_command_output_errors_stop_refresh_and_reopening_retries() {
 }
 
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_tasks_panel_stops_the_selected_command_or_member() {
     let home = Home::new();
     let (deliver, delivery) = std::sync::mpsc::channel();
@@ -11761,7 +11759,6 @@ fn tui_draws_a_prompt_hooks_context_as_a_status_row() {
 /// `▸` closed, and `/tools` opens and closes its body as it does a hook
 /// context's.
 #[test]
-#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_draws_a_stop_hooks_follow_up_as_one_row() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {

@@ -71,6 +71,7 @@ export class TmuxCase {
     this.requestsFile = path.join(root, 'requests.jsonl');
     this.interactionsFile = path.join(root, 'interactions.log');
     this.sessions = [];
+    this.closed = false;
   }
 
   /// `documents` writes product-home settings documents (for example
@@ -139,6 +140,13 @@ export class TmuxCase {
   }
 
   tmuxRun(args, {allowFailure = false} = {}) {
+    if (this.closed) throw new Error(`case ${this.name} is closed; tmux ${args[0]} not run`);
+    return this.execTmux(args, {allowFailure});
+  }
+
+  /// The raw tmux call, also used by the teardown that runs after the case is
+  /// marked closed.
+  execTmux(args, {allowFailure = false} = {}) {
     try {
       return execFileSync(
         this.tmux,
@@ -229,20 +237,40 @@ export class TmuxCase {
   }
 
   async close() {
-    this.tmuxRun(['kill-server'], {allowFailure: true});
+    if (this.closed) return;
+    // A scenario abandoned by its timeout must not keep issuing commands into
+    // a case whose server and directory are about to go away.
+    this.closed = true;
+    this.execTmux(['kill-server'], {allowFailure: true});
     this.stopDaemon();
-    if (fs.existsSync(path.join(this.home, 'rust', 'daemon.sock'))) {
-      try {
-        execFileSync('pkill', ['-f', path.join(this.home, 'rust', 'dimcode-server')], {
-          stdio: 'ignore',
-          timeout: 5_000,
-        });
-      } catch {
-        // No daemon left to stop.
-      }
-    }
+    this.killLeftovers();
     await this.model?.close();
     if (!this.keep) fs.rmSync(this.root, {recursive: true, force: true});
+  }
+
+  /// The daemon's own shutdown is the normal exit. When it does not settle,
+  /// every process still naming this case's home is the leftover: the linked
+  /// `dimcode-server` and the standalone `dim-app-server` profile alike, whose
+  /// own path says nothing about this case.
+  killLeftovers() {
+    if (!fs.existsSync(path.join(this.home, 'rust', 'daemon.sock'))) return;
+    let listing = '';
+    try {
+      listing = execFileSync('ps', ['-axo', 'pid=,command='], {encoding: 'utf8', timeout: 5_000});
+    } catch {
+      return;
+    }
+    for (const line of listing.split('\n')) {
+      const match = /^\s*(\d+)\s+(.*)$/.exec(line);
+      if (!match || !match[2].includes(this.home)) continue;
+      const pid = Number(match[1]);
+      if (pid === process.pid) continue;
+      try {
+        process.kill(pid, 'SIGKILL');
+      } catch {
+        // The process left between the listing and the signal.
+      }
+    }
   }
 
   /// Copies everything a failure needs to be diagnosed from the case's own

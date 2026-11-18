@@ -191,11 +191,15 @@ async function main() {
     let failure;
     try {
       fs.mkdirSync(caseRoot, {recursive: true});
-      await withTimeout(
-        scenario.run(owner, {repository, runId: run, verbose: options.verbose}),
-        options.timeout,
-        scenario.name,
-      );
+      const work = scenario.run(owner, {repository, runId: run, verbose: options.verbose});
+      try {
+        await withTimeout(work, options.timeout, scenario.name);
+      } catch (error) {
+        failure = error;
+        // A timed-out scenario is still running: the case is closed next, and
+        // whatever it throws on the way out is not a second failure.
+        work.catch(() => {});
+      }
     } catch (error) {
       failure = error;
     }
@@ -213,8 +217,17 @@ async function main() {
     } else {
       process.stderr.write(`PASS ${scenario.name} (${((Date.now() - started) / 1000).toFixed(1)}s)\n\n`);
     }
-    await owner.close();
-    active = null;
+    try {
+      await owner.close();
+    } catch (error) {
+      if (!failure) {
+        failed += 1;
+        process.stderr.write(`FAIL ${scenario.name} (teardown)\n`);
+      }
+      process.stderr.write(`tui-tmux: closing ${scenario.name} failed: ${error.message}\n\n`);
+    } finally {
+      active = null;
+    }
   }
   if (!options.keep) fs.rmSync(root, {recursive: true, force: true});
   process.stderr.write(`${chosen.length - failed}/${chosen.length} scenario(s) passed\n`);

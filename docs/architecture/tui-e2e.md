@@ -36,7 +36,7 @@ Prerequisites:
 | --- | --- |
 | `target/debug/dimcode` | Built from the checkout; `--binary` names another build |
 | `target/debug/dim-app-server` | The provider scenario's `--server` profile; `--binary` looks for it beside the CLI, and the case names the build command when it is missing |
-| tmux | 3.2 or newer, on macOS or Linux |
+| tmux | 3.2 or newer, on macOS or Linux. `pane_dead_signal` arrived in 3.3: on 3.2 the field is unknown, so a signal death reports an empty status and fails the case instead of naming the signal |
 | Node.js | The version in `.node-version`; the suite and its fixture are plain ES modules |
 | No network | The model fixture listens on loopback; the suite sets `DIMCODE_UPDATE_CHECK=0` |
 
@@ -82,11 +82,16 @@ its replies, so a prompt has one expected answer; the tool calls a scenario need
 messages, so a scenario can assert what reached the model.
 
 Teardown always runs: the tmux server is killed (ending the pane's CLI), the
-daemon is stopped through `dimcode --home … daemon stop` with a `pkill` fallback,
-the fixture server is closed, and the case directory is removed. `SIGINT`,
+daemon is stopped through `dimcode --home … daemon stop`, and every process
+still naming the case's home is killed — the linked `dimcode-server` and the
+standalone `dim-app-server` profile alike — then the fixture server is closed
+and the case directory is removed. A scenario the runner's budget abandoned can
+no longer issue tmux commands into a case that is closing: the case is marked
+closed first and whatever the abandoned scenario throws is dropped. `SIGINT`,
 `SIGTERM`, an unhandled rejection and an uncaught exception close the case in
-progress through the same path before the runner exits. `--keep` leaves the home
-and raw streams in place for inspection.
+progress through the same path before the runner exits, and the per-case close
+runs in a `finally`, so a failing teardown cannot strand the run root or the
+daemon. `--keep` leaves the home and raw streams in place for inspection.
 
 ## Scenarios
 
@@ -99,7 +104,7 @@ and raw streams in place for inspection.
 | terminal-modes | `resize_during_thinking_rewraps_multiline_history` | Expanded reasoning streams in a turn sent as three lines; five resizes (100x24, 60x24, 120x40, 45x18, 100x36) keep every user line and every reasoning line, the transcript settles as a thought, and the answer still arrives |
 | composer | `composer_edits_multiline_and_stores_a_large_paste` | `Ctrl+J` newline editing, backspace, a five-line bracketed paste stored as an attachment, and the exact prompt text the model receives |
 | composer | `file_mention_inserts_a_workspace_link` | The `@` picker lists the `--cwd` workspace and inserts the chosen file into the prompt |
-| no-session | `home_commands_without_a_session_answer_and_send_nothing` | `/export`, `/queue`, `/agent` and `/mcp list` answer at home in both layouts, the draft survives, and the fixture model receives no request |
+| no-session | `home_commands_without_a_session_answer_and_send_nothing` | `/export`, `/queue` and `/mcp list` run from the palette over a draft answer at home in both layouts, the draft returns to the composer after each, no command sends it, and the fixture model receives no request; `/agent` and a valued `/effort` stay with `tui_home_commands_without_a_session_answer_and_send_nothing` in CI |
 | hooks | `hook_context_and_stop_follow_up_stay_status_rows` | A prompt hook's context draws one closed row and reaches the model after the operator's words; a stop hook's follow-up draws its own closed row and starts a turn; three `/tools` toggles open and close both |
 | commands | `slash_palette_lists_curated_commands_and_settings` | The palette's curated order and filter, the Settings panel, and `/keys` output |
 | commands | `palette_tab_completes_and_enter_runs_the_command` | `Tab` completes the command without running it and `Enter` still runs it, in both layouts |
@@ -108,11 +113,11 @@ and raw streams in place for inspection.
 | approvals | `approval_panel_allows_one_command` | The permission panel names the tool and command, `y` allows once, the command output returns to the model, and the status is blocked before the answer |
 | approvals | `question_panel_answer_reaches_the_next_request` | The question panel's options, the review step, and the chosen label in the tool result the model receives |
 | tasks | `background_task_row_and_tasks_panel` | A background command's task row, `1 in background`, the Background tasks panel, and stopping it with `x` |
-| members | `member_conversation_and_stop_all` | A delegated member's task row, the read-only member conversation, `Ctrl+X` stop-all, and the leader's settled turn |
+| members | `member_conversation_and_stop_all` | A delegated member's task row, the member conversation's heading and transcript, `Ctrl+X` stop-all, and the leader's settled turn; read-only input and the leader draft stay with `tui_member_conversation_is_read_only_and_preserves_the_leader_draft` in CI |
 | providers | `provider_panel_adds_and_keeps_a_custom_provider` | On the production App Server profile (`--server`, no `--model-config`) `/connect` adds a custom provider against the fixture, tests and applies it, a turn uses its key, and the product home keeps it across a daemon restart |
 | suggestions | `prompt_suggestion_offers_and_takes_the_next_message` | Every completed turn draws its own numbered offer; `Tab` takes it in scrollback, `Tab` keeps the focus in fullscreen (and `Enter` sends nothing) while `Right` takes it there, and `Escape` withdraws it without asking again |
 | suggestions | `suggestion_asks_nothing_while_a_draft_exists` | A draft withdraws the offer, no suggestion request follows it, and the next completed turn asks again |
-| daemon | `daemon_stop_reports_disconnect_and_resume_replays_history` | A stopped daemon keeps the draft in the same process and shows it, names `dimcode --resume`, exits cleanly with the terminal restored; the resumed session replays history and accepts a new prompt (the draft is not restored across processes) |
+| daemon | `daemon_stop_reports_disconnect_and_resume_replays_history` | A stopped daemon keeps the draft in the same process and shows it, names `dimcode --resume`, exits cleanly with the terminal restored; the resumed session replays history and then answers a distinct new prompt, which only a new turn can produce (the draft is not restored across processes) |
 | launcher | `npm_launcher_streams_and_passes_interrupts` | The npm launcher copies the native binary into its platform package, starts the TUI, streams an answer, shows the interrupt confirmation, and a second `Ctrl+C` exits 130 with the terminal restored |
 
 ## Effects pane text cannot show
@@ -123,12 +128,12 @@ screen cannot show:
 
 | Effect | Evidence in the raw stream |
 | --- | --- |
-| Alternate-screen entry and exit | `CSI ? 1049 h` before the fullscreen composer, `CSI ? 1049 l` when leaving |
-| Cursor restoration | `CSI ? 25 h` after exit or after the daemon leaves |
+| Alternate-screen entry and exit | `CSI ? 1049 h` before the fullscreen composer; the last screen switch is a `CSI ? 1049 l`, so the first `/tui` leave cannot satisfy it |
+| Cursor restoration | `CSI ? 25 h` in the final restore sequence, the part that starts at the status record's clear and runs to the process's last byte, so no frame or earlier mode switch can satisfy it |
 | Keyboard protocol | The multiplexer branch tmux selects: `CSI > 4 ; 2 m` enables `ModifyOtherKeys` and `CSI > 4 ; 0 m` resets it, both counted and balanced. tmux answers the kitty probe without negotiating it, so `CSI > 5 u` never appears; actual kitty negotiation and the per-screen flag stacks stay with `exit::keyboard_protocol_follows_the_screen_and_restores_both_stacks_on_exit` in CI |
 | Program Status Protocol | `OSC 7501` records: `state=idle`, `state=working`, `state=blocked:kind=permission`, and `state=clear` on exit |
 | Terminal progress | `OSC 9;4` with `DIM_TERMINAL_PROGRESS=on` (the bar is suppressed inside a multiplexer by default): `9;4;3` while the run works, and `9;4;0` once it settles and again on exit |
-| Process exit status and signals | `pane_dead_status` and `pane_dead_signal` from `remain-on-exit`: a clean exit is status 0 with no signal, the second interrupt is 130, and a signal death or an empty status fails the case instead of reading as 0 |
+| Process exit status and signals | `pane_dead_status` and `pane_dead_signal` from `remain-on-exit`: a clean exit is status 0 with no signal, the second interrupt is 130, and a signal death or an empty status fails the case instead of reading as 0. From tmux 3.3 the signal is also named; on 3.2 the field is unknown, and the failure is the empty status |
 
 Inside tmux the OSC 7501 records stop at tmux and are not forwarded to the outer
 terminal; the app writes them to the pane, so the tap sees them while the outer
@@ -151,15 +156,15 @@ CI (#1810).
 | Composer editing and paste | `composer_edits_multiline_and_stores_a_large_paste` | `interactive_composer_preserves_multiline_pastes_and_edits_atomic_markers` (CI) |
 | File mentions and attachments | `file_mention_inserts_a_workspace_link`, `composer_edits_multiline_and_stores_a_large_paste` | `tui_at_mentions_pick_files_from_the_working_directory` (moved), paste flows (CI) |
 | Slash commands and panels | `slash_palette_lists_curated_commands_and_settings`, `palette_tab_completes_and_enter_runs_the_command` | `tui_palette_tab_only_completes_and_enter_still_runs` (moved); palette and panel flows in `session_management`, `skills`, `workflow`, `mcp` (CI) |
-| Missing session | `home_commands_without_a_session_answer_and_send_nothing` | `tui_mcp_without_a_session_reports_the_catalog_only` (CI: the scenario sees the answer but not that the daemon stays quiet); `tui_home_commands_without_a_session_answer_and_send_nothing` (CI: also rejects a valued `/effort` without a model and keeps the daemon quiet); `tui_shell_session_creation_failure_…` (CI) |
-| Hook rows | `hook_context_and_stop_follow_up_stay_status_rows` | `tui_draws_a_prompt_hooks_context_as_a_status_row`, `tui_draws_a_stop_hooks_follow_up_as_one_row` (moved); `tui_draws_an_operators_own_hook_marker_verbatim` (CI) |
-| Input suggestions | `prompt_suggestion_offers_and_takes_the_next_message`, `suggestion_asks_nothing_while_a_draft_exists` | the six offer cases (moved); `a_narrow_terminal_…`, `settings_…` and the pending-question/goal suppression (CI) |
+| Missing session | `home_commands_without_a_session_answer_and_send_nothing` | `tui_mcp_without_a_session_reports_the_catalog_only` (CI: the scenario sees the answer but not that the daemon stays quiet); `tui_home_commands_without_a_session_answer_and_send_nothing` (CI: also runs `/agent` and a valued `/effort` without a model and keeps the daemon quiet); `tui_shell_session_creation_failure_…` (CI) |
+| Hook rows | `hook_context_and_stop_follow_up_stay_status_rows` | `tui_draws_a_prompt_hooks_context_as_a_status_row` (moved); `tui_draws_a_stop_hooks_follow_up_as_one_row` (CI: the resumed `resumed session · N messages` count it is skipped by needs a resumed transcript) and `tui_draws_an_operators_own_hook_marker_verbatim` (CI) |
+| Input suggestions | `prompt_suggestion_offers_and_takes_the_next_message`, `suggestion_asks_nothing_while_a_draft_exists` | four offer cases (moved); `enter_on_an_empty_composer_leaves_the_offer` (CI: the scrollback `Enter` on an empty composer); `a_narrow_terminal_…`, `settings_…` and the pending-question/goal suppression (CI) |
 | Streaming and status | `streaming_status_reports_and_interrupts`, `scrollback_streams_and_exits_cleanly` | `tui_reports_the_run_state_to_the_terminal_and_clears_it_on_exit` (CI: also holds the paused OSC 9;4 `4;100` bar across a permission request and a question in both interface modes, and with the bar disabled); the scenario turns `DIM_TERMINAL_PROGRESS` on and additionally asserts OSC 9;4 `working` and its removal |
 | Queue controls | `queue_holds_steers_and_deletes` | `tui_queue_panel_deletes_steers_and_moves_applied_inputs_to_the_transcript` (moved); recall and rapid controls (CI) |
 | Permissions and questions | `approval_panel_allows_one_command`, `question_panel_answer_reaches_the_next_request` | `question::native_tui_question_answer_reaches_the_next_model_request` (moved); the panel cases (CI) |
-| Task and subagent controls | `background_task_row_and_tasks_panel`, `member_conversation_and_stop_all` | `tui_tasks_panel_stops_the_selected_command_or_member`, `tasks::native_tui_stop_all_…` (moved); member cards (CI) |
+| Task and subagent controls | `background_task_row_and_tasks_panel`, `member_conversation_and_stop_all` | `tui_tasks_panel_stops_the_selected_command_or_member` (CI: the scenario stops the selected command, this case also selects a member row and stops it); `tasks::native_tui_stop_all_…` (moved); member cards (CI) |
 | Provider and account panels | `provider_panel_adds_and_keeps_a_custom_provider` | `tui_provider_management_uses_the_production_daemon_and_survives_restart` (moved); the account and model panels (CI) |
-| Daemon disconnect/restart | `daemon_stop_reports_disconnect_and_resume_replays_history` | `tui_stays_up_when_the_daemon_leaves_and_restores_the_terminal_on_exit` (moved); `daemon_replace::*` (CI) |
+| Daemon disconnect/restart | `daemon_stop_reports_disconnect_and_resume_replays_history` | `tui_stays_up_when_the_daemon_leaves_and_restores_the_terminal_on_exit` (CI: the interface staying up, raw mode and a resize while disconnected need a daemon that leaves without shutting down); `daemon_replace::*` (CI) |
 | Production launcher and App Server | `npm_launcher_streams_and_passes_interrupts`; every scenario runs the production daemon | `unix_npm_wrapper_…` (moved); the 12 production flows the CI `--ignored` step names |
 
 ## Per-gap outcome
@@ -177,6 +182,8 @@ one.
 | Queue recall and rapid controls | **Admitted in CI** (#1810) |
 | Resume catalog paging and its latency cases | **Admitted in CI** (#1810): they need a daemon that answers slowly |
 | One-line hook singular wording, the operator's own hook marker | **Admitted in CI** (#1810) |
+| The selected member row's stop (`x` on a member row), the scrollback `Enter` on an empty composer, and a follow-up's exclusion from the resumed `resumed session · N messages` count | **Kept in CI** (#1810): each is a distinct interaction the shared scenarios do not perform, so `tui_tasks_panel_stops_the_selected_command_or_member`, `enter_on_an_empty_composer_leaves_the_offer` and `tui_draws_a_stop_hooks_follow_up_as_one_row` stay selected |
+| A daemon that leaves without shutting down (the interface stays up, keeps raw mode and reflows a resize while disconnected) | **Kept in CI** (#1810): the suite's daemon is the CLI's own App Server, so stopping it ends the interface through the disconnect path; `tui_stays_up_when_the_daemon_leaves_and_restores_the_terminal_on_exit` needs a daemon that only closes the connection |
 | Account sign-in, model picker and management, MCP/skills/hooks/scheduled/workflow panels, goal and context rows, title, windows, startup model adoption, member cards and approval | **Admitted in CI** (#1810) |
 | UI-leaf ownership, close and terminal restoration (`tests/ui_leaf.rs`) | **Admitted in CI** (#1810) |
 
@@ -196,16 +203,17 @@ the verdict and where its behavior lives afterwards.
 | Model picker | Four cases kept: localized hint, no-management guidance, empty providers, and on-demand paging |
 | Input suggestions | `right_takes_the_offer_into_the_draft_without_sending`, `a_narrow_terminal_truncates_the_offer` and the ten request/suppression cases are kept; `tab_takes_the_offer_in_scrollback` merges into `tab_keeps_the_fullscreen_focus_and_right_still_takes_the_offer`, which is kept |
 | Missing session | `/export`, `/queue`, `/agent` and a valued `/effort` merge into the new `tui_home_commands_without_a_session_answer_and_send_nothing`; `tui_shell_session_creation_failure_settles_with_the_no_session_notice` and `tui_mcp_without_a_session_reports_the_catalog_only` are kept |
-| Coverage to account for | `tui_resizing_during_thinking_preserves_multiline_history`, `tui_stays_up_when_the_daemon_leaves_and_restores_the_terminal_on_exit`, `unix_npm_wrapper_preserves_the_native_terminal_and_interrupt_flow`, `tui_provider_management_uses_the_production_daemon_and_survives_restart`, `question::native_tui_question_answer_reaches_the_next_model_request` and `tasks::native_tui_stop_all_settles_the_member_and_reports_cancellation_to_the_leader` were kept by #1802 and are each moved by the scenario named in the inventory |
+| Coverage to account for | `tui_resizing_during_thinking_preserves_multiline_history`, `unix_npm_wrapper_preserves_the_native_terminal_and_interrupt_flow`, `tui_provider_management_uses_the_production_daemon_and_survives_restart`, `question::native_tui_question_answer_reaches_the_next_model_request` and `tasks::native_tui_stop_all_settles_the_member_and_reports_cancellation_to_the_leader` were kept by #1802 and are each moved by the scenario named in the inventory; `tui_stays_up_when_the_daemon_leaves_and_restores_the_terminal_on_exit` stays in CI because the suite cannot exhibit a daemon that leaves without shutting down |
 | Startup routing carry-forward | `fresh_native_startup_uses_workspace_and_ask_without_policy_file` moves with the line-mode production flows, not the TUI suite; see [Line-mode routing exception](#line-mode-routing-exception) |
 
-The no-session gate, the hook rows and the input-suggestion flows are the groups
-this PR moved: `home_commands_without_a_session_answer_and_send_nothing`,
-`hook_context_and_stop_follow_up_stay_status_rows` and
-`prompt_suggestion_offers_and_takes_the_next_message` cover their user-visible
-flows, and the remaining assertions in those groups (the singular hook body, the
-operator's own marker and the request-suppression cases) stay in the ignored
-local cases listed under [Coverage mapping](#coverage-mapping).
+The no-session gate and the input-suggestion flows are the groups this PR
+moved: `home_commands_without_a_session_answer_and_send_nothing` runs each
+refused command from the palette over a draft, and
+`prompt_suggestion_offers_and_takes_the_next_message` covers the offers and
+their keyboard actions. The rest of those groups — `/agent` and a valued
+`/effort`, the scrollback `Enter` on an empty composer, the pending-question and
+goal suppression and the request-suppression cases — stay selected by CI, as
+does the resumed `resumed session · N messages` count a follow-up is skipped by.
 
 ## Existing terminal E2E cases
 
@@ -213,9 +221,9 @@ local cases listed under [Coverage mapping](#coverage-mapping).
 launcher that passes through to it) through a PTY, spread over 26 modules; the
 inventory below lists each one with the disposition #1802 gave it. #1805 is
 merged, so the five cases it merged are gone and its no-session survivor is in
-their place. Of those 299, 14 are now `#[ignore]`d with the reason "TUI E2E runs
+their place. Of those 299, 10 are now `#[ignore]`d with the reason "TUI E2E runs
 in the local tmux suite" because a tmux scenario proves their behavior; 8 were
-already ignored for production (4 of them now have a scenario); the other 277
+already ignored for production (4 of them now have a scenario); the other 281
 stay selected by CI until #1810 replaces them. `tests/ui_leaf.rs` adds 4 UI
 leaf cases, all still selected by CI.
 
@@ -271,7 +279,9 @@ States (the #1802 disposition, not the current routing):
 **`prompt_suggestion`** — 13 cases
 
 - merged → `prompt_suggestion::tab_keeps_the_fullscreen_focus_and_right_still_takes_the_offer` (#1805, gone) — `tab_takes_the_offer_in_scrollback`
-- keep (#1802), CI — `a_completed_turn_asks_for_the_next_message_and_draws_the_offer`, `a_daemon_that_does_not_list_the_method_is_never_asked`, `a_draft_keeps_the_interface_from_asking`, `a_pending_question_keeps_the_interface_from_asking`, `an_active_goal_keeps_the_interface_from_asking`, `right_takes_the_offer_into_the_draft_without_sending`, `tab_keeps_the_fullscreen_focus_and_right_still_takes_the_offer`, `enter_on_an_empty_composer_leaves_the_offer`, `escape_and_an_edit_withdraw_the_offer`, `a_narrow_terminal_truncates_the_offer`, `the_pause_is_announced_once_per_session`, `settings_shows_no_suggestion_row_without_the_methods`, `settings_toggles_the_switch_through_the_daemon`
+- tmux `prompt_suggestion_offers_and_takes_the_next_message` — keep — `a_completed_turn_asks_for_the_next_message_and_draws_the_offer`, `right_takes_the_offer_into_the_draft_without_sending`, `tab_keeps_the_fullscreen_focus_and_right_still_takes_the_offer`, `escape_and_an_edit_withdraw_the_offer`
+- tmux `suggestion_asks_nothing_while_a_draft_exists` — keep — `a_draft_keeps_the_interface_from_asking`
+- keep (#1802), CI — `a_daemon_that_does_not_list_the_method_is_never_asked`, `a_pending_question_keeps_the_interface_from_asking`, `an_active_goal_keeps_the_interface_from_asking`, `enter_on_an_empty_composer_leaves_the_offer` (scrollback `Enter` on an empty composer is not in a scenario), `a_narrow_terminal_truncates_the_offer`, `the_pause_is_announced_once_per_session`, `settings_shows_no_suggestion_row_without_the_methods`, `settings_toggles_the_switch_through_the_daemon`
 
 **`prompts`** — 1 case
 
@@ -341,19 +351,21 @@ flows.
 - tmux `file_mention_inserts_a_workspace_link` — unreviewed — `tui_at_mentions_pick_files_from_the_working_directory`
 - tmux `npm_launcher_streams_and_passes_interrupts` — keep — `unix_npm_wrapper_preserves_the_native_terminal_and_interrupt_flow` (ignored, production boundary)
 - tmux `queue_holds_steers_and_deletes` — keep — `tui_queue_panel_deletes_steers_and_moves_applied_inputs_to_the_transcript`
-- tmux `background_task_row_and_tasks_panel` — keep — `tui_tasks_panel_stops_the_selected_command_or_member`
+- tmux `background_task_row_and_tasks_panel` — keep, CI (the scenario stops the selected command; the selected member row stays with this case) — `tui_tasks_panel_stops_the_selected_command_or_member`
+- tmux `hook_context_and_stop_follow_up_stay_status_rows` — keep — `tui_draws_a_prompt_hooks_context_as_a_status_row`
+- keep, CI (the scenario draws the live follow-up row and its three `/tools` toggles; the resumed `resumed session · N messages` count it is skipped by stays with this case) — `tui_draws_a_stop_hooks_follow_up_as_one_row`
 - tmux `streaming_status_reports_and_interrupts` — keep, CI (the scenario adds OSC 9;4 `working` and its clear; the paused bar, the clear after a permission request and a question, and the disabled configuration stay with this case) — `tui_reports_the_run_state_to_the_terminal_and_clears_it_on_exit`
-- keep (#1802), CI — `tui_mcp_without_a_session_reports_the_catalog_only`, `tui_shell_session_creation_failure_settles_with_the_no_session_notice`, `tui_stays_up_when_the_daemon_leaves_and_restores_the_terminal_on_exit`, `tui_provider_management_uses_the_production_daemon_and_survives_restart`, `tui_rapid_queue_controls_settle_each_held_input_once`, `tui_queue_recall_refuses_attachments_and_steering_preserves_all_content`, `tui_composer_shows_context_use_and_refreshes_it_when_a_run_ends`, `tui_compaction_row_runs_then_shows_the_summary_it_recorded`, `tui_compact_displays_committed_outcomes_and_reports_an_unsupported_daemon`, `tui_context_warning_starts_at_the_threshold_share_and_a_compaction_refreshes_it`, `tui_rebuilds_compaction_rows_from_history_on_resume`, `tui_draws_a_prompt_hooks_context_as_a_status_row`, `tui_draws_a_stop_hooks_follow_up_as_one_row`, `tui_draws_an_operators_own_hook_marker_verbatim`, `tui_models_picker_hides_manage_models_without_management_methods`, `tui_models_picker_draws_its_hint_in_the_interface_language`, `tui_models_picker_reads_pages_on_demand_and_reopens_without_a_cache`, `tui_models_picker_names_every_provider_with_no_selectable_model`
+- keep (#1802), CI — `tui_mcp_without_a_session_reports_the_catalog_only`, `tui_shell_session_creation_failure_settles_with_the_no_session_notice`, `tui_stays_up_when_the_daemon_leaves_and_restores_the_terminal_on_exit`, `tui_provider_management_uses_the_production_daemon_and_survives_restart`, `tui_rapid_queue_controls_settle_each_held_input_once`, `tui_queue_recall_refuses_attachments_and_steering_preserves_all_content`, `tui_composer_shows_context_use_and_refreshes_it_when_a_run_ends`, `tui_compaction_row_runs_then_shows_the_summary_it_recorded`, `tui_compact_displays_committed_outcomes_and_reports_an_unsupported_daemon`, `tui_context_warning_starts_at_the_threshold_share_and_a_compaction_refreshes_it`, `tui_rebuilds_compaction_rows_from_history_on_resume`, `tui_draws_an_operators_own_hook_marker_verbatim`, `tui_models_picker_hides_manage_models_without_management_methods`, `tui_models_picker_draws_its_hint_in_the_interface_language`, `tui_models_picker_reads_pages_on_demand_and_reopens_without_a_cache`, `tui_models_picker_names_every_provider_with_no_selectable_model`
 - rewrite (#1802), CI — `tui_queue_shows_held_messages_and_steers_or_withdraws_them`
 - unreviewed (#1802), CI — `explicit_model_selection_uses_protocol_field_names_from_tui_and_line_client`, `fullscreen_session_attached_before_the_first_frame_shows_one_banner`, `the_model_label_shows_the_adopted_reasoning_effort_in_both_modes`, `a_new_session_shows_the_effort_its_creation_adopted`, `the_model_label_shows_a_configured_profile_effort` (ignored, production), `home_after_new_drops_the_previous_sessions_effort`, `repicking_the_current_model_keeps_the_effort`, `a_resumed_session_draws_the_adopted_model_and_effort`, `another_clients_adoption_redraws_the_model_label`, `a_narrow_composer_drops_the_effort_before_the_model`, `tui_escape_sends_the_reason_that_records_the_interruption`, `tui_shell_mode_runs_through_session_methods_and_shows_the_recorded_run`, `tui_effort_dialog_selects_the_current_models_effort_and_cancels_without_writing`, `tui_mcp_and_configuration_commands_use_session_methods`, `tui_pasted_images_and_long_text_submit_as_user_content`, `tui_skill_rows_come_from_the_catalog_and_complete_without_sending`, `reloading_skills_changes_the_palette_rows`, `a_daemon_without_skill_catalog_keeps_a_working_command_palette`, `tui_palette_tab_only_completes_and_enter_still_runs`, `tui_sends_dropped_files_as_links_and_images_by_model_capability`, `fullscreen_login_releases_mouse_for_the_link_and_restores_the_preference_on_close`, `tui_mcp_says_when_no_server_is_configured`, `tui_mcp_shows_failure_reasons_rejections_and_the_catalog_error`, `tui_mcp_enables_and_disables_a_project_server`, `tui_web_toggles_the_daemon_switch_without_leaving`, `tui_registers_with_the_ui_registry_and_leaves_when_asked`, `tui_export_dialog_matches_the_subcommand_and_cancel_sends_nothing`, `tui_ctrl_enter_interrupts_the_run_and_starts_a_new_one_with_the_draft`, `tui_ctrl_s_steers_the_draft_while_a_run_is_in_progress`, `tui_escape_withdraws_the_queue_before_the_run_stops`, `tui_command_output_refreshes_one_read_and_preserves_its_branch_and_terminal_result`, `tui_command_output_errors_stop_refresh_and_reopening_retries`, `tui_permissions_keep_pending_file_and_member_questions_and_save_command_rules`, `tui_approval_alias_selects_presets_and_remembers_them`, `tui_shift_tab_cycles_permissions_and_preserves_the_draft_in_both_modes`, `tui_yields_the_title_and_the_bar_to_a_terminal_that_keeps_the_record`, `cold_hosted_tui_opens_without_reading_the_session_catalog`, `resume_by_id_takes_its_model_from_the_attach_record`, `resume_by_id_finds_the_model_in_the_catalog_when_the_attach_reply_is_empty`, `tui_provider_create_recovery_preserves_changed_draft_until_confirmation`, `tui_models_picker_edits_only_the_subagent_model_policy`, `tui_models_picker_cycles_reasoning_effort`, `tui_models_picker_writes_the_default_the_launch_workspace_reads`, `member_tool_approval_requires_trusted_details_in_both_terminal_modes`, `member_approval_without_the_detail_method_offers_only_rejection`, `tui_default_theme_respects_background_and_saved_choice`
 
 Modules: 26; cases: 299; already ignored before this PR: 8 (4 now covered by a
 tmux scenario: `unix_npm_wrapper_…`, `tui_provider_management_…`,
 `native_tui_question_answer_…`, `tasks::native_tui_stop_all_…`); newly ignored
-for the tmux suite: 14; moved to the tmux suite: 18; still ignored with no
+for the tmux suite: 10; moved to the tmux suite: 14; still ignored with no
 scenario: `a_cold_ui_leaf_…`, `a_resumed_session_of_an_older_protocol_opens`,
 `managed_worktree_tui_…`, `the_model_label_shows_a_configured_profile_effort`;
-selected by CI: 277 in `cli_flow` plus the 4 `ui_leaf` cases (281).
+selected by CI: 281 in `cli_flow` plus the 4 `ui_leaf` cases (285).
 
 The `cli_flow` target also holds the line-mode, ACP, daemon and production flows
 that CI keeps: 412 cases, of which 400 run by default and 12 are `--ignored`
@@ -383,11 +395,11 @@ server are removed. `--keep` keeps them meanwhile and still writes the captures.
 
 ## CI
 
-No CI job runs a **migrated** TUI flow. The 14 cases whose behavior a tmux
+No CI job runs a **migrated** TUI flow. The 10 cases whose behavior a tmux
 scenario proves are `#[ignore]`d with the reason "TUI E2E runs in the local tmux
 suite", so the ordinary `cargo test --workspace` selection compiles them and
 runs none of them; the production `--ignored` step names only the flows CI
-keeps. The other 277 `cli_flow` TUI cases and the 4 `ui_leaf` cases have no
+keeps. The other 281 `cli_flow` TUI cases and the 4 `ui_leaf` cases have no
 replacement yet and stay selected by CI, because dropping them would remove
 runtime coverage that only they assert (#1810). Terminal E2E coverage that has
 moved is a local verification step: a display-less runner and the suite's
@@ -401,7 +413,7 @@ CI keeps:
 - Ordinary workspace tests: the `dim-cli` component render and keyboard tests,
   `dim-app-server` protocol and transport flows, the 400 non-TUI `cli_flow`
   cases (`--no-tui`, `exec`, piped prompts, ACP and the scripted daemon flows),
-  and the 281 TUI cases #1810 still tracks.
+  and the 285 TUI cases #1810 still tracks.
 - The explicit `cli_flow` step that names the 12 `--ignored` production and
   line-mode flows one by one: the production App Server, the account and
   permission presets, the real-owner MCP/hooks/workflow writes, and the

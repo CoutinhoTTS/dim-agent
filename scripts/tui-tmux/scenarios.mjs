@@ -70,6 +70,31 @@ async function exitWith(terminal, expected = 0) {
   return status;
 }
 
+/// The exit path's own output: everything the process wrote after its goodbye
+/// panel, so a cursor or screen assertion cannot be satisfied by an earlier
+/// frame or an earlier mode switch.
+function exitTail(raw) {
+  const at = raw.lastIndexOf('Bye!');
+  return at === -1 ? '' : raw.slice(at);
+}
+
+/// The final hand-back. The restore sequence starts with the status record's
+/// clear, so everything after it is the process leaving the terminal, whatever
+/// ended the interface.
+function restoreTail(raw) {
+  const marker = '\u001b]7501;state=clear';
+  const at = raw.lastIndexOf(marker);
+  return at === -1 ? '' : raw.slice(at);
+}
+
+/// The reports written after the newest `state=working`, so a settled wait
+/// cannot be satisfied by a report from before the run started.
+function afterLastWorking(raw) {
+  const marker = 'state=working';
+  const at = raw.lastIndexOf(marker);
+  return at === -1 ? '' : raw.slice(at + marker.length);
+}
+
 const scenarios = [
   {
     name: 'scrollback_streams_and_exits_cleanly',
@@ -97,9 +122,10 @@ const scenarios = [
 
       const raw = terminal.raw();
       assert(!raw.includes('\u001b[?1049h'), 'a scrollback run never enters the alternate screen');
-      assert(raw.includes('\u001b[?25h'), 'the cursor is shown again on exit');
+      const tail = exitTail(raw);
+      assert(tail.includes('\u001b[?25h'), 'the cursor is shown again on exit');
+      assert(tail.includes('state=clear'), 'leaving clears the status record');
       assert(raw.includes('\u001b]7501;state=working'), 'a run reports working through OSC 7501');
-      assert(raw.includes('\u001b]7501;state=clear'), 'leaving clears the status record');
     },
   },
   {
@@ -143,8 +169,11 @@ const scenarios = [
       assert(enables > 0, 'the multiplexer kept ModifyOtherKeys enabled');
       assert.equal(resets, enables, `every ModifyOtherKeys enable is reset (${enables} enables, ${resets} resets)`);
       assert(!raw.includes('\u001b[>5u'), 'tmux does not negotiate the kitty protocol');
-      assert(raw.includes('\u001b[?25h'), 'the cursor is restored on exit');
-      assert(raw.trimEnd().includes('\u001b[?1049l'), 'the last screen is the caller screen');
+      assert(restoreTail(raw).includes('\u001b[?25h'), 'the cursor is restored on exit');
+      assert(
+        raw.lastIndexOf('\u001b[?1049l') > raw.lastIndexOf('\u001b[?1049h'),
+        'the last screen switch leaves the alternate screen',
+      );
     },
   },
   {
@@ -332,20 +361,30 @@ const scenarios = [
         },
         respond: () => ({text: ANSWER}),
       });
-      const workspace = path.join(tui.root, 'workspace');
+      const workspace = fs.realpathSync(path.join(tui.root, 'workspace'));
       const terminal = await tui.launch(['--cwd', workspace], {waitForComposer: true});
 
-      terminal.send('@lantern');
+      terminal.send('read @lantern');
       await terminal.waitFor('Files');
       await terminal.waitFor('@lantern-notes.md');
       terminal.key('Enter');
       await terminal.waitFor('@lantern-notes.md', {describe: 'the inserted mention'});
+      // Typing a path prefix completes to the file under it, so a directory is
+      // picked the way a file is.
+      terminal.send('@sr');
+      await terminal.waitFor('@src/');
+      terminal.key('Tab');
+      await terminal.waitFor('@src/app.ts', {describe: 'the completed directory prefix'});
+      terminal.key('Tab');
       terminal.key('Enter');
       await terminal.untilComposer();
       await terminal.waitFor(ANSWER);
 
       const sent = lastTurnText(tui.model);
-      assert(sent.includes('@lantern-notes.md'), `the prompt carries the mention: ${sent}`);
+      for (const name of ['lantern-notes.md', 'src/app.ts']) {
+        const link = `[@${name}](${path.join(workspace, name)})`;
+        assert(sent.includes(link), `the prompt links ${name}: ${sent}`);
+      }
 
       await exitWith(terminal);
     },
@@ -356,33 +395,41 @@ const scenarios = [
     title: 'Commands that need a session answer at home, keep the draft and reach no model',
     async run(tui) {
       await tui.setup({respond: () => ({text: ANSWER})});
+      // The palette is the only way to run a command over a draft: typing `/`
+      // into a non-empty composer appends it, so every command here is picked
+      // from the palette and the draft it restored is asserted after it.
+      const runFromPalette = async (terminal, filter, expected) => {
+        terminal.key('C-o');
+        await terminal.waitFor(/Commands|Command Palette/, {describe: 'the command palette'});
+        terminal.send(filter);
+        await terminal.waitFor(`/${filter}`, {describe: `the ${filter} entry`});
+        terminal.key('Enter');
+        await terminal.waitFor(expected);
+      };
       for (const args of [[], ['--fullscreen']]) {
         const terminal = await tui.launch(args, {waitForComposer: true});
         await terminal.waitFor('Welcome to DIM');
-
-        terminal.send('/export');
-        terminal.key('Enter');
-        await terminal.waitFor('/export needs a session');
-        assert(!terminal.capture().includes('Export session'), 'no export dialog opened');
-
-        terminal.send('/queue');
-        terminal.key('Enter');
-        await terminal.waitFor('/queue needs a session');
-
-        terminal.send('/agent ghost');
-        terminal.key('Enter');
-        await terminal.waitFor('Sign in with /login');
-        await terminal.waitFor('to start a session');
-
-        terminal.send('/mcp list');
-        terminal.key('Enter');
-        await terminal.waitFor('No MCP server is configured.');
-
         terminal.send('kept draft');
         await terminal.waitFor('kept draft');
-        for (let index = 0; index < 'kept draft'.length; index += 1) terminal.key('BSpace');
+
+        await runFromPalette(terminal, 'export', '/export needs a session');
+        assert(!terminal.capture().includes('Export session'), 'no export dialog opened');
+        assert(terminal.capture().includes('kept draft'), 'the draft survives /export');
+
+        await runFromPalette(terminal, 'queue', '/queue needs a session');
+        assert(terminal.capture().includes('kept draft'), 'the draft survives /queue');
+
+        await runFromPalette(terminal, 'mcp list', 'No MCP server is configured.');
+        assert(terminal.capture().includes('kept draft'), 'the draft survives /mcp list');
+
+        assert(
+          !terminal.capture({history: true}).includes('┃ kept draft'),
+          'the commands never sent the draft',
+        );
         assert.equal(tui.model.requests.length, 0, 'no home command asked the fixture model');
 
+        for (let index = 0; index < 'kept draft'.length; index += 1) terminal.key('BSpace');
+        await terminal.waitForAbsent('kept draft');
         await exitWith(terminal);
       }
     },
@@ -440,6 +487,14 @@ const scenarios = [
       );
 
       await terminal.waitFor('Stop hook follow-up · 3 lines ▸', {timeout: 30_000});
+      assert(
+        !terminal.capture({history: true}).includes('1 lines'),
+        'a one-line hook context is named in the singular',
+      );
+      assert(
+        !terminal.capture({history: true}).includes('<dim-hooks'),
+        'the marker is the model\'s, not the transcript\'s',
+      );
       for (const line of ['run the suite', 'fix parser::tests', 'keep the diff small']) {
         assert(!terminal.capture().includes(line), `a closed follow-up keeps ${line} out of the transcript`);
       }
@@ -519,6 +574,15 @@ const scenarios = [
         terminal.key('C-c');
         await terminal.waitForAbsent('keysx');
 
+        // Repeated Tab keeps completing the palette's selection and never
+        // exits it, so the draft still takes the next typed character.
+        terminal.send('/');
+        for (let index = 0; index < 3; index += 1) terminal.key('Tab');
+        terminal.send('x');
+        await terminal.waitFor('newx', {describe: 'the repeated completion'});
+        terminal.key('C-c');
+        await terminal.waitForAbsent('newx');
+
         terminal.send('/ke');
         terminal.key('Tab');
         await terminal.waitFor('/keys');
@@ -560,8 +624,8 @@ const scenarios = [
       await terminal.waitFor('User interrupted the run.');
       await terminal.waitFor('stopped');
       await terminal.untilComposer();
-      await terminal.waitForRaw((raw) => raw.includes('state=idle') || raw.includes('state=error'), {
-        describe: 'the settled status',
+      await terminal.waitForRaw((raw) => /state=(idle|error)/.test(afterLastWorking(raw)), {
+        describe: 'a settled status reported after the interrupted run',
       });
       await terminal.waitForRaw((raw) => raw.includes(bar('0')), {describe: 'the removed progress bar'});
 
@@ -604,12 +668,22 @@ const scenarios = [
       terminal.send('/queue');
       terminal.key('Enter');
       await terminal.waitFor('Held · awaiting application', {describe: 'the queue panel'});
+      // The panel replaces the queue strip, so its own row text is the
+      // deletion's barrier: the strip's `Held · …` form is already gone.
       terminal.key('x');
-      await terminal.waitForAbsent('Held · first follow-up');
-      await sleep(500);
+      await terminal.waitForAbsent('first follow-up');
+      assert(
+        terminal.capture().includes('second follow-up'),
+        'the deletion leaves the other held row selected',
+      );
       terminal.key('Enter');
       await terminal.waitFor('No queued messages.', {describe: 'the emptied queue'});
+      assert(!terminal.capture().includes('Enter steer'), 'an empty queue offers no steer or delete');
       await terminal.waitFor('┃ second follow-up', {history: true});
+      assert(
+        !terminal.capture({history: true}).includes('┃ first follow-up'),
+        'a deleted message never enters the transcript',
+      );
       terminal.key('Escape');
       await terminal.waitForAbsent('Queue');
 
@@ -755,7 +829,7 @@ const scenarios = [
   {
     name: 'member_conversation_and_stop_all',
     area: 'members',
-    title: 'A delegated member draws a task row, opens read-only and stop-all settles it',
+    title: 'A delegated member draws a task row, opens its conversation and stop-all settles it',
     async run(tui) {
       await tui.setup({
         respond: (request) => {
@@ -997,7 +1071,13 @@ const scenarios = [
     area: 'daemon',
     title: 'A stopped daemon keeps the draft in the same process, names the resume command, and the resumed session replays history',
     async run(tui) {
-      await tui.setup({respond: () => ({text: ANSWER})});
+      const RESUMED_ANSWER = 'The resumed session answered the new prompt, not a replay.';
+      await tui.setup({
+        respond: (request) =>
+          (request.tools ?? []).length > 0 && userText(request).includes('after restart')
+            ? {text: RESUMED_ANSWER}
+            : {text: ANSWER},
+      });
       const terminal = await tui.launch([], {waitForComposer: true});
 
       await terminal.sendPrompt('remember this');
@@ -1015,13 +1095,16 @@ const scenarios = [
       const resume = /dimcode --resume ([0-9a-f-]{36})/.exec(screen);
       assert(resume, `the notice names the resume command: ${screen}`);
       assert.equal((await terminal.waitForExit()).status, 0);
-      assert(terminal.raw().includes('\u001b[?25h'), 'the terminal is restored when the daemon leaves');
+      assert(restoreTail(terminal.raw()).includes('\u001b[?25h'), 'the terminal is restored when the daemon leaves');
 
       const resumed = await tui.launch(['--resume', resume[1]], {waitForComposer: true});
       await resumed.waitFor('remember this', {history: true});
       await resumed.waitFor(ANSWER, {history: true});
       await resumed.sendPrompt('after restart');
-      await resumed.waitFor(ANSWER);
+      // The replayed answer is already on screen, so the new turn is proven by
+      // an answer only the new prompt can produce.
+      await resumed.waitFor(RESUMED_ANSWER, {describe: 'the answer to the new prompt'});
+      assert.equal(lastTurnText(tui.model), 'after restart', 'the resumed session sent the new prompt, not a replay');
 
       await exitWith(resumed);
     },
@@ -1060,7 +1143,11 @@ const scenarios = [
       await terminal.waitFor(ANSWER);
       assert.equal(lastTurnText(tui.model), 'launcher prompt');
 
-      await terminal.waitForAbsent('esc interrupt', {describe: 'the settled run'});
+      // The pre-interrupt barrier is the product's own settled status; the
+      // status row alone may not have been drawn yet.
+      await terminal.waitForRaw((raw) => /state=(done|idle|error)/.test(afterLastWorking(raw)), {
+        describe: 'the settled run before the interrupt',
+      });
       terminal.key('C-c');
       await terminal.waitFor(/Press Ctrl\+C again to exit|Interrupt requested; Ctrl\+C again to exit/, {
         describe: 'the interrupt confirmation',
@@ -1069,7 +1156,7 @@ const scenarios = [
       terminal.key('C-c');
       const status = await terminal.waitForExit();
       assert.equal(status.status, 130, 'a second interrupt ends the CLI with the interrupt status');
-      assert(terminal.raw().includes('\u001b[?25h'), 'the launcher leaves the terminal restored');
+      assert(restoreTail(terminal.raw()).includes('\u001b[?25h'), 'the launcher leaves the terminal restored');
     },
   },
 ];

@@ -41,7 +41,8 @@ export function replyFrames(reply) {
     ['content', reply.text],
   ]) {
     const characters = Array.from(character ?? '');
-    const size = reply.chunkSize ?? Math.max(1, Math.ceil(characters.length / 4));
+    // A zero chunk size would stream forever.
+    const size = Math.max(1, reply.chunkSize ?? Math.max(1, Math.ceil(characters.length / 4)));
     for (let index = 0; index < characters.length; index += size) {
       frames.push(frame({[field]: characters.slice(index, index + size).join('')}));
     }
@@ -101,8 +102,10 @@ export async function startModelFixture({respond, logFile}) {
       requests.push(entry);
       if (logFile) appendFileSync(logFile, `${JSON.stringify(entry)}\n`);
       // A provider's model listing, which the provider panel probes; every
-      // other request is a chat completion the scenario scripts.
-      if (request.method === 'GET' && request.url.endsWith('/models')) {
+      // other request is a chat completion the scenario scripts. The path alone
+      // decides: a provider may append a query string.
+      const pathname = new URL(request.url ?? '/', 'http://fixture').pathname;
+      if (request.method === 'GET' && pathname.endsWith('/models')) {
         response.writeHead(200, {'content-type': 'application/json'});
         response.end(JSON.stringify({data: [{id: MODEL_ID, context_window: 128000, max_output_tokens: 4096}]}));
         return;
