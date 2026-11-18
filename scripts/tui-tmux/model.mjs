@@ -89,6 +89,13 @@ export async function startModelFixture({respond, logFile}) {
       const entry = {index: requests.length, url: request.url, method: request.method, body: parsed};
       requests.push(entry);
       if (logFile) appendFileSync(logFile, `${JSON.stringify(entry)}\n`);
+      // A provider's model listing, which the provider panel probes; every
+      // other request is a chat completion the scenario scripts.
+      if (request.method === 'GET' && request.url.endsWith('/models')) {
+        response.writeHead(200, {'content-type': 'application/json'});
+        response.end(JSON.stringify({data: [{id: MODEL_ID, context_window: 128000, max_output_tokens: 4096}]}));
+        return;
+      }
       let reply;
       try {
         reply = (await respond(parsed, {index: entry.index, requests, response})) ?? {};

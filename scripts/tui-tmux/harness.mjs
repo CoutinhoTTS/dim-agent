@@ -64,10 +64,16 @@ export class TmuxCase {
     this.sessions = [];
   }
 
-  async setup({respond, config = {}, files = {}}) {
+  /// `documents` writes product-home settings documents (for example
+  /// `hooks.json` or `prompt-suggestion.json`), which is how a case turns on a
+  /// daemon feature the production App Server reads from its home.
+  async setup({respond, config = {}, files = {}, documents = {}}) {
     fs.mkdirSync(path.join(this.home, 'rust'), {recursive: true, mode: 0o700});
     fs.chmodSync(path.join(this.home, 'rust'), 0o700);
     fs.writeFileSync(path.join(this.home, 'config.json'), JSON.stringify({locale: 'en', ...config}));
+    for (const [name, document] of Object.entries(documents)) {
+      fs.writeFileSync(path.join(this.home, name), JSON.stringify(document, null, 2));
+    }
     fs.mkdirSync(this.userHome, {recursive: true});
     fs.mkdirSync(path.join(this.root, 'tmp'), {recursive: true});
     fs.mkdirSync(path.join(this.root, 'workspace'), {recursive: true});
@@ -135,10 +141,14 @@ export class TmuxCase {
 
   /// Starts one CLI (or launcher) on its own tmux session and taps the pane's
   /// output stream, which is where escape sequences a pane cannot show live.
-  async launch(argv = [], {env = {}, cols = 100, rows = 30, name, command, waitForComposer = false} = {}) {
+  async launch(argv = [], {env = {}, cols = 100, rows = 30, name, command, waitForComposer = false, modelConfig = true} = {}) {
     const session = name ?? `cli-${this.sessions.length + 1}`;
     this.sessions.push(session);
-    const program = command ?? [this.binary, '--home', this.home, '--model-config', this.modelFile];
+    const program =
+      command ??
+      (modelConfig
+        ? [this.binary, '--home', this.home, '--model-config', this.modelFile]
+        : [this.binary, '--home', this.home]);
     const line = shellCommand(this.environment(env), [...program, ...argv]);
     this.log(`# launch ${session}: ${line}`);
     this.tmuxRun(['new-session', '-d', '-s', session, '-x', String(cols), '-y', String(rows), line]);
@@ -155,11 +165,12 @@ export class TmuxCase {
     if (this.verbose) process.stderr.write(`  ${entry}\n`);
   }
 
-  runCommand(args, {env = {}, timeout = 60_000} = {}) {
-    this.log(`# command: ${this.binary} ${args.join(' ')}`);
+  runCommand(args, {env = {}, cwd, timeout = 60_000} = {}) {
+    this.log(`# command: ${this.binary} ${args.join(' ')}${cwd ? ` (cwd ${cwd})` : ''}`);
     return execFileSync(this.binary, args, {
       encoding: 'utf8',
       timeout,
+      cwd,
       env: {...process.env, ...this.environment(env)},
       stdio: ['ignore', 'pipe', 'pipe'],
     });

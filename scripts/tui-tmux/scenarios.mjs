@@ -8,6 +8,10 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function quote(value) {
+  return `'${String(value).replace(/'/g, "'\\''")}'`;
+}
+
 function lastMessage(request) {
   return (request.messages ?? []).at(-1) ?? {};
 }
@@ -219,6 +223,124 @@ const scenarios = [
     },
   },
   {
+    name: 'home_commands_without_a_session_answer_and_send_nothing',
+    area: 'no-session',
+    title: 'Commands that need a session answer at home, keep the draft and reach no model',
+    async run(tui) {
+      await tui.setup({respond: () => ({text: ANSWER})});
+      for (const args of [[], ['--fullscreen']]) {
+        const terminal = await tui.launch(args, {waitForComposer: true});
+        await terminal.waitFor('Welcome to DIM');
+
+        terminal.send('/export');
+        terminal.key('Enter');
+        await terminal.waitFor('/export needs a session');
+        assert(!terminal.capture().includes('Export session'), 'no export dialog opened');
+
+        terminal.send('/queue');
+        terminal.key('Enter');
+        await terminal.waitFor('/queue needs a session');
+
+        terminal.send('/agent ghost');
+        terminal.key('Enter');
+        await terminal.waitFor('Sign in with /login');
+        await terminal.waitFor('to start a session');
+
+        terminal.send('/mcp list');
+        terminal.key('Enter');
+        await terminal.waitFor('No MCP server is configured.');
+
+        terminal.send('kept draft');
+        await terminal.waitFor('kept draft');
+        for (let index = 0; index < 'kept draft'.length; index += 1) terminal.key('BSpace');
+        assert.equal(tui.model.requests.length, 0, 'no home command asked the fixture model');
+
+        await exitWith(terminal);
+      }
+    },
+  },
+  {
+    name: 'hook_context_and_stop_follow_up_stay_status_rows',
+    area: 'hooks',
+    title: 'A prompt hook context and a stop follow-up draw one closed row each and reach the model',
+    async run(tui) {
+      await tui.setup({respond: () => ({text: ANSWER})});
+      const workspace = fs.realpathSync(path.join(tui.root, 'workspace'));
+      const script = path.join(workspace, '.dimcode', 'stop-hook.sh');
+      fs.mkdirSync(path.dirname(script), {recursive: true});
+      fs.writeFileSync(
+        script,
+        [
+          `if [ -f ${quote(path.join(workspace, '.dimcode', 'stop-once'))} ]; then exit 0; fi`,
+          `: > ${quote(path.join(workspace, '.dimcode', 'stop-once'))}`,
+          `printf '%s' '{"decision":"block","reason":"run the suite\\nfix parser::tests\\nkeep the diff small"}'`,
+          '',
+        ].join('\n'),
+      );
+      fs.writeFileSync(
+        path.join(workspace, '.dimcode', 'hooks.json'),
+        JSON.stringify({
+          hooks: {
+            UserPromptSubmit: [
+              {hooks: [{type: 'command', command: "printf 'SEARCH-MEMORY-FIRST\\n'"}]},
+            ],
+            Stop: [{hooks: [{type: 'command', command: `sh ${quote(script)}`}]}],
+          },
+        }),
+      );
+      tui.runCommand(['--home', tui.home, '--model-config', tui.modelFile, 'hooks', 'enable'], {cwd: workspace});
+      const operator = 'why does the parser stall?';
+      const terminal = await tui.launch(['--cwd', workspace], {waitForComposer: true});
+
+      await terminal.sendPrompt(operator);
+      await terminal.waitFor(ANSWER);
+      await terminal.waitFor('Hook context · 1 line ▸');
+      assert(!terminal.capture().includes('SEARCH-MEMORY-FIRST'), 'a closed hook row keeps its body closed');
+
+      const turn = await waitForRequest(
+        tui.model,
+        (request) => (request.tools ?? []).length > 0 && userText(request).includes(operator),
+        {describe: 'the prompt-hook turn'},
+      );
+      assert(
+        userText(turn.body).includes('SEARCH-MEMORY-FIRST'),
+        'the hook context reaches the model with the operator words',
+      );
+      assert(
+        userText(turn.body).indexOf(operator) < userText(turn.body).indexOf('SEARCH-MEMORY-FIRST'),
+        'the operator words stay the message and the hook context follows',
+      );
+
+      await terminal.waitFor('Stop hook follow-up · 3 lines ▸', {timeout: 30_000});
+      for (const line of ['run the suite', 'fix parser::tests', 'keep the diff small']) {
+        assert(!terminal.capture().includes(line), `a closed follow-up keeps ${line} out of the transcript`);
+      }
+      await waitForRequest(
+        tui.model,
+        (request) =>
+          (request.tools ?? []).length > 0 &&
+          userText(request).includes('<dim-hooks kind="follow-up">'),
+        {describe: 'the stop-hook follow-up turn'},
+      );
+
+      terminal.send('/tools');
+      terminal.key('Enter');
+      await terminal.waitFor('Hook context · 1 line ▸');
+      terminal.send('/tools');
+      terminal.key('Enter');
+      await terminal.waitFor('Hook context · 1 line ▾');
+      await terminal.waitFor('SEARCH-MEMORY-FIRST');
+      await terminal.waitFor('Stop hook follow-up · 3 lines ▾');
+      await terminal.waitFor('fix parser::tests');
+      terminal.send('/tools');
+      terminal.key('Enter');
+      await terminal.waitFor('Hook context · 1 line ▸');
+      assert(!terminal.capture().includes('SEARCH-MEMORY-FIRST'), 'the row closes again');
+
+      await exitWith(terminal);
+    },
+  },
+  {
     name: 'slash_palette_lists_curated_commands_and_settings',
     area: 'commands',
     title: 'The command palette keeps its curated order and opens a settings panel',
@@ -249,6 +371,35 @@ const scenarios = [
       await terminal.waitForAbsent('Commands');
 
       await exitWith(terminal);
+    },
+  },
+  {
+    name: 'palette_tab_completes_and_enter_runs_the_command',
+    area: 'commands',
+    title: 'Tab in the palette completes the command, never runs it, and Enter still runs it',
+    async run(tui) {
+      await tui.setup({respond: () => ({text: ANSWER})});
+      for (const args of [[], ['--fullscreen']]) {
+        const terminal = await tui.launch(args, {waitForComposer: true});
+
+        terminal.send('/ke');
+        terminal.key('Tab');
+        await terminal.waitFor('/keys');
+        terminal.send('x');
+        await terminal.waitFor('keysx');
+        assert(!terminal.capture({history: true}).includes('Enter submit when idle'), 'Tab completed without running it');
+        terminal.key('C-c');
+        await terminal.waitForAbsent('keysx');
+
+        terminal.send('/ke');
+        terminal.key('Tab');
+        await terminal.waitFor('/keys');
+        terminal.key('Enter');
+        await terminal.waitFor('Enter submit when idle', {history: true});
+
+        assert.equal(tui.model.requests.length, 0, 'completing a command reaches no model');
+        await exitWith(terminal);
+      }
     },
   },
   {
@@ -458,6 +609,174 @@ const scenarios = [
       await terminal.untilComposer();
 
       await exitWith(terminal);
+    },
+  },
+  {
+    name: 'member_conversation_and_stop_all',
+    area: 'members',
+    title: 'A delegated member draws a task row, opens read-only and stop-all settles it',
+    async run(tui) {
+      await tui.setup({
+        respond: (request) => {
+          const tools = (request.tools ?? []).length > 0;
+          const last = lastMessage(request);
+          const text = userText(request);
+          if (text.includes('MEMBER-TASK')) {
+            return {text: 'member working line. '.repeat(60), chunkSize: 6, chunkDelayMs: 250};
+          }
+          if (!tools) return {text: ANSWER};
+          if (text.includes('resultId')) return {text: 'Noted the cancellation.'};
+          if (last.role === 'tool') return {text: 'The member was started.'};
+          return {
+            toolCalls: [
+              {
+                name: 'agent',
+                arguments: {
+                  action: 'request',
+                  title: 'Fixture member task',
+                  prompt: 'MEMBER-TASK: inspect the fixture workspace',
+                  profile: {
+                    name: 'fixture-member',
+                    description: 'A fixture member',
+                    systemPrompt: 'You are the fixture member.',
+                    tools: [],
+                  },
+                },
+              },
+            ],
+          };
+        },
+      });
+      const terminal = await tui.launch([], {waitForComposer: true});
+
+      terminal.send('delegate-member-task');
+      terminal.key('Enter');
+      await terminal.waitFor('Permission required');
+      await terminal.waitFor('Tool `agent` requires approval');
+      terminal.key('y');
+      await terminal.waitFor('The member was started.');
+      await terminal.waitFor('Fixture member task');
+      await terminal.waitFor('1 in background');
+
+      terminal.send('/tasks');
+      terminal.key('Enter');
+      await terminal.waitFor('Background tasks');
+      await terminal.waitFor('agent · fixture-member · Running');
+      terminal.key('Enter');
+      await terminal.waitFor('Member conversation');
+      await terminal.waitFor('x interrupt member · Esc back');
+      await terminal.waitFor('MEMBER-TASK: inspect the fixture workspace');
+      await terminal.waitFor('Member Session:');
+      terminal.key('Escape');
+      await terminal.waitFor('Background tasks');
+      terminal.key('C-x');
+      await terminal.waitFor('attempted 1, errors 0, unavailable');
+      await terminal.waitFor('agent cancelled: stopped by the user');
+      terminal.key('Escape');
+      await terminal.waitForAbsent('Background tasks');
+      await terminal.waitFor('Noted the cancellation.', {timeout: 30_000});
+      await terminal.waitForAbsent('1 in background');
+      await exitWith(terminal);
+    },
+  },
+  {
+    name: 'provider_panel_adds_and_keeps_a_custom_provider',
+    area: 'providers',
+    title: 'The provider panel adds a custom provider against the fixture and keeps it after a restart',
+    async run(tui) {
+      await tui.setup({respond: () => ({text: ANSWER})});
+      const open = () => tui.launch([], {waitForComposer: true, modelConfig: false});
+      const terminal = await open();
+
+      terminal.send('/connect');
+      terminal.key('Enter');
+      terminal.send('Add custom');
+      await terminal.waitFor('Add custom provider');
+      terminal.key('Enter');
+      await terminal.waitFor('Name:');
+      terminal.send('Fixture provider');
+      terminal.key('Enter');
+      terminal.send(tui.model.url);
+      terminal.key('Enter');
+      terminal.send('fixture-key');
+      terminal.key('Enter');
+      // The prefix and Test + apply take an empty answer each.
+      terminal.key('Enter');
+      terminal.key('Enter');
+      await terminal.waitFor('Disable provider', {timeout: 40_000});
+      terminal.key('Escape');
+      await terminal.waitFor('Enter open', {describe: 'the providers list again'});
+      await terminal.waitForAbsent('Disable provider');
+      terminal.key('Escape');
+      await terminal.waitFor('302.AI', {describe: 'the cleared provider filter'});
+      terminal.key('Escape');
+      await terminal.waitForAbsent('Providers');
+      await exitWith(terminal);
+
+      tui.stopDaemon();
+      const restarted = await open();
+      restarted.send('/connect');
+      restarted.key('Enter');
+      restarted.send('Fixture');
+      await restarted.waitFor('Fixture provider');
+      await restarted.waitFor('ready');
+      restarted.key('Escape');
+      restarted.key('Escape');
+      await restarted.waitForAbsent('Providers');
+      await exitWith(restarted);
+    },
+  },
+  {
+    name: 'prompt_suggestion_offers_and_takes_the_next_message',
+    area: 'suggestions',
+    title: 'A completed turn offers the next message; Tab takes it in scrollback, Right in both, and an edit withdraws it',
+    async run(tui) {
+      const OFFER = 'run the fixture suite';
+      const prediction = (request) => userText(request).startsWith('You predict the next message');
+      await tui.setup({
+        respond: (request) => (prediction(request) ? {text: OFFER} : {text: ANSWER}),
+        documents: {'rust/prompt-suggestion.json': {enabled: true, maxChars: 80}},
+      });
+      const predictions = () => tui.model.requests.filter((entry) => prediction(entry.body)).length;
+      const takeTurn = async (terminal, text) => {
+        await terminal.sendPrompt(text);
+        await terminal.waitFor(ANSWER);
+        await terminal.waitFor(OFFER, {timeout: 30_000});
+      };
+
+      for (const args of [[], ['--fullscreen']]) {
+        const scrollback = args.length === 0;
+        const terminal = await tui.launch(args, {waitForComposer: true});
+
+        await takeTurn(terminal, 'offer me the next message');
+        terminal.key('Tab');
+        terminal.send('x');
+        if (scrollback) {
+          await terminal.waitFor(`${OFFER}x`, {describe: 'the offer Tab completed into the draft'});
+        } else {
+          await terminal.waitForAbsent(OFFER);
+          await terminal.waitFor('x', {describe: 'the typed draft'});
+        }
+        terminal.key('C-c');
+        await terminal.waitFor('Press Ctrl+C again to exit', {describe: 'the cleared draft'});
+
+        await takeTurn(terminal, 'offer it again');
+        terminal.key('Right');
+        assert(
+          !tui.model.requests.some((entry) => userText(entry.body) === OFFER),
+          'taking the offer fills the draft without sending it',
+        );
+        terminal.send('z');
+        await terminal.waitFor(`${OFFER}z`, {describe: 'the offer Right put in the draft'});
+        terminal.key('C-c');
+        await terminal.waitFor('Press Ctrl+C again to exit', {describe: 'the cleared draft'});
+
+        await takeTurn(terminal, 'offer it one more time');
+        terminal.key('Escape');
+        await terminal.waitForAbsent(OFFER);
+        await terminal.waitFor('Ask anything...', {describe: 'the withdrawn offer'});
+        await exitWith(terminal);
+      }
     },
   },
   {
