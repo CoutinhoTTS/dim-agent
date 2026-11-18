@@ -5,7 +5,7 @@ use dim_agent_types::{
 };
 use dim_client::question::{self, Answer, Call};
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Deserialize)]
@@ -194,11 +194,22 @@ pub(crate) async fn question(
         "Answer the agent's questions",
     ))
     .ok()?;
-    // `EnumOption` omits a description holding null while the form has always
-    // stated it: the rule `projection::notification` states for a tool call's
-    // `kind` and `status`, at the boundary that serializes.
+    // `ElicitationSchema` stores `properties` in a sorted map, while the form
+    // has always listed them in question order, each custom answer right after
+    // its question: a client renders the fields in the order the schema lists.
+    // `serde_json/preserve_order`, which the build enables, keeps that order.
+    let serialized = params["requestedSchema"]["properties"]
+        .as_object_mut()
+        .expect("a serialized schema carries its properties as an object");
+    let mut ordered = Map::new();
     for (index, question) in call.questions.iter().enumerate() {
-        let property = &mut params["requestedSchema"]["properties"][format!("q{index}")];
+        let name = format!("q{index}");
+        let mut property = serialized
+            .remove(&name)
+            .expect("the schema carries every question it was built from");
+        // `EnumOption` omits a description holding null while the form has
+        // always stated it: the rule `projection::notification` states for a
+        // tool call's `kind` and `status`, at the boundary that serializes.
         let choices = if question.multi_select {
             &mut property["items"]["anyOf"]
         } else {
@@ -209,7 +220,16 @@ pub(crate) async fn question(
                 choice.entry("description").or_insert(Value::Null);
             }
         }
+        ordered.insert(name, property);
+        if question.allow_custom {
+            let name = format!("custom{index}");
+            let custom = serialized
+                .remove(&name)
+                .expect("the schema carries every custom answer it was built from");
+            ordered.insert(name, custom);
+        }
     }
+    params["requestedSchema"]["properties"] = Value::Object(ordered);
     let result: Option<Value> = tokio::select! {
         () = stop.cancelled() => return None,
         result = outbox.request(&cx,"elicitation/create",params) => result.ok(),
