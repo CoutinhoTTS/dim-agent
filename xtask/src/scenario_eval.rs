@@ -570,7 +570,10 @@ enum TextMember {
     /// shipped text is a TypeScript plugin member any more. The attribute is
     /// unconditional because the fixture is a test target: with the feature
     /// on, the bin target still never constructs the variant.
-    #[allow(dead_code)]
+    #[allow(
+        dead_code,
+        reason = "the `eval-tests` fixture is its only constructor, and the bin target never builds the variant, so an expectation fails there"
+    )]
     Plugin {
         plugin: &'static str,
         member: &'static str,
@@ -1025,7 +1028,10 @@ async fn rejudge_with(
 /// One saved run judged again: a run that failed before judging keeps its
 /// outcome and is not judged; every other run's view is read from its saved
 /// `judge-view.jsonl` and judged afresh.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one parameter per input a re-judging run carries"
+)]
 async fn rejudge_one(
     source: &Path,
     host: &Arc<ModelHost>,
@@ -2126,7 +2132,6 @@ impl JudgeCall {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 /// One run's serve child: the App Server of the run, served in its own
 /// process with a disposable environment (isolation decision 1). The parent
 /// starts its own binary with `scenario-eval-serve <params>`; the offline
@@ -3416,7 +3421,10 @@ fn preflight_checks(
     checks
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one parameter per input a scenario run carries"
+)]
 async fn run_once(
     options: &Options,
     arm: &'static str,
@@ -3550,7 +3558,10 @@ fn write_run_outputs(
 /// disposable home, `PATH` and the model configuration's one credential
 /// variable, and nothing else of the operator's environment. The child
 /// prints one JSON line; the parent reads it and builds the record.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one parameter per path and host an isolated run carries"
+)]
 async fn isolate_run(
     options: &Options,
     arm: &'static str,
@@ -4294,7 +4305,10 @@ impl Judging {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one parameter per part of a driven run's state"
+)]
 async fn drive_once(
     server: &RunningServer,
     settings: &RunSettings,

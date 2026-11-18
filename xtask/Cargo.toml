@@ -42,3 +42,6 @@ axum = { workspace = true, features = ["json"] }
 [target.'cfg(unix)'.dependencies]
 libc = "0.2.189"
 [dev-dependencies]
+
+[lints]
+workspace = true

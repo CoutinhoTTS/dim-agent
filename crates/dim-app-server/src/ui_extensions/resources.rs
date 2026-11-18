@@ -414,7 +414,11 @@ impl DynPlugin for UiResourcesPlugin {
             let task = tokio::spawn(async move {
                 tokio::select! {
                     _ = stop.cancelled() => {},
-                    _ = async { if lifecycle.activated().await { lifecycle.closing().await; } } => {},
+                    _ = async {
+                        if lifecycle.activated().await {
+                            lifecycle.closing().await;
+                        }
+                    } => {},
                 }
                 running.close().await;
             });

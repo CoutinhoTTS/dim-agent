@@ -1,6 +1,9 @@
 //! Follows one branch the way a host does: listen on the Session broadcast
 //! first, then read the Timeline history and drop what the broadcast repeats.
-#![allow(dead_code)]
+#![expect(
+    dead_code,
+    reason = "the three flow binaries share this fixture; each uses the parts it needs"
+)]
 use dim_agent_capabilities::session_broadcast::{
     SessionBroadcast, SessionBroadcastEvent, session_channel,
 };

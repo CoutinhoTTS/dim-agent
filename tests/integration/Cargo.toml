@@ -19,3 +19,6 @@ serde_json.workspace = true
 futures-util.workspace = true
 test-extension-a = { path = "../extension-a" }
 test-extension-b = { path = "../extension-b" }
+
+[lints]
+workspace = true

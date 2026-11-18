@@ -173,7 +173,10 @@ pub fn terminal_palette(mode: ColorMode, appearance: Appearance) -> Palette {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one parameter per syntax class the palette colours"
+)]
 fn code(
     keyword: &str,
     string: &str,

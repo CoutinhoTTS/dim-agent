@@ -301,7 +301,10 @@ fn establishment(cwd: &Path, roots: usize) -> Result<(), Error> {
 
 impl Gateway {
     // Keep the owned connection, task and host inputs explicit at composition.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one parameter per handle the gateway is composed from"
+    )]
     pub(crate) fn new(
         rpc: Rpc,
         cx: ConnectionTo<Client>,
@@ -1613,6 +1616,7 @@ impl Gateway {
                                     &id,
                                     json!({
                                         "sessionUpdate":"agent_message_chunk",
+                                        "messageId":crate::projection::notice_id("refusal", &prompt.submission),
                                         "content":{"type":"text","text":error.message},
                                     }),
                                 )
@@ -1800,7 +1804,15 @@ impl Gateway {
                     },
                 };
                 if let Some(text) = text {
-                    self.update(&id, json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":text}})).await?;
+                    self.update(
+                        &id,
+                        json!({
+                            "sessionUpdate":"agent_message_chunk",
+                            "messageId":crate::projection::notice_id("command", &command_id.to_string()),
+                            "content":{"type":"text","text":text},
+                        }),
+                    )
+                    .await?;
                 }
                 command
                     .reply

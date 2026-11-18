@@ -284,8 +284,12 @@ impl Fixture {
             let mut calls = tokio::task::JoinSet::new();
             loop {
                 tokio::select! {
-                    accepted = listener.accept() => { calls.spawn(provider(accepted.unwrap().0, remote.clone())); }
-                    completed = calls.join_next(), if !calls.is_empty() => { completed.unwrap().unwrap(); }
+                    accepted = listener.accept() => {
+                        calls.spawn(provider(accepted.unwrap().0, remote.clone()));
+                    }
+                    completed = calls.join_next(), if !calls.is_empty() => {
+                        completed.unwrap().unwrap();
+                    }
                 }
             }
         });
