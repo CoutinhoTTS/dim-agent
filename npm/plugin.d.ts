@@ -58,6 +58,7 @@ export interface SourceDeclaration {
 
 /** Process service `settings`. */
 export interface Settings {
+  declaredBy(request: { instanceId: string }): SourceDeclaration[];
   /** Registers a source for as long as the calling row is loaded; its documents stay in the
    * home when the row unloads. Rejects (failing the caller's apply) when the declaration is
    * invalid or its name or a file is registered already. Call it from a row's own `apply`. */
@@ -702,8 +703,12 @@ export interface TimelineStore {
   latestSnapshot(request: { sessionId: string; branchId: string; through: number; interpreter: string }): Promise<{ snapshot: TimelineRecoverySnapshot | null }>;
 }
 
-/** Pinned reads on the filesystem owner; see resource-faces §4.1. */
+export type FsEntryName = string | { Unix: number[] } | { Windows: number[] };
+/** Directory operations and pinned reads on the filesystem owner; see resource-faces §4.1. */
 export interface FsHost {
+  createDirectory(request: { path: string }): Promise<Record<string, never>>;
+  list(request: { path: string }): Promise<{ entries: { name: FsEntryName; kind: 'file' | 'directory' | 'other' }[] }>;
+  remove(request: { path: string } | { parent: string; name: FsEntryName }): Promise<Record<string, never>>;
   openRead(request: { path: string }): Promise<{ readId: string; size: number }>;
   readAt(request: { readId: string; offset: number; limit: number }): Promise<{ bytes: string }>;
   closeRead(request: { readId: string }): Promise<Record<string, never>>;

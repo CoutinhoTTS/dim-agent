@@ -214,6 +214,7 @@ Process scope, no instance key, provided by Settings.
 | `register` | async | a declaration (§3.1) | nothing; rejects when refused |
 | `read` | async | `{source, scope: Scope}` | `Snapshot` |
 | `update` | async | `{source, scope: Scope, expectedRevision, document}` | `Snapshot` (the stored document) |
+| `declaredBy` | sync | `{instanceId: string}` (the live loader instance ID in decimal) | The JSON Schema declarations registered by that instance, ordered by source name. An instance with no live declarations returns an empty array. |
 | `projects` | sync | `{}` | `{projects: [{root, cwd}]}`: the authorized project roots now |
 
 - `register` is a registration of the calling row, withdrawn when that row unloads. It is called

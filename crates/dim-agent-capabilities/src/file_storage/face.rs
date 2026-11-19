@@ -1,9 +1,13 @@
-use super::{FileReader, FileStorage, FileStorageError, Result};
+use super::{DirectoryEntry, FileReader, FileStorage, FileStorageError, Result};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use rutis::Ctx;
 use rutis_bridge::session::{Error, HostDispatch, Reply, Value};
 use serde::{Deserialize, Serialize};
-use std::{path::Path, sync::Arc};
+use std::{
+    ffi::{OsStr, OsString},
+    path::{Component, Path},
+    sync::Arc,
+};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -14,13 +18,90 @@ pub struct OpenRead {
     pub size: u64,
 }
 
-/// The pinned-reader operations on the existing filesystem owner.
+pub(super) fn serialize_name<S: serde::Serializer>(
+    name: &OsStr,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error> {
+    match name.to_str() {
+        Some(text) => serializer.serialize_str(text),
+        #[cfg(any(unix, windows))]
+        None => name.serialize(serializer),
+        #[cfg(not(any(unix, windows)))]
+        None => Err(serde::ser::Error::custom(
+            "unsupported filesystem name encoding",
+        )),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum EntryName {
+    Text(String),
+    #[cfg(any(unix, windows))]
+    Native(OsString),
+}
+
+fn deserialize_name<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<OsString, D::Error> {
+    Ok(match EntryName::deserialize(deserializer)? {
+        EntryName::Text(text) => text.into(),
+        #[cfg(any(unix, windows))]
+        EntryName::Native(name) => name,
+    })
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged, deny_unknown_fields)]
+pub enum FsRemove {
+    Path {
+        path: String,
+    },
+    Entry {
+        parent: String,
+        #[serde(deserialize_with = "deserialize_name")]
+        name: OsString,
+    },
+}
+
+/// Filesystem operations on the existing storage generation.
 #[derive(Clone)]
 pub struct FsHost(Arc<FileStorage>);
 
 impl FsHost {
     pub(super) fn new(owner: Arc<FileStorage>) -> Self {
         Self(owner)
+    }
+
+    pub async fn create_directory(&self, path: &str, cancel: &CancellationToken) -> Result<()> {
+        let path = self.0.resolve(Path::new(path))?;
+        self.0.create_directory(&path, cancel).await
+    }
+
+    pub async fn list(
+        &self,
+        path: &str,
+        cancel: &CancellationToken,
+    ) -> Result<Vec<DirectoryEntry>> {
+        let path = self.0.resolve(Path::new(path))?;
+        self.0.list(&path, cancel).await
+    }
+
+    pub async fn remove(&self, request: FsRemove, cancel: &CancellationToken) -> Result<()> {
+        let path = match request {
+            FsRemove::Path { path } => self.0.resolve(Path::new(&path))?,
+            FsRemove::Entry { parent, name } => {
+                if Path::new(&name).components().next() != Some(Component::Normal(name.as_os_str()))
+                {
+                    return Err(FileStorageError::InvalidPath(
+                        "expected a single directory entry name",
+                    ));
+                }
+                let parent = self.0.resolve(Path::new(&parent))?;
+                self.0.path(parent.root, parent.relative.join(name))?
+            }
+        };
+        self.0.remove(&path, cancel).await
     }
 
     /// Pins a file until close or the calling row's unload.
@@ -139,13 +220,16 @@ impl FileStorage {
 #[derive(Deserialize)]
 #[serde(tag = "method", content = "request", rename_all = "camelCase")]
 enum Request {
-    OpenRead(Open),
+    OpenRead(PathRequest),
+    CreateDirectory(PathRequest),
+    List(PathRequest),
+    Remove(FsRemove),
     ReadAt(Read),
     CloseRead(Close),
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Open {
+struct PathRequest {
     path: String,
 }
 #[derive(Deserialize)]
@@ -163,7 +247,9 @@ struct Close {
 
 impl HostDispatch for FsHost {
     fn methods(&self) -> Option<serde_json::Value> {
-        Some(serde_json::json!({"openRead":"async", "readAt":"async", "closeRead":"async"}))
+        Some(
+            serde_json::json!({"openRead":"async", "readAt":"async", "closeRead":"async", "createDirectory":"async", "list":"async", "remove":"async"}),
+        )
     }
 
     fn invoke(&self, method: &str, args: Value) -> Reply {
@@ -181,6 +267,21 @@ impl HostDispatch for FsHost {
             let cancel = CancellationToken::new();
             let _dropped = cancel.clone().drop_guard();
             let reply = match request {
+                Request::CreateDirectory(request) => {
+                    owner
+                        .create_directory(&request.path, &cancel)
+                        .await
+                        .map_err(failure)?;
+                    serde_json::json!({})
+                }
+                Request::List(request) => {
+                    let entries = owner.list(&request.path, &cancel).await.map_err(failure)?;
+                    serde_json::json!({"entries": entries})
+                }
+                Request::Remove(request) => {
+                    owner.remove(request, &cancel).await.map_err(failure)?;
+                    serde_json::json!({})
+                }
                 Request::OpenRead(request) => {
                     let caller = caller.ok_or_else(|| {
                         Error::Value("fsHost.openRead requires a calling row".into())

@@ -31,7 +31,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 mod face;
-pub use face::{FsHost, OpenRead};
+pub use face::{FsHost, FsRemove, OpenRead};
 
 /// Read-only reader lifetime observations for filesystem flow tests.
 #[cfg(feature = "testing")]
@@ -96,8 +96,9 @@ pub struct FilePath {
 
 /// One entry of a directory listing: a single component as the filesystem
 /// stores it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct DirectoryEntry {
+    #[serde(serialize_with = "face::serialize_name")]
     pub name: OsString,
     pub kind: EntryKind,
 }
