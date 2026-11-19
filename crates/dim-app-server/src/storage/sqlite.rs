@@ -2393,7 +2393,7 @@ struct SqliteDispatch(Arc<SqliteStorage>);
 impl HostDispatch for SqliteDispatch {
     fn methods(&self) -> Option<serde_json::Value> {
         Some(
-            serde_json::json!({"storageReport":"async","readUser":"async","importUserIfAbsent":"async","replaceUser":"async","agents":"async","owners":"async","save":"async","delete":"async","members":"async","ledMembers":"async","ownedAgents":"async","memberSessions":"async","agentOwner":"async","unfinishedOwned":"async","readSelection":"async","writeSelection":"async","readPreferences":"async"}),
+            serde_json::json!({"storageReport":"async","readUser":"async","importUserIfAbsent":"async","replaceUser":"async","agents":"async","owners":"async","save":"async","delete":"async","members":"async","ledMembers":"async","ownedAgents":"async","memberSessions":"async","agentOwner":"async","unfinishedOwned":"async","readSelection":"async","writeSelection":"async","readPreferences":"async","reserveFile":"async","commitFile":"async","abandonFile":"async","ownsFile":"async","ownsOutput":"async","ownedPaths":"async","registerOutput":"async"}),
         )
     }
 
@@ -2413,6 +2413,43 @@ impl HostDispatch for SqliteDispatch {
             deny_unknown_fields
         )]
         enum Request {
+            #[serde(rename_all = "camelCase")]
+            AbandonFile {
+                file_id: String,
+                generation: String,
+            },
+            #[serde(rename_all = "camelCase")]
+            CommitFile {
+                session_id: String,
+                file_id: String,
+                generation: String,
+            },
+            #[serde(rename_all = "camelCase")]
+            ReserveFile {
+                session_id: String,
+                file_id: String,
+                generation: String,
+            },
+            #[serde(rename_all = "camelCase")]
+            OwnsFile {
+                session_id: String,
+                file_id: String,
+            },
+            #[serde(rename_all = "camelCase")]
+            OwnsOutput {
+                session_id: String,
+                path: String,
+            },
+            #[serde(rename_all = "camelCase")]
+            OwnedPaths {
+                session_id: String,
+            },
+            #[serde(rename_all = "camelCase")]
+            RegisterOutput {
+                session_id: String,
+                path: String,
+            },
+
             ReadSelection {
                 scope: String,
             },
@@ -2465,9 +2502,56 @@ impl HostDispatch for SqliteDispatch {
         let db = self.0.clone();
         Ok(BridgeValue::cancellable_future(async move {
             let value = match request {
+                Request::AbandonFile {
+                    file_id,
+                    generation,
+                } => serde_json::json!(
+                    db.abandon_file(file_id, generation)
+                        .await
+                        .map_err(storage_failure)?
+                ),
+                Request::CommitFile {
+                    session_id,
+                    file_id,
+                    generation,
+                } => serde_json::json!(
+                    db.commit_file(session_id, file_id, generation)
+                        .await
+                        .map_err(storage_failure)?
+                ),
+                Request::ReserveFile {
+                    session_id,
+                    file_id,
+                    generation,
+                } => serde_json::json!(
+                    db.reserve_file(session_id, file_id, generation)
+                        .await
+                        .map_err(storage_failure)?
+                ),
                 Request::ReadSelection { scope } => {
                     serde_json::json!(db.read_selection(scope).await.map_err(storage_failure)?)
                 }
+                Request::OwnsFile {
+                    session_id,
+                    file_id,
+                } => serde_json::json!(
+                    db.owns_file(session_id, file_id)
+                        .await
+                        .map_err(storage_failure)?
+                ),
+                Request::OwnsOutput { session_id, path } => serde_json::json!(
+                    db.owns_output(session_id, path)
+                        .await
+                        .map_err(storage_failure)?
+                ),
+                Request::OwnedPaths { session_id } => {
+                    serde_json::json!(db.owned_paths(session_id).await.map_err(storage_failure)?)
+                }
+                Request::RegisterOutput { session_id, path } => serde_json::json!(
+                    db.register_output(session_id, path)
+                        .await
+                        .map_err(storage_failure)?
+                ),
                 Request::ReadPreferences {
                     provider_id,
                     model_id,

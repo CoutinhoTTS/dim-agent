@@ -1458,6 +1458,21 @@ async fn node_store_preserves_repository_results_and_worktree_removal_exclusion(
     }})).await;
     assert_ok(&created);
     assert!(store.has_records("wire-source").await.unwrap());
+    let output = home.join("fixture-owned-output");
+    assert_ok(
+        &client
+            .rpc(
+                "storefixture.file_ownership",
+                json!({"sessionId":"wire-source","path":output}),
+            )
+            .await,
+    );
+    assert!(
+        raw.owned_paths("wire-source")
+            .await
+            .unwrap()
+            .contains(&output)
+    );
     let agents = client
         .rpc(
             "storefixture.agent_records",
