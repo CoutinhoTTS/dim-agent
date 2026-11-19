@@ -6,6 +6,7 @@
 | --- | --- |
 | Branch management, input and history callers → `timelineTree` | `create/end/info/input/list/page/query` retain their existing signatures on the single Session tree face. Creation returns the branch ID. |
 | Language readers → PromptSources | `sessionLanguage.get`. |
+| Language updates → App Server | [`session.language.update`](session-access.md) accepts the existing language code or clear action. The owner serializes persistence, live-state replacement and Prompt adoption on main and loaded branches before replying. |
 | Prompt → PromptRegistry; guide and tool contributors → their registries | `initialPromptConfiguration.get`, `promptHost.load`, `guideEntries.register`, `toolRegistry.register`, `toolSourcesView.get/observe`. |
 | Session and branch parts → their lifecycle; branch fact consumers → Dispatcher | `sessionLifecycle.activated/closing/hold/release`, `branchLifecycle.activated/closing`, `dispatcher.listen/consume/committed`. |
 
@@ -49,7 +50,7 @@ own methods.
 For a live main branch, Report captures its published head once at draft capture (`directory({id:"main"}).head`)
 and stores it as `conversationThrough` on that draft. Activity evidence and later opt-in
 conversation extraction call `timelineTree.query` with the same explicit `through`,
-existing bounded window and `includePublishing:false`. Zero yields an empty window.
+existing bounded window and `include_publishing: false`. Zero yields an empty window.
 A draft without a captured cutoff does not fetch a conversation. Plan generation never
 substitutes a newer head.
 
@@ -59,7 +60,6 @@ substitutes a newer head.
 | --- | --- |
 | ToolBinding, Session language and Agent configuration → `prompt` | `prompt.initialCompletion({}) → void or opening error`; `prompt.configure({sources, model?}) → unchanged, adopted or superseded`. |
 | Prompt and guide adoption → `contextPreparation` | `contextPreparation.publish({adopted, changes, model?, toolAdoption?, inputs}) → sequence or null`; `awaitPublished({sequence}) → sequence`. Publication commits adoption atomically. |
-| Language updates → `sessionLanguage` | Add `sessionLanguage.set({language}) → existing language/outcome reply`. The owner persists the value, replaces the cell and delivers configuration to loaded branches. |
 | File read/edit/write tools → branch FileReads | `binding({path}) → TextFileBinding or null`, `writeBinding({path}) → absent, compacted or bound`, `record({path, binding, established}) → void`. The original read supplies the established sequence; file I/O stays on the file node. |
 
 ### Model preparation, history and tools
