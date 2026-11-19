@@ -8,6 +8,11 @@
 //! The two ids are defined once, each in its own language's file; a definition
 //! anywhere else is refused, so no private duplicate can hold the literal.
 //!
+//! In a Vue single-file component the value of a directive or bound attribute —
+//! `v-*`, `:prop`, `@event`, `#slot` — is an expression, so a `"main"` or
+//! `'main'` inside one is a use too. A plain attribute such as `id="main"` is
+//! not an expression and keeps the handling `UNRELATED` gives it.
+//!
 //! Test files and items gated by a test-only `cfg` keep the literal: it is the
 //! root's stored id, and the rule does not read them.
 use std::{
@@ -75,29 +80,8 @@ pub fn check(root: &Path) -> Result<()> {
     for path in sources(root) {
         let text = fs::read_to_string(&path)?;
         let file = relative(root, &path);
-        for offset in main_literals(&text) {
-            let line = text[..offset].matches('\n').count() + 1;
-            let source = text.lines().nth(line - 1).unwrap_or_default();
-            if names_the_id(&file, source) {
-                continue;
-            }
-            if defines_an_id(source) {
-                errors.push(format!(
-                    "{file}:{line}: a branch id is defined once, in {} or {}; \
-                     name the definition's home in `HOMES` instead of copying it",
-                    HOMES[0].0, HOMES[1].0
-                ));
-                continue;
-            }
-            if unrelated(&file, source) {
-                allowed += 1;
-                continue;
-            }
-            errors.push(format!(
-                "{file}:{line}: `\"main\"` names neither the root nor the default branch; \
-                 write `ROOT_BRANCH_ID` or `DEFAULT_BRANCH_ID`, or name the use in `UNRELATED`"
-            ));
-        }
+        let vue = path.extension().is_some_and(|extension| extension == "vue");
+        allowed += findings(&file, &text, vue, &mut errors);
     }
     if errors.is_empty() {
         println!("literal main passed ({allowed} unrelated uses)");
@@ -107,11 +91,47 @@ pub fn check(root: &Path) -> Result<()> {
     }
 }
 
+/// The failures one file's `text` has, whose repository-relative path is
+/// `file` and whose kind decides whether its attribute values are expressions,
+/// added to `errors`; answers how many of its uses `UNRELATED` allows.
+fn findings(file: &str, text: &str, vue: bool, errors: &mut Vec<String>) -> usize {
+    let mut allowed = 0;
+    for offset in main_literals(text, vue) {
+        let line = text[..offset].matches('\n').count() + 1;
+        let source = text.lines().nth(line - 1).unwrap_or_default();
+        if names_the_id(file, source) {
+            continue;
+        }
+        if defines_an_id(source) {
+            errors.push(format!(
+                "{file}:{line}: a branch id is defined once, in {} or {}; \
+                 name the definition's home in `HOMES` instead of copying it",
+                HOMES[0].0, HOMES[1].0
+            ));
+            continue;
+        }
+        if unrelated(file, source) {
+            allowed += 1;
+            continue;
+        }
+        errors.push(format!(
+            "{file}:{line}: `\"main\"` names neither the root nor the default branch; \
+             write `ROOT_BRANCH_ID` or `DEFAULT_BRANCH_ID`, or name the use in `UNRELATED`"
+        ));
+    }
+    allowed
+}
+
+/// The repository-relative spelling of `path` under `root`, with `/` as its
+/// only separator: a Windows checkout spells the same file with `\`, while
+/// `HOMES` and `UNRELATED` are written with `/`.
 fn relative(root: &Path, path: &Path) -> String {
-    path.strip_prefix(root)
-        .unwrap_or(path)
-        .to_string_lossy()
-        .into_owned()
+    normalize(&path.strip_prefix(root).unwrap_or(path).to_string_lossy())
+}
+
+/// `path` with every separator a platform may write replaced by `/`.
+fn normalize(path: &str) -> String {
+    path.replace('\\', "/")
 }
 
 /// Whether `line` of `file` is one of the ids' definitions at its own home, in
@@ -214,16 +234,22 @@ fn is_production(name: &str, kind: Kind) -> bool {
 
 /// The byte offsets of the opening quote of every string literal in `text`
 /// whose content is exactly `main`, outside comments and outside items gated by
-/// a test-only `cfg`.
-fn main_literals(text: &str) -> Vec<usize> {
+/// a test-only `cfg`. A Vue component's `vue` is set, and the values of its
+/// directive attributes are read as expressions as well.
+fn main_literals(text: &str, vue: bool) -> Vec<usize> {
     let skipped = test_only_items(text);
-    literals(text)
+    let mut found: Vec<usize> = literals(text)
         .into_iter()
-        .filter(|(offset, content)| {
-            *content == "main" && !skipped.iter().any(|range| range.contains(offset))
-        })
+        .filter(|(_, content)| *content == "main")
         .map(|(offset, _)| offset)
-        .collect()
+        .collect();
+    if vue {
+        found.extend(expression_literals(text));
+    }
+    found.retain(|offset| !skipped.iter().any(|range| range.contains(offset)));
+    found.sort_unstable();
+    found.dedup();
+    found
 }
 
 /// Every string literal in `text` as its opening quote's offset and its
@@ -324,6 +350,153 @@ fn quoted(body: &str) -> usize {
         }
     }
     body.len()
+}
+
+/// The offsets of the `'main'` and `"main"` literals in the values of `text`'s
+/// directive attributes: in `v-*`, `:prop`, `@event` and `#slot` the value is a
+/// Vue expression, so a line id written there is a use like any other.
+fn expression_literals(text: &str) -> Vec<usize> {
+    let mut found = Vec::new();
+    for value in directive_values(text) {
+        let body = &text[value.clone()];
+        let mut at = 0;
+        while let Some(character) = body[at..].chars().next() {
+            let literal = string_literal(body, at).or_else(|| single_literal(body, at));
+            match literal {
+                Some((start, end, length)) => {
+                    if &body[start..end] == "main" {
+                        found.push(value.start + at);
+                    }
+                    at = (at + length).min(body.len());
+                }
+                None => at += character.len_utf8(),
+            }
+        }
+    }
+    found
+}
+
+/// Whether `name` is a Vue directive or bound attribute, whose value is an
+/// expression: `v-*`, and the `:`, `@` and `#` shorthands for bind, on and slot.
+fn is_directive(name: &str) -> bool {
+    name.starts_with("v-") || name.starts_with([':', '@', '#'])
+}
+
+/// The byte ranges of the attribute values of `text`'s template that belong to
+/// directive or bound attributes.
+fn directive_values(text: &str) -> Vec<std::ops::Range<usize>> {
+    let mut values = Vec::new();
+    let Some(body) = template_body(text) else {
+        return values;
+    };
+    let mut at = body.start;
+    while at < body.end
+        && let Some(found) = text[at..body.end].find('<')
+    {
+        let open = at + found;
+        if text[open..body.end].starts_with("<!--") {
+            at = text[open..body.end]
+                .find("-->")
+                .map_or(body.end, |end| open + end + 3);
+            continue;
+        }
+        at = tag_attributes(text, open + 1, body.end, &mut values);
+    }
+    values
+}
+
+/// The range of `text`'s `<template>` element's content, `None` when it has no
+/// template element, whose directives would be the only expressions it holds.
+fn template_body(text: &str) -> Option<std::ops::Range<usize>> {
+    let open = text.find("<template")?;
+    let start = open + text[open..].find('>')? + 1;
+    let end = text[start..].rfind("</template>")?;
+    Some(start..start + end)
+}
+
+/// Reads the attributes of the tag whose name begins at `cursor` in `text`,
+/// pushing the value range of each directive one, and answers the offset just
+/// past the tag. `end` bounds the template the tag belongs to.
+fn tag_attributes(
+    text: &str,
+    mut cursor: usize,
+    end: usize,
+    values: &mut Vec<std::ops::Range<usize>>,
+) -> usize {
+    while cursor < end && !text.as_bytes()[cursor].is_ascii_whitespace() {
+        match text.as_bytes()[cursor] {
+            b'>' | b'/' => break,
+            _ => cursor += text[cursor..].chars().next().map_or(1, char::len_utf8),
+        }
+    }
+    loop {
+        while cursor < end && text.as_bytes()[cursor].is_ascii_whitespace() {
+            cursor += 1;
+        }
+        match text.as_bytes().get(cursor) {
+            None => return end,
+            Some(b'>') => return cursor + 1,
+            Some(b'/') => {
+                cursor += 1;
+                continue;
+            }
+            Some(_) => {}
+        }
+        let name = cursor;
+        while cursor < end && !text.as_bytes()[cursor].is_ascii_whitespace() {
+            match text.as_bytes()[cursor] {
+                b'=' | b'>' | b'/' => break,
+                _ => cursor += text[cursor..].chars().next().map_or(1, char::len_utf8),
+            }
+        }
+        let directive = is_directive(&text[name..cursor]);
+        while cursor < end && text.as_bytes()[cursor].is_ascii_whitespace() {
+            cursor += 1;
+        }
+        if text.as_bytes().get(cursor) != Some(&b'=') {
+            continue;
+        }
+        cursor += 1;
+        while cursor < end && text.as_bytes()[cursor].is_ascii_whitespace() {
+            cursor += 1;
+        }
+        let Some(quote) = text
+            .as_bytes()
+            .get(cursor)
+            .copied()
+            .filter(|quote| matches!(quote, b'"' | b'\''))
+        else {
+            continue;
+        };
+        let value = cursor + 1;
+        let close = text[value..end]
+            .find(char::from(quote))
+            .map_or(end, |close| value + close);
+        if directive {
+            values.push(value..close);
+        }
+        cursor = (close + 1).min(end);
+    }
+}
+
+/// The single-quoted string literal that starts at `at` in `text`, as its
+/// content's bounds and its whole length, `None` when one does not start there
+/// or its quotes do not close on its own line. A lifetime such as `'a` has no
+/// closing quote and so is not one.
+fn single_literal(text: &str, at: usize) -> Option<(usize, usize, usize)> {
+    let body = text.get(at..)?.strip_prefix('\'')?;
+    let mut characters = body.char_indices();
+    while let Some((offset, character)) = characters.next() {
+        match character {
+            '\\' => {
+                characters.next();
+            }
+            '\'' => return Some((at + 1, at + 1 + offset, offset + 2)),
+            '\n' => return None,
+            _ => {}
+        }
+    }
+    None
 }
 
 /// The length of the character literal that starts at `at`, `None` for a
@@ -577,6 +750,113 @@ mod tests {
         let error = refusal(&root);
         assert!(error.contains("crates/example/src/lib.rs:1"), "{error}");
         assert!(!error.contains("web/content.rs"), "{error}");
+    }
+
+    #[test]
+    fn a_windows_spelled_path_matches_the_homes_and_the_allowlist() {
+        let root = Path::new("/repo");
+        let windows = |path: &str| root.join(path.replace('/', "\\"));
+        let mut errors = Vec::new();
+        let events = relative(root, &windows("crates/dim-agent-types/src/events.rs"));
+        assert_eq!(events, "crates/dim-agent-types/src/events.rs");
+        assert_eq!(
+            findings(
+                &events,
+                "pub const ROOT_BRANCH_ID: &str = \"main\";\n",
+                false,
+                &mut errors
+            ),
+            0
+        );
+        assert!(errors.is_empty(), "{errors:?}");
+        let sqlite = relative(
+            root,
+            &windows("crates/dim-app-server/src/storage/sqlite.rs"),
+        );
+        assert_eq!(
+            findings(
+                &sqlite,
+                "if let Ok(false) = connection.is_readonly(\"main\") {}\n",
+                false,
+                &mut errors
+            ),
+            1
+        );
+        assert!(errors.is_empty(), "{errors:?}");
+        let bare = relative(root, &windows("crates/example/src/lib.rs"));
+        assert_eq!(
+            findings(
+                &bare,
+                "fn branch() -> &'static str {\n    \"main\"\n}\n",
+                false,
+                &mut errors
+            ),
+            0
+        );
+        assert!(
+            errors[0].contains("crates/example/src/lib.rs:2: `\"main\"` names neither"),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn a_main_in_a_directive_expression_is_refused_with_its_line() {
+        let mut errors = Vec::new();
+        let file = "web/src/features/chat/LinesTree.vue";
+        findings(
+            file,
+            "<template>\n  <li v-if=\"line.id === 'main'\">root</li>\n</template>\n",
+            true,
+            &mut errors,
+        );
+        assert!(
+            errors[0].contains("web/src/features/chat/LinesTree.vue:2: `\"main\"` names neither"),
+            "{errors:?}"
+        );
+        let mut errors = Vec::new();
+        findings(
+            file,
+            "<template>\n  <li :class=\"{ active: id === 'main' }\">root</li>\n</template>\n",
+            true,
+            &mut errors,
+        );
+        assert!(
+            errors[0].contains("web/src/features/chat/LinesTree.vue:2: `\"main\"` names neither"),
+            "{errors:?}"
+        );
+        let mut errors = Vec::new();
+        findings(
+            file,
+            "<template>\n  <li @click=\"select('main')\">{{ t('x') }}</li>\n</template>\n",
+            true,
+            &mut errors,
+        );
+        assert_eq!(errors.len(), 1, "{errors:?}");
+    }
+
+    #[test]
+    fn a_plain_attribute_in_an_allowlisted_component_passes() {
+        let mut errors = Vec::new();
+        findings(
+            "web/src/app/AppRoot.vue",
+            "<template>\n  <main id=\"main\" class=\"page\"></main>\n</template>\n",
+            true,
+            &mut errors,
+        );
+        assert!(errors.is_empty(), "{errors:?}");
+        let mut errors = Vec::new();
+        findings(
+            "web/src/app/AppRoot.vue",
+            "<template>\n  <main :id=\"'main'\" class=\"page\"></main>\n</template>\n",
+            true,
+            &mut errors,
+        );
+        assert_eq!(
+            errors,
+            vec![
+                "web/src/app/AppRoot.vue:2: `\"main\"` names neither the root nor the default branch; write `ROOT_BRANCH_ID` or `DEFAULT_BRANCH_ID`, or name the use in `UNRELATED`".to_owned()
+            ]
+        );
     }
 
     #[test]
