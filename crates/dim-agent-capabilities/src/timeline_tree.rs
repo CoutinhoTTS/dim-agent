@@ -81,6 +81,20 @@ struct Undelivered {
     data: BranchEndData,
     error: AgentError,
 }
+/// One operation between taking the operations guard and handing its
+/// settlement to the tree. Close waits for it, so a settle task is never
+/// spawned after the tree stopped tracking them (design §5, §10, §20.26).
+struct Admission<'a> {
+    tree: &'a TimelineTree,
+}
+impl Drop for Admission<'_> {
+    fn drop(&mut self) {
+        let mut state = self.tree.state.lock().unwrap();
+        state.admitting -= 1;
+        drop(state);
+        self.tree.admitted.notify_waiters();
+    }
+}
 /// One committed move of the default branch: the line that held the role, `None`
 /// for the root, and the line it passed to. Each participant turns its own
 /// transition into its one status note (design §5, §12.1, §20.21).
@@ -106,6 +120,10 @@ struct TreeState {
     default_from: Option<String>,
     closing: bool,
     cleanup_errors: Vec<AgentError>,
+    /// Operations holding the operations guard that have not handed their
+    /// settlement to the tree yet; close waits for it before it stops tracking
+    /// them.
+    admitting: usize,
 }
 pub struct TimelineTree {
     weak: Weak<Self>,
@@ -135,7 +153,15 @@ pub struct TimelineTree {
     /// until its fact commits, so of two conflicting operations exactly one is
     /// admitted and each reads what the other would have written (design §10,
     /// §20.26).
-    operations: tokio::sync::Mutex<()>,
+    operations: Arc<tokio::sync::Mutex<()>>,
+    /// The tasks that settle an admitted operation: each holds the operations
+    /// guard, awaits its fact's publication and applies the live update, so a
+    /// caller that goes away leaves the settlement with the tree (design §5,
+    /// §10, §20.26).
+    settling: TaskTracker,
+    /// Wakes `start_close` once no admitted operation is between its append and
+    /// its settling task.
+    admitted: tokio::sync::Notify,
 }
 /// Shared with Timeline roots; never owns the tree or its child roots.
 pub struct TreeCommands {
@@ -844,6 +870,7 @@ impl TimelineTree {
                 default_from: None,
                 closing: false,
                 cleanup_errors: Vec::new(),
+                admitting: 0,
             }),
             factory,
             store,
@@ -857,7 +884,9 @@ impl TimelineTree {
             moves: Mutex::new(Vec::new()),
             default_moved: watch::channel(0).0,
             retry: tokio::sync::Mutex::new(()),
-            operations: tokio::sync::Mutex::new(()),
+            operations: Arc::new(tokio::sync::Mutex::new(())),
+            settling: TaskTracker::new(),
+            admitted: tokio::sync::Notify::new(),
         })
     }
     fn owned_context(&self, id: &str) -> Option<Arc<TimelineContext>> {
@@ -1537,7 +1566,20 @@ impl TimelineTree {
             && self.undelivered(id)
         {
             drop(_operations);
-            return self.retry_undelivered(id).await;
+            let admitted = self.admit()?;
+            let owner = self
+                .weak
+                .upgrade()
+                .ok_or_else(|| AgentError::Closed("TimelineTree".into()))?;
+            let line = id.to_owned();
+            let (answer, wait) = oneshot::channel();
+            self.settling.spawn(async move {
+                let _ = answer.send(owner.retry_undelivered(&line).await);
+            });
+            drop(admitted);
+            return wait
+                .await
+                .map_err(|_| AgentError::Closed("TimelineTree settling".into()))?;
         }
         appended?;
         drop(_operations);
@@ -1649,14 +1691,14 @@ impl TimelineTree {
     /// selectable and not already the role, and the move then writes one
     /// `branch/default` on the root and answers once that fact is published:
     /// a move the caller saw succeed is a move a restart keeps, and a write
-    /// that fails answers its error and changes nothing.
+    /// that fails answers its error and changes nothing. Once the write is
+    /// admitted the tree settles it, so a caller that goes away after that
+    /// point does not leave the fact unapplied.
     async fn set_default_branch(&self, id: &str, source: BranchSource) -> Result<String> {
-        let _operations = self.operations.lock().await;
+        let operations = self.operations.clone().lock_owned().await;
+        let admitted = self.admit()?;
         let (root, from) = {
             let state = self.state.lock().unwrap();
-            if state.closing {
-                return Err(AgentError::Closed("TimelineTree".into()));
-            }
             if state.default == id {
                 return Err(AgentError::refused(
                     BranchRefusal::AlreadyDefault,
@@ -1678,27 +1720,86 @@ impl TimelineTree {
             from: from.clone(),
             source,
         };
-        let timeline = root.timeline();
+        let timeline = root.timeline().clone();
         let event = timeline.append(EventKind::BranchDefault(data).into())?;
-        Self::published(timeline, event.sequence).await?;
-        self.set_default(id, from);
-        Ok(id.into())
+        let owner = self
+            .weak
+            .upgrade()
+            .ok_or_else(|| AgentError::Closed("TimelineTree".into()))?;
+        let branch = id.to_owned();
+        let wait = self.settle(operations, async move {
+            Self::published(&timeline, event.sequence).await?;
+            owner.set_default(&branch, from);
+            Ok(branch)
+        });
+        drop(admitted);
+        wait.await
+            .map_err(|_| AgentError::Closed("TimelineTree settling".into()))?
+    }
+    /// Hands an operation that has admitted its durable write to the tree: the
+    /// task holds the operations guard, awaits the fact's publication, applies
+    /// the live update and answers the oneshot. A caller that goes away drops
+    /// only its receiver (design §5, §10, §20.26).
+    fn settle<T: Send + 'static>(
+        &self,
+        operations: tokio::sync::OwnedMutexGuard<()>,
+        work: impl std::future::Future<Output = Result<T>> + Send + 'static,
+    ) -> oneshot::Receiver<Result<T>> {
+        let (answer, wait) = oneshot::channel();
+        self.settling.spawn(async move {
+            let _operations = operations;
+            let _ = answer.send(work.await);
+        });
+        wait
+    }
+    /// Counts the operation until it has handed its settlement to the tree;
+    /// close waits for it so no settle task is spawned after it stopped
+    /// tracking them.
+    fn admit(&self) -> Result<Admission<'_>> {
+        let mut state = self.state.lock().unwrap();
+        if state.closing {
+            return Err(AgentError::Closed("TimelineTree".into()));
+        }
+        state.admitting += 1;
+        drop(state);
+        Ok(Admission { tree: self })
+    }
+    /// Waits until no admitted operation is between its append and its settling
+    /// task. That span has no await, so the wait is bounded.
+    async fn settled_admissions(&self) {
+        loop {
+            let admitted = self.admitted.notified();
+            tokio::pin!(admitted);
+            admitted.as_mut().enable();
+            if self.state.lock().unwrap().admitting == 0 {
+                return;
+            }
+            admitted.await;
+        }
     }
     /// Waits until `timeline` publishes `sequence`: the store committed the
     /// batch, not only queued it. A failed transaction leaves it unpublished
-    /// and its fault answers here (design §5, §20.21).
+    /// and its fault answers here; a timeline that closes first can no longer
+    /// publish it, and answers `Closed` instead of waiting forever (design §5,
+    /// §20.21).
     async fn published(timeline: &Timeline, sequence: u64) -> Result<()> {
         let mut published = timeline.watch();
-        while published.borrow_and_update().0 < sequence {
+        loop {
+            let (tail, closed) = *published.borrow_and_update();
+            if tail >= sequence {
+                return Ok(());
+            }
             if let Some(error) = timeline.failure() {
                 return Err(error);
+            }
+            if closed {
+                return Err(AgentError::Closed("branch/default publication".into()));
             }
             published
                 .changed()
                 .await
                 .map_err(|_| AgentError::Closed("branch/default publication".into()))?;
         }
-        Ok(())
     }
     /// The move in force after its fact committed: the tree's answer, the one
     /// transition both participants write their note from, and the wake that
@@ -2257,6 +2358,12 @@ impl TimelineTree {
         let task = tokio::spawn(async move {
             owner.builds.close();
             owner.builds.wait().await;
+            // Every admitted operation has handed its settlement over by now,
+            // so closing the tracker loses none of them. The contexts close
+            // before the tasks are joined: a task waiting for its fact's
+            // publication ends when its timeline closes.
+            owner.settled_admissions().await;
+            owner.settling.close();
             let (contexts, failures): (Vec<_>, Vec<_>) = {
                 let mut state = owner.state.lock().unwrap();
                 (
@@ -2275,6 +2382,7 @@ impl TimelineTree {
                     .into_iter()
                     .filter_map(|result| result.err()),
             );
+            owner.settling.wait().await;
             owner
                 .close_result
                 .send_replace(Some(AgentError::aggregate(errors)));

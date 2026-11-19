@@ -1255,9 +1255,11 @@ struct TestStore {
     /// The branch whose next submission lookup fails at the read, before the
     /// store writes anything: a transitory failure a delivery can retry.
     fail_lookup: Mutex<Option<String>>,
-    /// The branch whose next append is accepted and then held, the state a
-    /// store is in between queueing a batch and committing it.
-    hold: Mutex<Option<String>>,
+    /// The branch whose next append of a kind is accepted and then held, the
+    /// state a store is in between queueing a batch and committing it. The kind
+    /// is an event key; `branch-final` stands for a tool end's final message on
+    /// the parent.
+    hold: Mutex<Option<(String, String)>>,
     /// The batch the held append has not written or answered yet.
     held: Mutex<Option<(TimelineKey, Vec<StoredEvent>, PublishCallback)>>,
     /// Wakes the test that waits for a hold to be taken.
@@ -1293,7 +1295,12 @@ impl TestStore {
     /// publication, so a caller can assert what the tree answers before the
     /// commit.
     fn hold_next_default(&self, branch: &str) {
-        *self.hold.lock().unwrap() = Some(branch.into());
+        *self.hold.lock().unwrap() = Some((branch.into(), "branch/default".into()));
+    }
+    /// Accepts the next final message a tool end delivers to `branch` and holds
+    /// its commit.
+    fn hold_next_final(&self, branch: &str) {
+        *self.hold.lock().unwrap() = Some((branch.into(), "branch-final".into()));
     }
     /// Waits until a held publication is there to release.
     async fn wait_holding(&self) {
@@ -1428,12 +1435,23 @@ impl TimelineStore for TestStore {
         events: Vec<StoredEvent>,
         publish: PublishCallback,
     ) -> Result<()> {
-        let default = events
-            .iter()
-            .any(|record| matches!(record.event.kind, EventKind::BranchDefault(_)));
-        let hold = default && {
+        let final_message = |record: &StoredEvent| match &record.event.kind {
+            EventKind::InputMessage(data) => data
+                .submission_id
+                .as_deref()
+                .is_some_and(|id| id.starts_with("branch-final:")),
+            _ => false,
+        };
+        let hold = {
             let mut armed = self.hold.lock().unwrap();
-            let hold = armed.as_deref() == Some(key.branch_id.as_str());
+            let hold = armed.as_ref().is_some_and(|(branch, kind)| {
+                branch == &key.branch_id
+                    && if kind == "branch-final" {
+                        events.iter().any(final_message)
+                    } else {
+                        events.iter().any(|record| record.event.kind.key() == kind)
+                    }
+            });
             if hold {
                 *armed = None;
             }
@@ -1444,13 +1462,7 @@ impl TimelineStore for TestStore {
             self.holding.notify_waiters();
             return Ok(());
         }
-        let delivery = events.iter().any(|record| match &record.event.kind {
-            EventKind::InputMessage(data) => data
-                .submission_id
-                .as_deref()
-                .is_some_and(|id| id.starts_with("branch-final:")),
-            _ => false,
-        });
+        let delivery = events.iter().any(final_message);
         let failed = delivery && {
             let mut armed = self.fail_delivery.lock().unwrap();
             let failed = armed.as_deref() == Some(key.branch_id.as_str());
@@ -10390,4 +10402,227 @@ async fn a_move_that_stopped_between_its_fact_and_its_notes_is_completed_at_load
         "the restored lines keep their history"
     );
     soon(again.close()).await.unwrap();
+}
+
+/// §20.21: a move whose caller goes away after `branch/default` is admitted
+/// settles under the tree: the fact commits, the default moves, the target is
+/// protected from `end`, and its note is written.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_move_cancelled_after_admission_settles_under_the_tree() {
+    let store = Arc::new(TestStore::default());
+    let agent = setup_with(&store).await;
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let line = open_line(&session, "switched while cancelled").await;
+    let tree = session.session_service::<TreeCommands>().unwrap();
+    // The line's turn and its parent's roster writes settle before the store is
+    // armed, so the held batch is the move's own.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    store.hold_next_default("main");
+    let mut moved = Box::pin(tree.set_default_branch(
+        line.clone(),
+        BranchSource::User {
+            operation_id: "switch".into(),
+        },
+    ));
+    tokio::select! {
+        result = &mut moved => panic!("the move answered before its fact committed: {result:?}"),
+        _ = store.wait_holding() => {}
+    }
+    drop(moved);
+    store.release();
+    answers_default(&tree, &line).await;
+    let refused = soon(tree.end(
+        line.clone(),
+        BranchSource::User {
+            operation_id: "end".into(),
+        },
+    ))
+    .await;
+    assert_eq!(
+        refusal(&refused).0,
+        "branch_cannot_end",
+        "the settled move made the line the default branch: {refused:?}"
+    );
+    let notes = owed_notes(&session, &line, 1).await;
+    assert!(notes[0].contains(r#"default="true""#), "{}", notes[0]);
+    soon(agent.close()).await.unwrap();
+}
+
+/// §20.21: a publication that fails after the caller went away still changes
+/// nothing, and the tree keeps the admitted operation's guard until it has
+/// settled: the next move waits for that settlement and then answers the
+/// faulted root's error.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cancelled_move_whose_publication_fails_keeps_the_tree_until_it_settles() {
+    let store = Arc::new(TestStore::default());
+    let agent = setup_with(&store).await;
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let first = open_line(&session, "first switch").await;
+    let second = open_line(&session, "second switch").await;
+    let tree = session.session_service::<TreeCommands>().unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    store.hold_next_default("main");
+    let mut moved = Box::pin(tree.set_default_branch(
+        first.clone(),
+        BranchSource::User {
+            operation_id: "switch".into(),
+        },
+    ));
+    tokio::select! {
+        result = &mut moved => panic!("the move answered before its fact committed: {result:?}"),
+        _ = store.wait_holding() => {}
+    }
+    drop(moved);
+    let mut next = Box::pin(tree.set_default_branch(
+        second.clone(),
+        BranchSource::User {
+            operation_id: "next".into(),
+        },
+    ));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(150), &mut next)
+            .await
+            .is_err(),
+        "a second move must wait for the admitted one to settle"
+    );
+    store.release_failed();
+    let failed = soon(&mut next).await;
+    assert!(
+        failed.is_err(),
+        "the settled failure reaches the tree's next operation: {failed:?}"
+    );
+    assert_eq!(
+        tree.default_branch().unwrap(),
+        "main",
+        "a failed publication changes nothing"
+    );
+    assert_eq!(
+        default_notes(&session, &["main", &first]).await,
+        [("main".to_owned(), 0), (first.clone(), 0)],
+        "no participant is told about a move that did not commit"
+    );
+    // The failed batch faults the Session; its close is where it has settled.
+    let _ = soon(session.close()).await;
+    let _ = soon(agent.close()).await;
+}
+
+/// §20.26b: the one end path whose settlement the caller's future owned is a
+/// refused end's retried final message. Once that retry's input is admitted,
+/// the tree finishes the end even if the caller goes away: the line is
+/// recorded, the message is delivered once, and a later end answers.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_end_retry_cancelled_after_admission_settles_under_the_tree() {
+    let store = Arc::new(TestStore::default());
+    let agent = setup_with(&store).await;
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let line = open_line(&session, "deliver me").await;
+    soon(session.idle("main")).await.unwrap();
+    let tree = session.session_service::<TreeCommands>().unwrap();
+    let source = || BranchSource::Tool {
+        turn_id: "turn".into(),
+        request_id: "request".into(),
+        call_id: "call".into(),
+    };
+    store.fail_next_lookup("main");
+    let failed = soon(tree.end_with_final(line.clone(), source(), Some("the result".into()))).await;
+    assert!(
+        failed.is_err(),
+        "the delivery failure reaches the caller: {failed:?}"
+    );
+    assert!(
+        session
+            .directory()
+            .into_iter()
+            .any(|entry| entry.info.id == line && entry.state == BranchDirectoryState::Ending),
+        "the line stays ending while its message is owed"
+    );
+    store.hold_next_final("main");
+    let mut retry =
+        Box::pin(tree.end_with_final(line.clone(), source(), Some("the result".into())));
+    tokio::select! {
+        result = &mut retry => panic!("the retry answered before its message was admitted: {result:?}"),
+        _ = store.wait_holding() => {}
+    }
+    drop(retry);
+    store.release();
+    records_end(&session, &line).await;
+    let delivery = format!("branch-final:{line}:");
+    let deliveries = local_events(&session, "main")
+        .await
+        .iter()
+        .filter(|event| match &event.kind {
+            EventKind::InputMessage(data) => data
+                .submission_id
+                .as_deref()
+                .is_some_and(|id| id.starts_with(&delivery)),
+            _ => false,
+        })
+        .count();
+    assert_eq!(deliveries, 1, "the settled retry delivers the message once");
+    let again = soon(tree.end(
+        line.clone(),
+        BranchSource::User {
+            operation_id: "end".into(),
+        },
+    ))
+    .await;
+    assert!(
+        matches!(again, Err(AgentError::BranchEnded(_))),
+        "a later end answers once the tree recorded the end: {again:?}"
+    );
+    // The refused first delivery stays in the tree's cleanup errors, which
+    // close reports.
+    let _ = soon(agent.close()).await;
+}
+
+/// §20.21: closing the Session while an admitted move settles waits for that
+/// settlement, answers within a bound, and a restore reads the fact the store
+/// committed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_close_waits_for_an_admitted_move_and_a_restore_reads_its_fact() {
+    let store = Arc::new(TestStore::default());
+    let agent = setup_with(&store).await;
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let id = session.id().to_owned();
+    let line = open_line(&session, "moved while closing").await;
+    let tree = session.session_service::<TreeCommands>().unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    store.hold_next_default("main");
+    let mut moved = Box::pin(tree.set_default_branch(
+        line.clone(),
+        BranchSource::User {
+            operation_id: "switch".into(),
+        },
+    ));
+    tokio::select! {
+        result = &mut moved => panic!("the move answered before its fact committed: {result:?}"),
+        _ = store.wait_holding() => {}
+    }
+    drop(moved);
+    store.release();
+    answers_default(&tree, &line).await;
+    soon(session.close()).await.unwrap();
+    soon(agent.close()).await.unwrap();
+    let restored = MinimalHost::start(&builder_with_store(
+        &Arc::new(Probe::default()),
+        store.clone(),
+    ))
+    .await
+    .unwrap();
+    let session = soon(restored.restore_session(id)).await.unwrap();
+    assert_eq!(
+        session.default_branch().unwrap(),
+        line,
+        "a restore reads the fact the settled move committed"
+    );
+    soon(session.close()).await.unwrap();
+    soon(restored.close()).await.unwrap();
 }
