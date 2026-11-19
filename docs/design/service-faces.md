@@ -116,6 +116,9 @@ Rust 产品装配的现状以 [生成的 catalog](../architecture/rust-agent/gen
 
 ### 3.4 对象/句柄：拆成操作加 id
 
+Proposed target operations: [Resource and repository operations](contracts/resource-owner-operations.md).
+
+
 | 名字 | 现在的对象 | 目标操作 |
 | --- | --- | --- |
 | `hostPlatform` | `ProcessTree`、`PtyProcessTree`、临时目录 | 数据面 `execHost`：`start`/`wait`/`kill`/`settle`/`output`/`tail`/`removeOutputDirectory`/`shell`/`write`/`resize`/`info`/`confined`/`configured`（[resource and store data faces](resource-faces.md) §3，#1295）；`hostPlatform` 是提供方和它的 Rust binding |
