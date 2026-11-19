@@ -17857,6 +17857,13 @@
     },
     {
       "from": "dim_agent_capabilities::timeline_tree",
+      "to": "dim_agent_capabilities::branch_input",
+      "references": [
+        "path crate::branch_input::append_own"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::timeline_tree",
       "to": "dim_agent_capabilities::context_block",
       "references": [
         "path crate::context_block::element",
@@ -18084,6 +18091,7 @@
         "path QueryValue::Missing",
         "path QueryValue::Value",
         "path TimelineQuery",
+        "path TimelineQueryReply",
         "path dim_agent_runtime::TimelineQuery",
         "path dim_agent_runtime::TimelineQueryReply",
         "use dim_agent_runtime::QueryComparison",
@@ -18095,7 +18103,8 @@
         "use dim_agent_runtime::QuerySelect",
         "use dim_agent_runtime::QuerySpec",
         "use dim_agent_runtime::QueryValue",
-        "use dim_agent_runtime::TimelineQuery"
+        "use dim_agent_runtime::TimelineQuery",
+        "use dim_agent_runtime::TimelineQueryReply"
       ]
     },
     {

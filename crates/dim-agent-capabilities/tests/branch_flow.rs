@@ -10388,6 +10388,7 @@ async fn a_move_that_stopped_between_its_fact_and_its_notes_is_completed_at_load
             .unwrap();
     }
 
+    let mut held = dim_agent_capabilities::timeline_tree::testing::hold_writers(&id);
     let agent = MinimalHost::start(&builder_with_store(
         &Arc::new(Probe::default()),
         store.clone(),
@@ -10396,19 +10397,57 @@ async fn a_move_that_stopped_between_its_fact_and_its_notes_is_completed_at_load
     .unwrap();
     let session = soon(agent.restore_session(id.clone())).await.unwrap();
     assert_eq!(session.default_branch().unwrap(), c, "the fact stands");
-    until_events(&session, &b, |events| {
-        line_block(events).is_some_and(|(text, _)| text.contains(r#"default="false""#))
+    let mut arrived = std::collections::BTreeSet::new();
+    let stopped = tokio::time::timeout(Duration::from_secs(5), async {
+        while !(arrived.contains(&b) && arrived.contains(&c)) {
+            arrived.insert(held.arrived().await);
+        }
     })
     .await;
-    let note = until_events(&session, &c, |events| {
-        line_block(events).is_some_and(|(text, _)| text.contains(r#"default="true""#))
-    })
-    .await;
-    let note = line_block(&note).expect("C holds its note").0;
     assert!(
-        note.contains(&format!("switched from line {b}")),
-        "C's note names the line the move started from: {note}"
+        stopped.is_ok(),
+        "the writers of {b} and {c} never stopped at the test seam"
     );
+    for (line, role, other) in [
+        (
+            b.clone(),
+            r#"default="false""#.to_owned(),
+            format!("Line {c} is now the session's default branch"),
+        ),
+        (
+            c.clone(),
+            r#"default="true""#.to_owned(),
+            format!("switched from line {b}"),
+        ),
+    ] {
+        soon(session.submit("next request".into(), InputMode::Queue, &line))
+            .await
+            .unwrap();
+        let events = until_events(&session, &line, |events| {
+            request_after_resume(events).is_some()
+        })
+        .await;
+        let (at, request) = request_after_resume(&events).expect("the line's first request exists");
+        let before: Vec<_> = events
+            .iter()
+            .filter(|event| event.sequence < at)
+            .cloned()
+            .collect();
+        let note = blocks_with(&before, "<dim-branch-line ")
+            .pop()
+            .expect("the restored line holds its note");
+        assert!(note.contains(&role), "{line}: {note}");
+        assert!(note.contains(&other), "{line}: {note}");
+        assert!(
+            request
+                .request
+                .messages
+                .iter()
+                .any(|message| said(message).contains(&note)),
+            "line {line}'s first request carries the note its load wrote"
+        );
+    }
+    held.release();
     assert_eq!(
         default_notes(&session, &["main", &b, &c]).await,
         [("main".to_owned(), 0), (b.clone(), 2), (c.clone(), 1)],
@@ -10432,6 +10471,121 @@ async fn a_move_that_stopped_between_its_fact_and_its_notes_is_completed_at_load
         "the restored lines keep their history"
     );
     soon(again.close()).await.unwrap();
+}
+
+/// §5, §20.24a: a restored line owes its note before it can answer a
+/// request. The store holds a durable `main -> B` fact and no note, and B's
+/// restored writer is stopped at the seam, so only the load can write it; the
+/// first request B builds already carries it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_restore_writes_the_owed_note_before_the_line_answers() {
+    let store = Arc::new(MemoryTimelineStore::default());
+    let agent = MinimalHost::start(&builder_with_store(
+        &Arc::new(Probe::default()),
+        store.clone(),
+    ))
+    .await
+    .unwrap();
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let b = open_line(&session, "the purpose of B").await;
+    soon(session.idle("main")).await.unwrap();
+    let id = session.id().to_owned();
+    soon(session.close()).await.unwrap();
+    soon(agent.close()).await.unwrap();
+
+    // The store now holds the moved fact and no note beside it, which is what
+    // a daemon that stopped right after the commit leaves.
+    {
+        let root_store: Arc<dyn TimelineStore> = store.clone();
+        let key = TimelineKey {
+            session_id: id.clone(),
+            branch_id: "main".into(),
+        };
+        let head = root_store.head(&key).await.unwrap();
+        let main = Timeline::restore(rutis::Ctx::root().unwrap(), key, Vec::new(), root_store)
+            .await
+            .unwrap();
+        assert_eq!(main.sequence(), head, "the root reads at its stored head");
+        main.append(
+            EventKind::BranchDefault(BranchDefaultData {
+                branch: b.clone(),
+                from: None,
+                source: BranchSource::User {
+                    operation_id: "switch-to-b".into(),
+                },
+            })
+            .into(),
+        )
+        .unwrap();
+        dim_agent_runtime::core::close_timeline(&main)
+            .await
+            .unwrap();
+    }
+
+    let mut held = dim_agent_capabilities::timeline_tree::testing::hold_writers(&id);
+    let agent = MinimalHost::start(&builder_with_store(
+        &Arc::new(Probe::default()),
+        store.clone(),
+    ))
+    .await
+    .unwrap();
+    let session = soon(agent.restore_session(id.clone())).await.unwrap();
+    assert_eq!(session.default_branch().unwrap(), b, "the fact stands");
+    let stopped = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if held.arrived().await == b {
+                break;
+            }
+        }
+    })
+    .await;
+    assert!(
+        stopped.is_ok(),
+        "line {b}'s writer never stopped at the test seam"
+    );
+    soon(session.submit("next request".into(), InputMode::Queue, &b))
+        .await
+        .unwrap();
+    let events = until_events(&session, &b, |events| {
+        request_after_resume(events).is_some()
+    })
+    .await;
+    let (at, request) = request_after_resume(&events).expect("B's first request exists");
+    let before: Vec<_> = events
+        .iter()
+        .filter(|event| event.sequence < at)
+        .cloned()
+        .collect();
+    let note = blocks_with(&before, "<dim-branch-line ")
+        .pop()
+        .expect("B holds the note the restored fact earns");
+    assert!(note.contains(r#"default="true""#), "{note}");
+    assert!(note.contains("switched from line main"), "{note}");
+    assert!(
+        request
+            .request
+            .messages
+            .iter()
+            .any(|message| said(message).contains(&note)),
+        "the first request carries the owed note before the writer runs"
+    );
+    held.release();
+    soon(agent.close()).await.unwrap();
+}
+
+/// The first model request a line prepared after its latest `branch/resume`,
+/// with its sequence: requests before the resume are the previous
+/// generation's.
+fn request_after_resume(events: &[Arc<AgentEvent>]) -> Option<(u64, &ContextPrepareData)> {
+    let resume = events
+        .iter()
+        .rposition(|event| matches!(event.kind, EventKind::BranchResume(_)))?;
+    events[resume..].iter().find_map(|event| match &event.kind {
+        EventKind::ContextPrepare(data) => Some((event.sequence, data)),
+        _ => None,
+    })
 }
 
 /// The status notes a line holds, in commit order.
@@ -10486,9 +10640,12 @@ async fn records_end(session: &Session, line: &str) {
 }
 
 /// §20.21: a move that commits in the window between a line becoming
-/// selectable and its writer starting still owes that line its note. The
-/// writer is stopped at a test seam, so the two moves are committed while the
-/// line is ready and unstarted, not by racing it.
+/// selectable and its writer starting still owes that line its note, and a
+/// queued move keeps its own role and counterpart: `main -> B -> C -> B`
+/// leaves B a `true` note naming `main`, a `false` one naming C and a `true`
+/// one naming C, in that order. The writer is stopped at a test seam, so the
+/// three moves are committed while the lines are ready and unstarted, not by
+/// racing them.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_move_committed_before_its_writer_starts_still_owes_its_note() {
     let probe = Arc::new(Probe::default());
@@ -10497,29 +10654,35 @@ async fn a_move_committed_before_its_writer_starts_still_owes_its_note() {
         .await
         .unwrap();
     let mut held = dim_agent_capabilities::timeline_tree::testing::hold_writers(session.id());
-    let line = soon(session.branch(
-        "main".into(),
-        0,
-        BranchOptions {
-            prompt: "opened before its writer runs".into(),
-            source: BranchSource::User {
-                operation_id: "open".into(),
-            },
-        },
-    ))
-    .await
-    .unwrap();
+    let open = |purpose: &'static str, operation_id: &'static str| {
+        let session = session.clone();
+        async move {
+            soon(session.branch(
+                "main".into(),
+                0,
+                BranchOptions {
+                    prompt: purpose.into(),
+                    source: BranchSource::User {
+                        operation_id: operation_id.into(),
+                    },
+                },
+            ))
+            .await
+            .unwrap()
+        }
+    };
+    let b = open("opened before its writer runs", "open-b").await;
+    let c = open("opened before its writer runs too", "open-c").await;
+    let mut arrived = std::collections::BTreeSet::new();
     let stopped = tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if held.arrived().await == line {
-                break;
-            }
+        while !(arrived.contains(&b) && arrived.contains(&c)) {
+            arrived.insert(held.arrived().await);
         }
     })
     .await;
     assert!(
         stopped.is_ok(),
-        "line {line}'s writer never stopped at the test seam"
+        "the writers of lines {b} and {c} never stopped at the test seam"
     );
     let tree = session.session_service::<TreeCommands>().unwrap();
     let switch = |target: &str| {
@@ -10536,16 +10699,42 @@ async fn a_move_committed_before_its_writer_starts_still_owes_its_note() {
             .expect("the move commits")
         }
     };
-    switch(&line).await;
-    switch("main").await;
+    switch(&b).await;
+    switch(&c).await;
+    switch(&b).await;
     held.release();
-    let notes = owed_notes(&session, &line, 2).await;
+    let notes = owed_notes(&session, &b, 3).await;
     assert!(notes[0].contains(r#"default="true""#), "{}", notes[0]);
+    assert!(notes[0].contains("switched from line main"), "{}", notes[0]);
     assert!(notes[1].contains(r#"default="false""#), "{}", notes[1]);
+    assert!(
+        notes[1].contains(&format!("Line {c} is now the session's default branch")),
+        "{}",
+        notes[1]
+    );
+    assert!(notes[2].contains(r#"default="true""#), "{}", notes[2]);
+    assert!(
+        notes[2].contains(&format!("switched from line {c}")),
+        "{}",
+        notes[2]
+    );
+    let at_c = owed_notes(&session, &c, 2).await;
+    assert!(at_c[0].contains(r#"default="true""#), "{}", at_c[0]);
+    assert!(
+        at_c[0].contains(&format!("switched from line {b}")),
+        "{}",
+        at_c[0]
+    );
+    assert!(at_c[1].contains(r#"default="false""#), "{}", at_c[1]);
+    assert!(
+        at_c[1].contains(&format!("Line {b} is now the session's default branch")),
+        "{}",
+        at_c[1]
+    );
     assert_eq!(
-        default_notes(&session, &["main", &line]).await,
-        [("main".to_owned(), 0), (line.clone(), 2)],
-        "both moves reach the line and none reaches the root"
+        default_notes(&session, &["main", &b, &c]).await,
+        [("main".to_owned(), 0), (b.clone(), 3), (c.clone(), 2)],
+        "every queued move reaches its participant once, and none reaches the root"
     );
     soon(agent.close()).await.unwrap();
 }
