@@ -64,6 +64,34 @@ pub enum FsRemove {
     },
 }
 
+#[derive(Debug, Default, Clone, Copy, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum FsPermissions {
+    #[default]
+    Preserve,
+    Private,
+    PrivateReadOnly,
+}
+
+impl FsPermissions {
+    fn mode(self) -> super::ReplacementMode {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            super::ReplacementMode::Native(match self {
+                Self::Private => Some(std::fs::Permissions::from_mode(0o600)),
+                Self::PrivateReadOnly => Some(std::fs::Permissions::from_mode(0o400)),
+                Self::Preserve => None,
+            })
+        }
+        #[cfg(not(unix))]
+        match self {
+            Self::PrivateReadOnly => super::ReplacementMode::ReadOnly,
+            Self::Preserve | Self::Private => super::ReplacementMode::Native(None),
+        }
+    }
+}
+
 /// Filesystem operations on the existing storage generation.
 #[derive(Clone)]
 pub struct FsHost(Arc<FileStorage>);
@@ -71,6 +99,162 @@ pub struct FsHost(Arc<FileStorage>);
 impl FsHost {
     pub(super) fn new(owner: Arc<FileStorage>) -> Self {
         Self(owner)
+    }
+
+    pub async fn lock(&self, caller: &Ctx, path: &str, cancel: &CancellationToken) -> Result<Uuid> {
+        let path = self.0.resolve(Path::new(path))?;
+        let lease = self.0.lock(&path, cancel).await?;
+        let id = lease.0.as_ref().expect("new file lease").id;
+        let held = Arc::new(super::SharedLease::new(Some(lease)));
+        let cleanup = held.clone();
+        let release = caller
+            .effect(move || async move {
+                cleanup.lock().await.take();
+                Ok(())
+            })
+            .map_err(|_| FileStorageError::Closed)?;
+        {
+            let mut state = self.0.state.lock().unwrap();
+            if let Some(entry) = state.leases.get_mut(&id) {
+                entry.binding = Some((Arc::downgrade(&held), release));
+                return Ok(id);
+            }
+        }
+        let _ = release.dispose().await;
+        Err(FileStorageError::Closed)
+    }
+
+    pub async fn unlock(&self, id: Uuid) -> Result<()> {
+        let release = {
+            let mut state = self.0.state.lock().unwrap();
+            let (_, release) = state
+                .leases
+                .get_mut(&id)
+                .and_then(|entry| entry.binding.take())
+                .ok_or(FileStorageError::InvalidPath("unknown lease id"))?;
+            release
+        };
+        release
+            .dispose()
+            .await
+            .map_err(|_| FileStorageError::Closed)
+    }
+
+    pub async fn stat(&self, path: &Path, cancel: &CancellationToken) -> Result<super::FileStat> {
+        let path = self.0.resolve(path)?;
+        let relative = path.relative.clone();
+        self.0
+            .run(&path, cancel, move |root, _, _| {
+                let (parent, name) = match super::native::parent(root, &relative) {
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        return Ok(super::FileStat::Missing);
+                    }
+                    result => result?,
+                };
+                super::native::file_stat(&parent, &name)
+            })
+            .await
+    }
+
+    pub async fn read_bytes(
+        &self,
+        path: &Path,
+        limit: usize,
+        lease_id: Option<Uuid>,
+        cancel: &CancellationToken,
+    ) -> Result<Vec<u8>> {
+        let path = self.0.resolve(path)?;
+        let Some(id) = lease_id else {
+            return self.0.read_limited(&path, limit, cancel).await;
+        };
+        self.held_lease(id, Some(&path), cancel)
+            .await?
+            .read_limited(limit, cancel)
+            .await
+    }
+
+    async fn held_lease(
+        &self,
+        id: Uuid,
+        path: Option<&super::FilePath>,
+        cancel: &CancellationToken,
+    ) -> Result<tokio::sync::OwnedMappedMutexGuard<Option<super::FileLease>, super::FileLease>>
+    {
+        let held = {
+            let state = self.0.state.lock().unwrap();
+            state
+                .leases
+                .get(&id)
+                .and_then(|entry| entry.binding.as_ref()?.0.upgrade())
+                .ok_or(FileStorageError::InvalidPath("unknown lease id"))?
+        };
+        let guard = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Err(FileStorageError::Cancelled),
+            guard = held.lock_owned() => guard,
+        };
+        let lease = tokio::sync::OwnedMutexGuard::try_map(guard, Option::as_mut)
+            .map_err(|_| FileStorageError::InvalidPath("unknown lease id"))?;
+        if path.is_some_and(|path| &lease.0.as_ref().expect("held file lease").path != path) {
+            return Err(FileStorageError::InvalidPath(
+                "lease does not hold the requested path",
+            ));
+        }
+        Ok(lease)
+    }
+
+    pub async fn replace(
+        &self,
+        path: &Path,
+        bytes: Vec<u8>,
+        permissions: FsPermissions,
+        lease_id: Option<Uuid>,
+        cancel: &CancellationToken,
+    ) -> Result<()> {
+        let path = self.0.resolve(path)?;
+        let mode = permissions.mode();
+        match lease_id {
+            Some(id) => {
+                self.held_lease(id, Some(&path), cancel)
+                    .await?
+                    .replace_with(bytes, mode, cancel)
+                    .await
+            }
+            None => {
+                self.0
+                    .lock(&path, cancel)
+                    .await?
+                    .replace_with(bytes, mode, cancel)
+                    .await
+            }
+        }
+    }
+
+    pub async fn backup(
+        &self,
+        id: Uuid,
+        suffix: &str,
+        permissions: FsPermissions,
+        cancel: &CancellationToken,
+    ) -> Result<()> {
+        if matches!(permissions, FsPermissions::PrivateReadOnly) {
+            return Err(FileStorageError::InvalidPath(
+                "privateReadOnly applies only to replacement",
+            ));
+        }
+        #[cfg(unix)]
+        let super::ReplacementMode::Native(mode) = permissions.mode();
+        #[cfg(not(unix))]
+        let mode = None;
+        self.held_lease(id, None, cancel)
+            .await?
+            .backup_with(
+                suffix,
+                mode,
+                matches!(permissions, FsPermissions::Preserve),
+                cancel,
+            )
+            .await
     }
 
     pub async fn create_directory(&self, path: &str, cancel: &CancellationToken) -> Result<()> {
@@ -221,12 +405,47 @@ impl FileStorage {
 #[derive(Deserialize)]
 #[serde(tag = "method", content = "request", rename_all = "camelCase")]
 enum Request {
+    Stat(PathRequest),
+    Lock(PathRequest),
+    Unlock(LeaseRequest),
+    ReadBytes(ReadBytes),
+    Replace(Replace),
+    Backup(Backup),
     OpenRead(PathRequest),
     CreateDirectory(PathRequest),
     List(PathRequest),
     Remove(FsRemove),
     ReadAt(Read),
     CloseRead(Close),
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LeaseRequest {
+    lease_id: Uuid,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ReadBytes {
+    path: String,
+    limit: usize,
+    lease_id: Option<Uuid>,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Replace {
+    path: String,
+    bytes: String,
+    #[serde(default)]
+    permissions: FsPermissions,
+    lease_id: Option<Uuid>,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Backup {
+    lease_id: Uuid,
+    suffix: String,
+    #[serde(default)]
+    permissions: FsPermissions,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -249,7 +468,7 @@ struct Close {
 impl HostDispatch for FsHost {
     fn methods(&self) -> Option<serde_json::Value> {
         Some(
-            serde_json::json!({"openRead":"async", "readAt":"async", "closeRead":"async", "createDirectory":"async", "list":"async", "remove":"async"}),
+            serde_json::json!({"stat":"async","replace":"async","backup":"async","lock":"async", "unlock":"async", "readBytes":"async", "openRead":"async", "readAt":"async", "closeRead":"async", "createDirectory":"async", "list":"async", "remove":"async"}),
         )
     }
 
@@ -268,6 +487,65 @@ impl HostDispatch for FsHost {
             let cancel = CancellationToken::new();
             let _dropped = cancel.clone().drop_guard();
             let reply = match request {
+                Request::Stat(request) => serde_json::json!(
+                    owner
+                        .stat(Path::new(&request.path), &cancel)
+                        .await
+                        .map_err(failure)?
+                ),
+                Request::Lock(request) => {
+                    let caller = caller
+                        .ok_or_else(|| Error::Value("fsHost.lock requires a calling row".into()))?;
+                    let id = owner
+                        .lock(&caller, &request.path, &cancel)
+                        .await
+                        .map_err(failure)?;
+                    serde_json::json!({"leaseId":id})
+                }
+                Request::Unlock(request) => {
+                    owner.unlock(request.lease_id).await.map_err(failure)?;
+                    serde_json::json!({})
+                }
+                Request::Replace(request) => {
+                    let bytes = STANDARD.decode(request.bytes).map_err(|_| {
+                        failure(FileStorageError::InvalidPath("invalid base64 bytes"))
+                    })?;
+                    owner
+                        .replace(
+                            Path::new(&request.path),
+                            bytes,
+                            request.permissions,
+                            request.lease_id,
+                            &cancel,
+                        )
+                        .await
+                        .map_err(failure)?;
+                    serde_json::json!({})
+                }
+                Request::Backup(request) => {
+                    owner
+                        .backup(
+                            request.lease_id,
+                            &request.suffix,
+                            request.permissions,
+                            &cancel,
+                        )
+                        .await
+                        .map_err(failure)?;
+                    serde_json::json!({})
+                }
+                Request::ReadBytes(request) => {
+                    let bytes = owner
+                        .read_bytes(
+                            Path::new(&request.path),
+                            request.limit,
+                            request.lease_id,
+                            &cancel,
+                        )
+                        .await
+                        .map_err(failure)?;
+                    serde_json::json!({"size":bytes.len(),"bytes":STANDARD.encode(bytes)})
+                }
                 Request::CreateDirectory(request) => {
                     owner
                         .create_directory(&request.path, &cancel)
@@ -316,6 +594,13 @@ fn failure(error: FileStorageError) -> Error {
         FileStorageError::Closed | FileStorageError::Unsupported => "node_unavailable",
         FileStorageError::Cancelled => "cancelled",
         FileStorageError::Locked => "locked",
+        FileStorageError::Io(error)
+            if error
+                .get_ref()
+                .is_some_and(|cause| cause.is::<super::ReadLimitExceeded>()) =>
+        {
+            "too_large"
+        }
         FileStorageError::Io(error) if error.kind() == std::io::ErrorKind::NotFound => "not_found",
         _ => "io",
     };
