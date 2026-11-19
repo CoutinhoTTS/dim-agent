@@ -979,6 +979,16 @@ pub struct TurnEndData {
     pub outcome: TurnOutcome,
 }
 
+/// The root line's id: the line of a Session that has no parent and no
+/// source, present in every Session for its whole life.
+pub const ROOT_BRANCH_ID: &str = "main";
+
+/// The root, standing in for the default branch at a site that does not read
+/// the Session's default branch. It is always the root: a site that reads it
+/// does not follow a Session whose default branch has moved, and a site that
+/// must follow one reads the Session's default branch instead.
+pub const DEFAULT_BRANCH_ID: &str = ROOT_BRANCH_ID;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
 pub enum BranchCreateAt {
