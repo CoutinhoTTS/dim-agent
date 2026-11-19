@@ -38,7 +38,8 @@ pub use reclaim::Reclaimed;
 #[cfg(feature = "testing")]
 pub use sqlite::set_upgrade_report_delay;
 pub use sqlite::{
-    FORMAT as STORE_FORMAT, SqliteStorage, SqliteStoragePlugin, StorageReport, Vacuumed, vacuum_store,
+    FORMAT as STORE_FORMAT, SqliteStorage, SqliteStoragePlugin, StorageReport, Vacuumed,
+    vacuum_store,
 };
 pub use text::initialize_session_text_index;
 /// Derives every text candidate from the stored rows, in order: what an upgrade
