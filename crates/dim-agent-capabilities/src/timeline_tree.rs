@@ -81,6 +81,14 @@ struct Undelivered {
     data: BranchEndData,
     error: AgentError,
 }
+/// One committed move of the default branch: the line that held the role, `None`
+/// for the root, and the line it passed to. Each participant turns its own
+/// transition into its one status note (design §5, §12.1, §20.21).
+#[derive(Clone)]
+struct DefaultMove {
+    from: Option<String>,
+    to: String,
+}
 struct TreeState {
     nodes: BTreeMap<String, Node>,
     ended: BTreeMap<String, EndedLine>,
@@ -112,9 +120,13 @@ pub struct TimelineTree {
     close_started: AtomicBool,
     /// Wakes the callers waiting for an end to complete or to wait for a turn.
     end_notify: tokio::sync::Notify,
-    /// The default branch after each move, so each line's BranchLine writes its
-    /// own status note (design §5, §12.1). A load reconciles from the fact.
-    default_moved: watch::Sender<Option<String>>,
+    /// The moves the default branch has committed, in order: a line's
+    /// BranchLine turns the ones it took part in into its status notes, one per
+    /// move (design §5, §12.1, §20.21). A load reconciles from the fact.
+    moves: Mutex<Vec<DefaultMove>>,
+    /// Wakes the writers after a move lands in `moves`; its value is an epoch,
+    /// not the move, so a writer never reads only the latest one.
+    default_moved: watch::Sender<u64>,
     /// Serialises the retries of one line's refused final message, so two
     /// waiters cannot both deliver and record it (design §10, §20.26b).
     retry: tokio::sync::Mutex<()>,
@@ -352,14 +364,26 @@ impl TreeCommands {
             .upgrade()
             .and_then(|tree| tree.state.lock().unwrap().default_from.clone())
     }
-    /// The default branch after each move; a line's status note is written on
-    /// hearing it (design §5).
+    /// A signal that changes after each move; a line's writer reads the moves
+    /// it owes a note for from the tree, not from this value (design §5).
     #[service(skip)]
-    fn default_moves(&self) -> watch::Receiver<Option<String>> {
+    fn default_moves(&self) -> watch::Receiver<u64> {
         self.tree
             .upgrade()
             .map(|tree| tree.default_moved.subscribe())
-            .unwrap_or_else(|| watch::channel(None).1)
+            .unwrap_or_else(|| watch::channel(0).1)
+    }
+    /// How many moves have committed: a line that opens now owes no note for
+    /// the moves before it.
+    #[service(skip)]
+    fn moves_len(&self) -> usize {
+        self.tree.upgrade().map_or(0, |tree| tree.moves_len())
+    }
+    /// The next move line `id` took part in, in commit order (design §5,
+    /// §20.21).
+    #[service(skip)]
+    fn next_move(&self, id: &str, seen: &mut usize) -> Option<DefaultMove> {
+        self.tree.upgrade()?.next_move(id, seen)
     }
     /// A signal that changes when line `id` ends a turn; it carries that
     /// `turn/end`'s sequence.
@@ -830,7 +854,8 @@ impl TimelineTree {
             close_task: Mutex::new(None),
             close_started: AtomicBool::new(false),
             end_notify: tokio::sync::Notify::new(),
-            default_moved: watch::channel(None).0,
+            moves: Mutex::new(Vec::new()),
+            default_moved: watch::channel(0).0,
             retry: tokio::sync::Mutex::new(()),
             operations: tokio::sync::Mutex::new(()),
         })
@@ -1622,7 +1647,9 @@ impl TimelineTree {
     /// Moves the default branch to `id` (design §4, §10, §14, §20.21). The
     /// target and every ancestor of it must be open, the target must be
     /// selectable and not already the role, and the move then writes one
-    /// `branch/default` on the root. A refusal writes nothing.
+    /// `branch/default` on the root and answers once that fact is published:
+    /// a move the caller saw succeed is a move a restart keeps, and a write
+    /// that fails answers its error and changes nothing.
     async fn set_default_branch(&self, id: &str, source: BranchSource) -> Result<String> {
         let _operations = self.operations.lock().await;
         let (root, from) = {
@@ -1651,20 +1678,61 @@ impl TimelineTree {
             from: from.clone(),
             source,
         };
-        root.timeline()
-            .append(EventKind::BranchDefault(data).into())?;
+        let timeline = root.timeline();
+        let event = timeline.append(EventKind::BranchDefault(data).into())?;
+        Self::published(timeline, event.sequence).await?;
         self.set_default(id, from);
         Ok(id.into())
     }
-    /// The move in force after its fact committed: the tree's answer, and the
-    /// signal each line's BranchLine reads to write its note.
+    /// Waits until `timeline` publishes `sequence`: the store committed the
+    /// batch, not only queued it. A failed transaction leaves it unpublished
+    /// and its fault answers here (design §5, §20.21).
+    async fn published(timeline: &Timeline, sequence: u64) -> Result<()> {
+        let mut published = timeline.watch();
+        while published.borrow_and_update().0 < sequence {
+            if let Some(error) = timeline.failure() {
+                return Err(error);
+            }
+            published
+                .changed()
+                .await
+                .map_err(|_| AgentError::Closed("branch/default publication".into()))?;
+        }
+        Ok(())
+    }
+    /// The move in force after its fact committed: the tree's answer, the one
+    /// transition both participants write their note from, and the wake that
+    /// lets them read it (design §5, §12.1, §20.21).
     fn set_default(&self, id: &str, from: Option<String>) {
         {
             let mut state = self.state.lock().unwrap();
             state.default = id.into();
             state.default_from = from.clone();
         }
-        let _ = self.default_moved.send_replace(Some(id.to_owned()));
+        self.moves.lock().unwrap().push(DefaultMove {
+            from,
+            to: id.to_owned(),
+        });
+        self.default_moved.send_modify(|epoch| *epoch += 1);
+    }
+    /// How many moves have committed: a line that opens now starts after them,
+    /// so it owes no note for a move it did not take part in.
+    fn moves_len(&self) -> usize {
+        self.moves.lock().unwrap().len()
+    }
+    /// The next move `id` took part in, in commit order, advancing `seen` past
+    /// [`Self::moves_len`]'s counter for the moves it did not (design §5,
+    /// §20.21).
+    fn next_move(&self, id: &str, seen: &mut usize) -> Option<DefaultMove> {
+        let moves = self.moves.lock().unwrap();
+        while *seen < moves.len() {
+            let change = &moves[*seen];
+            *seen += 1;
+            if change.to == id || change.from.as_deref() == Some(id) {
+                return Some(change.clone());
+            }
+        }
+        None
     }
     /// Whether `id` or any ancestor of it is ending or ended: such a line
     /// cannot become the default branch, because an end already on its way to
@@ -2857,6 +2925,13 @@ enum Decision {
     /// The default branch moved: this line writes the note its own role earns,
     /// once (design §5, §12.1).
     Default,
+    /// A committed move this line took part in: the role it assigns this line
+    /// and the other participant, so every transition earns its own note
+    /// (design §5, §20.21).
+    Moved {
+        became_default: bool,
+        other: String,
+    },
 }
 /// BranchLine's fold of its own line's facts.
 #[derive(Default)]
@@ -3794,6 +3869,7 @@ impl BranchLine {
             .and_then(|(_, parent)| parent)
             .and_then(|parent| self.tree.turn_ends(&parent));
         let mut defaults = Some(self.tree.default_moves());
+        let mut moves = self.tree.moves_len();
         // A load whose own history disagrees with the tree writes the note the
         // tree earns once, before the line's next request (design §5).
         self.want(Decision::Default);
@@ -3804,6 +3880,20 @@ impl BranchLine {
                     return;
                 }
                 let _ = self.write(decision).await;
+                continue;
+            }
+            if let Some(change) = self.tree.next_move(&self.own, &mut moves) {
+                let became_default = change.to == self.own;
+                let other = match became_default {
+                    true => change.from.unwrap_or_else(|| ROOT_BRANCH_ID.into()),
+                    false => change.to,
+                };
+                let _ = self
+                    .write(Decision::Moved {
+                        became_default,
+                        other,
+                    })
+                    .await;
                 continue;
             }
             let parent_change = async {
@@ -3828,7 +3918,7 @@ impl BranchLine {
                 Wake::Queued => {}
                 Wake::Parents(true) => self.want(Decision::Parent),
                 Wake::Parents(false) => parent = None,
-                Wake::Defaults(true) => self.want(Decision::Default),
+                Wake::Defaults(true) => {}
                 Wake::Defaults(false) => defaults = None,
             }
         }
@@ -4001,7 +4091,14 @@ impl BranchLine {
                 };
                 self.tree.input(parent, data).await.map(|_| ())
             }
-            Decision::Default => self.write_default_note(role, parent.as_deref()).await,
+            Decision::Default => self.write_default_note(role, parent.as_deref(), None).await,
+            Decision::Moved {
+                became_default,
+                other,
+            } => {
+                self.write_default_note(role, parent.as_deref(), Some((became_default, other)))
+                    .await
+            }
             Decision::Parent => {
                 let Some(parent) = parent.filter(|_| role != LineRole::Main) else {
                     return Ok(());
@@ -4199,16 +4296,35 @@ impl BranchLine {
         };
         Ok(prompt.clone())
     }
-    /// Writes the one status note this line's role and the tree's current
-    /// default branch call for, unless its latest block already says so: a
-    /// move writes the note to each of its two participants that is not the
-    /// root, and a load that finds the block and the tree disagreeing writes
-    /// the missing one (design §5, §12.1).
-    async fn write_default_note(&self, role: LineRole, parent: Option<&str>) -> Result<()> {
+    /// Writes the one status note this line's role and the default branch call
+    /// for, unless its latest block already says so: `moved` carries the
+    /// committed transition this line took part in, whose own role and other
+    /// participant the note states; without one, a load that finds the block
+    /// and the latest fact disagreeing writes the missing note (design §5,
+    /// §12.1, §20.21).
+    async fn write_default_note(
+        &self,
+        role: LineRole,
+        parent: Option<&str>,
+        moved: Option<(bool, String)>,
+    ) -> Result<()> {
         if role == LineRole::Main || role == LineRole::Host {
             return Ok(());
         }
-        let is_default = self.tree.default_branch()? == self.own;
+        let (is_default, other) = match moved {
+            Some((became_default, other)) => (became_default, other),
+            None => {
+                let is_default = self.tree.default_branch()? == self.own;
+                let other: String = if is_default {
+                    self.tree
+                        .default_from()
+                        .unwrap_or_else(|| ROOT_BRANCH_ID.into())
+                } else {
+                    self.tree.default_branch()?
+                };
+                (is_default, other)
+            }
+        };
         // The fold has seen no block on a load, so the comparison starts from
         // the latest one stored: a birth block carries no `default` attribute
         // and a missing one means not default (design §5).
@@ -4243,13 +4359,6 @@ impl BranchLine {
             _ => String::new(),
         };
         let idle_notice = self.view.lock().unwrap().idle_notice;
-        let other = if is_default {
-            self.tree
-                .default_from()
-                .unwrap_or_else(|| ROOT_BRANCH_ID.into())
-        } else {
-            self.tree.default_branch()?
-        };
         let block = status_note(
             &self.own,
             parent,

@@ -1254,6 +1254,13 @@ struct TestStore {
     /// The branch whose next submission lookup fails at the read, before the
     /// store writes anything: a transitory failure a delivery can retry.
     fail_lookup: Mutex<Option<String>>,
+    /// The branch whose next append is accepted and then held, the state a
+    /// store is in between queueing a batch and committing it.
+    hold: Mutex<Option<String>>,
+    /// The batch the held append has not written or answered yet.
+    held: Mutex<Option<(TimelineKey, Vec<StoredEvent>, PublishCallback)>>,
+    /// Wakes the test that waits for a hold to be taken.
+    holding: tokio::sync::Notify,
 }
 impl TestStore {
     /// A store over `memory` that refuses every range read.
@@ -1279,6 +1286,36 @@ impl TestStore {
     /// Fails the next submission lookup on `branch`, then answers normally.
     fn fail_next_lookup(&self, branch: &str) {
         *self.fail_lookup.lock().unwrap() = Some(branch.into());
+    }
+    /// Accepts the next `branch/default` append to `branch` and holds its
+    /// publication, so a caller can assert what the tree answers before the
+    /// commit.
+    fn hold_next_default(&self, branch: &str) {
+        *self.hold.lock().unwrap() = Some(branch.into());
+    }
+    /// Waits until a held publication is there to release.
+    async fn wait_holding(&self) {
+        loop {
+            let notified = self.holding.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.held.lock().unwrap().is_some() {
+                return;
+            }
+            notified.await;
+        }
+    }
+    /// Writes the held batch and answers it as committed.
+    fn release(&self) {
+        let (key, events, publish) = self.held.lock().unwrap().take().expect("a held append");
+        self.memory.append(key, events, publish).unwrap();
+    }
+    /// Answers the held append as a failed transaction that wrote nothing.
+    fn release_failed(&self) {
+        let (_, _, publish) = self.held.lock().unwrap().take().expect("a held append");
+        publish(Err(AgentError::Storage(
+            "injected transaction failure".into(),
+        )));
     }
     /// The pages `branch` was read with while selecting exactly `kinds`.
     fn pages(&self, branch: &str, kinds: &[&str]) -> usize {
@@ -1389,6 +1426,22 @@ impl TimelineStore for TestStore {
         events: Vec<StoredEvent>,
         publish: PublishCallback,
     ) -> Result<()> {
+        let default = events
+            .iter()
+            .any(|record| matches!(record.event.kind, EventKind::BranchDefault(_)));
+        let hold = default && {
+            let mut armed = self.hold.lock().unwrap();
+            let hold = armed.as_deref() == Some(key.branch_id.as_str());
+            if hold {
+                *armed = None;
+            }
+            hold
+        };
+        if hold {
+            *self.held.lock().unwrap() = Some((key, events, publish));
+            self.holding.notify_waiters();
+            return Ok(());
+        }
         let failed = {
             let mut armed = self.fail_append.lock().unwrap();
             let failed = armed.as_deref() == Some(key.branch_id.as_str());
@@ -9196,6 +9249,210 @@ async fn a_move_writes_one_note_per_participant_that_is_not_the_root() {
         "B → C writes two notes, one per participant, and the root gets none"
     );
     soon(agent.close()).await.unwrap();
+}
+
+/// §20.21, §12.1: two moves committed before a writer runs still earn one note
+/// each, in commit order, and the line's next request carries its latest note.
+/// The note test above waits for each note before the next move; this one does
+/// not. One worker thread, so both moves commit before the writer is scheduled:
+/// that is the order that left a line with no note at all.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn moves_that_overtake_their_writer_each_reach_their_participants() {
+    let probe = Arc::new(Probe::default());
+    let agent = setup(&probe).await;
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let b = open_line(&session, "b").await;
+    soon(session.idle("main")).await.unwrap();
+    let switch = |line: String| {
+        let session = session.clone();
+        async move {
+            soon(session.set_default_branch(
+                &line,
+                BranchSource::User {
+                    operation_id: "switch".into(),
+                },
+            ))
+            .await
+            .unwrap()
+        }
+    };
+    fn notes(events: &[Arc<AgentEvent>]) -> Vec<String> {
+        blocks_with(events, "<dim-branch-line ")
+            .into_iter()
+            .filter(|text| text.contains(" default=\""))
+            .collect()
+    }
+    switch(b.clone()).await;
+    switch("main".into()).await;
+    let events = until_events(&session, &b, |events| notes(events).len() == 2).await;
+    let held = notes(&events);
+    assert!(held[0].contains(r#"default="true""#), "{}", held[0]);
+    assert!(held[1].contains(r#"default="false""#), "{}", held[1]);
+    assert_eq!(
+        default_notes(&session, &["main", &b]).await,
+        [("main".to_owned(), 0), (b.clone(), 2)],
+        "main → B → main writes both notes to B and none to the root"
+    );
+    let c = open_line(&session, "c").await;
+    soon(session.idle("main")).await.unwrap();
+    switch(b.clone()).await;
+    switch(c.clone()).await;
+    let events = until_events(&session, &b, |events| notes(events).len() == 4).await;
+    let held = notes(&events);
+    assert!(held[2].contains(r#"default="true""#), "{}", held[2]);
+    assert!(held[3].contains(r#"default="false""#), "{}", held[3]);
+    let at_c = until_events(&session, &c, |events| notes(events).len() == 1).await;
+    assert!(
+        notes(&at_c)[0].contains(r#"default="true""#),
+        "{}",
+        notes(&at_c)[0]
+    );
+    assert_eq!(
+        default_notes(&session, &["main", &b, &c]).await,
+        [("main".to_owned(), 0), (b.clone(), 4), (c.clone(), 1)],
+        "B's losing note follows its winning one, and the root gets none"
+    );
+    soon(session.submit("next request".into(), InputMode::Queue, &b))
+        .await
+        .unwrap();
+    soon(session.idle(&b)).await.unwrap();
+    let events = local_events(&session, &b).await;
+    let latest = notes(&events).pop().expect("B holds its notes");
+    let request = events
+        .iter()
+        .rev()
+        .find_map(|event| match &event.kind {
+            EventKind::ModelCall(data) => Some(data),
+            _ => None,
+        })
+        .expect("B's next request exists");
+    assert!(
+        request
+            .request
+            .messages
+            .iter()
+            .any(|message| said(message).contains(&latest)),
+        "B's next request carries its latest note"
+    );
+    soon(agent.close()).await.unwrap();
+}
+
+/// §20.21: a move answers only once its fact is durable. While the store holds
+/// the batch, the tree keeps the old default and a conflicting end waits; the
+/// committed move answers, and the end is then refused because the line it
+/// would end is now the default branch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_move_answers_only_after_its_fact_is_durable() {
+    let store = Arc::new(TestStore::default());
+    let agent = setup_with(&store).await;
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let line = open_line(&session, "continue on").await;
+    let tree = session.session_service::<TreeCommands>().unwrap();
+    // The line's turn and its parent's roster writes settle before the store
+    // is armed, so the held batch is the move's own.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    store.hold_next_default("main");
+    let mut moved = Box::pin(tree.set_default_branch(
+        line.clone(),
+        BranchSource::User {
+            operation_id: "switch".into(),
+        },
+    ));
+    tokio::select! {
+        result = &mut moved => panic!("the move answered before its fact committed: {result:?}"),
+        _ = store.wait_holding() => {}
+    }
+    assert_eq!(
+        tree.default_branch().unwrap(),
+        "main",
+        "the tree keeps the default it had while the batch is queued"
+    );
+    let mut ended = Box::pin(tree.end(
+        line.clone(),
+        BranchSource::User {
+            operation_id: "end".into(),
+        },
+    ));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(150), &mut ended)
+            .await
+            .is_err(),
+        "an end waits for the move's admission"
+    );
+    store.release();
+    assert_eq!(soon(&mut moved).await.unwrap(), line);
+    assert_eq!(tree.default_branch().unwrap(), line);
+    let refused = soon(&mut ended).await;
+    assert_eq!(
+        refusal(&refused).0,
+        "branch_cannot_end",
+        "the committed move made the line the default branch: {refused:?}"
+    );
+    soon(agent.close()).await.unwrap();
+}
+
+/// §20.21: a move whose transaction fails answers its error and changes
+/// nothing: the tree keeps the old default, no participant is told, and a
+/// restart reads the old default.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_move_whose_write_fails_changes_nothing() {
+    let store = Arc::new(TestStore::default());
+    let agent = setup_with(&store).await;
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let session_id = session.id().to_owned();
+    let line = open_line(&session, "stay on main").await;
+    let tree = session.session_service::<TreeCommands>().unwrap();
+    // The line's turn and its parent's roster writes settle before the store
+    // is armed, so the held batch is the move's own.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    store.hold_next_default("main");
+    let mut moved = Box::pin(tree.set_default_branch(
+        line.clone(),
+        BranchSource::User {
+            operation_id: "switch".into(),
+        },
+    ));
+    tokio::select! {
+        result = &mut moved => panic!("the move answered before its batch failed: {result:?}"),
+        _ = store.wait_holding() => {}
+    }
+    store.release_failed();
+    let failed = soon(&mut moved).await;
+    assert!(failed.is_err(), "the failed write reaches the caller");
+    assert_eq!(
+        tree.default_branch().unwrap(),
+        "main",
+        "the tree keeps the default it had"
+    );
+    assert_eq!(
+        default_notes(&session, &["main", &line]).await,
+        [("main".to_owned(), 0), (line.clone(), 0)],
+        "a failed move writes no note"
+    );
+    // A store that publishes an error faults the Session; its close is where
+    // the failed batch has settled.
+    let _ = soon(session.close()).await;
+    let _ = soon(agent.close()).await;
+    let restored = MinimalHost::start(&builder_with_store(
+        &Arc::new(Probe::default()),
+        store.clone(),
+    ))
+    .await
+    .unwrap();
+    let session = soon(restored.restore_session(session_id)).await.unwrap();
+    assert_eq!(
+        session.default_branch().unwrap(),
+        "main",
+        "a restart reads the default the failed move never changed"
+    );
+    soon(session.close()).await.unwrap();
+    soon(restored.close()).await.unwrap();
 }
 
 /// §20.20, last sentence: a recorded target that is a plugin line or was
