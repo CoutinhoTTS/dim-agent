@@ -37135,8 +37135,6 @@
       "from": "dim_cli",
       "to": "dim_cli::ui::tui",
       "references": [
-        "path ui::tui::Leave::Exit",
-        "path ui::tui::Leave::Update",
         "path ui::tui::UpdateRequest",
         "path ui::tui::is_interactive"
       ]
@@ -37146,6 +37144,7 @@
       "to": "dim_cli::update",
       "references": [
         "mod update",
+        "path update",
         "path update::hold_installation",
         "path update::recover_startup",
         "path update::registry",
@@ -40547,7 +40546,7 @@
       "to": "dim_cli::ui::tui",
       "references": [
         "path WebOpened",
-        "path ui::tui::Leave",
+        "path ui::tui::UpdateRequest",
         "path ui::tui::print_web_panel",
         "path ui::tui::run",
         "use crate::ui::tui::WebOpened"

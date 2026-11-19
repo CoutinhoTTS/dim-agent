@@ -180,29 +180,26 @@ pub fn is_interactive() -> bool {
     std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
 }
 
-/// How the terminal interface ended.
-pub enum Leave {
-    Exit(i32),
-    /// `Update now`: the interface left so this process can update the
-    /// installation and start the new version.
-    Update(UpdateRequest),
-}
-
-/// What the updated build reopens.
+/// `Update now`: the interface left so this process can update the
+/// installation and start the new version, which reopens this.
 pub struct UpdateRequest {
     pub fullscreen: bool,
     /// The Session to resume, when one was in use.
     pub session_id: Option<String>,
 }
 
-pub fn run(host: Box<dyn SessionPort>, surroundings: Env) -> Leave {
-    let mut update = None;
-    let code = run_terminal(host, surroundings, &mut update);
+/// Runs the interface and returns its exit code. `Update now` is sent on
+/// `update` once the terminal is restored and before the interface closes its
+/// connection, so the composition root can act on it without waiting for the
+/// rest of the interface's end.
+pub fn run(
+    host: Box<dyn SessionPort>,
+    surroundings: Env,
+    update: tokio::sync::oneshot::Sender<UpdateRequest>,
+) -> i32 {
+    let code = run_terminal(host, surroundings, update);
     history::flush();
-    match update {
-        Some(update) => Leave::Update(update),
-        None => Leave::Exit(code),
-    }
+    code
 }
 
 /// Where the Web workspace is, as `dimcode web` reports it.
@@ -254,7 +251,7 @@ fn write_notifications(
 fn run_terminal(
     host: Box<dyn SessionPort>,
     surroundings: Env,
-    update: &mut Option<UpdateRequest>,
+    update: tokio::sync::oneshot::Sender<UpdateRequest>,
 ) -> i32 {
     let mut terminal = match Terminal::enter() {
         Ok(terminal) => terminal,
@@ -843,17 +840,20 @@ fn run_terminal(
     };
     let resume =
         (app.session_active() && !app.session_id.is_empty()).then_some(app.session_id.as_str());
-    if app.update_requested {
-        *update = Some(UpdateRequest {
-            fullscreen: app.fullscreen,
-            session_id: (!app.session_id.is_empty()).then(|| app.session_id.clone()),
-        });
+    let request = app.update_requested.then(|| UpdateRequest {
+        fullscreen: app.fullscreen,
+        session_id: (!app.session_id.is_empty()).then(|| app.session_id.clone()),
+    });
+    if request.is_some() {
         bytes.extend(b"\r\n");
     } else {
         bytes.extend(format!("\r\n{}\r\n", goodbye_panel(resume).join("\r\n")).into_bytes());
     }
     let _ = terminal.write(&bytes);
     terminal.leave();
+    if let Some(request) = request {
+        let _ = update.send(request);
+    }
     app.host.shutdown();
     code
 }

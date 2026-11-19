@@ -155,36 +155,32 @@ async fn open_tui(
         resume: options.resume.is_some(),
     };
     let (leave, mut left) = tokio::sync::oneshot::channel();
-    let (leaf_end, leaf_ended) = tokio::sync::oneshot::channel();
+    let (leaf_end, mut leaf_ended) = tokio::sync::oneshot::channel();
+    let (update, mut updated) = tokio::sync::oneshot::channel();
     let tui = root.plugin(plugins::Tui {
         root: root.clone(),
         env,
         options: options.clone(),
         leave: std::sync::Mutex::new(Some(leave)),
+        update: std::sync::Mutex::new(Some(update)),
         leaf_end: std::sync::Mutex::new(Some(leaf_end)),
     });
     (&tui).await.map_err(plugin_error)?;
-    // The interface's own leave closes the connection before its result is
-    // sent, so a leaf that ended may be that leave: its result still wins
-    // when it arrives within the exit budget.
-    let leave = tokio::select! {
-        leave = &mut left => leave,
-        ended = leaf_ended => {
-            if ended.is_ok() {
-                tokio::time::timeout(ui::terminal::EXIT_BUDGET, &mut left)
-                    .await
-                    .unwrap_or(Ok(ui::tui::Leave::Exit(0)))
-            } else {
-                left.await
-            }
-        }
+    // `Err` is `Update now`. It arrives before the interface closes its
+    // connection, so before the leaf that connection ends, while the
+    // interface's own result may wait on its input history.
+    let ended: std::result::Result<i32, ui::tui::UpdateRequest> = tokio::select! {
+        biased;
+        Ok(request) = &mut updated => Err(request),
+        code = &mut left => Ok(code.map_err(|_| "the terminal interface ended without a result")?),
+        Ok(()) = &mut leaf_ended => Ok(0),
     }
-    .map_err(|_| "the terminal interface ended without a result")?;
+    .and_then(|code| updated.try_recv().map_or(Ok(code), Err));
     tui.dispose().await?;
     link.dispose().await?;
-    match leave {
-        ui::tui::Leave::Exit(code) => Ok(code),
-        ui::tui::Leave::Update(request) => update_after_tui(options, locale, request).await,
+    match ended {
+        Ok(code) => Ok(code),
+        Err(request) => update_after_tui(options, locale, request).await,
     }
 }
 
