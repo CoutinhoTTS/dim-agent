@@ -244,6 +244,11 @@ pub(super) fn release(connection: &Connection, session_id: &str) -> rusqlite::Re
 }
 
 impl SessionFiles {
+    #[cfg(feature = "testing")]
+    pub(super) fn generation(&self) -> &str {
+        &self.0.generation
+    }
+
     pub(super) fn new(db: Arc<SqliteStorage>, ctx: Ctx, root: usize, sweep: Arc<Notify>) -> Self {
         let mut directory = db
             .path
