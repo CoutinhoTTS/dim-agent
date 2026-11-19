@@ -1669,3 +1669,7 @@ rejects unknown mixtures before writable PRAGMAs, and older writers reject v44.
 Ordinary v44 opening does not rebuild indexes or scan history. Disposable-store
 verification covers both v43 and both v42 families, reopen, current-member
 semantics, preserved Steer candidates, automation origins and rollback.
+
+## Storage size report
+
+StorageMethods serves `storage.report` from the SQLite owner operation `sqliteStorage.storageReport({})`. Both return `{databaseBytes, walBytes, reclaimableBytes}`. SQLite reads the current file sizes and counts free database pages.

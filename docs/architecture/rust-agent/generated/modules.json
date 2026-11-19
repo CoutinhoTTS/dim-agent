@@ -3953,6 +3953,7 @@
         "format",
         "matches",
         "panic",
+        "serde_json::json",
         "tokio::pin",
         "tracing::error",
         "vec",
@@ -33953,6 +33954,7 @@
         "use sqlite::FORMAT",
         "use sqlite::SqliteStorage",
         "use sqlite::SqliteStoragePlugin",
+        "use sqlite::StorageReport",
         "use sqlite::Vacuumed",
         "use sqlite::set_upgrade_report_delay",
         "use sqlite::vacuum_store"
