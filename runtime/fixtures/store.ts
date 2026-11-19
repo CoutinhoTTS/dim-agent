@@ -13,10 +13,38 @@ export default definePlugin({
     let release: (() => void) | undefined
     await ctx.use<ManagementMethods>('managementMethods').register(
       'storefixture',
-      ['status', 'read_user', 'import_user', 'replace_user', 'report', 'create', 'cycle', 'remove', 'refuse', 'release', 'invalid_id'].map(name => ({ name: `storefixture.${name}`, mutating: true, interruption: 'report', progress: false })),
+      ['status', 'selection', 'agent_records', 'read_user', 'import_user', 'replace_user', 'report', 'create', 'cycle', 'remove', 'refuse', 'release', 'invalid_id'].map(name => ({ name: `storefixture.${name}`, mutating: true, interruption: 'report', progress: false })),
       async (call: { method: string; params: any }): Promise<MethodReply> => {
         const params = call.params
         if (call.method === 'storefixture.status') return { kind: 'value', value: {} }
+        if (call.method === 'storefixture.selection') {
+          const scope = 'workspace:/fixture'
+          const selection = {providerId:'fixture', modelId:'first'}
+          assert.equal(await sqlite.readSelection({scope}), null)
+          assert.equal(await sqlite.readPreferences(selection), null)
+          const saved = await sqlite.writeSelection({scope, selection, expectedVersion:null})
+          assert.deepEqual(saved, {provider_id:'fixture', model_id:'first', version:1})
+          await assert.rejects(() => sqlite.writeSelection({scope, selection, expectedVersion:null}),
+            (error: unknown) => error instanceof Error && 'code' in error && error.code === 'conflict')
+          return {kind:'value', value: await sqlite.readSelection({scope})}
+        }
+        if (call.method === 'storefixture.agent_records') {
+          const { agent, leader } = params
+          const profile = { name: 'Fixture', description: '', systemPrompt: '' }
+          await sqlite.save({id: agent, profile, default: false, owner: leader})
+          assert.deepEqual((await sqlite.agents({})).find(row => row.id === agent), {id: agent, profile: {Ok: profile}, default: false, owner: leader})
+          assert.equal(await sqlite.agentOwner({agent}), leader)
+          assert.deepEqual(await sqlite.ownedAgents({owner: leader}), [agent])
+          assert.deepEqual(await sqlite.memberSessions({agent}), [])
+          assert.deepEqual(await sqlite.ledMembers({leader}), [])
+          assert.equal((await sqlite.members({})).some(([, id]) => id === leader), false)
+          assert.ok((await sqlite.unfinishedOwned({})).incomplete.includes(agent))
+          const owner = (await sqlite.owners({})).find(row => row.sessionId === leader)
+          assert.ok(owner?.owner)
+          await sqlite.delete({id:agent})
+          assert.equal(await sqlite.agentOwner({agent}), null)
+          return {kind: 'value', value: {leaderAgent: owner.owner[0]}}
+        }
         if (call.method === 'storefixture.replace_user') {
           const source = 'fixture-import'
           const rejected = { kind: 'reject' as const, field: '/protected' }

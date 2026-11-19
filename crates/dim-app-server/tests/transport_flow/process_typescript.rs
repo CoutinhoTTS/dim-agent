@@ -1379,6 +1379,12 @@ async fn node_store_preserves_repository_results_and_worktree_removal_exclusion(
     let replaced = client.rpc("storefixture.replace_user", json!({})).await;
     assert_ok(&replaced);
     assert_eq!(replaced["result"], json!({"version":2}));
+    let selected = client.rpc("storefixture.selection", json!({})).await;
+    assert_ok(&selected);
+    assert_eq!(
+        selected["result"],
+        json!({"provider_id":"fixture","model_id":"first","version":1})
+    );
     let store = server.service::<Store>().unwrap();
     let listed = client.rpc("agent.list", json!({})).await;
     assert_ok(&listed);
@@ -1452,6 +1458,15 @@ async fn node_store_preserves_repository_results_and_worktree_removal_exclusion(
     }})).await;
     assert_ok(&created);
     assert!(store.has_records("wire-source").await.unwrap());
+    let agents = client
+        .rpc(
+            "storefixture.agent_records",
+            json!({"agent":"fixture-owned","leader":"wire-source"}),
+        )
+        .await;
+    assert_ok(&agents);
+    assert_eq!(agents["result"], json!({"leaderAgent":agent_id}));
+
     let reply = client
         .rpc(
             "storefixture.cycle",
