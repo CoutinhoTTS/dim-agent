@@ -1458,7 +1458,13 @@ async fn node_store_preserves_repository_results_and_worktree_removal_exclusion(
     }})).await;
     assert_ok(&created);
     assert!(store.has_records("wire-source").await.unwrap());
-    let output = home.join("fixture-owned-output");
+    let output = server
+        .service::<dim_agent_capabilities::host_platform::HostPlatform>()
+        .unwrap()
+        .exec_root()
+        .join("fixture-owned-output")
+        .join("stdout");
+    std::fs::create_dir_all(output.parent().unwrap()).unwrap();
     assert_ok(
         &client
             .rpc(
@@ -1468,7 +1474,11 @@ async fn node_store_preserves_repository_results_and_worktree_removal_exclusion(
             .await,
     );
     assert!(
-        raw.owned_paths("wire-source")
+        server
+            .service::<dim_agent_capabilities::host::SessionFiles>()
+            .unwrap()
+            .0
+            .owned_paths("wire-source".to_owned())
             .await
             .unwrap()
             .contains(&output)
