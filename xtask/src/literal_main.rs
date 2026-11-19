@@ -9,9 +9,10 @@
 //! anywhere else is refused, so no private duplicate can hold the literal.
 //!
 //! In a Vue single-file component the value of a directive or bound attribute —
-//! `v-*`, `:prop`, `@event`, `#slot` — is an expression, so a `"main"` or
-//! `'main'` inside one is a use too. A plain attribute such as `id="main"` is
-//! not an expression and keeps the handling `UNRELATED` gives it.
+//! `v-*`, `:prop`, `@event`, `#slot` — and the content of a `{{ … }}`
+//! interpolation are expressions, so a `"main"` or `'main'` inside one is a use
+//! too. A plain attribute such as `id="main"` is not an expression and keeps the
+//! handling `UNRELATED` gives it.
 //!
 //! Test files and items gated by a test-only `cfg` keep the literal: it is the
 //! root's stored id, and the rule does not read them.
@@ -352,9 +353,9 @@ fn quoted(body: &str) -> usize {
     body.len()
 }
 
-/// The offsets of the `'main'` and `"main"` literals in the values of `text`'s
-/// directive attributes: in `v-*`, `:prop`, `@event` and `#slot` the value is a
-/// Vue expression, so a line id written there is a use like any other.
+/// The offsets of the `'main'` and `"main"` literals in `text`'s Vue
+/// expressions: in `v-*`, `:prop`, `@event`, `#slot` and `{{ … }}` what is
+/// written there is code, so a line id in it is a use like any other.
 fn expression_literals(text: &str) -> Vec<usize> {
     let mut found = Vec::new();
     for value in directive_values(text) {
@@ -382,13 +383,14 @@ fn is_directive(name: &str) -> bool {
     name.starts_with("v-") || name.starts_with([':', '@', '#'])
 }
 
-/// The byte ranges of the attribute values of `text`'s template that belong to
-/// directive or bound attributes.
+/// The byte ranges of `text`'s template that hold Vue expressions: the values of
+/// its directive and bound attributes, and its `{{ … }}` interpolations.
 fn directive_values(text: &str) -> Vec<std::ops::Range<usize>> {
     let mut values = Vec::new();
     let Some(body) = template_body(text) else {
         return values;
     };
+    values.extend(interpolations(text, body.end));
     let mut at = body.start;
     while at < body.end
         && let Some(found) = text[at..body.end].find('<')
@@ -416,55 +418,69 @@ fn template_body(text: &str) -> Option<std::ops::Range<usize>> {
 
 /// Reads the attributes of the tag whose name begins at `cursor` in `text`,
 /// pushing the value range of each directive one, and answers the offset just
-/// past the tag. `end` bounds the template the tag belongs to.
+/// past the tag. `end` bounds the template the tag belongs to: every read stops
+/// there, so a `<` that is a comparison rather than a tag costs one step and
+/// never holds the scan.
 fn tag_attributes(
     text: &str,
-    mut cursor: usize,
+    cursor: usize,
     end: usize,
     values: &mut Vec<std::ops::Range<usize>>,
 ) -> usize {
-    while cursor < end && !text.as_bytes()[cursor].is_ascii_whitespace() {
-        match text.as_bytes()[cursor] {
-            b'>' | b'/' => break,
-            _ => cursor += text[cursor..].chars().next().map_or(1, char::len_utf8),
+    let Some(first) = byte(text, cursor, end) else {
+        return end;
+    };
+    if !first.is_ascii_alphabetic() && !matches!(first, b'/' | b'!' | b'?') {
+        // A `<` that opens no tag, such as a comparison in an interpolation.
+        return cursor + 1;
+    }
+    let mut cursor = cursor;
+    while let Some(byte) = byte(text, cursor, end) {
+        if byte.is_ascii_whitespace() || byte == b'>' || byte == b'/' {
+            break;
         }
+        cursor += text[cursor..].chars().next().map_or(1, char::len_utf8);
     }
     loop {
-        while cursor < end && text.as_bytes()[cursor].is_ascii_whitespace() {
+        while byte(text, cursor, end).is_some_and(|byte| byte.is_ascii_whitespace()) {
             cursor += 1;
         }
-        match text.as_bytes().get(cursor) {
-            None => return end,
-            Some(b'>') => return cursor + 1,
-            Some(b'/') => {
+        let Some(current) = byte(text, cursor, end) else {
+            return end;
+        };
+        match current {
+            b'>' => return cursor + 1,
+            b'/' => {
                 cursor += 1;
                 continue;
             }
-            Some(_) => {}
+            _ => {}
         }
         let name = cursor;
-        while cursor < end && !text.as_bytes()[cursor].is_ascii_whitespace() {
-            match text.as_bytes()[cursor] {
-                b'=' | b'>' | b'/' => break,
-                _ => cursor += text[cursor..].chars().next().map_or(1, char::len_utf8),
+        while let Some(byte) = byte(text, cursor, end) {
+            if byte.is_ascii_whitespace() || matches!(byte, b'=' | b'>' | b'/') {
+                break;
             }
+            cursor += text[cursor..].chars().next().map_or(1, char::len_utf8);
+        }
+        if cursor == name {
+            // Nothing this pass could consume: a byte that starts neither a name
+            // nor a value. Step over it so the scan always moves.
+            cursor += 1;
+            continue;
         }
         let directive = is_directive(&text[name..cursor]);
-        while cursor < end && text.as_bytes()[cursor].is_ascii_whitespace() {
+        while byte(text, cursor, end).is_some_and(|byte| byte.is_ascii_whitespace()) {
             cursor += 1;
         }
-        if text.as_bytes().get(cursor) != Some(&b'=') {
+        if byte(text, cursor, end) != Some(b'=') {
             continue;
         }
         cursor += 1;
-        while cursor < end && text.as_bytes()[cursor].is_ascii_whitespace() {
+        while byte(text, cursor, end).is_some_and(|byte| byte.is_ascii_whitespace()) {
             cursor += 1;
         }
-        let Some(quote) = text
-            .as_bytes()
-            .get(cursor)
-            .copied()
-            .filter(|quote| matches!(quote, b'"' | b'\''))
+        let Some(quote) = byte(text, cursor, end).filter(|quote| matches!(quote, b'"' | b'\''))
         else {
             continue;
         };
@@ -477,6 +493,31 @@ fn tag_attributes(
         }
         cursor = (close + 1).min(end);
     }
+}
+
+/// The byte at `cursor` in `text`, `None` at or past `end`, which bounds the
+/// region a scan reads.
+fn byte(text: &str, cursor: usize, end: usize) -> Option<u8> {
+    text.as_bytes()
+        .get(cursor)
+        .copied()
+        .filter(|_| cursor < end)
+}
+
+/// The byte ranges of `text`'s `{{ … }}` interpolations, whose content is a Vue
+/// expression like a directive's value.
+fn interpolations(text: &str, end: usize) -> Vec<std::ops::Range<usize>> {
+    let mut values = Vec::new();
+    let mut at = 0;
+    while let Some(found) = text[at..end].find("{{") {
+        let open = at + found + 2;
+        let Some(close) = text[open..end].find("}}") else {
+            break;
+        };
+        values.push(open..open + close);
+        at = open + close + 2;
+    }
+    values
 }
 
 /// The single-quoted string literal that starts at `at` in `text`, as its
@@ -856,6 +897,44 @@ mod tests {
             vec![
                 "web/src/app/AppRoot.vue:2: `\"main\"` names neither the root nor the default branch; write `ROOT_BRANCH_ID` or `DEFAULT_BRANCH_ID`, or name the use in `UNRELATED`".to_owned()
             ]
+        );
+    }
+
+    #[test]
+    fn a_comparison_in_an_interpolation_does_not_hold_the_scan() {
+        let mut errors = Vec::new();
+        findings(
+            "web/src/features/chat/LinesTree.vue",
+            "<template>\n  <p>{{ 1 < 2 }}</p>\n</template>\n",
+            true,
+            &mut errors,
+        );
+        assert!(errors.is_empty(), "{errors:?}");
+        let mut errors = Vec::new();
+        findings(
+            "web/src/features/chat/LinesTree.vue",
+            "<template>\n  <p>{{ 1 < 2 }}",
+            true,
+            &mut errors,
+        );
+        assert!(
+            errors.is_empty(),
+            "a < with no tag after it ends: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn a_main_in_an_interpolation_is_refused_with_its_line() {
+        let mut errors = Vec::new();
+        findings(
+            "web/src/features/chat/LinesTree.vue",
+            "<template>\n  <p>{{ line.id === 'main' ? a : b }}</p>\n</template>\n",
+            true,
+            &mut errors,
+        );
+        assert!(
+            errors[0].contains("web/src/features/chat/LinesTree.vue:2: `\"main\"` names neither"),
+            "{errors:?}"
         );
     }
 
