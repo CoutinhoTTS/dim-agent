@@ -2127,6 +2127,15 @@ async fn node_fs_readers_share_pinned_files_and_release_with_the_caller() {
             .unwrap(),
         b"new"
     );
+    let readonly = path.with_file_name("readonly");
+    let created = client.rpc("fsreader.replace", json!({"path":readonly,"bytes":STANDARD.encode(b"immutable"),"permissions":"privateReadOnly"})).await;
+    assert_ok(&created);
+    assert_eq!(std::fs::read(&readonly).unwrap(), b"immutable");
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(
+        std::fs::metadata(&readonly).unwrap().permissions().mode() & 0o777,
+        0o400
+    );
     let locked = client.rpc("fsreader.lock", json!({"path":path})).await;
     assert_ok(&locked);
     let lease = locked["result"]["leaseId"].as_str().unwrap();

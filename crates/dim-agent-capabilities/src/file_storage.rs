@@ -967,17 +967,21 @@ fn replace_file(
 ) -> Result<()> {
     #[cfg(not(unix))]
     let read_only = matches!(mode, ReplacementMode::ReadOnly);
+    let existing = native::permissions(parent, name)?;
     let permissions = match mode {
-        ReplacementMode::Native(permissions) => permissions.or(native::permissions(parent, name)?),
+        ReplacementMode::Native(permissions) => permissions.or(existing),
         #[cfg(not(unix))]
-        ReplacementMode::ReadOnly => None,
+        ReplacementMode::ReadOnly => existing,
     };
     let (temporary_directory, mut temp) = create_temporary(parent, name, permissions.as_ref())?;
     let result = (|| {
         write(&mut temp, owner, cancel)?;
         #[cfg(not(unix))]
         let permissions = if read_only {
-            let mut attributes = temp.metadata()?.permissions();
+            let mut attributes = match permissions {
+                Some(attributes) => attributes,
+                None => temp.metadata()?.permissions(),
+            };
             attributes.set_readonly(true);
             Some(attributes)
         } else {
