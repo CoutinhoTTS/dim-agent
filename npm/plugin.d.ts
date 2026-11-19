@@ -705,6 +705,11 @@ export interface TimelineStore {
 export type FsEntryName = string | { Unix: number[] } | { Windows: number[] };
 /** Directory operations and pinned reads on the filesystem owner; see resource-faces §4.1. */
 export interface FsHost {
+  replace(request: { path: string; bytes: string; permissions?: 'preserve' | 'private' | 'privateReadOnly'; leaseId?: string }): Promise<Record<string, never>>;
+  backup(request: { leaseId: string; suffix: string; permissions?: 'preserve' | 'private' }): Promise<Record<string, never>>;
+  lock(request: { path: string }): Promise<{ leaseId: string }>;
+  unlock(request: { leaseId: string }): Promise<Record<string, never>>;
+  readBytes(request: { path: string; limit: number; leaseId?: string }): Promise<{ size: number; bytes: string }>;
   createDirectory(request: { path: string }): Promise<Record<string, never>>;
   list(request: { path: string }): Promise<{ entries: { name: FsEntryName; kind: 'file' | 'directory' | 'other' }[] }>;
   remove(request: { path: string } | { parent: string; name: FsEntryName }): Promise<Record<string, never>>;

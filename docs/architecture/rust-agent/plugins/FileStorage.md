@@ -36,6 +36,8 @@ folding names would break case-sensitive directories and their aliases.
 authorized roots. They use the directory creation, listing and removal contracts above.
 Pass a listed name unchanged to `remove({parent, name})`. A Unicode name is a string. Other names carry the original Unix bytes (`{Unix: number[]}`) or Windows UTF-16 code units (`{Windows: number[]}`). The owner accepts a single component below the listed directory.
 
+`fsHost.readBytes({path, limit, leaseId?})` returns base64 bytes and the length. A file over the limit fails with `too_large`. Hooks reads the authorized project settings path through this operation. `lock({path})` returns a lease ID for reads of that same file. `replace({path, bytes, permissions?, leaseId?})` accepts base64 bytes and atomically replaces the target under the supplied lease or a new lock. `backup({leaseId, suffix, permissions?})` creates an exclusive sibling copy under the same lease. Explicit `unlock({leaseId})` or caller unload releases the lease.
+
 ### Pinned reads
 
 The process `fsHost` name provides the pinned-reader operations from

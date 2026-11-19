@@ -2114,6 +2114,56 @@ async fn node_fs_readers_share_pinned_files_and_release_with_the_caller() {
             .unwrap(),
         b"new"
     );
+    let locked = client.rpc("fsreader.lock", json!({"path":path})).await;
+    assert_ok(&locked);
+    let lease = locked["result"]["leaseId"].as_str().unwrap();
+    let target = storage.resolve(&path).unwrap();
+    assert!(matches!(
+        storage.lock(&target, &cancel).await,
+        Err(FileStorageError::Locked)
+    ));
+    for (request, expected) in [
+        (
+            json!({"path":path,"limit":3,"leaseId":lease}),
+            json!({"bytes":STANDARD.encode(b"new"), "size":3}),
+        ),
+        (json!({"path":path,"limit":2}), json!({"code":"too_large"})),
+        (
+            json!({"path":directory,"limit":3,"leaseId":lease}),
+            json!({"code":"invalid"}),
+        ),
+    ] {
+        let read = client.rpc("fsreader.read_bytes", request).await;
+        assert_ok(&read);
+        assert_eq!(read["result"], expected);
+    }
+    assert_ok(
+        &client
+            .rpc(
+                "fsreader.backup",
+                json!({"leaseId":lease,"suffix":"previous","permissions":"private"}),
+            )
+            .await,
+    );
+    assert_ok(&client.rpc("fsreader.replace", json!({"path":path,"bytes":STANDARD.encode(b"replacement"),"permissions":"private","leaseId":lease})).await);
+    assert_eq!(std::fs::read(&path).unwrap(), b"replacement");
+    assert_eq!(
+        std::fs::read(path.with_extension("bin.previous")).unwrap(),
+        b"new"
+    );
+    assert_ok(
+        &client
+            .rpc("fsreader.unlock", json!({"leaseId":lease}))
+            .await,
+    );
+    let expired = client
+        .rpc(
+            "fsreader.read_bytes",
+            json!({"path":path,"limit":3,"leaseId":lease}),
+        )
+        .await;
+    assert_eq!(expired["result"], json!({"code":"invalid"}));
+    assert_ok(&client.rpc("fsreader.lock", json!({"path":path})).await);
     let retained = client.rpc("fsreader.open", json!({"path":path})).await;
     assert_ok(&retained);
     let retained = retained["result"]["readId"].as_str().unwrap().to_owned();
@@ -2136,6 +2186,17 @@ async fn node_fs_readers_share_pinned_files_and_release_with_the_caller() {
             .unwrap(),
         b"new"
     );
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            match storage.lock(&target, &cancel).await {
+                Ok(_) => break,
+                Err(FileStorageError::Locked) => tokio::task::yield_now().await,
+                Err(error) => panic!("reacquiring the unloaded caller's lease: {error}"),
+            }
+        }
+    })
+    .await
+    .unwrap();
     native_caller.shutdown().await.unwrap();
     assert!(matches!(
         face.read_at(native.read_id, 0, 1, &cancel).await,

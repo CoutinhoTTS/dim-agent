@@ -676,7 +676,9 @@
       "parent": "dim_agent_capabilities::file_storage",
       "file": "crates/dim-agent-capabilities/src/file_storage/face.rs",
       "unexpandedMacros": [
-        "serde_json::json"
+        "matches",
+        "serde_json::json",
+        "tokio::select"
       ]
     },
     {
@@ -9660,6 +9662,13 @@
     },
     {
       "from": "dim_agent_capabilities",
+      "to": "dim_agent_capabilities::file_storage::face",
+      "references": [
+        "path file_storage::FsHost"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities",
       "to": "dim_agent_capabilities::history",
       "references": [
         "mod history",
@@ -12623,6 +12632,7 @@
         "path FsHost",
         "path FsHost::new",
         "use face::FsHost",
+        "use face::FsPermissions",
         "use face::FsRemove",
         "use face::OpenRead"
       ]
@@ -12763,6 +12773,13 @@
         "path FileStorageError::Locked",
         "path FileStorageError::Unsupported",
         "path Result",
+        "path super::FileLease",
+        "path super::FilePath",
+        "path super::ReadLimitExceeded",
+        "path super::ReplacementMode",
+        "path super::ReplacementMode::Native",
+        "path super::ReplacementMode::ReadOnly",
+        "path super::SharedLease::new",
         "use super::DirectoryEntry",
         "use super::FileReader",
         "use super::FileStorage",
@@ -28249,11 +28266,17 @@
       "from": "dim_app_server::hooks_settings",
       "to": "dim_agent_capabilities::file_storage",
       "references": [
-        "path FileStorage",
         "path FileStorageError::Cancelled",
         "path FileStorageError::Io",
-        "use dim_agent_capabilities::file_storage::FileStorage",
         "use dim_agent_capabilities::file_storage::FileStorageError"
+      ]
+    },
+    {
+      "from": "dim_app_server::hooks_settings",
+      "to": "dim_agent_capabilities::file_storage::face",
+      "references": [
+        "path FsHost",
+        "use dim_agent_capabilities::file_storage::FsHost"
       ]
     },
     {
@@ -28408,8 +28431,14 @@
       "from": "dim_app_server::hooks_settings::tests",
       "to": "dim_agent_capabilities::file_storage",
       "references": [
-        "path FileStorage",
         "use dim_agent_capabilities::file_storage::FileStoragePlugin"
+      ]
+    },
+    {
+      "from": "dim_app_server::hooks_settings::tests",
+      "to": "dim_agent_capabilities::file_storage::face",
+      "references": [
+        "path FsHost"
       ]
     },
     {
