@@ -6,7 +6,6 @@ Use a new output directory for the initial build. On macOS and Windows,
 """
 
 import argparse
-import bisect
 from collections import Counter
 import hashlib
 import json
@@ -21,6 +20,8 @@ import subprocess
 import sys
 import tempfile
 
+from elf import input_sections
+from layout import ranks, unique_functions
 from toolchain import rustc as rustc_command
 
 HERE = Path(__file__).resolve().parent
@@ -124,30 +125,47 @@ def footprint(path, binary):
     return sorted(pages)
 
 
-def order(binary, profiles, output):
+def order(binary, map_path, profiles, output):
+    """Write the order file for ``binary``, keeping each ``.text`` chunk together.
+
+    lld ranks an input section by the best rank of the symbols it names and keeps
+    the section's own order inside it, so functions sharing a section cannot be
+    placed independently. Each chunk is emitted contiguously in address order at
+    the position of its best-ranked member, which is where one link puts it. A
+    name the map attributes to more than one chunk cannot be placed at all and
+    is left out.
+    """
     functions = symbols(binary)
     pages = [footprint(profile, binary) for profile in profiles]
-    priority = {mask: index for index, mask in enumerate([7, 3, 5, 1, 6, 2, 4])}
-    selected = []
-    for start, end, name in functions:
-        mask = sum(1 << i for i, used in enumerate(pages)
-                   if bisect.bisect_left(used, start // 4096) <
-                   bisect.bisect_left(used, (end + 4095) // 4096))
-        if mask:
-            selected.append((priority[mask], start, name))
-    names = list(dict.fromkeys(name for _, _, name in sorted(selected)))
-    if not names:
-        raise ValueError("training selected no linkable functions")
-    output.write_text("\n".join(names) + "\n")
-    return {"pages": [len(p) for p in pages], "orderedFunctions": len(names),
+    chunks_of = {}
+    for chunk, symbols_in_chunk in input_sections(map_path):
+        for name in symbols_in_chunk:
+            chunks_of.setdefault(name, set()).add(chunk)
+    ranked = [entry for entry in ranks(unique_functions(functions), pages, 4096)
+              if len(chunks_of.get(entry[2], ())) < 2]
+    if not ranked:
+        raise ValueError("every selected function was ambiguous between .text chunks")
+    frames = {name: index for index, (_, _, name) in enumerate(functions)}
+    groups = {}
+    for priority, _, name in ranked:
+        chunks = chunks_of.get(name, ())
+        key = ("chunk", next(iter(chunks))) if len(chunks) == 1 else ("symbol", name)
+        groups.setdefault(key, []).append((priority, name))
+    ordered = [name for members in groups.values()
+               for _, name in sorted(members, key=lambda member: frames[member[1]])]
+    output.write_text("\n".join(ordered) + "\n")
+    return {"pages": [len(p) for p in pages], "orderedFunctions": len(ordered),
+            "sectionCoupledFunctions": sum(1 for members in groups.values() if len(members) > 1),
             "functionSymbols": len(functions)}
 
 
-def relink(record, output, order_file=None, strict=True):
+def relink(record, output, order_file=None, strict=True, map_path=None):
     arguments = record["arguments"].copy()
     arguments[arguments.index("-o") + 1] = str(output)
     if order_file:
         arguments.append(f"-Wl,--symbol-ordering-file={order_file}")
+    if map_path:
+        arguments.extend([f"-Wl,-Map={map_path}", "-Wl,--no-demangle"])
     if strict:
         arguments.append("-Wl,--fatal-warnings")
     env = dict(os.environ, PATH=record["path"])
@@ -159,6 +177,11 @@ def relink(record, output, order_file=None, strict=True):
 
 
 def ordered_link(record, output, order_file):
+    """Link ``output`` with ``order_file`` and return the names it was linked with.
+
+    lld reports names it cannot place; those are removed and the link repeats, so
+    the returned names are the ones the candidate was actually laid out by.
+    """
     diagnostics = relink(record, output, order_file, strict=False)
     names = order_file.read_text().splitlines()
     omitted = set()
@@ -168,25 +191,31 @@ def ordered_link(record, output, order_file):
             raise RuntimeError(f"unexpected native link diagnostic:\n{diagnostics}")
         omitted.add(match[1])
     if omitted:
-        order_file.write_text("\n".join(name for name in names if name not in omitted) + "\n")
+        names = [name for name in names if name not in omitted]
+        order_file.write_text("\n".join(names) + "\n")
         relink(record, output, order_file)
-    return sorted(omitted)
+    return names, sorted(omitted)
 
 
-def validate_layout(baseline, candidate, order_file):
+def validate_layout(baseline, candidate, order_names):
+    """Check ``candidate`` follows ``order_names``, the order it was linked with."""
     before, after = symbols(baseline), symbols(candidate)
     if Counter((name, end - start) for start, end, name in before) != Counter((name, end - start) for start, end, name in after):
         raise RuntimeError("relink changed the function set or function sizes")
-    ranks = {name: rank for rank, name in enumerate(order_file.read_text().splitlines())}
+    ranks = {name: rank for rank, name in enumerate(order_names)}
     if not ranks or set(ranks) - {name for _, _, name in after}:
         raise RuntimeError("the final order must name existing function symbols")
-    positions = {}
+    positions, labels = {}, {}
     for start, _, name in after:
-        if name in ranks:
-            positions[start] = min(positions.get(start, ranks[name]), ranks[name])
-    priorities = [rank for _, rank in sorted(positions.items())]
-    if priorities != sorted(priorities):
-        raise RuntimeError("candidate function addresses do not follow the final symbol order")
+        if name in ranks and ranks[name] < positions.get(start, len(ranks)):
+            positions[start], labels[start] = ranks[name], name
+    priorities = [(start, rank) for start, rank in sorted(positions.items())]
+    for (start, rank), (previous_start, previous_rank) in zip(priorities[1:], priorities):
+        if rank < previous_rank:
+            raise RuntimeError(
+                "candidate function addresses do not follow the final symbol order: "
+                f"{labels[start]} (rank {rank}) at {start:#x} follows "
+                f"{labels[previous_start]} (rank {previous_rank}) at {previous_start:#x}")
     selected_before = Counter((name, start, end - start) for start, end, name in before if name in ranks)
     selected_after = Counter((name, start, end - start) for start, end, name in after if name in ranks)
     moved = sum((selected_before - selected_after).values())
@@ -224,7 +253,8 @@ def main():
         work = Path(temporary)
         record = cargo_link(work, compiler, args.jobs, args.target)
         baseline = output / "baseline"
-        relink(record, baseline)
+        baseline_map = output / "baseline.map"
+        relink(record, baseline, map_path=baseline_map)
         if digest(baseline) != digest(Path(record["output"])):
             raise RuntimeError("captured inputs did not reproduce Cargo's executable")
         probe = work / "probe.so"
@@ -234,11 +264,12 @@ def main():
         for profile in profiles:
             shutil.copyfile(profile, output / profile.name)
         order_file = output / "symbols.order"
-        measurement = order(baseline, profiles, order_file)
+        measurement = order(baseline, baseline_map, profiles, order_file)
         candidate = output / "candidate"
-        measurement["unorderableSymbols"] = ordered_link(record, candidate, order_file)
-        measurement["orderedFunctions"] = len(order_file.read_text().splitlines())
-        measurement.update(validate_layout(baseline, candidate, order_file))
+        order_names, omitted = ordered_link(record, candidate, order_file)
+        measurement["unorderableSymbols"] = omitted
+        measurement["orderedFunctions"] = len(order_names)
+        measurement.update(validate_layout(baseline, candidate, order_names))
         train(candidate, work / "acceptance")
         manifest = {"source": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPO, text=True).strip(),
                     "dirty": bool(subprocess.check_output(["git", "status", "--porcelain"], cwd=REPO)),

@@ -135,6 +135,10 @@ jobs:
           - platform: windows-arm64
             runner: windows-11-arm
             target: aarch64-pc-windows-msvc
+          - platform: linux-x64
+            runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            linux_image: quay.io/pypa/manylinux_2_28_x86_64@sha256:7e41b1c7fd64dfc69703a1124b43c404382973ee06ec5d764b85c34d2221fded
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 240
     env:
@@ -208,8 +212,27 @@ jobs:
           python scripts/code-layout/build.py --output $output --jobs 2
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Get-Content (Join-Path $output "manifest.json")
+      - name: Build, train and validate the native executable (Linux container)
+        if: matrix.linux_image
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm --user "$(id -u):$(id -g)" --workdir /src --entrypoint /bin/bash \
+            --mount "type=bind,src=$PWD,dst=/src" \
+            --mount "type=bind,src=$(rustc --print sysroot),dst=/opt/rust,readonly" \
+            --mount "type=bind,src=$RUNNER_TEMP,dst=/out" \
+            --env HOME=/tmp --env CARGO_INCREMENTAL --env CARGO_BUILD_JOBS \
+            --env CARGO_PROFILE_RELEASE_LTO --env RUSTC_WRAPPER \
+            --env DIM_LAYOUT_PLATFORM --env DIM_BUILD_TARGET="${{ matrix.target }}" \
+            "${{ matrix.linux_image }}" -ec '
+              export PATH="/opt/rust/bin:$PATH"
+              /opt/python/cp311-cp311/bin/python scripts/code-layout/build.py \
+                --target "$DIM_BUILD_TARGET" --jobs "$CARGO_BUILD_JOBS" \
+                --output "/out/dim-layout-$DIM_LAYOUT_PLATFORM"
+              cat "/out/dim-layout-$DIM_LAYOUT_PLATFORM/manifest.json"
+            '
       - name: Build, train and validate the native executable (Unix)
-        if: runner.os != 'Windows'
+        if: runner.os != 'Windows' && !matrix.linux_image
         shell: bash
         run: |
           set -euo pipefail
@@ -217,7 +240,7 @@ jobs:
           python3 scripts/code-layout/build.py --output "$output" --jobs 2
           cat "$output/manifest.json"
       - name: Measure the validated executables
-        if: inputs.measure
+        if: inputs.measure && !matrix.linux_image
         shell: python
         run: |
           import os, subprocess, sys
@@ -225,7 +248,7 @@ jobs:
           output = Path(os.environ["RUNNER_TEMP"]) / ("dim-layout-" + os.environ["DIM_LAYOUT_PLATFORM"])
           subprocess.run([sys.executable, "scripts/code-layout/build.py", "--output", output, "--measure-only"], check=True)
       - name: Preserve reusable baseline after a layout failure
-        if: failure()
+        if: failure() && !matrix.linux_image
         shell: python
         run: |
           import os, tarfile
