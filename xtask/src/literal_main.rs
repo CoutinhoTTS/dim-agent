@@ -24,7 +24,9 @@
 //! - **In a TypeScript file, only code is read:** string literals outside
 //!   comments and outside template text. A template's `${ … }` is code; a `/`
 //!   that opens a regular-expression literal is read as one, not as the start
-//!   of a string.
+//!   of a string. A `/` after a control-flow header's `)` or a block's `}`
+//!   opens one, as it does after a token that cannot end an expression, while a
+//!   `/` after a call's `)`, an index's `]` or an object literal's `}` divides.
 //! - **The scan always terminates and never panics.** Every offset it slices at
 //!   is a character boundary inside the text.
 use proc_macro2::{TokenStream, TokenTree};
@@ -918,6 +920,62 @@ const KEYWORDS: [&str; 14] = [
     "yield",
 ];
 
+/// The token before the current one, as far as an opener's role needs it.
+#[derive(Clone, Copy)]
+enum Before<'a> {
+    /// The start of the region, before any token.
+    Start,
+    /// An identifier, a keyword or a number, as written.
+    Word(&'a str),
+    /// `;`.
+    Semicolon,
+    /// `{`.
+    Brace,
+    /// `}`.
+    CloseBrace,
+    /// `)`.
+    CloseParen,
+    /// `=>`.
+    Arrow,
+    /// Any other token: an opener other than `{`, a separator or an operator.
+    Other,
+}
+
+/// What the token that closes an opener ends, which decides whether a `/`
+/// after it opens a regular-expression literal or divides.
+#[derive(Clone, Copy)]
+enum Ends {
+    /// An expression: a call's `)` or an object literal's `}`.
+    Expression,
+    /// A control-flow header's `)` or a block's `}`.
+    HeaderOrBlock,
+}
+
+/// Whether a `(` after `before` opens the header of `if`, `while`, `for` or
+/// `with` rather than a call, a grouping or a parameter list.
+fn header(before: Before<'_>) -> bool {
+    matches!(before, Before::Word("if" | "while" | "for" | "with"))
+}
+
+/// Whether a `{` after `before` opens a block rather than an object literal.
+/// A block follows the start of the region, `;`, `{`, `}`, `)`, `=>`, `else`,
+/// `do`, `try`, `finally`, or an identifier or keyword that `KEYWORDS` does not
+/// name; anything else is an object literal, among it `return` and `(`.
+fn block(before: Before<'_>) -> bool {
+    match before {
+        Before::Start
+        | Before::Semicolon
+        | Before::Brace
+        | Before::CloseBrace
+        | Before::CloseParen
+        | Before::Arrow => true,
+        Before::Word(word) => {
+            matches!(word, "else" | "do" | "try" | "finally") || !KEYWORDS.contains(&word)
+        }
+        Before::Other => false,
+    }
+}
+
 /// Reads `text` as code, pushing into `found` the offset of every `main`
 /// literal, and answers how many bytes it read: all of `text`, or, when `brace`
 /// is set, the bytes up to and including the `}` that closes the `${ … }` it
@@ -927,25 +985,39 @@ const KEYWORDS: [&str; 14] = [
 /// `${ … }` is, and is read by this same function, so an interpolation can nest
 /// braces, strings, comments, templates and regular-expression literals. A `/`
 /// begins a regular-expression literal when the token before it cannot end an
-/// expression, and divides otherwise. Every branch moves the scan forward, and a
-/// literal that never closes runs to the end of `text`, so the scan always ends.
+/// expression, and divides otherwise. Whitespace changes no token, so it
+/// neither ends an expression nor hides the token before an opener.
+///
+/// A `)` or `}` ends an expression unless it closes an opener the stack
+/// remembers as a control-flow header or a block. A `(` after `if`, `while`,
+/// `for` or `with` opens such a header; a `{` after the start of the region,
+/// `;`, `{`, `}`, `)`, `=>`, `else`, `do`, `try`, `finally` or a word that
+/// `KEYWORDS` does not name opens a block; any other `(` or `{` ends an
+/// expression. Every branch moves the scan forward, and a literal that never
+/// closes runs to the end of `text`, so the scan always ends.
 fn code(text: &str, brace: bool, found: &mut Vec<usize>) -> usize {
     let mut at = 0;
     let mut depth = 0usize;
     let mut expression = true;
+    let mut before = Before::Start;
+    let mut open = Vec::new();
     while let Some(character) = text[at..].chars().next() {
         let next = at + character.len_utf8();
         if let Some(length) = comment(text, at) {
             at = (at + length).min(text.len());
+        } else if character.is_whitespace() {
+            at = next;
         } else if let Some((body, length)) = string(text, at) {
             if text[at + 1..at + 1 + body] == *"main" {
                 found.push(at);
             }
             at = (at + length).min(text.len());
             expression = false;
+            before = Before::Other;
         } else if character == '`' {
             at = (at + template(text, at, found)).min(text.len());
             expression = false;
+            before = Before::Other;
         } else if character == '/' && expression {
             match regex(text, at) {
                 Some(length) => {
@@ -957,19 +1029,41 @@ fn code(text: &str, brace: bool, found: &mut Vec<usize>) -> usize {
                     expression = true;
                 }
             }
+            before = Before::Other;
+        } else if character == '(' {
+            open.push(if header(before) {
+                Ends::HeaderOrBlock
+            } else {
+                Ends::Expression
+            });
+            at = next;
+            expression = true;
+            before = Before::Other;
         } else if character == '{' {
+            open.push(if block(before) {
+                Ends::HeaderOrBlock
+            } else {
+                Ends::Expression
+            });
             depth += 1;
             at = next;
             expression = true;
+            before = Before::Brace;
         } else if character == '}' && brace && depth == 0 {
             return next;
         } else if character == '}' {
             depth = depth.saturating_sub(1);
             at = next;
-            expression = false;
-        } else if matches!(character, ')' | ']') {
+            expression = matches!(open.pop(), Some(Ends::HeaderOrBlock));
+            before = Before::CloseBrace;
+        } else if character == ')' {
+            at = next;
+            expression = matches!(open.pop(), Some(Ends::HeaderOrBlock));
+            before = Before::CloseParen;
+        } else if character == ']' {
             at = next;
             expression = false;
+            before = Before::Other;
         } else if character.is_alphanumeric() || matches!(character, '_' | '$' | '.') {
             let mut end = next;
             while let Some(character) = text[end..].chars().next() {
@@ -978,11 +1072,22 @@ fn code(text: &str, brace: bool, found: &mut Vec<usize>) -> usize {
                 }
                 end += character.len_utf8();
             }
-            expression = KEYWORDS.contains(&&text[at..end]);
+            let word = &text[at..end];
+            before = Before::Word(word);
+            expression = KEYWORDS.contains(&word);
             at = end;
+        } else if character == '=' && text[next..].starts_with('>') {
+            at = next + 1;
+            expression = true;
+            before = Before::Arrow;
         } else {
             at = next;
             expression = true;
+            before = if character == ';' {
+                Before::Semicolon
+            } else {
+                Before::Other
+            };
         }
     }
     at
@@ -1515,6 +1620,28 @@ mod tests {
         ("web/src/a.ts", "const re = /[/']/\nconst id = 'main'\n"),
         ("web/src/a.ts", "const r = a / b; const id = 'main'\n"),
         ("web/src/a.ts", "return /'/.test(x) ? y : 'main'\n"),
+        ("web/src/a.ts", "if (enabled) /\"main\"/.test(label);\n"),
+        ("web/src/a.ts", "if (enabled)/\"main\"/.test(label);\n"),
+        (
+            "web/src/a.ts",
+            "while (ready) /'/.test(x);\nconst a = 'main';\n",
+        ),
+        (
+            "web/src/a.ts",
+            "while (ready)/'/.test(x);\nconst a = 'main';\n",
+        ),
+        ("web/src/a.ts", "for (const x of xs) /\"main\"/.test(x);\n"),
+        ("web/src/a.ts", "for (const x of xs)/\"main\"/.test(x);\n"),
+        ("web/src/a.ts", "total(a) / 2; const b = \"main\";\n"),
+        ("web/src/a.ts", "total(a) /\"main\"/ 2;\n"),
+        ("web/src/a.ts", "function f() {}\n/\"main\"/.test(s);\n"),
+        ("web/src/a.ts", "function f() {}/\"main\"/.test(s);\n"),
+        ("web/src/a.ts", "if (x) { y(); } /\"main\"/.test(s);\n"),
+        ("web/src/a.ts", "if (x) { y(); }/\"main\"/.test(s);\n"),
+        ("web/src/a.ts", "const r = {} / 2; const b = \"main\";\n"),
+        ("web/src/a.ts", "const r = {} /\"main\"/ 2;\n"),
+        ("web/src/a.ts", "class A {}\n/\"main\"/.test(s);\n"),
+        ("web/src/a.ts", "class A {}/\"main\"/.test(s);\n"),
         (
             "web/src/features/chat/TimelineView.vue",
             "<template>\n  <div :data-variant=\"variant\" @click=\"openLine('main')\"></div>\n</template>\n",
@@ -1701,6 +1828,35 @@ mod tests {
             errors[0].contains("web/src/a.ts:2: `\"main\"` names neither"),
             "{errors:?}"
         );
+    }
+
+    #[test]
+    fn a_slash_after_a_control_flow_header_or_a_block_opens_a_regex() {
+        let mut failures = Vec::new();
+        for (text, uses) in [
+            ("if (enabled) /\"main\"/.test(label);\n", 0),
+            ("if (enabled)/\"main\"/.test(label);\n", 0),
+            ("while (ready) /'/.test(x);\nconst a = 'main';\n", 1),
+            ("while (ready)/'/.test(x);\nconst a = 'main';\n", 1),
+            ("for (const x of xs) /\"main\"/.test(x);\n", 0),
+            ("for (const x of xs)/\"main\"/.test(x);\n", 0),
+            ("total(a) / 2; const b = \"main\";\n", 1),
+            ("total(a) /\"main\"/ 2;\n", 1),
+            ("function f() {}\n/\"main\"/.test(s);\n", 0),
+            ("function f() {}/\"main\"/.test(s);\n", 0),
+            ("if (x) { y(); } /\"main\"/.test(s);\n", 0),
+            ("if (x) { y(); }/\"main\"/.test(s);\n", 0),
+            ("const r = {} / 2; const b = \"main\";\n", 1),
+            ("const r = {} /\"main\"/ 2;\n", 1),
+            ("class A {}\n/\"main\"/.test(s);\n", 0),
+            ("class A {}/\"main\"/.test(s);\n", 0),
+        ] {
+            let found = bounded("web/src/a.ts", text).len();
+            if found != uses {
+                failures.push(format!("{text:?}: left {found}, right {uses}"));
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
     }
 
     #[test]
