@@ -8170,13 +8170,11 @@
       "to": "dim_agent_types::events",
       "references": [
         "path DEFAULT_BRANCH_ID",
-        "path ROOT_BRANCH_ID",
         "path TurnOutcome",
         "path TurnOutcome::Cancelled",
         "path TurnOutcome::Completed",
         "path TurnOutcome::Failed",
         "use dim_agent_types::DEFAULT_BRANCH_ID",
-        "use dim_agent_types::ROOT_BRANCH_ID",
         "use dim_agent_types::TurnOutcome"
       ]
     },
@@ -8342,10 +8340,8 @@
         "path CollaborationOutcome::Cancelled",
         "path CollaborationOutcome::Completed",
         "path CollaborationOutcome::Failed",
-        "path ROOT_BRANCH_ID",
         "use dim_agent_types::CollaborationDelivery",
-        "use dim_agent_types::CollaborationOutcome",
-        "use dim_agent_types::ROOT_BRANCH_ID"
+        "use dim_agent_types::CollaborationOutcome"
       ]
     },
     {
@@ -8423,11 +8419,9 @@
         "path ContextCompactionResult::Completed",
         "path ContextCompactionResult::Failed",
         "path ContextCompactionResult::Skipped",
-        "path ROOT_BRANCH_ID",
         "path UserInput",
         "use dim_agent_types::ContextCompactionResult",
         "use dim_agent_types::ExecStatus",
-        "use dim_agent_types::ROOT_BRANCH_ID",
         "use dim_agent_types::UserInput"
       ]
     },
@@ -8504,7 +8498,14 @@
       "from": "dim_acp::projection::tests",
       "to": "dim_acp::projection",
       "references": [
-        "path Projection::default"
+        "path Projection::new"
+      ]
+    },
+    {
+      "from": "dim_acp::projection::tests",
+      "to": "dim_client::question",
+      "references": [
+        "path dim_client::question::Call"
       ]
     },
     {
