@@ -222,7 +222,7 @@ Unchanged from #427 §14: a switch writes a `⑂ name · id` boundary and the sh
 └ Enter show · p continue from here · x end it · Esc close ───────┘
 ```
 
-主线 is the default branch and 起点 is the root. `p` chooses the selected line as the default branch
+主线 is the default branch and 起点 is the root, and those two rows are the two lines that can open a line (§6.1 is the menu's contract for it, and `p` moves the role between them). `p` chooses the selected line as the default branch
 ("continue from here"): the Session's conversation, its default targets and its centring follow, and the
 old default branch stays open with the lines it opened. It is refused on a line a plugin opened, on a line
 created through a client before the upgrade, and on the line that is already the default branch; the root is a
