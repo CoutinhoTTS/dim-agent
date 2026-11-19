@@ -58,6 +58,7 @@ export interface SourceDeclaration {
 
 /** Process service `settings`. */
 export interface Settings {
+  declaredBy(request: { instanceId: string }): SourceDeclaration[];
   /** Registers a source for as long as the calling row is loaded; its documents stay in the
    * home when the row unloads. Rejects (failing the caller's apply) when the declaration is
    * invalid or its name or a file is registered already. Call it from a row's own `apply`. */

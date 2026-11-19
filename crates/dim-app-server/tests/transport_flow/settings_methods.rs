@@ -231,6 +231,26 @@ async fn node_settings_typescript_owner_reads_and_writes() {
     let read = owner(&mut client, &session, "read", user.clone()).await;
     assert_eq!(read["ok"], true, "{read}");
     assert_eq!(read["value"]["document"], json!({"maxResults": 5}));
+    let loader = server.service::<rutis_loader::Loader>().unwrap();
+    let id = loader
+        .get(OWNER)
+        .unwrap()
+        .view
+        .unwrap()
+        .instance()
+        .to_string();
+    let declarations = owner(&mut client, &session, "declared", json!({"instanceId":id})).await;
+    assert_eq!(
+        declarations,
+        serde_json::from_str::<Value>(include_str!(
+            "../../../../runtime/fixtures/settings-owner.settings.json"
+        ))
+        .unwrap()
+    );
+    assert_eq!(
+        owner(&mut client, &session, "declared", json!({"instanceId":"0"})).await,
+        json!([])
+    );
     let first = read["value"]["revision"].clone();
     let write = |revision: &Value, document: Value| json!({"source":"example","scope":"user","expectedRevision":revision,"document":document});
     let written = owner(
