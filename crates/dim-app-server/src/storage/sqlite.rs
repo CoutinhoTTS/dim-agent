@@ -1,12 +1,12 @@
 use super::reclaim::Reclaimed;
 use dim_agent_runtime::{AgentError, Result, panic_message};
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use rutis::host::{CtxHost, ErrorKind};
 use rutis::{Ctx, Plugin};
 use rutis_bridge::session::{
     Error as BridgeError, HostDispatch, Reply, Value as BridgeValue, host_key,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     fs::File,
@@ -16,6 +16,7 @@ use std::{
     sync::{Arc, Condvar, Mutex, PoisonError},
     time::Duration,
 };
+use tokio_util::sync::CancellationToken;
 
 /// The native store format this daemon creates and opens.
 pub const FORMAT: u32 = 52;
@@ -2247,39 +2248,232 @@ fn store_bytes(path: &Path) -> u64 {
     file_bytes(path) + file_bytes(&wal_path(path))
 }
 
+#[derive(Serialize)]
+pub(crate) struct UserDocument {
+    pub(crate) version: i64,
+    pub(crate) document: String,
+}
+
+impl UserDocument {
+    fn read(connection: &Connection, source: &str) -> Result<Option<Self>> {
+        connection
+            .query_row(
+                "SELECT version, document FROM settings_documents WHERE source = ?1",
+                [format!("user/{source}")],
+                |row| {
+                    Ok(Self {
+                        version: row.get(0)?,
+                        document: row.get(1)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(storage)
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ImportUser {
+    pub(crate) source: String,
+    pub(crate) document: String,
+    pub(crate) imported_revision: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ReplaceUser {
+    pub(crate) source: String,
+    pub(crate) expected_version: i64,
+    pub(crate) decision: UserDecision,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) enum UserDecision {
+    Write { document: String },
+    Reject { field: String },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum UserWriteError {
+    #[error("persisted settings source is missing")]
+    Missing,
+    #[error("settings revision conflict")]
+    Conflict,
+    #[error("settings revision overflow")]
+    Overflow,
+    #[error("settings field {0} is changed only by the user")]
+    Rejected(String),
+}
+
+fn check_user_write(cancel: &CancellationToken, closing: &CancellationToken) -> Result<()> {
+    if closing.is_cancelled() {
+        return Err(AgentError::Closed("settings caller".into()));
+    }
+    if cancel.is_cancelled() {
+        return Err(AgentError::Cancelled("settings write".into()));
+    }
+    Ok(())
+}
+
+impl SqliteStorage {
+    pub(crate) async fn read_user(
+        self: &Arc<Self>,
+        source: String,
+    ) -> Result<Option<UserDocument>> {
+        self.run_read(move |connection| UserDocument::read(connection, &source))
+            .await
+    }
+
+    pub(crate) async fn import_user_if_absent(
+        self: &Arc<Self>,
+        request: ImportUser,
+        cancel: CancellationToken,
+        closing: CancellationToken,
+    ) -> Result<UserDocument> {
+        self.run(move |connection| {
+            check_user_write(&cancel, &closing)?;
+            let tx = connection.transaction().map_err(storage)?;
+            tx.execute(
+                "INSERT INTO settings_documents(source, version, document, imported_revision) VALUES (?1, 1, ?2, ?3) ON CONFLICT(source) DO NOTHING",
+                rusqlite::params![format!("user/{}", request.source), request.document, request.imported_revision],
+            ).map_err(storage)?;
+            let row = UserDocument::read(&tx, &request.source)?.ok_or_else(|| storage("missing imported settings row"))?;
+            tx.commit().map_err(storage)?;
+            Ok(row)
+        }).await
+    }
+
+    pub(crate) async fn replace_user(
+        self: &Arc<Self>,
+        request: ReplaceUser,
+        cancel: CancellationToken,
+        closing: CancellationToken,
+    ) -> Result<std::result::Result<i64, UserWriteError>> {
+        self.run(move |connection| {
+            check_user_write(&cancel, &closing)?;
+            let tx = connection.transaction().map_err(storage)?;
+            let key = format!("user/{}", request.source);
+            let version: Option<i64> = tx
+                .query_row(
+                    "SELECT version FROM settings_documents WHERE source = ?1",
+                    [&key],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(storage)?;
+            let Some(version) = version else {
+                return Ok(Err(UserWriteError::Missing));
+            };
+            if version != request.expected_version {
+                return Ok(Err(UserWriteError::Conflict));
+            }
+            let document = match request.decision {
+                UserDecision::Write { document } => document,
+                UserDecision::Reject { field } => return Ok(Err(UserWriteError::Rejected(field))),
+            };
+            let Some(version) = version.checked_add(1) else {
+                return Ok(Err(UserWriteError::Overflow));
+            };
+            tx.execute(
+                "UPDATE settings_documents SET version = ?1, document = ?2 WHERE source = ?3",
+                rusqlite::params![version, document, key],
+            )
+            .map_err(storage)?;
+            tx.commit().map_err(storage)?;
+            Ok(Ok(version))
+        })
+        .await
+    }
+}
+
 struct SqliteDispatch(Arc<SqliteStorage>);
 
 impl HostDispatch for SqliteDispatch {
     fn methods(&self) -> Option<serde_json::Value> {
-        Some(serde_json::json!({"storageReport":"async"}))
+        Some(
+            serde_json::json!({"storageReport":"async","readUser":"async","importUserIfAbsent":"async","replaceUser":"async"}),
+        )
     }
 
     fn invoke(&self, method: &str, args: BridgeValue) -> Reply {
-        if method != "storageReport" {
-            return Err(BridgeError::Value(format!(
-                "unknown sqliteStorage method {method}"
-            )));
-        }
         let [request]: [serde_json::Value; 1] = serde_json::from_value(args.json()?)
             .map_err(|error| BridgeError::Value(error.to_string()))?;
-        if !request.as_object().is_some_and(|fields| fields.is_empty()) {
+        if !request.is_object() {
             return Err(BridgeError::Value(
-                "storageReport expects an empty request object".into(),
+                "sqliteStorage request must be an object".into(),
             ));
         }
+        #[derive(Deserialize)]
+        #[serde(
+            tag = "method",
+            content = "request",
+            rename_all = "camelCase",
+            deny_unknown_fields
+        )]
+        enum Request {
+            StorageReport {},
+            ReadUser { source: String },
+            ImportUserIfAbsent(ImportUser),
+            ReplaceUser(ReplaceUser),
+        }
+        let request =
+            serde_json::from_value(serde_json::json!({"method":method,"request":request}))
+                .map_err(|error| BridgeError::Value(error.to_string()))?;
         let db = self.0.clone();
         Ok(BridgeValue::cancellable_future(async move {
-            let report = db.storage_report().await.map_err(|error| {
-                rutis_bridge::exports::failure(
-                    "StorageError",
-                    "storage_unavailable",
-                    error.to_string(),
-                    None,
-                )
-            })?;
-            Ok(serde_json::json!(report).into())
+            let value = match request {
+                Request::StorageReport {} => {
+                    serde_json::json!(db.storage_report().await.map_err(storage_failure)?)
+                }
+                Request::ReadUser { source } => {
+                    serde_json::json!(db.read_user(source).await.map_err(storage_failure)?)
+                }
+                Request::ReplaceUser(request) => {
+                    let cancel = CancellationToken::new();
+                    let _guard = cancel.clone().drop_guard();
+                    let version = db
+                        .replace_user(request, cancel.clone(), cancel)
+                        .await
+                        .map_err(storage_failure)?
+                        .map_err(|error| {
+                            let code = match &error {
+                                UserWriteError::Missing => "missing",
+                                UserWriteError::Conflict => "conflict",
+                                UserWriteError::Overflow => "overflow",
+                                UserWriteError::Rejected(_) => "user_only_field",
+                            };
+                            rutis_bridge::exports::failure(
+                                "StorageError",
+                                code,
+                                error.to_string(),
+                                None,
+                            )
+                        })?;
+                    serde_json::json!({"version":version})
+                }
+                Request::ImportUserIfAbsent(request) => {
+                    let cancel = CancellationToken::new();
+                    let _guard = cancel.clone().drop_guard();
+                    serde_json::json!(
+                        db.import_user_if_absent(request, cancel.clone(), cancel)
+                            .await
+                            .map_err(storage_failure)?
+                    )
+                }
+            };
+            Ok(value.into())
         }))
     }
+}
+
+fn storage_failure(error: AgentError) -> BridgeError {
+    let code = match error {
+        AgentError::Cancelled(_) | AgentError::Closed(_) => "cancelled",
+        _ => "storage_unavailable",
+    };
+    rutis_bridge::exports::failure("StorageError", code, error.to_string(), None)
 }
 
 pub struct SqliteStoragePlugin {

@@ -13,10 +13,21 @@ export default definePlugin({
     let release: (() => void) | undefined
     await ctx.use<ManagementMethods>('managementMethods').register(
       'storefixture',
-      ['status', 'report', 'create', 'cycle', 'remove', 'refuse', 'release', 'invalid_id'].map(name => ({ name: `storefixture.${name}`, mutating: true, interruption: 'report', progress: false })),
+      ['status', 'read_user', 'import_user', 'replace_user', 'report', 'create', 'cycle', 'remove', 'refuse', 'release', 'invalid_id'].map(name => ({ name: `storefixture.${name}`, mutating: true, interruption: 'report', progress: false })),
       async (call: { method: string; params: any }): Promise<MethodReply> => {
         const params = call.params
         if (call.method === 'storefixture.status') return { kind: 'value', value: {} }
+        if (call.method === 'storefixture.replace_user') {
+          const source = 'fixture-import'
+          const rejected = { kind: 'reject' as const, field: '/protected' }
+          for (const [expectedVersion, code] of [[0, 'conflict'], [1, 'user_only_field']] as const) {
+            await assert.rejects(() => sqlite.replaceUser({ source, expectedVersion, decision: rejected }),
+              (error: unknown) => error instanceof Error && 'code' in error && error.code === code)
+          }
+          return { kind: 'value', value: await sqlite.replaceUser({source, expectedVersion: 1, decision: {kind: 'write', document: '{"value":3}'}}) }
+        }
+        if (call.method === 'storefixture.import_user') return { kind: 'value', value: await sqlite.importUserIfAbsent(params) }
+        if (call.method === 'storefixture.read_user') return { kind: 'value', value: await sqlite.readUser(params) }
         if (call.method === 'storefixture.report') return { kind: 'value', value: await sqlite.storageReport({}) }
         if (call.method === 'storefixture.create') {
           if (!params.create) throw new Error('missing creation request')

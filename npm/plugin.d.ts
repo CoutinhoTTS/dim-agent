@@ -621,6 +621,9 @@ export interface TimelineReadScope {
   segments: { branchId: string; from: number; through: number; storedThrough: number; tail: AgentEvent[] }[];
 }
 export interface SqliteStorage {
+  replaceUser(request: { source: string; expectedVersion: number | bigint; decision: { kind: 'write'; document: string } | { kind: 'reject'; field: string } }): Promise<{ version: number | bigint }>;
+  importUserIfAbsent(request: { source: string; document: string; importedRevision: string }): Promise<{ version: number | bigint; document: string }>;
+  readUser(request: { source: string }): Promise<{ version: number | bigint; document: string } | null>;
   storageReport(request: Record<string, never>): Promise<{ databaseBytes: number; walBytes: number; reclaimableBytes: number }>;
 }
 
