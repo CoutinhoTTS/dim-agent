@@ -456,15 +456,17 @@ while a lease holds it or a file beneath it. Text and binary are separate operat
 carry raw bytes. A text read of a raw file fails `invalid_data` and leaves it
 untouched, and a binary read of a text file returns its envelope bytes. The byte
 operations are whole-buffer and capped at 8 MiB, below the 12 MiB raw ceiling
-the base64-encoded runtime frame implies; there is no streaming in JavaScript.
+the base64-encoded runtime frame implies.
 A buffer large enough that its call message would exceed the runtime's 16 MiB
 frame is refused by the plugin's own runtime before it is sent, failing only
 that call with a `RangeError` coded `bad-value` while the row and the file
 store stay up, and the same holds for any call argument, a large text
 `replace` included.
-Streaming and work directories belong to the typed Rust API and have no
-JavaScript binding: `directory` creates missing parents for a helper process,
-while `withLock` still does not, so provisioning stays with installation.
+`scope.directory(name)` creates missing parents and returns the node-local work path.
+`scope.openRead(name)` returns a pinned reader ID and size, or null for a missing file.
+Use `fsHost.readAt` and `fsHost.closeRead`; unloading the opening row closes its readers.
+`scope.writeStream(name, next)` consumes byte chunks until null and replaces the file atomically.
+Source failure or cancellation discards the partial replacement.
 
 All trusted consumers use that same host-authorized root. A FileScope owns
 operations and cleanup; it is not a per-package directory sandbox. Consumers
