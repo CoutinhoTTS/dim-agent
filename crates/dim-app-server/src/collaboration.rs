@@ -651,7 +651,10 @@ impl Collaboration {
                 let (name, status) = match self.index.session(&session_id) {
                     Some((host, session)) if !session.is_closing() => (
                         host.profile.name.clone(),
-                        if session.state("main").is_ok_and(|state| state.running) {
+                        if session
+                            .state(ROOT_BRANCH_ID)
+                            .is_ok_and(|state| state.running)
+                        {
                             "working"
                         } else {
                             "idle"
@@ -1297,7 +1300,7 @@ impl CollaborationSession {
         self.collaboration
             .member_agent(&self.session_id, &p.member_session_id)
             .ok_or_else(|| refusal_rpc(Refusal::TeamMemberNotFound))?;
-        let branch_id = p.branch_id.as_deref().unwrap_or("main");
+        let branch_id = p.branch_id.as_deref().unwrap_or(DEFAULT_BRANCH_ID);
         if branch_id.is_empty() {
             return Err(RpcError::invalid("branchId must not be empty"));
         }
@@ -2027,7 +2030,7 @@ impl CollaborationSession {
                     .session
                     .input(
                         self.message_input(&sender, data.content.clone(), mode),
-                        "main",
+                        ROOT_BRANCH_ID,
                     )
                     .await
                     .map_err(|_| Refusal::MemberClosed)?;
@@ -2038,7 +2041,7 @@ impl CollaborationSession {
                     .collaboration
                     .member(&self.session_id, &data.agent_id, &data.session_id)
                     .await?;
-                let _ = peer.session.stop("main", CANCELLED.into()).await;
+                let _ = peer.session.stop(ROOT_BRANCH_ID, CANCELLED.into()).await;
                 Ok(delivered(&peer, None, Some(cancel)))
             }
             EventKind::CollaborationClose(data) => {
@@ -2047,7 +2050,7 @@ impl CollaborationSession {
                     .member(&self.session_id, &data.agent_id, &data.session_id)
                     .await?;
                 let working = self.in_flight(&data.session_id);
-                let _ = peer.session.stop("main", CANCELLED.into()).await;
+                let _ = peer.session.stop(ROOT_BRANCH_ID, CANCELLED.into()).await;
                 if let Some(mut done) = working {
                     let abort = self.with_abort(branch_id);
                     tokio::select! {
@@ -2160,7 +2163,10 @@ impl CollaborationSession {
             if !new
                 && (state.requests.contains_key(&member)
                     || state.stopping.contains_key(&member)
-                    || peer.session.state("main").is_ok_and(|state| state.running))
+                    || peer
+                        .session
+                        .state(ROOT_BRANCH_ID)
+                        .is_ok_and(|state| state.running))
             {
                 return Err(Refusal::Busy.into());
             }
@@ -2188,7 +2194,7 @@ impl CollaborationSession {
             .session
             .input(
                 self.message_input(&sender, data.prompt.clone(), InputMode::Queue),
-                "main",
+                ROOT_BRANCH_ID,
             )
             .await
         {
@@ -2302,7 +2308,7 @@ impl CollaborationSession {
         let branch_id = branch_id.to_owned();
         branch.tasks.spawn(async move {
             let idle = tokio::select! {
-                result = session.idle("main") => result,
+                result = session.idle(ROOT_BRANCH_ID) => result,
                 _ = abort.cancelled() => return,
             };
             this.settle(&branch_id, &member, Some(idle)).await;
@@ -2433,7 +2439,7 @@ impl CollaborationSession {
         // published while it reads, or between it and the withdrawal, still
         // wakes the wait below: whatever the check cannot see happened after
         // this subscription, and the wait checks after every change.
-        let mut published = session.publication("main")?.watch();
+        let mut published = session.publication(ROOT_BRANCH_ID)?.watch();
         match input_fate(session, input, &mut after, &mut open).await? {
             InputFate::Consumed(Some(turn)) => {
                 stop_member_turn(session, &turn, reason)?;
@@ -2445,7 +2451,7 @@ impl CollaborationSession {
             InputFate::Pending => {}
         }
         match session
-            .service::<dim_agent_capabilities::input_queue::InputQueue>("main")?
+            .service::<dim_agent_capabilities::input_queue::InputQueue>(ROOT_BRANCH_ID)?
             .withdraw(InputWithdrawData {
                 input_id: input.to_owned(),
                 reason: Some(reason.into()),
@@ -2695,7 +2701,7 @@ impl CollaborationSession {
                     });
                 }
             } else {
-                let _ = session.interrupt("main", INTERRUPTED.into());
+                let _ = session.interrupt(ROOT_BRANCH_ID, INTERRUPTED.into());
             }
             self.settle(branch_id, &member, None).await;
         }
@@ -2714,7 +2720,7 @@ fn close_request(open: &mut BTreeMap<String, BTreeSet<String>>, request: &str) {
 /// turn-scoped stop: a turn that already ended writes nothing.
 fn stop_member_turn(session: &Session, turn: &str, reason: &str) -> dim_agent_runtime::Result<()> {
     session
-        .service::<dim_agent_capabilities::agent_loop::AgentLoop>("main")?
+        .service::<dim_agent_capabilities::agent_loop::AgentLoop>(ROOT_BRANCH_ID)?
         .stop_turn(turn, reason.into())?;
     Ok(())
 }
@@ -2742,7 +2748,7 @@ async fn input_fate(
     // under the reader while it pages: a check answers for the moment it
     // starts, and the caller's next check sees whatever has been published
     // since.
-    let through = Some(session.sequence("main")?);
+    let through = Some(session.sequence(ROOT_BRANCH_ID)?);
     loop {
         let (next, events) = read_page(
             session,
@@ -2783,19 +2789,19 @@ async fn read_page(
     through: Option<u64>,
     kinds: &[&str],
 ) -> dim_agent_runtime::Result<(u64, Vec<Arc<AgentEvent>>)> {
-    let head = session.sequence("main")?;
+    let head = session.sequence(ROOT_BRANCH_ID)?;
     let through = through.unwrap_or(head);
     if through > head || after > through {
         return Err(AgentError::InvalidInput("future Timeline cursor".into()));
     }
-    session.batch_end("main", after).await?;
-    session.batch_end("main", through).await?;
+    session.batch_end(ROOT_BRANCH_ID, after).await?;
+    session.batch_end(ROOT_BRANCH_ID, through).await?;
     if after == through {
         return Ok((after, Vec::new()));
     }
     let mut next = through.min(after.saturating_add(limit as u64));
     while next < through {
-        match session.batch_end("main", next).await {
+        match session.batch_end(ROOT_BRANCH_ID, next).await {
             Ok(()) => break,
             Err(AgentError::InvalidInput(_)) => next += 1,
             Err(error) => return Err(error),
@@ -2803,12 +2809,12 @@ async fn read_page(
     }
     let reply = session
         .query(
-            "main",
+            ROOT_BRANCH_ID,
             TimelineQuery {
                 scope: TimelineQueryScope::Branch,
                 include_publishing: false,
                 from: Some(TimelinePosition {
-                    branch_id: "main".into(),
+                    branch_id: ROOT_BRANCH_ID.into(),
                     sequence: after + 1,
                 }),
                 through: Some(next),
@@ -2847,7 +2853,7 @@ async fn read_events(
     };
     let reply = session
         .query(
-            "main",
+            ROOT_BRANCH_ID,
             TimelineQuery {
                 scope: TimelineQueryScope::Branch,
                 include_publishing: false,
@@ -2895,7 +2901,7 @@ async fn read_tool_use_starts(
     if keys.is_empty() {
         return Ok(starts);
     }
-    let through = session.sequence("main")?;
+    let through = session.sequence(ROOT_BRANCH_ID)?;
     let mut query = TimelineQuery {
         scope: TimelineQueryScope::Branch,
         include_publishing: false,
@@ -2945,7 +2951,7 @@ async fn read_tool_use_starts(
         }),
     };
     loop {
-        let reply = session.query("main", query.clone()).await?;
+        let reply = session.query(ROOT_BRANCH_ID, query.clone()).await?;
         let QueryOutput::Events { events } = reply.result else {
             unreachable!("event selection returns events")
         };
@@ -2970,7 +2976,7 @@ async fn outcome(
     input: Option<&str>,
     cutoff: Option<u64>,
 ) -> (Option<String>, String, CollaborationOutcome) {
-    let through = match cutoff.map_or_else(|| session.sequence("main"), Ok) {
+    let through = match cutoff.map_or_else(|| session.sequence(ROOT_BRANCH_ID), Ok) {
         Ok(sequence) => sequence,
         Err(error) => {
             return (
@@ -3974,7 +3980,7 @@ async fn restore(
                 return;
             }
             if let Some(member) = member {
-                let _ = member.stop("main", INTERRUPTED.into()).await;
+                let _ = member.stop(ROOT_BRANCH_ID, INTERRUPTED.into()).await;
             }
             let _ = timeline.append(
                 EventKind::CollaborationResult(CollaborationResultData {

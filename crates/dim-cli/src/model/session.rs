@@ -390,6 +390,8 @@ pub enum Command {
     LoginUsage(String),
     /// `/web`: flip the daemon-owned Web entry switch.
     ToggleWeb,
+    /// `/update`: check this build's channel, skipped versions included.
+    CheckUpdate,
     /// Sign the described account out.
     Logout(AccountTarget),
     /// Run a shell-mode command through the App Server; `private` (`!!`)
@@ -1340,6 +1342,9 @@ pub enum Update {
     },
     /// A newer version the user has not skipped, once per start.
     Upgrade(crate::update::Offer),
+    /// What `/update` found: a newer version, `None` when this build is the
+    /// newest, or why nothing can be offered.
+    UpgradeChecked(Result<Option<crate::update::Offer>, String>),
     Models(Result<ModelList, String>),
     EffortChoices(Result<crate::configure::EffortChoices, String>),
     /// Sent only by a daemon that advertises the policy methods.

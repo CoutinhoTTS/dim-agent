@@ -4,17 +4,16 @@
 //! [`ViewSnapshot`]s built here. Only the rows the screen needs are kept; the
 //! durable history stays with the App Server.
 
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
-
 use dim_agent_types::{
     BranchCreateAt, BranchCreateFailedData, BranchSource, CollaborationDelivery,
     CollaborationOutcome, CollaborationTarget, ContentBlock, ContextCompactionResult, ExecStatus,
     InputMode, InsufficientSpacePartName, JsonObject, Message, MessageContent, MessagePart,
-    ModelFailure, ModelFailureKind, ModelOutputOutcome, ReplacementParts, ToolContent, ToolResult,
-    TurnOutcome, UserInput, markup,
+    ModelFailure, ModelFailureKind, ModelOutputOutcome, ROOT_BRANCH_ID, ReplacementParts,
+    ToolContent, ToolResult, TurnOutcome, UserInput, markup,
 };
 use serde_json::Value;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use crate::model::shell::ShellRun;
 use crate::model::view::{
@@ -108,7 +107,7 @@ impl Projection {
     fn owns(&self, branch_id: &str) -> bool {
         branch_id
             == if self.owner.is_empty() {
-                "main"
+                ROOT_BRANCH_ID
             } else {
                 &self.owner
             }
@@ -1326,7 +1325,7 @@ impl Projection {
 
     /// The lines `main` recorded, without `main` itself (design §14).
     pub fn directory(&mut self, entry: &dim_client::wire::BranchEntry) {
-        if entry.branch_id == "main" {
+        if entry.branch_id == ROOT_BRANCH_ID {
             return;
         }
         let previous = self
@@ -1553,7 +1552,7 @@ impl Projection {
 
     /// A main-branch delegation's card.
     fn card(&mut self, branch_id: &str, request_event_id: &str) -> Option<&mut MemberCard> {
-        if branch_id != "main" {
+        if branch_id != ROOT_BRANCH_ID {
             return None;
         }
         let index = *self.cards.get(request_event_id)?;
@@ -1633,7 +1632,7 @@ impl Projection {
 
     fn refresh_result_labels(&mut self) {
         let owner = if self.owner.is_empty() {
-            "main"
+            ROOT_BRANCH_ID
         } else {
             &self.owner
         };

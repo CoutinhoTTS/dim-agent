@@ -8,7 +8,7 @@ use dim_agent_capabilities::session_broadcast::{
     SessionBroadcast, SessionBroadcastEvent, session_channel,
 };
 use dim_agent_runtime::{BranchStatus, ModelProgress};
-use dim_agent_types::{AgentEvent, EventKind};
+use dim_agent_types::{AgentEvent, EventKind, ROOT_BRANCH_ID};
 use futures_util::{StreamExt, future::BoxFuture as Pending, stream::FuturesUnordered};
 use rutis::Disposer;
 use rutis::host::FiberStatusChanged;
@@ -368,7 +368,7 @@ fn project(
                 decision: data.decision,
             }))
         }
-        _ if version == 1 => (branch_id == "main" && event.parent_call_id.is_none())
+        _ if version == 1 => (branch_id == ROOT_BRANCH_ID && event.parent_call_id.is_none())
             .then(|| dim_agent_types::v1::SharedEvent::new(event))
             .flatten()
             .map(|event| {
@@ -558,7 +558,7 @@ impl Connection {
                 },
             );
             let adopted = session
-                .get::<PromptSnapshot>("main")
+                .get::<PromptSnapshot>(ROOT_BRANCH_ID)
                 .ok()
                 .flatten()
                 .and_then(|snapshot| snapshot.configuration);
@@ -724,7 +724,7 @@ impl Connection {
             }
         };
         let branches: Vec<_> = if version == 1 {
-            vec!["main".to_owned()]
+            vec![ROOT_BRANCH_ID.to_owned()]
         } else {
             session.branches().into_iter().map(|info| info.id).collect()
         };
@@ -824,7 +824,7 @@ impl Connection {
             result = session.closed() => result,
         };
         let branches: Vec<_> = if version == 1 {
-            vec!["main".to_owned()]
+            vec![ROOT_BRANCH_ID.to_owned()]
         } else {
             session.branches().into_iter().map(|info| info.id).collect()
         };

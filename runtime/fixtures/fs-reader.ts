@@ -10,12 +10,15 @@ export default definePlugin({
     const files = ctx.use<FsHost>('fsHost')
     await ctx.use<ManagementMethods>('managementMethods').register(
       'fsreader',
-      ['status', 'open', 'read', 'close'].map(name => ({ name: `fsreader.${name}`, mutating: true, interruption: 'report', progress: false })),
+      ['status', 'open', 'read', 'close', 'mkdir', 'list', 'remove'].map(name => ({ name: `fsreader.${name}`, mutating: true, interruption: 'report', progress: false })),
       async (call: { method: string; params: any }) => {
         if (call.method === 'fsreader.status') {
           await assert.rejects(() => Reflect.apply(files.openRead, files, [['/unused']]), /request must be an object/)
           return { kind: 'value', value: { pid: process.pid } }
         }
+        if (call.method === 'fsreader.mkdir') return { kind: 'value', value: await files.createDirectory(call.params) }
+        if (call.method === 'fsreader.list') return { kind: 'value', value: await files.list(call.params) }
+        if (call.method === 'fsreader.remove') return { kind: 'value', value: await files.remove(call.params) }
         const value = call.method === 'fsreader.open' ? await files.openRead(call.params)
           : call.method === 'fsreader.read' ? await files.readAt(call.params)
           : await files.closeRead(call.params)

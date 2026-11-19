@@ -9,7 +9,7 @@ use dim_agent_capabilities::{
     timeline_tree::TreeCommands,
 };
 use dim_agent_runtime::{Names, PromptSourceTarget};
-use dim_agent_types::{ModelSelection, PromptScope};
+use dim_agent_types::{DEFAULT_BRANCH_ID, ModelSelection, PromptScope};
 use rutis::Ctx;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use serde_json::{Value, json};
@@ -122,7 +122,7 @@ async fn adopt_profile(
         agent_id,
         ..
     } = params(value)?;
-    if branch_id != "main" {
+    if branch_id != DEFAULT_BRANCH_ID {
         return Err(RpcError::invalid(
             "Agent configuration updates only support main",
         ));

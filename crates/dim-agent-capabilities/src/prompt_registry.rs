@@ -159,7 +159,7 @@ pub fn targets<'a>(sources: impl IntoIterator<Item = &'a str>) -> Vec<PromptSour
         .map(|source| PromptSourceTarget {
             source: source.into(),
             scope: PromptScope::Branch {
-                timeline: "main".into(),
+                timeline: ROOT_BRANCH_ID.into(),
             },
         })
         .collect()

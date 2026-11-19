@@ -2,7 +2,7 @@
 //! validation at the document boundary ([design](../../../docs/design/plugins/Scheduler.md),
 //! A.1, A.4, §2.3, §7.1).
 use croner::Cron;
-use dim_agent_types::{InputMode, PermissionPolicy, PermissionPreset};
+use dim_agent_types::{DEFAULT_BRANCH_ID, InputMode, PermissionPolicy, PermissionPreset};
 use dim_app_server::settings::{BusinessDocument, SettingsError};
 use jiff::{
     SignedDuration, Timestamp,
@@ -115,7 +115,7 @@ pub struct DisabledReason {
 }
 
 fn default_branch_id() -> String {
-    "main".into()
+    DEFAULT_BRANCH_ID.to_owned()
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -568,9 +568,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         // keys.rs
         "show the key bindings" => "lihat pintasan tombol",
-        "show the command that updates this installation" => {
-            "lihat perintah untuk memperbarui instalasi ini"
-        }
+        "check for a newer version" => "periksa versi yang lebih baru",
         "Application keys" => "Tombol aplikasi",
         "Enter submit when idle · Shift+Enter / Alt+Enter / Ctrl+J newline · ↑↓ history" => {
             "Enter kirim saat idle · Shift+Enter / Alt+Enter / Ctrl+J baris baru · ↑↓ riwayat"

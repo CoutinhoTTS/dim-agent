@@ -22,14 +22,14 @@ struct Read {
 impl Worker {
     fn compaction_projection(&mut self, target: &CompactionTarget) -> Option<&mut Projection> {
         if target.session_id == self.session_id {
-            if target.branch_id == "main" {
+            if target.branch_id == ROOT_BRANCH_ID {
                 Some(&mut self.projection)
             } else {
                 self.lines
                     .get_mut(&target.branch_id)
                     .map(|line| &mut line.projection)
             }
-        } else if target.branch_id == "main" {
+        } else if target.branch_id == ROOT_BRANCH_ID {
             self.member_projection(&target.session_id)
         } else {
             None
@@ -40,7 +40,7 @@ impl Worker {
         if target.session_id == self.session_id {
             target.branch_id == self.focus || self.side.as_ref() == Some(&target.branch_id)
         } else {
-            target.branch_id == "main"
+            target.branch_id == ROOT_BRANCH_ID
                 && self
                     .members
                     .selected
