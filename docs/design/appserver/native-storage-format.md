@@ -1676,7 +1676,7 @@ Persistent Agents calls `sqliteStorage.agents`, `owners`, `save` and `delete` fo
 
 SessionFiles calls `sqliteStorage.reserveFile({sessionId,fileId,generation})` before writing file bytes. It returns false for a missing Session. `commitFile({sessionId,fileId,generation})` clears the writer and records ownership in one SQLite transaction, returning `owned`, `sessionGone`, or `superseded`. `abandonFile({fileId,generation})` clears a matching writer and returns the affected row count.
 
-SessionFiles resolves output paths and calls `registerOutput({sessionId,path})`, which records ownership in one SQLite transaction and returns false for a missing Session. `ownsOutput({sessionId,path})` and `ownsFile({sessionId,fileId})` test exact ownership. `ownedPaths({sessionId})` returns a pair of sorted lists, file IDs followed by output paths. SessionFiles resolves file IDs to directories.
+Direct callers supply a resolved absolute UTF-8 path in the Session command-output directory or the host execution root. SessionFiles resolves output paths and calls `registerOutput({sessionId,path})`, which records ownership in one SQLite transaction and returns false for a missing Session. `ownsOutput({sessionId,path})` and `ownsFile({sessionId,fileId})` test exact ownership. `ownedPaths({sessionId})` returns a pair of sorted lists, file IDs followed by output paths. SessionFiles resolves file IDs to directories.
 
 Provider reads stored selections and the single model preferences field through `sqliteStorage.readSelection({scope})` and `readPreferences({providerId, modelId})`. A missing row returns null. After Provider validates a target, `writeSelection({scope, expectedVersion, selection})` commits it at the expected version and returns the stored selection.
 

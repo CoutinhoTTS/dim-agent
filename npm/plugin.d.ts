@@ -633,6 +633,7 @@ export interface SqliteStorage {
   ownsFile(request: { sessionId: string; fileId: string }): Promise<boolean>;
   ownsOutput(request: { sessionId: string; path: string }): Promise<boolean>;
   ownedPaths(request: { sessionId: string }): Promise<[string[], string[]]>;
+  /** Supply a resolved absolute UTF-8 path under the Session command-output directory or host execution root. */
   registerOutput(request: { sessionId: string; path: string }): Promise<boolean>;
   readPreferences(request: { providerId: string; modelId: string }): Promise<{ reasoningEffort?: string; serviceTier?: string } | null>;
   agents(request: Record<string, never>): Promise<{ id: string; profile: { Ok: StoredAgentProfile } | { Err: string }; default: boolean; owner: string | null }[]>;
