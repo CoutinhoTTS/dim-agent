@@ -4341,7 +4341,8 @@
       "unexpandedMacros": [
         "assert",
         "assert_eq",
-        "format"
+        "format",
+        "panic"
       ]
     },
     {
@@ -37521,9 +37522,17 @@
       "from": "dim_cli::client::progress_note_tests",
       "to": "dim_cli::client",
       "references": [
+        "path ProgressKind::Assembly",
+        "path ProgressKind::StoreUpgrade",
         "path ProgressNote",
+        "path ProgressReport::StoreUpgrade",
+        "path ProgressWatch::default",
+        "path UpgradeStage",
         "path read_progress_note",
+        "use super::ProgressKind",
         "use super::ProgressNote",
+        "use super::ProgressReport",
+        "use super::ProgressWatch",
         "use super::UpgradeStage",
         "use super::read_progress_note"
       ]

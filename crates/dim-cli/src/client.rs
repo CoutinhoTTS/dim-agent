@@ -290,11 +290,30 @@ impl UpgradeStage {
 struct ProgressNote {
     /// The daemon that wrote it.
     pid: u32,
-    from: u32,
-    to: u32,
     /// Rises with each rewrite; a reader counts only increases.
     counter: u64,
-    stage: Option<UpgradeStage>,
+    kind: ProgressKind,
+}
+
+/// The kind of startup a progress note reports, and the fields only one kind
+/// carries.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ProgressKind {
+    /// A store format upgrade.
+    StoreUpgrade {
+        from: u32,
+        to: u32,
+        stage: Option<UpgradeStage>,
+    },
+    /// The daemon's ordinary assembly after its store opened.
+    Assembly,
+}
+impl ProgressKind {
+    /// Whether both notes count one series: the kind, never the fields a
+    /// stage or a format moves.
+    fn same_series(self, other: Self) -> bool {
+        std::mem::discriminant(&self) == std::mem::discriminant(&other)
+    }
 }
 
 /// The note's text when it is a regular file of a bounded size, owned by the
@@ -314,7 +333,7 @@ fn read_note(path: &Path) -> Option<String> {
     String::from_utf8(std::fs::read(path).ok()?).ok()
 }
 
-/// The store upgrade a daemon's progress note announces, when the note is one.
+/// The startup progress a daemon's note announces, when the note is one.
 fn read_progress_note(path: &Path) -> Option<ProgressNote> {
     let text = read_note(path)?;
     let (header, body) = text.split_once('\n')?;
@@ -323,9 +342,7 @@ fn read_progress_note(path: &Path) -> Option<ProgressNote> {
         .parse()
         .ok()?;
     let mut fields = body.lines().next()?.split_whitespace();
-    if fields.next()? != "store-upgrade" {
-        return None;
-    }
+    let kind = fields.next()?;
     let (mut from, mut to, mut counter, mut stage) = (None, None, None, None);
     for field in fields {
         let (name, value) = field.split_once('=')?;
@@ -339,12 +356,19 @@ fn read_progress_note(path: &Path) -> Option<ProgressNote> {
             _ => {}
         }
     }
+    let kind = match kind {
+        "store-upgrade" => ProgressKind::StoreUpgrade {
+            from: from?,
+            to: to?,
+            stage,
+        },
+        "assembly" => ProgressKind::Assembly,
+        _ => return None,
+    };
     Some(ProgressNote {
         pid,
-        from: from?,
-        to: to?,
         counter: counter?,
-        stage,
+        kind,
     })
 }
 
@@ -353,11 +377,16 @@ fn read_progress_note(path: &Path) -> Option<ProgressNote> {
 /// waiter passes `None`, because it does not know the holder's child. A note
 /// from another pid than the series being counted starts a new series, whose
 /// first note counts even when its counter is lower: a new daemon begins at
-/// one, while a daemon killed mid-upgrade may have left a higher counter.
+/// one, while a daemon killed mid-upgrade may have left a higher counter. A
+/// note of another kind starts a new series too: an assembly's counter begins
+/// at one after the store's upgrade reached a higher count. A note of the same
+/// kind continues the series, even when an upgrade moves to another stage.
 #[derive(Default)]
 struct ProgressWatch {
     /// The pid whose note series is being counted.
     pid: Option<u32>,
+    /// The kind of note the series counts.
+    kind: Option<ProgressKind>,
     counter: u64,
     /// The upgrade line has been printed.
     reported: bool,
@@ -368,16 +397,24 @@ struct ProgressWatch {
     line: crate::UpgradeLine,
 }
 
+/// What one new progress counter reports to a wait.
+enum ProgressReport {
+    /// A store upgrade, which is shown.
+    StoreUpgrade(StoreUpgrade),
+    /// An ordinary assembly, which is not shown.
+    Assembly,
+}
+
 impl ProgressWatch {
     /// `None` when the note is absent, for another pid, or not a new report;
-    /// otherwise the reported upgrade and a deadline one `timeout` away.
+    /// otherwise what the note reports and a deadline one `timeout` away.
     fn observe(
         &mut self,
         path: &Path,
         pid: Option<u32>,
         deadline: &mut tokio::time::Instant,
         timeout: Duration,
-    ) -> Option<StoreUpgrade> {
+    ) -> Option<ProgressReport> {
         let note = read_progress_note(path)?;
         if pid.is_some_and(|pid| note.pid != pid) {
             return None;
@@ -387,23 +424,35 @@ impl ProgressWatch {
             self.counter = 0;
             self.started = None;
             self.line = crate::UpgradeLine::default();
+        } else if self.kind.is_some_and(|kind| !kind.same_series(note.kind)) {
+            // Keep the upgrade line: it is still the one on screen, and a
+            // change of kind does not print another.
+            self.counter = 0;
+            self.started = None;
         }
+        self.kind = Some(note.kind);
         if note.counter <= self.counter {
             return None;
         }
         self.counter = note.counter;
         let started = *self.started.get_or_insert_with(std::time::Instant::now);
         *deadline = tokio::time::Instant::now() + timeout;
-        Some(StoreUpgrade {
-            from: note.from,
-            to: note.to,
-            stage: note.stage,
-            elapsed: started.elapsed(),
+        Some(match note.kind {
+            ProgressKind::StoreUpgrade { from, to, stage } => {
+                ProgressReport::StoreUpgrade(StoreUpgrade {
+                    from,
+                    to,
+                    stage,
+                    elapsed: started.elapsed(),
+                })
+            }
+            ProgressKind::Assembly => ProgressReport::Assembly,
         })
     }
     /// Starts counting again for a child whose notes begin at one.
     fn reset(&mut self) {
         self.pid = None;
+        self.kind = None;
         self.counter = 0;
         self.started = None;
         self.line = crate::UpgradeLine::default();
@@ -475,9 +524,10 @@ fn pid_alive(pid: u32) -> bool {
 
 /// The pid a progress note names, when it names another process: a daemon
 /// another client started owns the store and has no socket until its upgrade
-/// finishes (#1335). A note that names this client is stale, because a client
-/// never upgrades a store itself, so its pid has been reused. Whether the pid
-/// is still alive is the wait's question, which asks again on every poll.
+/// or assembly finishes (#1335). A note that names this client is stale,
+/// because a client never starts a daemon itself, so its pid has been reused.
+/// Whether the pid is still alive is the wait's question, which asks again on
+/// every poll.
 fn another_daemon_starting(note: &Path) -> Option<u32> {
     let note = read_progress_note(note)?;
     (note.pid != std::process::id()).then_some(note.pid)
@@ -506,14 +556,18 @@ impl<'a> StartupWait<'a> {
         }
     }
 
-    /// Reads the note, moves the bound and prints what it reports: the first
-    /// report says which upgrade is running, each later one redraws it.
+    /// Reads the note, moves the bound and prints what it reports: a store
+    /// upgrade says which upgrade is running, each later report redraws it, and
+    /// an assembly note only moves the bound.
     fn observe(&mut self, pid: Option<u32>) {
-        if let Some(upgrade) = self
+        match self
             .watch
             .observe(self.note, pid, &mut self.deadline, self.timeout)
         {
-            self.watch.announce(self.locale, upgrade);
+            Some(ProgressReport::StoreUpgrade(upgrade)) => {
+                self.watch.announce(self.locale, upgrade);
+            }
+            Some(ProgressReport::Assembly) | None => {}
         }
     }
 
@@ -1127,8 +1181,8 @@ pub async fn connect_inner(
         use std::os::windows::process::CommandExt;
         command.creation_flags(0x08000000 | 0x00000200);
     }
-    // A daemon another client started may already own the store: a store
-    // upgrade runs before it serves, so it has no socket yet. Its progress
+    // A daemon another client started may already own the store: its upgrade
+    // or assembly runs before it serves, so it has no socket yet. Its progress
     // note, from a pid that is still alive, says so, and this client waits
     // for that daemon instead of spawning a second one that would fail
     // admission (#1335). The note belongs to that daemon, so this client
@@ -1268,23 +1322,26 @@ mod starting_note_tests {
     use std::{fs, os::unix::fs::PermissionsExt};
 
     /// A progress note names the daemon to wait for, unless it names this
-    /// client; a missing note names nothing. The failed-note and permission
-    /// cases live in the startup flow tests, where the client runs.
+    /// client; a missing note names nothing. A store upgrade and an assembly
+    /// are both progress a starting daemon reports. The failed-note and
+    /// permission cases live in the startup flow tests, where the client runs.
     #[test]
     fn a_progress_note_names_another_process() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("dimcode.sqlite.startup");
-        let write = |pid: u32| {
+        let write = |pid: u32, body: &str| {
             fs::write(
                 &path,
-                format!("dimcode-startup-progress v1 pid={pid}\nstore-upgrade from=34 to=36 progress=1\n"),
+                format!("dimcode-startup-progress v1 pid={pid}\n{body}\n"),
             )
             .unwrap();
             fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
         };
-        write(4242);
+        write(4242, "store-upgrade from=34 to=36 progress=1");
         assert_eq!(another_daemon_starting(&path), Some(4242));
-        write(std::process::id());
+        write(4242, "assembly progress=1");
+        assert_eq!(another_daemon_starting(&path), Some(4242));
+        write(std::process::id(), "assembly progress=2");
         assert_eq!(another_daemon_starting(&path), None);
         assert_eq!(another_daemon_starting(&dir.path().join("missing")), None);
     }
@@ -1357,13 +1414,13 @@ mod same_file_tests {
 
 #[cfg(test)]
 mod progress_note_tests {
-    use super::{ProgressNote, UpgradeStage, read_progress_note};
-    use std::path::PathBuf;
+    use super::{
+        ProgressKind, ProgressNote, ProgressReport, ProgressWatch, UpgradeStage, read_progress_note,
+    };
+    use std::path::{Path, PathBuf};
+    use std::time::Duration;
 
-    /// Writes a note as the daemon writes it and reads it back: the header
-    /// binds the note to a pid, and a client that knows fewer fields than the
-    /// note carries reads the ones it knows.
-    fn note(name: &str, body: &str) -> Option<(ProgressNote, PathBuf)> {
+    fn note_path(name: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!(
             "dim-progress-{}-{name}-{}",
             std::process::id(),
@@ -1373,9 +1430,14 @@ mod progress_note_tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&root).unwrap();
-        let path = root.join("dimcode.sqlite.startup");
+        root.join("dimcode.sqlite.startup")
+    }
+
+    /// Writes a note as the daemon writes it: the header binds the note to a
+    /// pid.
+    fn write(path: &Path, body: &str) {
         std::fs::write(
-            &path,
+            path,
             format!(
                 "dimcode-startup-progress v1 pid={}\n{body}\n",
                 std::process::id()
@@ -1385,48 +1447,136 @@ mod progress_note_tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
         }
+    }
+
+    /// Writes a note as the daemon writes it and reads it back: a client that
+    /// knows fewer fields than the note carries reads the ones it knows.
+    fn note(name: &str, body: &str) -> Option<ProgressNote> {
+        let path = note_path(name);
+        write(&path, body);
         let note = read_progress_note(&path);
-        std::fs::remove_dir_all(&root).unwrap();
-        note.map(|note| (note, path))
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+        note
+    }
+
+    fn upgrade(note: ProgressNote) -> (u32, u32, Option<UpgradeStage>) {
+        match note.kind {
+            ProgressKind::StoreUpgrade { from, to, stage } => (from, to, stage),
+            ProgressKind::Assembly => panic!("not a store upgrade"),
+        }
     }
 
     /// A note that names a known stage is read with it, and one that names a
     /// stage this client does not know keeps every field it does know.
     #[test]
     fn a_progress_note_reads_the_stage_it_knows_and_ignores_the_rest() {
-        let (known, _) = note(
+        let known = note(
             "known",
             "store-upgrade from=49 to=50 progress=7 stage=index",
         )
         .unwrap();
-        assert_eq!((known.from, known.to, known.counter), (49, 50, 7));
-        assert_eq!(known.stage, Some(UpgradeStage::Index));
+        assert_eq!(known.counter, 7);
+        assert_eq!(upgrade(known), (49, 50, Some(UpgradeStage::Index)));
 
-        let (unknown, _) = note(
+        let unknown = note(
             "unknown",
             "store-upgrade from=49 to=50 progress=8 stage=compacting future=value",
         )
         .unwrap();
-        assert_eq!((unknown.from, unknown.to, unknown.counter), (49, 50, 8));
+        assert_eq!(unknown.counter, 8);
         assert_eq!(
-            unknown.stage, None,
+            upgrade(unknown),
+            (49, 50, None),
             "a stage this client cannot show is not a stage it shows as something else"
         );
 
-        let (older, _) = note("older", "store-upgrade from=49 to=50 progress=9").unwrap();
+        let older = note("older", "store-upgrade from=49 to=50 progress=9").unwrap();
         assert_eq!(older.counter, 9);
-        assert_eq!(older.stage, None, "a daemon from before stages names none");
+        assert_eq!(
+            upgrade(older),
+            (49, 50, None),
+            "a daemon from before stages names none"
+        );
         for stage in ["images", "verify"] {
-            let (read, _) = note(
+            let read = note(
                 stage,
                 &format!("store-upgrade from=49 to=50 progress=1 stage={stage}"),
             )
             .unwrap();
-            assert!(read.stage.is_some(), "{stage}");
+            assert!(upgrade(read).2.is_some(), "{stage}");
         }
         assert!(note("broken", "store-upgrade from=49 to=50").is_none());
+    }
+
+    /// An assembly note needs only its counter: the formats and the stage
+    /// belong to a store upgrade.
+    #[test]
+    fn a_progress_note_reads_assembly_progress_without_upgrade_fields() {
+        let assembly = note("assembly", "assembly progress=7 future=value").unwrap();
+        assert_eq!(assembly.counter, 7);
+        assert!(matches!(assembly.kind, ProgressKind::Assembly));
+        assert!(note("assembly-without-counter", "assembly").is_none());
+    }
+
+    /// A daemon that switches from an upgrade to its assembly begins a new
+    /// counter series at one, so the assembly's lower counter still counts.
+    #[test]
+    fn a_new_note_kind_starts_a_new_counter_series() {
+        let path = note_path("kind-change");
+        write(&path, "store-upgrade from=49 to=50 progress=9");
+        let mut watch = ProgressWatch::default();
+        let mut deadline = tokio::time::Instant::now();
+        assert!(matches!(
+            watch.observe(
+                &path,
+                Some(std::process::id()),
+                &mut deadline,
+                Duration::from_secs(10)
+            ),
+            Some(ProgressReport::StoreUpgrade(_))
+        ));
+        write(&path, "assembly progress=1");
+        assert!(matches!(
+            watch.observe(
+                &path,
+                Some(std::process::id()),
+                &mut deadline,
+                Duration::from_secs(10)
+            ),
+            Some(ProgressReport::Assembly)
+        ));
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    /// A stage change inside one upgrade continues its counter series, so the
+    /// elapsed time keeps running from the first note.
+    #[test]
+    fn a_stage_change_keeps_the_upgrade_series() {
+        let path = note_path("stage-change-series");
+        let pid = Some(std::process::id());
+        let timeout = Duration::from_secs(10);
+        let mut deadline = tokio::time::Instant::now();
+        let mut watch = ProgressWatch::default();
+        write(&path, "store-upgrade from=49 to=50 progress=1 stage=images");
+        let first = match watch.observe(&path, pid, &mut deadline, timeout) {
+            Some(ProgressReport::StoreUpgrade(upgrade)) => upgrade,
+            _ => panic!("the first note is a store upgrade"),
+        };
+        std::thread::sleep(Duration::from_millis(1100));
+        write(&path, "store-upgrade from=49 to=50 progress=2 stage=index");
+        let second = match watch.observe(&path, pid, &mut deadline, timeout) {
+            Some(ProgressReport::StoreUpgrade(upgrade)) => upgrade,
+            _ => panic!("the next note is the same upgrade"),
+        };
+        assert_eq!(second.stage, Some(UpgradeStage::Index));
+        assert!(
+            second.elapsed >= first.elapsed + Duration::from_secs(1),
+            "the elapsed time continues across the stage change: {:?}",
+            second.elapsed
+        );
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
     /// A note the daemon writes without a counter, or with an unknown header,
