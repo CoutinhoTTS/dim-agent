@@ -123,7 +123,7 @@ Release builds use the following [GitHub-hosted runner images](https://docs.gith
 | --- | --- | --- | --- | --- |
 | macOS ARM64 | `aarch64-apple-darwin` | `macos-15` | 7 GB | thin |
 | macOS Intel | `x86_64-apple-darwin` | `macos-15-intel` | 14 GB | fat |
-| Linux ARM64 | `aarch64-unknown-linux-gnu` | `ubuntu-22.04-arm` | 16 GB | fat |
+| Linux ARM64 | `aarch64-unknown-linux-gnu` | `ubuntu-22.04-arm` | 16 GB | thin |
 | Linux x64 | `x86_64-unknown-linux-gnu` | `ubuntu-22.04` | 16 GB | fat |
 | Windows ARM64 | `aarch64-pc-windows-msvc` | `windows-11-arm` | 16 GB | fat |
 | Windows x64 | `x86_64-pc-windows-msvc` | `windows-2022` | 16 GB | fat |
@@ -132,9 +132,12 @@ The RAM values are the public-repository specifications in the linked GitHub run
 Release builds cap Cargo at two jobs, including inside the Linux container. The shared fat-LTO
 profile has a measured Linux x64 single-process peak above 8 GiB; a jobs cap does not reduce that
 single-process requirement. macOS ARM64 therefore retains thin LTO until its full release build
-and runtime smoke checks establish that fat LTO fits the 7 GB runner. Other targets still need
-their own release-profile build and runtime validation; Linux measurements do not establish
-their peak memory requirements.
+and runtime smoke checks establish that fat LTO fits the 7 GB runner. Linux ARM64 retains thin
+LTO for the same reason: release 0.1.0-alpha.26 was OOM-killed at the final `dimcode` link on the
+16 GB `ubuntu-22.04-arm` runner, so that target needs its own successful release-profile build
+and runtime validation before fat LTO is enabled there. Other targets still need their own
+release-profile build and runtime validation; Linux or macOS measurements do not establish their
+peak memory requirements.
 
 The Ubuntu preflight generates the Rust distribution notices once with cargo-about 0.9.3 using the versioned checkout. All six targets download that artifact. Linux builds on each native host with GNU tools in a digest-pinned manylinux_2_28 container. The executable also runs in that glibc 2.28 environment. Windows uses native MSVC, clang-cl on ARM64, NASM on x64, and the Windows system tar to create ZIP archives. Actions installs Node from `.node-version` and Rust uses `rust-toolchain.toml`. Web and Release assembly run on hosted Ubuntu.
 
@@ -149,12 +152,17 @@ The platform-independent `changes` and `ci-ok` jobs can run on any eligible self
 and macOS arm64/x86-64 runners run the native fixture test; Windows uses hosted
 `windows-2022` (x64) and `windows-11-arm` (ARM64) runners, with Python 3.13
 provisioned explicitly. Both select the MSVC Rust host toolchain matching the
-runner architecture and the version in `rust-toolchain.toml`. On manual dispatch, after the fixture jobs pass, a four-target matrix
-builds, trains and validates a real `dimcode` with the release LTO choice (thin
-for macOS ARM64, fat otherwise): Cargo capture and replay, native
-page-residency or working-set sampling, the real TUI model picker, function
-ordering and uninstrumented acceptance. The dispatch input `measure` adds
-alternating measurements using those binaries. If ordering fails after capture,
+runner architecture and the version in `rust-toolchain.toml`. On manual
+dispatch, after the fixture jobs pass, a five-target matrix builds, trains and
+validates a real `dimcode` with the release LTO choice (thin for macOS ARM64 and
+Linux ARM64, fat otherwise): Cargo capture and replay, native page-residency or
+working-set sampling, the real TUI model picker, function ordering and
+uninstrumented acceptance. Linux x64 runs that command inside the same
+digest-pinned manylinux 2.28 container the release build uses, so this job and
+the release job validate the same linker. The dispatch input `measure` adds
+alternating measurements from the retained build directory on macOS and Windows;
+the Linux command builds and validates once and keeps no reusable directory.
+If ordering fails after capture,
 the diagnostic artifact includes `capture.tar`. Extract it beside the baseline
 executable and map at the original output path on a matching build host.
 Use a capture from a trusted build because replay runs its recorded linker.

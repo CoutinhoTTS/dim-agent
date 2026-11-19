@@ -74,8 +74,9 @@ use crate::ui::transcript::commit::CommitState;
 use crate::ui::transcript::reveal::Reveal;
 use crate::ui::transcript::stream::{StreamPlanner, TextBlock, render_open};
 use crate::ui::transcript::tool_group::{
-    Detail, State as GroupState, ToolGroup, action_at, card_actions, card_rows, disclosure_at,
-    disclosure_rows, group_id, project_fullscreen_group, project_group, render_group,
+    Detail, State as GroupState, ToolGroup, action_at, body_disclosure_at, card_actions, card_rows,
+    disclosure_at, disclosure_rows, group_id, project_fullscreen_group, project_group,
+    render_group,
 };
 use crate::ui::upgrade_dialog::UpgradeDialog;
 use crate::usage::format_tokens;
@@ -521,8 +522,10 @@ fn run_terminal(host: Box<dyn SessionPort>, surroundings: Env) -> i32 {
         } else {
             terminal.next_event(wait)
         };
-        if matches!(&next, Wait::Event(InputEvent::Key(_)))
-            && let Some(full) = &mut full
+        if matches!(
+            &next,
+            Wait::Event(InputEvent::Key(_) | InputEvent::Paste(_) | InputEvent::Submit)
+        ) && let Some(full) = &mut full
         {
             full.cancel_click();
         }
@@ -538,16 +541,19 @@ fn run_terminal(host: Box<dyn SessionPort>, surroundings: Env) -> i32 {
                     app.host.shutdown();
                     return code;
                 }
-                if let Some(full) = &mut full
-                    && let Some(click) = full.pending_click(&app, Instant::now())
-                {
-                    dirty |= match click {
-                        MouseOutcome::Click { block, row } => {
-                            app.click(block, row, full.layout_cols() as usize)
-                        }
-                        MouseOutcome::Thought { key, body } => app.click_panel_thought(&key, body),
-                        _ => false,
-                    };
+                if let Some(full) = &mut full {
+                    dirty |= full.resize(terminal.size());
+                    if let Some(click) = full.pending_click(&app, Instant::now()) {
+                        dirty |= match click {
+                            MouseOutcome::Click { block, row } => {
+                                app.click(block, row, full.layout_cols() as usize)
+                            }
+                            MouseOutcome::Thought { key, body } => {
+                                app.click_panel_thought(&key, body)
+                            }
+                            _ => false,
+                        };
+                    }
                 }
                 if app.tick() {
                     dirty = true;
@@ -1070,6 +1076,7 @@ struct App {
     thinking_gesture: u64,
     default_send_mode: SubmitMode,
     tool_choices: HashMap<(String, String), HashMap<String, bool>>,
+    tool_gesture: u64,
     tail_groups: Vec<(usize, ToolGroup)>,
     tail_thoughts: Vec<(std::ops::Range<usize>, String)>,
     notices: Vec<String>,
@@ -1539,6 +1546,7 @@ impl App {
                 SubmitMode::Steer
             },
             tool_choices: HashMap::new(),
+            tool_gesture: 0,
             tail_groups: Vec::new(),
             tail_thoughts: Vec::new(),
             home,
@@ -4956,6 +4964,7 @@ impl App {
     fn toggle_tool_details(&mut self) {
         let detail = self.tool_detail.next();
         self.tool_detail = detail;
+        self.tool_gesture += 1;
         for block in &mut self.history {
             match block {
                 Block::ToolGroup(group) => group.detail = detail,
@@ -7529,30 +7538,42 @@ impl App {
         }
     }
 
+    fn set_tool_open(&mut self, node: String, open: bool, cols: usize) {
+        self.tool_gesture += 1;
+        if self.shows_member() {
+            self.member_choices.insert(node, open);
+            self.project_member(cols);
+            return;
+        }
+        self.tool_choices
+            .entry(self.tool_scope())
+            .or_default()
+            .insert(node, open);
+        self.refresh_tool_choices();
+        self.sync_tool_origins();
+    }
+
     /// Puts the whole text of the open streamed block in place of what it
     /// had: the block keeps one history entry however many batches wrote it.
     /// A click on transcript row `row` of committed block `block` (stable
-    /// id), or of the live tail: on a tool group's header it opens or closes
-    /// that group. Whether it did.
+    /// id), or of the live tail: on a tool header it opens or closes that
+    /// node; on an expanded tool body it collapses its nearest enclosing node.
+    /// Whether it did.
     fn click(&mut self, block: Option<usize>, row: usize, cols: usize) -> bool {
         if let Some((node, open)) = self.tool_disclosure(block, row, cols) {
-            if self.shows_member() {
-                self.member_choices.insert(node, !open);
-                self.project_member(cols);
-                return true;
-            }
-            self.tool_choices
-                .entry(self.tool_scope())
-                .or_default()
-                .insert(node, !open);
-            self.refresh_tool_choices();
-            self.sync_tool_origins();
+            self.set_tool_open(node, !open, cols);
+            return true;
+        }
+        if let Some((_, node, _)) = self.tool_body(block, row, cols) {
+            let node = node.to_owned();
+            self.set_tool_open(node, false, cols);
             return true;
         }
         let Some(id) = block else {
-            let Some((source_id, header)) = self.live_thought(row) else {
+            let Some((source_id, start)) = self.live_thought(row) else {
                 return false;
             };
+            let header = row == start;
             let source_id = source_id.to_owned();
             let scope = self.tool_scope();
             let choices = self.thinking_choices.entry(scope).or_default();
@@ -7643,7 +7664,7 @@ impl App {
         true
     }
 
-    fn live_thought(&self, row: usize) -> Option<(&str, bool)> {
+    fn live_thought(&self, row: usize) -> Option<(&str, usize)> {
         if self.shows_member() {
             return None;
         }
@@ -7658,7 +7679,7 @@ impl App {
             .any(|source| {
                 source.row_id == *source_id && source.streaming && source.kind == RowKind::Thinking
             })
-            .then_some((source_id.as_str(), row == rows.start))
+            .then_some((source_id.as_str(), rows.start))
     }
 
     fn tool_scope(&self) -> (String, String) {
@@ -7671,6 +7692,29 @@ impl App {
         )
     }
 
+    fn tool_group_at(
+        &self,
+        block: Option<usize>,
+        row: usize,
+    ) -> Option<(&ToolGroup, usize, usize)> {
+        match block {
+            Some(id) => {
+                let Block::ToolGroup(group) =
+                    self.active_history().get(id.checked_sub(self.dropped())?)?
+                else {
+                    return None;
+                };
+                Some((group, 1, row.checked_sub(1)?))
+            }
+            None if self.shows_member() => None,
+            None => {
+                self.tail_groups.iter().rev().find_map(|(start, group)| {
+                    row.checked_sub(*start).map(|row| (group, *start, row))
+                })
+            }
+        }
+    }
+
     fn tool_disclosure(
         &self,
         block: Option<usize>,
@@ -7678,23 +7722,69 @@ impl App {
         cols: usize,
     ) -> Option<(String, bool)> {
         let width = cols.saturating_sub(2 + MARGIN).max(1);
-        let (group, row) = match block {
-            Some(id) => {
-                let Block::ToolGroup(group) =
-                    self.active_history().get(id.checked_sub(self.dropped())?)?
+        let (group, _, row) = self.tool_group_at(block, row)?;
+        disclosure_at(group, width, &self.palette, row).map(|(id, open)| (id.to_owned(), open))
+    }
+
+    fn tool_body(
+        &self,
+        block: Option<usize>,
+        row: usize,
+        cols: usize,
+    ) -> Option<(&ToolGroup, &str, usize)> {
+        let width = cols.saturating_sub(2 + MARGIN).max(1);
+        let (group, start, row) = self.tool_group_at(block, row)?;
+        let (node, header) = body_disclosure_at(group, width, &self.palette, row)?;
+        Some((group, node, start + header))
+    }
+
+    fn thinking_body(
+        &self,
+        block: Option<usize>,
+        cols: usize,
+        row: usize,
+    ) -> Option<(String, usize)> {
+        let (source_id, header) = match block {
+            Some(block) => {
+                let index = block.checked_sub(self.dropped())?;
+                let Block::Thinking {
+                    source_id,
+                    expanded: true,
+                    ..
+                } = self.active_history().get(index)?
                 else {
                     return None;
                 };
-                (group, row.checked_sub(1)?)
+                if row < 2 || row >= self.rows(index, cols).len() {
+                    return None;
+                }
+                (source_id.as_str(), 1)
             }
-            None if self.shows_member() => return None,
-            None => self
-                .tail_groups
-                .iter()
-                .rev()
-                .find_map(|(start, group)| row.checked_sub(*start).map(|row| (group, row)))?,
+            None => {
+                let (source_id, start) = self.live_thought(row)?;
+                if row == start
+                    || !self
+                        .thinking_choices
+                        .get(&self.tool_scope())
+                        .and_then(|choices| choices.get(source_id))
+                        .copied()
+                        .unwrap_or(self.thinking_detail == Detail::Expanded)
+                {
+                    return None;
+                }
+                (source_id, start)
+            }
         };
-        disclosure_at(group, width, &self.palette, row).map(|(id, open)| (id.to_owned(), open))
+        Some((
+            serde_json::to_string(&(
+                self.tool_scope(),
+                self.member_target.as_ref(),
+                self.thinking_gesture,
+                source_id,
+            ))
+            .expect("thinking identity is JSON"),
+            header,
+        ))
     }
 
     fn refresh_tool_choices(&mut self) {
@@ -8333,47 +8423,28 @@ impl Document for App {
         })
     }
 
-    fn thinking_body(&self, block: Option<usize>, cols: usize, row: usize) -> Option<String> {
-        let source_id = match block {
-            Some(block) => {
-                let index = block.checked_sub(self.dropped())?;
-                let Block::Thinking {
-                    source_id,
-                    expanded: true,
-                    ..
-                } = self.active_history().get(index)?
-                else {
-                    return None;
-                };
-                if row < 2 || row >= self.rows(index, cols).len() {
-                    return None;
-                }
-                source_id
-            }
-            None => {
-                let (source_id, header) = self.live_thought(row)?;
-                if header
-                    || !self
-                        .thinking_choices
-                        .get(&self.tool_scope())
-                        .and_then(|choices| choices.get(source_id))
-                        .copied()
-                        .unwrap_or(self.thinking_detail == Detail::Expanded)
-                {
-                    return None;
-                }
-                source_id
-            }
-        };
-        Some(
+    fn collapsible_body(
+        &self,
+        block: Option<usize>,
+        cols: usize,
+        row: usize,
+    ) -> Option<(String, usize)> {
+        if let Some(target) = self.thinking_body(block, cols, row) {
+            return Some(target);
+        }
+        let (group, node, header) = self.tool_body(block, row, cols)?;
+        Some((
             serde_json::to_string(&(
+                "tool",
                 self.tool_scope(),
                 self.member_target.as_ref(),
-                self.thinking_gesture,
-                source_id,
+                self.tool_gesture,
+                &group.id,
+                node,
             ))
-            .expect("thinking identity is JSON"),
-        )
+            .expect("tool body identity is JSON"),
+            header,
+        ))
     }
 
     fn disclosure(&self, block: Option<usize>, cols: usize, row: usize) -> Option<String> {
@@ -14747,6 +14818,444 @@ mod tests {
     }
 
     #[test]
+    fn fullscreen_tool_body_clicks_collapse_nearest_node_without_breaking_selection_links_or_cards()
+    {
+        use crate::model::view::{MemberCard, MemberTarget, TaskKind};
+        use crate::ui::render::fullscreen::FullScreen;
+        use crate::ui::terminal::{MouseEvent, MouseKind};
+
+        let call = |request: &str,
+                    id: &str,
+                    parent: Option<&str>,
+                    name: &str,
+                    command: &str,
+                    output: Option<&str>| {
+            let mut row = (*message(false)).clone();
+            row.row_id = serde_json::to_string(&(request, id)).unwrap();
+            row.kind = RowKind::ToolCall;
+            row.text.clear();
+            row.call_id = Some(id.into());
+            row.batch = Some(request.into());
+            row.parent_call_id = parent.map(str::to_owned);
+            row.tool_name = Some(name.into());
+            row.tool_input = Some(serde_json::json!({"command": command}));
+            row.result_text = output.map(str::to_owned);
+            std::sync::Arc::new(row)
+        };
+        let render =
+            |app: &mut App, screen: &mut FullScreen, emu: &mut crate::ui::render::testterm::Emu| {
+                let size = (96, 40);
+                let frame = app.frame(size);
+                emu.feed(&screen.render(&frame, size, &app.palette, app));
+            };
+        let find_row = |emu: &crate::ui::render::testterm::Emu, needle: &str| {
+            emu.rows_text()
+                .iter()
+                .position(|row| row.contains(needle))
+                .unwrap_or_else(|| panic!("missing row {needle}:\n{}", emu.rows_text().join("\n")))
+                as u16
+        };
+        let click_at = |screen: &mut FullScreen, app: &App, column: u16, row: u16| {
+            screen.mouse(
+                MouseEvent {
+                    kind: MouseKind::Press,
+                    column,
+                    row,
+                },
+                app,
+            );
+            screen.mouse(
+                MouseEvent {
+                    kind: MouseKind::Release,
+                    column,
+                    row,
+                },
+                app,
+            )
+        };
+
+        let mut drawn = attached();
+        drawn.size = (96, 40);
+        drawn.app.set_fullscreen(true);
+        drawn.app.tool_detail = Detail::Expanded;
+        let mut screen = FullScreen::new(drawn.size, false);
+        let mut emu = crate::ui::render::testterm::Emu::new(96, 40);
+
+        let mut member_row = (*message(false)).clone();
+        member_row.row_id = "member-call".into();
+        member_row.kind = RowKind::ToolCall;
+        member_row.text.clear();
+        member_row.call_id = Some("member-call".into());
+        member_row.batch = Some("r1".into());
+        member_row.tool_name = Some("agent".into());
+        member_row.tool_input = Some(serde_json::json!({"action": "request", "prompt": "check"}));
+        let mut task = background_task("task-member", "Inspect diff");
+        task.agent = Some("worker".into());
+        task.kind = TaskKind::Member(MemberTarget::Session("member-1".into()));
+        member_row.member = Some(Box::new(MemberCard {
+            task,
+            prompt: "Inspect diff".into(),
+            model: Some("fixture".into()),
+            activity: None,
+            observation: None,
+        }));
+
+        show(
+            &mut drawn,
+            vec![
+                call(
+                    "r1",
+                    "seq",
+                    None,
+                    "exec",
+                    "seq 1 8",
+                    Some("alpha https://example.com\n2\n3\n4\n5\n6\n7\n8"),
+                ),
+                call("r1", "sib", None, "exec", "echo sibling", Some("sib-body")),
+                std::sync::Arc::new(member_row),
+            ],
+        );
+        render(&mut drawn.app, &mut screen, &mut emu);
+
+        let seq_header = find_row(&emu, "$ seq 1 8");
+        let body_row = find_row(&emu, "alpha https://example.com");
+        assert_eq!(
+            screen.mouse(
+                MouseEvent {
+                    kind: MouseKind::Move,
+                    column: 8,
+                    row: body_row,
+                },
+                &drawn.app,
+            ),
+            MouseOutcome::Ignored,
+            "hover feedback stays on headers only"
+        );
+        assert_eq!(
+            screen.mouse(
+                MouseEvent {
+                    kind: MouseKind::Move,
+                    column: 8,
+                    row: seq_header,
+                },
+                &drawn.app,
+            ),
+            MouseOutcome::Redraw
+        );
+
+        let url_col = emu.row(body_row as usize).find("https://").unwrap() as u16 + 2;
+        assert_eq!(
+            click_at(&mut screen, &drawn.app, url_col, body_row),
+            MouseOutcome::Open("https://example.com".into())
+        );
+        assert_eq!(screen.click_wait(Instant::now()), None);
+
+        let alpha_col = emu.row(body_row as usize).find("alpha").unwrap() as u16;
+        screen.mouse(
+            MouseEvent {
+                kind: MouseKind::Press,
+                column: alpha_col,
+                row: body_row,
+            },
+            &drawn.app,
+        );
+        screen.mouse(
+            MouseEvent {
+                kind: MouseKind::Drag,
+                column: alpha_col + 4,
+                row: body_row,
+            },
+            &drawn.app,
+        );
+        assert_eq!(
+            screen.mouse(
+                MouseEvent {
+                    kind: MouseKind::Release,
+                    column: alpha_col + 4,
+                    row: body_row,
+                },
+                &drawn.app,
+            ),
+            MouseOutcome::Copy("alpha".into())
+        );
+        assert_eq!(
+            screen.pending_click(&drawn.app, Instant::now() + Duration::from_millis(500)),
+            None
+        );
+
+        assert_eq!(
+            click_at(&mut screen, &drawn.app, alpha_col, body_row),
+            MouseOutcome::Ignored
+        );
+        assert_eq!(
+            click_at(&mut screen, &drawn.app, alpha_col, body_row),
+            MouseOutcome::Copy("alpha".into())
+        );
+        assert_eq!(
+            screen.pending_click(&drawn.app, Instant::now() + Duration::from_millis(500)),
+            None
+        );
+
+        let card_entry = find_row(&emu, "Open member conversation");
+        let MouseOutcome::Click {
+            block: Some(card_block),
+            row: card_row,
+        } = click_at(&mut screen, &drawn.app, 10, card_entry)
+        else {
+            panic!("member entry must click immediately without deferring");
+        };
+        assert_eq!(
+            screen.card_at(&drawn.app, card_block, card_row).as_deref(),
+            Some("task-member")
+        );
+
+        let five_row = find_row(&emu, "      5");
+        assert_eq!(
+            click_at(&mut screen, &drawn.app, 8, five_row),
+            MouseOutcome::Ignored
+        );
+        let Some(MouseOutcome::Click { block, row }) =
+            screen.pending_click(&drawn.app, Instant::now() + Duration::from_millis(401))
+        else {
+            panic!("tool body click must confirm after the multi-click window");
+        };
+        assert!(drawn.app.click(block, row, 96));
+        render(&mut drawn.app, &mut screen, &mut emu);
+        let visible = emu.rows_text().join("\n");
+        assert!(visible.contains("▸ $ seq 1 8"), "{visible}");
+        assert!(visible.contains("sib-body"), "sibling call stays open");
+        assert!(
+            visible.contains("Open member conversation"),
+            "sibling member card stays open"
+        );
+
+        let card_task = find_row(&emu, "Task: Inspect diff");
+        assert_eq!(
+            click_at(&mut screen, &drawn.app, 10, card_task),
+            MouseOutcome::Ignored
+        );
+        let Some(MouseOutcome::Click { block, row }) =
+            screen.pending_click(&drawn.app, Instant::now() + Duration::from_millis(401))
+        else {
+            panic!("member card detail row must collapse its call");
+        };
+        assert!(drawn.app.click(block, row, 96));
+        render(&mut drawn.app, &mut screen, &mut emu);
+        let visible = emu.rows_text().join("\n");
+        assert!(!visible.contains("Open member conversation"), "{visible}");
+        assert!(visible.contains("sib-body"), "{visible}");
+
+        let tree = vec![
+            call("tree", "prog-a", None, "codemode", "", None),
+            call("tree", "prog-b", None, "codemode", "", None),
+            call("tree", "plain", Some("prog-a"), "exec", "true", Some("")),
+            call(
+                "tree",
+                "child-b",
+                Some("prog-b"),
+                "exec",
+                "echo b",
+                Some("out-b"),
+            ),
+        ];
+        show(&mut drawn, tree);
+        render(&mut drawn.app, &mut screen, &mut emu);
+        let plain_row = find_row(&emu, "$ true");
+        assert_eq!(
+            click_at(&mut screen, &drawn.app, 8, plain_row),
+            MouseOutcome::Ignored
+        );
+        let Some(MouseOutcome::Click { block, row }) =
+            screen.pending_click(&drawn.app, Instant::now() + Duration::from_millis(401))
+        else {
+            panic!("non-foldable child row must collapse its enclosing codemode");
+        };
+        assert!(drawn.app.click(block, row, 96));
+        render(&mut drawn.app, &mut screen, &mut emu);
+        let visible = emu.rows_text().join("\n");
+        assert!(!visible.contains("$ true"), "{visible}");
+        assert!(visible.contains("out-b"), "sibling codemode stays open");
+
+        let mut single_plain = vec![call("batch-plain", "only", None, "exec", "true", Some(""))];
+        show(&mut drawn, single_plain.clone());
+        render(&mut drawn.app, &mut screen, &mut emu);
+        let batch_child = find_row(&emu, "$ true");
+        assert_eq!(
+            click_at(&mut screen, &drawn.app, 8, batch_child),
+            MouseOutcome::Ignored
+        );
+        let Some(MouseOutcome::Click { block, row }) =
+            screen.pending_click(&drawn.app, Instant::now() + Duration::from_millis(401))
+        else {
+            panic!("non-foldable root row must collapse its batch");
+        };
+        assert!(drawn.app.click(block, row, 96));
+        render(&mut drawn.app, &mut screen, &mut emu);
+        let visible = emu.rows_text().join("\n");
+        assert!(visible.contains("▸ ✓ Ran 1 command"), "{visible}");
+        assert!(!visible.contains("$ true"), "{visible}");
+
+        std::sync::Arc::make_mut(&mut single_plain[0]).batch = Some("live-run".into());
+        std::sync::Arc::make_mut(&mut single_plain[0]).row_id = "live-call".into();
+        std::sync::Arc::make_mut(&mut single_plain[0]).pending = true;
+        std::sync::Arc::make_mut(&mut single_plain[0]).result_text = Some("live line".into());
+        show(&mut drawn, single_plain.clone());
+        render(&mut drawn.app, &mut screen, &mut emu);
+        let live_body = find_row(&emu, "live line");
+        assert_eq!(
+            click_at(&mut screen, &drawn.app, 8, live_body),
+            MouseOutcome::Ignored
+        );
+        drawn.app.toggle_tool_details();
+        assert_eq!(
+            screen.pending_click(&drawn.app, Instant::now() + Duration::from_millis(401)),
+            None,
+            "detail change invalidates a pending tool body collapse"
+        );
+        if drawn.app.take_reflow_request() {
+            screen.relayout(drawn.size.0);
+        }
+
+        drawn.app.tool_detail = Detail::Expanded;
+        show(&mut drawn, single_plain);
+        render(&mut drawn.app, &mut screen, &mut emu);
+        let live_body = find_row(&emu, "live line");
+        assert_eq!(
+            click_at(&mut screen, &drawn.app, 8, live_body),
+            MouseOutcome::Ignored
+        );
+        let Some(MouseOutcome::Click { block: None, row }) =
+            screen.pending_click(&drawn.app, Instant::now() + Duration::from_millis(401))
+        else {
+            panic!("live tool body click must collapse the running call");
+        };
+        assert!(drawn.app.click(None, row, 96));
+        render(&mut drawn.app, &mut screen, &mut emu);
+        let visible = emu.rows_text().join("\n");
+        assert!(!visible.contains("live line"), "{visible}");
+        assert!(visible.contains("▸ · true · Running…"), "{visible}");
+
+        let mut scrolled = attached();
+        scrolled.size = (92, 14);
+        scrolled.app.set_fullscreen(true);
+        scrolled.app.tool_detail = Detail::Expanded;
+        scrolled.app.thinking_detail = Detail::Expanded;
+        let mut screen = FullScreen::new(scrolled.size, false);
+        let mut emu = crate::ui::render::testterm::Emu::new(92, 14);
+        let draw_small =
+            |app: &mut App, screen: &mut FullScreen, emu: &mut crate::ui::render::testterm::Emu| {
+                let size = (92, 14);
+                let frame = app.frame(size);
+                emu.feed(&screen.render(&frame, size, &app.palette, app));
+            };
+        let fifteen = (1..=15)
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut reply = (*message(false)).clone();
+        reply.row_id = "reply-1".into();
+        reply.text = "First reply paragraph line one.\nFirst reply paragraph line two.\nFirst reply paragraph line three.\n\nSecond reply paragraph line one.\nSecond reply paragraph line two.\nSecond reply paragraph line three.".into();
+        show(
+            &mut scrolled,
+            vec![
+                call("r-tall", "seq15", None, "exec", "seq 1 15", Some(&fifteen)),
+                std::sync::Arc::new(reply.clone()),
+            ],
+        );
+        draw_small(&mut scrolled.app, &mut screen, &mut emu);
+        while !emu.row(0).trim_start().starts_with("4 ") && emu.row(0).trim() != "4" {
+            screen.scroll(-1);
+            draw_small(&mut scrolled.app, &mut screen, &mut emu);
+        }
+        assert!(
+            !emu.rows_text().iter().any(|row| row.contains("$ seq 1 15")),
+            "header is scrolled above the viewport:\n{}",
+            emu.rows_text().join("\n")
+        );
+        let five_row = find_row(&emu, "      5");
+        assert_eq!(
+            click_at(&mut screen, &scrolled.app, 8, five_row),
+            MouseOutcome::Ignored
+        );
+        assert!(screen.resize((90, 14)));
+        assert_eq!(
+            screen.pending_click(&scrolled.app, Instant::now() + Duration::from_millis(401)),
+            None,
+            "resize right before the deadline cancels a pending body collapse"
+        );
+        assert!(screen.resize((92, 14)));
+        draw_small(&mut scrolled.app, &mut screen, &mut emu);
+        let five_row = find_row(&emu, "      5");
+        assert_eq!(
+            click_at(&mut screen, &scrolled.app, 8, five_row),
+            MouseOutcome::Ignored
+        );
+        let Some(MouseOutcome::Click { block, row }) =
+            screen.pending_click(&scrolled.app, Instant::now() + Duration::from_millis(401))
+        else {
+            panic!("scrolled tool body click must confirm after the multi-click window");
+        };
+        assert!(scrolled.app.click(block, row, 92));
+        draw_small(&mut scrolled.app, &mut screen, &mut emu);
+        let visible = emu.rows_text().join("\n");
+        assert!(
+            emu.row(0).contains("▸ $ seq 1 15"),
+            "collapsed header re-anchors at top of viewport:\n{visible}"
+        );
+        assert!(
+            visible.contains("First reply paragraph line one."),
+            "first paragraph of reply stays in view:\n{visible}"
+        );
+
+        let mut thought = (*message(false)).clone();
+        thought.row_id = "tall-thought".into();
+        thought.kind = RowKind::Thinking;
+        thought.text = (1..=15)
+            .map(|n| format!("Thought step {n:02}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        thought.display = Some("Thought step 01".into());
+        thought.elapsed_ms = Some(4000);
+        let mut scrolled_thought = attached();
+        scrolled_thought.size = (92, 14);
+        scrolled_thought.app.set_fullscreen(true);
+        scrolled_thought.app.thinking_detail = Detail::Expanded;
+        let mut screen = FullScreen::new(scrolled_thought.size, false);
+        let mut emu = crate::ui::render::testterm::Emu::new(92, 14);
+        show(
+            &mut scrolled_thought,
+            vec![std::sync::Arc::new(thought), std::sync::Arc::new(reply)],
+        );
+        draw_small(&mut scrolled_thought.app, &mut screen, &mut emu);
+        while !emu.row(0).contains("Thought step 04") {
+            screen.scroll(-1);
+            draw_small(&mut scrolled_thought.app, &mut screen, &mut emu);
+        }
+        let step5 = find_row(&emu, "Thought step 05");
+        assert_eq!(
+            click_at(&mut screen, &scrolled_thought.app, 8, step5),
+            MouseOutcome::Ignored
+        );
+        let Some(MouseOutcome::Click { block, row }) = screen.pending_click(
+            &scrolled_thought.app,
+            Instant::now() + Duration::from_millis(401),
+        ) else {
+            panic!("scrolled thought body click must confirm");
+        };
+        assert!(scrolled_thought.app.click(block, row, 92));
+        draw_small(&mut scrolled_thought.app, &mut screen, &mut emu);
+        let visible = emu.rows_text().join("\n");
+        assert!(
+            emu.row(0).contains("Thought for 4.0s"),
+            "collapsed thought header re-anchors at top of viewport:\n{visible}"
+        );
+        assert!(
+            visible.contains("First reply paragraph line one."),
+            "first paragraph of reply stays in view after thought collapse:\n{visible}"
+        );
+    }
+
+    #[test]
     fn fullscreen_command_previews_preserve_background_handoff_status() {
         use crate::ui::render::panel::strip_escapes;
 
@@ -18546,7 +19055,7 @@ mod tests {
                 ),
                 show_error: true,
             });
-            open_test_report(&mut app);
+            let panel = open_test_report(&mut app);
             assert!(matches!(
                 sent.borrow().last(),
                 Some(Command::Report(Request {
@@ -18554,6 +19063,37 @@ mod tests {
                     ..
                 }))
             ));
+            let mut prepared = prepared_report("error", "p1");
+            prepared.plan.evidence.timeline = None;
+            prepared.plan.evidence.unavailable =
+                Some(crate::report::EvidenceUnavailable::NoReference);
+            app.apply(Update::ReportReply {
+                panel,
+                reply: Reply::Prepared(None, prepared),
+            });
+            let Some(Prompt::Report(report)) = &app.prompt else {
+                panic!("expected report panel")
+            };
+            let screen = report.render(110, 20, &app.palette).join("\n");
+            assert!(screen.contains(t("Error diagnostics only; no session text is available.")));
+            assert!(!screen.contains(t("Default: current-session diagnostics only.")));
+            assert!(!screen.contains(t("Turn Redact off to attach recent user/assistant text to ZIP; it may contain sensitive data.")));
+            for _ in 0..3 {
+                press(&mut app, KeyCode::Down);
+            }
+            press(&mut app, KeyCode::Enter);
+            assert!(matches!(
+                sent.borrow().last(),
+                Some(Command::Report(Request { action: Action::Generate(draft), .. }))
+                    if draft.session.is_none() && draft.plan_id == "p1"
+            ));
+            app.apply(Update::ReportReply {
+                panel,
+                reply: Reply::Failed {
+                    message: "Generation cancelled".into(),
+                    draft_missing: false,
+                },
+            });
             press(&mut app, KeyCode::Esc);
 
             app.apply(Update::Switched {
@@ -18581,6 +19121,63 @@ mod tests {
             let screen = report.render(90, 20, &app.palette).join("\n");
             assert!(screen.contains(t("Report this session")));
             assert!(screen.contains(t("Evidence · No recent session activity")));
+            assert!(screen.contains(t("Redact [x]")));
+            for (width, budget) in [(110, 20), (36, 20)] {
+                let screen = report.render(width, budget, &app.palette);
+                assert!(screen.len() <= budget);
+                assert!(
+                    screen
+                        .iter()
+                        .all(|line| { crate::ui::render::panel::visible_width(line) <= width })
+                );
+                let text: String = screen
+                    .iter()
+                    .flat_map(|line| {
+                        crate::ui::render::panel::strip_escapes(line)
+                            .chars()
+                            .filter(|c| !c.is_whitespace() && *c != '│')
+                            .collect::<Vec<_>>()
+                    })
+                    .collect();
+                for notice in [
+                    "Default: current-session diagnostics only.",
+                    "Turn Redact off to attach recent user/assistant text to ZIP; it may contain sensitive data.",
+                    "Generate/save never uploads. Share manually after saving.",
+                ] {
+                    let notice: String = t(notice).chars().filter(|c| !c.is_whitespace()).collect();
+                    assert!(
+                        text.contains(&notice),
+                        "missing notice at {width}x{budget}: {text}"
+                    );
+                }
+            }
+            for _ in 0..3 {
+                press(&mut app, KeyCode::Down);
+            }
+            let Some(Prompt::Report(report)) = &app.prompt else {
+                panic!("expected report panel")
+            };
+            let compact = report.render(36, 8, &app.palette);
+            assert!(compact.len() <= 8);
+            assert!(
+                compact
+                    .iter()
+                    .all(|line| { crate::ui::render::panel::visible_width(line) <= 36 })
+            );
+            assert!(compact.join("\n").contains(t("Generate report")));
+            press(&mut app, KeyCode::Enter);
+            assert!(matches!(
+                sent.borrow().last(),
+                Some(Command::Report(Request { action: Action::Generate(draft), .. }))
+                    if draft.plan_id == "p1"
+            ));
+            app.apply(Update::ReportReply {
+                panel,
+                reply: Reply::Failed {
+                    message: "Generation cancelled".into(),
+                    draft_missing: false,
+                },
+            });
             press(&mut app, KeyCode::Esc);
 
             app.apply(Update::Switched {
@@ -18643,6 +19240,22 @@ mod tests {
         });
         press(&mut app, KeyCode::Down);
         press(&mut app, KeyCode::Enter);
+        assert!(matches!(
+            sent.borrow().last(),
+            Some(Command::Report(Request {
+                action: Action::Plan { redact: false, .. },
+                ..
+            }))
+        ));
+        let Some(Prompt::Report(report)) = &app.prompt else {
+            panic!("expected report panel")
+        };
+        let notice = report.render(110, 20, &app.palette).join("\n");
+        assert!(notice.contains(t("Redact [ ]")));
+        assert!(notice.contains(t(
+            "Redact is off. The ZIP may contain sensitive text from recent messages."
+        )));
+        assert!(!notice.contains(t("Default: current-session diagnostics only.")));
         app.apply(Update::ReportReply {
             panel,
             reply: Reply::Plan(prepared_report("r1", "p2").plan),
@@ -18731,6 +19344,46 @@ mod tests {
     }
 
     #[test]
+    fn report_close_before_save_never_activates_a_share_destination() {
+        use crate::report::{Archive, GeneratedReport, Reply, Sharing};
+        use base64::{Engine, engine::general_purpose::STANDARD};
+
+        for fullscreen in [false, true] {
+            let (mut app, _sent, home) = asked();
+            app.fullscreen = fullscreen;
+            app.session_id = "s1".into();
+            app.cwd_key = home.path().display().to_string();
+            let panel = open_test_report(&mut app);
+            app.apply(Update::ReportReply {
+                panel,
+                reply: Reply::Generated(GeneratedReport {
+                    title: "Test report".into(),
+                    archive: Archive {
+                        base64: STANDARD.encode(b"PK\x03\x04fixture"),
+                    },
+                    sharing: Sharing {
+                        github_issue_url: "https://github.com/arcships/dim/issues/new".into(),
+                        discord_url: "https://discord.gg/ds35K3TadP".into(),
+                        description: "Diagnostic summary".into(),
+                    },
+                }),
+            });
+            let Some(Prompt::Report(report)) = &app.prompt else {
+                panic!("expected report panel")
+            };
+            let screen = report.render(90, 20, &app.palette).join("\n");
+            assert!(!screen.contains(t("Draft a GitHub issue")));
+            assert!(!screen.contains(t("Give feedback on Discord")));
+            assert!(!screen.contains("feedback@arcships.ai"));
+            assert_eq!(std::fs::read_dir(home.path()).unwrap().count(), 0);
+            press(&mut app, KeyCode::Tab);
+            press(&mut app, KeyCode::Enter);
+            assert!(!matches!(app.prompt, Some(Prompt::Report(_))));
+            assert_eq!(std::fs::read_dir(home.path()).unwrap().count(), 0);
+        }
+    }
+
+    #[test]
     fn report_saves_only_bounded_zip_bytes_after_disconnect() {
         use crate::report::{Archive, GeneratedReport, Reply, Sharing};
         use base64::{Engine, engine::general_purpose::STANDARD};
@@ -18780,6 +19433,16 @@ mod tests {
             assert_eq!(screen.contains("feedback@arcships.ai"), should_save);
             assert_eq!(screen.contains(t("Draft a GitHub issue")), should_save);
             assert_eq!(screen.contains(t("Give feedback on Discord")), should_save);
+            if !should_save {
+                press(&mut app, KeyCode::Tab);
+                press(&mut app, KeyCode::Enter);
+                assert!(
+                    !matches!(app.prompt, Some(Prompt::Report(_))),
+                    "after a failed save, the second action is Close, not Share"
+                );
+                assert_eq!(std::fs::read_dir(home.path()).unwrap().count(), 0);
+                continue;
+            }
             if let Some(path) = report.saved_path() {
                 assert_eq!(path.parent(), Some(home.path()));
                 assert!(
