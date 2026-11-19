@@ -234,6 +234,24 @@ omits the menu title and footer when necessary; fullscreen keeps its palette
 query and selection above the composer. The order does not change with terminal
 size.
 
+A command that cannot run in the current state stays listed in its fixed
+position, drawn faint and without bold weight so it is distinct from available
+rows across themes. Its `(unavailable)` marker sits beside the command name so
+long descriptions never truncate it away; when the row is narrow, the command
+name keeps priority before the marker. On the selected row, the marker stays
+visible and the row remains unbolded and faint on the selection highlight. Once
+the required state exists (such as an open Session), the row returns to its
+normal style.
+
+```text
+Before a Session exists:
+  /new                     start a new session
+  /resume                  resume a previous session
+  /models                  select a model
+  /compact (unavailable)   compact the context of the shown line
+  /usage (unavailable)     show the context window usage
+```
+
 When the usual history reservation leaves fewer than eight live rows,
 live controls take priority: either renderer can use up to eight rows for
 the live region, limited by terminal height. Fullscreen reduces the composer's empty padding

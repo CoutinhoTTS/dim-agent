@@ -62,6 +62,20 @@ Skill 行读作 `/skill:<name>`，带其描述。只列出已启用、未被其�
 Scrollback 保留菜单上方的命令草稿，必要时省略菜单标题和页脚；fullscreen 保留输入框上方的
 命令面板查询行和选中项。顺序不随终端尺寸变化。
 
+当前状态下不能执行的命令仍保留在固定位置，以不加粗的弱化样式绘制，使其在各类主题下都能与可用行区分。
+它的不可用标记（如 `(unavailable)`、中文界面为 `（不可用）`）放在命令名旁，避免被长描述截断；行宽极窄时命令名优先于标记。
+选中不可用行时，标记仍然可见，整行在高亮条上保持不加粗且弱化。
+一旦满足前提状态（例如已有打开的会话），该行即恢复正常样式。
+
+```text
+会话尚未创建时：
+  /new                     start a new session
+  /resume                  resume a previous session
+  /models                  select a model
+  /compact (unavailable)   compact the context of the shown line
+  /usage (unavailable)     show the context window usage
+```
+
 当通常的历史保留空间使实时区域不足八行时，实时控件优先：两种渲染器都可为实时区域使用最多八行，
 但不超过终端高度。Fullscreen 先减少输入框的空白内边距和命令面板查询行的留白，避免两个输入区域
 重叠。命令面板只剩三行时，查询放在顶边框内，保留选中命令，不遮挡输入框或权限页脚。
