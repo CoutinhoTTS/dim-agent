@@ -3039,6 +3039,11 @@ async fn read_history(
                 .data(json!({"code":"checked_attach_unavailable"})),
         );
     }
+    // The whole recovery reads one branch's conversation: the history window
+    // that yields the cutoff, the pending requests read from that cutoff, and
+    // the reply check. It reads the branch the Session shows by default without
+    // reading the Session's default branch, so `DEFAULT_BRANCH_ID` names it.
+    let conversation = DEFAULT_BRANCH_ID;
     let attached: Attached = rpc
         .typed("session.attach", {
             let mut params = json!({"sessionId":id});
@@ -3077,7 +3082,7 @@ async fn read_history(
         loop {
             let args = window.params_with_display(
                 id,
-                ROOT_BRANCH_ID,
+                conversation,
                 rpc.supports("session.history.display.tail"),
                 rpc.supports("session.history.display.transcript"),
             );
@@ -3106,7 +3111,7 @@ async fn read_history(
     let config = Config::read(rpc, id, model).await?;
     let mut questions = HashMap::new();
     if config.methods.contains("session.question.pending") {
-        let mut branches = vec![ROOT_BRANCH_ID.to_owned()];
+        let mut branches = vec![conversation.to_owned()];
         if rpc.supports("session.branches") {
             let directory: dim_client::wire::BranchDirectory = rpc
                 .typed("session.branches", json!({"sessionId":id}))
@@ -3120,7 +3125,7 @@ async fn read_history(
         }
         for branch in branches {
             let mut params = json!({"sessionId":id,"branchId":branch});
-            if branch == ROOT_BRANCH_ID {
+            if branch == conversation {
                 params["through"] = json!(through);
             }
             let mut batches = Vec::new();
@@ -3157,7 +3162,7 @@ async fn read_history(
         if !config.methods.contains(method) {
             continue;
         }
-        let mut params = json!({"sessionId":id,"branchId":DEFAULT_BRANCH_ID,"through":through});
+        let mut params = json!({"sessionId":id,"branchId":conversation,"through":through});
         loop {
             let value = rpc.call(method, params.clone()).await?;
             let (branch, cut, next) = match method {
@@ -3177,7 +3182,7 @@ async fn read_history(
                     (page.branch_id, page.through, page.next)
                 }
             };
-            if branch != ROOT_BRANCH_ID || cut != through {
+            if branch != conversation || cut != through {
                 return Err(Error::internal_error());
             }
             let Some(next) = next else {
@@ -3192,7 +3197,7 @@ async fn read_history(
     let turn: TurnRead = rpc
         .typed(
             "session.turn.get",
-            json!({"sessionId":id,"branchId":DEFAULT_BRANCH_ID,"through":through}),
+            json!({"sessionId":id,"branchId":conversation,"through":through}),
         )
         .await?;
     let output = turn.output;
