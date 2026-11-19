@@ -702,8 +702,12 @@ export interface TimelineStore {
   latestSnapshot(request: { sessionId: string; branchId: string; through: number; interpreter: string }): Promise<{ snapshot: TimelineRecoverySnapshot | null }>;
 }
 
-/** Pinned reads on the filesystem owner; see resource-faces §4.1. */
+export type FsEntryName = string | { Unix: number[] } | { Windows: number[] };
+/** Directory operations and pinned reads on the filesystem owner; see resource-faces §4.1. */
 export interface FsHost {
+  createDirectory(request: { path: string }): Promise<Record<string, never>>;
+  list(request: { path: string }): Promise<{ entries: { name: FsEntryName; kind: 'file' | 'directory' | 'other' }[] }>;
+  remove(request: { path: string } | { parent: string; name: FsEntryName }): Promise<Record<string, never>>;
   openRead(request: { path: string }): Promise<{ readId: string; size: number }>;
   readAt(request: { readId: string; offset: number; limit: number }): Promise<{ bytes: string }>;
   closeRead(request: { readId: string }): Promise<Record<string, never>>;

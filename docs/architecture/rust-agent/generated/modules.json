@@ -12649,6 +12649,7 @@
         "path FsHost",
         "path FsHost::new",
         "use face::FsHost",
+        "use face::FsRemove",
         "use face::OpenRead"
       ]
     },
@@ -12777,6 +12778,7 @@
       "from": "dim_agent_capabilities::file_storage::face",
       "to": "dim_agent_capabilities::file_storage",
       "references": [
+        "path DirectoryEntry",
         "path FileReader",
         "path FileStorage",
         "path FileStorageError",
@@ -12787,6 +12789,7 @@
         "path FileStorageError::Locked",
         "path FileStorageError::Unsupported",
         "path Result",
+        "use super::DirectoryEntry",
         "use super::FileReader",
         "use super::FileStorage",
         "use super::FileStorageError",
@@ -56134,6 +56137,18 @@
     {
       "module": "dim_agent_capabilities::adapters",
       "path": "AsRef::as_ref"
+    },
+    {
+      "module": "dim_agent_capabilities::file_storage::face",
+      "path": "D::Error"
+    },
+    {
+      "module": "dim_agent_capabilities::file_storage::face",
+      "path": "S::Error"
+    },
+    {
+      "module": "dim_agent_capabilities::file_storage::face",
+      "path": "S::Ok"
     },
     {
       "module": "dim_agent_capabilities::file_storage::windows",
