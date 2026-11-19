@@ -1428,6 +1428,59 @@ async fn node_store_preserves_repository_results_and_worktree_removal_exclusion(
         assert_eq!(std::fs::read_to_string(&marker).unwrap(), "untouched");
     }
     let raw = server.service::<SessionStore>().unwrap().timeline_store();
+    for session in ["round-a", "round-b"] {
+        raw.create_session(session, &config).await.unwrap();
+    }
+    let batch = |session: &str, seq: u64| {
+        let id = format!("{session}-{seq}");
+        let record = dim_agent_runtime::StoredEvent {
+            event: Arc::new(dim_agent_types::AgentEvent {
+                id: id.clone(),
+                sequence: seq,
+                create_at: seq,
+                tags: None,
+                parent_call_id: None,
+                kind: dim_agent_types::EventKind::InputMessage(
+                    dim_agent_types::InputMessageData::text("saved", None),
+                ),
+            }),
+            trace: None,
+            batch_end: seq,
+        };
+        json!({"sessionId":session,"branchId":"main","batchId":id,"events":[record]})
+    };
+    let grouped = client
+        .rpc(
+            "storefixture.commit_round",
+            json!({"batches":[batch("round-b",1),batch("round-a",1),batch("round-b",2)]}),
+        )
+        .await;
+    assert_ok(&grouped);
+    let committed = |session: &str| json!({"sessionId":session,"result":{"Ok":null}});
+    assert_eq!(
+        grouped["result"]["sessions"],
+        json!([committed("round-a"), committed("round-b")])
+    );
+    let fallback = client
+        .rpc(
+            "storefixture.commit_round",
+            json!({"batches":[batch("round-a",2),batch("round-b",3),batch("round-a",4)]}),
+        )
+        .await;
+    assert_ok(&fallback);
+    let sessions = fallback["result"]["sessions"].as_array().unwrap();
+    assert_eq!(sessions.len(), 2);
+    assert_eq!(sessions[0]["sessionId"], "round-a");
+    assert_eq!(sessions[0]["result"]["Err"]["code"], "storage");
+    assert_eq!(sessions[1], committed("round-b"));
+    for (session, expected) in [("round-a", 1), ("round-b", 3)] {
+        let key = dim_agent_runtime::TimelineKey {
+            session_id: session.into(),
+            branch_id: "main".into(),
+        };
+        assert_eq!(raw.head(&key).await.unwrap(), expected);
+        raw.rollback_session(session).await.unwrap();
+    }
     raw.create_session(protected.to_str().unwrap(), &config)
         .await
         .unwrap();

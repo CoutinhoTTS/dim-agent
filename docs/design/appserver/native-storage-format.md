@@ -1674,6 +1674,8 @@ semantics, preserved Steer candidates, automation origins and rollback.
 
 Persistent Agents calls `sqliteStorage.agents`, `owners`, `save` and `delete` for its directory and Session ownership. Delegation reads use `members`, `ledMembers`, `ownedAgents`, `memberSessions` and `agentOwner`. Startup repair reads both lists from `unfinishedOwned`. SQLite owns all record reads and writes.
 
+SessionStore passes one writer round to `sqliteStorage.commitTimelineRound({batches})`. Each batch has the existing Timeline append fields. SQLite prepares and commits all Sessions together. If the grouped transaction fails, each prepared Session retries in its own transaction. The reply contains one `{sessionId,result}` per Session, with `{Ok:null}` or `{Err:{code,message}}`. SessionStore settles the original publication callbacks after receiving the outcomes.
+
 SessionFiles calls `sqliteStorage.reserveFile({sessionId,fileId,generation})` before writing file bytes. It returns false for a missing Session. `commitFile({sessionId,fileId,generation})` clears the writer and records ownership in one SQLite transaction, returning `owned`, `sessionGone`, or `superseded`. `abandonFile({fileId,generation})` clears a matching writer and returns the affected row count.
 
 SessionFiles resolves output paths and calls `registerOutput({sessionId,path})`, which records ownership in one SQLite transaction and returns false for a missing Session. `ownsOutput({sessionId,path})` and `ownsFile({sessionId,fileId})` test exact ownership. `ownedPaths({sessionId})` returns a pair of sorted lists, file IDs followed by output paths. SessionFiles resolves file IDs to directories.
