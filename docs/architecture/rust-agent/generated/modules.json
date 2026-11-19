@@ -12761,6 +12761,7 @@
         "path FileStorageError::Locked",
         "path FileStorageError::Unsupported",
         "path Result",
+        "path super::FilePath",
         "use super::FileReader",
         "use super::FileStorage",
         "use super::FileStorageError",
