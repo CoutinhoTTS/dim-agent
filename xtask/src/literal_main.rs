@@ -22,7 +22,9 @@
 //!   plain attributes and HTML comments are not code, and a commented-out
 //!   block or tag is not a block or a tag.
 //! - **In a TypeScript file, only code is read:** string literals outside
-//!   comments.
+//!   comments and outside template text. A template's `${ … }` is code; a `/`
+//!   that opens a regular-expression literal is read as one, not as the start
+//!   of a string.
 //! - **The scan always terminates and never panics.** Every offset it slices at
 //!   is a character boundary inside the text.
 use proc_macro2::{TokenStream, TokenTree};
@@ -871,24 +873,101 @@ fn tag_attributes(
 }
 
 /// The byte offsets of the `main` literals in a JavaScript or TypeScript
-/// `text`, outside its comments. Every offset is the opening quote of the
-/// literal, which is a boundary.
+/// `text`, outside its comments and its template text. Every offset is the
+/// opening quote of the literal, which is a boundary.
 fn javascript_uses(text: &str) -> Vec<usize> {
     let mut found = Vec::new();
+    code(text, false, &mut found);
+    found
+}
+
+/// The keywords after which a `/` begins a regular-expression literal rather
+/// than dividing: each cannot end an expression.
+const KEYWORDS: [&str; 14] = [
+    "await",
+    "case",
+    "delete",
+    "do",
+    "else",
+    "in",
+    "instanceof",
+    "new",
+    "of",
+    "return",
+    "throw",
+    "typeof",
+    "void",
+    "yield",
+];
+
+/// Reads `text` as code, pushing into `found` the offset of every `main`
+/// literal, and answers how many bytes it read: all of `text`, or, when `brace`
+/// is set, the bytes up to and including the `}` that closes the `${ … }` it
+/// reads for.
+///
+/// A string's text is not code, and neither is a template's; a template's
+/// `${ … }` is, and is read by this same function, so an interpolation can nest
+/// braces, strings, comments, templates and regular-expression literals. A `/`
+/// begins a regular-expression literal when the token before it cannot end an
+/// expression, and divides otherwise. Every branch moves the scan forward, and a
+/// literal that never closes runs to the end of `text`, so the scan always ends.
+fn code(text: &str, brace: bool, found: &mut Vec<usize>) -> usize {
     let mut at = 0;
+    let mut depth = 0usize;
+    let mut expression = true;
     while let Some(character) = text[at..].chars().next() {
+        let next = at + character.len_utf8();
         if let Some(length) = comment(text, at) {
             at = (at + length).min(text.len());
-        } else if let Some((offset, length)) = quoted(text, at) {
-            if text[at + 1..at + 1 + offset] == *"main" {
+        } else if let Some((body, length)) = string(text, at) {
+            if text[at + 1..at + 1 + body] == *"main" {
                 found.push(at);
             }
             at = (at + length).min(text.len());
+            expression = false;
+        } else if character == '`' {
+            at = (at + template(text, at, found)).min(text.len());
+            expression = false;
+        } else if character == '/' && expression {
+            match regex(text, at) {
+                Some(length) => {
+                    at = (at + length).min(text.len());
+                    expression = false;
+                }
+                None => {
+                    at = next;
+                    expression = true;
+                }
+            }
+        } else if character == '{' {
+            depth += 1;
+            at = next;
+            expression = true;
+        } else if character == '}' && brace && depth == 0 {
+            return next;
+        } else if character == '}' {
+            depth = depth.saturating_sub(1);
+            at = next;
+            expression = false;
+        } else if matches!(character, ')' | ']') {
+            at = next;
+            expression = false;
+        } else if character.is_alphanumeric() || matches!(character, '_' | '$' | '.') {
+            let mut end = next;
+            while let Some(character) = text[end..].chars().next() {
+                if !(character.is_alphanumeric() || matches!(character, '_' | '$' | '.')) {
+                    break;
+                }
+                end += character.len_utf8();
+            }
+            expression = KEYWORDS.contains(&&text[at..end]);
+            at = end;
         } else {
-            at += character.len_utf8();
+            at = next;
+            expression = true;
         }
     }
-    found
+    at
 }
 
 /// The length of the comment that starts at `at`, `None` when one does not.
@@ -901,16 +980,13 @@ fn comment(text: &str, at: usize) -> Option<usize> {
     Some(2 + body.find("*/").map_or(body.len(), |end| end + 2))
 }
 
-/// The string literal that starts at `at`, as the bytes between its quotes and
-/// its whole length, `None` when one does not start there. `'…'`, `"…"` and
-/// `` `…` `` are read; a backslash quotes the character after it, so `"\""` is
-/// one literal rather than two.
-fn quoted(text: &str, at: usize) -> Option<(usize, usize)> {
+/// The string literal that starts at `at`, as the byte length of its body and
+/// of the whole literal, `None` when one does not start there. `'…'` and `"…"`
+/// are read; a backslash quotes the character after it, so `"\""` is one
+/// literal rather than two.
+fn string(text: &str, at: usize) -> Option<(usize, usize)> {
     let rest = text.get(at..)?;
-    let quote = rest
-        .chars()
-        .next()
-        .filter(|q| matches!(q, '\'' | '"' | '`'))?;
+    let quote = rest.chars().next().filter(|q| matches!(q, '\'' | '"'))?;
     let body = &rest[quote.len_utf8()..];
     let mut characters = body.char_indices();
     while let Some((offset, character)) = characters.next() {
@@ -921,6 +997,82 @@ fn quoted(text: &str, at: usize) -> Option<(usize, usize)> {
         }
     }
     Some((body.len(), body.len() + quote.len_utf8()))
+}
+
+/// The length of the template literal that starts with the backtick at `at`,
+/// reading each `${ … }` of its text as code and pushing the literals found
+/// there into `found`. The text between interpolations is not code, so a
+/// template with no interpolation is a use only when its whole text is `main`,
+/// as a string would be. A template that never closes runs to the end of `text`.
+fn template(text: &str, at: usize, found: &mut Vec<usize>) -> usize {
+    let mut cursor = at + 1;
+    let mut interpolated = false;
+    while let Some(character) = text[cursor..].chars().next() {
+        match character {
+            '`' => {
+                if !interpolated && &text[at + 1..cursor] == "main" {
+                    found.push(at);
+                }
+                return cursor + 1 - at;
+            }
+            '\\' => {
+                cursor += 1;
+                if let Some(escaped) = text[cursor..].chars().next() {
+                    cursor += escaped.len_utf8();
+                }
+            }
+            '$' if text
+                .get(cursor + 1..)
+                .is_some_and(|rest| rest.starts_with('{')) =>
+            {
+                interpolated = true;
+                let open = cursor + 2;
+                let mut nested = Vec::new();
+                let length = code(&text[open..], true, &mut nested);
+                found.extend(nested.into_iter().map(|offset| offset + open));
+                cursor = open + length;
+            }
+            _ => cursor += character.len_utf8(),
+        }
+    }
+    text.len() - at
+}
+
+/// The length of the regular-expression literal that starts with the `/` at
+/// `at`, `None` when no literal starts there. The body ends at an unescaped `/`
+/// outside a `[...]` class and cannot cross a line, so a `/` with neither is
+/// division. A literal's flags follow its closing `/`.
+fn regex(text: &str, at: usize) -> Option<usize> {
+    let mut cursor = at + 1;
+    let mut class = false;
+    while let Some(character) = text[cursor..].chars().next() {
+        match character {
+            '\n' | '\r' => return None,
+            '\\' => {
+                cursor += 1;
+                if let Some(escaped) = text[cursor..].chars().next() {
+                    cursor += escaped.len_utf8();
+                }
+                continue;
+            }
+            '[' => class = true,
+            ']' => class = false,
+            '/' if !class => {
+                cursor += 1;
+                while let Some(flag) = text[cursor..]
+                    .chars()
+                    .next()
+                    .filter(|character| character.is_alphanumeric())
+                {
+                    cursor += flag.len_utf8();
+                }
+                return Some(cursor - at);
+            }
+            _ => {}
+        }
+        cursor += character.len_utf8();
+    }
+    None
 }
 
 #[cfg(test)]
@@ -1331,6 +1483,19 @@ mod tests {
             "const a = 'main', b = `main`, c = \"main\"\n",
         ),
         ("web/src/a.ts", "const a = \"unterminated\n"),
+        ("web/src/a.ts", "const label = `${line ?? 'main'}`\n"),
+        ("web/src/a.ts", "const label = `main is ${x}`\n"),
+        (
+            "web/src/a.ts",
+            "const label = `a ${ `b ${ f('main') }` }`\n",
+        ),
+        (
+            "web/src/a.ts",
+            "const trimQuote = /'/g\nconst id = 'main'\n",
+        ),
+        ("web/src/a.ts", "const re = /[/']/\nconst id = 'main'\n"),
+        ("web/src/a.ts", "const r = a / b; const id = 'main'\n"),
+        ("web/src/a.ts", "return /'/.test(x) ? y : 'main'\n"),
     ];
 
     #[test]
@@ -1457,5 +1622,63 @@ mod tests {
         assert_eq!(errors.len(), 1, "{errors:?}");
         let errors = bounded("web/src/a.ts", "// \"main\"\n/* \"main\" */\n");
         assert!(errors.is_empty(), "{errors:?}");
+    }
+
+    #[test]
+    fn a_template_interpolation_is_code_and_its_text_is_not() {
+        let errors = bounded("web/src/a.ts", "const label = `${line ?? 'main'}`\n");
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(
+            errors[0].contains("web/src/a.ts:1: `\"main\"` names neither"),
+            "{errors:?}"
+        );
+        let errors = bounded("web/src/a.ts", "const label = `main is ${x}`\n");
+        assert!(errors.is_empty(), "{errors:?}");
+    }
+
+    #[test]
+    fn a_template_whose_whole_text_is_the_literal_is_one() {
+        let errors = bounded("web/src/a.ts", "const id = `main`\n");
+        assert_eq!(errors.len(), 1, "{errors:?}");
+    }
+
+    #[test]
+    fn a_nested_template_interpolation_is_code() {
+        let errors = bounded(
+            "web/src/a.ts",
+            "const label = `a ${ `b ${ f('main') }` }`\n",
+        );
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(
+            errors[0].contains("web/src/a.ts:1: `\"main\"` names neither"),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn a_quote_in_a_regex_does_not_open_a_string() {
+        let errors = bounded(
+            "web/src/a.ts",
+            "const trimQuote = /'/g\nconst id = 'main'\n",
+        );
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(
+            errors[0].contains("web/src/a.ts:2: `\"main\"` names neither"),
+            "{errors:?}"
+        );
+        let errors = bounded("web/src/a.ts", "const re = /[/']/\nconst id = 'main'\n");
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(
+            errors[0].contains("web/src/a.ts:2: `\"main\"` names neither"),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn a_slash_that_divides_is_not_a_regex_literal() {
+        let errors = bounded("web/src/a.ts", "const r = a / b; const id = 'main'\n");
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        let errors = bounded("web/src/a.ts", "return /'/.test(x) ? y : 'main'\n");
+        assert_eq!(errors.len(), 1, "{errors:?}");
     }
 }
