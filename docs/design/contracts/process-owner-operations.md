@@ -23,9 +23,28 @@
 | Permission consumers → Agent directory | `sessions.permission({sessionId,branchId})` and `sessions.permissionDefaults({})` retain the existing policy replies. The first holds the Session lease; the second reads the current default without creating a Session. |
 | Dialogue, summary and suggestion → active invocation owner | `modelHost.invoke(request, mode, consume, cancelled, hooks?) → value`. Full `ModelRequest` with pinned tools, configuration, cached prefix and capability snapshot. Attempt contract below. |
 | Session configuration → `providerService` (managed profile) | `configuration(explicit?, cwd?, preferences) → ModelSelection`; `applyPreferences(current, update) → ModelSelection`. Bind the existing Provider operations. |
-| Session creation/adoption and Collaboration → `providerService` (managed profile) | `prepareStartup(request) → {model, admissionId?}`, `checkStartup(source) → void`, `retainStartup({sessionId, model, admissionId?}) → void`, `releaseStartup({admissionId}) → void`. Reuse the pending startup binding ID. Retain on success for that Session generation; release on failure or caller unload. |
+| Session creation/adoption and Collaboration → `providerService` (managed profile) | `prepareStartup(request) → {model, admissionId?}`, `checkStartup(source) → void`, `retainStartup({sessionId, generation, model, admissionId?}) → void`, `releaseStartup({admissionId}) → void`. Reuse the pending startup binding ID. Retain on success for that Session generation; release on failure or caller unload. |
 | Session creation / worktree management → ManagedWorktrees | `create({source, base?, branch?}) → CreatedWorktreeReply`, `discard(created) → void`, `list({}) → WorktreeView[]`, `pruneSelection({olderThanMs?, keep?, force}) → PruneSelection`, `remove({taskId, force}) → boolean`. Bind the existing operations. Failed Session creation discards the created worktree on its node. |
 | PluginManager → UiExtensions | `plugins({}) → string[]`, `refusal({plugin}) → string or null`, `register({plugin, name, package?}) → void`, `withdraw({plugin}) → void`. Bind the existing catalog methods. |
+
+### Session use and generation observation
+
+| Caller → owner | API and lifetime |
+| --- | --- |
+| Collaboration → sessions | `acquireUse({sessionId,agentId}) → {useId,generation}` runs the directory's existing acquire/restore and verifies the Agent before returning. Generation is the mounted Session instance ID. The directory keeps the existing SessionUse and process hold until `releaseUse({useId})` or caller unload. One lease covers delivery through request settlement, including delayed stop and idle. Failed admission releases it. |
+| Collaboration → sessions | Existing input, pending, withdraw, stop and idle requests may carry the useId. For these calls the directory uses the pinned instance and retains the lease for the admitted call. `state({useId,branchId}) → BranchStatus` reads that instance's current branch state for the existing busy check. An expired use or mismatched target fails without restoring another generation. |
+| Collaboration and Provider → sessions | `observeCurrent({sessionId,generation?}, onEnd) → {agentId,generation} or null`. Atomically bind to the matching loaded instance and arm its existing closed notification. No restore or idle hold. Deliver `onEnd({sessionId,agentId,generation,reason})` once, with reason `unloaded` or `closed`. The observer is owned by the caller generation; stale completions cannot remove a newer watch. |
+| Agents → Collaboration and Provider | Keep `agent/session-restored` and `agent/unloaded-session-deleted`. Include the mounted generation on restored. A business close or deletion ends relations and startup ownership; idle unload preserves them. |
+| Provider → sessions | `startupSources({sessionId,generation}) → StartupConnectionSource[]` projects the existing adopted startup connection references from loaded branches in that generation. Reuse the existing source type; omit branches without an adoption. No restore or credential read. Retain uses the current target and matching destinations; restore reattaches ownership. Retain is pinned to the generation supplied by its creating/adopting caller. Register observation before collecting sources; apply results only while that generation remains current. |
+
+### Connection settlement
+
+| Caller → owner | API and completion |
+| --- | --- |
+| Client → Connection | Existing Session detach RPC retires that Session attachment under its transition lock, calls UI detach, publishes presence and joins the attachment before replying. |
+| Connection → UiHost | Bind existing `detach({connectionId,sessionId})` on detach and `release({connectionId})`, then `finished({connectionId})` on connection finish. These use the transport's connection identity. |
+| Local transport / Web socket → Connection | Socket EOF, entry shutdown and failed handshake enter the same connection finish path: cancel calls, release local Web holder if present, settle UI, retire attachments, remove the connection. Web entry owns its holder set, cancellation and listener join. |
+| Host shutdown → Connection | Existing hub close signal ends readers and writers and joins their tasks. Client `daemon.shutdown` settles its initiating reply before teardown. Client detach and entry disable retain their narrower scopes. |
 
 ### Model invocation
 
