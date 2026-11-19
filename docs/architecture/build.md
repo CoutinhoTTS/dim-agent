@@ -11,7 +11,7 @@ cargo build --workspace --locked
 
 A normal Cargo installation is sufficient; compiler caching is optional. Each worktree keeps its own target directory. Existing source caches can be reused without sharing build outputs.
 
-The release profile uses full LTO (`lto = "fat"`) with one codegen unit to reduce binary size. Hosted release builds use two Cargo jobs. The macOS ARM64 release job overrides LTO to `thin` on its 7 GB runner; full LTO requires a release build and runtime smoke test within that runner's memory budget before enabling it there. The other release targets retain full LTO. [The resource investigation](https://github.com/arcships/dim/issues/1674) tracks measurements and build costs. Code residency depends on executable layout and file-cache mapping conditions as well as code size. Normal PR tests use the dev profile, so release builds and runtime smoke tests on each supported platform must validate this setting.
+The release profile uses full LTO (`lto = "fat"`) with one codegen unit to reduce binary size. Hosted release builds use two Cargo jobs. The macOS ARM64 and Linux ARM64 release jobs override LTO to `thin` on their 7 GB and 16 GB runners; full LTO requires a successful release-profile build and runtime smoke test within that runner's memory budget before enabling it there. The other release targets retain full LTO. [The resource investigation](https://github.com/arcships/dim/issues/1674) tracks measurements and build costs. Code residency depends on executable layout and file-cache mapping conditions as well as code size. Normal PR tests use the dev profile, so release builds and runtime smoke tests on each supported platform must validate this setting.
 
 ## Native executable layout
 
@@ -24,6 +24,7 @@ hardware and rejects cross compilation:
 | Host | Target | Page size | Release LTO |
 | --- | --- | --- | --- |
 | Linux x86-64 | `x86_64-unknown-linux-gnu` | 4 KiB | fat |
+| Linux arm64 | `aarch64-unknown-linux-gnu` | 4 KiB | thin on the release runner |
 | macOS arm64 | `aarch64-apple-darwin` | 16 KiB | thin on the release runner |
 | macOS x86-64 | `x86_64-apple-darwin` | 4 KiB | fat |
 | Windows x86-64 | `x86_64-pc-windows-msvc` | 4 KiB | fat |
@@ -97,6 +98,22 @@ function-name/size multiset must remain equal. Selected function addresses must
 follow the final order, treating symbols at the same address as aliases, and at
 least one selected address must move. An unchanged or unordered candidate fails
 before publication; movement alone does not establish an RSS or CPU gain.
+
+LLD ranks an *input section*, not a symbol: it gives a section the best rank of
+the symbols that name it and keeps the section's own order inside it
+([`sortISDBySectionOrder`](https://github.com/llvm/llvm-project/blob/llvmorg-21.1.8/lld/ELF/Writer.cpp#L1158-L1220)).
+A relink therefore cannot place two functions independently when one input
+section defines both, and an order file that splits them is a request the link
+cannot satisfy. Because rustc emits one input section per function, this held
+for Rust code but not for native assembly and C objects that place several
+functions in one `.text` section, which is why the release run failed only on a
+full product link. The order file is built from the baseline's
+`--Map`/`--no-demangle` map: functions sharing a `.text` chunk are emitted
+contiguously in address order at the position of the chunk's best-ranked
+member, and a name the map attributes to more than one chunk is left out. Both
+flags leave the linked bytes unchanged, so the baseline hash check still applies.
+`ordered_link` returns the names the candidate was actually linked with after
+unplaceable ones were removed, and acceptance ranks addresses against that list.
 
 Linux x64 releases build and validate the ordered executable in the pinned manylinux 2.28 container. The candidate
 then runs all three flows without the probe, plus CLI help/version checks. Only

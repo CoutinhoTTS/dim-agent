@@ -13,14 +13,18 @@
 //! These hold for every input, and each is checked by a test below.
 //!
 //! - **Rust sources are parsed, not lexed by hand.** A use is a string literal
-//!   token whose value is `main`, outside every item that a test-only `cfg`
-//!   gates.
+//!   token whose value is `main`, outside every item, statement, match arm,
+//!   struct-literal field, field, variant or foreign item that a test-only
+//!   `cfg` gates.
 //! - **In a Vue component, only code is read:** the contents of `<script>`
-//!   blocks, and the template's expressions — directive and bound attribute
-//!   values, and `{{ … }}` interpolations. Template text, plain attributes and
-//!   HTML comments are not code.
+//!   blocks outside HTML comments, and the template's expressions — directive
+//!   and bound attribute values, and `{{ … }}` interpolations. Template text,
+//!   plain attributes and HTML comments are not code, and a commented-out
+//!   block or tag is not a block or a tag.
 //! - **In a TypeScript file, only code is read:** string literals outside
-//!   comments.
+//!   comments and outside template text. A template's `${ … }` is code; a `/`
+//!   that opens a regular-expression literal is read as one, not as the start
+//!   of a string.
 //! - **The scan always terminates and never panics.** Every offset it slices at
 //!   is a character boundary inside the text.
 use proc_macro2::{TokenStream, TokenTree};
@@ -44,9 +48,9 @@ const HOMES: [(&str, &str); 2] = [
 ];
 
 /// Production uses of `"main"` that are not about lines, each with the file's
-/// path from the repository root, text that must be on the literal's own line,
-/// and why the use is unrelated.
-const UNRELATED: [(&str, &str, &str); 7] = [
+/// path from the repository root, the expression or attribute that must span
+/// the literal on its own line, and why the use is unrelated.
+const UNRELATED: [(&str, &str, &str); 9] = [
     (
         "crates/dim-app-server/src/storage/sqlite.rs",
         "is_readonly(\"main\")",
@@ -69,15 +73,29 @@ const UNRELATED: [(&str, &str, &str); 7] = [
     ),
     (
         "web/src/features/chat/ComposerPanel.vue",
-        "variant",
-        "a layout variant",
+        ":data-variant=\"variant ?? 'main'\"",
+        "a layout variant's default",
+    ),
+    (
+        "web/src/features/chat/ComposerPanel.vue",
+        "variant?: \"main\" | \"panel\"",
+        "a layout variant's type",
     ),
     (
         "web/src/features/chat/TimelineView.vue",
-        "variant",
-        "a layout variant",
+        ":data-variant=\"variant ?? 'main'\"",
+        "a layout variant's default",
     ),
-    ("web/src/i18n", "\"lines.main\"", "the root line's label"),
+    (
+        "web/src/features/chat/TimelineView.vue",
+        "variant?: \"main\" | \"panel\"",
+        "a layout variant's type",
+    ),
+    (
+        "web/src/i18n",
+        "\"lines.main\": \"main\"",
+        "the root line's label",
+    ),
 ];
 
 /// Checks every production source under `root`. Each failure names the file,
@@ -98,21 +116,21 @@ pub fn check(root: &Path) -> Result<()> {
     }
 }
 
-/// The lines `text` uses the literal on, whose repository-relative path is
-/// `file`, by the rule its spelling earns; answers how many uses `UNRELATED`
-/// allows and adds every other use to `errors`. A Rust source the parser cannot
-/// read is an error naming the file: the rule fails closed rather than skipping
-/// a file it cannot see into.
+/// The uses `text` has, whose repository-relative path is `file`, by the rule a
+/// use earns; answers how many uses `UNRELATED` allows and adds every other use
+/// to `errors`. A Rust source the parser cannot read is an error naming the
+/// file: the rule fails closed rather than skipping a file it cannot see into.
 fn findings(file: &str, text: &str, errors: &mut Vec<String>) -> Result<usize> {
     let mut allowed = 0;
-    let lines = match uses(file, text) {
-        Ok(lines) => lines,
+    let offsets = match uses(file, text) {
+        Ok(offsets) => offsets,
         Err(error) => {
             errors.push(error.to_string());
             return Ok(0);
         }
     };
-    for line in lines {
+    for offset in offsets {
+        let line = line_at(text, offset);
         let source = text.lines().nth(line.saturating_sub(1)).unwrap_or_default();
         if names_the_id(file, source) {
             continue;
@@ -125,7 +143,7 @@ fn findings(file: &str, text: &str, errors: &mut Vec<String>) -> Result<usize> {
             ));
             continue;
         }
-        if unrelated(file, source) {
+        if unrelated(file, text, offset) {
             allowed += 1;
             continue;
         }
@@ -137,20 +155,14 @@ fn findings(file: &str, text: &str, errors: &mut Vec<String>) -> Result<usize> {
     Ok(allowed)
 }
 
-/// The 1-based lines of `text` that use the literal as code, by the file's
-/// spelling.
+/// The byte offsets of `text`'s `main` literals that are code, by the file's
+/// spelling. Each offset is the literal's opening quote.
 fn uses(file: &str, text: &str) -> Result<Vec<usize>> {
     let extension = file.rsplit_once('.').map_or("", |(_, extension)| extension);
     match extension {
         "rs" => rust_uses(file, text).map_err(Into::into),
-        "vue" => Ok(vue_uses(text)
-            .into_iter()
-            .map(|offset| line_at(text, offset))
-            .collect()),
-        _ => Ok(javascript_uses(text)
-            .into_iter()
-            .map(|offset| line_at(text, offset))
-            .collect()),
+        "vue" => Ok(vue_uses(text)),
+        _ => Ok(javascript_uses(text)),
     }
 }
 
@@ -199,11 +211,21 @@ fn declares(line: &str, spelling: &str) -> bool {
     })
 }
 
-/// Whether an allowlist entry covers the literal on `line` of `file`.
-fn unrelated(file: &str, line: &str) -> bool {
-    UNRELATED
-        .iter()
-        .any(|(path, text, _)| file.starts_with(path) && line.contains(text))
+/// Whether an allowlist entry covers the literal at `offset` in `text`: the
+/// entry's file must match, and one occurrence of its text on the literal's own
+/// line must span the literal's position. An entry names the expression or
+/// attribute that holds the literal, so a second literal on the same line is
+/// not covered by it.
+fn unrelated(file: &str, text: &str, offset: usize) -> bool {
+    let start = text[..offset].rfind('\n').map_or(0, |newline| newline + 1);
+    let line = text[start..].split('\n').next().unwrap_or_default();
+    let column = offset - start;
+    UNRELATED.iter().any(|(path, entry, _)| {
+        file.starts_with(path)
+            && line
+                .match_indices(entry)
+                .any(|(at, found)| at <= column && column < at + found.len())
+    })
 }
 
 /// Every production source the rule reads: each crate's `src`, and the Web
@@ -272,25 +294,25 @@ fn is_production(name: &str, kind: Kind) -> bool {
 
 // ---------------------------------------------------------------- Rust
 
-/// The 1-based lines of the `main` literals in `text` that are production.
+/// The byte offsets of the `main` literals in `text` that are production.
 fn rust_uses(file: &str, text: &str) -> std::result::Result<Vec<usize>, String> {
     let parsed = syn::parse_file(text).map_err(|error| {
         format!("{file}: the literal-main rule cannot parse this source: {error}")
     })?;
     let mut visitor = RustLiterals {
-        lines: Vec::new(),
+        offsets: Vec::new(),
         gated: false,
     };
     visitor.visit_file(&parsed);
-    Ok(visitor.lines)
+    Ok(visitor.offsets)
 }
 
-/// Collects the lines of the `main` literals that are production, and nothing
-/// from an item a test-only `cfg` gates. The gate is read from the parsed
-/// attributes, so a doc line that mentions `#[cfg(test)]` is not a gate: it is
-/// an attribute whose body is a doc string, and `cfg` is not its path.
+/// Collects the byte offsets of the `main` literals that are production, and
+/// nothing from an item a test-only `cfg` gates. The gate is read from the
+/// parsed attributes, so a doc line that mentions `#[cfg(test)]` is not a gate:
+/// it is an attribute whose body is a doc string, and `cfg` is not its path.
 struct RustLiterals {
-    lines: Vec<usize>,
+    offsets: Vec<usize>,
     /// Whether the node being visited is inside a test-only `cfg`, which every
     /// literal below it inherits.
     gated: bool,
@@ -342,6 +364,46 @@ impl<'ast> Visit<'ast> for RustLiterals {
         });
     }
 
+    fn visit_arm(&mut self, node: &'ast syn::Arm) {
+        gated(self, &node.attrs, |this, gated| {
+            if !gated {
+                syn::visit::visit_arm(this, node);
+            }
+        });
+    }
+
+    fn visit_field_value(&mut self, node: &'ast syn::FieldValue) {
+        gated(self, &node.attrs, |this, gated| {
+            if !gated {
+                syn::visit::visit_field_value(this, node);
+            }
+        });
+    }
+
+    fn visit_field(&mut self, node: &'ast syn::Field) {
+        gated(self, &node.attrs, |this, gated| {
+            if !gated {
+                syn::visit::visit_field(this, node);
+            }
+        });
+    }
+
+    fn visit_variant(&mut self, node: &'ast syn::Variant) {
+        gated(self, &node.attrs, |this, gated| {
+            if !gated {
+                syn::visit::visit_variant(this, node);
+            }
+        });
+    }
+
+    fn visit_foreign_item(&mut self, node: &'ast syn::ForeignItem) {
+        gated(self, foreign_item_attributes(node), |this, gated| {
+            if !gated {
+                syn::visit::visit_foreign_item(this, node);
+            }
+        });
+    }
+
     fn visit_attribute(&mut self, _: &'ast syn::Attribute) {
         // A doc comment is an attribute holding text, and a doc line that
         // writes `"main"` in an example is documentation, not a use.
@@ -349,13 +411,13 @@ impl<'ast> Visit<'ast> for RustLiterals {
 
     fn visit_lit_str(&mut self, node: &'ast syn::LitStr) {
         if !self.gated && node.value() == "main" {
-            self.lines.push(node.span().start().line);
+            self.offsets.push(node.span().byte_range().start);
         }
     }
 
     fn visit_macro(&mut self, node: &'ast syn::Macro) {
         if !self.gated {
-            self.lines.extend(macro_literals(&node.tokens));
+            self.offsets.extend(macro_offsets(&node.tokens));
         }
         syn::visit::visit_macro(self, node);
     }
@@ -405,11 +467,71 @@ fn trait_item_attributes(item: &syn::TraitItem) -> &[syn::Attribute] {
     }
 }
 
-/// The attributes a statement may carry.
+/// The attributes a foreign item may carry.
+fn foreign_item_attributes(item: &syn::ForeignItem) -> &[syn::Attribute] {
+    match item {
+        syn::ForeignItem::Fn(item) => &item.attrs,
+        syn::ForeignItem::Static(item) => &item.attrs,
+        syn::ForeignItem::Type(item) => &item.attrs,
+        syn::ForeignItem::Macro(item) => &item.attrs,
+        _ => &[],
+    }
+}
+
+/// The attributes a statement may carry: an item's, a local's, a macro
+/// statement's, or the expression's own.
 fn stmt_attributes(statement: &syn::Stmt) -> &[syn::Attribute] {
     match statement {
         syn::Stmt::Item(item) => item_attributes(item),
-        syn::Stmt::Local(local) => &local.attrs,
+        syn::Stmt::Local(item) => &item.attrs,
+        syn::Stmt::Macro(item) => &item.attrs,
+        syn::Stmt::Expr(item, _) => expr_attributes(item),
+    }
+}
+
+/// The outer attributes an expression may carry, whichever expression it is.
+fn expr_attributes(expression: &syn::Expr) -> &[syn::Attribute] {
+    match expression {
+        syn::Expr::Array(item) => &item.attrs,
+        syn::Expr::Assign(item) => &item.attrs,
+        syn::Expr::Async(item) => &item.attrs,
+        syn::Expr::Await(item) => &item.attrs,
+        syn::Expr::Binary(item) => &item.attrs,
+        syn::Expr::Block(item) => &item.attrs,
+        syn::Expr::Break(item) => &item.attrs,
+        syn::Expr::Call(item) => &item.attrs,
+        syn::Expr::Cast(item) => &item.attrs,
+        syn::Expr::Closure(item) => &item.attrs,
+        syn::Expr::Const(item) => &item.attrs,
+        syn::Expr::Continue(item) => &item.attrs,
+        syn::Expr::Field(item) => &item.attrs,
+        syn::Expr::ForLoop(item) => &item.attrs,
+        syn::Expr::Group(item) => &item.attrs,
+        syn::Expr::If(item) => &item.attrs,
+        syn::Expr::Index(item) => &item.attrs,
+        syn::Expr::Infer(item) => &item.attrs,
+        syn::Expr::Let(item) => &item.attrs,
+        syn::Expr::Lit(item) => &item.attrs,
+        syn::Expr::Loop(item) => &item.attrs,
+        syn::Expr::Macro(item) => &item.attrs,
+        syn::Expr::Match(item) => &item.attrs,
+        syn::Expr::MethodCall(item) => &item.attrs,
+        syn::Expr::Paren(item) => &item.attrs,
+        syn::Expr::Path(item) => &item.attrs,
+        syn::Expr::Range(item) => &item.attrs,
+        syn::Expr::RawAddr(item) => &item.attrs,
+        syn::Expr::Reference(item) => &item.attrs,
+        syn::Expr::Repeat(item) => &item.attrs,
+        syn::Expr::Return(item) => &item.attrs,
+        syn::Expr::Struct(item) => &item.attrs,
+        syn::Expr::Try(item) => &item.attrs,
+        syn::Expr::TryBlock(item) => &item.attrs,
+        syn::Expr::Tuple(item) => &item.attrs,
+        syn::Expr::Unary(item) => &item.attrs,
+        syn::Expr::Unsafe(item) => &item.attrs,
+        syn::Expr::While(item) => &item.attrs,
+        syn::Expr::Yield(item) => &item.attrs,
+        syn::Expr::Verbatim(_) => &[],
         _ => &[],
     }
 }
@@ -458,25 +580,25 @@ fn test_only_meta(meta: &syn::Meta) -> bool {
     }
 }
 
-/// The 1-based lines of the `main` literals in a macro's tokens, read through
-/// the same parser a source literal goes through: `json!({"branchId": "main"})`
-/// and a `format!` argument are uses like any other.
-fn macro_literals(tokens: &TokenStream) -> Vec<usize> {
+/// The byte offsets of the `main` literals in a macro's tokens, read through the
+/// same parser a source literal goes through: `json!({"branchId": "main"})` and
+/// a `format!` argument are uses like any other.
+fn macro_offsets(tokens: &TokenStream) -> Vec<usize> {
     tokens
         .clone()
         .into_iter()
         .flat_map(|tree| match tree {
             TokenTree::Literal(literal) => {
                 // The value comes from a parse of the token's text, which is a
-                // new span; the line comes from the token itself, which is the
-                // one the source wrote.
+                // new span; the position comes from the token itself, which is
+                // the one the source wrote.
                 let value = syn::parse_str::<syn::LitStr>(&literal.to_string());
                 match value.is_ok_and(|literal| literal.value() == "main") {
-                    true => vec![literal.span().start().line],
+                    true => vec![literal.span().byte_range().start],
                     false => Vec::new(),
                 }
             }
-            TokenTree::Group(group) => macro_literals(&group.stream()),
+            TokenTree::Group(group) => macro_offsets(&group.stream()),
             _ => Vec::new(),
         })
         .collect()
@@ -507,23 +629,88 @@ fn vue_uses(text: &str) -> Vec<usize> {
     found
 }
 
-/// The byte range of each `<script …>` block in `text`.
-fn script_blocks(text: &str) -> Vec<std::ops::Range<usize>> {
+/// The kind of a top-level block a Vue component may hold.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Block {
+    Script,
+    Template,
+}
+
+/// Each top-level `<script …>` and `<template …>` block in `text`, with its
+/// content's byte range, found in one pass that skips an HTML comment whole
+/// before it looks for a tag: a commented-out block is markup, not code. A
+/// block's own content is not scanned for a tag, so a `<script>` written in
+/// markup is not a block either.
+fn blocks(text: &str) -> Vec<(Block, std::ops::Range<usize>)> {
     let mut blocks = Vec::new();
     let mut at = 0;
-    while let Some(found) = text[at..].find("<script") {
-        let open = at + found;
-        let Some(close) = text[open..].find('>') else {
+    while let Some(character) = text[at..].chars().next() {
+        let rest = &text[at..];
+        if rest.starts_with("<!--") {
+            // `<!--` and `-->` are ASCII, so the offset past them is a boundary.
+            at = match rest.find("-->") {
+                Some(end) => at + end + 3,
+                None => text.len(),
+            };
+            continue;
+        }
+        let kind = match tag_at(rest) {
+            Some(kind) => kind,
+            None => {
+                at += character.len_utf8();
+                continue;
+            }
+        };
+        let Some(close) = rest.find('>') else {
             break;
         };
-        let start = open + close + 1;
-        let end = text[start..]
-            .find("</script>")
-            .map_or(text.len(), |end| start + end);
-        blocks.push(start..end);
-        at = end;
+        let start = at + close + 1;
+        let (end, next) = match kind {
+            Block::Script => {
+                let end = text[start..]
+                    .find("</script>")
+                    .map_or(text.len(), |end| start + end);
+                (end, (end + "</script>".len()).min(text.len()))
+            }
+            Block::Template => match text[start..].rfind("</template>") {
+                Some(end) => (
+                    start + end,
+                    (start + end + "</template>".len()).min(text.len()),
+                ),
+                // An unclosed `<template>` is not an element: skip its tag and
+                // keep looking for a block.
+                None => {
+                    at = start;
+                    continue;
+                }
+            },
+        };
+        blocks.push((kind, start..end));
+        at = next;
     }
     blocks
+}
+
+/// The kind of block the tag at the start of `rest` opens, `None` when `rest`
+/// opens neither.
+fn tag_at(rest: &str) -> Option<Block> {
+    for (tag, kind) in [("<script", Block::Script), ("<template", Block::Template)] {
+        if rest.strip_prefix(tag).is_some_and(|after| {
+            after.is_empty()
+                || after.starts_with(|c: char| c.is_ascii_whitespace() || matches!(c, '>' | '/'))
+        }) {
+            return Some(kind);
+        }
+    }
+    None
+}
+
+/// The byte range of each `<script …>` block in `text`.
+fn script_blocks(text: &str) -> Vec<std::ops::Range<usize>> {
+    blocks(text)
+        .into_iter()
+        .filter_map(|(kind, block)| (kind == Block::Script).then_some(block))
+        .collect()
 }
 
 /// The byte ranges of a component's template expressions: the values of its
@@ -539,10 +726,9 @@ fn expression_values(text: &str) -> Vec<std::ops::Range<usize>> {
 /// The range of `text`'s `<template>` element's content, `None` when it has
 /// none.
 fn template_body(text: &str) -> Option<std::ops::Range<usize>> {
-    let open = text.find("<template")?;
-    let start = open + text[open..].find('>')? + 1;
-    let end = text[start..].rfind("</template>")?;
-    Some(start..start + end)
+    blocks(text)
+        .into_iter()
+        .find_map(|(kind, block)| (kind == Block::Template).then_some(block))
 }
 
 /// The byte ranges of `text`'s `{{ … }}` interpolations, skipping HTML
@@ -705,24 +891,101 @@ fn tag_attributes(
 }
 
 /// The byte offsets of the `main` literals in a JavaScript or TypeScript
-/// `text`, outside its comments. Every offset is the opening quote of the
-/// literal, which is a boundary.
+/// `text`, outside its comments and its template text. Every offset is the
+/// opening quote of the literal, which is a boundary.
 fn javascript_uses(text: &str) -> Vec<usize> {
     let mut found = Vec::new();
+    code(text, false, &mut found);
+    found
+}
+
+/// The keywords after which a `/` begins a regular-expression literal rather
+/// than dividing: each cannot end an expression.
+const KEYWORDS: [&str; 14] = [
+    "await",
+    "case",
+    "delete",
+    "do",
+    "else",
+    "in",
+    "instanceof",
+    "new",
+    "of",
+    "return",
+    "throw",
+    "typeof",
+    "void",
+    "yield",
+];
+
+/// Reads `text` as code, pushing into `found` the offset of every `main`
+/// literal, and answers how many bytes it read: all of `text`, or, when `brace`
+/// is set, the bytes up to and including the `}` that closes the `${ … }` it
+/// reads for.
+///
+/// A string's text is not code, and neither is a template's; a template's
+/// `${ … }` is, and is read by this same function, so an interpolation can nest
+/// braces, strings, comments, templates and regular-expression literals. A `/`
+/// begins a regular-expression literal when the token before it cannot end an
+/// expression, and divides otherwise. Every branch moves the scan forward, and a
+/// literal that never closes runs to the end of `text`, so the scan always ends.
+fn code(text: &str, brace: bool, found: &mut Vec<usize>) -> usize {
     let mut at = 0;
+    let mut depth = 0usize;
+    let mut expression = true;
     while let Some(character) = text[at..].chars().next() {
+        let next = at + character.len_utf8();
         if let Some(length) = comment(text, at) {
             at = (at + length).min(text.len());
-        } else if let Some((offset, length)) = quoted(text, at) {
-            if text[at + 1..at + 1 + offset] == *"main" {
+        } else if let Some((body, length)) = string(text, at) {
+            if text[at + 1..at + 1 + body] == *"main" {
                 found.push(at);
             }
             at = (at + length).min(text.len());
+            expression = false;
+        } else if character == '`' {
+            at = (at + template(text, at, found)).min(text.len());
+            expression = false;
+        } else if character == '/' && expression {
+            match regex(text, at) {
+                Some(length) => {
+                    at = (at + length).min(text.len());
+                    expression = false;
+                }
+                None => {
+                    at = next;
+                    expression = true;
+                }
+            }
+        } else if character == '{' {
+            depth += 1;
+            at = next;
+            expression = true;
+        } else if character == '}' && brace && depth == 0 {
+            return next;
+        } else if character == '}' {
+            depth = depth.saturating_sub(1);
+            at = next;
+            expression = false;
+        } else if matches!(character, ')' | ']') {
+            at = next;
+            expression = false;
+        } else if character.is_alphanumeric() || matches!(character, '_' | '$' | '.') {
+            let mut end = next;
+            while let Some(character) = text[end..].chars().next() {
+                if !(character.is_alphanumeric() || matches!(character, '_' | '$' | '.')) {
+                    break;
+                }
+                end += character.len_utf8();
+            }
+            expression = KEYWORDS.contains(&&text[at..end]);
+            at = end;
         } else {
-            at += character.len_utf8();
+            at = next;
+            expression = true;
         }
     }
-    found
+    at
 }
 
 /// The length of the comment that starts at `at`, `None` when one does not.
@@ -735,16 +998,13 @@ fn comment(text: &str, at: usize) -> Option<usize> {
     Some(2 + body.find("*/").map_or(body.len(), |end| end + 2))
 }
 
-/// The string literal that starts at `at`, as the bytes between its quotes and
-/// its whole length, `None` when one does not start there. `'…'`, `"…"` and
-/// `` `…` `` are read; a backslash quotes the character after it, so `"\""` is
-/// one literal rather than two.
-fn quoted(text: &str, at: usize) -> Option<(usize, usize)> {
+/// The string literal that starts at `at`, as the byte length of its body and
+/// of the whole literal, `None` when one does not start there. `'…'` and `"…"`
+/// are read; a backslash quotes the character after it, so `"\""` is one
+/// literal rather than two.
+fn string(text: &str, at: usize) -> Option<(usize, usize)> {
     let rest = text.get(at..)?;
-    let quote = rest
-        .chars()
-        .next()
-        .filter(|q| matches!(q, '\'' | '"' | '`'))?;
+    let quote = rest.chars().next().filter(|q| matches!(q, '\'' | '"'))?;
     let body = &rest[quote.len_utf8()..];
     let mut characters = body.char_indices();
     while let Some((offset, character)) = characters.next() {
@@ -755,6 +1015,82 @@ fn quoted(text: &str, at: usize) -> Option<(usize, usize)> {
         }
     }
     Some((body.len(), body.len() + quote.len_utf8()))
+}
+
+/// The length of the template literal that starts with the backtick at `at`,
+/// reading each `${ … }` of its text as code and pushing the literals found
+/// there into `found`. The text between interpolations is not code, so a
+/// template with no interpolation is a use only when its whole text is `main`,
+/// as a string would be. A template that never closes runs to the end of `text`.
+fn template(text: &str, at: usize, found: &mut Vec<usize>) -> usize {
+    let mut cursor = at + 1;
+    let mut interpolated = false;
+    while let Some(character) = text[cursor..].chars().next() {
+        match character {
+            '`' => {
+                if !interpolated && &text[at + 1..cursor] == "main" {
+                    found.push(at);
+                }
+                return cursor + 1 - at;
+            }
+            '\\' => {
+                cursor += 1;
+                if let Some(escaped) = text[cursor..].chars().next() {
+                    cursor += escaped.len_utf8();
+                }
+            }
+            '$' if text
+                .get(cursor + 1..)
+                .is_some_and(|rest| rest.starts_with('{')) =>
+            {
+                interpolated = true;
+                let open = cursor + 2;
+                let mut nested = Vec::new();
+                let length = code(&text[open..], true, &mut nested);
+                found.extend(nested.into_iter().map(|offset| offset + open));
+                cursor = open + length;
+            }
+            _ => cursor += character.len_utf8(),
+        }
+    }
+    text.len() - at
+}
+
+/// The length of the regular-expression literal that starts with the `/` at
+/// `at`, `None` when no literal starts there. The body ends at an unescaped `/`
+/// outside a `[...]` class and cannot cross a line, so a `/` with neither is
+/// division. A literal's flags follow its closing `/`.
+fn regex(text: &str, at: usize) -> Option<usize> {
+    let mut cursor = at + 1;
+    let mut class = false;
+    while let Some(character) = text[cursor..].chars().next() {
+        match character {
+            '\n' | '\r' => return None,
+            '\\' => {
+                cursor += 1;
+                if let Some(escaped) = text[cursor..].chars().next() {
+                    cursor += escaped.len_utf8();
+                }
+                continue;
+            }
+            '[' => class = true,
+            ']' => class = false,
+            '/' if !class => {
+                cursor += 1;
+                while let Some(flag) = text[cursor..]
+                    .chars()
+                    .next()
+                    .filter(|character| character.is_alphanumeric())
+                {
+                    cursor += flag.len_utf8();
+                }
+                return Some(cursor - at);
+            }
+            _ => {}
+        }
+        cursor += character.len_utf8();
+    }
+    None
 }
 
 #[cfg(test)]
@@ -949,6 +1285,77 @@ mod tests {
     }
 
     #[test]
+    fn a_gated_statement_macro_is_not_code_and_an_ungated_one_is() {
+        let errors = rust_findings(
+            "fn production() {\n    #[cfg(test)]\n    assert_eq!(id(), \"main\");\n}\n",
+        );
+        assert!(errors.is_empty(), "{errors:?}");
+        let errors = rust_findings("fn production() {\n    assert_eq!(id(), \"main\");\n}\n");
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(
+            errors[0].contains("crates/example/src/lib.rs:2: `\"main\"` names neither"),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn a_gated_expression_statement_is_not_code() {
+        let errors =
+            rust_findings("fn production() {\n    #[cfg(test)]\n    { let _ = \"main\"; }\n}\n");
+        assert!(errors.is_empty(), "{errors:?}");
+        let errors = rust_findings("fn production() {\n    { let _ = \"main\"; }\n}\n");
+        assert_eq!(errors.len(), 1, "{errors:?}");
+    }
+
+    #[test]
+    fn a_gated_match_arm_is_not_code_and_an_ungated_one_is() {
+        let gated = "fn production(line: Option<u8>) -> &'static str {\n    match line {\n        #[cfg(test)]\n        Some(_) => \"main\",\n        None => \"other\",\n    }\n}\n";
+        let errors = rust_findings(gated);
+        assert!(errors.is_empty(), "{errors:?}");
+        let ungated = "fn production(line: Option<u8>) -> &'static str {\n    match line {\n        Some(_) => \"main\",\n        None => \"other\",\n    }\n}\n";
+        let errors = rust_findings(ungated);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(
+            errors[0].contains("crates/example/src/lib.rs:3: `\"main\"` names neither"),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn a_gated_struct_literal_field_is_not_code() {
+        let errors = rust_findings(
+            "struct S { name: &'static str }\n\nfn production() -> S {\n    S {\n        #[cfg(test)]\n        name: \"main\",\n    }\n}\n",
+        );
+        assert!(errors.is_empty(), "{errors:?}");
+    }
+
+    #[test]
+    fn a_gated_field_variant_and_foreign_item_are_not_code() {
+        let gated = "struct S {\n    #[cfg(test)]\n    name: [u8; \"main\".len()],\n}\n\nenum E {\n    #[cfg(test)]\n    A([u8; \"main\".len()]),\n}\n\nextern \"C\" {\n    #[cfg(test)]\n    fn ext(name: [u8; \"main\".len()]);\n}\n";
+        let errors = rust_findings(gated);
+        assert!(errors.is_empty(), "{errors:?}");
+        let ungated = "struct S {\n    name: [u8; \"main\".len()],\n}\n";
+        let errors = rust_findings(ungated);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+    }
+
+    #[test]
+    fn a_commented_out_script_is_markup_and_the_real_script_is_code() {
+        let errors = vue_findings(
+            "<!-- <script>const x = \"main\"</script> -->\n<script setup>\nconst id = ROOT_BRANCH_ID\n</script>\n<template><p>hello</p></template>\n",
+        );
+        assert!(errors.is_empty(), "{errors:?}");
+        let errors = vue_findings(
+            "<!-- <script>const x = 1</script> -->\n<script setup>\nconst id = \"main\"\n</script>\n<template><p>hello</p></template>\n",
+        );
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(
+            errors[0].contains("LinesTree.vue:3: `\"main\"` names neither"),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
     fn a_main_in_a_directive_expression_is_refused_with_its_line() {
         for (text, expected) in [
             (
@@ -1024,6 +1431,30 @@ mod tests {
             "crates/example/src/lib.rs",
             "#[cfg(test)]\nmod tests {\n    fn a() { let _ = json!({\"branchId\": \"main\"}); }\n}\n",
         ),
+        (
+            "crates/example/src/lib.rs",
+            "fn production() {\n    #[cfg(test)]\n    assert_eq!(id(), \"main\");\n}\n",
+        ),
+        (
+            "crates/example/src/lib.rs",
+            "fn production() {\n    #[cfg(test)]\n    { let _ = \"main\"; }\n}\n",
+        ),
+        (
+            "crates/example/src/lib.rs",
+            "fn production(line: Option<u8>) -> &'static str {\n    match line {\n        #[cfg(test)]\n        Some(_) => \"main\",\n        None => \"other\",\n    }\n}\n",
+        ),
+        (
+            "crates/example/src/lib.rs",
+            "struct S { name: &'static str }\nfn production() -> S {\n    S {\n        #[cfg(test)]\n        name: \"main\",\n    }\n}\n",
+        ),
+        (
+            "crates/example/src/lib.rs",
+            "struct S {\n    #[cfg(test)]\n    name: [u8; \"main\".len()],\n}\n\nenum E {\n    #[cfg(test)]\n    A([u8; \"main\".len()]),\n}\n\nextern \"C\" {\n    #[cfg(test)]\n    fn ext(name: [u8; \"main\".len()]);\n}\n",
+        ),
+        (
+            "web/src/a.vue",
+            "<!-- <script>const x = \"main\"</script> -->\n<script setup>\nconst id = ROOT_BRANCH_ID\n</script>\n<template><p>hello</p></template>\n",
+        ),
         ("web/src/a.vue", "<template>{{ 1 < 2 }}</template>"),
         ("web/src/a.vue", "<template>{{ a <b }}</template>"),
         ("web/src/a.vue", "<template>x <</template>"),
@@ -1070,6 +1501,28 @@ mod tests {
             "const a = 'main', b = `main`, c = \"main\"\n",
         ),
         ("web/src/a.ts", "const a = \"unterminated\n"),
+        ("web/src/a.ts", "const label = `${line ?? 'main'}`\n"),
+        ("web/src/a.ts", "const label = `main is ${x}`\n"),
+        (
+            "web/src/a.ts",
+            "const label = `a ${ `b ${ f('main') }` }`\n",
+        ),
+        ("web/src/a.ts", "const label = `a ${ `b` + 'main' }`\n"),
+        (
+            "web/src/a.ts",
+            "const trimQuote = /'/g\nconst id = 'main'\n",
+        ),
+        ("web/src/a.ts", "const re = /[/']/\nconst id = 'main'\n"),
+        ("web/src/a.ts", "const r = a / b; const id = 'main'\n"),
+        ("web/src/a.ts", "return /'/.test(x) ? y : 'main'\n"),
+        (
+            "web/src/features/chat/TimelineView.vue",
+            "<template>\n  <div :data-variant=\"variant\" @click=\"openLine('main')\"></div>\n</template>\n",
+        ),
+        (
+            "crates/dim-app-server/src/storage/sqlite.rs",
+            "fn check(connection: &Connection) {\n    if let Ok(false) = connection.is_readonly(\"main\") { let b = \"main\"; }\n}\n",
+        ),
     ];
 
     #[test]
@@ -1196,5 +1649,86 @@ mod tests {
         assert_eq!(errors.len(), 1, "{errors:?}");
         let errors = bounded("web/src/a.ts", "// \"main\"\n/* \"main\" */\n");
         assert!(errors.is_empty(), "{errors:?}");
+    }
+
+    #[test]
+    fn a_template_interpolation_is_code_and_its_text_is_not() {
+        let errors = bounded("web/src/a.ts", "const label = `${line ?? 'main'}`\n");
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(
+            errors[0].contains("web/src/a.ts:1: `\"main\"` names neither"),
+            "{errors:?}"
+        );
+        let errors = bounded("web/src/a.ts", "const label = `main is ${x}`\n");
+        assert!(errors.is_empty(), "{errors:?}");
+    }
+
+    #[test]
+    fn a_template_whose_whole_text_is_the_literal_is_one() {
+        let errors = bounded("web/src/a.ts", "const id = `main`\n");
+        assert_eq!(errors.len(), 1, "{errors:?}");
+    }
+
+    #[test]
+    fn a_nested_template_interpolation_is_code() {
+        let errors = bounded(
+            "web/src/a.ts",
+            "const label = `a ${ `b ${ f('main') }` }`\n",
+        );
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(
+            errors[0].contains("web/src/a.ts:1: `\"main\"` names neither"),
+            "{errors:?}"
+        );
+        let errors = bounded("web/src/a.ts", "const label = `a ${ `b` + 'main' }`\n");
+        assert_eq!(errors.len(), 1, "{errors:?}");
+    }
+
+    #[test]
+    fn a_quote_in_a_regex_does_not_open_a_string() {
+        let errors = bounded(
+            "web/src/a.ts",
+            "const trimQuote = /'/g\nconst id = 'main'\n",
+        );
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(
+            errors[0].contains("web/src/a.ts:2: `\"main\"` names neither"),
+            "{errors:?}"
+        );
+        let errors = bounded("web/src/a.ts", "const re = /[/']/\nconst id = 'main'\n");
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(
+            errors[0].contains("web/src/a.ts:2: `\"main\"` names neither"),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn a_slash_that_divides_is_not_a_regex_literal() {
+        let errors = bounded("web/src/a.ts", "const r = a / b; const id = 'main'\n");
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        let errors = bounded("web/src/a.ts", "return /'/.test(x) ? y : 'main'\n");
+        assert_eq!(errors.len(), 1, "{errors:?}");
+    }
+
+    #[test]
+    fn an_allowlist_entry_covers_only_the_literal_it_spans() {
+        let codoggys = "<template>\n  <div :data-variant=\"variant\" @click=\"openLine('main')\"></div>\n</template>\n";
+        let errors = bounded("web/src/features/chat/TimelineView.vue", codoggys);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(
+            errors[0].contains("TimelineView.vue:2: `\"main\"` names neither"),
+            "{errors:?}"
+        );
+        let real = "<template>\n  <div :data-variant=\"variant ?? 'main'\"></div>\n</template>\n";
+        let errors = bounded("web/src/features/chat/TimelineView.vue", real);
+        assert!(errors.is_empty(), "{errors:?}");
+        let both = "fn check(connection: &Connection) {\n    if let Ok(false) = connection.is_readonly(\"main\") { let b = \"main\"; }\n}\n";
+        let errors = bounded("crates/dim-app-server/src/storage/sqlite.rs", both);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(
+            errors[0].contains("storage/sqlite.rs:2: `\"main\"` names neither"),
+            "{errors:?}"
+        );
     }
 }

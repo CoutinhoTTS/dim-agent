@@ -19,6 +19,7 @@ import tempfile
 from contextlib import ExitStack
 sys.path.insert(0, sys.argv[1])
 import build
+import elf
 from train import begin, finish, terminate, tui
 
 with tempfile.TemporaryDirectory(prefix='dim-layout-test-') as temporary:
@@ -48,7 +49,8 @@ int main(void) { printf("%d\\n", first() + second() + shared_name() + discarded_
     record = {'compiler':'cc', 'arguments':['-B'+str(linker_dir), '-fuse-ld=lld', str(obj),
               str(spare), '-Wl,--gc-sections', '-Wl,--no-as-needed', str(library), '-Wl,--as-needed', '-o', str(base)],
               'cwd':str(root), 'path':os.environ['PATH']}
-    build.relink(record, base)
+    base_map = root / 'base.map'
+    build.relink(record, base, map_path=base_map)
     original = build.symbols(base)
     order = root / 'order'
     order.write_text('second\nfirst_alias\nfirst\nmain\n')
@@ -59,9 +61,9 @@ int main(void) { printf("%d\\n", first() + second() + shared_name() + discarded_
     addresses = {n:s for s,e,n in reordered}
     assert addresses['second'] < addresses['first'] < addresses['main']
     assert addresses['first_alias'] == addresses['first']
-    assert build.validate_layout(base, changed, order)['movedFunctionSymbols'] > 0
+    assert build.validate_layout(base, changed, order.read_text().split())['movedFunctionSymbols'] > 0
     try:
-        build.validate_layout(base, base, order)
+        build.validate_layout(base, base, order.read_text().split())
     except RuntimeError as error:
         assert 'do not follow' in str(error)
     else:
@@ -69,7 +71,7 @@ int main(void) { printf("%d\\n", first() + second() + shared_name() + discarded_
     unchanged_order = root / 'unchanged.order'
     unchanged_order.write_text('\n'.join(n for _,_,n in original if n in ('first','second','main'))+'\n')
     try:
-        build.validate_layout(base, base, unchanged_order)
+        build.validate_layout(base, base, unchanged_order.read_text().split())
     except RuntimeError as error:
         assert 'moved no selected' in str(error)
     else:
@@ -85,7 +87,7 @@ int main(void) { printf("%d\\n", first() + second() + shared_name() + discarded_
         profile = root / 'lifecycle.smaps'
         finish(process, profile)
         assert process.stdout.read() == b'42\n'
-        measurement = build.order(base, [profile,profile,profile], root/'trained.order')
+        measurement = build.order(base, base_map, [profile,profile,profile], root/'trained.order')
         assert measurement['orderedFunctions'] > 0
         trained = root / 'trained'
         build.ordered_link(record, trained, root/'trained.order')
@@ -167,7 +169,8 @@ fn main() { let x = std::hint::black_box(0); println!("{}", layout_first(x) + la
     build.REPO = project
     recorded = build.cargo_link(capture, shutil.which('cc'), 2)
     rust_base = root / 'rust-base'
-    build.relink(recorded, rust_base)
+    rust_base_map = root / 'rust-base.map'
+    build.relink(recorded, rust_base, map_path=rust_base_map)
     assert build.digest(rust_base) == build.digest(Path(recorded['output']))
     rust_names = [name for _,_,name in build.symbols(rust_base) if name in ('layout_first','layout_second')]
     assert len(rust_names) == 2
@@ -175,8 +178,60 @@ fn main() { let x = std::hint::black_box(0); println!("{}", layout_first(x) + la
     rust_order.write_text('\n'.join(reversed(rust_names))+'\n')
     rust_changed = root / 'rust-changed'
     build.ordered_link(recorded, rust_changed, rust_order)
-    assert build.validate_layout(rust_base, rust_changed, rust_order)['movedFunctionSymbols'] > 0
+    assert build.validate_layout(rust_base, rust_changed, rust_order.read_text().split())['movedFunctionSymbols'] > 0
     assert subprocess.check_output([str(rust_base)]) == subprocess.check_output([str(rust_changed)]) == b'42\n'
+
+    coupled_order = root / 'coupled.order'
+    paired_source, alone_source = root / 'paired.c', root / 'alone.c'
+    paired_source.write_text('''__attribute__((noinline, aligned(4096))) int coupled_low(void) { return 1; }
+__attribute__((noinline, aligned(4096))) int coupled_high(void) { return 2; }
+''')
+    alone_source.write_text(
+        '__attribute__((noinline, aligned(4096))) int alone(void) { return 3; }\n')
+    entry_source = root / 'entry.c'
+    entry_source.write_text('''extern int coupled_low(void), coupled_high(void), alone(void);
+__attribute__((aligned(4096))) int main(void) {
+  return coupled_low() + coupled_high() + alone();
+}
+''')
+    paired_obj, alone_obj, entry_obj = root / 'paired.o', root / 'alone.o', root / 'entry.o'
+    for name, output in (('paired', paired_obj), ('alone', alone_obj), ('entry', entry_obj)):
+        subprocess.run(['cc', '-O0', '-c', str(root / f'{name}.c'), '-o', str(output)], check=True)
+    coupled_base, coupled_map = root / 'coupled-base', root / 'coupled.map'
+    coupled_record = {'compiler': 'cc', 'arguments': [
+        '-B'+str(linker_dir), '-fuse-ld=lld', str(paired_obj), str(alone_obj), str(entry_obj),
+        '-Wl,--gc-sections', '-o', str(root / 'coupled-cargo')],
+        'cwd': str(root), 'path': os.environ['PATH']}
+    build.relink(coupled_record, coupled_base, map_path=coupled_map)
+    chunk_of = {name: chunk for chunk, names in elf.input_sections(coupled_map)
+                for name in names}
+    assert chunk_of['coupled_low'] == chunk_of['coupled_high'], (
+        'a translation unit built without -ffunction-sections shares one .text chunk')
+    addresses = {name: start for start, _, name in build.symbols(coupled_base)}
+    for flow, name in (('startup', 'coupled_high'), ('tui', 'coupled_low'),
+                       ('conversation', 'alone')):
+        at = addresses[name]
+        (root / f'{flow}.pages').write_text(
+            f'{0x200000 + at:x}-{0x200000 + at + 4096:x} r-xp {at:08x} 08:01 1 {coupled_base}\n'
+            'Referenced: 4 kB\n')
+    build.order(coupled_base, coupled_map,
+                [root / f'{flow}.pages' for flow in ('startup', 'tui', 'conversation')],
+                coupled_order)
+    ordered = coupled_order.read_text().split()
+    coupled_names = [name for name in ordered if name.startswith('coupled_')]
+    assert coupled_names == sorted(coupled_names, key=addresses.__getitem__), (
+        'training ranks the shared chunk in reverse address order, so the order file must'
+        ' keep the chunk together for one link to satisfy it')
+    split_order = root / 'split.order'
+    split_order.write_text('\n'.join(['coupled_high', 'coupled_low', 'alone']) + '\n')
+    split_candidate = root / 'split-candidate'
+    linked = build.ordered_link(coupled_record, split_candidate, split_order)[0]
+    try:
+        build.validate_layout(coupled_base, split_candidate, linked)
+    except RuntimeError as error:
+        assert 'do not follow' in str(error)
+    else:
+        raise AssertionError('an order that splits a shared .text chunk must not pass acceptance')
 
     selected_sysroot = root / 'selected-toolchain'
     selected_sysroot.symlink_to(sysroot, target_is_directory=True)

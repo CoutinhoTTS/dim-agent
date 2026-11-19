@@ -8,14 +8,9 @@ from collections import Counter
 PRIORITY = {mask: index for index, mask in enumerate([7, 3, 5, 1, 6, 2, 4])}
 
 
-def select(functions, pages, page_size):
-    """Return ordered unique names whose extent intersects an observed page.
-
-    ``functions`` are ``(start, end, name)`` with addresses relative to the
-    page-aligned code base; ``pages`` are sorted page indices in that base.
-    Original address order is kept within each usage group.
-    """
-    selected = []
+def ranks(functions, pages, page_size):
+    """Return ``(priority, start, name)`` for functions touching an observed page."""
+    ranked = []
     for start, end, name in functions:
         mask = sum(
             1 << index
@@ -24,10 +19,21 @@ def select(functions, pages, page_size):
             < bisect.bisect_left(used, (end + page_size - 1) // page_size)
         )
         if mask:
-            selected.append((PRIORITY[mask], start, name))
-    if not selected:
+            ranked.append((PRIORITY[mask], start, name))
+    if not ranked:
         raise ValueError("training selected no linkable functions")
-    return list(dict.fromkeys(name for _, _, name in sorted(selected)))
+    return sorted(ranked)
+
+
+def select(functions, pages, page_size):
+    """Return ordered unique names whose extent intersects an observed page.
+
+    ``functions`` are ``(start, end, name)`` with addresses relative to the
+    page-aligned code base; ``pages`` are sorted page indices in that base.
+    Original address order is kept within each usage group.
+    """
+    ranked = ranks(functions, pages, page_size)
+    return list(dict.fromkeys(name for _, _, name in ranked))
 
 
 def unique_functions(functions):

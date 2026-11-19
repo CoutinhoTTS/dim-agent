@@ -5460,6 +5460,9 @@
       "unexpandedMacros": [
         "assert",
         "assert_eq",
+        "assert_ne",
+        "format",
+        "panic",
         "vec"
       ]
     },
@@ -44066,6 +44069,13 @@
     },
     {
       "from": "dim_cli::ui::composer::palette::tests",
+      "to": "dim_cli::ui::rows",
+      "references": [
+        "path Kind::Command"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::composer::palette::tests",
       "to": "dim_cli::ui::text",
       "references": [
         "use crate::ui::text::display_width"
@@ -44075,8 +44085,18 @@
       "from": "dim_cli::ui::composer::palette::tests",
       "to": "dim_cli::ui::theme",
       "references": [
+        "path Theme::named",
         "path Theme::system",
         "use crate::ui::theme::Theme"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::composer::palette::tests",
+      "to": "dim_cli::ui::theme::ansi",
+      "references": [
+        "path Paint",
+        "path Paint::default",
+        "path paint"
       ]
     },
     {
@@ -44084,6 +44104,7 @@
       "to": "dim_cli::ui::theme::palette",
       "references": [
         "path Appearance::Dark",
+        "path Appearance::Light",
         "path ColorMode::TrueColor",
         "use crate::ui::theme::Appearance",
         "use crate::ui::theme::ColorMode"
@@ -51172,6 +51193,7 @@
         "path Detail::Summary",
         "path ToolGroup",
         "path action_at",
+        "path body_disclosure_at",
         "path card_actions",
         "path card_rows",
         "path disclosure_at",
@@ -51184,6 +51206,7 @@
         "use crate::ui::transcript::tool_group::State",
         "use crate::ui::transcript::tool_group::ToolGroup",
         "use crate::ui::transcript::tool_group::action_at",
+        "use crate::ui::transcript::tool_group::body_disclosure_at",
         "use crate::ui::transcript::tool_group::card_actions",
         "use crate::ui::transcript::tool_group::card_rows",
         "use crate::ui::transcript::tool_group::disclosure_at",
@@ -51457,6 +51480,7 @@
       "from": "dim_cli::ui::tui::tests",
       "to": "dim_cli::report",
       "references": [
+        "path crate::report::EvidenceUnavailable::NoReference",
         "path crate::report::EvidenceUnavailable::Omitted",
         "path crate::report::Prepared"
       ]
@@ -55624,6 +55648,7 @@
         "path ErrorReference",
         "path Snapshot",
         "path Snapshot::capture_session",
+        "path crate::evidence::capture_conversation",
         "use crate::evidence::ErrorReference",
         "use crate::evidence::Snapshot"
       ]
@@ -55670,6 +55695,7 @@
       "to": "dim_agent_runtime::branch",
       "references": [
         "path Branch",
+        "path Branch::sequence",
         "use dim_agent_runtime::Branch"
       ]
     },
@@ -55723,6 +55749,16 @@
     },
     {
       "from": "dim_report::evidence",
+      "to": "dim_agent_types::content",
+      "references": [
+        "path ContentBlock::Text",
+        "path MessagePart::Text",
+        "use dim_agent_types::ContentBlock",
+        "use dim_agent_types::MessagePart"
+      ]
+    },
+    {
+      "from": "dim_report::evidence",
       "to": "dim_agent_types::events",
       "references": [
         "path AgentEvent",
@@ -55735,8 +55771,12 @@
         "path EventKind::BranchEnded",
         "path EventKind::BranchResume",
         "path EventKind::BranchStart",
+        "path EventKind::InputConsumed",
+        "path EventKind::InputMessage",
+        "path EventKind::ModelContent",
         "path EventKind::ModelOutputEnd",
         "path EventKind::ModelStart",
+        "path EventKind::Text",
         "path EventKind::ToolCompleted",
         "path EventKind::ToolStart",
         "path EventKind::TurnEnd",
@@ -55751,8 +55791,17 @@
         "use dim_agent_types::BranchCreateFailedData",
         "use dim_agent_types::DEFAULT_BRANCH_ID",
         "use dim_agent_types::EventKind",
+        "use dim_agent_types::FinishReason",
         "use dim_agent_types::ModelOutputOutcome",
         "use dim_agent_types::TurnOutcome"
+      ]
+    },
+    {
+      "from": "dim_report::evidence",
+      "to": "dim_agent_types::markup",
+      "references": [
+        "path runtime_context",
+        "use dim_agent_types::markup::runtime_context"
       ]
     },
     {
@@ -55795,6 +55844,7 @@
       "to": "dim_report::evidence",
       "references": [
         "path CapturedError",
+        "path ConversationExcerpt",
         "path Missing",
         "path Missing::FailureUnavailable",
         "path Missing::NoReference",
@@ -55805,6 +55855,7 @@
         "path TimelineEvidence::Failure",
         "path TimelineEvidence::Recent",
         "use crate::evidence::CapturedError",
+        "use crate::evidence::ConversationExcerpt",
         "use crate::evidence::Missing",
         "use crate::evidence::Snapshot",
         "use crate::evidence::TimelineEvidence"
@@ -57553,6 +57604,10 @@
     },
     {
       "module": "dim_cli::ui::tui::tests",
+      "path": "MemberTarget::Session"
+    },
+    {
+      "module": "dim_cli::ui::tui::tests",
       "path": "ModelFailureKind::Network"
     },
     {
@@ -57678,6 +57733,10 @@
     {
       "module": "dim_cli::ui::tui::tests",
       "path": "State::Row"
+    },
+    {
+      "module": "dim_cli::ui::tui::tests",
+      "path": "TaskKind::Member"
     },
     {
       "module": "dim_cli::ui::tui::tests",

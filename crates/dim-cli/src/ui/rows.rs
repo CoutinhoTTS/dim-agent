@@ -30,8 +30,8 @@ pub struct Row {
     pub label: String,
     pub detail: String,
     pub key: Option<String>,
-    /// Shown faint and marked `(unavailable)`; still runs, and the app says
-    /// why it cannot.
+    /// Shown unbolded and faint with `(unavailable)` beside the label; still
+    /// runs, and the app says why it cannot.
     pub unavailable: bool,
 }
 
@@ -89,6 +89,7 @@ pub struct Columns {
 
 impl Columns {
     pub fn of(rows: &[Row], inner: usize) -> Self {
+        let marker = display_width(t(UNAVAILABLE));
         let widest = |f: &dyn Fn(&Row) -> Option<usize>| {
             rows.iter()
                 .filter(|r| r.selectable())
@@ -96,9 +97,21 @@ impl Columns {
                 .max()
                 .unwrap_or(0)
         };
-        let label = widest(&|r| (!r.detail.is_empty()).then(|| display_width(&r.label)));
+        let label = widest(&|r| {
+            (!r.detail.is_empty())
+                .then(|| display_width(&r.label) + if r.unavailable { marker } else { 0 })
+        });
         let command = widest(&|r| match r.kind {
-            Kind::Command(command) => Some(display_width(command.name) + 1 + DETAIL_GAP),
+            Kind::Command(command) => Some(
+                display_width(command.name)
+                    + 1
+                    + if r.unavailable {
+                        marker + usize::from(command.argument.is_some())
+                    } else {
+                        0
+                    }
+                    + DETAIL_GAP,
+            ),
             _ => None,
         });
         let room = inner.saturating_sub(ROW_INDENT);
@@ -115,9 +128,10 @@ impl Columns {
 
 const UNAVAILABLE: &str = " (unavailable)";
 
-/// One row in the shared columns: label (bold), detail (faint), key (keybind
-/// colour, at the right edge). An unavailable row is faint throughout; the
-/// selected row sits on an accent bar.
+/// One row in the shared columns: label (bold), detail (muted), key (keybind
+/// colour, at the right edge). An unavailable row carries its marker beside
+/// the label and is drawn unbolded and faint throughout, including on the
+/// selection highlight.
 pub fn panel_row(row: &Row, selected: bool, inner: usize, columns: Columns, p: &Palette) -> String {
     if !row.selectable() {
         return paint(
@@ -129,33 +143,41 @@ pub fn panel_row(row: &Row, selected: bool, inner: usize, columns: Columns, p: &
             },
         );
     }
+    let marker = if row.unavailable { t(UNAVAILABLE) } else { "" };
+    let marker_width = display_width(marker);
     let key = row
         .key
         .as_deref()
         .map(|key| format!("{}{key}", " ".repeat(DETAIL_GAP)))
-        .filter(|key| ROW_INDENT + display_width(&row.label) + display_width(key) <= inner)
+        .filter(|key| {
+            ROW_INDENT + display_width(&row.label) + marker_width + display_width(key) <= inner
+        })
         .unwrap_or_default();
     let room = inner
         .saturating_sub(ROW_INDENT + display_width(&key))
         .max(1);
-    let mut label = row.label.clone();
-    let mut detail = row.detail.clone();
-    if row.unavailable {
-        if detail.is_empty() {
-            label.push_str(t(UNAVAILABLE));
-        } else {
-            detail.push_str(t(UNAVAILABLE));
-        }
-    }
-    let label = if detail.is_empty() {
-        truncate_cells(&label, room)
+    let limit = if row.detail.is_empty() || columns.label >= room {
+        room
     } else {
-        truncate_cells(
-            &label,
-            room.min(columns.label.saturating_sub(DETAIL_GAP).max(1)),
+        room.min(columns.label.saturating_sub(DETAIL_GAP).max(1))
+    };
+    let min_head = match row.kind {
+        Kind::Command(command) => {
+            display_width(command.name) + 1 + usize::from(command.argument.is_some())
+        }
+        _ => 1,
+    };
+    let label = if !row.unavailable {
+        truncate_cells(&row.label, limit)
+    } else if limit < min_head + marker_width {
+        truncate_cells(&format!("{}{marker}", row.label), room)
+    } else {
+        format!(
+            "{}{marker}",
+            truncate_cells(&row.label, limit - marker_width)
         )
     };
-    let detail = if detail.is_empty() {
+    let detail = if row.detail.is_empty() {
         String::new()
     } else {
         let gap = columns
@@ -166,7 +188,7 @@ pub fn panel_row(row: &Row, selected: bool, inner: usize, columns: Columns, p: &
         if available <= gap {
             String::new()
         } else {
-            truncate_cells(&format!("{}{detail}", " ".repeat(gap)), available)
+            truncate_cells(&format!("{}{}", " ".repeat(gap), row.detail), available)
         }
     };
     let used = ROW_INDENT + display_width(&label) + display_width(&detail) + display_width(&key);
@@ -177,15 +199,24 @@ pub fn panel_row(row: &Row, selected: bool, inner: usize, columns: Columns, p: &
             Paint {
                 fg: Some(fg),
                 bg: selected.then_some(p.accent.as_str()),
-                bold,
+                bold: bold && !row.unavailable,
+                dim: selected && row.unavailable,
                 ..Paint::default()
             },
         )
     };
     let (text, faint, keyed) = if selected {
-        (&p.on_accent, &p.on_accent, &p.keybind)
+        (
+            &p.on_accent,
+            &p.on_accent,
+            if row.unavailable {
+                &p.on_accent
+            } else {
+                &p.keybind
+            },
+        )
     } else if row.unavailable {
-        (&p.muted, &p.muted, &p.muted)
+        (&p.faint, &p.faint, &p.faint)
     } else {
         (&p.text, &p.muted, &p.keybind)
     };

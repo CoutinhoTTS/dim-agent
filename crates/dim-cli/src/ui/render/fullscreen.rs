@@ -95,10 +95,17 @@ pub trait Document {
     fn disclosure(&self, _block: Option<usize>, _cols: usize, _row: usize) -> Option<String> {
         None
     }
-    /// An identity only for actual rows of an expanded thought body.
-    /// The key includes the view, Session, branch, request and source block,
-    /// and changes when that target is replaced or its expansion is reset.
-    fn thinking_body(&self, _block: Option<usize>, _cols: usize, _row: usize) -> Option<String> {
+    /// An identity and owning header row (in the same `block` coordinates)
+    /// only for actual rows of an expanded collapsible body (thought or tool
+    /// node). The key includes the view, Session, branch, gesture and target
+    /// identity, and changes when that target is replaced or its expansion is
+    /// reset.
+    fn collapsible_body(
+        &self,
+        _block: Option<usize>,
+        _cols: usize,
+        _row: usize,
+    ) -> Option<(String, usize)> {
         None
     }
     /// Whether a panel thought identity is current; body rows must still be expanded.
@@ -524,6 +531,24 @@ impl FullScreen {
         self.pinned = Some(self.anchor_at(self.top()));
     }
 
+    /// Holds the view on a body collapse, re-anchoring to the owning header
+    /// when the current top row sits inside the rows being collapsed.
+    fn hold_header(&mut self, block: Option<usize>, header_row: usize) {
+        let anchor = self.anchor_at(self.top());
+        let target_block = block.unwrap_or(self.base + self.heights.len());
+        self.floor = 0;
+        self.pinned = Some(
+            if anchor.block == target_block && anchor.offset > header_row {
+                Anchor {
+                    block: target_block,
+                    offset: header_row,
+                }
+            } else {
+                anchor
+            },
+        );
+    }
+
     /// Holds the view with row `top` first; the bottom row follows.
     fn pin(&mut self, top: usize) {
         self.floor = 0;
@@ -653,7 +678,16 @@ impl FullScreen {
             return None;
         }
         let click = self.pending.take()?;
-        self.hold();
+        match click.spot {
+            MouseOutcome::Click { block, row } => {
+                if let Some((_, header)) = doc.collapsible_body(block, self.layout_cols, row) {
+                    self.hold_header(block, header);
+                } else {
+                    self.hold();
+                }
+            }
+            _ => self.hold(),
+        }
         Some(click.spot)
     }
 
@@ -1030,9 +1064,9 @@ impl FullScreen {
                     .flatten();
                 let pressing = target.is_some();
                 let body = match &spot {
-                    MouseOutcome::Click { block, row } if link.is_none() && target.is_none() => {
-                        doc.thinking_body(*block, self.layout_cols, *row)
-                    }
+                    MouseOutcome::Click { block, row } if link.is_none() && target.is_none() => doc
+                        .collapsible_body(*block, self.layout_cols, *row)
+                        .map(|(key, _)| key),
                     MouseOutcome::Thought { key, body: true } if link.is_none() => {
                         Some(key.clone())
                     }
@@ -1567,7 +1601,10 @@ impl FullScreen {
             .is_some_and(|click| match &click.spot {
                 MouseOutcome::Click { block, row } => {
                     block.is_some_and(|block| block < dropped || block - dropped >= doc.len())
-                        || doc.thinking_body(*block, self.layout_cols, *row).as_ref()
+                        || doc
+                            .collapsible_body(*block, self.layout_cols, *row)
+                            .as_ref()
+                            .map(|(key, _)| key)
                             != Some(&click.key)
                 }
                 MouseOutcome::Thought { .. } => !doc.panel_thought(&click.key, true),
@@ -1583,7 +1620,10 @@ impl FullScreen {
                 let MouseOutcome::Click { block, row } = press.spot else {
                     return true;
                 };
-                doc.thinking_body(block, self.layout_cols, row).as_ref() != Some(key)
+                doc.collapsible_body(block, self.layout_cols, row)
+                    .as_ref()
+                    .map(|(key, _)| key)
+                    != Some(key)
             })
         {
             self.cancel_click();
@@ -2400,8 +2440,20 @@ mod tests {
         fn disclosure(&self, block: Option<usize>, _cols: usize, row: usize) -> Option<String> {
             self.headers.get(&(block, row)).cloned()
         }
-        fn thinking_body(&self, block: Option<usize>, _cols: usize, row: usize) -> Option<String> {
-            self.bodies.get(&(block, row)).cloned()
+        fn collapsible_body(
+            &self,
+            block: Option<usize>,
+            _cols: usize,
+            row: usize,
+        ) -> Option<(String, usize)> {
+            let key = self.bodies.get(&(block, row))?.clone();
+            let header = self
+                .headers
+                .keys()
+                .filter_map(|(b, r)| (*b == block && *r < row).then_some(*r))
+                .max()
+                .unwrap_or(1);
+            Some((key, header))
         }
         fn panel_thought(&self, key: &str, body: bool) -> bool {
             self.panel
