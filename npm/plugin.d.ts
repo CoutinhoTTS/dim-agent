@@ -628,12 +628,14 @@ export interface SqliteStorage extends Pick<TimelineStore, "createSession" | "se
   commitTimelineRound(request: { batches: TimelineAppend[] }): Promise<{ sessions: { sessionId: string; result: { Ok: null } | { Err: { code: string; message: string } } }[] }>;
   readSelection(request: { scope: string }): Promise<StoredProviderSelection | null>;
   writeSelection(request: { scope: string; expectedVersion?: number | null; selection: ModelId }): Promise<StoredProviderSelection>;
+  /** SessionFiles supplies its active writer generation for reserve, commit and abandon. */
   reserveFile(request: { sessionId: string; fileId: string; generation: string }): Promise<boolean>;
   commitFile(request: { sessionId: string; fileId: string; generation: string }): Promise<"owned" | "sessionGone" | "superseded">;
   abandonFile(request: { fileId: string; generation: string }): Promise<number>;
   ownsFile(request: { sessionId: string; fileId: string }): Promise<boolean>;
   ownsOutput(request: { sessionId: string; path: string }): Promise<boolean>;
   ownedPaths(request: { sessionId: string }): Promise<[string[], string[]]>;
+  /** Supply a resolved absolute UTF-8 path under the Session command-output directory or a persistent shell output directory below the host execution root. */
   registerOutput(request: { sessionId: string; path: string }): Promise<boolean>;
   readPreferences(request: { providerId: string; modelId: string }): Promise<{ reasoningEffort?: string; serviceTier?: string } | null>;
   agents(request: Record<string, never>): Promise<{ id: string; profile: { Ok: StoredAgentProfile } | { Err: string }; default: boolean; owner: string | null }[]>;
