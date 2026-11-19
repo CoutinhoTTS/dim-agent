@@ -50,7 +50,7 @@ if [[ "$action" == check ]]; then
   [[ $# == 0 ]] || { echo 'check takes no arguments.' >&2; exit 1; }
   (
     cd -- "$repository"
-    cargo fmt --all -- --check
+    cargo fmt --all -- --check --config error_on_line_overflow=true
     cargo clippy --locked -p dim-cli -p dim-app-server -p dim-oauth -p dimcode --all-targets -- -D warnings
   ) >&2
   exit 0
