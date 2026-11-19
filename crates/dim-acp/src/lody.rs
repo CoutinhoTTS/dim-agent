@@ -1,9 +1,7 @@
 //! Lody Core 0.2.0 boundary controls and snapshot-only delegation projection.
 use crate::projection::tool_id;
 use agent_client_protocol::Error;
-use dim_agent_types::{
-    CollaborationDelivery, CollaborationOutcome, PermissionPreset, ROOT_BRANCH_ID,
-};
+use dim_agent_types::{CollaborationDelivery, CollaborationOutcome, PermissionPreset};
 use dim_client::wire::{Event, EventContent};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -166,12 +164,13 @@ impl Subagents {
     pub(crate) fn pending(
         &mut self,
         session: &str,
+        branch: &str,
         request: &dim_agent_types::PendingDelegation,
     ) -> Value {
         let run = Run {
             id: json!([self.activation, request.event_id]).to_string(),
             parent_tool: tool_id(
-                ROOT_BRANCH_ID,
+                branch,
                 &request.request.request_id,
                 &request.request.call_id,
             ),
@@ -192,7 +191,7 @@ impl Subagents {
         snapshot
     }
 
-    pub(crate) fn event(&mut self, session: &str, event: &Event) -> Vec<Value> {
+    pub(crate) fn event(&mut self, session: &str, branch: &str, event: &Event) -> Vec<Value> {
         let mut output = Vec::new();
         if event.sequence <= self.through {
             return output;
@@ -205,7 +204,7 @@ impl Subagents {
                 }
                 let run = Run {
                     id: json!([self.activation, event.id]).to_string(),
-                    parent_tool: tool_id(ROOT_BRANCH_ID, &data.request_id, &data.call_id),
+                    parent_tool: tool_id(branch, &data.request_id, &data.call_id),
                     description: data.prompt.chars().take(4096).collect(),
                     started: event.create_at as f64 / 1000.,
                     state: "pending",

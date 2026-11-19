@@ -63,6 +63,8 @@ impl TextCursor {
 #[derive(Default)]
 pub(crate) struct Projection {
     pub(crate) through: u64,
+    /// The branch whose conversation this projection shows.
+    pub(crate) branch: String,
     cwd: PathBuf,
     compaction_updates: bool,
     pub(crate) turn: Option<String>,
@@ -490,11 +492,17 @@ fn replacements(input: &Value) -> Vec<(&str, &str)> {
 }
 
 impl Projection {
+    /// `branch` is the branch whose conversation this projection shows.
     /// `cwd` is the session directory a relative tool path resolves against.
     /// `compaction_updates` says the client declared `session.compaction`, so a
     /// compaction is sent as the standard entity rather than as a tool call.
-    pub(crate) fn new(cwd: impl Into<PathBuf>, compaction_updates: bool) -> Self {
+    pub(crate) fn new(
+        branch: impl Into<String>,
+        cwd: impl Into<PathBuf>,
+        compaction_updates: bool,
+    ) -> Self {
         Self {
+            branch: branch.into(),
             cwd: cwd.into(),
             compaction_updates,
             ..Self::default()
@@ -986,7 +994,7 @@ mod tests {
 
     /// The messages an input replays, as the wire carries them.
     fn replay(blocks: Value) -> Vec<Value> {
-        let mut projection = Projection::default();
+        let mut projection = Projection::new("main", "", false);
         assert!(
             projection
                 .event(&event(json!({

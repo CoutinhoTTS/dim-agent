@@ -5,7 +5,7 @@ use crate::{
     rpc::{self, Native, Rpc},
 };
 use agent_client_protocol::{Client, ConnectionTo, Error, UntypedMessage, schema::v1 as acp};
-use dim_agent_types::{DEFAULT_BRANCH_ID, ROOT_BRANCH_ID, TurnOutcome};
+use dim_agent_types::{DEFAULT_BRANCH_ID, TurnOutcome};
 use dim_client::window::Window;
 use dim_client::wire::{
     Attached, Configuration, DisplayNotice, DisplayPage, Event, EventContent, EventNotice,
@@ -145,6 +145,8 @@ pub(crate) struct RecoveredSession {
 }
 
 pub(crate) struct Prepared {
+    /// The branch whose conversation this recovery read.
+    branch: String,
     history: Vec<Event>,
     before: Option<u64>,
     through: u64,
@@ -999,7 +1001,7 @@ impl Gateway {
                         {
                             return Err(Error::invalid_params());
                         }
-                        let mut params = json!({"sessionId":source,"branchId":ROOT_BRANCH_ID});
+                        let mut params = json!({"sessionId":source,"branchId":DEFAULT_BRANCH_ID});
                         if let Some(turn) = &controls.fork_turn {
                             params["turnId"] = json!(turn);
                         }
@@ -1492,13 +1494,14 @@ impl Gateway {
                 let Some(Slot::Ready(session)) = self.sessions.get(&id) else {
                     return reply.respond_with_error(Error::resource_not_found(Some(id)));
                 };
+                let branch = session.projection.branch.clone();
                 let cwd = session.cwd.clone();
                 match result {
                     Ok(page) => {
                         let next = page
                             .next(before, through)
                             .map_err(|_| Error::internal_error())?;
-                        let mut projection = Projection::new(cwd, self.compaction_updates);
+                        let mut projection = Projection::new(branch, cwd, self.compaction_updates);
                         for event in page.events {
                             for update in projection.event(&decode_native(event)?) {
                                 self.update(&id, update).await?;
@@ -1542,9 +1545,14 @@ impl Gateway {
                             matches!(waiter.kind, Preparation::Load)
                                 && !waiter.reply.cancellation().is_cancelled()
                         });
+                        let branch = prepared.branch;
                         let mut session = Session {
                             cwd: loading.cwd.clone(),
-                            projection: Projection::new(loading.cwd, self.compaction_updates),
+                            projection: Projection::new(
+                                branch.clone(),
+                                loading.cwd,
+                                self.compaction_updates,
+                            ),
                             prompt: None,
                             command: None,
                             config: prepared.config,
@@ -1569,9 +1577,9 @@ impl Gateway {
                             if index % 32 == 0 {
                                 tokio::task::yield_now().await;
                             }
-                            fold_questions(&mut session.questions, ROOT_BRANCH_ID, &event);
+                            fold_questions(&mut session.questions, &branch, &event);
                             let updates = session.projection.event(&event);
-                            let snapshots = session.subagents.event(&id, &event);
+                            let snapshots = session.subagents.event(&id, &branch, &event);
                             if self.subagent_events {
                                 for snapshot in snapshots {
                                     self.outbox.notify(
@@ -1606,13 +1614,13 @@ impl Gateway {
                             }
                         }
                         for request in prepared.delegations {
-                            let snapshot = session.subagents.pending(&id, &request);
+                            let snapshot = session.subagents.pending(&id, &branch, &request);
                             if self.subagent_events {
                                 self.outbox
                                     .notify(&self.cx, "_lody/subagents/event", snapshot)?;
                             }
                         }
-                        session.questions.clear_branch(ROOT_BRANCH_ID);
+                        session.questions.clear_branch(&branch);
                         for (branch, (cut, batches)) in prepared.questions {
                             session.questions.clear_branch(&branch);
                             session.question_through.insert(branch.clone(), cut);
@@ -2060,8 +2068,12 @@ impl Gateway {
                         prompt_turn,
                     }) => {
                         let previous_through = session.projection.through;
-                        session.projection =
-                            Projection::new(session.cwd.clone(), self.compaction_updates);
+                        let branch = prepared.branch;
+                        session.projection = Projection::new(
+                            branch.clone(),
+                            session.cwd.clone(),
+                            self.compaction_updates,
+                        );
                         session.questions = dim_client::question::Pending::default();
                         session.question_through.clear();
                         let title = prepared.title;
@@ -2110,10 +2122,10 @@ impl Gateway {
                         }
                         let mut snapshots = Vec::new();
                         for event in &prepared.history {
-                            snapshots.extend(session.subagents.event(&id, event));
+                            snapshots.extend(session.subagents.event(&id, &branch, event));
                         }
                         for request in prepared.delegations {
-                            snapshots.push(session.subagents.pending(&id, &request));
+                            snapshots.push(session.subagents.pending(&id, &branch, &request));
                         }
                         if self.subagent_events {
                             for snapshot in snapshots {
@@ -2130,7 +2142,7 @@ impl Gateway {
                             } else {
                                 self.event_notice(EventNotice {
                                     session_id: id.clone(),
-                                    branch_id: ROOT_BRANCH_ID.into(),
+                                    branch_id: branch.clone(),
                                     event,
                                 })
                                 .await?;
@@ -2668,7 +2680,7 @@ impl Gateway {
                         .or(accepted_input);
                     let prompt_turn = if turn_id.is_some() || input_id.is_some() {
                         let mut query =
-                            json!({"sessionId":id,"branchId":DEFAULT_BRANCH_ID,"through":prepared.through});
+                            json!({"sessionId":id,"branchId":prepared.branch.clone(),"through":prepared.through});
                         if let Some(turn) = turn_id {
                             query["turnId"] = json!(turn);
                         } else if let Some(input) = input_id {
@@ -2730,12 +2742,12 @@ impl Gateway {
             }
             self.questions(&notice.session_id);
         }
-        if notice.branch_id != DEFAULT_BRANCH_ID {
-            return Ok(());
-        }
         let Some(Slot::Ready(session)) = self.sessions.get_mut(&notice.session_id) else {
             return Ok(());
         };
+        if notice.branch_id != session.projection.branch {
+            return Ok(());
+        }
         if matches!(notice.event.content, EventContent::Configuration(_))
             && notice.event.sequence > session.model_through
         {
@@ -2788,7 +2800,11 @@ impl Gateway {
             }
         }
         let updates = session.projection.event(&notice.event);
-        let snapshots = session.subagents.event(&notice.session_id, &notice.event);
+        let snapshots = session.subagents.event(
+            &notice.session_id,
+            &session.projection.branch,
+            &notice.event,
+        );
         if matches!(&notice.event.content, EventContent::PermissionChanged(_)) {
             session.config.event(&notice.event);
             session.config_revision += 1;
@@ -3206,6 +3222,7 @@ async fn read_history(
         .filter(|turn| !turn.ended)
         .map(|turn| turn.turn_id);
     Ok(Prepared {
+        branch: conversation.to_owned(),
         history,
         before,
         through,
