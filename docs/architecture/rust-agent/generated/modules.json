@@ -24509,6 +24509,7 @@
       "from": "dim_app_server",
       "to": "dim_app_server::storage::sqlite",
       "references": [
+        "path storage::AssemblyProgress::new",
         "path storage::SqliteStorage",
         "path storage::SqliteStoragePlugin::new"
       ]
@@ -33950,6 +33951,7 @@
       "to": "dim_app_server::storage::sqlite",
       "references": [
         "mod sqlite",
+        "use sqlite::AssemblyProgress",
         "use sqlite::FORMAT",
         "use sqlite::SqliteStorage",
         "use sqlite::SqliteStoragePlugin",

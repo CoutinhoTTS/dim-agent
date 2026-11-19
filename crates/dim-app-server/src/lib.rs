@@ -655,6 +655,12 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         None => None,
     };
     let config = Arc::new(config);
+    let assembly_progress = config.database_path.as_deref().map(|database| {
+        Arc::new(storage::AssemblyProgress::new(
+            database,
+            tokio::runtime::Handle::current(),
+        ))
+    });
     let root = Ctx::root_with_sink(
         tokio::runtime::Handle::current(),
         Arc::new(|error| tracing::error!(%error, "App Server runtime error")),
@@ -757,10 +763,17 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     }
     if let (Some(path), Some(files_root)) = (&config.database_path, session_files_root) {
         let path = path.clone();
+        let assembly_progress = assembly_progress.clone();
         rows.push(register_part(
             &mut builtins,
             builder.catalog(),
-            move |_| Ok(Box::new(storage::SqliteStoragePlugin::new(path.clone()))),
+            move |_| {
+                Ok(Box::new(match &assembly_progress {
+                    Some(assembly_progress) => storage::SqliteStoragePlugin::new(path.clone())
+                        .with_assembly_progress(assembly_progress.clone()),
+                    None => storage::SqliteStoragePlugin::new(path.clone()),
+                }))
+            },
         )?);
         rows.push(register_part(&mut builtins, builder.catalog(), |names| {
             Ok(Box::new(storage_methods::StorageMethodsPlugin::new(names)?))
@@ -1298,6 +1311,10 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         }],
     );
     let mut progress = StartupProgress::new(&root, config.startup_timeout)?;
+    if let Some(assembly_progress) = &assembly_progress {
+        let assembly_progress = assembly_progress.clone();
+        progress.on_progress(move || assembly_progress.progress());
+    }
     let started = progress
         .wait(
             async {
@@ -1342,6 +1359,9 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
         None => Err(processes.timed_out(&root).await),
     };
     if let Err(error) = started {
+        if let Some(assembly_progress) = &assembly_progress {
+            assembly_progress.stop();
+        }
         tracing::error!(%error, "App Server startup failed before cleanup");
         for plugin in root.diagnostics().plugins {
             if plugin.state != rutis::host::FiberState::Active {
@@ -1381,6 +1401,9 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
     #[cfg(feature = "testing")]
     if let Some(hold) = &config.publication_hold {
         hold.wait().await;
+    }
+    if let Some(assembly_progress) = &assembly_progress {
+        assembly_progress.finish();
     }
     handle.open();
     let task = tokio::spawn(coordinate(root.clone(), handle.clone()));
