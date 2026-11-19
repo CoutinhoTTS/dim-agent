@@ -1431,7 +1431,7 @@ async fn node_store_preserves_repository_results_and_worktree_removal_exclusion(
     for session in ["round-a", "round-b"] {
         raw.create_session(session, &config).await.unwrap();
     }
-    let batch = |session: &str, seq: u64| {
+    let batch_with_text = |session: &str, seq: u64, text: &str| {
         let id = format!("{session}-{seq}");
         let record = dim_agent_runtime::StoredEvent {
             event: Arc::new(dim_agent_types::AgentEvent {
@@ -1441,7 +1441,7 @@ async fn node_store_preserves_repository_results_and_worktree_removal_exclusion(
                 tags: None,
                 parent_call_id: None,
                 kind: dim_agent_types::EventKind::InputMessage(
-                    dim_agent_types::InputMessageData::text("saved", None),
+                    dim_agent_types::InputMessageData::text(text, None),
                 ),
             }),
             trace: None,
@@ -1449,6 +1449,7 @@ async fn node_store_preserves_repository_results_and_worktree_removal_exclusion(
         };
         json!({"sessionId":session,"branchId":"main","batchId":id,"events":[record]})
     };
+    let batch = |session: &str, seq: u64| batch_with_text(session, seq, "saved");
     let grouped = client
         .rpc(
             "storefixture.commit_round",
@@ -1473,6 +1474,40 @@ async fn node_store_preserves_repository_results_and_worktree_removal_exclusion(
     assert_eq!(sessions[0]["sessionId"], "round-a");
     assert_eq!(sessions[0]["result"]["Err"]["code"], "storage");
     assert_eq!(sessions[1], committed("round-b"));
+    raw.create_session("round-wal", &config).await.unwrap();
+    let wal_generation = || {
+        use std::io::Read;
+        let mut header = [0; 16];
+        std::fs::File::open(home.join("rust/dimcode.sqlite-wal"))
+            .unwrap()
+            .read_exact(&mut header)
+            .unwrap();
+        u32::from_be_bytes(header[12..16].try_into().unwrap())
+    };
+    let initial = wal_generation();
+    let text = "w".repeat(512 * 1024);
+    for seq in 1..=24 {
+        let result = client
+            .rpc(
+                "storefixture.commit_round",
+                json!({"batches":[batch_with_text("round-wal",seq,&text)]}),
+            )
+            .await;
+        assert_ok(&result);
+        assert_eq!(
+            result["result"]["sessions"],
+            json!([committed("round-wal")])
+        );
+        if wal_generation() != initial {
+            break;
+        }
+    }
+    assert_ne!(
+        wal_generation(),
+        initial,
+        "wire commits recycle the SQLite write-ahead log"
+    );
+    raw.rollback_session("round-wal").await.unwrap();
     for (session, expected) in [("round-a", 1), ("round-b", 3)] {
         let key = dim_agent_runtime::TimelineKey {
             session_id: session.into(),
