@@ -183,6 +183,9 @@ Rust 产品装配的现状以 [生成的 catalog](../architecture/rust-agent/gen
 
 ### 3.6 入口、凭据与宿主资源
 
+Proposed target operations: [Process owner operations](contracts/process-owner-operations.md).
+
+
 按 #1292 逐批确定各项的公共操作，并按 §2.6 迁移登记。状态、资源和凭据留在各自的 owner。`managedSearch` 的搜索操作见 §4.6。`skillsCatalog` 的插件内容操作见 [Skills owner 契约](../architecture/rust-agent/plugins/Skills.md#plugin-content-data-face)。
 
 | 名字 | scope | provider | reason |
