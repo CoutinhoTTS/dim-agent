@@ -3,8 +3,9 @@ import { dirname, extname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-const sourceRoot = join(root, 'src')
-const sourceExtensions = new Set(['.ts', '.tsx', '.vue', '.css'])
+const scanRoots = ['src', 'tests', 'scripts']
+const scannedExtensions = new Set(['.ts', '.tsx', '.mjs', '.vue', '.css'])
+const selfPath = fileURLToPath(import.meta.url)
 const forbiddenImports = [
   { label: "desktop '@/' import", pattern: /(?:from|import|@import)\s*\(?\s*['"]@\// },
   { label: 'window.dimcode', pattern: /window\.dimcode/ },
@@ -24,11 +25,13 @@ async function collect(directory) {
       await collect(path)
       continue
     }
-    if (sourceExtensions.has(extname(entry.name))) files.push(path)
+    if (path !== selfPath && scannedExtensions.has(extname(entry.name))) files.push(path)
   }
 }
 
-await collect(sourceRoot)
+for (const directory of scanRoots) {
+  await collect(join(root, directory))
+}
 
 const failures = []
 for (const file of files) {
@@ -62,4 +65,4 @@ if (failures.length > 0) {
   process.exit(1)
 }
 
-console.log(`[chat-ui:boundary] ${files.length} source files checked; no desktop or Electron dependencies found`)
+console.log(`[chat-ui:boundary] ${files.length} source, test, and script files checked; no desktop or Electron dependencies found`)

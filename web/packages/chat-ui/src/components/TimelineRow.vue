@@ -132,19 +132,22 @@ const resolvedRetryUserMessage = computed(() => {
   return message
 })
 
-const canRetry = computed(() => resolvedRetryUserMessage.value !== null && (timelineActions
-  ? timelineActions.canEdit(resolvedRetryUserMessage.value.id) === true
-  : !props.readOnly))
+const canRetry = computed(() => !props.readOnly
+  && resolvedRetryUserMessage.value !== null
+  && (timelineActions
+    ? timelineActions.canEdit(resolvedRetryUserMessage.value.id) === true
+    : true))
 const retryDisabled = computed(() => timelineActions
   ? !canRetry.value || actionPending.value
   : props.readOnly || !props.sessionId || !props.canSend)
 const canForkAssistant = computed(() => (
-  props.row.kind === 'turn'
+  !props.readOnly
+  && props.row.kind === 'turn'
   && props.row.turn.forkAnchorMessageId !== null
   && props.row.turn.forkAfterSequence != null
   && (timelineActions
     ? timelineActions.canFork(props.row.turn.forkAnchorMessageId) === true
-    : !props.readOnly)
+    : true)
 ))
 // Branch from here is a per-turn action: the cut is before the user message
 // that anchors the turn, and a running turn has no completed rest point.
@@ -230,6 +233,7 @@ function sequenceFromOrderKey(orderKey: string | undefined): number | undefined 
 }
 
 function emitUserFork(): void {
+  if (props.readOnly) return
   if (props.row.kind !== 'turn' || props.row.turn.userMessage === null) {
     throw new Error('Completed assistant turn requires a user fork message')
   }

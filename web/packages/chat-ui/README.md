@@ -22,6 +22,10 @@ This package is the shared, presentational chat render layer for the desktop ren
 
 The desktop renderer keeps thin wrappers where it supplies appearance, theme, or composition context.
 
+## License
+
+The package is licensed under Apache-2.0; see [`LICENSE`](./LICENSE). It was copied from `arcships/dim-electron` (`packages/desktop/packages/chat-ui` at `1a9839f2`), whose repository license is Apache-2.0.
+
 ## Boundary
 
 The package may not import:
@@ -31,7 +35,7 @@ The package may not import:
 - `@dimcode/shared`, `@dimcode/app-server-protocol`, or `@dimcode/renderer`;
 - Pinia or any transport client.
 
-`pnpm check:boundary` enforces the source and manifest rules.
+`npm run check:boundary -w @dimcode/chat-ui` enforces the source, test, script, and manifest rules.
 
 ## Host contract
 
@@ -88,7 +92,7 @@ The web integration must keep the `@terrastruct/d2` alias in its Vite config. Wi
 
 ## Release
 
-The package is private until `arcships/dim#1839` publishes it from the `dim` release train. Until the release and the desktop removal land, `dim-electron` remains the initial source mirror; do not edit both copies independently. The follow-up removes the desktop copy and pins an exact published version.
+The package is private until `arcships/dim#1839` publishes it from the `dim` release train. Until the release and the desktop removal land, `dim-electron` remains the initial source mirror at `1a9839f2`; do not edit both copies independently. The follow-up removes the desktop copy and pins an exact published version.
 
 ## Tracking
 

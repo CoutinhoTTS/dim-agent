@@ -379,6 +379,27 @@ describe('TimelineRow retry, fork, and branch gating', () => {
     expect(host.querySelector('[data-testid="assistant-actions"]')?.getAttribute('data-fork-disabled')).toBe('true')
     expect(host.querySelector('[data-testid="user-message"]')?.getAttribute('data-branch-disabled')).toBe('true')
   })
+
+  it('keeps host edit and fork actions disabled on read-only rows', async () => {
+    const timeline: ChatUiTimelineHost = {
+      actions: {
+        canEdit: () => true,
+        canFork: () => true,
+        pending: ref(false),
+      },
+    }
+    const { host, events } = mountRow(turnRow(), { readOnly: true }, { timeline })
+    await nextTick()
+
+    const actions = host.querySelector('[data-testid="assistant-actions"]')
+    expect(actions?.getAttribute('data-can-retry')).toBe('false')
+    expect(actions?.getAttribute('data-fork-message-id')).toBeNull()
+    host.querySelector<HTMLButtonElement>('[data-testid="assistant-retry"]')!.click()
+    host.querySelector<HTMLButtonElement>('[data-testid="assistant-fork"]')!.click()
+    host.querySelector<HTMLButtonElement>('[data-testid="user-fork"]')!.click()
+    expect(events.retryMessage).not.toHaveBeenCalled()
+    expect(events.forkMessage).not.toHaveBeenCalled()
+  })
 })
 
 describe('TimelineRow notices and fallback rendering', () => {
