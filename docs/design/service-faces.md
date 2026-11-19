@@ -27,7 +27,7 @@ During migration, an existing entry may carry `internal(reason)`:
 - `object`, `hot-path`, `lock-callback`, `secret`, `control`, `host-resource`, `legacy-no-consumer`
   and `owner-api` describe the remaining migration work.
 - New public services start as data faces. A batch can expose a face before it has a consumer.
-- Secret values stay with the owner. Public methods expose operations that use those values.
+- Secret values stay with the owner. Business methods expose operations that use those values. The storage exception for trusted plugins is limited to the [Provider and Settings persistence operations](contracts/resource-owner-operations.md#credential-values-in-replies).
 
 ### 2.3 Checks
 
