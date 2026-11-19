@@ -1507,6 +1507,7 @@ mod tests {
             "web/src/a.ts",
             "const label = `a ${ `b ${ f('main') }` }`\n",
         ),
+        ("web/src/a.ts", "const label = `a ${ `b` + 'main' }`\n"),
         (
             "web/src/a.ts",
             "const trimQuote = /'/g\nconst id = 'main'\n",
@@ -1679,6 +1680,8 @@ mod tests {
             errors[0].contains("web/src/a.ts:1: `\"main\"` names neither"),
             "{errors:?}"
         );
+        let errors = bounded("web/src/a.ts", "const label = `a ${ `b` + 'main' }`\n");
+        assert_eq!(errors.len(), 1, "{errors:?}");
     }
 
     #[test]
