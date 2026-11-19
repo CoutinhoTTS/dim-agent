@@ -35,9 +35,9 @@
 //!   with attributes is reachable: `DeriveInput` is not parsed.
 //! - **In a Vue component, only code is read:** the contents of `<script>`
 //!   blocks outside HTML comments, and the template's expressions — directive
-//!   and bound attribute values, and `{{ … }}` interpolations. Template text,
-//!   plain attributes and HTML comments are not code, and a commented-out
-//!   block or tag is not a block or a tag.
+//!   and bound attribute values, and `{{ … }}` interpolations in text.
+//!   Template text, plain attributes and HTML comments are not code, and a
+//!   commented-out block or tag is not a block or a tag.
 //! - **In a TypeScript file, only code is read:** string literals outside
 //!   comments and outside template text. A template's `${ … }` is code; a `/`
 //!   that opens a regular-expression literal is read as one, not as the start
@@ -838,12 +838,45 @@ fn script_blocks(text: &str) -> Vec<std::ops::Range<usize>> {
 }
 
 /// The byte ranges of a component's template expressions: the values of its
-/// directive and bound attributes, and its `{{ … }}` interpolations, each one a
-/// range of code.
+/// directive and bound attributes, and its `{{ … }}` interpolations in text.
+/// Each one is a range of code. A plain attribute's value is not an expression,
+/// and neither is the text around an interpolation: Vue interpolates only in
+/// text nodes.
 fn expression_values(text: &str) -> Vec<std::ops::Range<usize>> {
-    let mut values = interpolations(text);
-    values.extend(directive_values(text));
-    values.sort_by_key(|value| value.start);
+    let mut values = Vec::new();
+    let Some(body) = template_body(text) else {
+        return values;
+    };
+    let mut at = body.start;
+    while at < body.end {
+        let rest = &text[at..body.end];
+        if rest.starts_with("<!--") {
+            // An HTML comment holds no expression, and it is skipped whole:
+            // `<!--` and `-->` are ASCII, so the offsets past them are
+            // boundaries.
+            at = match rest.find("-->") {
+                Some(end) => at + end + 3,
+                None => body.end,
+            };
+        } else if rest.starts_with("{{") {
+            // `{{` is ASCII, so the two bytes past its boundary start a
+            // boundary.
+            let content = at + 2;
+            let Some(close) = text[content..body.end].find("}}") else {
+                break;
+            };
+            values.push(content..content + close);
+            at = content + close + 2;
+        } else if rest.starts_with('<') {
+            // A tag is not text: its directive and bound attributes are read,
+            // and an interpolation written inside one is skipped with the tag.
+            // A `<` that opens no tag costs one step.
+            at = tag_attributes(text, at + 1, body.end, &mut values);
+        } else {
+            // A character of text; its own length keeps `at` a boundary.
+            at += rest.chars().next().map_or(1, char::len_utf8);
+        }
+    }
     values
 }
 
@@ -853,71 +886,6 @@ fn template_body(text: &str) -> Option<std::ops::Range<usize>> {
     blocks(text)
         .into_iter()
         .find_map(|(kind, block)| (kind == Block::Template).then_some(block))
-}
-
-/// The byte ranges of `text`'s `{{ … }}` interpolations, skipping HTML
-/// comments: a commented-out interpolation is not an expression.
-fn interpolations(text: &str) -> Vec<std::ops::Range<usize>> {
-    let mut values = Vec::new();
-    let Some(body) = template_body(text) else {
-        return values;
-    };
-    let mut at = body.start;
-    while at < body.end {
-        let rest = &text[at..body.end];
-        let comment = rest.find("<!--");
-        let Some(found) = rest.find("{{") else {
-            break;
-        };
-        let open = at + found;
-        if let Some(comment) = comment.map(|comment| at + comment).filter(|c| *c < open) {
-            // `<!--` and `-->` are ASCII, so the offset past them is a boundary.
-            at = match text[comment..body.end].find("-->") {
-                Some(end) => comment + end + 3,
-                None => body.end,
-            };
-            continue;
-        }
-        // `{{` is ASCII, so the two bytes past its boundary start a boundary.
-        let content = open + 2;
-        let Some(close) = text[content..body.end].find("}}") else {
-            break;
-        };
-        values.push(content..content + close);
-        at = content + close + 2;
-    }
-    values
-}
-
-/// The byte ranges of the values of `text`'s directives and bound attributes in
-/// its template: `v-*`, and the `:`, `@` and `#` shorthands. A plain attribute
-/// value is not an expression and is not read.
-fn directive_values(text: &str) -> Vec<std::ops::Range<usize>> {
-    let mut values = Vec::new();
-    let Some(body) = template_body(text) else {
-        return values;
-    };
-    let mut at = body.start;
-    while at < body.end {
-        let rest = &text[at..body.end];
-        let Some(found) = rest.find('<') else {
-            break;
-        };
-        let open = at + found;
-        // An HTML comment holds no expression, and it is skipped whole: `<!--`
-        // and `-->` are ASCII, so the offsets past them are boundaries.
-        if text[open..body.end].starts_with("<!--") {
-            at = match text[open..body.end].find("-->") {
-                Some(end) => open + end + 3,
-                None => body.end,
-            };
-            continue;
-        }
-        // `find` answers a boundary before an ASCII `<`, so `open + 1` is one
-        // too: any other ASCII opener is matched from there.
-        at = tag_attributes(text, open + 1, body.end, &mut values);
-    }
-    values
 }
 
 /// Reads the attributes of the tag whose name begins at `cursor` in `text`,
@@ -1024,13 +992,21 @@ fn javascript_uses(text: &str) -> Vec<usize> {
 }
 
 /// The keywords after which a `/` begins a regular-expression literal rather
-/// than dividing: each cannot end an expression.
-const KEYWORDS: [&str; 14] = [
+/// than dividing: none of them can end an expression, each is followed by an
+/// expression or a statement body. `await`, `delete`, `typeof`, `void` and
+/// `yield` take a unary operand, `new` its constructor's member expression,
+/// `in`, `instanceof` and `of` a right operand, `case` its expression, `return`
+/// and `throw` their value, `else` and `do` a statement body, which a `/`
+/// begins as an expression statement, `default` the expression of
+/// `export default`, and `extends` a class's heritage.
+const KEYWORDS: [&str; 16] = [
     "await",
     "case",
+    "default",
     "delete",
     "do",
     "else",
+    "extends",
     "in",
     "instanceof",
     "new",
@@ -1699,6 +1675,32 @@ mod tests {
         assert_eq!(errors.len(), 1, "{errors:?}");
     }
 
+    #[test]
+    fn an_interpolation_is_code_in_template_text_and_not_in_an_attribute() {
+        let mut failures = Vec::new();
+        for (text, uses) in [
+            (
+                "<template>\n  <div title=\"Example: {{ 'main' }}\">Help</div>\n</template>\n",
+                0,
+            ),
+            ("<template>\n  <div>{{ 'main' }}</div>\n</template>\n", 1),
+            (
+                "<template>\n  <div title=\"a > {{ 'main' }}\">x</div>\n</template>\n",
+                0,
+            ),
+            (
+                "<template>\n  <div :title=\"'main'\">x</div>\n</template>\n",
+                1,
+            ),
+        ] {
+            let found = vue_findings(text).len();
+            if found != uses {
+                failures.push(format!("{text:?}: left {found}, right {uses}"));
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
     /// Every fixture this module scans, including each round's reviewers'
     /// input.
     const FIXTURES: &[(&str, &str)] = &[
@@ -1796,6 +1798,22 @@ mod tests {
             "<template>\n  <li @click=\"select('main')\">{{ t('x') }}</li>\n</template>\n",
         ),
         (
+            "web/src/a.vue",
+            "<template>\n  <div title=\"Example: {{ 'main' }}\">Help</div>\n</template>\n",
+        ),
+        (
+            "web/src/a.vue",
+            "<template>\n  <div>{{ 'main' }}</div>\n</template>\n",
+        ),
+        (
+            "web/src/a.vue",
+            "<template>\n  <div title=\"a > {{ 'main' }}\">x</div>\n</template>\n",
+        ),
+        (
+            "web/src/a.vue",
+            "<template>\n  <div :title=\"'main'\">x</div>\n</template>\n",
+        ),
+        (
             "web/src/a.ts",
             "const id = \"main\"\n// \"main\"\n/* \"main\" */\n",
         ),
@@ -1840,6 +1858,25 @@ mod tests {
         ("web/src/a.ts", "const r = {} /\"main\"/ 2;\n"),
         ("web/src/a.ts", "class A {}\n/\"main\"/.test(s);\n"),
         ("web/src/a.ts", "class A {}/\"main\"/.test(s);\n"),
+        ("web/src/a.ts", "export default /\"main\"/.test(label);\n"),
+        ("web/src/a.ts", "export default \"main\";\n"),
+        (
+            "web/src/a.ts",
+            "const r = obj.default / 2; const b = \"main\";\n",
+        ),
+        (
+            "web/src/a.ts",
+            "export default { a: 1 } / 2; const b = \"main\";\n",
+        ),
+        (
+            "web/src/a.ts",
+            "export default function f() {}\n/\"main\"/.test(s);\n",
+        ),
+        ("web/src/a.ts", "class A extends /\"main\"/ {}\n"),
+        (
+            "web/src/a.ts",
+            "class A extends base {}\nconst b = \"main\";\n",
+        ),
         (
             "web/src/features/chat/TimelineView.vue",
             "<template>\n  <div :data-variant=\"variant\" @click=\"openLine('main')\"></div>\n</template>\n",
@@ -2152,6 +2189,26 @@ mod tests {
             ("const r = {} /\"main\"/ 2;\n", 1),
             ("class A {}\n/\"main\"/.test(s);\n", 0),
             ("class A {}/\"main\"/.test(s);\n", 0),
+        ] {
+            let found = bounded("web/src/a.ts", text).len();
+            if found != uses {
+                failures.push(format!("{text:?}: left {found}, right {uses}"));
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    #[test]
+    fn a_slash_after_a_keyword_with_an_expression_operand_opens_a_regex() {
+        let mut failures = Vec::new();
+        for (text, uses) in [
+            ("export default /\"main\"/.test(label);\n", 0),
+            ("export default \"main\";\n", 1),
+            ("const r = obj.default / 2; const b = \"main\";\n", 1),
+            ("export default { a: 1 } / 2; const b = \"main\";\n", 1),
+            ("export default function f() {}\n/\"main\"/.test(s);\n", 0),
+            ("class A extends /\"main\"/ {}\n", 0),
+            ("class A extends base {}\nconst b = \"main\";\n", 1),
         ] {
             let found = bounded("web/src/a.ts", text).len();
             if found != uses {
