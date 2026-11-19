@@ -112,7 +112,7 @@ Rust 产品装配的现状以 [生成的 catalog](../architecture/rust-agent/gen
 | `modelHost` | `auxiliaryModel` | PromptSuggestion 的请求与流式语义见 §4.2。 |
 | `loader` | `rutis/loader` | 插件管理走数据面 |
 | `sessionStore` | `sessionMetadata`、`sessionFiles` | 行与文件分开 |
-| `timelineTree`、`timelineTreeControl` | `treeCommands` | 建/读分支走 `treeCommands` |
+| `treeCommands`、`timelineTreeControl` | `timelineTree` | 分支操作直接调用 Session 的树；不保留别名 |
 
 ### 3.4 对象/句柄：拆成操作加 id
 
