@@ -26,17 +26,96 @@ The OS path, pinned reader and input reader above use a path value, an existing 
 and a callback respectively. Existing local media submission/import, legacy node paths,
 result settlement and result paging keep the [Modality contract](../plugins/Modality.md).
 
-## Native consumers and existing entry points
+## Agent records
 
-| Dependency | Operation boundary |
+In the persistent profile Agents injects store, SessionStore, SqliteStorage and
+sessionMetadata. SessionStore supplies the native Timeline bootstrap binding.
+Agents constructs AgentRecords with the injected database. AgentRecords is private
+to Agents today; each of its repository operations uses the SQLite owner's reader or
+writer. In the volatile profile there is no such database dependency.
+
+With Agents and SQLite remaining independently mounted, place **only the repository
+operations** on the storage side and bind these existing calls directly through rutis:
+
+| Caller in Agents | Repository API; IDs and records are data |
 | --- | --- |
-| `sqliteStorage`: diagnostics and startup | The client method storage.report({}) calls SqliteStorage.storage_report(). Transport requires database readiness in the persistent profile and never calls report. |
-| `sqliteStorage`: Agents | Agents constructs its private AgentRecords repository. Startup, repair and removal use its existing agents/save/delete, ownership, member and unfinished-owned operations. store.query takes a Timeline query. It cannot supply the Agent profile records or classify incomplete/orphaned ownership rows. |
-| `sqliteStorage`: Provider and Settings | Provider owns credential-bearing reads and its per-provider writes. Settings owns document import, revision CAS and post-commit notices. Their database transactions remain private. The [Provider management](../appserver/provider-management.md#3-management-contract) and Settings client methods retain their current callers and results. |
-| `settingsService`: native documents | Permission, Collaboration, Hooks, MCP, Skills, Scheduler and Modality continue to use their owner-specific reads and writes and the existing BusinessDocument codecs. MCP secret/configuration reads stay in the MCP path. These sources remain outside the declared-source listing. |
-| `settingsService`: project admission | Agents create/restore, Hooks and MCP management keep the existing authorize_project operation at their trusted entry. Read-only consumers can use settings.projects. Listing roots does not authorize a new cwd. |
+| Load the directory and Session ownership | agents({}) → AgentRecord[]; owners({}) → SessionOwner[]. Keep ordered results, invalid-profile rows, ownership errors and validation of the unique default. |
+| Install/forget a persisted Agent | save({id,profile,default,owner?}) and delete({id}) → void. |
+| Look up delegation and decide if removal is permitted | members({}) → ordered Session/leader pairs; ledMembers({leader}), ownedAgents({owner}), memberSessions({agent}) → ordered IDs; agentOwner({agent}) → owning Session ID or null. |
+| Startup repair | unfinishedOwned({}) → {incomplete,orphaned}. Preserve the existing single query and the two distinct cleanup paths. |
 
-Private SQL closures, the live engine and type-parameterized BusinessDocument operations
-are outside the plugin API. The existing client RPCs do not replace these native
-dependencies. Removing a remaining native dependency requires an actual owner binding
-for each cross-part caller or private wiring confined to one owner.
+These signatures preserve the existing call granularity; they do not require a
+new service per method. store.owner maps a **Session to an Agent**. store.query
+queries Timeline data. Neither returns the Agent-to-owner relation or orphan scan.
+Live Agent hosts, admission/stop, cleanup decisions and the order of calls remain with
+Agents. The repository methods can remain private only in an assembly that actually
+places their database access inside the same owner. Removing a catalog name alone does
+not change the boundary.
+
+## Provider
+
+| Caller → owner | Operation |
+| --- | --- |
+| Provider management handlers, ProductResolver and auxiliary model binding → ProviderService | Same Provider row constructs these handlers. Catalog adoption, sparse reads, model preferences, validation, transaction contents, retries and credential lookup are private implementation. |
+| Provider → SqliteStorage | Explicit injection in Provider.apply. Reads and writes use the shared database for model/connection records, selection, preferences, CAS edits and legacy import. A client provider.* RPC calls Provider and cannot serve as a storage operation in the opposite direction. |
+| Rpc → Provider | Ordinary Session model configuration calls configuration(explicit?,cwd?,preferences) → ModelSelection and applyPreferences(current,update) → ModelSelection. modelSelectionHost uses configuration-at-defaults for a different purpose. Bind these existing selection operations for the Rpc caller. |
+| Rpc and Collaboration → Provider | Rpc admits a temporary startup selection, checks an inherited connection and retains it after successful adoption/creation. Collaboration retains the inherited configuration after creating a member Session. Provider owns pending admission, rollback, Session-close observation and credential destruction. |
+
+For the last row the required data are the selected model, an admission identity while
+creation/adoption is pending, and the target Session identity. Use the existing pending startup binding ID when present. The minimum proposed
+operations at that boundary are prepareStartup(existing startup request) →
+{model,admissionId?}, checkStartup(source) → void, retainStartup({sessionId,model,
+admissionId?}) → void and releaseStartup({admissionId}) → void. Failed or abandoned
+admission releases the pending binding, including on caller unload. A successful
+retention attaches to the same Session generation. The caller that checks an inherited
+connection receives success or the existing error; the HTTP connection stays inside
+Provider. This startup contract belongs with the process/model face in #1857.
+
+For the SQLite edge, the minimum *additional public repository API* is zero **if**
+the credential-bearing persistent Provider operations execute at the database owner.
+That is a placement decision requiring approval. With today's two independent rows,
+their raw run/read closures still cross the boundary. A general row getter would
+return inline credentials and a document-wide replacement would lose selective reads
+and per-model CAS. Neither is an approved alternative. Preserve the existing Provider
+operations, database writer and feature unload semantics when deciding placement.
+
+## Settings
+
+| Caller → Settings | Current operation and contract |
+| --- | --- |
+| PluginManager; declared-source consumers | Filter declarations by live loader instance using declaredBy above. Reuse settings.read/update/projects for owner edits and reads. SettingsMethods uses its client path and lists only declared sources. |
+| Agents create/restore, Hooks and MCP management | authorize_project(cwd,cancelled) → root registers the authorized root and publishes the existing notice. It is a write performed at trusted admission. project_root/path/sources are reads covered by settings.projects. Binding authorizeProject as an unrestricted plugin method would broaden admission. Keep the operation inside the trusted host entry or retain this as an explicit host-boundary decision. |
+| PermissionRules and CommandRules; CollaborationModelPolicy and optional Collaboration runtime | User permission and collaboration policy reads/writes. Expose the existing commandRules.read projection to rule consumers; use the policy owner's read returning {revision,policy} for Collaboration. Preserve absent-profile fallback. |
+| HooksSettings and HookSources | hooks, hooks-projects and hooks-plugins. The runtime consumes sources(cwd,cancelled) → HookSourcesSnapshot. Source resolution, revisions and enablement belong to Hooks. |
+| Mcp and McpPublication | mcp, mcp-projects, mcp-plugins and mcp-secrets. Publication reads effective server configuration and constructs live connections. Keep partial decoding of individual server entries and credential use at the MCP owner. A list/status response cannot start an authenticated connection. |
+| SkillsCatalog, Scheduler, Modality | Each registers and reads/updates its own native source. Keep the existing SkillDocument, ScheduleDocument and ModalitySettings behavior, including duplicate-job checks and validated model defaults. Their public management methods run at the feature owner. |
+| Settings → SqliteStorage in the native user profile | Read the existing row; on first use import validated content and provenance atomically; replace at expected revision and publish after commit. File-backed and project settings keep their existing file path and lease behavior. |
+
+There are two different crossings for a native document. The feature calls
+Settings.register<D>, read<D> and update<D>. Settings then runs the chosen persistence
+backend. Inside a feature, decoding, defaulting and validation belong to its codec.
+Inside persistence, the minimal database operations are readUser(source) → row or
+missing, importUserIfAbsent(source,document,importedRevision) → winning row, and
+replaceUser(source,expectedRevision,document) → committed revision or conflict.
+These are storage-owner operations, **not** a proposed public way to read every
+native document. Secret-bearing records must stay within their credential owner.
+
+For a non-secret source whose complete existing decode/default/validation and
+visibility contracts are representable by the declared-source face, reuse
+register/read/update. For other native sources the missing contract is a source-specific
+owner read(scope) → {revision,document} and update(scope,expectedRevision,document)
+→ {revision,document}, with registration/withdrawal tied to the source's row.
+Reuse these operation shapes at the source's boundary; declaring every native source as a
+JSON-schema source would change settings.sources and client access. For a source that must retain custom decoding and stay outside settings.sources, the
+candidate registration is registerDocument({source,userFile,projectFile?},codec) →
+source-bound {read,update}. The codec belongs to the registering feature; preserve its
+missing-file defaults, partial decoding and write validation. Withdrawal follows the
+registering row. Register only once per source and use its existing file/row and CAS
+revision. This is a proposed binding for non-secret data, not an additional global lookup.
+A second feature row uses its owner's projection (for example commandRules.read), rather
+than registering the same source twice. For MCP, publication refresh already runs inside
+McpPublication; no other plugin needs to call refresh to support its settings subscription.
+Keep server decoding, secret use and connection setup on the MCP side. Co-locating secret-bearing
+persistence/codec and the operation using it requires an owner decision, as for Provider.
+A native type parameter, storage closure or another row's database handle is never a
+wire argument.
