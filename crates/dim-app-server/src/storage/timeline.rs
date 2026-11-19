@@ -3305,7 +3305,6 @@ fn directory_rows(connection: &Connection, session: &str) -> Result<Vec<StoredBr
     }
     Ok(branches.into_values().collect())
 }
-/// The directory read of a restore or export pass.
 
 #[cfg(test)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
