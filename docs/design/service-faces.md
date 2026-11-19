@@ -158,6 +158,9 @@ Rust 产品装配的现状以 [生成的 catalog](../architecture/rust-agent/gen
 `hostPlatform`、`fileStorage`、`sqliteStorage`、`timelineStore` 不按对象分类保留：数据面就是公开契约，`execHost`、`fsHost`、`store`、`timelineStore` 的操作就是它们的接口，旧名字是提供方和它的 Rust binding，调用方在进程内直接调这组操作，不再有第二套公开 API。凭据是操作内部用的能力，不是保留 `internal` 的理由。`hostPlatform`、`fileStorage` 的提供方在持有资源的那个 daemon（控制节点自己的插件，或 #1296 挂载的资源 leaf）；`store` 在持有 Session 状态的那个 daemon，SQLite 还是 PostgreSQL 只是实现（#1298，[resource and store data faces](resource-faces.md) §6）。
 
 ### 3.5 热路径与顺序：待操作化
+
+Proposed target operations: [Session and branch operations](contracts/runtime-owner-operations.md).
+
 原因 `hot-path`：每回合或每条输入上的状态机、本地顺序或同步回调。操作面的粒度须保留原有顺序和失败语义。
 
 | 名字 | scope | provider | reason | 动作 |
