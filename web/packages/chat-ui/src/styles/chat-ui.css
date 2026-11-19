@@ -1,0 +1,10 @@
+/*
+ * Shared token entry point. Hosts may mount the package under .dim-chat-ui to
+ * pick up these defaults; component styles stay in their component files.
+ */
+.dim-chat-ui {
+  --dim-chat-ui-font-family: inherit;
+  --dim-chat-ui-code-font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: inherit;
+  font-family: var(--dim-chat-ui-font-family);
+}
