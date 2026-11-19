@@ -1,9 +1,13 @@
-use super::{EntryKind, FileReader, FileStorage, FileStorageError, Result};
+use super::{DirectoryEntry, FileReader, FileStorage, FileStorageError, Result};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use rutis::Ctx;
 use rutis_bridge::session::{Error, HostDispatch, Reply, Value};
 use serde::{Deserialize, Serialize};
-use std::{path::Path, sync::Arc};
+use std::{
+    ffi::{OsStr, OsString},
+    path::{Component, Path},
+    sync::Arc,
+};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -14,10 +18,50 @@ pub struct OpenRead {
     pub size: u64,
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize)]
-pub struct FsEntry {
-    pub name: String,
-    pub kind: EntryKind,
+pub(super) fn serialize_name<S: serde::Serializer>(
+    name: &OsStr,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error> {
+    match name.to_str() {
+        Some(text) => serializer.serialize_str(text),
+        #[cfg(any(unix, windows))]
+        None => name.serialize(serializer),
+        #[cfg(not(any(unix, windows)))]
+        None => Err(serde::ser::Error::custom(
+            "unsupported filesystem name encoding",
+        )),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum EntryName {
+    Text(String),
+    #[cfg(any(unix, windows))]
+    Native(OsString),
+}
+
+fn deserialize_name<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<OsString, D::Error> {
+    Ok(match EntryName::deserialize(deserializer)? {
+        EntryName::Text(text) => text.into(),
+        #[cfg(any(unix, windows))]
+        EntryName::Native(name) => name,
+    })
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged, deny_unknown_fields)]
+pub enum FsRemove {
+    Path {
+        path: String,
+    },
+    Entry {
+        parent: String,
+        #[serde(deserialize_with = "deserialize_name")]
+        name: OsString,
+    },
 }
 
 /// Filesystem operations on the existing storage generation.
@@ -34,25 +78,29 @@ impl FsHost {
         self.0.create_directory(&path, cancel).await
     }
 
-    pub async fn list(&self, path: &str, cancel: &CancellationToken) -> Result<Vec<FsEntry>> {
+    pub async fn list(
+        &self,
+        path: &str,
+        cancel: &CancellationToken,
+    ) -> Result<Vec<DirectoryEntry>> {
         let path = self.0.resolve(Path::new(path))?;
-        self.0
-            .list(&path, cancel)
-            .await?
-            .into_iter()
-            .map(|entry| {
-                Ok(FsEntry {
-                    name: entry.name.into_string().map_err(|_| {
-                        FileStorageError::InvalidPath("directory entry name is not UTF-8")
-                    })?,
-                    kind: entry.kind,
-                })
-            })
-            .collect()
+        self.0.list(&path, cancel).await
     }
 
-    pub async fn remove(&self, path: &str, cancel: &CancellationToken) -> Result<()> {
-        let path = self.0.resolve(Path::new(path))?;
+    pub async fn remove(&self, request: FsRemove, cancel: &CancellationToken) -> Result<()> {
+        let path = match request {
+            FsRemove::Path { path } => self.0.resolve(Path::new(&path))?,
+            FsRemove::Entry { parent, name } => {
+                if Path::new(&name).components().next() != Some(Component::Normal(name.as_os_str()))
+                {
+                    return Err(FileStorageError::InvalidPath(
+                        "expected a single directory entry name",
+                    ));
+                }
+                let parent = self.0.resolve(Path::new(&parent))?;
+                self.0.path(parent.root, parent.relative.join(name))?
+            }
+        };
         self.0.remove(&path, cancel).await
     }
 
@@ -175,7 +223,7 @@ enum Request {
     OpenRead(PathRequest),
     CreateDirectory(PathRequest),
     List(PathRequest),
-    Remove(PathRequest),
+    Remove(FsRemove),
     ReadAt(Read),
     CloseRead(Close),
 }
@@ -231,10 +279,7 @@ impl HostDispatch for FsHost {
                     serde_json::json!({"entries": entries})
                 }
                 Request::Remove(request) => {
-                    owner
-                        .remove(&request.path, &cancel)
-                        .await
-                        .map_err(failure)?;
+                    owner.remove(request, &cancel).await.map_err(failure)?;
                     serde_json::json!({})
                 }
                 Request::OpenRead(request) => {

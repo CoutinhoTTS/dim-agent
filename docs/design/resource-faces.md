@@ -372,7 +372,9 @@ tool semantics: no line numbers, no images, no effects.
 | `createDirectory` | async | `{path}` | `{}` |
 | `replace` | async | `{path, bytes, permissions?, leaseId?}` | `{}` |
 | `list` | async | `{path}` | `{entries: [{name, kind}]}` |
-| `remove` | async | `{path}` | `{}` |
+| `remove` | async | `{path}` / `{parent, name}` | `{}` |
+
+A listed name passes unchanged to `remove({parent, name})`: a Unicode string, `{Unix: number[]}` for native bytes, or `{Windows: number[]}` for native UTF-16 code units. The owner checks that the name is a single component.
 
 - `readBytes` is the bounded read: `limit` is required, a larger file is `too_large` without
   partial bytes, and `bytes` is base64. `size` is the file's length, so a caller can tell "done"

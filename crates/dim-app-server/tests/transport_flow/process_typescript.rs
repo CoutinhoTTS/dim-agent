@@ -2008,12 +2008,45 @@ async fn node_fs_readers_share_pinned_files_and_release_with_the_caller() {
             .await,
     );
     std::fs::write(directory.join("contents"), b"payload").unwrap();
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let name = std::ffi::OsStr::from_bytes(b"contents-\xff");
+        std::fs::write(directory.join(name), b"raw name").unwrap();
+    }
     let listed = client.rpc("fsreader.list", json!({"path":directory})).await;
     assert_ok(&listed);
+    let entries = listed["result"]["entries"].as_array().unwrap();
+    assert_eq!(entries[0], json!({"name":"contents","kind":"file"}));
+    #[cfg(target_os = "linux")]
     assert_eq!(
-        listed["result"],
-        json!({"entries":[{"name":"contents","kind":"file"}]})
+        entries[1],
+        json!({"name":{"Unix":b"contents-\xff".as_slice()},"kind":"file"})
     );
+    for entry in entries {
+        assert_ok(
+            &client
+                .rpc(
+                    "fsreader.remove",
+                    json!({"parent":directory,"name":entry["name"]}),
+                )
+                .await,
+        );
+    }
+    let listed = client.rpc("fsreader.list", json!({"path":directory})).await;
+    assert_eq!(listed["result"], json!({"entries":[]}));
+    let sibling = directory.with_file_name("sibling");
+    std::fs::write(&sibling, b"preserve").unwrap();
+    for name in [
+        json!("../sibling"),
+        json!({"Unix":b"../sibling".as_slice()}),
+    ] {
+        let refused = client
+            .rpc("fsreader.remove", json!({"parent":directory,"name":name}))
+            .await;
+        assert!(refused.get("error").is_some(), "{refused}");
+    }
+    assert_eq!(std::fs::read(sibling).unwrap(), b"preserve");
     assert_ok(
         &client
             .rpc("fsreader.remove", json!({"path":directory}))

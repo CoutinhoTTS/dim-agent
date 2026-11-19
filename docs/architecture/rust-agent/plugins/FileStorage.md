@@ -34,7 +34,7 @@ folding names would break case-sensitive directories and their aliases.
 
 `fsHost.createDirectory`, `list` and `remove` resolve absolute paths in the owner's
 authorized roots. They use the directory creation, listing and removal contracts above.
-A listing containing a name that cannot be represented as UTF-8 fails with `invalid`.
+Pass a listed name unchanged to `remove({parent, name})`. A Unicode name is a string. Other names carry the original Unix bytes (`{Unix: number[]}`) or Windows UTF-16 code units (`{Windows: number[]}`). The owner accepts a single component below the listed directory.
 
 ### Pinned reads
 
