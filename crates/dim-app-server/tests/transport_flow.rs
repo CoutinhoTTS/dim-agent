@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 use std::{
     sync::{
         Arc,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -2620,4 +2620,242 @@ pub(crate) fn activity_time(events: &[Arc<dim_agent_types::AgentEvent>]) -> Opti
                 && !matches!(&event.kind, EventKind::InputMessage(data) if data.user.is_none())
         })
         .map(|event| event.create_at)
+}
+
+/// A required row that reports progress while it assembles, after the store is
+/// open. It reads the store only to start after it.
+struct SlowAssemblyRow {
+    storage: rutis::host::Key<dim_app_server::storage::SqliteStorage>,
+}
+impl rutis::host::DynPlugin for SlowAssemblyRow {
+    fn name(&self) -> &str {
+        "SlowAssemblyRow"
+    }
+    fn injects(&self) -> Vec<rutis::host::TypeKey> {
+        vec![self.storage.erase()]
+    }
+    fn apply<'a>(
+        &'a self,
+        ctx: &'a rutis::Ctx,
+    ) -> rutis::host::BoxFuture<'a, rutis::Result<rutis::host::Effect>> {
+        Box::pin(async move {
+            for _ in 0..4 {
+                dim_agent_runtime::opening_advanced(ctx);
+                tokio::time::sleep(Duration::from_millis(700)).await;
+            }
+            Ok(rutis::host::Effect::Done)
+        })
+    }
+}
+
+/// The assembly note exists from the store's opening, its counter rises with
+/// the opening's progress, and opening removes it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_startup_note_reports_assembly_progress_until_the_server_opens() {
+    use std::time::Instant;
+
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("dimcode.sqlite");
+    let mut note = database.as_os_str().to_os_string();
+    note.push(".startup");
+    let note = std::path::PathBuf::from(note);
+    let hold = Arc::new(dim_app_server::PublicationHold::default());
+    let server = tokio::spawn(launch_with(
+        Arc::new(MockTools),
+        ServerConfig {
+            database_path: Some(database),
+            publication_hold: Some(hold.clone()),
+            ..Default::default()
+        },
+        |builder| {
+            builder.plugin(|names| {
+                Ok(Box::new(SlowAssemblyRow {
+                    storage: names.key::<dim_app_server::storage::SqliteStorage>()?,
+                }))
+            });
+        },
+    ));
+
+    let counter = |text: &str| {
+        text.lines()
+            .nth(1)?
+            .strip_prefix("assembly progress=")?
+            .parse::<u64>()
+            .ok()
+    };
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut first = None;
+    let mut increased = false;
+    while Instant::now() < deadline && !increased {
+        if let Ok(text) = std::fs::read_to_string(&note)
+            && let Some(counter) = counter(&text)
+        {
+            match first {
+                Some(first) if counter > first => increased = true,
+                None => first = Some(counter),
+                Some(_) => {}
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        increased,
+        "the note never carried an increasing assembly counter: {first:?}"
+    );
+    tokio::time::timeout(Duration::from_secs(10), hold.waiting.notified())
+        .await
+        .expect("the assembly reached the publication hold");
+    assert!(
+        note.exists(),
+        "the note is still there while the assembly is held before opening"
+    );
+    hold.release.notify_one();
+    let (server, _agent) = server.await.unwrap();
+    assert!(!note.exists(), "opening removes the startup note");
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// Epoch milliseconds, so a row and the test can compare one clock reading.
+fn epoch_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// The counter an assembly note carries, zero when it carries none.
+fn assembly_counter(path: &std::path::Path) -> u64 {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| {
+            text.lines()
+                .nth(1)?
+                .strip_prefix("assembly progress=")?
+                .parse()
+                .ok()
+        })
+        .unwrap_or(0)
+}
+
+/// A required row that reports progress twice within 50 ms once the store is
+/// open, then stays in `apply` for 1.5 s. The second report is inside the
+/// coalescing interval, so only a write at the end of that interval can make
+/// the note catch up while this row is quiet.
+struct BurstAssemblyRow {
+    storage: rutis::host::Key<dim_app_server::storage::SqliteStorage>,
+    note: std::path::PathBuf,
+    in_apply: Arc<AtomicBool>,
+    second_report: Arc<AtomicU64>,
+    counter_at_second: Arc<AtomicU64>,
+}
+impl rutis::host::DynPlugin for BurstAssemblyRow {
+    fn name(&self) -> &str {
+        "BurstAssemblyRow"
+    }
+    fn injects(&self) -> Vec<rutis::host::TypeKey> {
+        vec![self.storage.erase()]
+    }
+    fn apply<'a>(
+        &'a self,
+        ctx: &'a rutis::Ctx,
+    ) -> rutis::host::BoxFuture<'a, rutis::Result<rutis::host::Effect>> {
+        Box::pin(async move {
+            self.in_apply.store(true, Ordering::SeqCst);
+            dim_agent_runtime::opening_advanced(ctx);
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            self.counter_at_second
+                .store(assembly_counter(&self.note), Ordering::SeqCst);
+            dim_agent_runtime::opening_advanced(ctx);
+            self.second_report.store(epoch_millis(), Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(1500)).await;
+            self.in_apply.store(false, Ordering::SeqCst);
+            Ok(rutis::host::Effect::Done)
+        })
+    }
+}
+
+/// The note catches up with progress recorded inside the coalescing interval
+/// when that interval ends, while the row is still in `apply`; opening then
+/// stops every later write.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_startup_note_writes_progress_after_the_interval_ends() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("dimcode.sqlite");
+    let mut note = database.as_os_str().to_os_string();
+    note.push(".startup");
+    let note = std::path::PathBuf::from(note);
+    let hold = Arc::new(dim_app_server::PublicationHold::default());
+    let in_apply = Arc::new(AtomicBool::new(false));
+    let second_report = Arc::new(AtomicU64::new(0));
+    let counter_at_second = Arc::new(AtomicU64::new(0));
+    let server = tokio::spawn(launch_with(
+        Arc::new(MockTools),
+        ServerConfig {
+            database_path: Some(database),
+            publication_hold: Some(hold.clone()),
+            ..Default::default()
+        },
+        {
+            let note = note.clone();
+            let in_apply = in_apply.clone();
+            let second_report = second_report.clone();
+            let counter_at_second = counter_at_second.clone();
+            move |builder| {
+                builder.plugin(move |names| {
+                    Ok(Box::new(BurstAssemblyRow {
+                        storage: names.key::<dim_app_server::storage::SqliteStorage>()?,
+                        note: note.clone(),
+                        in_apply: in_apply.clone(),
+                        second_report: second_report.clone(),
+                        counter_at_second: counter_at_second.clone(),
+                    }))
+                });
+            }
+        },
+    ));
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if second_report.load(Ordering::SeqCst) != 0
+            && assembly_counter(&note) > counter_at_second.load(Ordering::SeqCst)
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the note stayed at {} after the second report",
+            counter_at_second.load(Ordering::SeqCst)
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let seen = epoch_millis();
+    let reported = second_report.load(Ordering::SeqCst);
+    assert!(
+        seen - reported <= 800,
+        "the note took {} ms after the second report",
+        seen - reported
+    );
+    assert!(
+        in_apply.load(Ordering::SeqCst),
+        "the row finished before the note caught up"
+    );
+
+    tokio::time::timeout(Duration::from_secs(10), hold.waiting.notified())
+        .await
+        .expect("the assembly reached the publication hold");
+    assert!(
+        note.exists(),
+        "the note is still there while the assembly is held before opening"
+    );
+    hold.release.notify_one();
+    let (server, _agent) = server.await.unwrap();
+    assert!(!note.exists(), "opening removes the startup note");
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert!(
+        !note.exists(),
+        "no trailing write recreates the note after opening"
+    );
+    server.shutdown();
+    server.join().await.unwrap();
 }

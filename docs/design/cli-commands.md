@@ -1981,22 +1981,33 @@ the store. A failed startup exits 1 unless it enters the recovery below.
 While a store format upgrade runs, the daemon writes the same note as a progress
 kind, `dimcode-startup-progress v1 pid=<pid>` with
 `store-upgrade from=<from> to=<to> progress=<n>`, at most once a second and
-after each upgrade step; a fresh store or one at the current format writes none.
-All three startup waits read it: the wait before spawning and the start-lock
-wait count any pid, the spawn wait only its child's pid, and each new counter
-moves the wait's bound forward by the bound itself (10 s for the wait before
-spawning and the spawn wait, one verified shutdown plus one startup plus a
-margin for the lock). A store format upgrade is the long phase that reports
-progress and moves the bound; every other phase of startup is bounded by the
-client's fixed value. Before it spawns, a client waits while the note names a
-live pid other than its own: the store is owned, and it has no socket until the
-upgrade finishes. Progress moves that bound, the client retries the socket, and
-it connects once the daemon serves; a note whose pid is gone, or that names the
-client itself, is stale, and the client starts its own daemon. The first such
-note a client reads prints, once on stderr in every mode,
+after each upgrade step. From the moment the store opens until the listeners
+open, the daemon owns the note as an assembly kind, `assembly progress=<n>`:
+`<n>` rises whenever the opening records progress (a row's first activation or
+an `OpeningAdvanced` report), the first progress after the store removes its own
+note writes at once and later ones at most once per 500 ms, with the last
+progress of an interval written when that interval ends so the note is never
+more than one interval behind the daemon's own progress, and opening removes
+the note. The store writes no note for a fresh store or one at the current
+format; the assembly note is what a normal start reports. All four startup
+waits read either kind: the wait before spawning and the start-lock wait count
+any pid, the spawn wait only its child's pid, and the reply wait takes the
+server that accepted its connection; each new counter moves the wait's bound
+forward by the bound itself (10 s for the wait before spawning, the spawn wait
+and the reply wait, one verified shutdown plus one startup plus a margin for the
+lock). A start that reports progress is waited for however long it takes; one
+that reports nothing for the bound fails. Before it spawns, a client waits while
+the note names a live pid other than its own: the store is owned, and it has no
+socket until the upgrade or assembly finishes. Progress moves that bound, the
+client retries the socket, and it connects once the daemon serves; a note whose
+pid is gone, or that names the client itself, is stale, and the client starts
+its own daemon. Only the store-upgrade kind prints: the first such note a
+client reads prints, once on stderr in every mode,
 `Upgrading the local store from format v<from> to v<to>; this can take a while on a large store.`;
-stdout and JSON output stay unchanged. A client that only knows the failure kind
-ignores the progress kind and falls back to the generic messages above.
+an assembly note prints nothing and stdout and JSON output stay unchanged. A
+client that only knows the failure kind ignores a progress kind and falls back
+to the generic messages above; a client that knows only the store-upgrade kind
+treats the assembly kind the same way.
 
 A note that names a `stage` keeps the upgrade visible instead of leaving the
 first line alone for as long as the upgrade runs: each later report prints
@@ -2016,10 +2027,10 @@ accepts and answers nothing. That wait is a startup phase, not a request
 handshake with a bound of its own: `hello` carries none, and the client takes
 the reply under the inactivity bound of the phase it is in, which a progress
 counter moves forward by the bound itself (10 s for a connect and the spawn
-wait, the shutdown plus startup plus margin for the start-lock wait). An
-upgrade therefore extends the handshake the same way it extends the spawn, and
-every action that connects, `daemon stop` included, is bounded like the phase
-it is in. `Client::greet` sends `hello` and `Client::complete_hello` checks the
+wait, the shutdown plus startup plus margin for the start-lock wait). A store
+upgrade or an assembly therefore extends the handshake the same way it extends
+the spawn, and every action that connects, `daemon stop` included, is bounded
+like the phase it is in. `Client::greet` sends `hello` and `Client::complete_hello` checks the
 reply, so a caller with a wait takes the reply itself, and `Client::hello` is
 for a caller with none, such as the ACP gateway's reconnect, which bounds a
 whole attempt inside its own deadline. When the bound does expire, the client

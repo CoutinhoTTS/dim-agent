@@ -4341,7 +4341,8 @@
       "unexpandedMacros": [
         "assert",
         "assert_eq",
-        "format"
+        "format",
+        "panic"
       ]
     },
     {
@@ -24511,6 +24512,7 @@
       "from": "dim_app_server",
       "to": "dim_app_server::storage::sqlite",
       "references": [
+        "path storage::AssemblyProgress::new",
         "path storage::SqliteStorage",
         "path storage::SqliteStoragePlugin::new"
       ]
@@ -33952,6 +33954,7 @@
       "to": "dim_app_server::storage::sqlite",
       "references": [
         "mod sqlite",
+        "use sqlite::AssemblyProgress",
         "use sqlite::FORMAT",
         "use sqlite::SqliteStorage",
         "use sqlite::SqliteStoragePlugin",
@@ -37535,9 +37538,17 @@
       "from": "dim_cli::client::progress_note_tests",
       "to": "dim_cli::client",
       "references": [
+        "path ProgressKind::Assembly",
+        "path ProgressKind::StoreUpgrade",
         "path ProgressNote",
+        "path ProgressReport::StoreUpgrade",
+        "path ProgressWatch::default",
+        "path UpgradeStage",
         "path read_progress_note",
+        "use super::ProgressKind",
         "use super::ProgressNote",
+        "use super::ProgressReport",
+        "use super::ProgressWatch",
         "use super::UpgradeStage",
         "use super::read_progress_note"
       ]

@@ -35,6 +35,7 @@ pub use prompt_migration::{Migrated, migrate_prompt_references};
 #[cfg(feature = "testing")]
 pub use query::{QueryStatementStats, sqlite_memory};
 pub use reclaim::Reclaimed;
+pub(crate) use sqlite::AssemblyProgress;
 #[cfg(feature = "testing")]
 pub use sqlite::set_upgrade_report_delay;
 pub use sqlite::{
