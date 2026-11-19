@@ -813,7 +813,8 @@ echo 'Installed package'
     assert!(!output.status.success(), "{output:?}");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("DimCode is currently running") && stderr.contains("`dima daemon stop`"),
+        stderr.contains("DimCode is currently running")
+            && stderr.contains(&format!("`dima --home {} daemon stop`", home.0.display())),
         "{output:?}"
     );
     assert!(!recorded.exists(), "a live consumer must block the install");
@@ -1021,7 +1022,10 @@ echo 'Installed package'
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 assert!(
                     stderr.contains("DimCode is currently running")
-                        && stderr.contains("`dimcode daemon stop`"),
+                        && stderr.contains(&format!(
+                            "`dimcode --home {} daemon stop`",
+                            other.0.display()
+                        )),
                     "{output:?}"
                 );
                 assert!(
