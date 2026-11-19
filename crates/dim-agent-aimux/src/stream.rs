@@ -350,7 +350,10 @@ pub(crate) fn convert(
                             &cancel,
                         )));
                     }
-                    if reason == ModelStopReason::EndTurn && !answered && completed_calls.is_empty() {
+                    if reason == ModelStopReason::EndTurn
+                        && !answered
+                        && completed_calls.is_empty()
+                    {
                         break Some(Err(empty_reply()));
                     }
                     break Some(Ok((usage_chunk(usage), reason)));
