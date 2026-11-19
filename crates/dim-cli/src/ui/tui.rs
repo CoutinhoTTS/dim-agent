@@ -521,8 +521,10 @@ fn run_terminal(host: Box<dyn SessionPort>, surroundings: Env) -> i32 {
         } else {
             terminal.next_event(wait)
         };
-        if matches!(&next, Wait::Event(InputEvent::Key(_)))
-            && let Some(full) = &mut full
+        if matches!(
+            &next,
+            Wait::Event(InputEvent::Key(_) | InputEvent::Paste(_) | InputEvent::Submit)
+        ) && let Some(full) = &mut full
         {
             full.cancel_click();
         }
@@ -538,16 +540,19 @@ fn run_terminal(host: Box<dyn SessionPort>, surroundings: Env) -> i32 {
                     app.host.shutdown();
                     return code;
                 }
-                if let Some(full) = &mut full
-                    && let Some(click) = full.pending_click(&app, Instant::now())
-                {
-                    dirty |= match click {
-                        MouseOutcome::Click { block, row } => {
-                            app.click(block, row, full.layout_cols() as usize)
-                        }
-                        MouseOutcome::Thought { key, body } => app.click_panel_thought(&key, body),
-                        _ => false,
-                    };
+                if let Some(full) = &mut full {
+                    dirty |= full.resize(terminal.size());
+                    if let Some(click) = full.pending_click(&app, Instant::now()) {
+                        dirty |= match click {
+                            MouseOutcome::Click { block, row } => {
+                                app.click(block, row, full.layout_cols() as usize)
+                            }
+                            MouseOutcome::Thought { key, body } => {
+                                app.click_panel_thought(&key, body)
+                            }
+                            _ => false,
+                        };
+                    }
                 }
                 if app.tick() {
                     dirty = true;
@@ -7558,15 +7563,16 @@ impl App {
             self.set_tool_open(node, !open, cols);
             return true;
         }
-        if let Some((_, node)) = self.tool_body(block, row, cols) {
+        if let Some((_, node, _)) = self.tool_body(block, row, cols) {
             let node = node.to_owned();
             self.set_tool_open(node, false, cols);
             return true;
         }
         let Some(id) = block else {
-            let Some((source_id, header)) = self.live_thought(row) else {
+            let Some((source_id, start)) = self.live_thought(row) else {
                 return false;
             };
+            let header = row == start;
             let source_id = source_id.to_owned();
             let scope = self.tool_scope();
             let choices = self.thinking_choices.entry(scope).or_default();
@@ -7657,7 +7663,7 @@ impl App {
         true
     }
 
-    fn live_thought(&self, row: usize) -> Option<(&str, bool)> {
+    fn live_thought(&self, row: usize) -> Option<(&str, usize)> {
         if self.shows_member() {
             return None;
         }
@@ -7672,7 +7678,7 @@ impl App {
             .any(|source| {
                 source.row_id == *source_id && source.streaming && source.kind == RowKind::Thinking
             })
-            .then_some((source_id.as_str(), row == rows.start))
+            .then_some((source_id.as_str(), rows.start))
     }
 
     fn tool_scope(&self) -> (String, String) {
@@ -7685,7 +7691,11 @@ impl App {
         )
     }
 
-    fn tool_group_at(&self, block: Option<usize>, row: usize) -> Option<(&ToolGroup, usize)> {
+    fn tool_group_at(
+        &self,
+        block: Option<usize>,
+        row: usize,
+    ) -> Option<(&ToolGroup, usize, usize)> {
         match block {
             Some(id) => {
                 let Block::ToolGroup(group) =
@@ -7693,14 +7703,14 @@ impl App {
                 else {
                     return None;
                 };
-                Some((group, row.checked_sub(1)?))
+                Some((group, 1, row.checked_sub(1)?))
             }
             None if self.shows_member() => None,
-            None => self
-                .tail_groups
-                .iter()
-                .rev()
-                .find_map(|(start, group)| row.checked_sub(*start).map(|row| (group, row))),
+            None => {
+                self.tail_groups.iter().rev().find_map(|(start, group)| {
+                    row.checked_sub(*start).map(|row| (group, *start, row))
+                })
+            }
         }
     }
 
@@ -7711,7 +7721,7 @@ impl App {
         cols: usize,
     ) -> Option<(String, bool)> {
         let width = cols.saturating_sub(2 + MARGIN).max(1);
-        let (group, row) = self.tool_group_at(block, row)?;
+        let (group, _, row) = self.tool_group_at(block, row)?;
         disclosure_at(group, width, &self.palette, row).map(|(id, open)| (id.to_owned(), open))
     }
 
@@ -7720,15 +7730,20 @@ impl App {
         block: Option<usize>,
         row: usize,
         cols: usize,
-    ) -> Option<(&ToolGroup, &str)> {
+    ) -> Option<(&ToolGroup, &str, usize)> {
         let width = cols.saturating_sub(2 + MARGIN).max(1);
-        let (group, row) = self.tool_group_at(block, row)?;
-        let node = body_disclosure_at(group, width, &self.palette, row)?;
-        Some((group, node))
+        let (group, start, row) = self.tool_group_at(block, row)?;
+        let (node, header) = body_disclosure_at(group, width, &self.palette, row)?;
+        Some((group, node, start + header))
     }
 
-    fn thinking_body(&self, block: Option<usize>, cols: usize, row: usize) -> Option<String> {
-        let source_id = match block {
+    fn thinking_body(
+        &self,
+        block: Option<usize>,
+        cols: usize,
+        row: usize,
+    ) -> Option<(String, usize)> {
+        let (source_id, header) = match block {
             Some(block) => {
                 let index = block.checked_sub(self.dropped())?;
                 let Block::Thinking {
@@ -7742,11 +7757,11 @@ impl App {
                 if row < 2 || row >= self.rows(index, cols).len() {
                     return None;
                 }
-                source_id
+                (source_id.as_str(), 1)
             }
             None => {
-                let (source_id, header) = self.live_thought(row)?;
-                if header
+                let (source_id, start) = self.live_thought(row)?;
+                if row == start
                     || !self
                         .thinking_choices
                         .get(&self.tool_scope())
@@ -7756,10 +7771,10 @@ impl App {
                 {
                     return None;
                 }
-                source_id
+                (source_id, start)
             }
         };
-        Some(
+        Some((
             serde_json::to_string(&(
                 self.tool_scope(),
                 self.member_target.as_ref(),
@@ -7767,7 +7782,8 @@ impl App {
                 source_id,
             ))
             .expect("thinking identity is JSON"),
-        )
+            header,
+        ))
     }
 
     fn refresh_tool_choices(&mut self) {
@@ -8406,12 +8422,17 @@ impl Document for App {
         })
     }
 
-    fn collapsible_body(&self, block: Option<usize>, cols: usize, row: usize) -> Option<String> {
-        if let Some(key) = self.thinking_body(block, cols, row) {
-            return Some(key);
+    fn collapsible_body(
+        &self,
+        block: Option<usize>,
+        cols: usize,
+        row: usize,
+    ) -> Option<(String, usize)> {
+        if let Some(target) = self.thinking_body(block, cols, row) {
+            return Some(target);
         }
-        let (group, node) = self.tool_body(block, row, cols)?;
-        Some(
+        let (group, node, header) = self.tool_body(block, row, cols)?;
+        Some((
             serde_json::to_string(&(
                 "tool",
                 self.tool_scope(),
@@ -8421,7 +8442,8 @@ impl Document for App {
                 node,
             ))
             .expect("tool body identity is JSON"),
-        )
+            header,
+        ))
     }
 
     fn disclosure(&self, block: Option<usize>, cols: usize, row: usize) -> Option<String> {
@@ -15111,6 +15133,125 @@ mod tests {
         let visible = emu.rows_text().join("\n");
         assert!(!visible.contains("live line"), "{visible}");
         assert!(visible.contains("▸ · true · Running…"), "{visible}");
+
+        let mut scrolled = attached();
+        scrolled.size = (92, 14);
+        scrolled.app.set_fullscreen(true);
+        scrolled.app.tool_detail = Detail::Expanded;
+        scrolled.app.thinking_detail = Detail::Expanded;
+        let mut screen = FullScreen::new(scrolled.size, false);
+        let mut emu = crate::ui::render::testterm::Emu::new(92, 14);
+        let draw_small =
+            |app: &mut App, screen: &mut FullScreen, emu: &mut crate::ui::render::testterm::Emu| {
+                let size = (92, 14);
+                let frame = app.frame(size);
+                emu.feed(&screen.render(&frame, size, &app.palette, app));
+            };
+        let fifteen = (1..=15)
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut reply = (*message(false)).clone();
+        reply.row_id = "reply-1".into();
+        reply.text = "First reply paragraph line one.\nFirst reply paragraph line two.\nFirst reply paragraph line three.\n\nSecond reply paragraph line one.\nSecond reply paragraph line two.\nSecond reply paragraph line three.".into();
+        show(
+            &mut scrolled,
+            vec![
+                call("r-tall", "seq15", None, "exec", "seq 1 15", Some(&fifteen)),
+                std::sync::Arc::new(reply.clone()),
+            ],
+        );
+        draw_small(&mut scrolled.app, &mut screen, &mut emu);
+        while !emu.row(0).trim_start().starts_with("4 ") && emu.row(0).trim() != "4" {
+            screen.scroll(-1);
+            draw_small(&mut scrolled.app, &mut screen, &mut emu);
+        }
+        assert!(
+            !emu.rows_text().iter().any(|row| row.contains("$ seq 1 15")),
+            "header is scrolled above the viewport:\n{}",
+            emu.rows_text().join("\n")
+        );
+        let five_row = find_row(&emu, "      5");
+        assert_eq!(
+            click_at(&mut screen, &scrolled.app, 8, five_row),
+            MouseOutcome::Ignored
+        );
+        assert!(screen.resize((90, 14)));
+        assert_eq!(
+            screen.pending_click(&scrolled.app, Instant::now() + Duration::from_millis(401)),
+            None,
+            "resize right before the deadline cancels a pending body collapse"
+        );
+        assert!(screen.resize((92, 14)));
+        draw_small(&mut scrolled.app, &mut screen, &mut emu);
+        let five_row = find_row(&emu, "      5");
+        assert_eq!(
+            click_at(&mut screen, &scrolled.app, 8, five_row),
+            MouseOutcome::Ignored
+        );
+        let Some(MouseOutcome::Click { block, row }) =
+            screen.pending_click(&scrolled.app, Instant::now() + Duration::from_millis(401))
+        else {
+            panic!("scrolled tool body click must confirm after the multi-click window");
+        };
+        assert!(scrolled.app.click(block, row, 92));
+        draw_small(&mut scrolled.app, &mut screen, &mut emu);
+        let visible = emu.rows_text().join("\n");
+        assert!(
+            emu.row(0).contains("▸ $ seq 1 15"),
+            "collapsed header re-anchors at top of viewport:\n{visible}"
+        );
+        assert!(
+            visible.contains("First reply paragraph line one."),
+            "first paragraph of reply stays in view:\n{visible}"
+        );
+
+        let mut thought = (*message(false)).clone();
+        thought.row_id = "tall-thought".into();
+        thought.kind = RowKind::Thinking;
+        thought.text = (1..=15)
+            .map(|n| format!("Thought step {n:02}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        thought.display = Some("Thought step 01".into());
+        thought.elapsed_ms = Some(4000);
+        let mut scrolled_thought = attached();
+        scrolled_thought.size = (92, 14);
+        scrolled_thought.app.set_fullscreen(true);
+        scrolled_thought.app.thinking_detail = Detail::Expanded;
+        let mut screen = FullScreen::new(scrolled_thought.size, false);
+        let mut emu = crate::ui::render::testterm::Emu::new(92, 14);
+        show(
+            &mut scrolled_thought,
+            vec![std::sync::Arc::new(thought), std::sync::Arc::new(reply)],
+        );
+        draw_small(&mut scrolled_thought.app, &mut screen, &mut emu);
+        while !emu.row(0).contains("Thought step 04") {
+            screen.scroll(-1);
+            draw_small(&mut scrolled_thought.app, &mut screen, &mut emu);
+        }
+        let step5 = find_row(&emu, "Thought step 05");
+        assert_eq!(
+            click_at(&mut screen, &scrolled_thought.app, 8, step5),
+            MouseOutcome::Ignored
+        );
+        let Some(MouseOutcome::Click { block, row }) = screen.pending_click(
+            &scrolled_thought.app,
+            Instant::now() + Duration::from_millis(401),
+        ) else {
+            panic!("scrolled thought body click must confirm");
+        };
+        assert!(scrolled_thought.app.click(block, row, 92));
+        draw_small(&mut scrolled_thought.app, &mut screen, &mut emu);
+        let visible = emu.rows_text().join("\n");
+        assert!(
+            emu.row(0).contains("Thought for 4.0s"),
+            "collapsed thought header re-anchors at top of viewport:\n{visible}"
+        );
+        assert!(
+            visible.contains("First reply paragraph line one."),
+            "first paragraph of reply stays in view after thought collapse:\n{visible}"
+        );
     }
 
     #[test]

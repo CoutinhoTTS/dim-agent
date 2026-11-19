@@ -107,7 +107,9 @@ the same still-valid target without a drag. Text selection, double/triple-click
 selection, safe links and the explicit member-conversation entry take priority
 and keep separate actions; the member's tool header toggles its details instead
 of navigating, and any new press, drag, scroll, resize, view change, overlay,
-mouse-off or keyboard input cancels a pending body collapse. Existing Tab/Shift+Tab
+mouse-off, paste or keyboard input cancels a pending body collapse. Collapsing
+from a scrolled body whose owning header sat above the viewport re-anchors to
+that header so it stays visible. Existing Tab/Shift+Tab
 transcript traversal includes committed tool headers; Enter/Space toggles only
 the focused tool. A press on the scrollbar column drags the view instead of
 selecting: the view moves as far as the thumb moves with the pointer, so a

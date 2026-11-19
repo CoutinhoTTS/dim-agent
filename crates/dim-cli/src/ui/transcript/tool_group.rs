@@ -2122,13 +2122,27 @@ pub fn disclosure_rows(group: &ToolGroup, width: usize, p: &Palette) -> Vec<usiz
         .collect()
 }
 
+/// The nearest enclosing open node and its header row (in group coordinates)
+/// for a detail/body row of an interactive group.
 pub fn body_disclosure_at<'a>(
     group: &'a ToolGroup,
     width: usize,
     p: &Palette,
     row: usize,
-) -> Option<&'a str> {
-    line_at(group, width, p, row)?.body_of.as_deref()
+) -> Option<(&'a str, usize)> {
+    let (rows, starts) = lay_out_group(group, width, p, RUNNING_MARK);
+    if row >= rows.len() {
+        return None;
+    }
+    let line = starts
+        .partition_point(|start| *start <= row)
+        .checked_sub(1)?;
+    let node = group.lines()[line].body_of.as_deref()?;
+    let header = group
+        .lines()
+        .iter()
+        .position(|line| line.disclosure.as_ref().is_some_and(|(id, _)| id == node))?;
+    Some((node, starts[header]))
 }
 
 /// The delegation a row of the drawn group opens: a member card's line.
@@ -2138,10 +2152,6 @@ pub fn action_at<'a>(
     p: &Palette,
     row: usize,
 ) -> Option<&'a str> {
-    line_at(group, width, p, row)?.action.as_deref()
-}
-
-fn line_at<'a>(group: &'a ToolGroup, width: usize, p: &Palette, row: usize) -> Option<&'a Line> {
     let (rows, starts) = lay_out_group(group, width, p, RUNNING_MARK);
     if row >= rows.len() {
         return None;
@@ -2149,7 +2159,7 @@ fn line_at<'a>(group: &'a ToolGroup, width: usize, p: &Palette, row: usize) -> O
     let line = starts
         .partition_point(|start| *start <= row)
         .checked_sub(1)?;
-    Some(&group.lines()[line])
+    group.lines()[line].action.as_deref()
 }
 
 /// The Session cards a keyboard pick can stop on, in drawing order.
