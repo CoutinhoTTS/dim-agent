@@ -113,7 +113,7 @@ are unchanged. See [service faces](../../../design/service-faces.md).
 | `B:TimelineIdentity` | The line's own id. |
 | `B:BranchLifecycle` | Wait for the branch to be Active before writing. |
 | `S:SessionLifecycle` | Wait for the restored child directory to be published before roster repair. |
-| `S:TreeCommands` | `info` for the role and its lines; `head`, the crate-internal `turn_ends` and the parent's new-activity check for the parent block; `default_branch` and the crate-internal move signal for the status note; `input` for every write. |
+| `S:TreeCommands` | `info` for the role and its lines; `head`, the crate-internal `turn_ends` and the parent's new-activity check for the parent block; `default_branch`, the crate-internal move signal and the line's own queue of owed moves for the status note; `input` for every write. |
 | `S:GuideEntries` | Register the roster and message entries on every line, until this part unloads. |
 
 ### Events and lifetime
@@ -123,7 +123,8 @@ Consumes `branch/create`, `branch/create-failed`, `branch/ended`, `branch/end`,
 `step/tool-result`. It writes only `input/message`, through the tree's input path.
 
 - **Status note.** On a line that is not the root, one keyed Append under `branch:line` when the
-  line becomes the default branch or stops being it, heard from the tree's move signal. It
+  line becomes the default branch or stops being it, read in commit order from the queue the tree
+  filled when the move committed, woken by its move signal. It
   restates the line's birth identity byte for byte and then the sentences the move changes; the
   root never receives one, and a load whose latest block disagrees with the tree writes the
   missing note once (design [§5](../../../design/timeline-branches.md#5-parts), [§12.1](../../../design/timeline-branches.md#121-context-mapping)).

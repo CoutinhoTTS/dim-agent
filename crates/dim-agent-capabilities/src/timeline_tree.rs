@@ -34,6 +34,84 @@ use tokio::{
 };
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
+/// A hook that stops a line's writer before it reads the moves it owes, so a
+/// test can commit moves in the window between a line becoming selectable and
+/// its writer starting. Feature `testing` only: a production build has no hook.
+#[cfg(feature = "testing")]
+pub mod testing {
+    use std::sync::Mutex;
+    use tokio::sync::{mpsc, watch};
+
+    type Hold = (String, mpsc::UnboundedSender<String>, watch::Receiver<bool>);
+    static HOLDS: Mutex<Vec<Hold>> = Mutex::new(Vec::new());
+
+    /// The writers of one Session, stopped before they run until released.
+    pub struct HeldWriters {
+        session: String,
+        arrived: mpsc::UnboundedReceiver<String>,
+        release: watch::Sender<bool>,
+    }
+    impl HeldWriters {
+        /// Resolves with the line whose writer the hook stopped; every later
+        /// writer of the Session stops here too.
+        pub async fn arrived(&mut self) -> String {
+            self.arrived.recv().await.unwrap_or_default()
+        }
+        /// Lets every stopped writer continue.
+        pub fn release(&self) {
+            self.release.send_replace(true);
+        }
+    }
+    impl Drop for HeldWriters {
+        fn drop(&mut self) {
+            self.release.send_replace(true);
+            let session = std::mem::take(&mut self.session);
+            HOLDS
+                .lock()
+                .unwrap()
+                .retain(|(held, _, _)| *held != session);
+        }
+    }
+
+    /// Holds every writer of `session_id` before it runs. The tests of one
+    /// process run in parallel, so the key is the Session.
+    pub fn hold_writers(session_id: &str) -> HeldWriters {
+        let (arrived, wait) = mpsc::unbounded_channel();
+        let (release, released) = watch::channel(false);
+        HOLDS
+            .lock()
+            .unwrap()
+            .push((session_id.to_owned(), arrived, released));
+        HeldWriters {
+            session: session_id.to_owned(),
+            arrived: wait,
+            release,
+        }
+    }
+
+    pub(crate) async fn writers(session_id: &str, branch: &str) {
+        let found = {
+            let holds = HOLDS.lock().unwrap();
+            holds
+                .iter()
+                .find(|(held, _, _)| held == session_id)
+                .map(|(_, arrived, released)| (arrived.clone(), released.clone()))
+        };
+        let Some((arrived, mut released)) = found else {
+            return;
+        };
+        let _ = arrived.send(branch.to_owned());
+        loop {
+            if *released.borrow_and_update() {
+                return;
+            }
+            if released.changed().await.is_err() {
+                return;
+            }
+        }
+    }
+}
+
 /// How a loaded branch begins on its Timeline.
 enum Opening {
     /// A new branch: the root of a new Session, or a child with its first
@@ -54,6 +132,11 @@ struct Node {
     /// The sequence of the line's latest `turn/end`, 0 before the first.
     turn_end: watch::Sender<u64>,
     started: bool,
+    /// The committed moves this line took part in and has not turned into
+    /// status notes yet, oldest first (design §5, §20.21). It is created with
+    /// the line, so a move that lands before the line's writer runs still owes
+    /// its note.
+    owed: VecDeque<DefaultMove>,
 }
 enum ChildTerminal {
     Ended(u64),
@@ -138,12 +221,8 @@ pub struct TimelineTree {
     close_started: AtomicBool,
     /// Wakes the callers waiting for an end to complete or to wait for a turn.
     end_notify: tokio::sync::Notify,
-    /// The moves the default branch has committed, in order: a line's
-    /// BranchLine turns the ones it took part in into its status notes, one per
-    /// move (design §5, §12.1, §20.21). A load reconciles from the fact.
-    moves: Mutex<Vec<DefaultMove>>,
-    /// Wakes the writers after a move lands in `moves`; its value is an epoch,
-    /// not the move, so a writer never reads only the latest one.
+    /// Wakes the writers after a move lands in a line's own queue; its value is
+    /// an epoch, not the move, so a writer never reads only the latest one.
     default_moved: watch::Sender<u64>,
     /// Serialises the retries of one line's refused final message, so two
     /// waiters cannot both deliver and record it (design §10, §20.26b).
@@ -390,8 +469,9 @@ impl TreeCommands {
             .upgrade()
             .and_then(|tree| tree.state.lock().unwrap().default_from.clone())
     }
-    /// A signal that changes after each move; a line's writer reads the moves
-    /// it owes a note for from the tree, not from this value (design §5).
+    /// A signal that changes after each move; it wakes a line's writer, which
+    /// reads the transitions the tree owes it from its own queue, not from this
+    /// value (design §5).
     #[service(skip)]
     fn default_moves(&self) -> watch::Receiver<u64> {
         self.tree
@@ -399,17 +479,11 @@ impl TreeCommands {
             .map(|tree| tree.default_moved.subscribe())
             .unwrap_or_else(|| watch::channel(0).1)
     }
-    /// How many moves have committed: a line that opens now owes no note for
-    /// the moves before it.
+    /// The oldest move `id` owes a status note for, in commit order; this call
+    /// takes it off the line's queue (design §5, §20.21).
     #[service(skip)]
-    fn moves_len(&self) -> usize {
-        self.tree.upgrade().map_or(0, |tree| tree.moves_len())
-    }
-    /// The next move line `id` took part in, in commit order (design §5,
-    /// §20.21).
-    #[service(skip)]
-    fn next_move(&self, id: &str, seen: &mut usize) -> Option<DefaultMove> {
-        self.tree.upgrade()?.next_move(id, seen)
+    fn next_move(&self, id: &str) -> Option<DefaultMove> {
+        self.tree.upgrade()?.next_move(id)
     }
     /// A signal that changes when line `id` ends a turn; it carries that
     /// `turn/end`'s sequence.
@@ -881,7 +955,6 @@ impl TimelineTree {
             close_task: Mutex::new(None),
             close_started: AtomicBool::new(false),
             end_notify: tokio::sync::Notify::new(),
-            moves: Mutex::new(Vec::new()),
             default_moved: watch::channel(0).0,
             retry: tokio::sync::Mutex::new(()),
             operations: Arc::new(tokio::sync::Mutex::new(())),
@@ -922,6 +995,7 @@ impl TimelineTree {
                 ready,
                 turn_end,
                 started: false,
+                owed: VecDeque::new(),
             },
         );
         Ok(receiver)
@@ -1801,39 +1875,43 @@ impl TimelineTree {
                 .map_err(|_| AgentError::Closed("branch/default publication".into()))?;
         }
     }
-    /// The move in force after its fact committed: the tree's answer, the one
-    /// transition both participants write their note from, and the wake that
-    /// lets them read it (design §5, §12.1, §20.21).
+    /// The move in force after its fact committed: the tree's answer, and the
+    /// transition both participants owe a note, queued under the same lock that
+    /// moves `default`, so a reader never sees the new default without the note
+    /// the tree owes for it (design §5, §12.1, §20.21).
     fn set_default(&self, id: &str, from: Option<String>) {
+        let transition = DefaultMove {
+            from,
+            to: id.to_owned(),
+        };
         {
             let mut state = self.state.lock().unwrap();
             state.default = id.into();
-            state.default_from = from.clone();
-        }
-        self.moves.lock().unwrap().push(DefaultMove {
-            from,
-            to: id.to_owned(),
-        });
-        self.default_moved.send_modify(|epoch| *epoch += 1);
-    }
-    /// How many moves have committed: a line that opens now starts after them,
-    /// so it owes no note for a move it did not take part in.
-    fn moves_len(&self) -> usize {
-        self.moves.lock().unwrap().len()
-    }
-    /// The next move `id` took part in, in commit order, advancing `seen` past
-    /// [`Self::moves_len`]'s counter for the moves it did not (design §5,
-    /// §20.21).
-    fn next_move(&self, id: &str, seen: &mut usize) -> Option<DefaultMove> {
-        let moves = self.moves.lock().unwrap();
-        while *seen < moves.len() {
-            let change = &moves[*seen];
-            *seen += 1;
-            if change.to == id || change.from.as_deref() == Some(id) {
-                return Some(change.clone());
+            state.default_from = transition.from.clone();
+            for line in [transition.from.clone(), Some(transition.to.clone())]
+                .into_iter()
+                .flatten()
+            {
+                if line == ROOT_BRANCH_ID {
+                    continue;
+                }
+                if let Some(node) = state.nodes.get_mut(&line) {
+                    node.owed.push_back(transition.clone());
+                }
             }
         }
-        None
+        self.default_moved.send_modify(|epoch| *epoch += 1);
+    }
+    /// The oldest move `id` owes a status note for, in commit order (design §5,
+    /// §20.21).
+    fn next_move(&self, id: &str) -> Option<DefaultMove> {
+        self.state
+            .lock()
+            .unwrap()
+            .nodes
+            .get_mut(id)?
+            .owed
+            .pop_front()
     }
     /// Whether `id` or any ancestor of it is ending or ended: such a line
     /// cannot become the default branch, because an end already on its way to
@@ -3296,6 +3374,8 @@ impl DynPlugin for BranchLinePlugin {
                 if !session.activated().await {
                     return;
                 }
+                #[cfg(feature = "testing")]
+                testing::writers(&identity.session_id, &identity.branch_id).await;
                 writer.run().await;
             });
             let stop = line.stop.clone();
@@ -3982,7 +4062,6 @@ impl BranchLine {
             .and_then(|(_, parent)| parent)
             .and_then(|parent| self.tree.turn_ends(&parent));
         let mut defaults = Some(self.tree.default_moves());
-        let mut moves = self.tree.moves_len();
         // A load whose own history disagrees with the tree writes the note the
         // tree earns once, before the line's next request (design §5).
         self.want(Decision::Default);
@@ -3995,7 +4074,7 @@ impl BranchLine {
                 let _ = self.write(decision).await;
                 continue;
             }
-            if let Some(change) = self.tree.next_move(&self.own, &mut moves) {
+            if let Some(change) = self.tree.next_move(&self.own) {
                 let became_default = change.to == self.own;
                 let other = match became_default {
                     true => change.from.unwrap_or_else(|| ROOT_BRANCH_ID.into()),

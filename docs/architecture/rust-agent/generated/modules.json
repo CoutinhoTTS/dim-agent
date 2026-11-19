@@ -1446,6 +1446,13 @@
       ]
     },
     {
+      "id": "dim_agent_capabilities::timeline_tree::testing",
+      "crate": "dim_agent_capabilities",
+      "parent": "dim_agent_capabilities::timeline_tree",
+      "file": "crates/dim-agent-capabilities/src/timeline_tree.rs",
+      "unexpandedMacros": []
+    },
+    {
       "id": "dim_agent_capabilities::timeline_tree::tests",
       "crate": "dim_agent_capabilities",
       "parent": "dim_agent_capabilities::timeline_tree",
@@ -17904,6 +17911,14 @@
       "to": "dim_agent_capabilities::timeline_tree::read",
       "references": [
         "mod read"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::timeline_tree",
+      "to": "dim_agent_capabilities::timeline_tree::testing",
+      "references": [
+        "mod testing",
+        "path testing::writers"
       ]
     },
     {

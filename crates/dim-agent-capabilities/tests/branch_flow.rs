@@ -10404,6 +10404,122 @@ async fn a_move_that_stopped_between_its_fact_and_its_notes_is_completed_at_load
     soon(again.close()).await.unwrap();
 }
 
+/// The status notes a line holds, in commit order.
+fn status_notes(events: &[Arc<AgentEvent>]) -> Vec<String> {
+    blocks_with(events, "<dim-branch-line ")
+        .into_iter()
+        .filter(|text| text.contains(" default=\""))
+        .collect()
+}
+
+/// Waits, bounded, for `line` to hold `count` status notes; a line left owing
+/// one fails here with what it holds instead of stalling the suite.
+async fn owed_notes(session: &Session, line: &str, count: usize) -> Vec<String> {
+    for _ in 0..600 {
+        let notes = status_notes(&local_events(session, line).await);
+        if notes.len() >= count {
+            return notes;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let notes = status_notes(&local_events(session, line).await);
+    panic!(
+        "line {line} owes {count} status notes and holds {}: a move's note is owed from the moment the line can take part",
+        notes.len()
+    );
+}
+
+/// Waits, bounded, for the tree to answer `line` as the default branch: an
+/// admitted `branch/default` settles even when its caller went away.
+async fn answers_default(tree: &TreeCommands, line: &str) {
+    for _ in 0..600 {
+        if tree.default_branch().is_ok_and(|default| default == line) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!(
+        "the tree never answered line {line} as the default branch: an admitted move must settle under the tree"
+    );
+}
+
+/// Waits, bounded, for the tree to record `line` as ended: an admitted end
+/// settles even when its caller went away.
+async fn records_end(session: &Session, line: &str) {
+    for _ in 0..600 {
+        if session.ended_head(line).is_some() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("line {line} was never recorded as ended: an admitted end must settle under the tree");
+}
+
+/// §20.21: a move that commits in the window between a line becoming
+/// selectable and its writer starting still owes that line its note. The
+/// writer is stopped at a test seam, so the two moves are committed while the
+/// line is ready and unstarted, not by racing it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_move_committed_before_its_writer_starts_still_owes_its_note() {
+    let probe = Arc::new(Probe::default());
+    let agent = setup(&probe).await;
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let mut held = dim_agent_capabilities::timeline_tree::testing::hold_writers(session.id());
+    let line = soon(session.branch(
+        "main".into(),
+        0,
+        BranchOptions {
+            prompt: "opened before its writer runs".into(),
+            source: BranchSource::User {
+                operation_id: "open".into(),
+            },
+        },
+    ))
+    .await
+    .unwrap();
+    let stopped = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if held.arrived().await == line {
+                break;
+            }
+        }
+    })
+    .await;
+    assert!(
+        stopped.is_ok(),
+        "line {line}'s writer never stopped at the test seam"
+    );
+    let tree = session.session_service::<TreeCommands>().unwrap();
+    let switch = |target: &str| {
+        let tree = tree.clone();
+        let target = target.to_owned();
+        async move {
+            soon(tree.set_default_branch(
+                target,
+                BranchSource::User {
+                    operation_id: "switch".into(),
+                },
+            ))
+            .await
+            .expect("the move commits")
+        }
+    };
+    switch(&line).await;
+    switch("main").await;
+    held.release();
+    let notes = owed_notes(&session, &line, 2).await;
+    assert!(notes[0].contains(r#"default="true""#), "{}", notes[0]);
+    assert!(notes[1].contains(r#"default="false""#), "{}", notes[1]);
+    assert_eq!(
+        default_notes(&session, &["main", &line]).await,
+        [("main".to_owned(), 0), (line.clone(), 2)],
+        "both moves reach the line and none reaches the root"
+    );
+    soon(agent.close()).await.unwrap();
+}
+
 /// §20.21: a move whose caller goes away after `branch/default` is admitted
 /// settles under the tree: the fact commits, the default moves, the target is
 /// protected from `end`, and its note is written.
