@@ -2197,11 +2197,14 @@ fn write_batch(
                 )
                 .map_err(error)?;
         }
-        if batch.events.first().is_some_and(|record| record.event.sequence <= 256)
-            && batch.events.iter().any(|record| matches!(&record.event.kind, EventKind::InputMessage(input) if input.user.is_some()))
-        {
-            super::catalog::refresh(connection, &batch.key.session_id, default)?;
-        }
+    }
+    // The preview comes from the root, the line that holds the Session's first
+    // words, whatever line the conversation moved to (session catalog §3.3).
+    if batch.key.branch_id == ROOT_BRANCH_ID
+        && batch.events.first().is_some_and(|record| record.event.sequence <= 256)
+        && batch.events.iter().any(|record| matches!(&record.event.kind, EventKind::InputMessage(input) if input.user.is_some()))
+    {
+        super::catalog::refresh_preview(connection, &batch.key.session_id)?;
     }
     Ok(())
 }

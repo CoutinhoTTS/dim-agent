@@ -35693,7 +35693,7 @@
         "path super::catalog::activity",
         "path super::catalog::create",
         "path super::catalog::initialize_session_catalog",
-        "path super::catalog::refresh"
+        "path super::catalog::refresh_preview"
       ]
     },
     {

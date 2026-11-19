@@ -9573,6 +9573,97 @@ async fn the_writer_thread_keeps_recent_activity_on_the_default_branch() {
     db.close().await.unwrap();
 }
 
+/// The catalog preview follows the root, the line that holds the Session's
+/// first words, even after the conversation moved to another line: a root
+/// batch inside the preview window fills a missing preview and leaves the
+/// activity time, which follows the default branch, where it was (session
+/// catalog §3.2, design §5, §15).
+#[tokio::test]
+async fn the_catalog_preview_follows_the_root_after_the_default_branch_moves() {
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    let config = SessionConfig {
+        interactive: false,
+        ..SessionConfig::default()
+    };
+    store.create_session("s", &config).await.unwrap();
+    append(
+        &store,
+        key("s", "main"),
+        vec![record(
+            1,
+            EventKind::BranchCreate(BranchCreateData {
+                at: BranchCreateAt::Create {},
+                source: BranchSource::User {
+                    operation_id: "open".into(),
+                },
+                branch: "line".into(),
+                prompt: "a line".into(),
+            }),
+        )],
+    )
+    .await
+    .unwrap();
+    append(
+        &store,
+        key("s", "main"),
+        vec![record(
+            2,
+            EventKind::BranchDefault(BranchDefaultData {
+                branch: "line".into(),
+                from: None,
+                source: BranchSource::User {
+                    operation_id: "switch".into(),
+                },
+            }),
+        )],
+    )
+    .await
+    .unwrap();
+    assert_eq!(store.default_of("s"), "line", "the cache follows the fact");
+    let projection = || {
+        let connection = Connection::open(&database.0).unwrap();
+        connection
+            .query_row(
+                "SELECT updated_at_ms, preview FROM session_catalog WHERE session_id='s'",
+                [],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?)),
+            )
+            .unwrap()
+    };
+    let activity = projection().0;
+    assert!(
+        projection().1.is_none(),
+        "the Session has no root user message yet"
+    );
+    append(
+        &store,
+        key("s", "main"),
+        vec![record(
+            3,
+            EventKind::InputMessage(InputMessageData::text(
+                "the root's first words",
+                Some(InputMode::Queue),
+            )),
+        )],
+    )
+    .await
+    .unwrap();
+    let (after, preview) = projection();
+    assert_eq!(
+        preview.as_deref(),
+        Some("the root's first words"),
+        "the root's user text fills the preview whatever the default is"
+    );
+    assert_eq!(
+        after, activity,
+        "a root batch does not move the activity time of a Session whose conversation is on another line"
+    );
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+}
+
 /// A `FORMAT` 52 store is migrated in place by the marker-only step, so this
 /// daemon opens it and rewrites only the marker; an older daemon refuses the
 /// store a newer one wrote, which is what the bump is for (design §15, §20.28).

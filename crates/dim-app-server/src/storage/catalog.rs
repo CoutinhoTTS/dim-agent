@@ -76,10 +76,18 @@ fn activity_selection() -> String {
     )
 }
 
-/// Rebuilds `session`'s catalog row: its most recent activity on `default`, the
-/// line its conversation is on, and its first words from the root, which is the
-/// line that holds them.
+/// Rebuilds both catalog columns for `session`: the activity time from
+/// `default` and a missing preview from the root. Imports, forks and the
+/// backfills need both, whichever line the Session's conversation is on.
 pub(super) fn refresh(connection: &Connection, session: &str, default: &str) -> Result<()> {
+    refresh_activity(connection, session, default)?;
+    refresh_preview(connection, session)
+}
+
+/// Rebuilds `session`'s activity time from its most recent activity on
+/// `default`, the line its conversation is on (design §5, §15). Writes only
+/// `updated_at_ms`.
+fn refresh_activity(connection: &Connection, session: &str, default: &str) -> Result<()> {
     let last: Option<String> = connection
         .query_row(
             &format!(
@@ -115,6 +123,14 @@ pub(super) fn refresh(connection: &Connection, session: &str, default: &str) -> 
             params![session, i64::try_from(updated_at).map_err(error)?],
         )
         .map_err(error)?;
+    Ok(())
+}
+
+/// Fills `session`'s missing preview from its first user input within the
+/// root's first 256 events: the root holds a Session's first words, whatever
+/// line its conversation moved to (session catalog §3.3). Writes only
+/// `preview`, and only while it is undecided.
+pub(super) fn refresh_preview(connection: &Connection, session: &str) -> Result<()> {
     let preview: Option<String> = connection
         .query_row(
             "SELECT preview FROM session_catalog WHERE session_id=?1",
