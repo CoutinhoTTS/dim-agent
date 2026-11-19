@@ -5460,6 +5460,9 @@
       "unexpandedMacros": [
         "assert",
         "assert_eq",
+        "assert_ne",
+        "format",
+        "panic",
         "vec"
       ]
     },
@@ -43900,6 +43903,13 @@
     },
     {
       "from": "dim_cli::ui::composer::palette::tests",
+      "to": "dim_cli::ui::rows",
+      "references": [
+        "path Kind::Command"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::composer::palette::tests",
       "to": "dim_cli::ui::text",
       "references": [
         "use crate::ui::text::display_width"
@@ -43909,8 +43919,18 @@
       "from": "dim_cli::ui::composer::palette::tests",
       "to": "dim_cli::ui::theme",
       "references": [
+        "path Theme::named",
         "path Theme::system",
         "use crate::ui::theme::Theme"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::composer::palette::tests",
+      "to": "dim_cli::ui::theme::ansi",
+      "references": [
+        "path Paint",
+        "path Paint::default",
+        "path paint"
       ]
     },
     {
@@ -43918,6 +43938,7 @@
       "to": "dim_cli::ui::theme::palette",
       "references": [
         "path Appearance::Dark",
+        "path Appearance::Light",
         "path ColorMode::TrueColor",
         "use crate::ui::theme::Appearance",
         "use crate::ui::theme::ColorMode"

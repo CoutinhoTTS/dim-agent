@@ -597,6 +597,172 @@ mod tests {
     }
 
     #[test]
+    fn unavailable_rows_keep_marker_beside_label_at_narrow_widths_and_when_selected() {
+        let theme = Theme::named("dim-dark", ColorMode::TrueColor, Appearance::Dark, None);
+        let p = &theme.palette;
+        let none = Context::default();
+        let rows = rows_for("/", none, &[]);
+        let compact_index = rows
+            .iter()
+            .position(|row| row.label == "/compact")
+            .expect("/compact row");
+
+        let unavailable_indices: Vec<(usize, String)> = rows
+            .iter()
+            .enumerate()
+            .filter_map(|(index, row)| match row.kind {
+                Kind::Command(command) if row.unavailable => {
+                    Some((index, format!("/{}", command.name)))
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(!unavailable_indices.is_empty());
+
+        for width in [78, 40, 30] {
+            let mut state = PaletteState::default();
+            for (index, prefix) in &unavailable_indices {
+                state.selected = *index;
+                let overlay = render_overlay(&state, &rows, width, 24, p).rows;
+                let plain: Vec<String> = overlay.iter().map(|r| strip(r)).collect();
+                assert!(
+                    plain.iter().all(|r| display_width(r) == width),
+                    "width {width}: {plain:#?}"
+                );
+                let line = plain
+                    .iter()
+                    .find(|line| line.contains(prefix))
+                    .unwrap_or_else(|| panic!("missing {prefix} at width {width}: {plain:#?}"));
+                assert!(
+                    line.contains(" (unavailable)"),
+                    "marker truncated for {prefix} at width {width}: {line:?}"
+                );
+            }
+            state.selected = compact_index;
+            let overlay = render_overlay(&state, &rows, width, 24, p).rows;
+            let selected_compact = overlay
+                .iter()
+                .find(|line| strip(line).contains("/compact"))
+                .expect("selected /compact line");
+            assert!(
+                strip(selected_compact).contains("/compact (unavailable)"),
+                "{selected_compact:?}"
+            );
+            let expected_selected = paint(
+                "/compact (unavailable)",
+                Paint {
+                    fg: Some(&p.on_accent),
+                    bg: Some(&p.accent),
+                    dim: true,
+                    ..Paint::default()
+                },
+            );
+            assert!(
+                selected_compact.contains(&expected_selected),
+                "selected unavailable row must be unbolded and faint on accent: {selected_compact:?}"
+            );
+        }
+
+        let usage_rows = rows_for("/usage", none, &[]);
+        let scrollback = render(&PaletteState::default(), &usage_rows, 60, 12, p);
+        let usage_plain = strip(&scrollback[2]);
+        assert!(
+            usage_plain.contains("/usage (unavailable)")
+                && usage_plain.contains("show the context window usage"),
+            "{usage_plain:?}"
+        );
+
+        let timeline_rows = rows_for("/timeline", none, &[]);
+        let tiny = render(&PaletteState::default(), &timeline_rows, 20, 10, p);
+        let tiny_plain = strip(&tiny[2]);
+        assert_eq!(display_width(&tiny_plain), 20);
+        assert!(tiny_plain.contains("/timeline"), "{tiny_plain:?}");
+
+        let with_session = rows_for("/", SCROLLBACK, &[]);
+        let open_panel = render_overlay(
+            &PaletteState::default(),
+            &with_session,
+            78,
+            with_session.len() + 6,
+            p,
+        )
+        .rows;
+        let open_compact = open_panel
+            .iter()
+            .find(|line| strip(line).contains("/compact"))
+            .expect("/compact with session");
+        assert!(
+            !strip(open_compact).contains("(unavailable)"),
+            "{open_compact:?}"
+        );
+        let expected_available = paint(
+            "/compact",
+            Paint {
+                fg: Some(&p.text),
+                bold: true,
+                ..Paint::default()
+            },
+        );
+        assert!(
+            open_compact.contains(&expected_available),
+            "{open_compact:?}"
+        );
+    }
+
+    #[test]
+    fn unavailable_label_style_differs_from_available_across_themes() {
+        let themes = [
+            Theme::named("dim-dark", ColorMode::TrueColor, Appearance::Dark, None),
+            Theme::system(ColorMode::TrueColor, Appearance::Dark, None),
+            Theme::named("gothab", ColorMode::TrueColor, Appearance::Dark, None),
+            Theme::named("dim-light", ColorMode::TrueColor, Appearance::Light, None),
+        ];
+        let rows = rows_for("/", Context::default(), &[]);
+        for theme in themes {
+            let p = &theme.palette;
+            assert_ne!(p.faint, p.text);
+            assert_ne!(p.faint, p.muted);
+            let panel = render_overlay(&PaletteState::default(), &rows, 78, rows.len() + 6, p).rows;
+            let available_row = panel
+                .iter()
+                .find(|line| strip(line).contains("/resume"))
+                .expect("/resume row");
+            let unavailable_row = panel
+                .iter()
+                .find(|line| strip(line).contains("/compact"))
+                .expect("/compact row");
+
+            let expected_available = paint(
+                "/resume",
+                Paint {
+                    fg: Some(&p.text),
+                    bold: true,
+                    ..Paint::default()
+                },
+            );
+            let expected_unavailable = paint(
+                "/compact (unavailable)",
+                Paint {
+                    fg: Some(&p.faint),
+                    ..Paint::default()
+                },
+            );
+            assert!(
+                available_row.contains(&expected_available),
+                "{available_row:?}"
+            );
+            assert!(
+                unavailable_row.contains(&expected_unavailable),
+                "{unavailable_row:?}"
+            );
+            assert!(
+                !unavailable_row.contains("\x1b[1m") && !unavailable_row.contains("\x1b[1;"),
+                "unavailable row must not be bold: {unavailable_row:?}"
+            );
+        }
+    }
+
+    #[test]
     fn rows_read_as_label_detail_and_key() {
         let theme = Theme::system(ColorMode::TrueColor, Appearance::Dark, None);
         let rows = rows_for("/", FULLSCREEN, &[]);
