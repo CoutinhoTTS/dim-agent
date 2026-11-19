@@ -36767,8 +36767,8 @@
         "path client::UpgradeStage::Index",
         "path client::UpgradeStage::Verify",
         "path client::connect_inner",
+        "path client::invocation",
         "path client::stop",
-        "path client::stop_idle_for_update",
         "path client::web_assets"
       ]
     },
@@ -37146,7 +37146,6 @@
       "to": "dim_cli::update",
       "references": [
         "mod update",
-        "path update::entry_command",
         "path update::hold_installation",
         "path update::recover_startup",
         "path update::registry",
@@ -51727,6 +51726,7 @@
       "from": "dim_cli::update",
       "to": "dim_cli::plugins",
       "references": [
+        "path crate::plugins::Signals",
         "path crate::plugins::Signals::listen"
       ]
     },

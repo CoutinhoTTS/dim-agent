@@ -370,6 +370,7 @@ async fn channel_version(package: &str, tag: &str) -> crate::Result<String> {
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub(crate) async fn recover_startup(
     home: &Path,
+    invocation: &str,
     store: &crate::client::NewerStore,
 ) -> crate::Result<i32> {
     use std::os::unix::process::CommandExt;
@@ -421,7 +422,8 @@ pub(crate) async fn recover_startup(
             store_format: store.format,
             skipped,
         });
-        run_install(installation, tag).await?;
+        let mut signals = crate::plugins::Signals::listen()?;
+        run_install(installation, tag, invocation, &mut signals).await?;
         eprintln!("Restarting {}...", entry_point(&package));
         let error = std::process::Command::new(&launcher)
             .args(std::env::args_os().skip(1))
@@ -470,15 +472,17 @@ fn not_installable(package: &str, current: &str) -> String {
 
 /// Updates this installation's package on its current channel, independently
 /// of automatic-check preferences and skipped versions. Unknown installation
-/// layouts return a manual command without installing anything.
-pub async fn run() -> crate::Result<i32> {
+/// layouts return a manual command without installing anything. `invocation`
+/// starts this CLI on the selected home in the commands an error names, and
+/// `signals` cancel the update.
+pub async fn run(invocation: &str, signals: &mut crate::plugins::Signals) -> crate::Result<i32> {
     let package = package()?;
     let current = dim_agent_capabilities::build::VERSION;
     let tag = channel(current);
     let executable = std::env::current_exe()?;
     let installation =
         installer(&executable, &package, tag).ok_or_else(|| not_installable(&package, current))?;
-    run_install(installation, tag).await?;
+    run_install(installation, tag, invocation, signals).await?;
     Ok(0)
 }
 
@@ -506,16 +510,20 @@ pub fn entry_command() -> String {
     std::env::current_exe().map_or_else(|_| PACKAGE.to_owned(), |exe| entry(&exe))
 }
 
-async fn run_install(installation: Install, tag: &str) -> crate::Result<()> {
+async fn run_install(
+    installation: Install,
+    tag: &str,
+    invocation: &str,
+    signals: &mut crate::plugins::Signals,
+) -> crate::Result<()> {
     let package = installation.package.clone();
-    let mut signals = crate::plugins::Signals::listen()?;
     let mut stderr = std::io::stderr();
     let interactive = stderr.is_terminal();
     if !interactive {
         writeln!(stderr, "Updating {package} on the {tag} channel...")?;
     }
     let cancel = CancellationToken::new();
-    let installation = install(installation, cancel.clone());
+    let installation = install(installation, invocation, cancel.clone());
     tokio::pin!(installation);
     let started = tokio::time::Instant::now();
     let mut progress = tokio::time::interval(Duration::from_millis(120));
@@ -570,6 +578,8 @@ async fn run_install(installation: Install, tag: &str) -> crate::Result<()> {
 }
 
 const LOCK_FILE: &str = ".dimcode-update.lock";
+/// What a cancelled update reports.
+const INTERRUPTED: &str = "Update interrupted";
 /// How long an update waits for the lock before it refuses: a server that just
 /// stopped can close its connection before the OS releases its lease.
 const LOCK_GRACE: Duration = Duration::from_secs(2);
@@ -646,19 +656,24 @@ pub fn hold_installation() -> Result<(), String> {
 /// The installation lock is taken exclusively, so it fails while any other
 /// process (client, server or installer, in any home) uses the installation.
 /// This process's own lease is released for the duration and restored after.
-pub async fn install(install: Install, cancel: CancellationToken) -> Result<Vec<String>, String> {
+pub async fn install(
+    install: Install,
+    invocation: &str,
+    cancel: CancellationToken,
+) -> Result<Vec<String>, String> {
     let own = LEASE.lock().unwrap().take();
     drop(own);
-    let result = install_exclusive(&install, cancel).await;
+    let result = install_exclusive(&install, invocation, cancel).await;
     *LEASE.lock().unwrap() = shared(&install.directory).ok().flatten();
     result
 }
 
 async fn install_exclusive(
     install: &Install,
+    invocation: &str,
     cancel: CancellationToken,
 ) -> Result<Vec<String>, String> {
-    let lock = lease(install).await?;
+    let lock = lease(install, invocation, &cancel).await?;
     let result = match install.manager {
         #[cfg(unix)]
         Manager::Staged => staged::update(install, &cancel).await,
@@ -671,22 +686,31 @@ async fn install_exclusive(
 }
 
 /// Takes the installation's exclusive lease, returning the lock so it is held
-/// for as long as the caller needs it.
-async fn lease(install: &Install) -> Result<std::fs::File, String> {
+/// for as long as the caller needs it. Cancellation ends the wait for it.
+async fn lease(
+    install: &Install,
+    invocation: &str,
+    cancel: &CancellationToken,
+) -> Result<std::fs::File, String> {
     let path = install.directory.join(LOCK_FILE);
     let lock = open_lock(&install.directory, true)
         .map_err(|error| format!("Cannot lock installation {}: {error}", path.display()))?;
     let deadline = tokio::time::Instant::now() + LOCK_GRACE;
     loop {
+        if cancel.is_cancelled() {
+            return Err(INTERRUPTED.to_owned());
+        }
         match lock.try_lock() {
             Ok(()) => return Ok(lock),
             Err(std::fs::TryLockError::WouldBlock) if tokio::time::Instant::now() < deadline => {
-                tokio::time::sleep(Duration::from_millis(50)).await;
+                tokio::select! {
+                    () = cancel.cancelled() => {}
+                    () = tokio::time::sleep(Duration::from_millis(50)) => {}
+                }
             }
             Err(std::fs::TryLockError::WouldBlock) => {
-                let command = entry_point(&install.package);
                 return Err(format!(
-                    "DimCode is currently running (another window, server, or update is active).\nClose all DimCode windows, run `{command} daemon stop`, and try again."
+                    "DimCode is currently running (another window, server, or update is active).\nClose all DimCode windows, run `{invocation} daemon stop`, and try again."
                 ));
             }
             Err(std::fs::TryLockError::Error(error)) => return Err(error.to_string()),
@@ -700,6 +724,9 @@ async fn run_manager(
     args: Vec<String>,
     cancel: CancellationToken,
 ) -> Result<(), String> {
+    if cancel.is_cancelled() {
+        return Err(INTERRUPTED.to_owned());
+    }
     let mut command = tokio::process::Command::new(&install.program);
     command.args(&args).stdin(std::process::Stdio::null());
     let mut tree = dim_agent_capabilities::host_platform::ProcessTree::spawn(command)
@@ -710,7 +737,7 @@ async fn run_manager(
     let mut sink = tokio::io::sink();
     let result = tokio::select! {
         biased;
-        _ = cancel.cancelled() => Err("Update interrupted".to_owned()),
+        _ = cancel.cancelled() => Err(INTERRUPTED.to_owned()),
         result = async {
             let (status, _, _) = tokio::try_join!(
                 tree.wait(),

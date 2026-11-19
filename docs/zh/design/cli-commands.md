@@ -1520,7 +1520,8 @@ npm 装在 `<prefix>\node_modules` 下并把命令 shim 直接放在 `<prefix>`�
 
 `update` 从不停止服务器，即使它空闲：当前 home 的 daemon 持有租约时，操作者先用
 `daemon stop` 停止它；其他 home 持有的租约到那个 home 处理。刚退出的进程可能还会短暂
-持有租约，所以 `update` 最多等待两秒再拒绝，并使用运行它的入口命令：
+持有租约，所以 `update` 最多等待两秒再拒绝；Ctrl+C 会结束这段等待，之后不会再启动包
+管理器。拒绝信息使用运行它的入口命令，调用时指定了 `--home` 就带上它：
 
 ```text
 $ dima update
@@ -1576,14 +1577,19 @@ $ dima update
    或 `--scrollback`），有 Session 时带上 `--resume <session>`；新客户端自行启动 daemon。
    其他布局提示重新启动 DimCode。
 
-daemon 忙碌、daemon 不支持 `daemon.shutdown.ifIdle`、租约被其他地方持有或安装失败时，
-不再停止任何东西：CLI 打印阻塞原因和下一步，再给出恢复会话的命令，并以非零状态退出。
+daemon 忙碌、daemon 不支持 `daemon.shutdown.ifIdle`、租约被其他地方持有、安装失败或
+按下 Ctrl+C 时，不再停止任何东西：CLI 打印阻塞原因和下一步，再给出恢复会话的命令，并以
+非零状态退出。界面离开后就开始监听 Ctrl+C，包括询问 daemon 期间；daemon 已接受的关闭会
+自行完成。调用时指定了 `--home` 时，打印的每条命令都带上它，指向同一个 daemon 和 Session：
 
 ```text
 Could not update: Other DimCode windows or tasks are using the server (clients: 1, attached sessions: 1, running turns: 0).
-Close them or let them finish, then run: dima update
-Resume this session with: dima --resume s-42
+Close them or let them finish, then run: dima --home /tmp/work update
+Resume this session with: dima --home /tmp/work --resume s-42
 ```
+
+安装失败时另外打印 `To try again, run: dima --home /tmp/work update`；按下 Ctrl+C 时打印
+`Update cancelled. To update later, run: dima --home /tmp/work update`。
 
 对话框在 fullscreen 和 scrollback 使用相同布局，并适应可用列数和行数。较长的版本和命令
 文字换行，必要时用 Up/Down 滚动。标题和动作行保持可见。所有动作无法放在同一行时，只

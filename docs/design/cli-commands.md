@@ -2656,8 +2656,9 @@ deleting it while an update runs would allow another inode to be locked independ
 `update` never stops a server, not even an idle one: while this home's daemon holds its
 lease, the operator stops it with `daemon stop` first, and a lease from another home is
 settled in that home. A process that has just exited can keep its lease for a moment, so
-`update` waits up to two seconds for the lock before it refuses, naming the entry point
-that runs it:
+`update` waits up to two seconds for the lock before it refuses; Ctrl+C ends that wait,
+and no package manager starts after it. The refusal names the entry point that runs it,
+with `--home` when the invocation selected one:
 
 ```text
 $ dima update
@@ -2728,15 +2729,21 @@ manager's own command):
    `--resume <session>` when a Session was open; the new client starts its own daemon.
    Any other layout says to start DimCode again.
 
-A busy daemon, a daemon without `daemon.shutdown.ifIdle`, a lease held elsewhere, or a
-failed install stops nothing more: the CLI prints what blocked it and the next step, then
-the resume command, and exits nonzero.
+A busy daemon, a daemon without `daemon.shutdown.ifIdle`, a lease held elsewhere, a
+failed install, or Ctrl+C stops nothing more: the CLI prints what blocked it and the next
+step, then the resume command, and exits nonzero. Ctrl+C is heard from the moment the
+interface leaves, also while the daemon is asked; a shutdown the daemon already accepted
+settles on its own. Every printed command keeps `--home` when the invocation selected one,
+so it addresses the same daemon and Session:
 
 ```text
 Could not update: Other DimCode windows or tasks are using the server (clients: 1, attached sessions: 1, running turns: 0).
-Close them or let them finish, then run: dima update
-Resume this session with: dima --resume s-42
+Close them or let them finish, then run: dima --home /tmp/work update
+Resume this session with: dima --home /tmp/work --resume s-42
 ```
+
+A failed install adds `To try again, run: dima --home /tmp/work update`, and Ctrl+C prints
+`Update cancelled. To update later, run: dima --home /tmp/work update`.
 
 The dialog uses the same layout in fullscreen and scrollback. It fits the available
 columns and rows: long version and command text wraps, with Up/Down scrolling when

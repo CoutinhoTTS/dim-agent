@@ -721,7 +721,7 @@ async fn shutdown_if_idle(client: &mut Client) -> Result<IdleShutdown> {
 /// again for a short while. `Err` names what keeps the daemon and the next
 /// step; nothing is stopped then.
 pub async fn stop_idle_for_update(options: &Options, locale: crate::locale::Locale) -> Result<()> {
-    let command = crate::update::entry_command();
+    let command = invocation(options);
     let mut options = options.clone();
     options.action = crate::args::Action::DaemonStop;
     let Some(Link { mut client, .. }) = connect_inner(&options, false, locale).await? else {
@@ -874,6 +874,21 @@ async fn adopt(
     }))
 }
 
+/// The command word that runs this CLI on the selected home, for a POSIX
+/// shell: `--home` follows the entry point only when the invocation named
+/// one, since `DIMCODE_HOME` reaches a command run from the same shell.
+pub fn invocation(options: &Options) -> String {
+    let program = shell_word(&crate::update::entry_command());
+    if options.home_explicit {
+        format!(
+            "{program} --home {}",
+            shell_word(&options.home.display().to_string())
+        )
+    } else {
+        program
+    }
+}
+
 /// The command that stops the selected home's daemon in a POSIX shell.
 fn daemon_stop_command(executable: &Path, home: &Path) -> String {
     let program = shell_word(&crate::update::entry(executable));
@@ -882,7 +897,7 @@ fn daemon_stop_command(executable: &Path, home: &Path) -> String {
 }
 
 /// `word` as a POSIX shell takes it whole.
-fn shell_word(word: &str) -> String {
+pub(crate) fn shell_word(word: &str) -> String {
     if !word.is_empty()
         && word
             .bytes()

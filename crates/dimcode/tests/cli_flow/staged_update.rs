@@ -1206,11 +1206,13 @@ mod tui_update {
 
     /// Leaving the interface, the CLI asks this home's daemon to stop only if
     /// it is idle. An idle daemon stops, the installation updates and the new
-    /// version starts in the same mode on the same Session; a busy one stays,
-    /// nothing is installed, and the CLI says how to finish.
+    /// version starts in the same mode on the same Session. A busy daemon, one
+    /// too old to decide, or Ctrl+C while the daemon is asked, installs
+    /// nothing, and every command the CLI prints to finish keeps the selected
+    /// home.
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
-    fn update_now_stops_an_idle_daemon_and_restarts_or_refuses_a_busy_one() {
+    fn update_now_stops_an_idle_daemon_and_restarts_or_refuses_a_busy_or_old_one() {
         if !option_env!("DIM_RELEASE_BUILD").is_some_and(|mark| !mark.is_empty()) {
             return;
         }
@@ -1222,7 +1224,7 @@ mod tui_update {
             _ => return,
         };
         let version = next_version();
-        for busy in [false, true] {
+        for case in ["idle", "busy", "old", "cancelled"] {
             let installed = Installed::new(CURRENT, &["dima"]);
             installed.mock_npm();
             installed.release();
@@ -1245,6 +1247,7 @@ mod tui_update {
             let socket = home.0.join("rust/daemon.sock");
             let listener = UnixListener::bind(&socket).unwrap();
             fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).unwrap();
+            let (asked, shutdown_asked) = std::sync::mpsc::channel();
             let daemon = thread::spawn(move || {
                 let (stream, _) = listener.accept().unwrap();
                 stream.set_read_timeout(Some(HANG_GUARD)).unwrap();
@@ -1268,14 +1271,25 @@ mod tui_update {
                 let (stream, _) = listener.accept().unwrap();
                 stream.set_read_timeout(Some(HANG_GUARD)).unwrap();
                 let mut wire = Wire::new(stream);
-                wire.hello(&["daemon.shutdown.completed", "daemon.shutdown.ifIdle"]);
+                if case == "old" {
+                    wire.hello(&["daemon.shutdown.completed"]);
+                } else {
+                    wire.hello(&["daemon.shutdown.completed", "daemon.shutdown.ifIdle"]);
+                }
                 while let Some(shutdown) = wire.trailing_request() {
                     let shutdown: Value = serde_json::from_str(&shutdown).unwrap();
                     assert_eq!(shutdown["method"], "daemon.shutdown");
                     assert_eq!(shutdown["params"], json!({"ifIdle": true}));
-                    if !busy {
-                        wire.reply(&shutdown, json!({}));
-                        return;
+                    match case {
+                        "idle" => {
+                            wire.reply(&shutdown, json!({}));
+                            return;
+                        }
+                        "cancelled" => {
+                            asked.send(()).unwrap();
+                            continue;
+                        }
+                        _ => {}
                     }
                     wire.send(json!({"jsonrpc":"2.0","id":shutdown["id"],"error":{
                         "code":-32000,"message":"The App Server is in use",
@@ -1315,17 +1329,29 @@ printf 'Updated launcher started\n'
             let mut terminal = Terminal::launch_tui(command);
             terminal.until_plain("Update now");
             terminal.write(b"\r");
+            if case == "cancelled" {
+                shutdown_asked.recv_timeout(HANG_GUARD).unwrap();
+                terminal.signal(libc::SIGINT);
+            }
             let status = terminal.wait();
             daemon.join().unwrap();
             let output = strip_ansi(&terminal.transcript);
-            if busy {
+            let selected = format!("dima --home {}", home.0.display());
+            if case != "idle" {
                 assert!(!status.success(), "{output}");
+                let blocker = match case {
+                    "busy" => "Other DimCode windows or tasks are using the server".to_owned(),
+                    "old" => format!("run `{selected} daemon stop`"),
+                    _ => "Update cancelled.".to_owned(),
+                };
+                assert!(output.contains(&blocker), "{output}");
+                assert!(output.contains(&format!("{selected} update")), "{output}");
                 assert!(
-                    output.contains("Other DimCode windows or tasks are using the server"),
+                    output.contains(&format!(
+                        "Resume this session with: {selected} --resume session"
+                    )),
                     "{output}"
                 );
-                assert!(output.contains("dima update"), "{output}");
-                assert!(output.contains("dima --resume session"), "{output}");
                 assert!(!installed.home.0.join("install-args").exists());
                 assert!(!marker.exists());
                 assert_eq!(installed.installed(), CURRENT);

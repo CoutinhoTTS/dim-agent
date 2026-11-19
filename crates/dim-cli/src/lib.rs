@@ -137,7 +137,10 @@ async fn open_tui(
     let (link, _connection) = match daemon_link(root, options, true, locale).await {
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         Err(error) => match error.downcast_ref::<client::NewerStore>() {
-            Some(store) => return update::recover_startup(&options.home, store).await,
+            Some(store) => {
+                return update::recover_startup(&options.home, &client::invocation(options), store)
+                    .await;
+            }
             None => return Err(error),
         },
         result => result?,
@@ -183,26 +186,39 @@ async fn open_tui(
 /// `Update now`: the interface has left and dropped its connection, so this
 /// home's daemon is stopped if it is idle, the installation is updated as
 /// `update` does, and the new version opens where the interface left off. A
-/// refusal or failure stops nothing more and says how to finish by hand.
+/// refusal, failure or Ctrl+C stops nothing more and says how to finish by
+/// hand; a shutdown the daemon already accepted settles on its own.
 async fn update_after_tui(
     options: &Options,
     locale: locale::Locale,
     request: ui::tui::UpdateRequest,
 ) -> Result<i32> {
-    let command = update::entry_command();
+    let command = client::invocation(options);
     let resume = |code: i32| {
         if let Some(session) = &request.session_id {
-            eprintln!("Resume this session with: {command} --resume {session}");
+            eprintln!(
+                "Resume this session with: {command} --resume {}",
+                client::shell_word(session)
+            );
         }
         Ok(code)
     };
+    let mut signals = plugins::Signals::listen()?;
     let launcher = update::restart_launcher();
-    if let Err(error) = client::stop_idle_for_update(options, locale).await {
+    let stopped = tokio::select! {
+        stopped = client::stop_idle_for_update(options, locale) => stopped,
+        () = signals.received() => {
+            eprintln!("Update cancelled. To update later, run: {command} update");
+            return resume(130);
+        }
+    };
+    if let Err(error) = stopped {
         eprintln!("Could not update: {error}");
         return resume(1);
     }
-    if let Err(error) = update::run().await {
+    if let Err(error) = update::run(&command, &mut signals).await {
         eprintln!("Error: {error}");
+        eprintln!("To try again, run: {command} update");
         return resume(1);
     }
     let Some(launcher) = launcher else {
@@ -775,7 +791,8 @@ async fn run_acp(
 
 async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
     if matches!(options.action, Action::Update) {
-        return update::run().await;
+        let mut signals = plugins::Signals::listen()?;
+        return update::run(&client::invocation(&options), &mut signals).await;
     }
     update::hold_installation()?;
     // `block_on` polls `act` on this thread, so the thread-local language
