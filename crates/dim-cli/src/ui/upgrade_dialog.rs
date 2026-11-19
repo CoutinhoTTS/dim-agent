@@ -44,7 +44,8 @@ impl Choice {
 
 pub struct UpgradeDialog {
     pub offer: Offer,
-    /// `Update now` was refused because this Session is still working.
+    /// `Update now` was refused while this Session was working; the dialog
+    /// says so for as long as it still is.
     blocked: bool,
     focused: usize,
     offset: Cell<usize>,
@@ -93,13 +94,14 @@ impl UpgradeDialog {
         Effect::None
     }
 
-    pub fn render(&self, width: usize, height: usize, p: &Palette) -> Vec<String> {
+    /// `busy`: this Session has work `Update now` waits for.
+    pub fn render(&self, width: usize, height: usize, busy: bool, p: &Palette) -> Vec<String> {
         let version = self.offer.version.as_str();
         let mut body = vec![tf(
             "Version {latest} is available (you have {current}).",
             &[("latest", version), ("current", &self.offer.current)],
         )];
-        if self.blocked {
+        if self.blocked && busy {
             body.push(
                 t("Finish or stop the current work first (a running turn, shell command, or pending prompt).")
                     .to_owned(),

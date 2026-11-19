@@ -2686,7 +2686,7 @@ Updated dimcode-alpha on the alpha channel.
 ```
 
 The update dialog names the new version. For a recognised installation whose server the
-client manages (no `--server`), it offers `Update now`, `Skip this version` and `Close`,
+client manages (no `--server`) and can stop when idle (`daemon.shutdown.ifIdle`), it offers `Update now`, `Skip this version` and `Close`,
 with `Update now` focused:
 
 ```text
@@ -2701,7 +2701,8 @@ with `Update now` focused:
 ╰──────────────────────────────────────────────────────────────╯
 ```
 
-Any other installation, or a client of an external `--server`, gets `Skip this version`
+Any other installation, a client of an external `--server`, or a daemon without
+`daemon.shutdown.ifIdle` gets `Skip this version`
 and `Close` with the command to run once DimCode has exited (`dima update`, or the package
 manager's own command):
 

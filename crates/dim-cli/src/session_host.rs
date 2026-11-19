@@ -437,7 +437,7 @@ async fn run(
     if update::enabled() {
         let offers = updates.clone();
         let home = options.home.clone();
-        let managed = options.server.is_none();
+        let managed = options.server.is_none() && client.offers("daemon.shutdown.ifIdle");
         tokio::spawn(async move {
             if let Some(mut offer) = update::available(&home, env!("CARGO_PKG_VERSION")).await {
                 offer.direct &= managed;
@@ -1645,7 +1645,8 @@ impl Worker {
             Command::Loop(request) => self.loop_command(request).await,
             Command::CheckUpdate => {
                 let updates = self.updates.clone();
-                let managed = self.options.server.is_none();
+                let managed =
+                    self.options.server.is_none() && self.client.offers("daemon.shutdown.ifIdle");
                 tokio::spawn(async move {
                     let mut checked = update::check(env!("CARGO_PKG_VERSION")).await;
                     if let Ok(Some(offer)) = &mut checked {

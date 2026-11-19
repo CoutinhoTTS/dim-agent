@@ -6484,7 +6484,12 @@ impl App {
             Some(Prompt::Settings(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Isolation(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Exit(prompt)) => Some(prompt.render(outer, p)),
-            Some(Prompt::Upgrade(prompt)) => Some(prompt.render(outer, panel_rows, p)),
+            Some(Prompt::Upgrade(prompt)) => Some(prompt.render(
+                outer,
+                panel_rows,
+                self.shell.is_some() || self.busy_reason().is_some(),
+                p,
+            )),
             Some(Prompt::Permission(prompt)) => Some(prompt.render_sized(outer, panel_rows, p)),
             Some(Prompt::Ask(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Effort(prompt)) => Some(prompt.render(outer, panel_rows, p)),
@@ -10153,6 +10158,11 @@ mod tests {
             );
 
             drawn.app.snapshot = Some(ViewSnapshot::default());
+            let screen = drawn.app.frame((80, 24)).live.join("\n");
+            assert!(
+                !screen.contains("Finish or stop the current work"),
+                "{screen}"
+            );
             assert!(matches!(
                 drawn.app.handle(InputEvent::Key(KeyEvent::new(
                     KeyCode::Enter,

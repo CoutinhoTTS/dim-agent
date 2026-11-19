@@ -164,11 +164,16 @@ async fn open_tui(
         leaf_end: std::sync::Mutex::new(Some(leaf_end)),
     });
     (&tui).await.map_err(plugin_error)?;
+    // The interface's own leave closes the connection before its result is
+    // sent, so a leaf that ended may be that leave: its result still wins
+    // when it arrives within the exit budget.
     let leave = tokio::select! {
         leave = &mut left => leave,
         ended = leaf_ended => {
             if ended.is_ok() {
-                Ok(ui::tui::Leave::Exit(0))
+                tokio::time::timeout(ui::terminal::EXIT_BUDGET, &mut left)
+                    .await
+                    .unwrap_or(Ok(ui::tui::Leave::Exit(0)))
             } else {
                 left.await
             }
@@ -225,22 +230,26 @@ async fn update_after_tui(
         eprintln!("Start {command} again to use the new version.");
         return resume(0);
     };
-    restart(&launcher, &request)
+    restart(&launcher, request.fullscreen, request.session_id.as_deref())
 }
 
 /// Replaces this process with the updated `launcher`, in the interface mode
 /// it left and on its Session.
 #[cfg(unix)]
-fn restart(launcher: &std::path::Path, request: &ui::tui::UpdateRequest) -> Result<i32> {
+fn restart(launcher: &std::path::Path, fullscreen: bool, session: Option<&str>) -> Result<i32> {
     use std::os::unix::process::CommandExt;
     let error = std::process::Command::new(launcher)
-        .args(restart_args(std::env::args_os().skip(1), request))
+        .args(restart_args(
+            std::env::args_os().skip(1),
+            fullscreen,
+            session,
+        ))
         .exec();
     Err(format!("Cannot start {}: {error}", launcher.display()).into())
 }
 
 #[cfg(not(unix))]
-fn restart(_: &std::path::Path, _: &ui::tui::UpdateRequest) -> Result<i32> {
+fn restart(_: &std::path::Path, _: bool, _: Option<&str>) -> Result<i32> {
     unreachable!("only a staged unix installation names a restart launcher")
 }
 
@@ -250,7 +259,8 @@ fn restart(_: &std::path::Path, _: &ui::tui::UpdateRequest) -> Result<i32> {
 #[cfg(unix)]
 fn restart_args(
     original: impl IntoIterator<Item = std::ffi::OsString>,
-    request: &ui::tui::UpdateRequest,
+    fullscreen: bool,
+    session: Option<&str>,
 ) -> Vec<std::ffi::OsString> {
     let mut args = Vec::new();
     let mut original = original.into_iter();
@@ -267,14 +277,14 @@ fn restart_args(
         }
     }
     args.push(
-        if request.fullscreen {
+        if fullscreen {
             "--fullscreen"
         } else {
             "--scrollback"
         }
         .into(),
     );
-    if let Some(session) = &request.session_id {
+    if let Some(session) = session {
         args.extend(["--resume".into(), session.into()]);
     }
     args
