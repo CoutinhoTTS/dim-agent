@@ -1262,6 +1262,12 @@ struct TestStore {
     hold: Mutex<Option<(String, String)>>,
     /// The batch the held append has not written or answered yet.
     held: Mutex<Option<(TimelineKey, Vec<StoredEvent>, PublishCallback)>>,
+    /// Whether the store commits in order: a batch it holds stops every later
+    /// append on the same branch until it settles, as the one writer that
+    /// commits a Session's batches does.
+    ordered: AtomicBool,
+    /// The appends the store accepted behind a held batch, in that order.
+    behind: Mutex<Vec<(TimelineKey, Vec<StoredEvent>, PublishCallback)>>,
     /// Wakes the test that waits for a hold to be taken.
     holding: tokio::sync::Notify,
 }
@@ -1302,6 +1308,13 @@ impl TestStore {
     fn hold_next_final(&self, branch: &str) {
         *self.hold.lock().unwrap() = Some((branch.into(), "branch-final".into()));
     }
+    /// Holds the next `branch/default` append to `branch` and queues every
+    /// later append on it behind that batch, so none of them commits first: the
+    /// order a store keeps when one writer commits its batches.
+    fn hold_next_default_in_order(&self, branch: &str) {
+        self.ordered.store(true, Ordering::SeqCst);
+        self.hold_next_default(branch);
+    }
     /// Waits until a held publication is there to release.
     async fn wait_holding(&self) {
         loop {
@@ -1318,6 +1331,7 @@ impl TestStore {
     fn release(&self) {
         let (key, events, publish) = self.held.lock().unwrap().take().expect("a held append");
         self.memory.append(key, events, publish).unwrap();
+        self.commit_behind();
     }
     /// Answers the held append as a failed transaction that wrote nothing.
     fn release_failed(&self) {
@@ -1325,6 +1339,15 @@ impl TestStore {
         publish(Err(AgentError::Storage(
             "injected transaction failure".into(),
         )));
+        self.commit_behind();
+    }
+    /// Commits what the store accepted behind the held batch, in the order it
+    /// came: the writer drains its queue once the batch in front settles.
+    fn commit_behind(&self) {
+        let queued: Vec<_> = std::mem::take(&mut *self.behind.lock().unwrap());
+        for (key, events, publish) in queued {
+            self.memory.append(key, events, publish).unwrap();
+        }
     }
     /// The pages `branch` was read with while selecting exactly `kinds`.
     fn pages(&self, branch: &str, kinds: &[&str]) -> usize {
@@ -1460,6 +1483,10 @@ impl TimelineStore for TestStore {
         if hold {
             *self.held.lock().unwrap() = Some((key, events, publish));
             self.holding.notify_waiters();
+            return Ok(());
+        }
+        if self.ordered.load(Ordering::SeqCst) && self.held.lock().unwrap().is_some() {
+            self.behind.lock().unwrap().push((key, events, publish));
             return Ok(());
         }
         let delivery = events.iter().any(final_message);
@@ -10697,9 +10724,10 @@ async fn an_end_retry_cancelled_after_admission_settles_under_the_tree() {
     let _ = soon(agent.close()).await;
 }
 
-/// §20.21: closing the Session while an admitted move settles waits for that
-/// settlement, answers within a bound, and a restore reads the fact the store
-/// committed.
+/// §20.21: a close that starts while an admitted move's batch is still held
+/// waits for that settlement, answers within a bound once the store settles
+/// the batch, and a restore reads the fact the store committed. A batch that
+/// fails changes nothing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_close_waits_for_an_admitted_move_and_a_restore_reads_its_fact() {
     let store = Arc::new(TestStore::default());
@@ -10708,10 +10736,60 @@ async fn a_close_waits_for_an_admitted_move_and_a_restore_reads_its_fact() {
         .await
         .unwrap();
     let id = session.id().to_owned();
-    let line = open_line(&session, "moved while closing").await;
+    let line = move_admitted_while_held(&session, &store).await;
+    let mut closing = Box::pin(session.close());
+    tokio::select! {
+        result = &mut closing => panic!("close answered while the move's batch was held: {result:?}"),
+        _ = tokio::time::sleep(Duration::from_millis(150)) => {}
+    }
+    store.release();
+    let closed = tokio::time::timeout(Duration::from_secs(5), &mut closing)
+        .await
+        .expect("close did not answer within its bound after the held batch settled");
+    closed.unwrap();
+    soon(agent.close()).await.unwrap();
+    assert_eq!(
+        restore_default(&store, &id).await,
+        line,
+        "a restore reads the fact the settled move committed"
+    );
+
+    let failed = Arc::new(TestStore::default());
+    let agent = setup_with(&failed).await;
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let id = session.id().to_owned();
+    move_admitted_while_held(&session, &failed).await;
+    let mut closing = Box::pin(session.close());
+    tokio::select! {
+        result = &mut closing => panic!("close answered while the move's batch was held: {result:?}"),
+        _ = tokio::time::sleep(Duration::from_millis(150)) => {}
+    }
+    failed.release_failed();
+    let closed = tokio::time::timeout(Duration::from_secs(5), &mut closing)
+        .await
+        .expect("close did not answer within its bound after the held batch failed");
+    assert!(
+        closed.is_err(),
+        "the failed batch's fault reaches close: {closed:?}"
+    );
+    let _ = soon(agent.close()).await;
+    assert_eq!(
+        restore_default(&failed, &id).await,
+        "main",
+        "a batch that failed changes nothing"
+    );
+}
+
+/// Opens a line, holds the next `branch/default` its move writes and answers
+/// the line once that move's batch sits in the store, admitted and unsettled,
+/// with its caller gone: the tree owns what happens to it.
+async fn move_admitted_while_held(session: &Session, store: &Arc<TestStore>) -> String {
+    let line = open_line(session, "moved while closing").await;
     let tree = session.session_service::<TreeCommands>().unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
-    store.hold_next_default("main");
+    store.hold_next_default_in_order("main");
     let mut moved = Box::pin(tree.set_default_branch(
         line.clone(),
         BranchSource::User {
@@ -10723,22 +10801,21 @@ async fn a_close_waits_for_an_admitted_move_and_a_restore_reads_its_fact() {
         _ = store.wait_holding() => {}
     }
     drop(moved);
-    store.release();
-    answers_default(&tree, &line).await;
-    soon(session.close()).await.unwrap();
-    soon(agent.close()).await.unwrap();
+    line
+}
+
+/// Restores `id` over `store` once its Session is closed and answers the
+/// default branch: what a restart reads from the facts the store holds.
+async fn restore_default(store: &Arc<TestStore>, id: &str) -> String {
     let restored = MinimalHost::start(&builder_with_store(
         &Arc::new(Probe::default()),
         store.clone(),
     ))
     .await
     .unwrap();
-    let session = soon(restored.restore_session(id)).await.unwrap();
-    assert_eq!(
-        session.default_branch().unwrap(),
-        line,
-        "a restore reads the fact the settled move committed"
-    );
+    let session = soon(restored.restore_session(id.into())).await.unwrap();
+    let default = session.default_branch().unwrap();
     soon(session.close()).await.unwrap();
     soon(restored.close()).await.unwrap();
+    default
 }
