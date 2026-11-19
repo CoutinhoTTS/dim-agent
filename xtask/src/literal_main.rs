@@ -390,7 +390,7 @@ fn directive_values(text: &str) -> Vec<std::ops::Range<usize>> {
     let Some(body) = template_body(text) else {
         return values;
     };
-    values.extend(interpolations(text, body.end));
+    values.extend(interpolations(text, body.clone()));
     let mut at = body.start;
     while at < body.end
         && let Some(found) = text[at..body.end].find('<')
@@ -504,14 +504,18 @@ fn byte(text: &str, cursor: usize, end: usize) -> Option<u8> {
         .filter(|_| cursor < end)
 }
 
-/// The byte ranges of `text`'s `{{ … }}` interpolations, whose content is a Vue
-/// expression like a directive's value.
-fn interpolations(text: &str, end: usize) -> Vec<std::ops::Range<usize>> {
+/// The byte ranges of the `{{ … }}` interpolations of `text`'s template body,
+/// whose content is a Vue expression like a directive's value. Only the body is
+/// searched: a `<script>` block's own braces, or a template literal in it, are
+/// not interpolations.
+fn interpolations(text: &str, body: std::ops::Range<usize>) -> Vec<std::ops::Range<usize>> {
     let mut values = Vec::new();
-    let mut at = 0;
-    while let Some(found) = text[at..end].find("{{") {
+    let mut at = body.start;
+    while at < body.end
+        && let Some(found) = text[at..body.end].find("{{")
+    {
         let open = at + found + 2;
-        let Some(close) = text[open..end].find("}}") else {
+        let Some(close) = text[open..body.end].find("}}") else {
             break;
         };
         values.push(open..open + close);
@@ -900,26 +904,51 @@ mod tests {
         );
     }
 
+    /// The findings of one Vue source, and a failure if the scan has not
+    /// answered in ten seconds: a regression fails the test instead of hanging
+    /// CI.
+    fn bounded_findings(text: &str) -> Vec<String> {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let text = text.to_owned();
+        let scan = std::thread::spawn(move || {
+            let mut errors = Vec::new();
+            findings(
+                "web/src/features/chat/LinesTree.vue",
+                &text,
+                true,
+                &mut errors,
+            );
+            let _ = sender.send(errors);
+        });
+        let errors = receiver
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("the template scan crossed the boundary and never returned");
+        scan.join().unwrap();
+        errors
+    }
+
     #[test]
     fn a_comparison_in_an_interpolation_does_not_hold_the_scan() {
-        let mut errors = Vec::new();
-        findings(
-            "web/src/features/chat/LinesTree.vue",
-            "<template>\n  <p>{{ 1 < 2 }}</p>\n</template>\n",
-            true,
-            &mut errors,
-        );
-        assert!(errors.is_empty(), "{errors:?}");
-        let mut errors = Vec::new();
-        findings(
-            "web/src/features/chat/LinesTree.vue",
-            "<template>\n  <p>{{ 1 < 2 }}",
-            true,
-            &mut errors,
-        );
+        for text in [
+            "<template>{{ 1 < 2 }}</template>",
+            "<template>{{ a <b }}</template>",
+            "<template>x <</template>",
+        ] {
+            let errors = bounded_findings(text);
+            assert!(errors.is_empty(), "{text}: {errors:?}");
+        }
+    }
+
+    #[test]
+    fn a_script_before_the_template_contributes_no_interpolation() {
+        let text = "<script setup lang=\"ts\">\nconst s = \"{{ x }}\"\n</script>\n\
+                    <template><p>hello</p></template>\n";
+        let Some(body) = template_body(text) else {
+            panic!("the template body is found");
+        };
         assert!(
-            errors.is_empty(),
-            "a < with no tag after it ends: {errors:?}"
+            interpolations(text, body).is_empty(),
+            "a {{ in the script block is not an interpolation"
         );
     }
 
