@@ -12622,6 +12622,7 @@
         "mod face",
         "path FsHost",
         "path FsHost::new",
+        "use face::FsEntry",
         "use face::FsHost",
         "use face::OpenRead"
       ]
@@ -12751,6 +12752,7 @@
       "from": "dim_agent_capabilities::file_storage::face",
       "to": "dim_agent_capabilities::file_storage",
       "references": [
+        "path EntryKind",
         "path FileReader",
         "path FileStorage",
         "path FileStorageError",
@@ -12761,6 +12763,7 @@
         "path FileStorageError::Locked",
         "path FileStorageError::Unsupported",
         "path Result",
+        "use super::EntryKind",
         "use super::FileReader",
         "use super::FileStorage",
         "use super::FileStorageError",

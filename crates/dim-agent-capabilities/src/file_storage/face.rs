@@ -1,4 +1,4 @@
-use super::{FileReader, FileStorage, FileStorageError, Result};
+use super::{EntryKind, FileReader, FileStorage, FileStorageError, Result};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use rutis::Ctx;
 use rutis_bridge::session::{Error, HostDispatch, Reply, Value};
@@ -14,13 +14,46 @@ pub struct OpenRead {
     pub size: u64,
 }
 
-/// The pinned-reader operations on the existing filesystem owner.
+#[derive(Debug, PartialEq, Eq, Serialize)]
+pub struct FsEntry {
+    pub name: String,
+    pub kind: EntryKind,
+}
+
+/// Filesystem operations on the existing storage generation.
 #[derive(Clone)]
 pub struct FsHost(Arc<FileStorage>);
 
 impl FsHost {
     pub(super) fn new(owner: Arc<FileStorage>) -> Self {
         Self(owner)
+    }
+
+    pub async fn create_directory(&self, path: &str, cancel: &CancellationToken) -> Result<()> {
+        let path = self.0.resolve(Path::new(path))?;
+        self.0.create_directory(&path, cancel).await
+    }
+
+    pub async fn list(&self, path: &str, cancel: &CancellationToken) -> Result<Vec<FsEntry>> {
+        let path = self.0.resolve(Path::new(path))?;
+        self.0
+            .list(&path, cancel)
+            .await?
+            .into_iter()
+            .map(|entry| {
+                Ok(FsEntry {
+                    name: entry.name.into_string().map_err(|_| {
+                        FileStorageError::InvalidPath("directory entry name is not UTF-8")
+                    })?,
+                    kind: entry.kind,
+                })
+            })
+            .collect()
+    }
+
+    pub async fn remove(&self, path: &str, cancel: &CancellationToken) -> Result<()> {
+        let path = self.0.resolve(Path::new(path))?;
+        self.0.remove(&path, cancel).await
     }
 
     /// Pins a file until close or the calling row's unload.
@@ -139,13 +172,16 @@ impl FileStorage {
 #[derive(Deserialize)]
 #[serde(tag = "method", content = "request", rename_all = "camelCase")]
 enum Request {
-    OpenRead(Open),
+    OpenRead(PathRequest),
+    CreateDirectory(PathRequest),
+    List(PathRequest),
+    Remove(PathRequest),
     ReadAt(Read),
     CloseRead(Close),
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Open {
+struct PathRequest {
     path: String,
 }
 #[derive(Deserialize)]
@@ -163,7 +199,9 @@ struct Close {
 
 impl HostDispatch for FsHost {
     fn methods(&self) -> Option<serde_json::Value> {
-        Some(serde_json::json!({"openRead":"async", "readAt":"async", "closeRead":"async"}))
+        Some(
+            serde_json::json!({"openRead":"async", "readAt":"async", "closeRead":"async", "createDirectory":"async", "list":"async", "remove":"async"}),
+        )
     }
 
     fn invoke(&self, method: &str, args: Value) -> Reply {
@@ -181,6 +219,24 @@ impl HostDispatch for FsHost {
             let cancel = CancellationToken::new();
             let _dropped = cancel.clone().drop_guard();
             let reply = match request {
+                Request::CreateDirectory(request) => {
+                    owner
+                        .create_directory(&request.path, &cancel)
+                        .await
+                        .map_err(failure)?;
+                    serde_json::json!({})
+                }
+                Request::List(request) => {
+                    let entries = owner.list(&request.path, &cancel).await.map_err(failure)?;
+                    serde_json::json!({"entries": entries})
+                }
+                Request::Remove(request) => {
+                    owner
+                        .remove(&request.path, &cancel)
+                        .await
+                        .map_err(failure)?;
+                    serde_json::json!({})
+                }
                 Request::OpenRead(request) => {
                     let caller = caller.ok_or_else(|| {
                         Error::Value("fsHost.openRead requires a calling row".into())

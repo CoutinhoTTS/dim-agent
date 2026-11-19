@@ -30,7 +30,13 @@ folding names would break case-sensitive directories and their aliases.
 
 `read_limited(path, limit, cancel)` preserves the same authorized-handle traversal and cancellation as `read`. It checks the opened file's length before allocating contents, then checks each chunk before extending the buffer to cover concurrent growth. Exceeding the byte limit returns `Io(InvalidData)` without partial bytes or a write. The lease's own `read_limited(limit, cancel)` applies the same rule under the held lock; `read` is its unbounded case. The business caller chooses its byte limit.
 
-## Pinned-reader data face
+## Filesystem data face
+
+`fsHost.createDirectory`, `list` and `remove` resolve absolute paths in the owner's
+authorized roots. They use the directory creation, listing and removal contracts above.
+A listing containing a name that cannot be represented as UTF-8 fails with `invalid`.
+
+### Pinned reads
 
 The process `fsHost` name provides the pinned-reader operations from
 [resource faces §4.1](../../../design/resource-faces.md#41-methods), using this

@@ -31,7 +31,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 mod face;
-pub use face::{FsHost, OpenRead};
+pub use face::{FsEntry, FsHost, OpenRead};
 
 /// Read-only reader lifetime observations for filesystem flow tests.
 #[cfg(feature = "testing")]

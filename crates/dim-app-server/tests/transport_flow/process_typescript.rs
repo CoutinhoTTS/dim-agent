@@ -2001,6 +2001,25 @@ async fn node_fs_readers_share_pinned_files_and_release_with_the_caller() {
     let pid = i32::try_from(status["pid"].as_i64().unwrap()).unwrap();
     let storage = server.service::<FileStorage>().unwrap();
     let face = server.service::<FsHost>().unwrap();
+    let directory = storage.root_path(0).unwrap().join("wire-list");
+    assert_ok(
+        &client
+            .rpc("fsreader.mkdir", json!({"path":directory}))
+            .await,
+    );
+    std::fs::write(directory.join("contents"), b"payload").unwrap();
+    let listed = client.rpc("fsreader.list", json!({"path":directory})).await;
+    assert_ok(&listed);
+    assert_eq!(
+        listed["result"],
+        json!({"entries":[{"name":"contents","kind":"file"}]})
+    );
+    assert_ok(
+        &client
+            .rpc("fsreader.remove", json!({"path":directory}))
+            .await,
+    );
+    assert!(!directory.exists());
     let path = storage.root_path(0).unwrap().join("pinned-reader.bin");
     let bytes = Vec::from_fn(200_000, |index| (index % 251) as u8);
     std::fs::write(&path, &bytes).unwrap();

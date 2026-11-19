@@ -359,6 +359,21 @@ async fn directory_listing_and_removal_stay_inside_the_authorized_root() {
     let cancel = CancellationToken::new();
     let path = |relative: &str| storage.path(0, relative).unwrap();
 
+    let face = root
+        .get::<dim_agent_capabilities::file_storage::FsHost>()
+        .unwrap();
+    let nested = root_path.join("nested");
+    let child = nested.join("child");
+    face.create_directory(child.to_str().unwrap(), &cancel)
+        .await
+        .unwrap();
+    let entries = face.list(nested.to_str().unwrap(), &cancel).await.unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].name, "child");
+    assert_eq!(entries[0].kind, EntryKind::Directory);
+    face.remove(child.to_str().unwrap(), &cancel).await.unwrap();
+    assert!(!child.exists());
+
     for id in ["a1", "a2"] {
         fs::create_dir_all(root_path.join(format!("sessions/s1/attachments/{id}"))).unwrap();
         let file = path(&format!("sessions/s1/attachments/{id}/paste.txt"));
