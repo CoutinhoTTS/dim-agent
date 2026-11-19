@@ -136,9 +136,9 @@ jobs:
             }
           }
           npm.cmd test --prefix web
-          npm.cmd test --workspace=@dimcode/chat-ui
-          npm.cmd run check:boundary --workspace=@dimcode/chat-ui
-          npm.cmd run build --workspace=@dimcode/chat-ui
+          npm.cmd test --prefix web --workspace=@dimcode/chat-ui
+          npm.cmd run check:boundary --prefix web --workspace=@dimcode/chat-ui
+          npm.cmd run build --prefix web --workspace=@dimcode/chat-ui
   verify:
     needs: changes
     if: >-
