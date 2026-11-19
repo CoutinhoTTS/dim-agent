@@ -3496,7 +3496,11 @@ async fn storage_panic_flow_preserves_connection_and_settles_accepted_batches() 
                 let admission = store.admission.lock().unwrap();
                 admission.sender.send(Command::Rollback { session_id: "barrier".into(), done, fault: None }).unwrap();
                 admission.sender.send(Command::Append(Pending {
-                    batch: TimelineBatch {key: key(phase), events: vec![record(1)], fault: Some(fault)},
+                    batch: TimelineBatch {
+                        key: key(phase),
+                        events: vec![record(1)],
+                        fault: Some(fault),
+                    },
                     publish: Some(Box::new(move |result| { let _ = failed.send(result); })),
                 })).unwrap();
                 drop(admission);
