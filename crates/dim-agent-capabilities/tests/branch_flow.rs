@@ -1255,21 +1255,28 @@ struct TestStore {
     /// The branch whose next submission lookup fails at the read, before the
     /// store writes anything: a transitory failure a delivery can retry.
     fail_lookup: Mutex<Option<String>>,
-    /// The branch whose next append of a kind is accepted and then held, the
-    /// state a store is in between queueing a batch and committing it. The kind
-    /// is an event key; `branch-final` stands for a tool end's final message on
-    /// the parent.
-    hold: Mutex<Option<(String, String)>>,
-    /// The batch the held append has not written or answered yet.
-    held: Mutex<Option<(TimelineKey, Vec<StoredEvent>, PublishCallback)>>,
-    /// Whether the store commits in order: a batch it holds stops every later
-    /// append on the same branch until it settles, as the one writer that
-    /// commits a Session's batches does.
-    ordered: AtomicBool,
-    /// The appends the store accepted behind a held batch, in that order.
-    behind: Mutex<Vec<(TimelineKey, Vec<StoredEvent>, PublishCallback)>>,
+    /// The hold seam and the queue it keeps back, under one lock so arming a
+    /// hold and deciding that an append queues behind it cannot interleave.
+    seam: Mutex<Seam>,
     /// Wakes the test that waits for a hold to be taken.
     holding: tokio::sync::Notify,
+}
+
+/// One batch's admission: its events and the callback that answers it.
+type QueuedBatch = (TimelineKey, Vec<StoredEvent>, PublishCallback);
+
+/// A store's hold seam: the next append to a branch that it accepts and does
+/// not commit, the batch that append became, and every later append to the same
+/// branch, in the order the store accepted them. `TimelineStore` runs one
+/// branch's publish callbacks in sequence order (`timeline_store.rs:75`), so a
+/// batch behind another may not commit first.
+#[derive(Default)]
+struct Seam {
+    /// The branch whose next append of a kind is held. The kind is an event key;
+    /// `branch-final` stands for a tool end's final message on the parent.
+    armed: Option<(String, String)>,
+    front: Option<QueuedBatch>,
+    behind: Vec<QueuedBatch>,
 }
 impl TestStore {
     /// A store over `memory` that refuses every range read.
@@ -1299,21 +1306,15 @@ impl TestStore {
     }
     /// Accepts the next `branch/default` append to `branch` and holds its
     /// publication, so a caller can assert what the tree answers before the
-    /// commit.
+    /// commit. Every later append to that branch queues behind the held batch
+    /// until it settles.
     fn hold_next_default(&self, branch: &str) {
-        *self.hold.lock().unwrap() = Some((branch.into(), "branch/default".into()));
+        self.seam.lock().unwrap().armed = Some((branch.into(), "branch/default".into()));
     }
     /// Accepts the next final message a tool end delivers to `branch` and holds
-    /// its commit.
+    /// its commit. Every later append to that branch queues behind it.
     fn hold_next_final(&self, branch: &str) {
-        *self.hold.lock().unwrap() = Some((branch.into(), "branch-final".into()));
-    }
-    /// Holds the next `branch/default` append to `branch` and queues every
-    /// later append on it behind that batch, so none of them commits first: the
-    /// order a store keeps when one writer commits its batches.
-    fn hold_next_default_in_order(&self, branch: &str) {
-        self.ordered.store(true, Ordering::SeqCst);
-        self.hold_next_default(branch);
+        self.seam.lock().unwrap().armed = Some((branch.into(), "branch-final".into()));
     }
     /// Waits until a held publication is there to release.
     async fn wait_holding(&self) {
@@ -1321,31 +1322,32 @@ impl TestStore {
             let notified = self.holding.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
-            if self.held.lock().unwrap().is_some() {
+            if self.seam.lock().unwrap().front.is_some() {
                 return;
             }
             notified.await;
         }
     }
-    /// Writes the held batch and answers it as committed.
+    /// Writes the held batch and answers it as committed, then commits what the
+    /// store accepted behind it, in the order it came: the writer drains its
+    /// queue once the batch in front settles.
     fn release(&self) {
-        let (key, events, publish) = self.held.lock().unwrap().take().expect("a held append");
+        let mut seam = self.seam.lock().unwrap();
+        let (key, events, publish) = seam.front.take().expect("a held append");
         self.memory.append(key, events, publish).unwrap();
-        self.commit_behind();
+        for (key, events, publish) in std::mem::take(&mut seam.behind) {
+            self.memory.append(key, events, publish).unwrap();
+        }
     }
-    /// Answers the held append as a failed transaction that wrote nothing.
+    /// Answers the held append as a failed transaction that wrote nothing, then
+    /// commits what the store accepted behind it.
     fn release_failed(&self) {
-        let (_, _, publish) = self.held.lock().unwrap().take().expect("a held append");
+        let mut seam = self.seam.lock().unwrap();
+        let (_, _, publish) = seam.front.take().expect("a held append");
         publish(Err(AgentError::Storage(
             "injected transaction failure".into(),
         )));
-        self.commit_behind();
-    }
-    /// Commits what the store accepted behind the held batch, in the order it
-    /// came: the writer drains its queue once the batch in front settles.
-    fn commit_behind(&self) {
-        let queued: Vec<_> = std::mem::take(&mut *self.behind.lock().unwrap());
-        for (key, events, publish) in queued {
+        for (key, events, publish) in std::mem::take(&mut seam.behind) {
             self.memory.append(key, events, publish).unwrap();
         }
     }
@@ -1465,30 +1467,31 @@ impl TimelineStore for TestStore {
                 .is_some_and(|id| id.starts_with("branch-final:")),
             _ => false,
         };
-        let hold = {
-            let mut armed = self.hold.lock().unwrap();
-            let hold = armed.as_ref().is_some_and(|(branch, kind)| {
-                branch == &key.branch_id
-                    && if kind == "branch-final" {
-                        events.iter().any(final_message)
-                    } else {
-                        events.iter().any(|record| record.event.kind.key() == kind)
-                    }
-            });
-            if hold {
-                *armed = None;
-            }
-            hold
-        };
+        let mut seam = self.seam.lock().unwrap();
+        let hold = seam.armed.as_ref().is_some_and(|(branch, kind)| {
+            branch == &key.branch_id
+                && if kind == "branch-final" {
+                    events.iter().any(final_message)
+                } else {
+                    events.iter().any(|record| record.event.kind.key() == kind)
+                }
+        });
         if hold {
-            *self.held.lock().unwrap() = Some((key, events, publish));
+            seam.armed = None;
+            seam.front = Some((key, events, publish));
+            drop(seam);
             self.holding.notify_waiters();
             return Ok(());
         }
-        if self.ordered.load(Ordering::SeqCst) && self.held.lock().unwrap().is_some() {
-            self.behind.lock().unwrap().push((key, events, publish));
+        if seam
+            .front
+            .as_ref()
+            .is_some_and(|(held, _, _)| held.branch_id == key.branch_id)
+        {
+            seam.behind.push((key, events, publish));
             return Ok(());
         }
+        drop(seam);
         let delivery = events.iter().any(final_message);
         let failed = delivery && {
             let mut armed = self.fail_delivery.lock().unwrap();
@@ -10789,7 +10792,7 @@ async fn move_admitted_while_held(session: &Session, store: &Arc<TestStore>) -> 
     let line = open_line(session, "moved while closing").await;
     let tree = session.session_service::<TreeCommands>().unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
-    store.hold_next_default_in_order("main");
+    store.hold_next_default("main");
     let mut moved = Box::pin(tree.set_default_branch(
         line.clone(),
         BranchSource::User {
