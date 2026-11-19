@@ -13,9 +13,26 @@
 //! These hold for every input, and each is checked by a test below.
 //!
 //! - **Rust sources are parsed, not lexed by hand.** A use is a string literal
-//!   token whose value is `main`, outside every item, statement, match arm,
-//!   struct-literal field, field, variant or foreign item that a test-only
-//!   `cfg` gates.
+//!   token whose value is `main`, outside every node a test-only `cfg` gates.
+//!   The visitor gates a node when rustc removes it with `#[cfg]` and a
+//!   literal can stand in its subtree:
+//!
+//!   | node | `#[cfg]` applies | can hold a literal |
+//!   | --- | --- | --- |
+//!   | a file's inner attributes | yes | yes |
+//!   | items, `impl`, trait and foreign items | yes | yes |
+//!   | statements, match arms, struct-literal fields | yes | yes |
+//!   | expressions | yes | yes |
+//!   | patterns (a closure parameter may carry an attribute) | yes | yes |
+//!   | struct pattern fields | yes | yes |
+//!   | function arguments, receiver included | yes | yes; not in a receiver's type |
+//!   | bare function arguments | yes | yes |
+//!   | generic parameters | yes | yes, in a const parameter's default |
+//!   | a foreign item's variadic | yes | yes, as a pattern |
+//!   | a bare function type's variadic | yes | no: rustc rejects a pattern there |
+//!
+//!   Each answer is a `rustc --edition 2024` compile test. No other `syn` type
+//!   with attributes is reachable: `DeriveInput` is not parsed.
 //! - **In a Vue component, only code is read:** the contents of `<script>`
 //!   blocks outside HTML comments, and the template's expressions — directive
 //!   and bound attribute values, and `{{ … }}` interpolations. Template text,
@@ -334,6 +351,14 @@ fn gated(
 }
 
 impl<'ast> Visit<'ast> for RustLiterals {
+    fn visit_file(&mut self, node: &'ast syn::File) {
+        gated(self, &node.attrs, |this, gated| {
+            if !gated {
+                syn::visit::visit_file(this, node);
+            }
+        });
+    }
+
     fn visit_item(&mut self, node: &'ast syn::Item) {
         gated(self, item_attributes(node), |this, gated| {
             if !gated {
@@ -366,6 +391,54 @@ impl<'ast> Visit<'ast> for RustLiterals {
         });
     }
 
+    fn visit_expr(&mut self, node: &'ast syn::Expr) {
+        gated(self, expr_attributes(node), |this, gated| {
+            if !gated {
+                syn::visit::visit_expr(this, node);
+            }
+        });
+    }
+
+    fn visit_pat(&mut self, node: &'ast syn::Pat) {
+        gated(self, pat_attributes(node), |this, gated| {
+            if !gated {
+                syn::visit::visit_pat(this, node);
+            }
+        });
+    }
+
+    fn visit_fn_arg(&mut self, node: &'ast syn::FnArg) {
+        gated(self, fn_arg_attributes(node), |this, gated| {
+            if !gated {
+                syn::visit::visit_fn_arg(this, node);
+            }
+        });
+    }
+
+    fn visit_bare_fn_arg(&mut self, node: &'ast syn::BareFnArg) {
+        gated(self, &node.attrs, |this, gated| {
+            if !gated {
+                syn::visit::visit_bare_fn_arg(this, node);
+            }
+        });
+    }
+
+    fn visit_generic_param(&mut self, node: &'ast syn::GenericParam) {
+        gated(self, generic_param_attributes(node), |this, gated| {
+            if !gated {
+                syn::visit::visit_generic_param(this, node);
+            }
+        });
+    }
+
+    fn visit_variadic(&mut self, node: &'ast syn::Variadic) {
+        gated(self, &node.attrs, |this, gated| {
+            if !gated {
+                syn::visit::visit_variadic(this, node);
+            }
+        });
+    }
+
     fn visit_arm(&mut self, node: &'ast syn::Arm) {
         gated(self, &node.attrs, |this, gated| {
             if !gated {
@@ -386,6 +459,14 @@ impl<'ast> Visit<'ast> for RustLiterals {
         gated(self, &node.attrs, |this, gated| {
             if !gated {
                 syn::visit::visit_field(this, node);
+            }
+        });
+    }
+
+    fn visit_field_pat(&mut self, node: &'ast syn::FieldPat) {
+        gated(self, &node.attrs, |this, gated| {
+            if !gated {
+                syn::visit::visit_field_pat(this, node);
             }
         });
     }
@@ -480,14 +561,55 @@ fn foreign_item_attributes(item: &syn::ForeignItem) -> &[syn::Attribute] {
     }
 }
 
-/// The attributes a statement may carry: an item's, a local's, a macro
-/// statement's, or the expression's own.
+/// The attributes a statement may carry: an item's, a local's or a macro
+/// statement's. An expression statement's own gate is its expression's, read
+/// in `visit_expr`.
 fn stmt_attributes(statement: &syn::Stmt) -> &[syn::Attribute] {
     match statement {
         syn::Stmt::Item(item) => item_attributes(item),
         syn::Stmt::Local(item) => &item.attrs,
         syn::Stmt::Macro(item) => &item.attrs,
-        syn::Stmt::Expr(item, _) => expr_attributes(item),
+        syn::Stmt::Expr(_, _) => &[],
+    }
+}
+
+/// The outer attributes a pattern may carry, whichever pattern it is.
+fn pat_attributes(pattern: &syn::Pat) -> &[syn::Attribute] {
+    match pattern {
+        syn::Pat::Const(item) => &item.attrs,
+        syn::Pat::Ident(item) => &item.attrs,
+        syn::Pat::Lit(item) => &item.attrs,
+        syn::Pat::Macro(item) => &item.attrs,
+        syn::Pat::Or(item) => &item.attrs,
+        syn::Pat::Paren(item) => &item.attrs,
+        syn::Pat::Path(item) => &item.attrs,
+        syn::Pat::Range(item) => &item.attrs,
+        syn::Pat::Reference(item) => &item.attrs,
+        syn::Pat::Rest(item) => &item.attrs,
+        syn::Pat::Slice(item) => &item.attrs,
+        syn::Pat::Struct(item) => &item.attrs,
+        syn::Pat::Tuple(item) => &item.attrs,
+        syn::Pat::TupleStruct(item) => &item.attrs,
+        syn::Pat::Type(item) => &item.attrs,
+        syn::Pat::Wild(item) => &item.attrs,
+        _ => &[],
+    }
+}
+
+/// The attributes a function argument may carry, receiver or typed argument.
+fn fn_arg_attributes(argument: &syn::FnArg) -> &[syn::Attribute] {
+    match argument {
+        syn::FnArg::Receiver(item) => &item.attrs,
+        syn::FnArg::Typed(item) => &item.attrs,
+    }
+}
+
+/// The attributes a generic parameter may carry, whichever parameter it is.
+fn generic_param_attributes(parameter: &syn::GenericParam) -> &[syn::Attribute] {
+    match parameter {
+        syn::GenericParam::Lifetime(item) => &item.attrs,
+        syn::GenericParam::Type(item) => &item.attrs,
+        syn::GenericParam::Const(item) => &item.attrs,
     }
 }
 
@@ -1445,6 +1567,82 @@ mod tests {
     }
 
     #[test]
+    fn a_gated_expression_is_not_code_in_any_position() {
+        for (gated, ungated) in [
+            (
+                "fn production(other: &'static str) {\n    let _ids = [#[cfg(test)] \"main\", other];\n}\n",
+                "fn production(other: &'static str) {\n    let _ids = [\"main\", other];\n}\n",
+            ),
+            (
+                "fn production() {\n    let _tuple = (#[cfg(test)] \"main\", 1);\n}\n",
+                "fn production() {\n    let _tuple = (\"main\", 1);\n}\n",
+            ),
+            (
+                "fn takes(_: &'static str) {}\nfn production() {\n    takes(#[cfg(test)] \"main\");\n}\n",
+                "fn takes(_: &'static str) {}\nfn production() {\n    takes(\"main\");\n}\n",
+            ),
+            (
+                "struct S;\nimpl S { fn takes(&self, _: &'static str) {} }\nfn production() {\n    S.takes(#[cfg(test)] \"main\");\n}\n",
+                "struct S;\nimpl S { fn takes(&self, _: &'static str) {} }\nfn production() {\n    S.takes(\"main\");\n}\n",
+            ),
+            (
+                "struct T(#[cfg(test)] &'static str, u8);\nfn production() {\n    let _ = T(#[cfg(test)] \"main\", 2);\n}\n",
+                "struct T(&'static str, u8);\nfn production() {\n    let _ = T(\"main\", 2);\n}\n",
+            ),
+            (
+                "fn production() {\n    let _tail = { #[cfg(test)] \"main\" };\n}\n",
+                "fn production() {\n    let _tail = { \"main\" };\n}\n",
+            ),
+            (
+                "struct S { name: &'static str }\nfn production(s: S) {\n    if let S { #[cfg(test)] name: \"main\", .. } = s {}\n}\n",
+                "struct S { name: &'static str }\nfn production(s: S) {\n    if let S { name: \"main\", .. } = s {}\n}\n",
+            ),
+        ] {
+            let errors = rust_findings(gated);
+            assert!(errors.is_empty(), "{gated}: {errors:?}");
+            let errors = rust_findings(ungated);
+            assert_eq!(errors.len(), 1, "{ungated}: {errors:?}");
+        }
+        let errors = rust_findings(
+            "fn production(other: &'static str) {\n    let _ids = [#[cfg(not(test))] \"main\", other];\n}\n",
+        );
+        assert_eq!(errors.len(), 1, "{errors:?}");
+    }
+
+    #[test]
+    fn every_node_the_table_gates_is_gated() {
+        for (gated, ungated) in [
+            (
+                "#![cfg(test)]\nfn production() -> &'static str { \"main\" }\n",
+                "#![allow(dead_code)]\nfn production() -> &'static str { \"main\" }\n",
+            ),
+            (
+                "fn takes(#[cfg(test)] name: [u8; \"main\".len()]) { let _ = name; }\nfn production() { takes(); }\n",
+                "fn takes(name: [u8; \"main\".len()]) { let _ = name; }\n",
+            ),
+            (
+                "fn production() {\n    let f: fn(#[cfg(test)] [u8; \"main\".len()]) = |_: [u8; 3]| {};\n    let _ = f;\n}\n",
+                "fn production() {\n    let f: fn([u8; \"main\".len()]) = |_: [u8; 3]| {};\n    let _ = f;\n}\n",
+            ),
+            (
+                "struct S<#[cfg(test)] const N: usize = { \"main\".len() }>([u8; N]);\n",
+                "struct S<const N: usize = { \"main\".len() }>([u8; N]);\n",
+            ),
+            (
+                "fn production() {\n    let f = |#[cfg(test)] \"main\"| {};\n    f();\n}\n",
+                "fn production() {\n    let f = |\"main\"| {};\n}\n",
+            ),
+        ] {
+            let errors = rust_findings(gated);
+            assert!(errors.is_empty(), "{gated}: {errors:?}");
+            let errors = rust_findings(ungated);
+            assert_eq!(errors.len(), 1, "{ungated}: {errors:?}");
+        }
+        let errors = rust_findings("unsafe extern \"C\" { fn f(#[cfg(test)] \"main\": ...); }\n");
+        assert!(errors.is_empty(), "{errors:?}");
+    }
+
+    #[test]
     fn a_commented_out_script_is_markup_and_the_real_script_is_code() {
         let errors = vue_findings(
             "<!-- <script>const x = \"main\"</script> -->\n<script setup>\nconst id = ROOT_BRANCH_ID\n</script>\n<template><p>hello</p></template>\n",
@@ -1649,6 +1847,110 @@ mod tests {
         (
             "crates/dim-app-server/src/storage/sqlite.rs",
             "fn check(connection: &Connection) {\n    if let Ok(false) = connection.is_readonly(\"main\") { let b = \"main\"; }\n}\n",
+        ),
+        (
+            "crates/example/src/lib.rs",
+            "fn production(other: &'static str) {\n    let _ids = [#[cfg(test)] \"main\", other];\n}\n",
+        ),
+        (
+            "crates/example/src/lib.rs",
+            "fn production(other: &'static str) {\n    let _ids = [\"main\", other];\n}\n",
+        ),
+        (
+            "crates/example/src/lib.rs",
+            "fn production() {\n    let _tuple = (#[cfg(test)] \"main\", 1);\n}\n",
+        ),
+        (
+            "crates/example/src/lib.rs",
+            "fn production() {\n    let _tuple = (\"main\", 1);\n}\n",
+        ),
+        (
+            "crates/example/src/lib.rs",
+            "fn takes(_: &'static str) {}\nfn production() {\n    takes(#[cfg(test)] \"main\");\n}\n",
+        ),
+        (
+            "crates/example/src/lib.rs",
+            "fn takes(_: &'static str) {}\nfn production() {\n    takes(\"main\");\n}\n",
+        ),
+        (
+            "crates/example/src/lib.rs",
+            "struct S;\nimpl S { fn takes(&self, _: &'static str) {} }\nfn production() {\n    S.takes(#[cfg(test)] \"main\");\n}\n",
+        ),
+        (
+            "crates/example/src/lib.rs",
+            "struct S;\nimpl S { fn takes(&self, _: &'static str) {} }\nfn production() {\n    S.takes(\"main\");\n}\n",
+        ),
+        (
+            "crates/example/src/lib.rs",
+            "struct T(#[cfg(test)] &'static str, u8);\nfn production() {\n    let _ = T(#[cfg(test)] \"main\", 2);\n}\n",
+        ),
+        (
+            "crates/example/src/lib.rs",
+            "struct T(&'static str, u8);\nfn production() {\n    let _ = T(\"main\", 2);\n}\n",
+        ),
+        (
+            "crates/example/src/lib.rs",
+            "fn production() {\n    let _tail = { #[cfg(test)] \"main\" };\n}\n",
+        ),
+        (
+            "crates/example/src/lib.rs",
+            "fn production() {\n    let _tail = { \"main\" };\n}\n",
+        ),
+        (
+            "crates/example/src/lib.rs",
+            "struct S { name: &'static str }\nfn production(s: S) {\n    if let S { #[cfg(test)] name: \"main\", .. } = s {}\n}\n",
+        ),
+        (
+            "crates/example/src/lib.rs",
+            "struct S { name: &'static str }\nfn production(s: S) {\n    if let S { name: \"main\", .. } = s {}\n}\n",
+        ),
+        (
+            "crates/example/src/lib.rs",
+            "fn production(other: &'static str) {\n    let _ids = [#[cfg(not(test))] \"main\", other];\n}\n",
+        ),
+        (
+            "crates/example/src/lib.rs",
+            "#![cfg(test)]\nfn production() -> &'static str { \"main\" }\n",
+        ),
+        (
+            "crates/example/src/lib.rs",
+            "#![allow(dead_code)]\nfn production() -> &'static str { \"main\" }\n",
+        ),
+        (
+            "crates/example/src/lib.rs",
+            "fn takes(#[cfg(test)] name: [u8; \"main\".len()]) { let _ = name; }\nfn production() { takes(); }\n",
+        ),
+        (
+            "crates/example/src/lib.rs",
+            "fn takes(name: [u8; \"main\".len()]) { let _ = name; }\n",
+        ),
+        (
+            "crates/example/src/lib.rs",
+            "fn production() {\n    let f: fn(#[cfg(test)] [u8; \"main\".len()]) = |_: [u8; 3]| {};\n    let _ = f;\n}\n",
+        ),
+        (
+            "crates/example/src/lib.rs",
+            "fn production() {\n    let f: fn([u8; \"main\".len()]) = |_: [u8; 3]| {};\n    let _ = f;\n}\n",
+        ),
+        (
+            "crates/example/src/lib.rs",
+            "struct S<#[cfg(test)] const N: usize = { \"main\".len() }>([u8; N]);\n",
+        ),
+        (
+            "crates/example/src/lib.rs",
+            "struct S<const N: usize = { \"main\".len() }>([u8; N]);\n",
+        ),
+        (
+            "crates/example/src/lib.rs",
+            "fn production() {\n    let f = |#[cfg(test)] \"main\"| {};\n    f();\n}\n",
+        ),
+        (
+            "crates/example/src/lib.rs",
+            "fn production() {\n    let f = |\"main\"| {};\n}\n",
+        ),
+        (
+            "crates/example/src/lib.rs",
+            "unsafe extern \"C\" { fn f(#[cfg(test)] \"main\": ...); }\n",
         ),
     ];
 
