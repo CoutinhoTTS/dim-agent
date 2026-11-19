@@ -5405,7 +5405,9 @@
       "crate": "dim_cli",
       "parent": "dim_cli::ui::composer",
       "file": "crates/dim-cli/src/ui/composer/history.rs",
-      "unexpandedMacros": []
+      "unexpandedMacros": [
+        "matches"
+      ]
     },
     {
       "id": "dim_cli::ui::composer::history::tests",
@@ -37107,7 +37109,7 @@
       "from": "dim_cli",
       "to": "dim_cli::ui::composer::history",
       "references": [
-        "path ui::composer::history::flush"
+        "path ui::composer::history::flush_within"
       ]
     },
     {
