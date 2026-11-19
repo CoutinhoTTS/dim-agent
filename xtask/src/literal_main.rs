@@ -396,6 +396,8 @@ fn directive_values(text: &str) -> Vec<std::ops::Range<usize>> {
         && let Some(found) = text[at..body.end].find('<')
     {
         let open = at + found;
+        // `find` answers a boundary before an ASCII `<`, and `<!--` and `-->`
+        // are ASCII, so the offsets past them are boundaries too.
         if text[open..body.end].starts_with("<!--") {
             at = text[open..body.end]
                 .find("-->")
@@ -432,7 +434,10 @@ fn tag_attributes(
     };
     if !first.is_ascii_alphabetic() && !matches!(first, b'/' | b'!' | b'?') {
         // A `<` that opens no tag, such as a comparison in an interpolation.
-        return cursor + 1;
+        // `cursor` is already past the ASCII `<` the caller matched, and the
+        // byte after it may lead a multibyte character, so the scan resumes
+        // there rather than one byte further.
+        return cursor;
     }
     let mut cursor = cursor;
     while let Some(byte) = byte(text, cursor, end) {
@@ -441,6 +446,9 @@ fn tag_attributes(
         }
         cursor += text[cursor..].chars().next().map_or(1, char::len_utf8);
     }
+    // Every `+= 1` below steps over a byte this code has just matched as
+    // ASCII: whitespace, `>`, `/`, `=`. Any other character moves by its own
+    // length, so no offset lands inside a multibyte character.
     loop {
         while byte(text, cursor, end).is_some_and(|byte| byte.is_ascii_whitespace()) {
             cursor += 1;
@@ -464,9 +472,10 @@ fn tag_attributes(
             cursor += text[cursor..].chars().next().map_or(1, char::len_utf8);
         }
         if cursor == name {
-            // Nothing this pass could consume: a byte that starts neither a name
-            // nor a value. Step over it so the scan always moves.
-            cursor += 1;
+            // Nothing this pass could consume: a character that starts neither
+            // a name nor a value. Step over it so the scan always moves; it
+            // need not be ASCII, so it moves by its own length.
+            cursor += text[cursor..].chars().next().map_or(1, char::len_utf8);
             continue;
         }
         let directive = is_directive(&text[name..cursor]);
@@ -484,6 +493,7 @@ fn tag_attributes(
         else {
             continue;
         };
+        // The quote is ASCII, so the value starts one byte past it.
         let value = cursor + 1;
         let close = text[value..end]
             .find(char::from(quote))
@@ -511,15 +521,27 @@ fn byte(text: &str, cursor: usize, end: usize) -> Option<u8> {
 fn interpolations(text: &str, body: std::ops::Range<usize>) -> Vec<std::ops::Range<usize>> {
     let mut values = Vec::new();
     let mut at = body.start;
-    while at < body.end
-        && let Some(found) = text[at..body.end].find("{{")
-    {
-        let open = at + found + 2;
-        let Some(close) = text[open..body.end].find("}}") else {
+    while at < body.end {
+        let comment = text[at..body.end].find("<!--").map(|found| at + found);
+        let Some(found) = text[at..body.end].find("{{") else {
             break;
         };
-        values.push(open..open + close);
-        at = open + close + 2;
+        let open = at + found;
+        // A commented-out interpolation is not an expression. `<!--` and `-->`
+        // are ASCII, so the offset past them is a boundary.
+        if let Some(comment) = comment.filter(|comment| *comment < open) {
+            at = text[comment..body.end]
+                .find("-->")
+                .map_or(body.end, |end| comment + end + 3);
+            continue;
+        }
+        // `{{` is ASCII, so the content starts two bytes past its boundary.
+        let content = open + 2;
+        let Some(close) = text[content..body.end].find("}}") else {
+            break;
+        };
+        values.push(content..content + close);
+        at = content + close + 2;
     }
     values
 }
@@ -641,32 +663,60 @@ fn item_range(text: &str, after_group: usize) -> Option<(usize, usize)> {
         at += 1;
     }
     let mut depth = 0usize;
-    for (offset, character) in text[at..].char_indices() {
+    let mut cursor = at;
+    while let Some(character) = text[cursor..].chars().next() {
+        if let Some(length) = code_gap(text, cursor) {
+            cursor += length;
+            continue;
+        }
         match character {
-            '{' if depth == 0 => return Some((open, closing_brace(text, at + offset) + 1)),
+            '{' if depth == 0 => return Some((open, closing_brace(text, cursor) + 1)),
             '{' | '(' | '[' => depth += 1,
             '}' | ')' | ']' => depth = depth.saturating_sub(1),
-            ';' if depth == 0 => return Some((open, at + offset + 1)),
+            ';' if depth == 0 => return Some((open, cursor + 1)),
             _ => {}
         }
+        cursor += character.len_utf8();
     }
     None
 }
 
-/// The offset of the brace that closes the block opening at `open`.
+/// The length of the non-code region that starts at `at` — a comment, a string
+/// or a character literal — which the brace scan steps over, `None` when code
+/// starts there. The recognisers are the ones the literal scan already uses, so
+/// the brace count reads their view of the text rather than a second lexer's.
+fn code_gap(text: &str, at: usize) -> Option<usize> {
+    if let Some(length) = comment(text, at) {
+        return Some(length);
+    }
+    if let Some((_, _, length)) = string_literal(text, at) {
+        return Some(length);
+    }
+    character_literal(text, at)
+}
+
+/// The offset of the brace that closes the code block opening at `open`,
+/// counting only code: a `"}"` in a string, a `'}'` in a character literal or a
+/// `// }` comment does not close it.
 fn closing_brace(text: &str, open: usize) -> usize {
     let mut depth = 0usize;
-    for (offset, character) in text[open..].char_indices() {
+    let mut cursor = open;
+    while let Some(character) = text[cursor..].chars().next() {
+        if let Some(length) = code_gap(text, cursor) {
+            cursor += length;
+            continue;
+        }
         match character {
             '{' => depth += 1,
             '}' => {
                 depth -= 1;
                 if depth == 0 {
-                    return open + offset;
+                    return cursor;
                 }
             }
             _ => {}
         }
+        cursor += character.len_utf8();
     }
     text.len().saturating_sub(1)
 }
@@ -922,7 +972,14 @@ mod tests {
         });
         let errors = receiver
             .recv_timeout(std::time::Duration::from_secs(10))
-            .expect("the template scan crossed the boundary and never returned");
+            .unwrap_or_else(|error| match error {
+                std::sync::mpsc::RecvTimeoutError::Timeout => {
+                    panic!("the template scan crossed the boundary and never returned")
+                }
+                std::sync::mpsc::RecvTimeoutError::Disconnected => {
+                    panic!("the template scan panicked instead of answering")
+                }
+            });
         scan.join().unwrap();
         errors
     }
@@ -937,6 +994,75 @@ mod tests {
             let errors = bounded_findings(text);
             assert!(errors.is_empty(), "{text}: {errors:?}");
         }
+    }
+
+    #[test]
+    fn a_multibyte_character_after_a_non_tag_angle_keeps_offsets_on_boundaries() {
+        let text = "<script setup lang=\"ts\">\nconst 数量 = 2\n</script>\n\
+                    <template>{{ 1<数量 }}</template>\n";
+        let errors = bounded_findings(text);
+        assert!(errors.is_empty(), "{errors:?}");
+        let text = "<template><p title=é>x</p><é</template>";
+        let errors = bounded_findings(text);
+        assert!(errors.is_empty(), "{errors:?}");
+    }
+
+    #[test]
+    fn a_commented_out_interpolation_is_not_an_expression() {
+        let file = "web/src/features/chat/LinesTree.vue";
+        let mut errors = Vec::new();
+        findings(
+            file,
+            "<template>\n  <!-- {{ id === 'main' }} -->\n</template>\n",
+            true,
+            &mut errors,
+        );
+        assert!(errors.is_empty(), "{errors:?}");
+        let mut errors = Vec::new();
+        findings(
+            file,
+            "<template>\n  <p>{{ id === 'main' }}</p>\n</template>\n",
+            true,
+            &mut errors,
+        );
+        assert_eq!(
+            errors,
+            vec![
+                "web/src/features/chat/LinesTree.vue:2: `\"main\"` names neither the root nor the default branch; write `ROOT_BRANCH_ID` or `DEFAULT_BRANCH_ID`, or name the use in `UNRELATED`".to_owned()
+            ]
+        );
+    }
+
+    #[test]
+    fn a_brace_in_a_string_a_character_or_a_comment_does_not_close_a_test_module() {
+        for line in [
+            "const A: &str = \"}\";",
+            "const C: char = '}';",
+            "// } seam",
+        ] {
+            let text = format!(
+                "fn root() -> &'static str {{ ROOT_BRANCH_ID }}\n\
+                 #[cfg(test)]\n\
+                 mod tests {{\n    {line}\n    const ID: &str = \"main\";\n}}\n"
+            );
+            let mut errors = Vec::new();
+            findings("crates/example/src/lib.rs", &text, false, &mut errors);
+            assert!(errors.is_empty(), "{line}: {errors:?}");
+        }
+        let mut errors = Vec::new();
+        findings(
+            "crates/example/src/lib.rs",
+            "fn root() -> &'static str { ROOT_BRANCH_ID }\n\
+             #[cfg(test)]\n\
+             mod tests {\n    const A: &str = \"}\";\n    const ID: &str = \"main\";\n}\n\
+             fn after() -> &'static str { \"main\" }\n",
+            false,
+            &mut errors,
+        );
+        assert!(
+            errors[0].contains("crates/example/src/lib.rs:7: `\"main\"` names neither"),
+            "{errors:?}"
+        );
     }
 
     #[test]
