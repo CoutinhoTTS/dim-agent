@@ -9,9 +9,10 @@ directly. The rutis binding dispatches its data arguments and returns its result
 | --- | --- |
 | `hostPlatform` | Exec and Shell use the task and PTY operations in [execHost §3](../resource-faces.md#3-exechost). Hooks calls configured(request); OCR calls confined(request). Both return the result of that call. Process handles remain with the platform. |
 | `fileStorage`, `mentionIndex` | File tools and workspace completion use [fsHost §4](../resource-faces.md#4-fshost), including mentions. Storage clients use the owner's file and lease operations. An opened reader uses openRead/readAt/closeRead. |
-| `sessionStore` | Session repository, metadata, attachments, Timeline and worktree associations use store, sessionMetadata, sessionFiles, timelineStore and worktreeAssociations respectively. Session construction binds the existing Session-scoped timelineStore. Path import and fileId reads use the [Session files contract](../appserver/session-files.md). |
+| `sessionStore` | Session repository, metadata, attachments, Timeline and worktree associations use store, store.readMetadata/setTitle, sessionFiles, timelineStore and store.associateWorktree respectively. Session construction binds the existing Session-scoped timelineStore. Path import and fileId reads use the [Session files contract](../appserver/session-files.md). |
 | `pluginFileTransactions` | Scheduler and EventHub use pluginFiles.open(), scope.withLock and lease.read/replace for the same atomic text update. Scope.list/remove and lease.readBytes/replaceBytes have their existing contracts. |
 | `settingsService` | Declared sources use settings.register/read/update/projects. PluginManager uses the owner-write form for CAS edits and applies its existing writeOnly redaction. SettingsMethods retains the local client-write path. [Settings contract](../appserver/settings-service.md#42-service-settings-owner-path). |
+| Permission, PromptSources, Skills catalog/management and execution/shell Settings → resource owners | Use the node facts and file operations in the [resource caller matrix](../resource-faces.md#6-migration), including execHost.info and fsHost resolution and reads. |
 
 ## Additional public bindings
 
@@ -37,9 +38,27 @@ result settlement and result paging keep the [Modality contract](../plugins/Moda
 
 ## Native storage
 
-Persistent Agents, Provider and native Settings call the same process face, `sqliteStorage`.
+SessionStore, persistent Agents, Provider and native Settings call the same process face, `sqliteStorage`.
 The SQLite plugin owns reads, transactions and writer shutdown. Each consumer owns its
 own unload. Session rows use `store`; volatile Agents and file-profile Settings use their existing backends.
+
+### SessionStore → sqliteStorage
+
+SessionStore publishes `store`, `sessionFiles` and the Session-scoped `timelineStore`.
+Its native backend calls the existing process face `sqliteStorage` with data. SQLite
+owns SQL, read connections, database transactions, writer shutdown and the database lock.
+SessionStore owns Session admission, the ownership lock, file I/O, change notices and
+draining its admitted work before unloading.
+
+| Caller → owner | API | Transaction owner and boundary |
+| --- | --- | --- |
+| Agents, Session catalog, grants and worktree clients → store → sqliteStorage | Reuse the store request/reply shapes for `createOwnedSession, fork, owner, creationRecord, hasRecords, sessionConfig, sessionConfigText, catalog, addGrant, removeGrant, grants, setSessionLanguage, associateWorktree, worktreeDirectories, worktreeUsages, sessionsUnderWorkspace, removeWorktreeDirectory`. | SQLite creates the Session, main branch, ownership and optional worktree association in one transaction. Fork uses bounded copy transactions on its own connection; only the final transaction inserts the Session row and makes the fork visible. Association commits the directory and Session link together. |
+| Session deletion and worktree removal → store | `store.delete` uses `sqliteStorage.hasRecords, removableOutputDirectories, touchWorktreeDirectories, rollbackSession`. `store.removeWorktree` uses the existing association/workspace checks and directory deletion. | SessionStore holds its ownership lock across the checks, filesystem operation and row cleanup. SQLite owns each database step. File deletion and Git removal run outside SQL transactions. |
+| SessionTitle and Session rename → store → sqliteStorage | `readMetadata(sessionId)`, `setTitle(existing title request)`; existing metadata replies. FileAccess → `store.associateWorktree` with the existing association record. | SQLite checks the title revision and commits the write. SessionStore serializes title writes and publishes the committed notice before admitting the next one. |
+| Timeline clients → timelineStore; SessionStore → sqliteStorage | Bind existing `createSession, rollbackSession, releaseSession, sessionConfig, branches, head, batchEnd, batchEndAt, readPage, readSegments, query, trace, saveSnapshot, latestSnapshot` requests at the native boundary. `commitTimelineRound(batches) → per-Session commit outcomes` accepts ordered batches grouped by Session. | SessionStore admits appends synchronously, groups the existing writer round, and serves commit subscriptions and release/drain. SQLite owns encoding, the grouped transaction, per-Session fallback on failure and writer memo settlement. One accepted round produces the existing ordered batch outcomes after commit. Release or unload drops generation-local reader/writer state after drain. |
+| Session file put/import and read → sessionFiles → sqliteStorage | `reserveFile(sessionId,fileId,generation)`, `commitFile(sessionId,fileId,generation)`, `abandonFile(fileId,generation)`; ownership and path reads via `ownsFile, ownsOutput, ownedPaths`; `registerOutput(sessionId,path)`. | SessionStore reserves, writes or imports bytes through the file owner, then finalizes. SQLite verifies the Session and writer generation, clears the reservation and inserts ownership atomically. Bytes, path validation and fileId transfer stay with the file owner. |
+| Session file sweep → sqliteStorage | `releaseStaleFileWriters(generation), unownedFiles(), deleteIfUnowned(fileId), recordedFiles(names)`. | SessionStore removes files outside SQLite. SQLite rechecks ownership when deleting the row. Failed cleanup remains retryable. |
+| StorageMethods → sqliteStorage; native Transport → SQLite readiness | `storage.report` calls `sqliteStorage.storageReport({})`. Transport gates endpoint binding on the storage face. | SQLite owns the report and holds the database lock before readiness. Transport performs no storage read. |
 
 ### Settings → sqliteStorage
 

@@ -96,7 +96,7 @@ Rust 产品装配的现状以 [生成的 catalog](../architecture/rust-agent/gen
 | `sessionLanguage` | `sessionLanguage.get()` | 形状见 §4.8。 |
 | `skillsConfig` | `skillsConfig.get()` | 形状见 §4.8。 |
 | `collaborationConfig` | `collaborationConfig.get()` | 形状见 §4.8。 |
-| `worktreeAssociations` | `worktreeAssociations.associate` | 形状见 §4.8。 |
+| `worktreeAssociations` | `store.associateWorktree` | 形状见 §4.8。 |
 | `toolSourcesView` | `toolSourcesView.get/observe` | 同一 ToolRegistry owner 的独立只读观察面；贡献注册仍由 `toolRegistry` 负责，见 [工具贡献 §7.5](../architecture/rust-agent/tool-contributions.md#75-服务接口)。 |
 
 宿主读取端口的数据面（§4.10）包括 `executionSettingsHost`、`toolchainSourceHost`、`promptSuggestionSettingsHost`、`selectableModelsHost` 和 `modelSelectionHost`。名字不变，不新增 catalog 行。
@@ -111,7 +111,7 @@ Rust 产品装配的现状以 [生成的 catalog](../architecture/rust-agent/gen
 | `settingsService` | `settings` | GoalBranch 的取消契约见 §4.1。 |
 | `modelHost` | `auxiliaryModel` | PromptSuggestion 的请求与流式语义见 §4.2。 |
 | `loader` | `rutis/loader` | 插件管理走数据面 |
-| `sessionStore` | `sessionMetadata`、`sessionFiles` | 行与文件分开 |
+| `sessionStore` | `store`、`sessionFiles`、`timelineStore` | 标题与 worktree 关联直接调 store |
 | `timelineTree`、`timelineTreeControl` | `treeCommands` | 建/读分支走 `treeCommands` |
 
 ### 3.4 对象/句柄：拆成操作加 id
@@ -310,7 +310,7 @@ skillsConfig.get() -> {instructions?}
   -- Skills 的 factory 文本；null 表示内置
 collaborationConfig.get() -> {leaderDescription?, memberDescription?}
   -- Collaboration 的 factory 文本；null 表示内置
-worktreeAssociations.associate {sessionId, repository, root, subtree} -> {}
+store.associateWorktree {sessionId, repository, root, subtree} -> {}
   -> error {code: failed, message}
   -- 路径按 §1 是 UTF-8 字符串；一次写入仍由 SessionStore 的原子事务保证
 ```
