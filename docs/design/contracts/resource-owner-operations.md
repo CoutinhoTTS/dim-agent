@@ -23,7 +23,7 @@ names. The additional scope methods return the existing FileResult envelope:
 | --- | --- |
 | directory(name) | The absolute directory path on the file owner's node. Create missing parents with the existing private permissions; reject a link or non-directory component. Native callers retain the lossless OS path. A path that cannot be encoded on the wire fails with invalid_path. |
 | openRead(name) | {readId,size}, or null if absent. Pin the scoped file and bind retention to this caller and scope. Use existing fsHost.readAt({readId,offset,limit}) and fsHost.closeRead({readId}) on the same node. Closing the scope releases its remaining IDs. |
-| writeStream(name,next,cancelled) | null after atomic replacement. Each pull requests up to 64 KiB; next returns bytes or end. The lease covers the whole write. Failure, interruption or scope close discards the temporary file. |
+| writeStream(name,next,cancelled) | null after atomic replacement. next returns bytes or end; the destination consumes each chunk before requesting the next. The lease covers the whole write. Failure, interruption or scope close discards the temporary file. |
 
 Modality and its native adapter execute on the same node as the task files. The following
 are paths in that node's filesystem. A path is never interpreted relative to a caller's cwd. Non-local clients use the existing task result pages to retrieve artifacts.
@@ -102,39 +102,3 @@ backend inside the persistence owner. The source registry keeps registration col
 checks and unload cleanup for both source kinds. Native-only sources stay absent from
 settings.sources and unavailable through generic settings.read/update. Management RPCs
 and their native consumers call the same owner operation directly.
-
-## Helper output across frames
-
-Ordinary execHost.output/tail retain their [text cursor contract](../resource-faces.md#34-output).
-confined/configured return independent, bounded **raw bytes** for stdout and stderr,
-including invalid UTF-8. Sizes and limits apply separately to captured stdout and stderr. The following is their Dim wire binding. The native result
-remains the existing two byte buffers plus status, flags and diagnostics.
-
-```text
-confined(request, receivePages)   → InlineResult | {kind:"pagesReceived"}
-configured(request, receivePages) → InlineResult | {kind:"pagesReceived"}
-InlineResult = existing result with stdout and stderr as base64 strings
-receivePages(metadata, {stdoutSize:u64, stderrSize:u64}, readAt) → void
-readAt({stream:"stdout"|"stderr", offset:u64, limit:u32}) → {bytes:base64}
-```
-
-- Return InlineResult directly when the combined captured length is at most 64 KiB.
-  Otherwise invoke receivePages once after settlement with the existing status and flags
-  and one reader over both immutable buffers. Return pagesReceived only after the receiver
-  acknowledges completion. The SDK assembles the original result and exposes it only when
-  the outer call succeeds. Small replies add zero calls; an execution failure never calls
-  receivePages.
-- Offsets and sizes count decoded bytes. Use the pinned-reader paging semantics:
-  clamp each reply to 64 KiB; zero limit or offset at/past EOF returns empty. Repeated
-  reads at the same offset return identical bytes. Each base64 page is at most 87,384
-  characters. Readers can alternate streams. The raw buffers already captured by the
-  helper stay in memory for this call; no path, temp file or second capture is required.
-- The outer call awaits receivePages. On receipt completion, failure, caller unload, link
-  close or cancellation, invalidate readAt and release both buffers. A retained reader
-  fails closed. Callback/read failure fails the call without rerunning the command.
-  Cancellation before process settlement follows the existing kill-and-join behavior.
-  Execution errors and configured/confined output limits keep the respective owner semantics.
-- For configured stdin above the same inline bound the wire argument is
-  {size,readAt(offset,limit) → {bytes:base64}}. Pull bounded pages from offset zero into
-  the existing stdin writer, observe backpressure and close on completion. A short final page must end at the declared size. Premature EOF, an oversized page or a failed input callback cancels and settles the child. Inline
-  stdin and absent stdin preserve the existing byte and EOF behavior.

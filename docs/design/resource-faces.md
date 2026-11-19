@@ -270,8 +270,6 @@ sandbox: a configuration command runs outside the agent boundary, exactly as it 
 background handoff; a cancelled call or `timeoutMs` kills the tree before the call answers. It is
 not an agent-reachable operation: no tool maps to it.
 
-The [helper wire binding](contracts/resource-owner-operations.md#helper-output-across-frames) carries large binary results in bounded pages and specifies their lifetime. The operation results above are the logical values returned to callers.
-
 ### 3.8 Ownership, disconnect, settlement and cancellation
 
 - The provider owns the process, the PTY, the temporary directory and the output file. The branch
