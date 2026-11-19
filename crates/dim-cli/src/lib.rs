@@ -182,7 +182,7 @@ async fn open_tui(
         Ok(code) => Ok(code),
         Err(request) => {
             let code = update_after_tui(options, locale, request).await;
-            ui::composer::history::flush();
+            flush_history_for_update();
             code
         }
     }
@@ -233,12 +233,21 @@ async fn update_after_tui(
     restart(&launcher, request.fullscreen, request.session_id.as_deref())
 }
 
+/// Lets the input history the interface queued land before the update
+/// replaces or ends this process, waiting a bounded time: another process
+/// may keep the history's lock for good, and that must not hold the update.
+fn flush_history_for_update() {
+    if !ui::composer::history::flush_within(std::time::Duration::from_secs(5)) {
+        eprintln!("Input history is still waiting for its lock; the last entry may not be saved.");
+    }
+}
+
 /// Replaces this process with the updated `launcher`, in the interface mode
 /// it left and on its Session.
 #[cfg(unix)]
 fn restart(launcher: &std::path::Path, fullscreen: bool, session: Option<&str>) -> Result<i32> {
     use std::os::unix::process::CommandExt;
-    ui::composer::history::flush();
+    flush_history_for_update();
     let error = std::process::Command::new(launcher)
         .args(restart_args(
             std::env::args_os().skip(1),
