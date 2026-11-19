@@ -29,10 +29,15 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Version {latest} is available (you have {current})." => {
             "Versi {latest} tersedia (terpasang {current})."
         }
-        "To update, run: {command}" => "Perbarui dengan: {command}",
-        "To update, exit every client and stop the server, then run {command}" => {
-            "Untuk memperbarui, keluar dari semua klien, hentikan server, lalu jalankan {command}"
+        "Update now" => "Perbarui sekarang",
+        "To update, exit DimCode and run: {command}" => {
+            "Untuk memperbarui, keluar dari DimCode lalu jalankan: {command}"
         }
+        "Finish or stop the current work first (a running turn, shell command, or pending prompt)." => {
+            "Selesaikan atau hentikan dulu pekerjaan yang berjalan (giliran, perintah shell, atau pertanyaan tertunda)."
+        }
+        "Checking for updates…" => "Memeriksa pembaruan…",
+        "DimCode {version} is up to date." => "DimCode {version} sudah terbaru.",
         "Skip this version" => "Lewati versi ini",
         "Skipped {version}." => "{version} dilewati.",
         "Close" => "Tutup",

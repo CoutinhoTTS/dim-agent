@@ -142,12 +142,7 @@ impl Installed {
             .collect::<Vec<_>>()
             .join("\n");
         command
-            .args([
-                "--home",
-                self.home.0.to_str().unwrap(),
-                "update",
-                "--confirm-legacy-exited",
-            ])
+            .args(["--home", self.home.0.to_str().unwrap(), "update"])
             .env("DIMCODE_NPM_PACKAGE", "dimcode-alpha")
             .env("UPDATE_ARGS", self.home.0.join("install-args"))
             .env("UPDATE_VERSION", version)
@@ -605,12 +600,7 @@ fn one_packages_staging_survives_the_others_update() {
     fs::set_permissions(&updater, fs::Permissions::from_mode(0o700)).unwrap();
     let mut command = Command::new(fs::canonicalize(updater).unwrap());
     command
-        .args([
-            "--home",
-            installed.home.0.to_str().unwrap(),
-            "update",
-            "--confirm-legacy-exited",
-        ])
+        .args(["--home", installed.home.0.to_str().unwrap(), "update"])
         .env("DIMCODE_NPM_PACKAGE", "dimcode")
         .env("UPDATE_ARGS", installed.home.0.join("install-args"))
         .env("UPDATE_VERSION", &version)
@@ -884,20 +874,16 @@ mod recovery {
         let version = next_version();
         let format = dim_app_server::storage::STORE_FORMAT;
         let future = format + 1;
-        for (baseline, declared, retry, second_failure) in [
-            (true, Some(future), false, false),
-            (true, Some(format), false, false),
-            (true, None, false, false),
-            (false, Some(future), false, false),
-            (true, Some(future), true, false),
-            (true, Some(future), false, true),
+        for (declared, retry, second_failure) in [
+            (Some(future), false, false),
+            (Some(format), false, false),
+            (None, false, false),
+            (Some(future), true, false),
+            (Some(future), false, true),
         ] {
             let installed = Installed::new(CURRENT, &["dima"]);
             installed.mock_npm();
             installed.release();
-            if baseline {
-                fs::write(installed.prefix.join(".dimcode-consumers"), "").unwrap();
-            }
             let home = Home::new();
             let database = home.0.join("rust/dimcode.sqlite");
             rusqlite::Connection::open(&database)
@@ -996,7 +982,7 @@ mod recovery {
             assert!(!output.contains("store-newer"), "{output}");
             assert_eq!(fs::read(&database).unwrap(), original);
             assert!(!installed.staging().exists());
-            let switched = baseline && declared == Some(future) && !retry;
+            let switched = declared == Some(future) && !retry;
             assert_eq!(status.success(), switched && !second_failure, "{output}");
             if switched {
                 assert_eq!(installed.recorded().last().unwrap(), "dimcode-alpha@alpha");
@@ -1021,11 +1007,6 @@ mod recovery {
                 assert!(!marker.exists());
                 if retry {
                     assert!(!output.contains("Checking dimcode-alpha"), "{output}");
-                } else if !baseline {
-                    assert!(
-                        output.contains("dima update --confirm-legacy-exited"),
-                        "{output}"
-                    );
                 } else if declared.is_some() {
                     assert!(
                         output.contains(&format!(
@@ -1054,7 +1035,6 @@ mod recovery {
         let installed = Installed::new(CURRENT, &["dima"]);
         installed.mock_npm();
         installed.release();
-        fs::write(installed.prefix.join(".dimcode-consumers"), "").unwrap();
         let home = Home::new();
         let database = home.0.join("rust/dimcode.sqlite");
         rusqlite::Connection::open(&database)
@@ -1123,7 +1103,6 @@ mod recovery {
         let installed = Installed::new(CURRENT, &["dima"]);
         installed.mock_npm();
         installed.release();
-        fs::write(installed.prefix.join(".dimcode-consumers"), "").unwrap();
         let home = Home::new();
         fs::write(
             home.0.join("upgrade-skip.json"),
@@ -1217,5 +1196,333 @@ mod recovery {
             !installed.staging().exists(),
             "a refused recovery must clear its staging directory: {output}"
         );
+    }
+}
+
+/// `Update now` in the terminal UI. These pass trivially unless the build is
+/// release-stamped; the CI step runs them.
+mod tui_update {
+    use super::*;
+
+    /// Leaving the interface, the CLI asks this home's daemon to stop only if
+    /// it is idle. An idle daemon stops, the installation updates and the new
+    /// version starts in the same mode on the same Session, without the first
+    /// message or image the interface opened with. A busy daemon or Ctrl+C
+    /// while the daemon is asked installs nothing, and every command the CLI
+    /// prints to finish keeps the selected home. A daemon that cannot decide
+    /// whether it is idle gets the manual command instead of `Update now`.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn update_now_stops_an_idle_daemon_and_restarts_or_refuses_a_busy_or_old_one() {
+        if !option_env!("DIM_RELEASE_BUILD").is_some_and(|mark| !mark.is_empty()) {
+            return;
+        }
+        let platform = match (std::env::consts::OS, std::env::consts::ARCH) {
+            ("macos", "aarch64") => "darwin-arm64",
+            ("macos", "x86_64") => "darwin-x64",
+            ("linux", "aarch64") => "linux-arm64",
+            ("linux", "x86_64") => "linux-x64",
+            _ => return,
+        };
+        let version = next_version();
+        for case in ["idle", "busy", "old", "cancelled"] {
+            let installed = Installed::new(CURRENT, &["dima"]);
+            installed.mock_npm();
+            installed.release();
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let registry = format!("http://{}", listener.local_addr().unwrap());
+            let reply = json!({ "alpha": version }).to_string();
+            thread::spawn(move || {
+                for stream in listener.incoming() {
+                    let mut stream = stream.unwrap();
+                    let mut request = String::new();
+                    BufReader::new(&stream).read_line(&mut request).unwrap();
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+                        reply.len()
+                    );
+                }
+            });
+            let home = Home::new();
+            let socket = home.0.join("rust/daemon.sock");
+            let listener = UnixListener::bind(&socket).unwrap();
+            fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).unwrap();
+            let (asked, shutdown_asked) = std::sync::mpsc::channel();
+            let daemon = thread::spawn(move || {
+                let (stream, _) = listener.accept().unwrap();
+                stream.set_read_timeout(Some(HANG_GUARD)).unwrap();
+                let mut wire = Wire::new(stream);
+                let shutdown = ["daemon.shutdown.completed", "daemon.shutdown.ifIdle"];
+                wire.hello(if case == "old" {
+                    &shutdown[..1]
+                } else {
+                    &shutdown
+                });
+                let attach = wire.read("session.attach");
+                wire.reply(&attach, attach_record(&attach));
+                let history = wire.read("session.history");
+                wire.reply(
+                    &history,
+                    json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+                );
+                wire.no_context();
+                let providers = wire.read("account.providers");
+                wire.reply(&providers, json!([]));
+                while let Some(request) = wire.trailing_request() {
+                    let request: Value = serde_json::from_str(&request).unwrap();
+                    assert_ne!(request["method"], "daemon.shutdown", "{request}");
+                    wire.reply(&request, json!({}));
+                }
+                if case == "old" {
+                    return;
+                }
+                let (stream, _) = listener.accept().unwrap();
+                stream.set_read_timeout(Some(HANG_GUARD)).unwrap();
+                let mut wire = Wire::new(stream);
+                wire.hello(&shutdown);
+                while let Some(shutdown) = wire.trailing_request() {
+                    let shutdown: Value = serde_json::from_str(&shutdown).unwrap();
+                    assert_eq!(shutdown["method"], "daemon.shutdown");
+                    assert_eq!(shutdown["params"], json!({"ifIdle": true}));
+                    match case {
+                        "idle" => {
+                            wire.reply(&shutdown, json!({}));
+                            return;
+                        }
+                        "cancelled" => {
+                            asked.send(()).unwrap();
+                            continue;
+                        }
+                        _ => {}
+                    }
+                    wire.send(json!({"jsonrpc":"2.0","id":shutdown["id"],"error":{
+                        "code":-32000,"message":"The App Server is in use",
+                        "data":{"appError":"daemon_busy","connections":1,"attachedSessions":1,"running":0}}}));
+                }
+            });
+            let launcher = format!(
+                r#"#!/bin/sh
+if [ "$1" = "--version" ]; then printf 'dimcode {version}\n'; exit 0; fi
+printf '%s\n' "$@" > "$UPDATE_RESTART"
+printf 'Updated launcher started\n'
+"#
+            );
+            let marker = home.0.join("restart");
+            let shot = home.0.join("shot.png");
+            fs::write(&shot, noise_png(4, 4)).unwrap();
+            let mut command = Command::new(&installed.updater);
+            command
+                .args([
+                    "--home",
+                    home.0.to_str().unwrap(),
+                    "tui",
+                    "--resume",
+                    "session",
+                ])
+                .env_remove("DIMCODE_DISABLE_AUTOUPDATE")
+                .env_remove("DIMCODE_AUTOUPDATE")
+                .env_remove("DIMCODE_UPDATE_CHECK")
+                .env("DIMCODE_NPM_PACKAGE", "dimcode-alpha")
+                .env("DIMCODE_NPM_REGISTRY", &registry)
+                .env("NO_PROXY", "127.0.0.1")
+                .env("UPDATE_RESTART", &marker)
+                .env("UPDATE_PLATFORM_PACKAGE", format!("dimcode-{platform}"))
+                .env("UPDATE_VERSION", &version)
+                .env("UPDATE_ARGS", installed.home.0.join("install-args"))
+                .env("UPDATE_GATE", installed.home.0.join("gate"))
+                .env("UPDATE_WAITING", installed.home.0.join("waiting"))
+                .env(
+                    "UPDATE_PACKAGE_JSON",
+                    package_json(&version, &[("dima", "bin/dimcode.mjs")]),
+                )
+                .env("UPDATE_BINS", "dima=bin/dimcode.mjs")
+                .env("UPDATE_COMMAND", &launcher);
+            if case == "idle" {
+                command.args(["-p", "first message", "--image", shot.to_str().unwrap()]);
+            }
+            sized(&mut command, 100, 30);
+            let mut terminal = Terminal::launch_tui(command);
+            if case == "old" {
+                terminal.until_plain("To update, exit DimCode and run: dima update");
+                assert!(!strip_ansi(&terminal.transcript).contains("Update now"));
+                terminal.write(b"\t\r");
+                terminal.write(b"/exit\r");
+                assert!(terminal.wait().success(), "{}", terminal.transcript);
+                daemon.join().unwrap();
+                assert!(!installed.home.0.join("install-args").exists());
+                continue;
+            }
+            terminal.until_plain("Update now");
+            terminal.write(b"\r");
+            if case == "cancelled" {
+                shutdown_asked.recv_timeout(HANG_GUARD).unwrap();
+                terminal.signal(libc::SIGINT);
+            }
+            let status = terminal.wait();
+            daemon.join().unwrap();
+            let output = strip_ansi(&terminal.transcript);
+            let selected = format!("dima --home {}", home.0.display());
+            if case != "idle" {
+                assert!(!status.success(), "{output}");
+                let blocker = if case == "busy" {
+                    "Other DimCode windows or tasks are using the server"
+                } else {
+                    "Update cancelled."
+                };
+                assert!(output.contains(blocker), "{output}");
+                assert!(output.contains(&format!("{selected} update")), "{output}");
+                assert!(
+                    output.contains(&format!(
+                        "Resume this session with: {selected} --resume session"
+                    )),
+                    "{output}"
+                );
+                assert!(!installed.home.0.join("install-args").exists());
+                assert!(!marker.exists());
+                assert_eq!(installed.installed(), CURRENT);
+            } else {
+                assert!(status.success(), "{output}");
+                assert!(output.contains("Updated launcher started"), "{output}");
+                assert_eq!(installed.installed(), version);
+                assert_eq!(
+                    fs::read_to_string(&marker).unwrap(),
+                    format!(
+                        "--home\n{}\ntui\n--scrollback\n--resume\nsession\n",
+                        home.0.display()
+                    )
+                );
+            }
+        }
+    }
+
+    /// With the real App Server, the interface's own leave ends its UI leaf
+    /// while the input history is still being written. A history lock held
+    /// by another process keeps that write waiting well past the exit budget:
+    /// `Update now` still installs and starts the new version once, after the
+    /// write lands, or, when the lock is never released, after a bounded wait
+    /// that says the entry may not be saved.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn update_now_survives_a_history_write_that_waits_for_its_lock() {
+        if !option_env!("DIM_RELEASE_BUILD").is_some_and(|mark| !mark.is_empty()) {
+            return;
+        }
+        let platform = match (std::env::consts::OS, std::env::consts::ARCH) {
+            ("macos", "aarch64") => "darwin-arm64",
+            ("macos", "x86_64") => "darwin-x64",
+            ("linux", "aarch64") => "linux-arm64",
+            ("linux", "x86_64") => "linux-x64",
+            _ => return,
+        };
+        for released in [true, false] {
+            let version = next_version();
+            let installed = Installed::new(CURRENT, &["dima"]);
+            installed.mock_npm();
+            installed.release();
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let registry = format!("http://{}", listener.local_addr().unwrap());
+            let reply = json!({ "alpha": version }).to_string();
+            thread::spawn(move || {
+                for stream in listener.incoming() {
+                    let mut stream = stream.unwrap();
+                    let mut request = String::new();
+                    BufReader::new(&stream).read_line(&mut request).unwrap();
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+                        reply.len()
+                    );
+                }
+            });
+            let home = Home::new();
+            let config = home.0.join("model.json");
+            fs::write(
+                &config,
+                include_str!("../../../dim-agent-aimux/examples/offline.json"),
+            )
+            .unwrap();
+            let history_lock = fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(home.0.join("input-history.json.lock"))
+                .unwrap();
+            history_lock.lock().unwrap();
+            let launcher = format!(
+                r#"#!/bin/sh
+    if [ "$1" = "--version" ]; then printf 'dimcode {version}\n'; exit 0; fi
+    printf '%s\n' "$@" >> "$UPDATE_RESTART"
+    printf 'Updated launcher started\n'
+    "#
+            );
+            let marker = home.0.join("restart");
+            let mut command = Command::new(&installed.updater);
+            command
+                .args(["--home", home.0.to_str().unwrap(), "--model-config"])
+                .arg(&config)
+                .arg("tui")
+                .env_remove("DIMCODE_DISABLE_AUTOUPDATE")
+                .env_remove("DIMCODE_AUTOUPDATE")
+                .env_remove("DIMCODE_UPDATE_CHECK")
+                .env("DIMCODE_NPM_PACKAGE", "dimcode-alpha")
+                .env("DIMCODE_NPM_REGISTRY", &registry)
+                .env("NO_PROXY", "127.0.0.1")
+                .env("UPDATE_RESTART", &marker)
+                .env("UPDATE_PLATFORM_PACKAGE", format!("dimcode-{platform}"))
+                .env("UPDATE_VERSION", &version)
+                .env("UPDATE_ARGS", installed.home.0.join("install-args"))
+                .env("UPDATE_GATE", installed.home.0.join("gate"))
+                .env("UPDATE_WAITING", installed.home.0.join("waiting"))
+                .env(
+                    "UPDATE_PACKAGE_JSON",
+                    package_json(&version, &[("dima", "bin/dimcode.mjs")]),
+                )
+                .env("UPDATE_BINS", "dima=bin/dimcode.mjs")
+                .env("UPDATE_COMMAND", &launcher);
+            sized(&mut command, 100, 30);
+            let mut terminal = Terminal::launch_tui(command);
+            terminal.until_plain("Update now");
+            terminal.write(b"\t\t\r");
+            terminal.until_plain("Ask anything");
+            terminal.write(b"hello");
+            terminal.until_plain("hello");
+            terminal.write(b"\r");
+            terminal.until_plain("Retrying");
+            terminal.write(b"\x1b");
+            terminal.until_plain("stopped");
+            terminal.write(b"/update\r");
+            terminal.until_plain("Update now");
+            terminal.write(b"\r");
+            terminal.until_plain("Updated dimcode-alpha on the alpha channel.");
+            thread::sleep(Duration::from_secs(2));
+            assert!(
+                !marker.exists(),
+                "the new version must not start before the history write lands"
+            );
+            if released {
+                drop(history_lock);
+            }
+            let status = terminal.wait();
+            let history = fs::read_to_string(home.0.join("input-history.json")).unwrap_or_default();
+            let output = strip_ansi(&terminal.transcript);
+            let unsaved = "Input history is still waiting for its lock";
+            if released {
+                assert!(history.contains("\"hello\""), "{history}");
+                assert!(!output.contains(unsaved), "{output}");
+            } else {
+                assert!(!history.contains("\"hello\""), "{history}");
+                assert!(output.contains(unsaved), "{output}");
+            }
+            assert!(status.success(), "{output}");
+            assert_eq!(
+                output.matches("Updated launcher started").count(),
+                1,
+                "{output}"
+            );
+            assert_eq!(installed.installed(), version);
+            let restarted = fs::read_to_string(&marker).unwrap();
+            assert!(restarted.contains("--resume\n"), "{restarted}");
+        }
     }
 }

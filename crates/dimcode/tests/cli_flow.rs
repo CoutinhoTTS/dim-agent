@@ -801,16 +801,6 @@ echo 'Installed package'
             .output()
             .unwrap()
     };
-    let output = refuse(&[]);
-    assert!(!output.status.success(), "{output:?}");
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("--confirm-legacy-exited"),
-        "{output:?}"
-    );
-    assert!(
-        !recorded.exists(),
-        "an unconfirmed legacy installation must not start npm"
-    );
     let lease = fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -819,16 +809,15 @@ echo 'Installed package'
         .open(prefix.join(".dimcode-update.lock"))
         .unwrap();
     lease.try_lock_shared().unwrap();
-    let output = refuse(&["--confirm-legacy-exited"]);
+    let output = refuse(&[]);
     assert!(!output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("in use by a client, server or update"),
+        stderr.contains("DimCode is currently running")
+            && stderr.contains(&format!("`dima --home {} daemon stop`", home.0.display())),
         "{output:?}"
     );
-    assert!(
-        !recorded.exists() && !prefix.join(".dimcode-consumers").exists(),
-        "a live consumer must block the install and the baseline"
-    );
+    assert!(!recorded.exists(), "a live consumer must block the install");
     drop(lease);
     fs::set_permissions(
         prefix.join(".dimcode-update.lock"),
@@ -889,18 +878,17 @@ echo 'Installed package'
         );
         thread::sleep(Duration::from_millis(20));
     }
-    let output = refuse(&["--confirm-legacy-exited"]);
+    let output = refuse(&[]);
     assert!(!output.status.success(), "{output:?}");
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("in use by a client, server or update"),
+        String::from_utf8_lossy(&output.stderr).contains("DimCode is currently running"),
         "a running packaged App Server must block the update: {output:?}"
     );
-    assert!(!recorded.exists() && !prefix.join(".dimcode-consumers").exists());
+    assert!(!recorded.exists());
     daemon.kill().unwrap();
     daemon.wait().unwrap();
-    let output = refuse(&["--confirm-legacy-exited"]);
+    let output = refuse(&[]);
     assert!(output.status.success(), "{output:?}");
-    assert!(prefix.join(".dimcode-consumers").exists());
     fs::remove_file(&recorded).unwrap();
     for (package, fail) in [
         ("dimcode-alpha", false),
@@ -1031,9 +1019,13 @@ echo 'Installed package'
                     .output()
                     .unwrap();
                 assert!(!output.status.success(), "{output:?}");
+                let stderr = String::from_utf8_lossy(&output.stderr);
                 assert!(
-                    String::from_utf8_lossy(&output.stderr)
-                        .contains("in use by a client, server or update"),
+                    stderr.contains("DimCode is currently running")
+                        && stderr.contains(&format!(
+                            "`dimcode --home {} daemon stop`",
+                            other.0.display()
+                        )),
                     "{output:?}"
                 );
                 assert!(

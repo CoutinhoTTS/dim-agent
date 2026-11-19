@@ -715,6 +715,47 @@ async fn shutdown_if_idle(client: &mut Client) -> Result<IdleShutdown> {
     .map_err(|_| "Daemon shutdown timed out; it is still settling and was not force-killed")?
 }
 
+/// Stops this home's daemon for an update, only while it is idle: no client,
+/// attached Session, running turn or accepted work. A client that has just
+/// disconnected may still be counted for a moment, so a refusal is asked
+/// again for a short while. `Err` names what keeps the daemon and the next
+/// step; nothing is stopped then.
+pub async fn stop_idle_for_update(options: &Options, locale: crate::locale::Locale) -> Result<()> {
+    let command = invocation(options);
+    let mut options = options.clone();
+    options.action = crate::args::Action::DaemonStop;
+    let Some(Link { mut client, .. }) = connect_inner(&options, false, locale).await? else {
+        return Ok(());
+    };
+    if !client.offers("daemon.shutdown.ifIdle") {
+        return Err(format!(
+            "The running server is too old to stop safely.\nClose all DimCode windows, run `{command} daemon stop`, then run: {command} update"
+        )
+        .into());
+    }
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        match shutdown_if_idle(&mut client).await? {
+            IdleShutdown::Stopped => return Ok(()),
+            IdleShutdown::Busy(_) if tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            IdleShutdown::Busy(counts) => {
+                let detail = counts.map_or_else(String::new, |counts| {
+                    format!(
+                        " (clients: {}, attached sessions: {}, running turns: {})",
+                        counts.connections, counts.attached_sessions, counts.running
+                    )
+                });
+                return Err(format!(
+                    "Other DimCode windows or tasks are using the server{detail}.\nClose them or let them finish, then run: {command} update"
+                )
+                .into());
+            }
+        }
+    }
+}
+
 /// Whether an older daemon's `session.summaries` reports a client attached to
 /// a Session or a running turn. The call is advertised together with
 /// `daemon.shutdown.completed`; a failed call or an unexpected answer counts
@@ -833,6 +874,21 @@ async fn adopt(
     }))
 }
 
+/// The command word that runs this CLI on the selected home, for a POSIX
+/// shell: `--home` follows the entry point only when the invocation named
+/// one, since `DIMCODE_HOME` reaches a command run from the same shell.
+pub fn invocation(options: &Options) -> String {
+    let program = shell_word(&crate::update::entry_command());
+    if options.home_explicit {
+        format!(
+            "{program} --home {}",
+            shell_word(&options.home.display().to_string())
+        )
+    } else {
+        program
+    }
+}
+
 /// The command that stops the selected home's daemon in a POSIX shell.
 fn daemon_stop_command(executable: &Path, home: &Path) -> String {
     let program = shell_word(&crate::update::entry(executable));
@@ -841,7 +897,7 @@ fn daemon_stop_command(executable: &Path, home: &Path) -> String {
 }
 
 /// `word` as a POSIX shell takes it whole.
-fn shell_word(word: &str) -> String {
+pub(crate) fn shell_word(word: &str) -> String {
     if !word.is_empty()
         && word
             .bytes()
