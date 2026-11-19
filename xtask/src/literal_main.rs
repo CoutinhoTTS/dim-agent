@@ -13,12 +13,14 @@
 //! These hold for every input, and each is checked by a test below.
 //!
 //! - **Rust sources are parsed, not lexed by hand.** A use is a string literal
-//!   token whose value is `main`, outside every item that a test-only `cfg`
-//!   gates.
+//!   token whose value is `main`, outside every item, statement, match arm,
+//!   struct-literal field, field, variant or foreign item that a test-only
+//!   `cfg` gates.
 //! - **In a Vue component, only code is read:** the contents of `<script>`
-//!   blocks, and the template's expressions — directive and bound attribute
-//!   values, and `{{ … }}` interpolations. Template text, plain attributes and
-//!   HTML comments are not code.
+//!   blocks outside HTML comments, and the template's expressions — directive
+//!   and bound attribute values, and `{{ … }}` interpolations. Template text,
+//!   plain attributes and HTML comments are not code, and a commented-out
+//!   block or tag is not a block or a tag.
 //! - **In a TypeScript file, only code is read:** string literals outside
 //!   comments.
 //! - **The scan always terminates and never panics.** Every offset it slices at
@@ -342,6 +344,46 @@ impl<'ast> Visit<'ast> for RustLiterals {
         });
     }
 
+    fn visit_arm(&mut self, node: &'ast syn::Arm) {
+        gated(self, &node.attrs, |this, gated| {
+            if !gated {
+                syn::visit::visit_arm(this, node);
+            }
+        });
+    }
+
+    fn visit_field_value(&mut self, node: &'ast syn::FieldValue) {
+        gated(self, &node.attrs, |this, gated| {
+            if !gated {
+                syn::visit::visit_field_value(this, node);
+            }
+        });
+    }
+
+    fn visit_field(&mut self, node: &'ast syn::Field) {
+        gated(self, &node.attrs, |this, gated| {
+            if !gated {
+                syn::visit::visit_field(this, node);
+            }
+        });
+    }
+
+    fn visit_variant(&mut self, node: &'ast syn::Variant) {
+        gated(self, &node.attrs, |this, gated| {
+            if !gated {
+                syn::visit::visit_variant(this, node);
+            }
+        });
+    }
+
+    fn visit_foreign_item(&mut self, node: &'ast syn::ForeignItem) {
+        gated(self, foreign_item_attributes(node), |this, gated| {
+            if !gated {
+                syn::visit::visit_foreign_item(this, node);
+            }
+        });
+    }
+
     fn visit_attribute(&mut self, _: &'ast syn::Attribute) {
         // A doc comment is an attribute holding text, and a doc line that
         // writes `"main"` in an example is documentation, not a use.
@@ -405,11 +447,71 @@ fn trait_item_attributes(item: &syn::TraitItem) -> &[syn::Attribute] {
     }
 }
 
-/// The attributes a statement may carry.
+/// The attributes a foreign item may carry.
+fn foreign_item_attributes(item: &syn::ForeignItem) -> &[syn::Attribute] {
+    match item {
+        syn::ForeignItem::Fn(item) => &item.attrs,
+        syn::ForeignItem::Static(item) => &item.attrs,
+        syn::ForeignItem::Type(item) => &item.attrs,
+        syn::ForeignItem::Macro(item) => &item.attrs,
+        _ => &[],
+    }
+}
+
+/// The attributes a statement may carry: an item's, a local's, a macro
+/// statement's, or the expression's own.
 fn stmt_attributes(statement: &syn::Stmt) -> &[syn::Attribute] {
     match statement {
         syn::Stmt::Item(item) => item_attributes(item),
-        syn::Stmt::Local(local) => &local.attrs,
+        syn::Stmt::Local(item) => &item.attrs,
+        syn::Stmt::Macro(item) => &item.attrs,
+        syn::Stmt::Expr(item, _) => expr_attributes(item),
+    }
+}
+
+/// The outer attributes an expression may carry, whichever expression it is.
+fn expr_attributes(expression: &syn::Expr) -> &[syn::Attribute] {
+    match expression {
+        syn::Expr::Array(item) => &item.attrs,
+        syn::Expr::Assign(item) => &item.attrs,
+        syn::Expr::Async(item) => &item.attrs,
+        syn::Expr::Await(item) => &item.attrs,
+        syn::Expr::Binary(item) => &item.attrs,
+        syn::Expr::Block(item) => &item.attrs,
+        syn::Expr::Break(item) => &item.attrs,
+        syn::Expr::Call(item) => &item.attrs,
+        syn::Expr::Cast(item) => &item.attrs,
+        syn::Expr::Closure(item) => &item.attrs,
+        syn::Expr::Const(item) => &item.attrs,
+        syn::Expr::Continue(item) => &item.attrs,
+        syn::Expr::Field(item) => &item.attrs,
+        syn::Expr::ForLoop(item) => &item.attrs,
+        syn::Expr::Group(item) => &item.attrs,
+        syn::Expr::If(item) => &item.attrs,
+        syn::Expr::Index(item) => &item.attrs,
+        syn::Expr::Infer(item) => &item.attrs,
+        syn::Expr::Let(item) => &item.attrs,
+        syn::Expr::Lit(item) => &item.attrs,
+        syn::Expr::Loop(item) => &item.attrs,
+        syn::Expr::Macro(item) => &item.attrs,
+        syn::Expr::Match(item) => &item.attrs,
+        syn::Expr::MethodCall(item) => &item.attrs,
+        syn::Expr::Paren(item) => &item.attrs,
+        syn::Expr::Path(item) => &item.attrs,
+        syn::Expr::Range(item) => &item.attrs,
+        syn::Expr::RawAddr(item) => &item.attrs,
+        syn::Expr::Reference(item) => &item.attrs,
+        syn::Expr::Repeat(item) => &item.attrs,
+        syn::Expr::Return(item) => &item.attrs,
+        syn::Expr::Struct(item) => &item.attrs,
+        syn::Expr::Try(item) => &item.attrs,
+        syn::Expr::TryBlock(item) => &item.attrs,
+        syn::Expr::Tuple(item) => &item.attrs,
+        syn::Expr::Unary(item) => &item.attrs,
+        syn::Expr::Unsafe(item) => &item.attrs,
+        syn::Expr::While(item) => &item.attrs,
+        syn::Expr::Yield(item) => &item.attrs,
+        syn::Expr::Verbatim(_) => &[],
         _ => &[],
     }
 }
@@ -507,23 +609,88 @@ fn vue_uses(text: &str) -> Vec<usize> {
     found
 }
 
-/// The byte range of each `<script …>` block in `text`.
-fn script_blocks(text: &str) -> Vec<std::ops::Range<usize>> {
+/// The kind of a top-level block a Vue component may hold.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Block {
+    Script,
+    Template,
+}
+
+/// Each top-level `<script …>` and `<template …>` block in `text`, with its
+/// content's byte range, found in one pass that skips an HTML comment whole
+/// before it looks for a tag: a commented-out block is markup, not code. A
+/// block's own content is not scanned for a tag, so a `<script>` written in
+/// markup is not a block either.
+fn blocks(text: &str) -> Vec<(Block, std::ops::Range<usize>)> {
     let mut blocks = Vec::new();
     let mut at = 0;
-    while let Some(found) = text[at..].find("<script") {
-        let open = at + found;
-        let Some(close) = text[open..].find('>') else {
+    while let Some(character) = text[at..].chars().next() {
+        let rest = &text[at..];
+        if rest.starts_with("<!--") {
+            // `<!--` and `-->` are ASCII, so the offset past them is a boundary.
+            at = match rest.find("-->") {
+                Some(end) => at + end + 3,
+                None => text.len(),
+            };
+            continue;
+        }
+        let kind = match tag_at(rest) {
+            Some(kind) => kind,
+            None => {
+                at += character.len_utf8();
+                continue;
+            }
+        };
+        let Some(close) = rest.find('>') else {
             break;
         };
-        let start = open + close + 1;
-        let end = text[start..]
-            .find("</script>")
-            .map_or(text.len(), |end| start + end);
-        blocks.push(start..end);
-        at = end;
+        let start = at + close + 1;
+        let (end, next) = match kind {
+            Block::Script => {
+                let end = text[start..]
+                    .find("</script>")
+                    .map_or(text.len(), |end| start + end);
+                (end, (end + "</script>".len()).min(text.len()))
+            }
+            Block::Template => match text[start..].rfind("</template>") {
+                Some(end) => (
+                    start + end,
+                    (start + end + "</template>".len()).min(text.len()),
+                ),
+                // An unclosed `<template>` is not an element: skip its tag and
+                // keep looking for a block.
+                None => {
+                    at = start;
+                    continue;
+                }
+            },
+        };
+        blocks.push((kind, start..end));
+        at = next;
     }
     blocks
+}
+
+/// The kind of block the tag at the start of `rest` opens, `None` when `rest`
+/// opens neither.
+fn tag_at(rest: &str) -> Option<Block> {
+    for (tag, kind) in [("<script", Block::Script), ("<template", Block::Template)] {
+        if rest.strip_prefix(tag).is_some_and(|after| {
+            after.is_empty()
+                || after.starts_with(|c: char| c.is_ascii_whitespace() || matches!(c, '>' | '/'))
+        }) {
+            return Some(kind);
+        }
+    }
+    None
+}
+
+/// The byte range of each `<script …>` block in `text`.
+fn script_blocks(text: &str) -> Vec<std::ops::Range<usize>> {
+    blocks(text)
+        .into_iter()
+        .filter_map(|(kind, block)| (kind == Block::Script).then_some(block))
+        .collect()
 }
 
 /// The byte ranges of a component's template expressions: the values of its
@@ -539,10 +706,9 @@ fn expression_values(text: &str) -> Vec<std::ops::Range<usize>> {
 /// The range of `text`'s `<template>` element's content, `None` when it has
 /// none.
 fn template_body(text: &str) -> Option<std::ops::Range<usize>> {
-    let open = text.find("<template")?;
-    let start = open + text[open..].find('>')? + 1;
-    let end = text[start..].rfind("</template>")?;
-    Some(start..start + end)
+    blocks(text)
+        .into_iter()
+        .find_map(|(kind, block)| (kind == Block::Template).then_some(block))
 }
 
 /// The byte ranges of `text`'s `{{ … }}` interpolations, skipping HTML
@@ -949,6 +1115,77 @@ mod tests {
     }
 
     #[test]
+    fn a_gated_statement_macro_is_not_code_and_an_ungated_one_is() {
+        let errors = rust_findings(
+            "fn production() {\n    #[cfg(test)]\n    assert_eq!(id(), \"main\");\n}\n",
+        );
+        assert!(errors.is_empty(), "{errors:?}");
+        let errors = rust_findings("fn production() {\n    assert_eq!(id(), \"main\");\n}\n");
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(
+            errors[0].contains("crates/example/src/lib.rs:2: `\"main\"` names neither"),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn a_gated_expression_statement_is_not_code() {
+        let errors =
+            rust_findings("fn production() {\n    #[cfg(test)]\n    { let _ = \"main\"; }\n}\n");
+        assert!(errors.is_empty(), "{errors:?}");
+        let errors = rust_findings("fn production() {\n    { let _ = \"main\"; }\n}\n");
+        assert_eq!(errors.len(), 1, "{errors:?}");
+    }
+
+    #[test]
+    fn a_gated_match_arm_is_not_code_and_an_ungated_one_is() {
+        let gated = "fn production(line: Option<u8>) -> &'static str {\n    match line {\n        #[cfg(test)]\n        Some(_) => \"main\",\n        None => \"other\",\n    }\n}\n";
+        let errors = rust_findings(gated);
+        assert!(errors.is_empty(), "{errors:?}");
+        let ungated = "fn production(line: Option<u8>) -> &'static str {\n    match line {\n        Some(_) => \"main\",\n        None => \"other\",\n    }\n}\n";
+        let errors = rust_findings(ungated);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(
+            errors[0].contains("crates/example/src/lib.rs:3: `\"main\"` names neither"),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn a_gated_struct_literal_field_is_not_code() {
+        let errors = rust_findings(
+            "struct S { name: &'static str }\n\nfn production() -> S {\n    S {\n        #[cfg(test)]\n        name: \"main\",\n    }\n}\n",
+        );
+        assert!(errors.is_empty(), "{errors:?}");
+    }
+
+    #[test]
+    fn a_gated_field_variant_and_foreign_item_are_not_code() {
+        let gated = "struct S {\n    #[cfg(test)]\n    name: [u8; \"main\".len()],\n}\n\nenum E {\n    #[cfg(test)]\n    A([u8; \"main\".len()]),\n}\n\nextern \"C\" {\n    #[cfg(test)]\n    fn ext(name: [u8; \"main\".len()]);\n}\n";
+        let errors = rust_findings(gated);
+        assert!(errors.is_empty(), "{errors:?}");
+        let ungated = "struct S {\n    name: [u8; \"main\".len()],\n}\n";
+        let errors = rust_findings(ungated);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+    }
+
+    #[test]
+    fn a_commented_out_script_is_markup_and_the_real_script_is_code() {
+        let errors = vue_findings(
+            "<!-- <script>const x = \"main\"</script> -->\n<script setup>\nconst id = ROOT_BRANCH_ID\n</script>\n<template><p>hello</p></template>\n",
+        );
+        assert!(errors.is_empty(), "{errors:?}");
+        let errors = vue_findings(
+            "<!-- <script>const x = 1</script> -->\n<script setup>\nconst id = \"main\"\n</script>\n<template><p>hello</p></template>\n",
+        );
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(
+            errors[0].contains("LinesTree.vue:3: `\"main\"` names neither"),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
     fn a_main_in_a_directive_expression_is_refused_with_its_line() {
         for (text, expected) in [
             (
@@ -1023,6 +1260,30 @@ mod tests {
         (
             "crates/example/src/lib.rs",
             "#[cfg(test)]\nmod tests {\n    fn a() { let _ = json!({\"branchId\": \"main\"}); }\n}\n",
+        ),
+        (
+            "crates/example/src/lib.rs",
+            "fn production() {\n    #[cfg(test)]\n    assert_eq!(id(), \"main\");\n}\n",
+        ),
+        (
+            "crates/example/src/lib.rs",
+            "fn production() {\n    #[cfg(test)]\n    { let _ = \"main\"; }\n}\n",
+        ),
+        (
+            "crates/example/src/lib.rs",
+            "fn production(line: Option<u8>) -> &'static str {\n    match line {\n        #[cfg(test)]\n        Some(_) => \"main\",\n        None => \"other\",\n    }\n}\n",
+        ),
+        (
+            "crates/example/src/lib.rs",
+            "struct S { name: &'static str }\nfn production() -> S {\n    S {\n        #[cfg(test)]\n        name: \"main\",\n    }\n}\n",
+        ),
+        (
+            "crates/example/src/lib.rs",
+            "struct S {\n    #[cfg(test)]\n    name: [u8; \"main\".len()],\n}\n\nenum E {\n    #[cfg(test)]\n    A([u8; \"main\".len()]),\n}\n\nextern \"C\" {\n    #[cfg(test)]\n    fn ext(name: [u8; \"main\".len()]);\n}\n",
+        ),
+        (
+            "web/src/a.vue",
+            "<!-- <script>const x = \"main\"</script> -->\n<script setup>\nconst id = ROOT_BRANCH_ID\n</script>\n<template><p>hello</p></template>\n",
         ),
         ("web/src/a.vue", "<template>{{ 1 < 2 }}</template>"),
         ("web/src/a.vue", "<template>{{ a <b }}</template>"),
