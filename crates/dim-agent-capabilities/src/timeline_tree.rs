@@ -2169,14 +2169,18 @@ impl TimelineTree {
             return Ok(None);
         };
         let [kind, branch, from] = <[_; 3]>::try_from(row.values).expect("default fields");
-        let (QueryValue::Value { value: kind }, QueryValue::Value { value: branch }) =
-            (kind, branch)
-        else {
-            unreachable!("default kind and branch")
+        let QueryValue::Value { value: kind } = kind else {
+            return Err(AgentError::Storage("default fact names no kind".into()));
         };
+        // A fork's default branch is its root, and `session/forked` has no
+        // branch at all: the kind must answer before the branch is read
+        // (design §5, §20.20).
         if kind.as_str() != Some("branch/default") {
             return Ok(None);
         }
+        let QueryValue::Value { value: branch } = branch else {
+            return Err(AgentError::Storage("branch/default names no line".into()));
+        };
         let branch = branch
             .as_str()
             .ok_or_else(|| AgentError::Storage("branch/default names no line".into()))?;

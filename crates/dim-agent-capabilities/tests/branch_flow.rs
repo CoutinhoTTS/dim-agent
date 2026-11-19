@@ -8310,6 +8310,86 @@ async fn a_restore_reads_one_fact_for_a_multi_line_session_and_none_for_a_single
     soon(restored.close()).await.unwrap();
 }
 
+/// #1862: a fork's `session/forked` names no branch, and a fork that opened
+/// a line has more than one line, so restore reads that fact. The kind must
+/// answer before the branch, or every restart of such a fork panics
+/// (design §5, §20.20).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_restore_of_a_fork_that_opened_a_line_keeps_the_root_default() {
+    let store = Arc::new(MemoryTimelineStore::default());
+    store
+        .create_session("forked", &SessionConfig::default())
+        .await
+        .unwrap();
+    let root = || rutis::Ctx::root().unwrap();
+    let key = |branch: &str| TimelineKey {
+        session_id: "forked".into(),
+        branch_id: branch.into(),
+    };
+    let main = Timeline::new(root(), key("main"), vec![], store.clone());
+    main.append(
+        EventKind::BranchStart(BranchStartData {
+            parent: None,
+            create_event: None,
+        })
+        .into(),
+    )
+    .unwrap();
+    let source = BranchSource::User {
+        operation_id: "fork".into(),
+    };
+    let create = main
+        .append(
+            EventKind::BranchCreate(BranchCreateData {
+                at: BranchCreateAt::Create {},
+                source: source.clone(),
+                branch: "A".into(),
+                prompt: "copied line".into(),
+            })
+            .into(),
+        )
+        .unwrap();
+    let a = Timeline::new(
+        root(),
+        key("A"),
+        vec![("main".into(), create.sequence)],
+        store.clone(),
+    );
+    a.append(
+        EventKind::BranchStart(BranchStartData {
+            parent: Some("main".into()),
+            create_event: Some(create.sequence),
+        })
+        .into(),
+    )
+    .unwrap();
+    a.append(
+        EventKind::InputMessage(InputMessageData::text("work on a", Some(InputMode::Queue))).into(),
+    )
+    .unwrap();
+    // A fork appends this after the copied facts; it carries no `branch`.
+    main.append(EventKind::SessionForked(SessionForkedData {}).into())
+        .unwrap();
+    for timeline in [&a, &main] {
+        dim_agent_runtime::core::close_timeline(timeline)
+            .await
+            .unwrap();
+    }
+    let agent = MinimalHost::start(&builder_with_store(
+        &Arc::new(Probe::default()),
+        store.clone(),
+    ))
+    .await
+    .unwrap();
+    let session = soon(agent.restore_session("forked".into())).await.unwrap();
+    assert_eq!(
+        session.default_branch().unwrap(),
+        "main",
+        "a fork's default branch is its root, and its restore panics on no fact"
+    );
+    soon(agent.close()).await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ending_the_root_the_default_branch_or_an_ancestor_is_refused() {
     let probe = Arc::new(Probe::default());
