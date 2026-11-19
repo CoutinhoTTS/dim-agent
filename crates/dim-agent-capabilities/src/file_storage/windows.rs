@@ -427,6 +427,29 @@ fn kind(attributes: u32) -> EntryKind {
         EntryKind::File
     }
 }
+pub(super) fn file_stat(parent: &File, name: &OsStr) -> Result<FileStat> {
+    let entry = match create(
+        Some(parent),
+        name,
+        FILE_READ_ATTRIBUTES,
+        FILE_OPEN,
+        0,
+        null_mut(),
+    ) {
+        Ok(entry) => entry,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(FileStat::Missing),
+        Err(error) => return Err(error.into()),
+    };
+    let id = identity(&entry)?.FileId.Identifier;
+    if reserved(parent)?.contains(&Some(id)) {
+        return Err(FileStorageError::InvalidPath("reserved storage resource"));
+    }
+    let metadata = entry.metadata()?;
+    Ok(FileStat::from_entry(
+        kind(metadata.file_attributes()),
+        metadata.len(),
+    ))
+}
 pub(super) fn entry_kind(parent: &File, name: &OsStr) -> io::Result<Option<EntryKind>> {
     match create(
         Some(parent),

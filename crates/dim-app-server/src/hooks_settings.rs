@@ -8,7 +8,7 @@ use crate::{
     settings::{BusinessDocument, SettingsError, SettingsScope, SettingsService, SettingsSnapshot},
 };
 use dim_agent_capabilities::{
-    file_storage::{FileStorage, FileStorageError},
+    file_storage::{FileStorageError, FsHost},
     hooks::{
         HookGroup, HookSourceId, HookSourceSnapshot, HookSourceState, HookSourcesHost,
         HookSourcesSnapshot, HooksDocument, ReadHookSources, entries,
@@ -126,11 +126,11 @@ fn plugin_sources(documents: HooksPlugins) -> Vec<HookSourceSnapshot> {
 }
 
 /// Reads the effective sources for a working directory. The user document is
-/// a Settings source; the project file is read through FileStorage under the
+/// a Settings source; the project file is read through fsHost under the
 /// root Settings authorized for the workspace.
 struct SettingsHookSources {
     settings: Arc<SettingsService>,
-    files: Arc<FileStorage>,
+    files: Arc<FsHost>,
     home: Option<PathBuf>,
 }
 
@@ -216,20 +216,17 @@ impl SettingsHookSources {
     ) -> Result<HookSourceSnapshot, dim_agent_capabilities::host::HostError> {
         let workspace = self.settings.project_path(root).map_err(host_error)?;
         let workspace_key = workspace.to_string_lossy().into_owned();
-        let path = self
-            .files
-            .path(root, PROJECT_FILE)
-            .map_err(|error| host_error_message(error.to_string()))?;
+        let path = workspace.join(PROJECT_FILE);
         let state = match self
             .files
-            .read_limited(&path, PROJECT_FILE_LIMIT, cancel)
+            .read_bytes(&path, PROJECT_FILE_LIMIT, None, cancel)
             .await
         {
             Ok(bytes) => match serde_json::from_slice::<HooksDocument>(&bytes) {
                 Ok(document) => {
                     return Ok(HookSourceSnapshot {
                         id: HookSourceId::Project,
-                        path: Some(workspace.join(PROJECT_FILE)),
+                        path: Some(path),
                         enabled: projects.enabled.contains(&workspace_key),
                         state: HookSourceState::Ok,
                         document: Some(document),
@@ -253,7 +250,7 @@ impl SettingsHookSources {
         };
         Ok(HookSourceSnapshot {
             id: HookSourceId::Project,
-            path: Some(workspace.join(PROJECT_FILE)),
+            path: Some(path),
             enabled: projects.enabled.contains(&workspace_key),
             state,
             document: None,
@@ -290,7 +287,7 @@ pub fn install(builder: &mut AgentBuilder, product_home: Option<PathBuf>) {
 struct HookSourcesPlugin {
     host: Key<HookSourcesHost>,
     settings: Key<SettingsService>,
-    files: Key<FileStorage>,
+    files: Key<FsHost>,
     home: Option<PathBuf>,
 }
 impl HookSourcesPlugin {
@@ -402,7 +399,7 @@ fn error(error: SettingsError) -> RpcError {
 /// The port over this host's Settings and files.
 fn reader(
     settings: &Arc<SettingsService>,
-    files: &Arc<FileStorage>,
+    files: &Arc<FsHost>,
     home: Option<PathBuf>,
 ) -> Arc<SettingsHookSources> {
     Arc::new(SettingsHookSources {
@@ -659,7 +656,7 @@ impl HooksService {
 /// Process owner of the `hooks` sources and their management methods.
 pub struct HooksSettingsPlugin {
     settings: Key<SettingsService>,
-    files: Key<FileStorage>,
+    files: Key<FsHost>,
     methods: Key<ManagementMethods>,
     product_home: Option<PathBuf>,
 }
@@ -888,7 +885,7 @@ mod tests {
             .await
             .unwrap();
         let settings = root.get::<SettingsService>().unwrap();
-        let files = root.get::<FileStorage>().unwrap();
+        let files = root.get::<FsHost>().unwrap();
         let sources = SettingsHookSources {
             settings: settings.clone(),
             files,

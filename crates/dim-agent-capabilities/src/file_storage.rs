@@ -31,7 +31,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 mod face;
-pub use face::{FsHost, FsRemove, OpenRead};
+pub use face::{FsHost, FsPermissions, FsRemove, OpenRead};
 
 /// Read-only reader lifetime observations for filesystem flow tests.
 #[cfg(feature = "testing")]
@@ -87,7 +87,7 @@ pub enum FileStorageError {
 }
 
 /// A relative path bound to one authorized root and one service generation.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FilePath {
     generation: Uuid,
     root: usize,
@@ -114,6 +114,25 @@ pub enum EntryKind {
     Other,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum FileStat {
+    File { size: u64 },
+    Directory,
+    Other,
+    Missing,
+}
+
+impl FileStat {
+    fn from_entry(kind: EntryKind, size: u64) -> Self {
+        match kind {
+            EntryKind::File => Self::File { size },
+            EntryKind::Directory => Self::Directory,
+            EntryKind::Other => Self::Other,
+        }
+    }
+}
+
 /// Names reserved for this module's lock, temporary and account-marker resources.
 fn reserved_name(name: &OsStr) -> bool {
     name.to_string_lossy().starts_with(RESOURCE_PREFIX) || name == "auth.json.lock"
@@ -122,9 +141,16 @@ fn reserved_name(name: &OsStr) -> bool {
 struct State {
     roots: Vec<File>,
     active: usize,
-    leases: HashMap<Uuid, Weak<Lease>>,
+    leases: HashMap<Uuid, LeaseEntry>,
     readers: HashMap<Uuid, ReaderEntry>,
     cleanup_errors: Vec<io::Error>,
+}
+
+type SharedLease = tokio::sync::Mutex<Option<FileLease>>;
+
+struct LeaseEntry {
+    lease: Weak<Lease>,
+    binding: Option<(Weak<SharedLease>, Disposer)>,
 }
 
 struct ReaderEntry {
@@ -501,7 +527,13 @@ impl FileStorage {
             {
                 let mut state = owner.state.lock().unwrap();
                 owner.check(&cancel)?;
-                state.leases.insert(lease.id, Arc::downgrade(&lease));
+                state.leases.insert(
+                    lease.id,
+                    LeaseEntry {
+                        lease: Arc::downgrade(&lease),
+                        binding: None,
+                    },
+                );
             }
             Ok(FileLease(Some(lease)))
         })
@@ -687,7 +719,7 @@ impl FileStorage {
                         state
                             .leases
                             .drain()
-                            .filter_map(|(_, lease)| lease.upgrade())
+                            .filter_map(|(_, entry)| entry.lease.upgrade())
                             .collect::<Vec<_>>(),
                         state
                             .readers
@@ -769,6 +801,16 @@ impl FileLease {
         permissions: Option<Permissions>,
         cancel: &CancellationToken,
     ) -> Result<()> {
+        self.backup_with(suffix, permissions, false, cancel).await
+    }
+
+    async fn backup_with(
+        &mut self,
+        suffix: &str,
+        permissions: Option<Permissions>,
+        preserve: bool,
+        cancel: &CancellationToken,
+    ) -> Result<()> {
         if suffix.is_empty()
             || !suffix
                 .bytes()
@@ -781,9 +823,17 @@ impl FileLease {
             let bytes = read(&parent, &name, &owner, &cancel, usize::MAX)?;
             let mut backup = name.clone();
             backup.push(format!(".{suffix}"));
+            let permissions = if preserve {
+                native::permissions(&parent, &name)?
+            } else {
+                permissions
+            };
             let mut file =
                 native::create_temp(&parent, &backup, &parent, &name, permissions.as_ref())?;
             file.write_all(&bytes)?;
+            if preserve && let Some(mode) = permissions {
+                file.set_permissions(mode)?;
+            }
             file.sync_all()?;
             native::sync_replacement(&file, &parent, &parent)?;
             Ok(())
@@ -800,6 +850,16 @@ impl FileLease {
         &mut self,
         bytes: Vec<u8>,
         permissions: Option<Permissions>,
+        cancel: &CancellationToken,
+    ) -> Result<()> {
+        self.replace_with(bytes, ReplacementMode::Native(permissions), cancel)
+            .await
+    }
+
+    async fn replace_with(
+        &mut self,
+        bytes: Vec<u8>,
+        permissions: ReplacementMode,
         cancel: &CancellationToken,
     ) -> Result<()> {
         self.run(cancel, move |parent, name, owner, cancel| {
@@ -835,7 +895,7 @@ impl FileLease {
             replace_file(
                 &parent,
                 &name,
-                permissions,
+                ReplacementMode::Native(permissions),
                 &owner,
                 &cancel,
                 |temp, owner, cancel| {
@@ -887,6 +947,12 @@ impl Read for ImportReader {
     }
 }
 
+enum ReplacementMode {
+    Native(Option<Permissions>),
+    #[cfg(not(unix))]
+    ReadOnly,
+}
+
 /// Writes the replacement of `name` in `parent` through `write` and makes it
 /// `name`, with the permissions and durability rules [`FileLease::replace`]
 /// documents. A failure before the rename removes the temporary file and
@@ -894,15 +960,33 @@ impl Read for ImportReader {
 fn replace_file(
     parent: &File,
     name: &OsString,
-    permissions: Option<Permissions>,
+    mode: ReplacementMode,
     owner: &Arc<FileStorage>,
     cancel: &CancellationToken,
     write: impl FnOnce(&mut File, &FileStorage, &CancellationToken) -> Result<()>,
 ) -> Result<()> {
-    let permissions = permissions.or(native::permissions(parent, name)?);
+    #[cfg(not(unix))]
+    let read_only = matches!(mode, ReplacementMode::ReadOnly);
+    let existing = native::permissions(parent, name)?;
+    let permissions = match mode {
+        ReplacementMode::Native(permissions) => permissions.or(existing),
+        #[cfg(not(unix))]
+        ReplacementMode::ReadOnly => existing,
+    };
     let (temporary_directory, mut temp) = create_temporary(parent, name, permissions.as_ref())?;
     let result = (|| {
         write(&mut temp, owner, cancel)?;
+        #[cfg(not(unix))]
+        let permissions = if read_only {
+            let mut attributes = match permissions {
+                Some(attributes) => attributes,
+                None => temp.metadata()?.permissions(),
+            };
+            attributes.set_readonly(true);
+            Some(attributes)
+        } else {
+            permissions
+        };
         if let Some(permissions) = permissions {
             temp.set_permissions(permissions)?;
         }
@@ -926,6 +1010,10 @@ fn replace_file(
     result
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("file exceeds read byte limit")]
+struct ReadLimitExceeded;
+
 fn read(
     parent: &File,
     name: &OsString,
@@ -935,9 +1023,7 @@ fn read(
 ) -> Result<Vec<u8>> {
     let mut file = native::read_user_file(parent, name)?;
     if file.metadata()?.len() > limit as u64 {
-        return Err(
-            io::Error::new(io::ErrorKind::InvalidData, "file exceeds read byte limit").into(),
-        );
+        return Err(io::Error::new(io::ErrorKind::InvalidData, ReadLimitExceeded).into());
     }
     let mut bytes = Vec::new();
     let mut chunk = [0; 64 * 1024];
@@ -948,9 +1034,7 @@ fn read(
             return Ok(bytes);
         }
         if count > limit.saturating_sub(bytes.len()) {
-            return Err(
-                io::Error::new(io::ErrorKind::InvalidData, "file exceeds read byte limit").into(),
-            );
+            return Err(io::Error::new(io::ErrorKind::InvalidData, ReadLimitExceeded).into());
         }
         bytes.extend_from_slice(&chunk[..count]);
     }
@@ -2011,6 +2095,19 @@ mod native {
             _ => EntryKind::Other,
         }
     }
+    pub fn file_stat(parent: &File, name: &OsStr) -> Result<FileStat> {
+        let Some(stat) = stat(parent, name)? else {
+            return Ok(FileStat::Missing);
+        };
+        if reserved(parent)?
+            .into_iter()
+            .flatten()
+            .any(|id| id == identity(&stat))
+        {
+            return Err(FileStorageError::InvalidPath("reserved storage resource"));
+        }
+        Ok(FileStat::from_entry(kind(&stat), stat.st_size as u64))
+    }
     pub fn entry_kind(parent: &File, name: &OsStr) -> io::Result<Option<EntryKind>> {
         Ok(stat(parent, name)?.as_ref().map(kind))
     }
@@ -2464,6 +2561,9 @@ mod unsupported {
     }
     pub fn open_key(_: &File, _: &OsStr) -> io::Result<File> {
         Err(unsupported())
+    }
+    pub fn file_stat(_: &File, _: &OsStr) -> Result<FileStat> {
+        Err(FileStorageError::Unsupported)
     }
     pub fn entry_kind(_: &File, _: &OsStr) -> io::Result<Option<EntryKind>> {
         Err(unsupported())
