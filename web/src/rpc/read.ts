@@ -586,7 +586,7 @@ function branchSource(value: unknown, at: string): BranchSource {
       callId: str(source, "call_id", at),
     }
   }
-  if (kind === "host") return { kind, operationId: str(source, "operation_id", at) }
+  if (kind === "host" || kind === "user") return { kind, operationId: str(source, "operation_id", at) }
   return fail(at, "a branch source")
 }
 
