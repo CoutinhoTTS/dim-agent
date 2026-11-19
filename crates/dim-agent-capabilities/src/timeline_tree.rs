@@ -2054,6 +2054,9 @@ impl TimelineTree {
     /// derived from the end, so a restart cannot deliver it twice: the id is
     /// the same one a reconciling load computes, and `Branch::input` answers
     /// the committed input for an id it already holds (design §10, §20.26b).
+    /// Answers once the input is published: a batch the store accepts and then
+    /// fails is still owed, and an end that recorded itself over it would lose
+    /// the message on restore.
     async fn deliver_final(
         &self,
         parent: &str,
@@ -2070,7 +2073,9 @@ impl TimelineTree {
             mode: Some(InputMode::Steer),
             ..InputMessageData::default()
         };
-        context.branch().input(data).await.map(|_| ())
+        let timeline = context.timeline();
+        let event = context.branch().input(data).await?;
+        Self::published(timeline, event.sequence).await
     }
     fn create_child(
         &self,

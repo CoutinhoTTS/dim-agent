@@ -1248,9 +1248,10 @@ struct TestStore {
     reads: AtomicUsize,
     armed: Mutex<Option<String>>,
     refuse_ranges: bool,
-    /// The branch whose next append answers its publish callback with an
-    /// error, the failure shape a store reports after accepting a batch.
-    fail_append: Mutex<Option<String>>,
+    /// The branch whose next final-message delivery answers its publish
+    /// callback with an error, the failure shape a store reports after
+    /// accepting a batch.
+    fail_delivery: Mutex<Option<String>>,
     /// The branch whose next submission lookup fails at the read, before the
     /// store writes anything: a transitory failure a delivery can retry.
     fail_lookup: Mutex<Option<String>>,
@@ -1279,9 +1280,10 @@ impl TestStore {
     fn disarm(&self) {
         *self.armed.lock().unwrap() = None;
     }
-    /// Fails the next append to `branch` through its publish callback.
-    fn fail_next_append(&self, branch: &str) {
-        *self.fail_append.lock().unwrap() = Some(branch.into());
+    /// Fails the next `branch-final:` delivery to `branch` through its
+    /// publish callback.
+    fn fail_next_delivery(&self, branch: &str) {
+        *self.fail_delivery.lock().unwrap() = Some(branch.into());
     }
     /// Fails the next submission lookup on `branch`, then answers normally.
     fn fail_next_lookup(&self, branch: &str) {
@@ -1442,8 +1444,15 @@ impl TimelineStore for TestStore {
             self.holding.notify_waiters();
             return Ok(());
         }
-        let failed = {
-            let mut armed = self.fail_append.lock().unwrap();
+        let delivery = events.iter().any(|record| match &record.event.kind {
+            EventKind::InputMessage(data) => data
+                .submission_id
+                .as_deref()
+                .is_some_and(|id| id.starts_with("branch-final:")),
+            _ => false,
+        });
+        let failed = delivery && {
+            let mut armed = self.fail_delivery.lock().unwrap();
             let failed = armed.as_deref() == Some(key.branch_id.as_str());
             if failed {
                 *armed = None;
@@ -8497,7 +8506,7 @@ async fn an_end_whose_final_message_fails_is_delivered_by_the_next_restore() {
     let session_id = session.id().to_owned();
     let line = open_line(&session, "deliver me").await;
     let tree = session.session_service::<TreeCommands>().unwrap();
-    store.fail_next_append("main");
+    store.fail_next_delivery("main");
     let failed = tree
         .end_with_final(
             line.clone(),
