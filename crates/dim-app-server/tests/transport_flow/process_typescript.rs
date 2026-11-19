@@ -174,7 +174,7 @@ async fn node_public_plugin_files_process_storage_and_close_drain() {
     );
     let contents = std::fs::read(work.join("input.bin")).unwrap();
     assert_eq!(contents.len(), 17 * 1024 * 1024);
-    for (index, chunk) in contents.chunks_exact(1024 * 1024).enumerate() {
+    for (index, chunk) in contents.chunks(1024 * 1024).enumerate() {
         assert!(chunk.iter().all(|&byte| byte as usize == index + 1));
     }
     assert_eq!(
