@@ -99,7 +99,7 @@ Rust 产品装配的现状以 [生成的 catalog](../architecture/rust-agent/gen
 | `worktreeAssociations` | `worktreeAssociations.associate` | 形状见 §4.8。 |
 | `toolSourcesView` | `toolSourcesView.get/observe` | 同一 ToolRegistry owner 的独立只读观察面；贡献注册仍由 `toolRegistry` 负责，见 [工具贡献 §7.5](../architecture/rust-agent/tool-contributions.md#75-服务接口)。 |
 
-宿主读取端口的数据面（§4.10）包括 `executionSettingsHost`、`toolchainSourceHost`、`promptSuggestionSettingsHost`、`selectableModelsHost` 和 `modelSelectionHost`。名字不变，不新增 catalog 行。
+宿主读取端口的数据面（§4.10）包括 `executionSettingsHost`、`toolchainSourceHost`、`promptSuggestionSettingsHost`、`selectableModelsHost` 和 `modelSelectionHost`。模型选择与列表的目标绑定见[进程操作](contracts/process-owner-operations.md)；其余读取端口沿用现名。
 
 ### 3.3 所有者 API，已有数据兄弟
 
@@ -109,7 +109,7 @@ Rust 产品装配的现状以 [生成的 catalog](../architecture/rust-agent/gen
 | --- | --- | --- |
 | `agentIndex` | `sessions` | 目录查询走 `sessions` |
 | `settingsService` | `settings` | GoalBranch 的取消契约见 §4.1。 |
-| `modelHost` | `auxiliaryModel` | PromptSuggestion 的请求与流式语义见 §4.2。 |
+| `modelHost` | `modelHost.invoke` | 完整模型请求直接调用所选配置的执行入口；辅助请求使用 `providerService.complete`。 |
 | `loader` | `rutis/loader` | 插件管理走数据面 |
 | `sessionStore` | `sessionMetadata`、`sessionFiles` | 行与文件分开 |
 | `timelineTree`、`timelineTreeControl` | `treeCommands` | 建/读分支走 `treeCommands` |
