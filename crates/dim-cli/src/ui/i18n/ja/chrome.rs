@@ -320,7 +320,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Press Ctrl+C to stop the Web workspace." => "Ctrl+C で Web ワークスペースを停止。",
         "To resume this session:" => "セッションの再開：",
 
-        // composer/commands.rs: descriptions
+        // commands.rs: descriptions
         "start a new session" => "新規セッションを開始",
         "show or set the reasoning effort" => "推論強度を表示・設定",
         "show or set the priority service tier (on|off)" => {
@@ -352,9 +352,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "exit" => "終了",
 
         // composer/palette.rs
-        "Enter select + default · ←/→ effort · Ctrl+B/F cursor · Ctrl+X clear saved · Esc clear/close" => {
-            "Enter 選択して既定に設定 · ←/→ 推論強度 · Ctrl+B/F カーソル · Ctrl+X 保存消去 · Esc 消去/閉じる"
-        }
         "Default for new sessions in {folder}: {model}" => {
             "新規セッションの {folder} での既定モデル：{model}"
         }
@@ -437,6 +434,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         // models_panel.rs
         "Select a model" => "モデルを選択",
         "Loading models..." => "モデルを読込中…",
+        "Previous page" => "前のページ",
+        "Next page" => "次のページ",
         "No models available. Connect a provider first." => {
             "利用可能なモデルなし。先にプロバイダーに接続"
         }
@@ -501,6 +500,33 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "名前付きエージェント含む新規メンバーに適用。"
         }
         "Existing members keep their models." => "既存メンバーはモデルを維持。",
+        "Conversation model" => "会話モデル",
+        "Selected: {model}" => "選択中：{model}",
+        "Model management" => "モデル管理",
+        "Manage models" => "モデルを管理",
+        "1 provider" => "1 Provider",
+        "{count} providers" => "{count} Providers",
+        "ready" => "準備完了",
+        "no models" => "モデルなし",
+        "catalog unreadable" => "catalog を読めません",
+        "{count} with missing limits" => "{count} 件が上限未宣言",
+        "{count} unavailable" => "{count} 件が利用不可",
+        "{count} disabled" => "{count} 件が無効",
+        "{count} without models" => "{count} 件がモデルなし",
+        "{count} unreadable" => "{count} 件が読み取り不可",
+        "{unavailable} unavailable, {disabled} disabled" => {
+            "{unavailable} 件利用不可、{disabled} 件無効"
+        }
+        "Enter select + default · ←/→ effort · Tab section · Esc clear/close" => {
+            "Enter 選択して既定に設定 · ←/→ 推論強度 · Tab セクション · Esc 消去/閉じる"
+        }
+        "Enter change · Tab section · Esc clear/close" => {
+            "Enter 変更 · Tab セクション · Esc 消去/閉じる"
+        }
+        "Enter manage · Tab section · Esc clear/close" => {
+            "Enter 管理 · Tab セクション · Esc 消去/閉じる"
+        }
+        "Enter manage · Esc back" => "Enter 管理 · Esc 戻る",
         "unknown" => "不明",
         "Subagent model policy saved" => "サブエージェントモデル方針を保存",
         "Subagent model policy changed elsewhere; choose again to reread it" => {
@@ -618,6 +644,12 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "The App Server is still {server} because other clients are using it (connections: {connections}, attached Sessions: {attached}, running turns: {running}); this {client} client uses it too. Run `dimcode daemon stop` when they are done, and the next start runs {client}." => {
             "App Server はまだ {server} です。他のクライアントが使用中です（接続: {connections}、アタッチ中のセッション: {attached}、実行中のターン: {running}）。この {client} クライアントもそれを使います。終わったら `dimcode daemon stop` を実行してください。次回の起動では {client} が動きます。"
+        }
+        "The App Server is still using a different build of {server}. Some features may be unavailable. After active work finishes, exit this client, run `{command}`, then reopen it." => {
+            "App Server はまだ {server} の別のビルドを使用しています。一部の機能が使えない場合があります。作業が終わったらこのクライアントを終了し、`{command}` を実行してから再度開いてください。"
+        }
+        "The App Server's build could not be verified as this client's. If features are missing after an update, wait for active work to finish, exit this client, run `{command}`, then reopen it." => {
+            "App Server のビルドがこのクライアントと同じか確認できませんでした。更新後に機能が足りない場合は、作業が終わるのを待ってこのクライアントを終了し、`{command}` を実行してから再度開いてください。"
         }
         "Upgrading the local store from format v{from} to v{to}; this can take a while on a large store." => {
             "ローカルストアをフォーマット v{from} から v{to} にアップグレードしています。大きなストアでは時間がかかることがあります。"

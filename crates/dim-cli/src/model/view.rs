@@ -35,7 +35,10 @@ pub enum RowKind {
     Status,
     /// A row kind the UI does not draw specially; it falls back to a status
     /// line.
-    #[allow(dead_code)]
+    #[allow(
+        dead_code,
+        reason = "constructed only by the lib's test target, so an expectation would be unfulfilled there"
+    )]
     Other,
 }
 

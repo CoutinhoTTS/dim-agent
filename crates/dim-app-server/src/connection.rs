@@ -237,8 +237,9 @@ impl Connection {
     pub fn new(
         hub: Arc<ConnectionHub>,
         entry: Entry,
+        closing: CancellationToken,
     ) -> (Arc<Self>, tokio::sync::mpsc::UnboundedReceiver<Frame>) {
-        let closed = hub.closing.child_token();
+        let closed = closing.child_token();
         let (sender, receiver) = Sender::new(closed.clone());
         let connection = Arc::new(Self {
             id: uuid::Uuid::new_v4().to_string(),
@@ -289,7 +290,7 @@ impl Connection {
             .hub
             .with_rpc(|rpc| rpc.callers.close_connection(&self.id));
         if self.entry == Entry::Local {
-            self.hub.web.release(&self.hub, &self.id).await;
+            self.hub.web.release(&self.id).await;
         }
         self.hub.ui.release(&self.id);
         self.hub.ui.finished(&self.id);
@@ -734,12 +735,23 @@ impl Connection {
                 }
                 (None, None)
             }
-            Call::ModelPreview(_) => {
-                if self.entry != Entry::Local {
+            // The authenticated Web entry creates Sessions, so it may preview the
+            // model its own creation would adopt. The startup channel stays local:
+            // a browser holds no launch inputs, and it carries a connection
+            // admission.
+            Call::ModelPreview(p) => {
+                if self.entry == Entry::Bare {
                     return Err(RpcError::app(
                         -32000,
                         "local_transport_required",
                         "Model preview requires a protected local connection",
+                    ));
+                }
+                if p.startup.is_some() && self.entry != Entry::Local {
+                    return Err(RpcError::app(
+                        -32000,
+                        "local_transport_required",
+                        "Model startup preview requires a protected local connection",
                     ));
                 }
                 (None, None)
@@ -1272,7 +1284,12 @@ impl Connection {
             Call::Idle(params) => match self.session(rpc, &params.session_id) {
                 Ok(session) => {
                     let branch = params.branch_id.as_deref().unwrap_or("main");
-                    let result = tokio::select! {biased;_=self.closed.cancelled()=>return None,_=rpc.unloading.cancelled()=>Err(RpcError::reloading()),result=session.idle(branch)=>result.map_err(RpcError::from)};
+                    let result = tokio::select! {
+                        biased;
+                        _ = self.closed.cancelled() => return None,
+                        _ = rpc.unloading.cancelled() => Err(RpcError::reloading()),
+                        result = session.idle(branch) => result.map_err(RpcError::from),
+                    };
                     match result {
                         Ok(sequence) => self.barrier(sequence, delivery, &rpc.unloading).await,
                         Err(error) => Err(error),
@@ -1524,7 +1541,6 @@ impl Connection {
             Call::SessionSkills(p) => {
                 let skills = session
                     .service::<SkillsBranch>(&p.branch_id)?
-                    .session()
                     .list()
                     .map_err(skills_error)?;
                 Reply::SessionSkills(SessionSkillsResult { skills })
@@ -1816,51 +1832,17 @@ impl Connection {
             }
         };
         let managed = rpc.ctx.get::<crate::worktrees::ManagedWorktrees>();
-        let worktree = match (params.worktree, &managed) {
-            (Some(request), Some(managed)) => Some(
-                managed
-                    .create(
-                        std::path::Path::new(&cwd),
-                        request.base.as_deref(),
-                        request.branch.as_deref(),
-                        &self.closed,
-                    )
-                    .await
-                    .map_err(|error| error.rpc())?,
-            ),
-            (Some(_), None) => {
-                return Err(RpcError::app(
-                    -32000,
-                    "worktree_unavailable",
-                    "This daemon has no managed worktree root",
-                ));
-            }
-            (None, _) => None,
-        };
-        if let Some(created) = &worktree {
-            config.cwd = created.prepared.subtree.to_string_lossy().into_owned();
-        }
-        let session = match rpc
+        let (session, worktree) = rpc
             .index
-            .create_session(
+            .create_with_worktree(
                 &host,
                 config,
                 self.protocol_version(),
-                None,
                 origin,
-                worktree.as_ref().map(|created| created.prepared.clone()),
+                params.worktree,
+                &self.closed,
             )
-            .await
-        {
-            Ok(session) => session,
-            Err(error) => {
-                if let (Some(created), Some(managed)) = (&worktree, &managed) {
-                    managed.discard(created, &self.closed).await;
-                }
-                clear_worktree_record(rpc, worktree.as_ref()).await;
-                return Err(RpcError::from(error));
-            }
-        };
+            .await?;
         if startup_admission.is_some() || source.is_some() {
             let retained = rpc
                 .ctx
@@ -1879,7 +1861,6 @@ impl Connection {
                 if let (Some(created), Some(managed)) = (&worktree, &managed) {
                     managed.discard(created, &self.closed).await;
                 }
-                clear_worktree_record(rpc, worktree.as_ref()).await;
                 return Err(error);
             }
         }
@@ -1948,22 +1929,6 @@ pub(crate) fn configuration_outcome(
             "Configuration was superseded by another update",
         )),
     }
-}
-
-/// A failed creation after the Session transaction removed its rows: the
-/// directory record it wrote stays a candidate, so drop it when nothing
-/// associates it. A cleanup failure is visible in the next `worktree list`.
-async fn clear_worktree_record(
-    rpc: &RpcService,
-    worktree: Option<&crate::worktrees::CreatedWorktree>,
-) {
-    let (Some(created), Some(store)) = (worktree, rpc.ctx.get::<crate::storage::SessionStore>())
-    else {
-        return;
-    };
-    let _ = store
-        .remove_worktree_directory(created.prepared.directory.clone())
-        .await;
 }
 
 /// Session operations wait for the product execution profile.
@@ -2103,12 +2068,6 @@ impl ConnectionHub {
             .expect("connection index")
             .get(id)
             .and_then(Weak::upgrade)
-    }
-    /// Asks every connection accepted on `entry` to close.
-    pub fn close_entry(&self, entry: Entry) {
-        for connection in self.entry_connections(entry) {
-            connection.closed.cancel();
-        }
     }
     /// A token cancelled when the hub closes; listeners it owns stop with it.
     pub fn closing(&self) -> CancellationToken {
@@ -2509,7 +2468,7 @@ impl RpcPlugin {
             control: names.key()?,
             loader: names.key()?,
             management: names.key()?,
-            callers: names.key()?,
+            callers: Key::of(),
         })
     }
 }
@@ -2588,16 +2547,7 @@ fn session_candidate(rpc: &RpcService, method: &str, params: &Value) -> bool {
 /// (methods contract A.2) and the caller index Rpc records into. It depends
 /// on no other row, so a row that names `callChannel` does not reload when
 /// Rpc or the Agent index reloads.
-pub(crate) struct CallChannelPlugin {
-    callers: Key<Callers>,
-}
-impl CallChannelPlugin {
-    pub fn new(names: &Names<'_>) -> rutis::Result<Self> {
-        Ok(Self {
-            callers: names.key()?,
-        })
-    }
-}
+pub(crate) struct CallChannelPlugin;
 impl DynPlugin for CallChannelPlugin {
     fn name(&self) -> &str {
         "CallChannel"
@@ -2614,7 +2564,7 @@ impl DynPlugin for CallChannelPlugin {
                     callers: callers.clone(),
                 }),
             )?;
-            ctx.provide_at(self.callers.clone(), callers)?;
+            ctx.provide_as::<Callers>(callers)?;
             Ok(Effect::Done)
         })
     }

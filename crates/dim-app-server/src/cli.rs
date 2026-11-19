@@ -201,6 +201,30 @@ pub fn product_session_defaults(defaults: &mut dim_agent_runtime::SessionConfig)
     defaults.permission_policy.preset = dim_agent_types::PermissionPreset::WorkspaceWrite;
 }
 
+/// How `--migrate-prompt-references` is written, printed both by its own usage
+/// error and by the one a flag in the wrong position reaches.
+const MIGRATE_PROMPT_REFERENCES_USAGE: &str =
+    "--migrate-prompt-references --database PATH --session ID --branch NAME";
+
+/// `DIM_USER_AGENT`, read once here rather than inside the Aimux part: the
+/// environment does not change under a running process, and a value a request
+/// cannot carry must fail startup before anything is served. It is read after
+/// the arguments are parsed, so `--help` and a configuration error stay
+/// reachable with a value this process would refuse.
+pub fn user_agent_from_environment() -> Result<Option<String>, String> {
+    let variable = match std::env::var(dim_agent_aimux::ENVIRONMENT_VARIABLE) {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err(format!(
+                "{} must be valid Unicode",
+                dim_agent_aimux::ENVIRONMENT_VARIABLE
+            ));
+        }
+    };
+    dim_agent_aimux::environment_user_agent(variable).map_err(|error| error.to_string())
+}
+
 /// [`run`] with a managed provider plugin, which an account build's own
 /// executable supplies; it is installed when the server has a product home.
 /// `install` contributes the host's native plugins to the builder before assembly.
@@ -275,6 +299,45 @@ pub fn run_with(
             vacuumed.after,
             vacuumed.reclaimed.rows,
             vacuumed.reclaimed.bytes
+        );
+        return Ok(());
+    }
+    if argv.first().map(String::as_str) == Some("--migrate-prompt-references") {
+        let mut session = None;
+        let mut branch = None;
+        let mut database = None;
+        let mut args = argv.iter().skip(1);
+        let usage = || -> Box<dyn std::error::Error> {
+            format!("Use {MIGRATE_PROMPT_REFERENCES_USAGE}").into()
+        };
+        while let Some(flag) = args.next() {
+            let value = args.next().ok_or_else(usage)?;
+            match flag.as_str() {
+                "--database" => database = Some(PathBuf::from(value)),
+                "--session" => session = Some(value.clone()),
+                "--branch" => branch = Some(value.clone()),
+                _ => return Err(usage()),
+            }
+        }
+        let (Some(database), Some(session), Some(branch)) = (database, session, branch) else {
+            return Err(usage());
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        let migrated = runtime.block_on(crate::storage::migrate_prompt_references(
+            database.clone(),
+            session.clone(),
+            branch.clone(),
+        ))?;
+        println!(
+            "{} prompt reference(s) for Session {session}, branch {branch} in {}",
+            if migrated.written {
+                "Wrote 1"
+            } else {
+                "Wrote 0"
+            },
+            database.display()
         );
         return Ok(());
     }
@@ -360,9 +423,15 @@ pub fn run_with(
                 println!(
                     "dim-app-server (--product-home PATH | --model-config PATH | --mock-model) [--unix PATH | --pipe NAME] [--ws HOST:PORT | --no-ws] [--threads COUNT] [--home PATH | --database PATH] [--defaults FILE] [--session-rows FILE] [--node PATH --js-runtime PATH] [--python PATH] [--web-assets PATH]\n\
                      dim-app-server --export-timeline SESSION_ID --database PATH\n\
-                     dim-app-server --vacuum --database PATH"
+                     dim-app-server --vacuum --database PATH\n\
+                     dim-app-server --migrate-prompt-references --database PATH --session ID --branch NAME"
                 );
                 return Ok(());
+            }
+            _ if arg == "--migrate-prompt-references" => {
+                return Err(
+                    format!("Use {MIGRATE_PROMPT_REFERENCES_USAGE} as the first argument").into(),
+                );
             }
             _ => return Err(format!("Unknown argument: {arg}").into()),
         }
@@ -460,6 +529,7 @@ pub fn run_with(
         };
         None
     };
+    config.user_agent = user_agent_from_environment()?;
     let mut agent_config = AgentConfig::default();
     if let Some(models) = &models {
         config.model_catalog = Some(models.clone());

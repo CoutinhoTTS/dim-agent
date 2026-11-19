@@ -202,6 +202,8 @@ pub const WEB_MANAGEMENT_METHODS: &[&str] = &[
     "report.cancel",
     "ui.extensions.list",
     "provider.management",
+    "provider.models.query",
+    "provider.management.list",
     "provider.create",
     "provider.update",
     "provider.probe",
@@ -211,6 +213,7 @@ pub const WEB_MANAGEMENT_METHODS: &[&str] = &[
     "provider.list",
     "provider.catalog",
     "provider.refresh",
+    "provider.model.set_enabled",
     "provider.models.set_enabled",
     "provider.models.edit",
     "provider.models.reset",
@@ -540,10 +543,10 @@ pub struct ModelSelection {
     #[serde(default, deserialize_with = "optional_non_null")]
     pub model_id: Option<String>,
 }
-/// `session.create`'s optional managed-worktree request: `cwd` is the source
-/// workspace the repository is resolved from, and the reply names the worktree
-/// and the Session's starting directory (#1451). Sent only when `hello.features`
-/// carries `session.create.worktree`.
+/// The optional managed-worktree request for `session.create` and `sessions.launch`:
+/// `cwd` is the source workspace, and the reply names the worktree and the Session's
+/// starting directory. Sent only when `hello.features` carries the entry's
+/// `session.create.worktree` or `sessions.launch.worktree` feature.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateWorktree {
@@ -604,7 +607,7 @@ pub struct Create {
     #[serde(default, deserialize_with = "optional_non_null")]
     pub language: Option<dim_agent_runtime::ReplyLanguage>,
     /// The managed worktree to create with the Session; absent keeps `cwd`.
-    #[serde(default, deserialize_with = "optional_non_null")]
+    #[serde(default, deserialize_with = "optional_worktree")]
     pub worktree: Option<CreateWorktree>,
 }
 #[derive(Debug, Deserialize)]
@@ -647,6 +650,9 @@ pub struct Catalog {
     /// Whether Sessions whose origin is `acp` are listed (#557).
     #[serde(default)]
     pub with_acp_sessions: bool,
+    /// Whether listed ACP Sessions bypass the preview and closed filters.
+    #[serde(default)]
+    pub with_acp_history: bool,
     /// Whether Sessions whose origin is `automation` are listed: work a saved
     /// configuration launched with no person present (#1421). Independent of
     /// both other class filters.
@@ -713,6 +719,18 @@ pub struct CatalogCancel {
 pub struct SessionId {
     pub session_id: String,
 }
+/// Requires the single path component used by Session command-output storage.
+pub(crate) fn check_session_id(id: &str) -> dim_agent_runtime::Result<()> {
+    if !matches!(std::path::Path::new(id).components().collect::<Vec<_>>()[..],
+        [std::path::Component::Normal(name)] if name == id)
+    {
+        return Err(dim_agent_runtime::AgentError::InvalidInput(format!(
+            "invalid Session id {id}"
+        )));
+    }
+    Ok(())
+}
+
 /// `session.delete`: with `requireInactive`, a Session in use refuses the
 /// delete with `session_active` instead of being closed and removed.
 #[derive(Debug, Deserialize)]
@@ -1188,6 +1206,9 @@ pub struct UiShutdownNotice {
 pub struct HelloResult {
     pub instance_id: String,
     pub server_version: &'static str,
+    /// The stamp of the artifact this daemon runs, absent for unstamped builds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub build_id: Option<String>,
     pub protocol_version: u32,
     pub daemon_profile: DaemonProfile,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1618,6 +1639,16 @@ fn protocol_version<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result
         ));
     }
     Ok(value as u32)
+}
+
+pub(crate) fn optional_worktree<'de, D>(deserializer: D) -> Result<Option<CreateWorktree>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let fields = serde_json::Map::<String, serde_json::Value>::deserialize(deserializer)?;
+    CreateWorktree::deserialize(serde_json::Value::Object(fields))
+        .map(Some)
+        .map_err(serde::de::Error::custom)
 }
 
 pub(crate) fn optional_non_null<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>

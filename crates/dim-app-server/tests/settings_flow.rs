@@ -7,7 +7,7 @@ use dim_agent_runtime::wait_active;
 use dim_app_server::{
     methods::{ManagementMethods, ManagementMethodsPlugin},
     settings::{
-        BusinessDocument, ProjectAuthorized, Result, SettingsChanged, SettingsError,
+        BusinessDocument, ProjectAuthorized, Result, Settings, SettingsChanged, SettingsError,
         SettingsPlugin, SettingsScope, SettingsService, SourceDeclaration, Writer,
         project_authorizations, settings_changes, without_write_only,
     },
@@ -1004,7 +1004,18 @@ async fn declared_source_owner_and_client_writes_in_both_profiles() {
         let mut changes = listen::<SettingsChanged>(&root, &settings_changes("example"));
         let user = json!({"source": "example", "scope": "user"});
 
+        let binding = root.get::<Settings>().unwrap();
         let first = owner_call(&owner, "read", user.clone()).await;
+        assert_eq!(
+            first["value"],
+            serde_json::to_value(
+                binding
+                    .read("example", SettingsScope::User, &cancel)
+                    .await
+                    .unwrap()
+            )
+            .unwrap()
+        );
         assert_eq!(first["ok"], true);
         assert_eq!(first["value"]["document"], json!({"maxResults": 5}));
         let first = first["value"]["revision"].as_str().unwrap().to_owned();
@@ -1026,7 +1037,18 @@ async fn declared_source_owner_and_client_writes_in_both_profiles() {
             (json!([]), "invalid_document"),
         ] {
             let revision = if code == "conflict" { &first } else { &second };
+            let native_error = binding
+                .update(
+                    "example",
+                    SettingsScope::User,
+                    revision,
+                    document.clone(),
+                    &cancel,
+                )
+                .await
+                .unwrap_err();
             let rejected = owner_call(&owner, "update", update(revision, document)).await;
+            assert_eq!(rejected["error"]["message"], native_error.to_string());
             assert_eq!(rejected["ok"], false);
             assert_eq!(rejected["error"]["code"], code, "{rejected}");
         }
@@ -1054,16 +1076,41 @@ async fn declared_source_owner_and_client_writes_in_both_profiles() {
         )
         .await;
         assert_eq!(changed["error"]["code"], "user_only_field");
-        let kept = owner_call(
-            &owner,
-            "update",
-            update(&third, json!({"searchService": service})),
-        )
-        .await;
+        let kept = binding
+            .update(
+                "example",
+                SettingsScope::User,
+                &third,
+                json!({"searchService": service}),
+                &cancel,
+            )
+            .await
+            .unwrap();
         let stored = json!({"maxResults": 5, "searchService": service});
-        assert_eq!(kept["value"]["document"], stored);
-        let fourth = kept["value"]["revision"].as_str().unwrap().to_owned();
+        assert_eq!(kept.document, stored);
+        assert_eq!(
+            owner_call(&owner, "read", user.clone()).await["value"],
+            serde_json::to_value(&kept).unwrap()
+        );
+        let fourth = kept.revision;
         saw(&mut changes, change(SettingsScope::User, &fourth)).await;
+        let stored = json!({"maxResults": 6, "searchService": service});
+        let kept = owner_call(&owner, "update", update(&fourth, stored.clone())).await;
+        assert_eq!(kept["ok"], true);
+        assert_eq!(kept["value"]["document"], stored);
+        let fifth = kept["value"]["revision"].as_str().unwrap().to_owned();
+        assert_ne!(fifth, fourth);
+        assert_eq!(
+            serde_json::to_value(
+                binding
+                    .read("example", SettingsScope::User, &cancel)
+                    .await
+                    .unwrap()
+            )
+            .unwrap(),
+            kept["value"]
+        );
+        saw(&mut changes, change(SettingsScope::User, &fifth)).await;
         let announced: Vec<_> = changes
             .borrow()
             .iter()
@@ -1071,7 +1118,7 @@ async fn declared_source_owner_and_client_writes_in_both_profiles() {
             .collect();
         assert_eq!(
             announced,
-            [&second, &third, &fourth].map(
+            [&second, &third, &fourth, &fifth].map(
                 |revision| json!({"source": "example", "scope": "user", "revision": revision})
             )
         );
@@ -1251,6 +1298,130 @@ async fn model_log_switch_starts_the_recorder() {
         assert_eq!(directory.permissions().mode() & 0o777, 0o700);
         let file = std::fs::metadata(&recording).unwrap();
         assert_eq!(file.permissions().mode() & 0o777, 0o600);
+    }
+    root.shutdown().await.unwrap();
+    fs::remove_dir_all(home).unwrap();
+}
+
+/// The `provider` source holds the model request User-Agent override. The
+/// source is declared and listed, a written document publishes on the Aimux
+/// part serving the same root, clearing it falls back, and the schema refuses
+/// a value a request cannot carry.
+#[tokio::test]
+async fn provider_identity_override_comes_from_the_settings_source() {
+    let home = home();
+    let root = Ctx::root().unwrap();
+    let identity = dim_agent_aimux::ModelIdentity::new(None);
+    let views = vec![
+        root.plugin(FileStoragePlugin::new(vec![home.clone()])),
+        root.plugin(settings_part(0, vec![])),
+        root.plugin(ManagementMethodsPlugin::typed(&dim_app_server::catalog()).unwrap()),
+        root.plugin(
+            SettingsMethodsPlugin::new(&Names::copy(&dim_app_server::catalog(), &Build::default()))
+                .unwrap(),
+        ),
+        root.plugin(
+            dim_app_server::provider_settings::ProviderSettingsPlugin::new(
+                &Names::copy(&dim_app_server::catalog(), &Build::default()),
+                identity.clone(),
+            )
+            .unwrap(),
+        ),
+    ];
+    let cancel = CancellationToken::new();
+    wait_active(&root, &views, Duration::from_secs(5), &cancel)
+        .await
+        .unwrap();
+    let settings = root.get::<SettingsService>().unwrap();
+    let listed = client_call(&root, "settings.sources", json!({}))
+        .await
+        .unwrap();
+    let provider = listed["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|source| source["source"] == "provider")
+        .unwrap_or_else(|| panic!("settings.sources lists provider: {listed}"));
+    assert_eq!(provider["scopes"], json!(["user"]));
+    assert_eq!(provider["userOnly"], json!(["/userAgent"]));
+    let current = settings
+        .read_declared("provider", SettingsScope::User, &cancel)
+        .await
+        .unwrap();
+    assert_eq!(
+        current.document,
+        json!({}),
+        "the document starts with no override, so the built-in User-Agent applies"
+    );
+    settings
+        .update_declared(
+            "provider",
+            SettingsScope::User,
+            &current.revision,
+            json!({"userAgent": "private-client/7"}),
+            Writer::Client,
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while identity.user_agent() != "private-client/7" {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the override was not published: {}",
+            identity.user_agent()
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let current = settings
+        .read_declared("provider", SettingsScope::User, &cancel)
+        .await
+        .unwrap();
+    settings
+        .update_declared(
+            "provider",
+            SettingsScope::User,
+            &current.revision,
+            json!({}),
+            Writer::Client,
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while identity.user_agent().starts_with("private-client/") {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "clearing the setting falls back to the built-in identity: {}",
+            identity.user_agent()
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    for refused in [
+        json!({"userAgent": ""}),
+        json!({"userAgent": "a".repeat(513)}),
+        json!({"userAgent": "a\nb"}),
+        json!({"userAgent": "dím/1.0"}),
+    ] {
+        let current = settings
+            .read_declared("provider", SettingsScope::User, &cancel)
+            .await
+            .unwrap();
+        let error = settings
+            .update_declared(
+                "provider",
+                SettingsScope::User,
+                &current.revision,
+                refused,
+                Writer::Client,
+                &cancel,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, SettingsError::Document(_)),
+            "the schema refuses a value a request cannot carry: {error}"
+        );
     }
     root.shutdown().await.unwrap();
     fs::remove_dir_all(home).unwrap();

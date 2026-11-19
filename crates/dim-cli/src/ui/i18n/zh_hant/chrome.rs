@@ -125,6 +125,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Observing conversation" => "正在檢視對話",
         "Conversation unavailable" => "對話無法使用",
         "Session closed" => "工作階段已關閉",
+        "This session is closed and cannot be resumed. Read its stored history with dimcode export {id} using the same --home." => {
+            "此工作階段已關閉，無法繼續對話。使用相同的 --home 執行 dimcode export {id} 可讀取已儲存的歷史。"
+        }
         "Member conversation" => "成員對話",
         "x stop command · Esc back" => "x 停止指令 · Esc 返回",
         "Esc back" => "Esc 返回",
@@ -300,7 +303,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Press Ctrl+C to stop the Web workspace." => "按 Ctrl+C 停止 Web 工作區。",
         "To resume this session:" => "繼續此工作階段：",
 
-        // composer/commands.rs: descriptions
+        // commands.rs: descriptions
         "start a new session" => "開始新工作階段",
         "show or set the reasoning effort" => "檢視或設定推理強度",
         "show or set the priority service tier (on|off)" => "檢視或設定優先服務層級（on|off）",
@@ -330,9 +333,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "exit" => "離開",
 
         // composer/palette.rs
-        "Enter select + default · ←/→ effort · Ctrl+B/F cursor · Ctrl+X clear saved · Esc clear/close" => {
-            "Enter 選擇並設為預設 · ←/→ 推理強度 · Ctrl+B/F 移動游標 · Ctrl+X 清除已儲存 · Esc 清除/關閉"
-        }
         "Default for new sessions in {folder}: {model}" => {
             "新工作階段在 {folder} 的預設模型：{model}"
         }
@@ -413,6 +413,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         // models_panel.rs
         "Select a model" => "選擇模型",
         "Loading models..." => "正在載入模型…",
+        "Previous page" => "上一頁",
+        "Next page" => "下一頁",
         "No models available. Connect a provider first." => "沒有可用的模型。請先連線供應商。",
         "No matching models." => "沒有相符的模型。",
         "current" => "目前",
@@ -471,6 +473,33 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Fixed model" => "固定模型",
         "Applies to new members, including named Agents." => "適用於新成員，包括具名 Agent。",
         "Existing members keep their models." => "既有成員保留原模型。",
+        "Conversation model" => "對話模型",
+        "Selected: {model}" => "已選擇：{model}",
+        "Model management" => "模型管理",
+        "Manage models" => "管理模型",
+        "1 provider" => "1 個 Provider",
+        "{count} providers" => "{count} 個 Provider",
+        "ready" => "就緒",
+        "no models" => "沒有模型",
+        "catalog unreadable" => "無法讀取 catalog",
+        "{count} with missing limits" => "{count} 個缺少上限",
+        "{count} unavailable" => "{count} 個不可用",
+        "{count} disabled" => "{count} 個已停用",
+        "{count} without models" => "{count} 個沒有模型",
+        "{count} unreadable" => "{count} 個無法讀取",
+        "{unavailable} unavailable, {disabled} disabled" => {
+            "{unavailable} 個不可用、{disabled} 個已停用"
+        }
+        "Enter select + default · ←/→ effort · Tab section · Esc clear/close" => {
+            "Enter 選擇並設為預設 · ←/→ 推理強度 · Tab 切換區段 · Esc 清除/關閉"
+        }
+        "Enter change · Tab section · Esc clear/close" => {
+            "Enter 變更 · Tab 切換區段 · Esc 清除/關閉"
+        }
+        "Enter manage · Tab section · Esc clear/close" => {
+            "Enter 管理 · Tab 切換區段 · Esc 清除/關閉"
+        }
+        "Enter manage · Esc back" => "Enter 管理 · Esc 返回",
         "unknown" => "不明",
         "Subagent model policy saved" => "已儲存子代理模型原則",
         "Subagent model policy changed elsewhere; choose again to reread it" => {
@@ -582,6 +611,12 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "The App Server is still {server} because other clients are using it (connections: {connections}, attached Sessions: {attached}, running turns: {running}); this {client} client uses it too. Run `dimcode daemon stop` when they are done, and the next start runs {client}." => {
             "App Server 仍是 {server}，因為其他用戶端正在使用它（連線：{connections}，已附加工作階段：{attached}，執行中的回合：{running}）；這個 {client} 用戶端也使用它。等它們結束後執行 `dimcode daemon stop`，下次啟動就會執行 {client}。"
+        }
+        "The App Server is still using a different build of {server}. Some features may be unavailable. After active work finishes, exit this client, run `{command}`, then reopen it." => {
+            "App Server 仍在執行 {server} 的另一個建置。部分功能可能無法使用。目前工作結束後，請結束此用戶端，執行 `{command}`，然後重新開啟。"
+        }
+        "The App Server's build could not be verified as this client's. If features are missing after an update, wait for active work to finish, exit this client, run `{command}`, then reopen it." => {
+            "無法確認 App Server 的建置與此用戶端一致。如果更新後缺少功能，請等目前工作結束後結束此用戶端，執行 `{command}`，然後重新開啟。"
         }
         "Upgrading the local store from format v{from} to v{to}; this can take a while on a large store." => {
             "正在把本機資料庫從格式 v{from} 升級到 v{to}；大型資料庫可能需要一段時間。"

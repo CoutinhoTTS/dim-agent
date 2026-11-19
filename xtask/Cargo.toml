@@ -21,6 +21,7 @@ dim-goal.workspace = true
 dim-report.workspace = true
 dim-event-hub.workspace = true
 dim-modality.workspace = true
+dim-image-understanding.workspace = true
 dim-agent-types.workspace = true
 dim-client.workspace = true
 rutis.workspace = true
@@ -41,3 +42,6 @@ axum = { workspace = true, features = ["json"] }
 [target.'cfg(unix)'.dependencies]
 libc = "0.2.189"
 [dev-dependencies]
+
+[lints]
+workspace = true

@@ -661,7 +661,7 @@ impl Env {
         .await
         .unwrap();
         authorize_project(&agent, &home).await;
-        let directory = agent.root().get::<McpService>().unwrap();
+        let directory = agent.root().get_at(&mcp::owner_key()).unwrap();
         Self {
             home,
             agent,
@@ -2448,11 +2448,17 @@ async fn a_shadowed_user_server_closes_its_unused_connection() {
 const TOOL_IMAGE: &str =
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jD1sAAAAASUVORK5CYII=";
 
-/// The Part 1 flow: an MCP tool returns a text block and a PNG, and the model
-/// request that follows carries the image instead of failing.
+/// An MCP image result retains its source while the model receives a reference.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mcp_image_tool_results_reach_the_model_and_the_session_keeps_working() {
+    use base64::Engine as _;
     use dim_agent_aimux::{AimuxModels, AimuxPlugin, ConfiguredModelsPlugin};
+    use sha2::{Digest, Sha256};
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(TOOL_IMAGE)
+        .unwrap();
+    let digest = format!("{:x}", Sha256::digest(bytes));
+    let reference = format!("img:{}", &digest[..16]);
     tokio::time::timeout(Duration::from_secs(30), async {
         let requests: Arc<Mutex<Vec<Value>>> = Default::default();
         let seen = requests.clone();
@@ -2558,7 +2564,7 @@ async fn mcp_image_tool_results_reach_the_model_and_the_session_keeps_working() 
             dim_agent_capabilities::model_provider::ModelProviderPlugin::process,
         );
         builder
-            .session_value(Arc::new(PromptHost(Arc::new(EmptyPromptHost))))
+            .session_data_value(Arc::new(PromptHost(Arc::new(EmptyPromptHost))))
             .session_value(Arc::new(
                 dim_agent_capabilities::prompt::InitialPromptConfiguration::fixed(Some(
                     ConfigureUpdate {
@@ -2573,18 +2579,23 @@ async fn mcp_image_tool_results_reach_the_model_and_the_session_keeps_working() 
                     },
                 )),
             ))
-            .session_value(Arc::new(dim_agent_capabilities::permission::CommandRulesHost(
+            .session_data_value(Arc::new(dim_agent_capabilities::permission::CommandRules(
                 Arc::new(dim_agent_capabilities::permission::NoCommandRules),
             )));
         dim_agent_aimux::install(&mut builder);
         mcp::install(&mut builder);
         mcp_host_rows(&mut builder, &home);
         let database = home.join("dimcode.sqlite");
-        builder.plugin(move |_| Ok(Box::new(dim_app_server::storage::SqliteStoragePlugin::new(database.clone()))));
+        builder.plugin(move |_| {
+            let storage = dim_app_server::storage::SqliteStoragePlugin::new(database.clone());
+            Ok(Box::new(storage))
+        });
         builder.plugin(|_| {
             let catalog = dim_app_server::catalog();
             let build = Build::default();
-            Ok(Box::new(dim_app_server::storage::SessionStorePlugin::new(&Names::copy(&catalog, &build), 0)?))
+            let names = Names::copy(&catalog, &build);
+            let plugin = dim_app_server::storage::SessionStorePlugin::new(&names, 0)?;
+            Ok(Box::new(plugin))
         });
         builder
             .plugin(|names| Ok(Box::new(AimuxPlugin::with_files(names.key()?))))
@@ -2617,8 +2628,16 @@ async fn mcp_image_tool_results_reach_the_model_and_the_session_keeps_working() 
             })
             .await
             .unwrap();
-        agent.root().get::<dim_app_server::storage::SessionStore>().unwrap()
-            .timeline_store().create_session(session.id(), &SessionConfig::default()).await.unwrap();
+        let store = agent
+            .root()
+            .get::<dim_app_server::storage::SessionStore>()
+            .unwrap();
+        let default = SessionConfig::default();
+        store
+            .timeline_store()
+            .create_session(session.id(), &default)
+            .await
+            .unwrap();
         // The tool enters the request once its source is adopted.
         ready(&session).await;
         let mut ran = false;
@@ -2629,13 +2648,30 @@ async fn mcp_image_tool_results_reach_the_model_and_the_session_keeps_working() 
                 .unwrap();
             session.idle("main").await.unwrap();
             let events = chain_events(&session, "main", ..).await.unwrap();
+            let ended = events
+                .iter()
+                .rev()
+                .find(|event| matches!(event.kind, EventKind::TurnEnd(_)))
+                .unwrap();
             assert!(
-                matches!(events.iter().rev().find(|event| matches!(event.kind, EventKind::TurnEnd(_))).unwrap().kind,
-                    EventKind::TurnEnd(TurnEndData { outcome: TurnOutcome::Completed { .. }, .. })),
+                matches!(
+                    ended.kind,
+                    EventKind::TurnEnd(TurnEndData { outcome: TurnOutcome::Completed { .. }, .. })
+                ),
                 "{:?}",
-                events.iter().filter_map(|event| match &event.kind { EventKind::ModelOutputEnd(data) => Some(&data.outcome), _ => None }).collect::<Vec<_>>()
+                events
+                    .iter()
+                    .filter_map(|event| match &event.kind {
+                        EventKind::ModelOutputEnd(data) => Some(&data.outcome),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
             );
-            ran = events.iter().any(|event| matches!(&event.kind, EventKind::ToolResult(data) if matches!(&data.results[0].result.content, ToolContent::Blocks(blocks) if blocks.iter().any(|block| matches!(block, ContentBlock::Image { .. })))));
+            ran = events.iter().any(|event| {
+                matches!(&event.kind, EventKind::ToolResult(data)
+                    if matches!(&data.results[0].result.content, ToolContent::Blocks(blocks)
+                        if blocks.iter().any(|block| matches!(block, ContentBlock::Image { .. }))))
+            });
             if ran {
                 break;
             }
@@ -2668,17 +2704,14 @@ async fn mcp_image_tool_results_reach_the_model_and_the_session_keeps_working() 
             .find(|message| message["role"] == "tool")
             .unwrap();
         assert!(
-            tool["content"].as_str().unwrap().contains("[Image: sent in the following user message as tool output.]"),
+            tool["content"].as_str().unwrap().contains(&reference),
             "{tool}"
         );
         assert!(tool["content"].as_str().unwrap().contains("screenshot captured"));
         assert!(tool["content"].as_str().unwrap().contains("[Image omitted: the image cannot be sent to this model.]"));
-        let user = next["messages"].as_array().unwrap().last().unwrap();
-        assert_eq!(user["role"], "user");
-        assert!(
-            user["content"][1]["image_url"]["url"].as_str().unwrap() == format!("data:image/png;base64,{TOOL_IMAGE}"),
-            "{user}"
-        );
+        assert!(!next.to_string().contains(TOOL_IMAGE), "{next}");
+        assert!(!next.to_string().contains("image_url"), "{next}");
+        assert!(!next.to_string().contains("[Image: sent in the following user message as tool output.]"), "{next}");
         session
             .submit("thanks".into(), InputMode::Queue, "main")
             .await

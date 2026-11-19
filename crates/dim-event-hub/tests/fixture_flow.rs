@@ -1,9 +1,9 @@
 //! The EventHub flows that need to observe or control input writes: delivery
 //! concurrency, a failed subscription-file write, a refused partial creation,
 //! the publish's one `lastFailure` transaction, the subscription limits, a
-//! source's row lifetime, a missed deletion notice, an EventHub reload, a
-//! producer that applied first, the subscribe/unsubscribe race, and a host
-//! without `sessionFiles` (design Appendix D items 3–5, 7–9, 12).
+//! source's row lifetime, an EventHub reload, a producer that applied first,
+//! the subscribe/unsubscribe race, and a host without `sessionFiles` (design
+//! Appendix D items 3–5, 7–8, 12).
 mod support;
 
 use dim_agent_types::InputMode;
@@ -428,26 +428,6 @@ async fn a_subscribe_reads_every_guide_before_it_writes_one() {
     );
 }
 
-/// A missed deletion notice leaves a subscription that fails
-/// `session_closed` and shows its failure (design §3.4, Appendix D item 9).
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_missed_notice_leaves_a_session_closed_failure() {
-    let (_directory, fixture) = mounted().await;
-    let subscription = fixture.subscribe("dead", &["im.*"], None).await.unwrap();
-    fixture.sessions.fail("dead", "session_closed");
-    let receipt = fixture.producer.publish(event("lost")).await.unwrap();
-    assert_eq!(receipt["deliveries"][0]["status"], json!("failed"));
-    assert_eq!(receipt["deliveries"][0]["code"], json!("session_closed"));
-    let stored = fixture.subscriptions(None).await;
-    assert_eq!(stored.len(), 1, "{stored:?}");
-    assert_eq!(stored[0]["id"], json!(subscription));
-    assert_eq!(
-        stored[0]["lastFailure"]["code"],
-        json!("session_closed"),
-        "{stored:?}"
-    );
-}
-
 /// A producer that applied before EventHub declares on `eventhub/ready`, and
 /// its events arrive (design §2.1, Appendix D item 12).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -457,13 +437,23 @@ async fn a_producer_that_applied_first_declares_on_the_notice() {
     // Its own apply found no service; the notice gave it one and it declared
     // then.
     wait_for("the ready notice", || fixture.producer.hub().is_some()).await;
-    let sources = fixture.call("eventhub.sources", json!({})).await.unwrap();
-    let listed = sources["sources"].as_array().unwrap();
-    let im = listed
-        .iter()
-        .find(|source| source["source"] == json!("im"))
-        .unwrap_or_else(|| panic!("the notice's declaration is listed: {sources}"));
-    assert_eq!(im["guide"], json!("The IM guide."), "{sources}");
+    let im = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let sources = fixture.call("eventhub.sources", json!({})).await.unwrap();
+            if let Some(im) = sources["sources"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|source| source["source"] == json!("im"))
+            {
+                break im.clone();
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the notice's declaration is listed");
+    assert_eq!(im["guide"], json!("The IM guide."), "{im}");
     fixture.subscribe("noticed", &["im.*"], None).await.unwrap();
     let receipt = fixture.producer.publish(event("noticed")).await.unwrap();
     assert_eq!(

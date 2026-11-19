@@ -96,6 +96,10 @@ pub struct LaunchRequest {
     /// its text rules and writes it as the first manual title.
     #[serde(default)]
     pub title: Option<String>,
+    /// The workspace to create; requires the `sessions.launch.worktree` feature.
+    /// See [managed worktrees §3](https://github.com/arcships/dim/blob/main/docs/design/worktree-management.md#3-创建).
+    #[serde(default, deserialize_with = "crate::protocol::optional_worktree")]
+    pub worktree: Option<crate::protocol::CreateWorktree>,
 }
 /// The creation origins a `sessions.launch` caller may declare: work a saved
 /// configuration runs with no person present. A closed enum, so a caller
@@ -119,6 +123,10 @@ pub struct LaunchReply {
     pub session_id: String,
     /// The effective policy the Session was created with.
     pub policy: PermissionPolicy,
+    /// The created workspace for `sessions.launch.worktree`; omitted if not requested.
+    /// See [managed worktrees §3](https://github.com/arcships/dim/blob/main/docs/design/worktree-management.md#3-创建).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<crate::worktrees::CreatedWorktreeReply>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -335,7 +343,7 @@ async fn published(publication: &Publication, sequence: u64) -> Result<(), Sessi
     Ok(())
 }
 
-/// A failed wait for a branch to settle (`stop`, `idle`): apart from a closed
+/// A failed wait for branch dispatch: apart from a closed
 /// Session, an unknown branch or a reloading capability, it is the branch's
 /// dispatch failure.
 fn settlement(error: AgentError) -> SessionsError {
@@ -455,34 +463,38 @@ impl AgentIndex {
             .await?;
         let origin = request.origin.map(LaunchOrigin::session_origin);
         let index = self.clone();
-        let session = tokio::spawn(async move {
+        let (session, worktree) = tokio::spawn(async move {
             let _activity = activity;
-            let session = index
-                .create_session(
+            let created = index
+                .create_with_worktree(
                     &host,
                     config,
                     PROTOCOL_VERSION,
-                    None,
                     origin.unwrap_or(SessionOrigin::Internal),
-                    None,
+                    request.worktree,
+                    &index.stopping,
                 )
                 .await?;
             index.retain_versions();
-            Ok::<_, AgentError>(session)
+            Ok::<_, super::CreateSessionError>(created)
         })
         .await
         .map_err(|error| SessionsError::Failed {
             message: error.to_string(),
         })?
         .map_err(|error| match error {
-            AgentError::Reloading(_) => SessionsError::from(error),
-            error => SessionsError::Failed {
+            super::CreateSessionError::Agent(error @ AgentError::Reloading(_)) => error.into(),
+            super::CreateSessionError::Agent(error) => SessionsError::Failed {
                 message: error.to_string(),
+            },
+            super::CreateSessionError::Worktree(error) => SessionsError::Failed {
+                message: format!("{}: {}", error.code(), error.message()),
             },
         })?;
         Ok(LaunchReply {
             session_id: session.id().to_owned(),
             policy,
+            worktree: worktree.as_ref().map(|created| created.reply()),
         })
     }
 
@@ -659,15 +671,37 @@ impl AgentIndex {
     /// Answers whether `inputId` is still pending on the branch
     /// (session-access §2): pending from its `input/message` until
     /// `input/applied` followed by `input/consumed`, or `input/deleted`,
-    /// references it. The branch's own InputQueue holds exactly that set, so
-    /// this reads it and reads no Timeline. An id the branch does not hold is
-    /// not pending.
+    /// references it. Waits for dispatch through the published head captured
+    /// on entry, then reads the branch's InputQueue without reading history.
+    /// An id the branch does not hold is not pending.
     pub async fn pending(&self, request: PendingRequest) -> Result<PendingReply, SessionsError> {
         self.until_unloaded(async {
             if request.input_id.is_empty() {
                 return Err(SessionsError::rejected("inputId must not be empty"));
             }
             let lease = self.acquire(&request.session_id).await?;
+            let publication = lease.session.publication(&request.branch_id)?;
+            let through = publication.sequence();
+            let mut dispatch = lease.session.dispatch_watch(&request.branch_id)?;
+            let mut published = publication.watch();
+            tokio::select! {
+                result = async {
+                    dispatch.wait_for(|state| state.sequence >= through || state.failure.is_some())
+                        .await.map(|state| state.failure.clone())
+                } => {
+                    let failure = result
+                        .map_err(|_| AgentError::Closed(request.branch_id.clone()))?;
+                    if let Some(error) = failure {
+                        return Err(settlement(error));
+                    }
+                }
+                _ = published.wait_for(|&(_, closed)| closed) => {
+                    let error = dispatch.borrow().failure.clone()
+                        .or_else(|| publication.failure())
+                        .unwrap_or_else(|| AgentError::Closed(request.branch_id.clone()));
+                    return Err(settlement(error));
+                }
+            }
             let pending = lease
                 .session
                 .service::<InputQueue>(&request.branch_id)?

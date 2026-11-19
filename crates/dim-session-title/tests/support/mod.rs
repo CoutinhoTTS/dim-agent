@@ -1,5 +1,7 @@
-// Each test binary uses the helpers it needs; the rest are shared.
-#![allow(dead_code)]
+#![allow(
+    dead_code,
+    reason = "each test binary uses the helpers it needs; the rest are shared, and a binary that uses all of them would leave the expectation unfulfilled"
+)]
 use axum::{Json, body::Body, extract::State};
 use dim_app_server::{RunningServer, ServerConfig};
 use dim_client::{Client, ConnectionConfig, Server};

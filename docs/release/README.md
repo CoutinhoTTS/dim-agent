@@ -1,6 +1,6 @@
 # Release packaging
 
-PR checks use self-hosted runners. Release preparation, packaging, npm publication and acceptance use standard GitHub-hosted runners. The [project release skill](../../.agents/skills/dim-release/SKILL.md) covers version preparation, PRs, tags, draft inspection and recovery. [Rust alpha release](alpha.html) covers the alpha channels and local publication alternative (Chinese).
+The main PR checks use self-hosted runners; the separate code-layout workflow uses GitHub-hosted runners. Release preparation, packaging, npm publication and acceptance use standard GitHub-hosted runners. The [project release skill](../../.agents/skills/dim-release/SKILL.md) covers version preparation, PRs, tags, draft inspection and recovery. [Rust alpha release](alpha.html) covers the alpha channels and local publication alternative (Chinese).
 
 The source, including the Dim account plugin, uses MIT. An account-enabled distribution differs from the API-key one only by the OAuth client IDs compiled in from repository secrets.
 
@@ -119,14 +119,25 @@ Updated clients disable Allow when the original action cannot be reviewed and ke
 
 Release builds use the following [GitHub-hosted runner images](https://docs.github.com/en/actions/reference/runners/github-hosted-runners). Each platform stages its native executable after checking its reported release version.
 
-| Platform | Rust target | Runner |
-| --- | --- | --- |
-| macOS ARM64 | `aarch64-apple-darwin` | `macos-15` |
-| macOS Intel | `x86_64-apple-darwin` | `macos-15-intel` |
-| Linux ARM64 | `aarch64-unknown-linux-gnu` | `ubuntu-22.04-arm` |
-| Linux x64 | `x86_64-unknown-linux-gnu` | `ubuntu-22.04` |
-| Windows ARM64 | `aarch64-pc-windows-msvc` | `windows-11-arm` |
-| Windows x64 | `x86_64-pc-windows-msvc` | `windows-2022` |
+| Platform | Rust target | Runner | RAM | Release LTO |
+| --- | --- | --- | --- | --- |
+| macOS ARM64 | `aarch64-apple-darwin` | `macos-15` | 7 GB | thin |
+| macOS Intel | `x86_64-apple-darwin` | `macos-15-intel` | 14 GB | fat |
+| Linux ARM64 | `aarch64-unknown-linux-gnu` | `ubuntu-22.04-arm` | 16 GB | thin |
+| Linux x64 | `x86_64-unknown-linux-gnu` | `ubuntu-22.04` | 16 GB | fat |
+| Windows ARM64 | `aarch64-pc-windows-msvc` | `windows-11-arm` | 16 GB | fat |
+| Windows x64 | `x86_64-pc-windows-msvc` | `windows-2022` | 16 GB | fat |
+
+The RAM values are the public-repository specifications in the linked GitHub runner reference.
+Release builds cap Cargo at two jobs, including inside the Linux container. The shared fat-LTO
+profile has a measured Linux x64 single-process peak above 8 GiB; a jobs cap does not reduce that
+single-process requirement. macOS ARM64 therefore retains thin LTO until its full release build
+and runtime smoke checks establish that fat LTO fits the 7 GB runner. Linux ARM64 retains thin
+LTO for the same reason: release 0.1.0-alpha.26 was OOM-killed at the final `dimcode` link on the
+16 GB `ubuntu-22.04-arm` runner, so that target needs its own successful release-profile build
+and runtime validation before fat LTO is enabled there. Other targets still need their own
+release-profile build and runtime validation; Linux or macOS measurements do not establish their
+peak memory requirements.
 
 The Ubuntu preflight generates the Rust distribution notices once with cargo-about 0.9.3 using the versioned checkout. All six targets download that artifact. Linux builds on each native host with GNU tools in a digest-pinned manylinux_2_28 container. The executable also runs in that glibc 2.28 environment. Windows uses native MSVC, clang-cl on ARM64, NASM on x64, and the Windows system tar to create ZIP archives. Actions installs Node from `.node-version` and Rust uses `rust-toolchain.toml`. Web and Release assembly run on hosted Ubuntu.
 
@@ -135,6 +146,37 @@ The separate PR workflow uses self-hosted macOS ARM64, Windows x64, and Linux x6
 The platform-independent `changes` and `ci-ok` jobs can run on any eligible self-hosted runner.
 
 ## GitHub workflows
+
+`code-layout.yml` runs on changes to the layout tool, its tests/workflow,
+`rust-toolchain.toml` or `.node-version`, and on manual dispatch. Hosted Ubuntu
+and macOS arm64/x86-64 runners run the native fixture test; Windows uses hosted
+`windows-2022` (x64) and `windows-11-arm` (ARM64) runners, with Python 3.13
+provisioned explicitly. Both select the MSVC Rust host toolchain matching the
+runner architecture and the version in `rust-toolchain.toml`. On manual
+dispatch, after the fixture jobs pass, a five-target matrix builds, trains and
+validates a real `dimcode` with the release LTO choice (thin for macOS ARM64 and
+Linux ARM64, fat otherwise): Cargo capture and replay, native page-residency or
+working-set sampling, the real TUI model picker, function ordering and
+uninstrumented acceptance. Linux x64 runs that command inside the same
+digest-pinned manylinux 2.28 container the release build uses, so this job and
+the release job validate the same linker. The dispatch input `measure` adds
+alternating measurements from the retained build directory on macOS and Windows;
+the Linux command builds and validates once and keeps no reusable directory.
+If ordering fails after capture,
+the diagnostic artifact includes `capture.tar`. Extract it beside the baseline
+executable and map at the original output path on a matching build host.
+Use a capture from a trusted build because replay runs its recorded linker.
+The checkout, build target directory and SDK/toolchain must also be available
+at the absolute paths recorded by the original build. Restore executable
+permissions on macOS files downloaded from Actions. It does not build or
+publish release packages; the opt-in command is documented in the
+[build environment](../architecture/build.md#native-executable-layout).
+
+For Linux x64, release packaging stages the executable validated by the layout
+builder inside the pinned manylinux 2.28 container. An ordering or acceptance
+failure stops packaging. An explicitly requested historical tag that predates
+the builder uses its original Cargo build. Linux arm64, macOS and Windows
+release packages use the ordinary Cargo executable.
 
 `ci.yml` runs on pull requests, pushes to `main`, and manual dispatch. A pull request runs the groups its changed paths need, as decided by `scripts/ci-changes.mjs`. A push to `main` runs only `changes` and `ci-ok` when its entire push range changes only documentation paths that select no check group. Architecture pages checked by `xtask` and the native storage format document retain the full main run, as do mixed pushes and pushes whose base cannot be compared. Manual dispatch selects every group. A documentation-only run leaves in-progress main build and test jobs running.
 
@@ -146,7 +188,7 @@ The `Verify downloaded Node runtime` step runs on full `main` push checks and ma
 
 ### Action pins and updates
 
-External Actions in `ci.yml`, `release.yml`, `npm-publish.yml` and `image-publish.yml` use full commit SHAs. PR checks use the same policy because their Actions execute on persistent self-hosted runners. Pinning does not change the [CI trust boundary](#ci-trust-model).
+External Actions in every workflow use full commit SHAs, including `code-layout.yml`. This policy covers both persistent self-hosted runners and GitHub-hosted runners. Pinning does not change the [CI trust boundary](#ci-trust-model).
 
 Update an Action in a normal pull request:
 
@@ -166,8 +208,8 @@ The protocol matrix reports unsupported optional methods separately; its process
 
 ### Rust dependency checks
 
-The `dependencies` job installs the fixed `cargo-deny` version declared in
-[`ci.yml`](../../.github/workflows/ci.yml) and runs:
+The `dependencies` job uses the `cargo-deny` version pinned in
+[`ci.yml`](../../.github/workflows/ci.yml) on a self-hosted Windows x64 runner.
 
 ```sh
 cargo deny --locked check advisories licenses
@@ -254,8 +296,10 @@ All Actions artifacts, including the npm publication receipt, use `retention-day
 
 One product version is shared by `Cargo.toml`, workspace versions in `Cargo.lock`, `npm/package.json`, its exact optional dependencies, runtime package/lock metadata, native version output and the release tag. Keep them synchronized before building. `0.1.0` is a development baseline; check existing npm versions before enabling registry publication. Every build command here sets `DIM_RELEASE_BUILD=1`, which makes the executable report exactly the version above. A build without that mark is a source build: it reports the committed version, which the last merged release PR wrote, followed by `-source` and the short commit it was built from, as `X.Y.Z-alpha.N-source+0123abcd`. The commit comes from a build script at the final binary that reads `HEAD`; where git is unavailable the label stays `X.Y.Z-alpha.N-source`. The suffix is display only, so the channel, the default home and the installed package version never see it. One installed identity carries it everywhere a build names itself: `--version`, the TUI banner, the ACP `initialize` reply, the `Dim` line and diagnostics of a report, and the MCP client's `clientInfo.version`.
 
+Every packaging build also sets `DIM_BUILD_ID`, a fresh value per artifact build. The build script embeds it in the final binary as the artifact stamp, which the daemon reports in `hello` as `buildId` and a client compares with its own: two builds of one version, or a rebuilt local package, are distinguishable even though `--version` and the protocol version match. The release workflow, `publish-alpha.mjs` and `build-all.mjs` set it; a source build that sets nothing carries no stamp and stays out of the comparison, and a released build must set it. Reinstalling an artifact preserves its stamp, so it is the only identity a running daemon and its client can compare.
+
 ```sh
-DIM_RELEASE_BUILD=1 cargo build --release --locked -p dimcode
+DIM_RELEASE_BUILD=1 DIM_BUILD_ID="$(node -p 'require("node:crypto").randomUUID()')" cargo build --release --locked -p dimcode
 node scripts/stage-plugins.mjs staging/local-plugins
 node scripts/rust-notices.mjs staging/rust-notices.txt
 node scripts/stage-release.mjs target/release staging/local 0.1.0 FULL_SOURCE_COMMIT --plugins staging/local-plugins --rust-notices staging/rust-notices.txt
@@ -263,14 +307,14 @@ node scripts/pack-release.mjs staging/local release/local
 node scripts/stage-web.mjs release/web 0.1.0 FULL_SOURCE_COMMIT
 ```
 
-The executable carries no frontend. `stage-web.mjs` builds `web/` once (`npm ci`, `npm run build`), records `web/dimcode-web.json` (`version`, `protocolVersion`, `sourceCommit`) beside it and packs the tree as `dimcode-web-VERSION.tar.gz` and the npm package `dimcode-web`, which the wrapper lists as an optional dependency and names to the executable through `DIMCODE_WEB_ASSETS`. A native-archive user unpacks `dimcode-web-VERSION.tar.gz` so that `web/index.html` sits beside the executable's `bin/` or in `<product home>/web`. A build that must carry the frontend uses `DIM_RELEASE_BUILD=1 cargo build --features embedded-web`, which needs npm on the build host.
+The executable carries no frontend. `stage-web.mjs` builds `web/` once (`npm ci`, `npm run build`), records `web/dimcode-web.json` (`version`, `protocolVersion`, `sourceCommit`) beside it and packs the tree as `dimcode-web-VERSION.tar.gz` and the npm package `dimcode-web`, which the wrapper lists as an optional dependency and names to the executable through `DIMCODE_WEB_ASSETS`. A native-archive user unpacks `dimcode-web-VERSION.tar.gz` so that `web/index.html` sits beside the executable's `bin/` or in `<product home>/web`. A build that must carry the frontend uses `DIM_RELEASE_BUILD=1 DIM_BUILD_ID=… cargo build --features embedded-web`, which needs npm on the build host.
 
 For a cross build, set `DIM_BUILD_PLATFORM` to the intended platform, build with the matching Rust `--target`, and stage from `target/TARGET/release`. The runner must use the same OS as the target. The six platform names are listed in the workflow matrix.
 
 These commands stage an API-key-only distribution. An account build is the same `dimcode` compiled with the Dim account's OAuth client IDs, which never enter the repository:
 
 ```sh
-DIM_RELEASE_BUILD=1 DIM_OAUTH_CLIENT_ID_CN=… DIM_OAUTH_CLIENT_ID_GLOBAL=… cargo build --release --locked -p dimcode
+DIM_RELEASE_BUILD=1 DIM_BUILD_ID="$(node -p 'require("node:crypto").randomUUID()')" DIM_OAUTH_CLIENT_ID_CN=… DIM_OAUTH_CLIENT_ID_GLOBAL=… cargo build --release --locked -p dimcode
 node scripts/stage-plugins.mjs staging/local-plugins
 node scripts/rust-notices.mjs staging/rust-notices.txt
 node scripts/stage-release.mjs target/release staging/local 0.1.0 FULL_SOURCE_COMMIT --account --plugins staging/local-plugins --rust-notices staging/rust-notices.txt

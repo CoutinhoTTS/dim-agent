@@ -4,10 +4,10 @@ import { useRoute, useRouter } from "vue-router"
 import { useI18n } from "vue-i18n"
 import ConfirmDialog from "../../components/ConfirmDialog.vue"
 import { settingsMessages } from "../../i18n/settings"
-import { readManagement, type ManagementProvider, type ManagementView } from "../../rpc/management"
+import { readManagement, readManagementPage, type ManagementProvider, type ManagementInfo, type ManagementPage } from "../../rpc/management"
 import { readAck } from "../../rpc/read"
 import { useConnectionStore } from "../../stores/connection"
-import { useModelsStore } from "../../stores/models"
+import { useModels } from "../../stores/models"
 import ProviderAuthFlow from "./ProviderAuthFlow.vue"
 import ProviderConnectionForm from "./ProviderConnectionForm.vue"
 import ProviderModels from "./ProviderModels.vue"
@@ -17,9 +17,13 @@ const { t } = useI18n({ messages: settingsMessages })
 const route = useRoute()
 const router = useRouter()
 const connection = useConnectionStore()
-const models = useModelsStore()
-const view = ref<ManagementView>()
-const detail = ref<ManagementProvider>()
+const models = useModels()
+const view = ref<ManagementPage>()
+const detail = ref<ManagementInfo>()
+const modelDetail = ref<ManagementProvider>()
+const modelNext = ref<string | null>(null)
+const modelQuery = ref("")
+let modelRead = 0
 const loading = ref(true)
 const busy = ref(false)
 const error = ref("")
@@ -41,39 +45,72 @@ const providerId = computed(() => typeof route.params.providerId === "string" ? 
 const opened = computed(() => isNew.value || providerId.value !== "")
 const tabItems = computed(() => [
   { label: t("connection"), value: "connection" },
-  { label: `${t("models")} (${detail.value?.models?.length ?? 0})`, value: "models" },
+  { label: t("models"), value: "models" },
 ])
-function configured(provider: ManagementProvider): boolean {
+function configured(provider: ManagementInfo): boolean {
   return provider.source === "custom" || provider.account?.state.authenticated === true
     || provider.connection?.credentialConfigured === true || (!provider.account && provider.enabled === true)
 }
 const configuredProviders = computed(() => (view.value?.providers ?? []).filter(configured).filter((p) => `${p.displayName} ${p.providerId}`.toLowerCase().includes(search.value.toLowerCase())))
 const availableProviders = computed(() => (view.value?.providers ?? []).filter((p) => !configured(p)).filter((p) => `${p.displayName} ${p.providerId}`.toLowerCase().includes(pickerSearch.value.toLowerCase())))
-async function load(): Promise<void> {
+async function load(more = false): Promise<void> {
   loading.value = true
   error.value = ""
   try {
-    view.value = await connection.client.call("provider.management", {}, readManagement)
-    if (!dirty.value && providerId.value) await loadDetail()
+    const query = isNew.value ? pickerSearch.value : search.value
+    const page = await connection.client.call("provider.management.list", { ...(more && view.value?.next ? { after: view.value.next } : {}), query }, readManagementPage)
+    if (query !== (isNew.value ? pickerSearch.value : search.value)) return
+    if (more && view.value) view.value = { ...page, providers: [...view.value.providers, ...page.providers], errors: [...view.value.errors, ...page.errors] }
+    else view.value = page
+    if (!more && !dirty.value && providerId.value) await loadDetail()
   } catch (cause) { error.value = messageFrom(cause) }
   finally { loading.value = false }
 }
 async function loadDetail(): Promise<void> {
   const id = providerId.value
   detailError.value = ""
-  detail.value = view.value?.providers.find((p) => p.providerId === id)
+  detail.value = undefined
+  modelDetail.value = undefined
+  modelRead++
+  modelNext.value = null
+  modelQuery.value = ""
   if (!id) return
   try {
-    const result = await connection.client.call("provider.management", { providerId: id }, readManagement)
+    const result = await connection.client.call("provider.management.list", { providerId: id }, readManagementPage)
     if (providerId.value === id) {
       const provider = result.providers.find((p) => p.providerId === id)
-      if (provider) updated(provider)
+      if (provider) { detail.value = provider; if (tab.value === "models") await loadModelDetail() }
       else {
         detail.value = undefined
         detailError.value = result.errors.find((failure) => failure.providerId === id)?.message ?? t("unavailable")
       }
     }
   } catch (cause) { if (providerId.value === id) detailError.value = messageFrom(cause) }
+}
+async function loadModelDetail(more = false, query = modelQuery.value): Promise<void> {
+  if (query !== modelQuery.value) {
+    more = false
+    modelNext.value = null
+  }
+  if (more && !modelNext.value) return
+  modelQuery.value = query
+  const request = ++modelRead
+  const id = providerId.value
+  try {
+    const result = await connection.client.call("provider.management", { providerId: id, page: { query, limit: 32, ...(more && modelNext.value ? { after: modelNext.value } : {}) } }, readManagement)
+    if (providerId.value === id && request === modelRead) {
+      const provider = result.providers.find((p) => p.providerId === id)
+      if (provider) {
+        if (more && modelDetail.value) {
+          provider.models = [...(modelDetail.value.models ?? []), ...(provider.models ?? [])]
+          provider.preferences = { ...modelDetail.value.preferences, ...provider.preferences }
+        }
+        modelNext.value = result.next
+        updated(provider)
+      }
+      else detailError.value = result.errors.find((failure) => failure.providerId === id)?.message ?? t("unavailable")
+    }
+  } catch (cause) { if (providerId.value === id && request === modelRead) detailError.value = messageFrom(cause) }
 }
 function close(): void { void router.push({ name: "settings-providers" }) }
 function open(id: string): void { void router.push({ name: "settings-provider-detail", params: { providerId: id } }) }
@@ -83,6 +120,7 @@ async function backToProviders(): Promise<void> {
   custom.value = false
 }
 function updated(provider: ManagementProvider): void {
+  modelDetail.value = provider
   detail.value = provider
   if (view.value) {
     const index = view.value.providers.findIndex((p) => p.providerId === provider.providerId)
@@ -90,12 +128,11 @@ function updated(provider: ManagementProvider): void {
     else view.value.providers.push(provider)
   }
 }
-async function saved(provider: ManagementProvider): Promise<void> {
+async function saved(provider: ManagementInfo): Promise<void> {
   connectionDirty.value = false
-  updated(provider)
+  detail.value = provider
   savedProvider.value = provider.displayName
   await router.replace({ name: "settings-providers" })
-  await models.load()
 }
 async function changeTab(next: string): Promise<void> {
   if (tab.value === next) return
@@ -103,6 +140,11 @@ async function changeTab(next: string): Promise<void> {
   connectionDirty.value = false
   modelDirty.value = false
   tab.value = next
+  if (next === "models") {
+    modelDetail.value = undefined
+    modelNext.value = null
+    await loadModelDetail(false, "")
+  }
 }
 async function reloadDetail(): Promise<void> {
   if (dirty.value && !await confirm.value?.open(t("discard"))) return
@@ -139,7 +181,7 @@ async function remove(logout = false): Promise<void> {
     await connection.client.call(logout ? `${current.account!.namespace}.logout` : "provider.delete", logout ? (current.account!.namespace === "account" ? { providerId: current.providerId } : {}) : { providerId: current.providerId, expectedVersion: current.version }, readAck)
     if (logout) await loadDetail()
     else close()
-    await Promise.all([load(), models.load()])
+    await load()
   } catch (cause) { detailError.value = messageFrom(cause) }
   finally { busy.value = false }
 }
@@ -154,6 +196,7 @@ watch([providerId, isNew], async () => {
   ++formKey.value
   await loadDetail()
 })
+watch([search, pickerSearch, isNew], () => { void load() })
 watch(() => connection.phase, (phase, before) => { if (phase === "connected" && before !== "connected" && !dirty.value) void load() })
 void load()
 </script>
@@ -165,7 +208,7 @@ void load()
     <UAlert v-if="savedProvider" color="success" variant="subtle" icon="i-lucide-check-circle" :description="t('providerSaved', { name: savedProvider })" role="status" class="settings-banner" />
     <UAlert v-if="error" color="error" variant="subtle" icon="i-lucide-alert-circle" :description="error" role="alert" class="settings-banner">
       <template #actions>
-        <UButton size="xs" color="neutral" variant="ghost" :disabled="loading || connection.phase !== 'connected'" @click="load">{{ t("retry") }}</UButton>
+        <UButton size="xs" color="neutral" variant="ghost" :disabled="loading || connection.phase !== 'connected'" @click="load()">{{ t("retry") }}</UButton>
       </template>
     </UAlert>
     <UAlert v-for="failure in view?.errors" :key="failure.providerId" color="warning" variant="subtle" icon="i-lucide-alert-triangle" :description="`${failure.providerId}: ${failure.message}`" class="settings-banner" />
@@ -181,11 +224,12 @@ void load()
           <strong>{{ provider.displayName }} <UBadge v-if="provider.account" color="neutral" variant="subtle" size="sm" label="OAuth" /></strong>
           <small v-if="provider.connection?.baseUrl">{{ provider.connection.baseUrl }}</small>
         </span>
-        <span class="settings-meta">{{ t(provider.enabled === false ? "disabled" : provider.account ? "signedIn" : "enabled") }} · {{ t("providerModelCount", { count: provider.models?.length ?? 0 }) }}</span>
+        <span class="settings-meta">{{ t(provider.enabled === false ? "disabled" : provider.account ? "signedIn" : "enabled") }}</span>
         <UIcon name="i-lucide-chevron-right" class="size-4 shrink-0 text-muted" aria-hidden="true" />
       </UButton>
       <p v-if="view && !configuredProviders.length" class="settings-empty">{{ t(search ? 'noResults' : 'noProviders') }}</p>
     </div>
+    <UButton v-if="view?.next" :loading="loading" @click="load(true)">{{ t("loadMore") }}</UButton>
     <UModal
       :open="opened"
       :title="isNew ? t(custom ? 'custom' : 'add') : detail?.displayName ?? providerId"
@@ -198,7 +242,7 @@ void load()
         <UAlert v-if="loading || busy" color="neutral" variant="subtle" :description="t(busy ? 'working' : 'loading')" role="status" class="settings-banner" />
         <UAlert v-if="error" color="error" variant="subtle" icon="i-lucide-alert-circle" :description="error" role="alert" class="settings-banner">
           <template #actions>
-            <UButton size="xs" color="neutral" variant="ghost" :disabled="loading || connection.phase !== 'connected'" @click="load">{{ t("retry") }}</UButton>
+            <UButton size="xs" color="neutral" variant="ghost" :disabled="loading || connection.phase !== 'connected'" @click="load()">{{ t("retry") }}</UButton>
           </template>
         </UAlert>
         <UAlert v-if="detailError" color="error" variant="subtle" icon="i-lucide-alert-circle" :description="detailError" role="alert" class="settings-banner">
@@ -228,6 +272,7 @@ void load()
                 <span class="settings-row-main"><strong>{{ provider.displayName }} <UBadge v-if="provider.account" color="neutral" variant="subtle" size="sm" label="OAuth" /></strong></span>
                 <UIcon name="i-lucide-chevron-right" class="size-4 shrink-0 text-muted" aria-hidden="true" />
               </UButton>
+              <UButton v-if="view.next" :loading="loading" @click="load(true)">{{ t("loadMore") }}</UButton>
               <p v-if="!availableProviders.length" class="settings-empty">{{ t("noResults") }}</p>
             </div>
           </template>
@@ -247,7 +292,7 @@ void load()
             </section>
             <ProviderConnectionForm v-if="detail.connection && view" :key="`${detail.providerId}-${formKey}`" v-model:dirty="connectionDirty" :provider="detail" :drivers="view.drivers" @saved="saved" @reload="reloadDetail" @cancel="close" />
           </template>
-          <ProviderModels v-else :key="detail.providerId" v-model:dirty="modelDirty" :provider="detail" @updated="updated" />
+          <ProviderModels v-else-if="modelDetail" :key="modelDetail.providerId" v-model:dirty="modelDirty" :provider="modelDetail" :next="modelNext" @load="(more, query) => loadModelDetail(more, query)" @updated="updated" />
           <footer v-if="detail.actions.includes('delete')" class="provider-footer">
             <UButton color="error" variant="ghost" :disabled="busy || dirty || connection.phase !== 'connected'" @click="remove()">{{ t("remove") }}</UButton>
           </footer>

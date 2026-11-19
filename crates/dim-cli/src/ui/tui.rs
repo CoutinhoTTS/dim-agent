@@ -73,8 +73,8 @@ use crate::ui::transcript::commit::CommitState;
 use crate::ui::transcript::reveal::Reveal;
 use crate::ui::transcript::stream::{StreamPlanner, TextBlock, render_open};
 use crate::ui::transcript::tool_group::{
-    Detail, ToolGroup, action_at, card_actions, card_rows, disclosure_at, disclosure_rows,
-    group_id, project_fullscreen_group, project_group, render_group,
+    Detail, State as GroupState, ToolGroup, action_at, card_actions, card_rows, disclosure_at,
+    disclosure_rows, group_id, project_fullscreen_group, project_group, render_group,
 };
 use crate::ui::upgrade_dialog::UpgradeDialog;
 use crate::usage::format_tokens;
@@ -1200,6 +1200,9 @@ struct App {
     /// A surface was opened from the Permissions page: closing it goes back
     /// to the page, as Process isolation and Command rules do.
     permissions_return: Option<ApprovalsPanel>,
+    /// The `/models` picker a Provider's management area was opened from:
+    /// closing the area goes back to the picker, as it was left.
+    models_return: Option<ModelsPanel>,
     /// Fullscreen reads the mouse (`tuiMouseMode`); off leaves selection
     /// and the wheel to the terminal.
     pub mouse: bool,
@@ -1483,7 +1486,7 @@ enum Prompt {
     Export(ListPanel),
     Report(Box<report_panel::Panel>),
     Fork(ForkAsk),
-    Models(ModelsPanel),
+    Models(Box<ModelsPanel>),
     Providers(Box<ProvidersPanel>),
     Plugins(PluginsPanel),
     Runtime(RuntimePanel),
@@ -1607,6 +1610,7 @@ impl App {
             jump: None,
             settings_return: None,
             permissions_return: None,
+            models_return: None,
             mouse,
             notify,
             notifications: Vec::new(),
@@ -1730,6 +1734,9 @@ impl App {
     fn open_prompt(&mut self, prompt: Prompt) {
         if matches!(self.prompt, Some(Prompt::Sessions(_))) {
             self.host.send(Command::CloseSessions);
+        }
+        if !matches!(prompt, Prompt::Management(_)) {
+            self.models_return = None;
         }
         if let Some(Prompt::Ask(question)) = self.prompt.take() {
             self.question_stash = Some(question);
@@ -2207,10 +2214,18 @@ impl App {
             if beat != self.last_pulse {
                 self.last_pulse = beat;
                 if self.fullscreen {
-                    let running: Vec<_> = self.history.iter().enumerate().filter_map(|(at, block)| {
-                        matches!(block, Block::ToolGroup(group) if group.state == crate::ui::transcript::tool_group::State::Running)
+                    let running: Vec<_> = self
+                        .history
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(at, block)| {
+                            matches!(
+                                block,
+                                Block::ToolGroup(group) if group.state == GroupState::Running
+                            )
                             .then_some(self.dropped + at)
-                    }).collect();
+                        })
+                        .collect();
                     for id in running {
                         self.mark_rewritten(id);
                     }
@@ -2874,11 +2889,6 @@ impl App {
                     prompt.set_choices(result);
                 }
             }
-            Update::ModelsRefilled => {
-                if matches!(self.prompt, Some(Prompt::Models(_))) {
-                    self.host.send(Command::ListModels);
-                }
-            }
             Update::Isolation(result) => {
                 if let Some(Prompt::Isolation(panel)) = &mut self.prompt {
                     panel.set_snapshot(result);
@@ -3105,7 +3115,10 @@ impl App {
                     Some(Prompt::Sessions(panel)) => panel.paste(&text),
                     Some(Prompt::Tasks(panel)) => panel.paste(&text),
                     Some(Prompt::Lines(panel)) => panel.paste(&text),
-                    Some(Prompt::Models(panel)) => panel.paste(&text),
+                    Some(Prompt::Models(panel)) => {
+                        let effect = panel.paste(&text);
+                        self.apply_effect(effect);
+                    }
                     Some(Prompt::Theme(panel)) => panel.paste(&text),
                     Some(Prompt::Language(panel)) => panel.paste(&text),
                     Some(Prompt::Settings(panel)) => panel.paste(&text),
@@ -3959,6 +3972,13 @@ impl App {
                 if matches!(self.prompt, Some(Prompt::Sessions(_))) {
                     self.host.send(Command::CloseSessions);
                 }
+                if matches!(self.prompt, Some(Prompt::Management(_)))
+                    && let Some(panel) = self.models_return.take()
+                {
+                    self.prompt = Some(Prompt::Models(Box::new(panel)));
+                    self.host.send(Command::ListModels);
+                    return Outcome::Continue;
+                }
                 self.prompt = match self.prompt.take() {
                     Some(Prompt::Fork(ask)) => ask.timeline.map(Prompt::Timeline),
                     _ => None,
@@ -4081,13 +4101,14 @@ impl App {
                 )));
             }
             Effect::OpenArea { area, note } => {
-                self.permissions_return = match self.prompt.take() {
-                    Some(Prompt::Approvals(panel)) => Some(panel),
-                    prompt => {
-                        self.prompt = prompt;
-                        None
-                    }
-                };
+                let taken = self.prompt.take();
+                self.permissions_return = None;
+                self.models_return = None;
+                match taken {
+                    Some(Prompt::Approvals(panel)) => self.permissions_return = Some(panel),
+                    Some(Prompt::Models(panel)) => self.models_return = Some(*panel),
+                    prompt => self.prompt = prompt,
+                }
                 self.open_management(area, note);
             }
             Effect::StopTask {
@@ -4278,11 +4299,11 @@ impl App {
                 if provider_id == DIM_OAUTH_ID {
                     self.signed_in = true;
                 }
-                self.prompt = Some(Prompt::Models(ModelsPanel::new()));
+                self.prompt = Some(Prompt::Models(Box::new(ModelsPanel::new())));
                 self.host.send(Command::ListModels);
             }
             Effect::OpenModels => {
-                self.prompt = Some(Prompt::Models(ModelsPanel::new()));
+                self.prompt = Some(Prompt::Models(Box::new(ModelsPanel::new())));
                 self.host.send(Command::ListModels);
             }
             Effect::Logout(target) => self.host.send(Command::Logout(target)),
@@ -4296,12 +4317,19 @@ impl App {
                     t("The browser could not be opened. Open the link manually, then return here.")
                 });
             }
+            Effect::QueryModels { query, after } => {
+                self.host.send(Command::QueryModels { query, after })
+            }
             Effect::ClearModelPreferences {
+                query,
+                after,
                 provider_id,
                 model_id,
                 expected_version,
             } => {
                 self.host.send(Command::ClearModelPreferences {
+                    query,
+                    after,
                     provider_id,
                     model_id,
                     expected_version,
@@ -5576,7 +5604,7 @@ impl App {
                 Outcome::Continue
             }
             "models" => {
-                self.open_prompt(Prompt::Models(ModelsPanel::new()));
+                self.open_prompt(Prompt::Models(Box::new(ModelsPanel::new())));
                 self.host.send(Command::ListModels);
                 Outcome::Continue
             }
@@ -5679,7 +5707,9 @@ impl App {
         let cols = size.0 as usize;
         let width = cols.saturating_sub(2 + MARGIN).max(1);
         let mut frame = Frame::default();
-        if !self.banner_committed {
+        let fullscreen_home_visible =
+            self.fullscreen && self.session_id.is_empty() && self.failure.is_none();
+        if !self.banner_committed && !fullscreen_home_visible {
             let text = banner(
                 cols,
                 &self.palette,
@@ -6415,6 +6445,9 @@ impl App {
             }),
         };
         frame.live = live;
+        if fullscreen_home_visible {
+            frame.home = fullscreen_home(cols, p);
+        }
         self.sync_compaction_details();
         if self.shows_member() {
             self.project_member(cols);
@@ -6721,7 +6754,6 @@ impl App {
 
     /// Commits owed this frame and the live rows (unclosed streaming tail,
     /// the reasoning preview and running tools, in transcript order).
-    #[allow(clippy::type_complexity)]
     fn transcript(&mut self, width: usize) -> (Vec<String>, Vec<(Block, Placement)>, Vec<String>) {
         self.tail_thoughts.clear();
         if !self.arm_window() {
@@ -7452,7 +7484,10 @@ impl App {
         self.history
             .iter()
             .rposition(|block| {
-                matches!(block, Block::User { text, cut, .. } if *cut == row.cut && *text == row.text)
+                matches!(
+                    block,
+                    Block::User { text, cut, .. } if *cut == row.cut && *text == row.text
+                )
             })
             .map(|index| self.dropped + index)
     }
@@ -8762,6 +8797,76 @@ fn pad_block(rows: &[String]) -> String {
         + "\n"
 }
 
+fn fullscreen_home(cols: usize, p: &Palette) -> Vec<String> {
+    let cols = cols.saturating_sub(1).min(72);
+    let inner = cols.saturating_sub(6 + MARGIN);
+    if inner < 13 {
+        return vec![fg("DIM", &p.accent)];
+    }
+    let logo = inner >= 56;
+    let text_width = if logo {
+        inner - STARTUP_LOGO_WIDTH - STARTUP_LOGO_GAP
+    } else {
+        inner
+    };
+    let heading = tf(
+        "Welcome to DIM {version}!",
+        &[("version", env!("CARGO_PKG_VERSION"))],
+    );
+    let heading = if width_of(&heading) <= text_width {
+        heading
+    } else {
+        "DIM".to_owned()
+    };
+    let mut rows = vec![
+        paint(
+            &heading,
+            Paint {
+                fg: Some(&p.text),
+                bold: true,
+                ..Paint::default()
+            },
+        ),
+        String::new(),
+    ];
+    rows.extend(
+        [
+            (t("Commands"), "Ctrl+O"),
+            (t("Sessions"), "/resume"),
+            (t("Models"), "/models"),
+            (t("scrollback"), "/tui"),
+            (t("Exit"), "/exit"),
+        ]
+        .into_iter()
+        .map(|(label, key)| {
+            let (label, cells) = clip(label, text_width - key.len() - 1);
+            format!(
+                "{}{:padding$}{}",
+                fg(&label, &p.text_soft),
+                "",
+                fg(key, &p.keybind),
+                padding = text_width - cells - key.len()
+            )
+        }),
+    );
+    if logo {
+        for (row, mark) in rows
+            .iter_mut()
+            .zip(STARTUP_LOGO.into_iter().chain(std::iter::repeat("")))
+        {
+            let gap = " ".repeat(STARTUP_LOGO_WIDTH + STARTUP_LOGO_GAP - width_of(mark));
+            *row = format!("{}{gap}{row}", fg(mark, &p.accent));
+        }
+    }
+    boxed(
+        &rows,
+        cols,
+        &|edge| fg(edge, &p.border),
+        &|_, body| body.to_owned(),
+        None,
+    )
+}
+
 fn banner(cols: usize, p: &Palette, branch: &str) -> String {
     let version = dim_agent_capabilities::build::current();
     let cwd = std::env::current_dir()
@@ -9180,6 +9285,8 @@ fn termux_height_only(previous_columns: u16, size: (u16, u16), termux: bool) -> 
 
 #[cfg(test)]
 mod tests {
+    use dim_agent_types::ContentBlock;
+
     use super::*;
 
     #[test]
@@ -9210,9 +9317,10 @@ mod tests {
                         .collect();
                     assert_eq!(shown, draft, "{cols} columns, fullscreen={fullscreen}");
                     drawn.key(KeyCode::Enter);
-                    assert!(
-                        matches!(sent.borrow().last(), Some(Command::Submit(text, _)) if text == draft)
-                    );
+                    assert!(matches!(
+                        sent.borrow().last(),
+                        Some(Command::Submit(text, _)) if text == draft
+                    ));
                 }
             }
         }
@@ -9328,6 +9436,7 @@ mod tests {
                     updated_at: u64::MAX,
                     model: "p/m".into(),
                     origin: None,
+                    closed: false,
                 })
                 .collect()));
             Prompt::Sessions(panel)
@@ -9992,6 +10101,52 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn composer_shows_conventional_windows_workspace_paths() {
+        use std::path::{Component, Prefix};
+
+        let home = tempfile::tempdir().unwrap();
+        let canonical = home.path().canonicalize().unwrap();
+        let cwd = canonical.to_str().unwrap();
+        let local = match canonical.components().next() {
+            Some(Component::Prefix(prefix)) => match prefix.kind() {
+                Prefix::VerbatimDisk(_) => cwd[4..].to_owned(),
+                Prefix::VerbatimUNC(..) => format!(r"\\{}", &cwd[8..]),
+                _ => cwd.to_owned(),
+            },
+            _ => cwd.to_owned(),
+        };
+        let theme = test_theme();
+        for (cwd, expected) in [
+            (cwd, local.as_str()),
+            (r"\\?\d:\项目\code", r"d:\项目\code"),
+            (
+                r"\\?\UNC\localhost\dim-test-nonexistent-share\project",
+                r"\\localhost\dim-test-nonexistent-share\project",
+            ),
+            (
+                r"\\?\Volume{00000000-0000-0000-0000-000000000000}\project",
+                r"\\?\Volume{00000000-0000-0000-0000-000000000000}\project",
+            ),
+        ] {
+            let mut app = App::new(
+                Box::new(Idle),
+                MarkdownRenderer::new(&theme),
+                theme.palette.clone(),
+                home.path().to_path_buf(),
+                cwd.to_owned(),
+            );
+            for fullscreen in [false, true] {
+                app.fullscreen = fullscreen;
+                let frame = app.frame(((width_of(expected) + 80) as u16, 30));
+                let border = frame.live.iter().rfind(|row| row.contains('╰')).unwrap();
+                let border = crate::ui::render::panel::strip_escapes(border);
+                assert!(border.contains(&format!("─ {expected} ─")), "{border:?}");
+            }
+        }
+    }
+
     /// The branch label follows the workspace the interface shows.
     #[test]
     fn composer_tracks_git_switches_in_repositories_and_worktrees() {
@@ -10600,7 +10755,7 @@ mod tests {
                 "-m",
                 "Initial",
             ]);
-            crate::ui::tilde(&path.to_string_lossy())
+            path.to_string_lossy().into_owned()
         };
 
         let theme = test_theme();
@@ -10654,13 +10809,21 @@ mod tests {
 
         // A branch wider than the path, so the path-alone rung is reachable:
         // it takes over once the tail beside the branch would be too short.
-        let path = root.path().join("checkout").to_string_lossy().into_owned();
-        let branch = format!("team/{}", "x".repeat(width_of(&crate::ui::tilde(&path))));
+        let checkout = root.path().join("checkout").to_string_lossy().into_owned();
+        let branch = format!(
+            "team/{}",
+            "x".repeat(width_of(&crate::ui::tilde(&checkout)))
+        );
+        // The attach carries the directory a daemon answers with. The border
+        // draws it through `tilde`, which shortens the temp root wherever the
+        // fixture lives below the home, so the label compares against the
+        // drawn form while the attach keeps the real path.
         let path = repository("checkout", &branch);
+        let shown = crate::ui::tilde(&path);
         let suffix = format!(" ({branch})");
-        let whole = format!("{path}{suffix}");
+        let whole = format!("{shown}{suffix}");
         assert!(
-            width_of(&suffix) + TAIL > width_of(&path),
+            width_of(&suffix) + TAIL > width_of(&shown),
             "this repository shows the path-alone rung"
         );
         attach(&mut app, "s-a", &path);
@@ -10685,13 +10848,13 @@ mod tests {
         );
         // The path alone, whole at its own width, then cut from the front.
         assert_eq!(
-            label(&mut app, width_of(&path)),
-            path,
+            label(&mut app, width_of(&shown)),
+            shown,
             "the whole path stays when the branch gives way"
         );
-        let cut = label(&mut app, width_of(&path) - 1);
+        let cut = label(&mut app, width_of(&shown) - 1);
         assert!(
-            cut.starts_with('…') && cut != path,
+            cut.starts_with('…') && cut != shown,
             "the path is cut: {cut:?}"
         );
         // No form fits: with a cell left the label is the cut mark alone,
@@ -11851,7 +12014,7 @@ mod tests {
                 app.run_command("models", "");
                 let frame = app.frame(size);
                 emu.feed(&screen.render(&frame, size, &app.palette, app));
-                assert!(emu.rows_text().join("\n").contains("Select a model"));
+                assert!(emu.rows_text().join("\n").contains("Conversation model"));
                 assert_ne!(
                     screen.mouse(event(MouseKind::Press, column), app),
                     MouseOutcome::Models
@@ -11900,7 +12063,7 @@ mod tests {
             typed(&mut drawn.app, "/model");
             drawn.key(KeyCode::Enter);
             let models = screen(&mut drawn);
-            assert!(models.contains("Select a model"), "{models}");
+            assert!(models.contains("Conversation model"), "{models}");
         }
     }
 
@@ -12341,6 +12504,7 @@ mod tests {
 
     #[test]
     fn permissions_focus_tracks_hints_and_survives_policy_updates_and_submenus() {
+        use crate::ui::render::panel::strip_escapes;
         use dim_agent_types::{PermissionPolicy, PermissionPreset};
 
         for fullscreen in [false, true] {
@@ -12363,20 +12527,13 @@ mod tests {
                     }
                     let render = |drawn: &mut Drawn| {
                         let frame = drawn.app.frame(size);
-                        let bytes = if fullscreen {
-                            FullScreen::new(size, true).render(
-                                &frame,
-                                size,
-                                &drawn.app.palette,
-                                &drawn.app,
-                            )
-                        } else {
-                            Screen::new(size, true).render(&frame, size)
-                        };
-                        let mut emu =
-                            crate::ui::render::testterm::Emu::new(size.0 as usize, size.1 as usize);
-                        emu.feed(&bytes);
-                        emu.rows_text()
+                        frame
+                            .overlay
+                            .as_ref()
+                            .map_or(&frame.live, |overlay| &overlay.rows)
+                            .iter()
+                            .map(|row| strip_escapes(row))
+                            .collect::<Vec<_>>()
                             .join("\n")
                             .replace('│', " ")
                             .split_whitespace()
@@ -13952,6 +14109,47 @@ mod tests {
             ),
             "the draft is a message, never a command"
         );
+    }
+
+    /// Both TUI modes draw a filled Skill by its name, and the message the same
+    /// draft sends still carries the canonical `/skill:<name>` token.
+    #[test]
+    fn a_filled_skill_draws_its_name_in_both_modes() {
+        use crate::management::skills::Entry;
+        for fullscreen in [false, true] {
+            let mut drawn = Drawn::new((100, 30), None, false);
+            drawn.app.fullscreen = fullscreen;
+            drawn.app.apply(Update::Skills(vec![Entry {
+                id: "user:status".into(),
+                source: Some("user".into()),
+                name: "status".into(),
+                description: "Show the status".into(),
+                file_path: "/home/.agents/skills/status/SKILL.md".into(),
+                enabled: true,
+                shadowed_by: None,
+                user_invocable: true,
+            }]));
+            drawn.app.composer.clear();
+            for ch in "/stat".chars() {
+                drawn.key(KeyCode::Char(ch));
+            }
+            drawn.key(KeyCode::Tab);
+
+            let screen = drawn.emu.rows_text().join("\n");
+            assert!(
+                screen.contains("/status"),
+                "the input draws the Skill's name in fullscreen={fullscreen}: {screen}"
+            );
+            assert!(
+                !screen.contains("skill:status"),
+                "the parser's namespace is not drawn in fullscreen={fullscreen}: {screen}"
+            );
+            assert_eq!(
+                drawn.app.composer.text(),
+                "/skill:status ",
+                "the draft still holds the canonical token in fullscreen={fullscreen}"
+            );
+        }
     }
 
     /// A resumed session of `count` user messages `ask N`, each cut at `N`.
@@ -15985,6 +16183,56 @@ mod tests {
         assert_eq!(drawn.app.composer.text(), "check the build");
     }
 
+    #[test]
+    fn fullscreen_home_adapts_to_the_viewport_and_yields_to_the_session() {
+        let mut drawn = Drawn::new((92, 22), None, true);
+        assert!(drawn.app.frame(drawn.size).home.is_empty());
+        drawn.app.set_fullscreen(true);
+        drawn.app.set_notice("fixture notice");
+        let home = drawn.app.frame(drawn.size).home;
+        let palette = &drawn.app.palette;
+        for (row, mark) in home.iter().skip(1).zip(STARTUP_LOGO) {
+            assert!(row.contains(&fg(mark, &palette.accent)), "{row:?}");
+        }
+        assert!(home[3].contains(&fg("Ctrl+O", &palette.keybind)));
+        let render_frame = |app: &mut App, size: (u16, u16)| {
+            let frame = app.frame(size);
+            let mut screen = FullScreen::new(size, true);
+            let mut emu = crate::ui::render::testterm::Emu::new(size.0.into(), size.1.into());
+            emu.feed(&screen.render(&frame, size, &app.palette, app));
+            emu.rows_text()
+        };
+        let wide = render_frame(&mut drawn.app, drawn.size).join("\n");
+        assert!(
+            wide.contains("Welcome to DIM") && wide.contains("Ctrl+O"),
+            "{wide}"
+        );
+        assert!(wide.contains("fixture notice"), "{wide}");
+        let narrow = render_frame(&mut drawn.app, (32, 22)).join("\n");
+        assert!(
+            narrow.contains("DIM") && narrow.contains("/resume"),
+            "{narrow}"
+        );
+        assert!(!narrow.contains(STARTUP_LOGO[0]), "{narrow}");
+        let short = render_frame(&mut drawn.app, (92, 9));
+        assert!(short.iter().any(|row| row.trim() == "DIM"), "{short:?}");
+        assert!(
+            short.iter().all(|row| !row.contains("/resume")),
+            "{short:?}"
+        );
+
+        drawn.app.apply(Update::Switched {
+            session_id: "s1".into(),
+            kind: SwitchKind::Resumed,
+            cwd: None,
+        });
+        drawn.show(&[("m1", "session transcript")], "main", true);
+        assert!(drawn.app.frame(drawn.size).home.is_empty());
+        let attached = render_frame(&mut drawn.app, drawn.size).join("\n");
+        assert!(attached.contains("session transcript"), "{attached}");
+        assert!(!attached.contains("/resume"), "{attached}");
+    }
+
     /// Entering fullscreen lays out only the shown Session's transcript,
     /// not what scrollback committed before it.
     #[test]
@@ -16552,7 +16800,10 @@ mod tests {
                 typed(&mut app, words);
                 press(&mut app, KeyCode::Enter);
                 assert!(
-                    matches!(sent.borrow().as_slice(), [Command::Loop(request)] if *request == expected),
+                    matches!(
+                        sent.borrow().as_slice(),
+                        [Command::Loop(request)] if *request == expected
+                    ),
                     "{words:?} dispatches {expected:?}"
                 );
                 assert!(app.composer.is_empty());
@@ -17016,8 +17267,10 @@ mod tests {
                     [Command::SubmitDraft(parts, SubmitMode::Queue)]
                         if matches!(
                             parts.as_slice(),
-                            [DraftPart::Text(all), DraftPart::Block(dim_agent_types::ContentBlock::Image { .. })]
-                                if all == "first\nand then "
+                            [
+                                DraftPart::Text(all),
+                                DraftPart::Block(ContentBlock::Image { .. })
+                            ] if all == "first\nand then "
                         )
                 ),
                 "{label}: the recalled text, the draft and its image: {}",
@@ -17075,8 +17328,10 @@ mod tests {
                 [Command::SubmitDraft(parts, SubmitMode::Queue)]
                     if matches!(
                         parts.as_slice(),
-                        [DraftPart::Text(all), DraftPart::Block(dim_agent_types::ContentBlock::Image { .. })]
-                            if all == "first\nand then "
+                        [
+                            DraftPart::Text(all),
+                            DraftPart::Block(ContentBlock::Image { .. })
+                        ] if all == "first\nand then "
                     )
             ),
             "one submit carries the recalled message, the text and its image: {}",
@@ -17347,6 +17602,11 @@ mod tests {
             } else {
                 "see [Image] here\nand then"
             };
+            let suffix = if draft.is_empty() {
+                " here"
+            } else {
+                " here\nand then"
+            };
             assert_eq!(
                 app.composer.text(),
                 expected,
@@ -17360,8 +17620,11 @@ mod tests {
                     [Command::SubmitDraft(parts, SubmitMode::Queue)]
                         if matches!(
                             parts.as_slice(),
-                            [DraftPart::Text(see), DraftPart::Block(dim_agent_types::ContentBlock::Image { .. }), DraftPart::Text(here)]
-                                if see == "see " && here == if draft.is_empty() { " here" } else { " here\nand then" }
+                            [
+                                DraftPart::Text(see),
+                                DraftPart::Block(ContentBlock::Image { .. }),
+                                DraftPart::Text(here)
+                            ] if see == "see " && here == suffix
                         )
                 ),
                 "the submitted message is the text, the image, then the text: {}",
@@ -17876,9 +18139,10 @@ mod tests {
             "restoring never submits automatically"
         );
         press(&mut app, KeyCode::Enter);
-        assert!(
-            matches!(sent.borrow().as_slice(), [Command::SubmitDraft(restored, _)] if restored == &parts)
-        );
+        assert!(matches!(
+            sent.borrow().as_slice(),
+            [Command::SubmitDraft(restored, _)] if restored == &parts
+        ));
     }
 
     /// A withdrawn message returns as the operator's own words: a block the
@@ -18354,8 +18618,13 @@ mod tests {
             assert_eq!(selection(&app), Some(answer));
             assert!(matches!(
                 sent.borrow().last(),
-                Some(Command::Report(Request { action: Action::Cancel { draft, generation: false }, .. }))
-                    if draft.report_id == "r1"
+                Some(Command::Report(Request {
+                    action: Action::Cancel {
+                        draft,
+                        generation: false,
+                    },
+                    ..
+                })) if draft.report_id == "r1"
             ));
         }
     }
@@ -18414,8 +18683,14 @@ mod tests {
         press(&mut app, KeyCode::Enter);
         assert!(matches!(
             sent.borrow().last(),
-            Some(Command::Report(Request { action: Action::Plan { draft, redact: false, instructions }, .. }))
-                if draft.report_id == "r1" && instructions == "omit timeline"
+            Some(Command::Report(Request {
+                action: Action::Plan {
+                    draft,
+                    redact: false,
+                    instructions,
+                },
+                ..
+            })) if draft.report_id == "r1" && instructions == "omit timeline"
         ));
         app.apply(Update::ReportReply {
             panel,
@@ -18441,8 +18716,16 @@ mod tests {
         });
         assert!(matches!(
             sent.borrow().last(),
-            Some(Command::Report(Request { action: Action::Plan { draft, redact: false, instructions }, .. }))
-                if draft.report_id == "r2" && draft.session.as_deref() == Some("s1") && instructions == "omit timeline"
+            Some(Command::Report(Request {
+                action: Action::Plan {
+                    draft,
+                    redact: false,
+                    instructions,
+                },
+                ..
+            })) if draft.report_id == "r2"
+                && draft.session.as_deref() == Some("s1")
+                && instructions == "omit timeline"
         ));
     }
 
@@ -18478,11 +18761,24 @@ mod tests {
                 }),
             });
             app.apply(Update::Failed("Disconnected".into()));
+            let Some(Prompt::Report(report)) = &app.prompt else {
+                panic!("expected report panel");
+            };
+            assert!(
+                !report
+                    .render(90, 20, &app.palette)
+                    .join("\n")
+                    .contains("feedback@arcships.ai")
+            );
             press(&mut app, KeyCode::Enter);
             let Some(Prompt::Report(report)) = &app.prompt else {
                 panic!("expected report panel");
             };
             assert_eq!(report.saved_path().is_some(), should_save);
+            let screen = report.render(36, 20, &app.palette).join("\n");
+            assert_eq!(screen.contains("feedback@arcships.ai"), should_save);
+            assert_eq!(screen.contains(t("Draft a GitHub issue")), should_save);
+            assert_eq!(screen.contains(t("Give feedback on Discord")), should_save);
             if let Some(path) = report.saved_path() {
                 assert_eq!(path.parent(), Some(home.path()));
                 assert!(
@@ -19399,7 +19695,12 @@ mod tests {
                 .app
                 .apply(Update::Snapshot(Box::new(snapshot.clone())));
             drawn.draw();
-            assert!(commands.borrow().iter().all(|command| !matches!(command, Command::CompactionDetails { targets, .. } if !targets.is_empty())));
+            assert!(commands.borrow().iter().all(|command| {
+                !matches!(
+                    command,
+                    Command::CompactionDetails { targets, .. } if !targets.is_empty()
+                )
+            }));
             let block = drawn.app.dropped
                 + drawn
                     .app
@@ -19423,16 +19724,22 @@ mod tests {
             drawn.app.apply(Update::Snapshot(Box::new(loaded)));
             drawn.draw();
             assert!(drawn_text(&mut drawn).contains("Loaded compaction body"));
-            assert!(drawn.app.history.iter().any(|block| matches!(block, Block::Compaction { text, .. } if std::sync::Arc::ptr_eq(text, &body))));
+            assert!(drawn.app.history.iter().any(|block| {
+                matches!(
+                    block,
+                    Block::Compaction { text, .. } if std::sync::Arc::ptr_eq(text, &body)
+                )
+            }));
             drop(body);
             if fullscreen {
                 drawn.app.set_fullscreen(false);
             } else {
                 assert!(drawn.app.click(Some(block), 1, 100));
             }
-            assert!(
-                matches!(commands.borrow().last(), Some(Command::CompactionDetails { targets, .. }) if targets.is_empty())
-            );
+            assert!(matches!(
+                commands.borrow().last(),
+                Some(Command::CompactionDetails { targets, .. }) if targets.is_empty()
+            ));
             drawn
                 .app
                 .apply(Update::Snapshot(Box::new(snapshot.clone())));
@@ -19658,6 +19965,7 @@ mod tests {
             updated_at: u64::MAX,
             model: "p/m".into(),
             origin: None,
+            closed: false,
         };
         let here = item("s-here", "Fix the failing test", &launch);
         let also = item("s-also", "Retry the flaky test", &launch);

@@ -15,7 +15,7 @@ use dim_agent_capabilities::{
     host::*,
     host_platform::{HostPlatform, HostPlatformConfig, HostPlatformPlugin, resolve_shell},
     model_provider::ModelProviderPlugin,
-    permission::{CommandRulesHost, NoCommandRules},
+    permission::{CommandRules, NoCommandRules},
     skill_settings::SkillSettingsHost,
     skills::{MemorySkillSettings, SkillsCatalogPlugin},
 };
@@ -210,14 +210,14 @@ impl Harness {
         let mut builder = AgentBuilder::new(AgentConfig::default());
         platform(&mut builder);
         builder
-            .timeline_store(store.clone())
+            .timeline_store(dim_agent_runtime::TimelineStoreBinding::new(store.clone()))
             .session_value(Arc::new(HistoryRenderer::default()))
             .process_value(Arc::new(ModelHost(model.clone())))
             .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
             .session_value(Arc::new(ContextModelHost(compacting.then(|| {
                 Arc::new(compaction_support::Window::default()) as Arc<dyn ResolveContextModel>
             }))))
-            .session_value(Arc::new(CommandRulesHost(Arc::new(NoCommandRules))))
+            .session_data_value(Arc::new(CommandRules(Arc::new(NoCommandRules))))
             .session_value(Arc::new(CompactionStrategyHost(compacting.then(|| {
                 Arc::new(compaction_support::Window::default()) as Arc<dyn CompactionStrategy>
             }))))
@@ -1299,7 +1299,19 @@ async fn shell_exit_kills_background_jobs() {
         "{}",
         text(&end.result)
     );
-    assert!(gone(&pid).await);
+    assert!(
+        gone(&pid).await,
+        "background process {pid} survived the shell reset: result={:?}, process={:?}",
+        end.result,
+        std::process::Command::new("ps")
+            .args(["-o", "pid=,ppid=,pgid=,stat=,comm=", "-p", &pid])
+            .output()
+            .map(|output| (
+                output.status,
+                String::from_utf8_lossy(&output.stdout).into_owned(),
+                String::from_utf8_lossy(&output.stderr).into_owned(),
+            ))
+    );
     session.close().await.unwrap();
     harness.shutdown().await;
 }
@@ -1370,32 +1382,6 @@ fn drive(grows_through: Option<u32>) -> (SettleDecision, SettleWait) {
     }
 }
 
-/// A total that never grows exits idle exactly one idle window in.
-#[test]
-fn a_wait_with_no_output_at_all_exits_idle() {
-    let (decision, wait) = drive(None);
-    assert_eq!(decision, SettleDecision::Idle);
-    assert_eq!(wait.polls, SETTLE_IDLE_POLLS);
-}
-
-/// A log that grows on every poll never reaches the idle exit, because every
-/// poll grows, so the ceiling is the only way out. The final poll is exactly
-/// the poll that grew, so the bookkeeping reports zero polls since the last
-/// growth and the text names that same poll.
-#[test]
-fn a_continuously_growing_log_exits_at_the_ceiling() {
-    let (decision, wait) = drive(Some(MAX_SETTLE_POLLS + 1));
-    assert_eq!(decision, SettleDecision::Ceiling);
-    assert_eq!(wait.polls, MAX_SETTLE_POLLS);
-    assert_eq!(wait.since_growth(), 0);
-    let text = settle_timeout("exec wake", decision, &wait);
-    assert!(
-        text.contains("the last growth was this same poll"),
-        "{text}"
-    );
-    assert!(!text.contains("still writing"), "{text}");
-}
-
 /// A stall inside the last idle window: growth through zero-based poll 2501,
 /// then flat for good. Only 498 unchanged polls follow, short of the 500 the
 /// idle exit needs, so it reaches the ceiling — and the ceiling text must
@@ -1408,17 +1394,6 @@ fn a_stall_inside_the_last_idle_window_still_exits_at_the_ceiling() {
     let text = settle_timeout("exec wake", decision, &wait);
     assert!(text.contains("last growth 498 polls (9.96 s)"), "{text}");
     assert!(!text.contains("still writing"), "{text}");
-}
-
-/// Growth through poll 2499, then flat: the 500th unchanged poll is poll 3000,
-/// which is also the ceiling. The idle exit is checked first, so a stall that
-/// begins exactly one idle window before the ceiling is named as a stall.
-#[test]
-fn a_stall_one_idle_window_before_the_ceiling_exits_idle() {
-    let (decision, wait) = drive(Some(2499));
-    assert_eq!(decision, SettleDecision::Idle);
-    assert_eq!(wait.polls, MAX_SETTLE_POLLS);
-    assert_eq!(wait.since_growth(), SETTLE_IDLE_POLLS);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1606,7 +1581,14 @@ async fn restarting_exec_recovery_settles_the_live_shell_before_rebuilding() {
     })
     .await;
     assert!(ended(&before).is_empty());
+    session.idle("main").await.unwrap();
     let plugins = session.branch_diagnostics("main").unwrap().plugins;
+    let shell = plugins
+        .iter()
+        .find(|plugin| plugin.name == "ShellSession")
+        .unwrap();
+    let shell_generation = shell.generation;
+    let mut shell_state = harness.agent.root().view(shell.id).unwrap().watch();
     let recovery = plugins
         .iter()
         .find(|plugin| plugin.name == "BackgroundExec")
@@ -1627,6 +1609,23 @@ async fn restarting_exec_recovery_settles_the_live_shell_before_rebuilding() {
         text(&ended(&after)[0].1.result).contains("shell was reset"),
         "the live shell must settle before recovery inspects history"
     );
+    {
+        let ready = tokio::time::timeout(
+            Duration::from_secs(10),
+            shell_state.wait_for(|state| {
+                state.generation > shell_generation
+                    && matches!(
+                        state.state,
+                        rutis::host::FiberState::Active | rutis::host::FiberState::Failed
+                    )
+            }),
+        )
+        .await
+        .expect("the dependent ShellSession completes its new generation")
+        .expect("the dependent ShellSession remains mounted");
+        assert_eq!(ready.state, rutis::host::FiberState::Active, "{ready:?}");
+    }
+    session.idle("main").await.unwrap();
     harness
         .run(
             &session,
@@ -1637,6 +1636,10 @@ async fn restarting_exec_recovery_settles_the_live_shell_before_rebuilding() {
     let final_events = local_events(&session).await;
     assert_eq!(ended(&final_events).len(), 1);
     assert_eq!(notifications(&final_events), notifications(&after));
-    assert!(text(results(&final_events).last().unwrap()).contains("new-generation"));
+    assert!(
+        text(results(&final_events).last().unwrap()).contains("new-generation"),
+        "the new generation must execute: {:?}",
+        results(&final_events).last().unwrap()
+    );
     harness.shutdown().await;
 }

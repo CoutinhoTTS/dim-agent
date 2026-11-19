@@ -26,7 +26,7 @@ use dim_app_server::protocol::SessionOrigin;
 use dim_app_server::storage::{
     NodeLoads, STORE_FORMAT, SqliteStorage, SqliteTimelineStore, vacuum_store,
 };
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use rutis::host::CtxHost;
 use std::{
     path::PathBuf,
@@ -48,6 +48,9 @@ mod prompt_recovery;
 
 #[path = "storage_flow/image_migration.rs"]
 mod image_migration;
+
+#[path = "storage_flow/prompt_migration.rs"]
+mod prompt_migration;
 
 #[path = "storage_flow/reclaim.rs"]
 mod reclaim;
@@ -160,8 +163,10 @@ async fn append(
         .unwrap()
 }
 /// How long a flow waits for the writer to publish a write before it fails
-/// instead of hanging.
-const PUBLISHED: Duration = Duration::from_secs(30);
+/// instead of hanging. A hang guard, not a performance bound: the largest
+/// append a flow makes (14,336 records) takes about 2 s on a quiet machine,
+/// almost all of it the writer's own per-record work.
+const PUBLISHED: Duration = Duration::from_secs(180);
 /// Queues `records` and returns their publish result, which fails the test
 /// after `PUBLISHED`.
 fn queue(
@@ -447,7 +452,63 @@ const V40_ADDITIONS: &[&str] = &[
     "CREATE INDEX timeline_events_scopes ON timeline_events(session_id,branch_id,kind,json_extract(body,'$.record.event.data.scope.kind'),json_extract(body,'$.record.event.data.scope.timeline'),json_extract(body,'$.record.event.data.scope.id'),json_extract(body,'$.record.event.data.status'),sequence) WHERE kind='context/scope'",
     "CREATE INDEX timeline_events_source_positions ON timeline_events(session_id,branch_id,kind,json_extract(body,'$.record.event.data.epoch'),json_extract(body,'$.record.event.data.current.at.branch'),json_extract(body,'$.record.event.data.current.at.sequence'),sequence) WHERE kind='context-usage/recovered'",
 ];
+const V51_ADDITIONS: &[&str] = &[
+    "CREATE TABLE provider_bundle (provider_id TEXT PRIMARY KEY, fingerprint TEXT, definition_fingerprint TEXT, pending INTEGER NOT NULL CHECK(pending IN (0,1)))",
+    "CREATE TABLE provider_catalog_revision (id INTEGER PRIMARY KEY CHECK(id=1), revision TEXT NOT NULL)",
+    "CREATE TABLE provider_query_records (provider_id TEXT PRIMARY KEY REFERENCES providers(provider_id) ON DELETE CASCADE, enabled INTEGER NOT NULL, kind TEXT, credential_configured INTEGER NOT NULL, record TEXT NOT NULL)",
+    "CREATE INDEX provider_query_records_by_state ON provider_query_records(enabled,credential_configured,provider_id)",
+    "CREATE INDEX provider_query_records_by_kind ON provider_query_records(kind,provider_id)",
+    "CREATE TABLE provider_models (provider_id TEXT NOT NULL REFERENCES providers(provider_id) ON DELETE CASCADE, model_id TEXT NOT NULL, source TEXT NOT NULL, entry TEXT NOT NULL, PRIMARY KEY(provider_id,model_id,source))",
+    "CREATE INDEX provider_models_by_model ON provider_models(model_id,provider_id)",
+    "CREATE TRIGGER provider_models_insert AFTER INSERT ON providers BEGIN DELETE FROM provider_query_records WHERE provider_id=NEW.provider_id; INSERT INTO provider_query_records SELECT NEW.provider_id,coalesce(json_extract(record,'$.enabled'),0),json_extract(record,'$.kind'),coalesce(json_extract(record,'$.credential') IS NOT NULL OR json_extract(record,'$.auth.type')='anonymous' OR coalesce(json_extract(record,'$.credentialAuthority'),'static')!='static',0),json_remove(record,'$.models','$.userModels','$.modelConfigOverrides') FROM (SELECT CASE WHEN json_valid(NEW.record) THEN NEW.record ELSE '{}' END AS record); DELETE FROM provider_models WHERE provider_id=NEW.provider_id; INSERT OR IGNORE INTO provider_models SELECT NEW.provider_id,coalesce(json_extract(CASE WHEN type='object' THEN value ELSE '{}' END,'$.modelId'),json_extract(CASE WHEN type='object' THEN value ELSE '{}' END,'$.entry.modelId')),'default',value FROM json_each(CASE WHEN json_valid(NEW.record) THEN NEW.record ELSE '{}' END,'$.models') WHERE coalesce(json_extract(CASE WHEN type='object' THEN value ELSE '{}' END,'$.modelId'),json_extract(CASE WHEN type='object' THEN value ELSE '{}' END,'$.entry.modelId')) IS NOT NULL; INSERT OR IGNORE INTO provider_models SELECT NEW.provider_id,json_extract(CASE WHEN type='object' THEN value ELSE '{}' END,'$.modelId'),'user',value FROM json_each(CASE WHEN json_valid(NEW.record) THEN NEW.record ELSE '{}' END,'$.userModels') WHERE json_extract(CASE WHEN type='object' THEN value ELSE '{}' END,'$.modelId') IS NOT NULL; INSERT OR IGNORE INTO provider_models SELECT NEW.provider_id,json_extract(CASE WHEN type='object' THEN value ELSE '{}' END,'$.modelId'),'override',value FROM json_each(CASE WHEN json_valid(NEW.record) THEN NEW.record ELSE '{}' END,'$.modelConfigOverrides') WHERE json_extract(CASE WHEN type='object' THEN value ELSE '{}' END,'$.modelId') IS NOT NULL; END",
+    "CREATE TRIGGER provider_models_update AFTER UPDATE ON providers BEGIN DELETE FROM provider_query_records WHERE provider_id=NEW.provider_id; INSERT INTO provider_query_records SELECT NEW.provider_id,coalesce(json_extract(record,'$.enabled'),0),json_extract(record,'$.kind'),coalesce(json_extract(record,'$.credential') IS NOT NULL OR json_extract(record,'$.auth.type')='anonymous' OR coalesce(json_extract(record,'$.credentialAuthority'),'static')!='static',0),json_remove(record,'$.models','$.userModels','$.modelConfigOverrides') FROM (SELECT CASE WHEN json_valid(NEW.record) THEN NEW.record ELSE '{}' END AS record); DELETE FROM provider_models WHERE provider_id=NEW.provider_id; INSERT OR IGNORE INTO provider_models SELECT NEW.provider_id,coalesce(json_extract(CASE WHEN type='object' THEN value ELSE '{}' END,'$.modelId'),json_extract(CASE WHEN type='object' THEN value ELSE '{}' END,'$.entry.modelId')),'default',value FROM json_each(CASE WHEN json_valid(NEW.record) THEN NEW.record ELSE '{}' END,'$.models') WHERE coalesce(json_extract(CASE WHEN type='object' THEN value ELSE '{}' END,'$.modelId'),json_extract(CASE WHEN type='object' THEN value ELSE '{}' END,'$.entry.modelId')) IS NOT NULL; INSERT OR IGNORE INTO provider_models SELECT NEW.provider_id,json_extract(CASE WHEN type='object' THEN value ELSE '{}' END,'$.modelId'),'user',value FROM json_each(CASE WHEN json_valid(NEW.record) THEN NEW.record ELSE '{}' END,'$.userModels') WHERE json_extract(CASE WHEN type='object' THEN value ELSE '{}' END,'$.modelId') IS NOT NULL; INSERT OR IGNORE INTO provider_models SELECT NEW.provider_id,json_extract(CASE WHEN type='object' THEN value ELSE '{}' END,'$.modelId'),'override',value FROM json_each(CASE WHEN json_valid(NEW.record) THEN NEW.record ELSE '{}' END,'$.modelConfigOverrides') WHERE json_extract(CASE WHEN type='object' THEN value ELSE '{}' END,'$.modelId') IS NOT NULL; END",
+];
+
+const V52_ADDITIONS: &[&str] = &[
+    "CREATE TABLE provider_model_state (provider_id TEXT NOT NULL REFERENCES providers(provider_id) ON DELETE CASCADE, model_id TEXT NOT NULL, field TEXT NOT NULL, position INTEGER NOT NULL, value TEXT NOT NULL, PRIMARY KEY(provider_id,model_id,field))",
+    "CREATE TABLE provider_bundle (provider_id TEXT PRIMARY KEY, fingerprint TEXT, definition_fingerprint TEXT, pending INTEGER NOT NULL CHECK(pending IN (0,1)), attempted INTEGER NOT NULL, naming_revision TEXT NOT NULL)",
+    "CREATE TABLE provider_catalog_revision (id INTEGER PRIMARY KEY CHECK(id=1), revision TEXT NOT NULL, activation INTEGER NOT NULL)",
+    "CREATE TABLE provider_sources (revision TEXT NOT NULL UNIQUE, image BLOB NOT NULL)",
+    "CREATE TABLE provider_bases (provider_id TEXT PRIMARY KEY REFERENCES providers(provider_id) ON DELETE CASCADE, revision TEXT NOT NULL REFERENCES provider_sources(revision))",
+    "CREATE TABLE provider_models (provider_id TEXT NOT NULL REFERENCES providers(provider_id) ON DELETE CASCADE, model_id TEXT NOT NULL, source TEXT NOT NULL, position INTEGER NOT NULL, entry TEXT NOT NULL, PRIMARY KEY(provider_id,model_id,source))",
+    "CREATE INDEX provider_models_by_model ON provider_models(model_id,provider_id)",
+    "CREATE INDEX provider_models_by_position ON provider_models(provider_id,source,position)",
+    "CREATE TABLE provider_names (provider_id TEXT NOT NULL REFERENCES providers(provider_id) ON DELETE CASCADE, model_id TEXT NOT NULL, display_name TEXT NOT NULL, label TEXT, zdr INTEGER NOT NULL, PRIMARY KEY(provider_id,model_id))",
+    "CREATE TABLE provider_name_keys (provider_id TEXT NOT NULL, key TEXT NOT NULL, model_id TEXT NOT NULL, PRIMARY KEY(provider_id,key,model_id), FOREIGN KEY(provider_id,model_id) REFERENCES provider_names(provider_id,model_id) ON DELETE CASCADE)",
+];
+
+fn drop_v51(connection: &Connection) {
+    for table in [
+        "provider_model_state",
+        "provider_name_keys",
+        "provider_names",
+        "provider_bases",
+        "provider_sources",
+    ] {
+        connection
+            .execute_batch(&format!("DROP TABLE IF EXISTS {table}"))
+            .unwrap();
+    }
+    for sql in V51_ADDITIONS.iter().rev() {
+        let words: Vec<_> = sql.split_whitespace().collect();
+        let kind: Option<String> = connection
+            .query_row(
+                "SELECT type FROM sqlite_master WHERE name=?1",
+                [words[2]],
+                |r| r.get(0),
+            )
+            .optional()
+            .unwrap();
+        if let Some(kind) = kind {
+            connection
+                .execute_batch(&format!("DROP {kind} {}", words[2]))
+                .unwrap();
+        }
+    }
+}
+
 fn drop_v40(connection: &Connection) {
+    drop_v51(connection);
     connection
         .execute_batch("DROP INDEX IF EXISTS timeline_events_branch_interrupts")
         .unwrap();
@@ -475,6 +536,7 @@ const SESSION_OWNERS_V38: &str = "CREATE TABLE session_owners(session_id TEXT PR
 /// they take a live store back to an earlier format: #1421 widened the
 /// column's CHECK, and the format gate compares the statement verbatim.
 fn without_automation_origin(connection: &Connection) {
+    drop_v51(connection);
     connection
         .execute_batch(&format!(
             "PRAGMA foreign_keys=OFF;
@@ -507,6 +569,8 @@ fn schema_of(version: u32) -> Vec<String> {
         .chain(V37_ADDITIONS.iter().filter(|_| version >= 37))
         .chain(V39_ADDITIONS.iter().filter(|_| version >= 39))
         .chain(V40_ADDITIONS.iter().filter(|_| version >= 40))
+        .chain(V51_ADDITIONS.iter().filter(|_| version == 51))
+        .chain(V52_ADDITIONS.iter().filter(|_| version >= 52))
         .chain(["CREATE INDEX timeline_events_branch_interrupts ON timeline_events(session_id, branch_id, sequence) WHERE kind = 'stop/interrupt' AND json_extract(body, '$.record.event.data.scope') = 'branch'"].iter().filter(|_| version >= 47))
         .filter(|sql| version <= 24 || !sql.starts_with("CREATE INDEX timeline_events_by_end "))
         .map(|sql| sql.replace("(version = 13)", &format!("(version = {version})")))
@@ -1257,7 +1321,7 @@ async fn output_block_start_id_roundtrips_through_the_merged_row() {
     let mut builder = AgentBuilder::new(AgentConfig::default());
     dim_agent_capabilities::defaults::mock_hosts(&mut builder);
     dim_agent_capabilities::defaults::install(&mut builder);
-    builder.timeline_store(store.clone());
+    builder.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(store.clone()));
     let agent = MinimalHost::start(&builder).await.unwrap();
     let session = agent.restore_session("session".into()).await.unwrap();
     let restored = chain_events(&session, "main", ..=2).await.unwrap();
@@ -1874,7 +1938,7 @@ async fn extension_events_keep_their_own_rows_and_restore_unchanged() {
     let mut builder = AgentBuilder::new(AgentConfig::default());
     dim_agent_capabilities::defaults::mock_hosts(&mut builder);
     dim_agent_capabilities::defaults::install(&mut builder);
-    builder.timeline_store(store.clone());
+    builder.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(store.clone()));
     let agent = MinimalHost::start(&builder).await.unwrap();
     let session = agent.restore_session("session".into()).await.unwrap();
     let restored = chain_events(&session, "main", ..=3).await.unwrap();
@@ -2010,7 +2074,7 @@ async fn conditional_steer_recovers_checked_candidates_once_and_preserves_old_in
         let mut builder = AgentBuilder::new(AgentConfig::default());
         dim_agent_capabilities::defaults::mock_hosts(&mut builder);
         dim_agent_capabilities::defaults::install(&mut builder);
-        builder.timeline_store(store.clone());
+        builder.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(store.clone()));
         let agent = MinimalHost::start(&builder).await.unwrap();
         let session = agent.restore_session("session".into()).await.unwrap();
         tokio::time::timeout(PUBLISHED, session.idle("main"))
@@ -2223,7 +2287,7 @@ async fn branch_end_events_restore_unchanged_and_the_line_stays_ended() {
     let mut builder = AgentBuilder::new(AgentConfig::default());
     dim_agent_capabilities::defaults::mock_hosts(&mut builder);
     dim_agent_capabilities::defaults::install(&mut builder);
-    builder.timeline_store(store.clone());
+    builder.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(store.clone()));
     let agent = MinimalHost::start(&builder).await.unwrap();
     let session = agent.restore_session("session".into()).await.unwrap();
     let restored = chain_events(&session, "main", ..=5).await.unwrap();
@@ -3277,7 +3341,7 @@ async fn failed_output_commit_closes_only_its_session_and_recovery_settles_the_o
         let mut builder = AgentBuilder::new(AgentConfig::default());
         dim_agent_capabilities::defaults::mock_hosts(&mut builder);
         dim_agent_capabilities::defaults::install(&mut builder);
-        builder.timeline_store(store.clone());
+        builder.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(store.clone()));
         let mut agent = MinimalHost::start(&builder).await.unwrap();
         let bad = agent
             .create_session(SessionConfig::default())
@@ -3370,7 +3434,7 @@ async fn failed_output_commit_closes_only_its_session_and_recovery_settles_the_o
             let mut builder = AgentBuilder::new(AgentConfig::default());
             dim_agent_capabilities::defaults::mock_hosts(&mut builder);
             dim_agent_capabilities::defaults::install(&mut builder);
-            builder.timeline_store(store.clone());
+            builder.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(store.clone()));
             agent = MinimalHost::start(&builder).await.unwrap();
             good = agent.restore_session(good_id).await.unwrap();
         }
@@ -4848,7 +4912,7 @@ async fn a_v21_store_upgrades_in_place_once_and_restores_typeless_tool_schemas()
     let mut builder = AgentBuilder::new(AgentConfig::default());
     dim_agent_capabilities::defaults::mock_hosts(&mut builder);
     dim_agent_capabilities::defaults::install(&mut builder);
-    builder.timeline_store(store.clone());
+    builder.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(store.clone()));
     let agent = MinimalHost::start(&builder).await.unwrap();
     let session = agent.restore_session("schema".into()).await.unwrap();
     let restored = chain_events(&session, "main", ..=2).await.unwrap();
@@ -4956,7 +5020,7 @@ async fn a_type_array_tool_schema_round_trips_on_the_current_store_without_an_up
     let mut builder = AgentBuilder::new(AgentConfig::default());
     dim_agent_capabilities::defaults::mock_hosts(&mut builder);
     dim_agent_capabilities::defaults::install(&mut builder);
-    builder.timeline_store(store.clone());
+    builder.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(store.clone()));
     let agent = MinimalHost::start(&builder).await.unwrap();
     let session = agent.restore_session("schema".into()).await.unwrap();
     let restored = chain_events(&session, "main", ..=2).await.unwrap();
@@ -5340,6 +5404,81 @@ fn sqlite_shutdown_drains_cancelled_and_queued_operations_before_releasing_owner
         replacement_store.close().await.unwrap();
         replacement.close().await.unwrap();
     });
+}
+
+#[tokio::test]
+async fn readers_open_on_demand_and_only_one_stays_idle() {
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    assert_eq!(
+        db.reader_connections(),
+        0,
+        "opening the store must not open a reader"
+    );
+    store
+        .create_session("session", &SessionConfig::default())
+        .await
+        .unwrap();
+    assert_eq!(db.reader_connections(), 0, "a write must not open a reader");
+    assert!(store.session_config("session").await.unwrap().is_some());
+    assert_eq!(db.reader_connections(), 1);
+    let writer = {
+        let store = store.clone();
+        tokio::spawn(async move {
+            for sequence in 1..=50 {
+                append(
+                    &store,
+                    key("session", "main"),
+                    vec![text(sequence, "concurrent")],
+                )
+                .await
+                .unwrap();
+            }
+        })
+    };
+    let reads: Vec<_> = (0..16)
+        .map(|_| {
+            let store = store.clone();
+            tokio::spawn(async move { store.session_config("session").await.unwrap().is_some() })
+        })
+        .collect();
+    for read in reads {
+        assert!(read.await.unwrap());
+    }
+    writer.await.unwrap();
+    assert_eq!(store.head(&key("session", "main")).await.unwrap(), 50);
+    assert_eq!(
+        db.reader_connections(),
+        1,
+        "a read burst must leave one idle reader, not its connections"
+    );
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+    assert_eq!(db.reader_connections(), 0, "close must drop every reader");
+
+    #[cfg(unix)]
+    {
+        let database = Database::new();
+        let db = SqliteStorage::open(database.0.clone()).unwrap();
+        let store = SqliteTimelineStore::new(db.clone());
+        let moved = database.0.with_extension("moved");
+        std::fs::rename(&database.0, &moved).unwrap();
+        assert!(store.session_config("missing").await.is_err());
+        assert_eq!(
+            db.reader_connections(),
+            0,
+            "a failed open releases its slot"
+        );
+        std::fs::rename(&moved, &database.0).unwrap();
+        assert!(store.session_config("missing").await.unwrap().is_none());
+        store.close().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), db.close())
+            .await
+            .expect("a failed reader open must not prevent shutdown")
+            .unwrap();
+        assert_eq!(db.reader_connections(), 0);
+    }
 }
 
 #[tokio::test]
@@ -5979,7 +6118,7 @@ async fn recovery_ignores_disposable_snapshots_but_preserves_and_validates_facts
         let mut builder = AgentBuilder::new(AgentConfig::default());
         dim_agent_capabilities::defaults::mock_hosts(&mut builder);
         dim_agent_capabilities::defaults::install(&mut builder);
-        builder.timeline_store(store.clone());
+        builder.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(store.clone()));
         let agent = MinimalHost::start(&builder).await.unwrap();
         agent.restore_session("session".into()).await.unwrap();
         agent.close().await.unwrap();
@@ -6391,10 +6530,11 @@ async fn a_cold_read_failure_preserves_the_record_and_other_session_progress() {
         let database = Database::new();
         let db = SqliteStorage::open(database.0.clone()).unwrap();
         let store = SqliteTimelineStore::new(db.clone());
-        let mut builder = dim_agent_runtime::AgentBuilder::new(dim_agent_runtime::AgentConfig::default());
+        let config = dim_agent_runtime::AgentConfig::default();
+        let mut builder = dim_agent_runtime::AgentBuilder::new(config);
         dim_agent_capabilities::defaults::mock_hosts(&mut builder);
         dim_agent_capabilities::defaults::install(&mut builder);
-        builder.timeline_store(store.clone());
+        builder.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(store.clone()));
         let agent = MinimalHost::start(&builder).await.unwrap();
         let bad = agent.create_session(SessionConfig::default()).await.unwrap();
         let good = agent.create_session(SessionConfig::default()).await.unwrap();
@@ -6574,7 +6714,7 @@ async fn directory_history_pages_keep_a_fixed_head() {
     let db = SqliteStorage::open(database.0.clone()).unwrap();
     let sessions =
         dim_app_server::storage::SessionStore::new(db.clone(), rutis::Ctx::root().unwrap(), 0);
-    let store = sessions.timeline_store();
+    let store: Arc<dyn TimelineStore> = sessions.timeline_store();
     store
         .create_session("paged", &SessionConfig::default())
         .await
@@ -7503,14 +7643,17 @@ async fn a_v25_provider_record_keeps_supplied_limits_and_drops_assumed_ones() {
     db.close().await.unwrap();
 
     let read = |id: &str| -> String {
-        Connection::open(&database.0)
-            .unwrap()
-            .query_row(
-                "SELECT record FROM providers WHERE provider_id=?1",
-                [id],
-                |row| row.get(0),
-            )
-            .unwrap()
+        let connection = Connection::open(&database.0).unwrap();
+        match dim_app_server::provider::testing::stored_provider(&connection, id) {
+            Ok(Some(value)) => value.to_string(),
+            _ => connection
+                .query_row(
+                    "SELECT record FROM providers WHERE provider_id=?1",
+                    [id],
+                    |r| r.get(0),
+                )
+                .unwrap(),
+        }
     };
     let connection = Connection::open(&database.0).unwrap();
     assert_eq!(schema(&connection), schema_of(STORE_FORMAT));
@@ -8845,8 +8988,7 @@ async fn interleaved_histories(store: Arc<dyn TimelineStore>) -> Timeline {
 mod position_queries;
 
 #[tokio::test]
-async fn main_and_branch_formats_upgrade_to_the_current_format_without_reinterpreting_their_markers()
- {
+async fn main_and_branch_formats_upgrade_without_reinterpreting_their_markers() {
     for (version, main_layout) in [
         (37, true),
         (38, true),
@@ -9042,4 +9184,181 @@ fn a_failed_main_format_upgrade_rolls_back_all_added_structures_and_the_marker()
             version
         );
     }
+}
+
+#[tokio::test]
+async fn v50_provider_projection_upgrade_preserves_records_and_tracks_atomic_writes() {
+    let database = Database::new();
+    let storage = SqliteStorage::open(database.0.clone()).unwrap();
+    storage.close().await.unwrap();
+    let mut connection = Connection::open(&database.0).unwrap();
+    drop_v51(&connection);
+    connection.execute_batch("DROP TABLE agent_store_format; CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 50)); INSERT INTO agent_store_format VALUES (50)").unwrap();
+    let model = |id| serde_json::json!({"modelId":id,"displayName":id,"status":"active","capabilities":{"modalities":["text"],"toolCalling":true,"streaming":true,"structuredOutput":false,"vision":false,"audio":false,"reasoning":false}});
+    let body = serde_json::json!({"kind":"custom","displayName":"Fixture","driverKind":"openai-compatible","baseUrl":"http://127.0.0.1:1/v1","auth":{"type":"anonymous"},"credential":null,"version":7,"enabled":true,"models":[model("base")],"userModels":[model("user")],"modelConfigOverrides":[model("base")],"disabledModelIds":[]}).to_string();
+    connection
+        .execute("INSERT INTO providers VALUES ('fixture',7,?1)", [&body])
+        .unwrap();
+    connection
+        .execute("INSERT INTO providers VALUES ('broken',1,'{broken')", [])
+        .unwrap();
+    drop(connection);
+    let storage = SqliteStorage::open(database.0.clone()).unwrap();
+    assert_eq!(storage.upgraded_from(), Some(50));
+    storage.close().await.unwrap();
+    connection = Connection::open(&database.0).unwrap();
+    let original: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let reconstructed = dim_app_server::provider::testing::stored_provider(&connection, "fixture")
+        .unwrap()
+        .unwrap();
+    for (key, value) in original.as_object().unwrap() {
+        assert_eq!(&reconstructed[key], value, "preserved {key}");
+    }
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT count(*) FROM provider_models WHERE provider_id='fixture'",
+                [],
+                |row| row.get::<_, u32>(0)
+            )
+            .unwrap(),
+        3
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT json_type(record,'$.models') FROM providers WHERE provider_id='fixture'",
+                [],
+                |row| row.get::<_, Option<String>>(0)
+            )
+            .unwrap(),
+        None
+    );
+    let tx = connection.transaction().unwrap();
+    tx.execute("UPDATE providers SET record=json_set(record,'$.models',json('[]')) WHERE provider_id='fixture'",[]).unwrap();
+    tx.rollback().unwrap();
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT count(*) FROM provider_models WHERE source='default'",
+                [],
+                |row| row.get::<_, u32>(0)
+            )
+            .unwrap(),
+        1
+    );
+    connection
+        .execute_batch("PRAGMA foreign_keys=ON; DELETE FROM providers WHERE provider_id='fixture'")
+        .unwrap();
+    assert_eq!(
+        connection
+            .query_row("SELECT count(*) FROM provider_models", [], |row| row
+                .get::<_, u32>(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT count(*) FROM providers WHERE provider_id='fixture'",
+                [],
+                |row| row.get::<_, u32>(0)
+            )
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT record FROM providers WHERE provider_id='broken'",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+        "{broken"
+    );
+}
+
+#[tokio::test]
+async fn v51_provider_history_migrates_atomically_without_guessing_the_bundle() {
+    let database = Database::new();
+    let connection = Connection::open(&database.0).unwrap();
+    let mut statements = schema_of(51);
+    statements.sort_by_key(|sql| !sql.starts_with("CREATE TABLE"));
+    for sql in statements {
+        connection.execute_batch(&sql).unwrap();
+    }
+    connection
+        .execute("INSERT INTO agent_store_format VALUES (51)", [])
+        .unwrap();
+    let model = |id| serde_json::json!({"modelId":id,"displayName":id,"status":"active","capabilities":{"modalities":["text"],"toolCalling":true,"streaming":true,"structuredOutput":false,"vision":false,"audio":false,"reasoning":false}});
+    let original = serde_json::json!({"kind":"builtin","displayName":"Admitted history","driverKind":"new-api-router","baseUrl":"http://127.0.0.1:1/v1","auth":{"type":"bearer"},"credential":{"secretRef":"fixture-reference"},"version":7,"enabled":false,"remoteModels":true,"models":[model("z"),model("a")],"userModels":[model("user")],"modelConfigOverrides":[model("a")],"disabledModelIds":["user","z"],"modelPreferences":{"a":{"reasoningEffort":"high"}},"modelAliases":{"a":"gpt-4o"},"gluedPrefix":"prefix","definitionFingerprint":"unrecoverable-old-base","headers":{"x-fixture":"fixture-header"},"endpointTypes":{"z":"openai"},"endpointOverrides":{"a":"openai-response"}});
+    connection
+        .execute(
+            "INSERT INTO providers VALUES ('history',7,?1)",
+            [original.to_string()],
+        )
+        .unwrap();
+    connection.execute("INSERT INTO provider_bundle VALUES ('history','available-source','proposed-definition',1)",[]).unwrap();
+    connection
+        .execute(
+            "INSERT INTO provider_catalog_revision VALUES (1,'available-source')",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO providers VALUES ('zz-invalid','not-a-version','{}')",
+            [],
+        )
+        .unwrap();
+    let before = schema(&connection);
+    let records = rows(&connection, "providers");
+    drop(connection);
+    assert!(SqliteStorage::open(database.0.clone()).is_err());
+    let connection = Connection::open(&database.0).unwrap();
+    assert_eq!(schema(&connection), before);
+    assert_eq!(rows(&connection, "providers"), records);
+    connection
+        .execute("DELETE FROM providers WHERE provider_id='zz-invalid'", [])
+        .unwrap();
+    drop(connection);
+    let storage = SqliteStorage::open(database.0.clone()).unwrap();
+    assert_eq!(storage.upgraded_from(), Some(51));
+    storage.close().await.unwrap();
+    let connection = Connection::open(&database.0).unwrap();
+    assert_eq!(schema(&connection), schema_of(STORE_FORMAT));
+    let reconstructed = dim_app_server::provider::testing::stored_provider(&connection, "history")
+        .unwrap()
+        .unwrap();
+    for (key, value) in original.as_object().unwrap() {
+        assert_eq!(&reconstructed[key], value, "preserved {key}");
+    }
+    assert_eq!(
+        connection
+            .query_row("SELECT count(*) FROM provider_bases", [], |r| r
+                .get::<_, u32>(0))
+            .unwrap(),
+        0,
+        "unknown history stays admitted rather than borrowing today's bundle"
+    );
+    assert!(
+        connection
+            .query_row(
+                "SELECT pending FROM provider_bundle WHERE provider_id='history'",
+                [],
+                |r| r.get::<_, bool>(0)
+            )
+            .unwrap()
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT json_type(record,'$.models') FROM providers WHERE provider_id='history'",
+                [],
+                |r| r.get::<_, Option<String>>(0)
+            )
+            .unwrap(),
+        None
+    );
 }

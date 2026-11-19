@@ -17,9 +17,9 @@ use crate::{
         loop_next_target, loop_start_request, loop_stop_target,
     },
 };
-use chrono::{DateTime, Duration, Utc};
 use dim_agent_capabilities::session_broadcast::{SessionNotice, notify};
 use dim_agent_types::markup::escaped;
+use jiff::{SignedDuration, Timestamp};
 use rutis_bridge::session::{Error as BridgeError, HostDispatch, Reply, Value as BridgeValue};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -37,9 +37,9 @@ pub const MAX_EVERY_SECONDS: u64 = 7 * 24 * 60 * 60;
 pub const MIN_NEXT_SECONDS: i64 = 60;
 pub const MAX_NEXT_SECONDS: i64 = 3600;
 /// How long a finished loop is kept for `list` (§12.5).
-const RETENTION_AFTER_TERMINAL: Duration = Duration::days(7);
+const RETENTION_AFTER_TERMINAL: SignedDuration = SignedDuration::from_hours(7 * 24);
 /// Creation + this is a loop's `expires_at`.
-const LIFETIME: Duration = Duration::days(7);
+const LIFETIME: SignedDuration = SignedDuration::from_hours(7 * 24);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -99,7 +99,7 @@ impl Cadence {
     /// missed windows is one round, never a burst (§12.2). Windows are counted
     /// in milliseconds, so a `now` a fraction of a second past a window is
     /// inside that window and the answer is the following one.
-    pub fn next_window_at(&self, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    pub fn next_window_at(&self, now: Timestamp) -> Option<Timestamp> {
         let Self::Every {
             every_seconds,
             anchor,
@@ -112,9 +112,11 @@ impl Cadence {
             return Some(anchor);
         }
         let step_ms = i64::try_from(*every_seconds).ok()?.checked_mul(1_000)?;
-        let elapsed_ms = (now - anchor).num_milliseconds();
+        let elapsed_ms = i64::try_from(now.duration_since(anchor).as_millis()).ok()?;
         let windows = elapsed_ms.checked_div(step_ms)?.checked_add(1)?;
-        Some(anchor + Duration::milliseconds(step_ms.checked_mul(windows)?))
+        anchor
+            .checked_add(SignedDuration::from_millis(step_ms.checked_mul(windows)?))
+            .ok()
     }
 }
 
@@ -323,7 +325,7 @@ async fn update<R: Send + 'static>(
         .await?
 }
 
-fn stamp(instant: DateTime<Utc>) -> String {
+fn stamp(instant: Timestamp) -> String {
     format_instant(instant)
 }
 
@@ -457,7 +459,7 @@ impl Loops {
         let _activity = self.shared.activity.take_hold().ok_or_else(|| {
             SchedulerError::new("service_reloading", "Process admission is paused")
         })?;
-        let at = self.shared.now() + Duration::seconds(clamp_next(delay_seconds));
+        let at = self.shared.now() + SignedDuration::from_secs(clamp_next(delay_seconds));
         let (record, _) = self
             .change(session_id, loop_id, move |record| {
                 if !record.state.is_live() {
@@ -608,7 +610,7 @@ impl Change {
     /// waits for `next`; a fixed one is already due at its next window, and
     /// its delivered input is remembered so that window can check whether the
     /// round is still pending (design 12.2, 12.3).
-    fn delivered(record: &Loop, round: u64, input_id: Option<String>, now: DateTime<Utc>) -> Self {
+    fn delivered(record: &Loop, round: u64, input_id: Option<String>, now: Timestamp) -> Self {
         let done = round.saturating_add(1);
         let next_at = record.cadence.next_window_at(now);
         let state = if next_at.is_some() {
@@ -642,7 +644,7 @@ impl Change {
         }
     }
 
-    fn apply(self, record: &mut Loop, now: DateTime<Utc>) {
+    fn apply(self, record: &mut Loop, now: Timestamp) {
         if let Some(state) = self.state {
             record.state = state;
         }
@@ -1189,132 +1191,5 @@ impl HostDispatch for LoopsFace {
             }
         };
         Ok(operation)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn at(text: &str) -> DateTime<Utc> {
-        chrono::DateTime::parse_from_rfc3339(text)
-            .unwrap()
-            .with_timezone(&Utc)
-    }
-
-    fn every_minute() -> Cadence {
-        Cadence::Every {
-            every_seconds: 60,
-            anchor: "2026-01-01T00:00:00.000Z".into(),
-        }
-    }
-
-    /// A fixed cadence arms the first window strictly after the pass's instant,
-    /// so a record written just past a window never holds a deadline that is
-    /// already due.
-    #[test]
-    fn a_fixed_cadence_arms_the_next_window_after_now() {
-        let cadence = every_minute();
-        assert_eq!(
-            cadence.next_window_at(at("2026-01-01T00:01:00.100Z")),
-            Some(at("2026-01-01T00:02:00.000Z")),
-            "a fraction of a second past a window is inside that window"
-        );
-        assert_eq!(
-            cadence.next_window_at(at("2026-01-01T00:01:00.000Z")),
-            Some(at("2026-01-01T00:02:00.000Z")),
-            "a window exactly now is not armed again"
-        );
-        assert_eq!(
-            cadence.next_window_at(at("2026-01-01T00:00:00.000Z")),
-            Some(at("2026-01-01T00:01:00.000Z"))
-        );
-        assert_eq!(
-            cadence.next_window_at(at("2025-12-31T23:59:30.000Z")),
-            Some(at("2026-01-01T00:00:00.000Z")),
-            "before the anchor the anchor is the first window"
-        );
-        assert_eq!(
-            cadence.next_window_at(at("2026-01-01T00:10:00.500Z")),
-            Some(at("2026-01-01T00:11:00.000Z")),
-            "ten missed windows are one round at the next window"
-        );
-    }
-
-    /// A self-paced loop has no window.
-    #[test]
-    fn a_self_paced_loop_has_no_window() {
-        assert_eq!(
-            Cadence::SelfPaced.next_window_at("2030-01-01T00:00:00Z".parse().unwrap()),
-            None
-        );
-    }
-
-    /// Only an answer that may clear by itself is worth the next tick. A code
-    /// that does not clear by itself waits for the minute pass: retrying it every
-    /// second would log and look up at that rate for as long as the loop lives.
-    #[test]
-    fn only_a_not_ready_answer_retries_on_the_next_tick() {
-        let code = |code: &str| Ok(Err(code.to_owned()));
-        for not_ready in [
-            "reloading",
-            "service_reloading",
-            "capability reloading",
-            "publication_unknown",
-            "ambiguous",
-        ] {
-            assert_eq!(
-                retry_for(&code(not_ready)),
-                Lookup::NextTick,
-                "{not_ready} says the service is not ready yet"
-            );
-        }
-        for lasting in ["failed", "rejected"] {
-            assert_eq!(
-                retry_for(&code(lasting)),
-                Lookup::NextMinute,
-                "{lasting} does not clear by itself"
-            );
-        }
-        // The pass answers a gone target by settling the record, so it is not a
-        // retry at all.
-        for gone in ["session_closed", "branch_missing", "branch_ended"] {
-            assert_eq!(
-                retry_for(&code(gone)),
-                Lookup::Settled,
-                "{gone} settles the record"
-            );
-        }
-        assert_eq!(
-            retry_for(&Err("lookup reply lost".to_owned())),
-            Lookup::NextTick,
-            "a reply that never arrived is what a restart meets first"
-        );
-        assert_eq!(
-            retry_for(&Ok(Ok(serde_json::json!({"status": "unknown"})))),
-            Lookup::Settled,
-            "a reply is a fact, so it settles the question either way"
-        );
-    }
-
-    /// One round that needs the next tick takes the whole pass with it: a pass
-    /// has one cadence, and the shorter one is the safe choice.
-    #[test]
-    fn a_round_that_needs_the_next_tick_wins_over_one_that_waits() {
-        assert_eq!(merge(Lookup::Settled, Lookup::Settled), Lookup::Settled);
-        assert_eq!(merge(Lookup::Settled, Lookup::NextTick), Lookup::NextTick);
-        assert_eq!(merge(Lookup::NextTick, Lookup::NextTick), Lookup::NextTick);
-        assert_eq!(
-            merge(Lookup::NextMinute, Lookup::NextTick),
-            Lookup::NextTick
-        );
-        assert_eq!(
-            merge(Lookup::Settled, Lookup::NextMinute),
-            Lookup::NextMinute
-        );
-        assert_eq!(
-            merge(Lookup::NextMinute, Lookup::NextMinute),
-            Lookup::NextMinute
-        );
     }
 }

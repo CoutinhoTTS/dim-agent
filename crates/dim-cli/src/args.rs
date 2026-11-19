@@ -259,6 +259,9 @@ Model startup:
   DIM_CUSTOM_HEADERS is newline-separated Name: Value, split at the first colon.
     Names are case-insensitive; duplicates and generated auth conflicts fail.
     Credentials and headers require direct mode; anonymous gateways are allowed.
+  DIM_USER_AGENT replaces the User-Agent on every chat model request. The App
+    Server reads it once at startup, not this client; 1-512 printable ASCII,
+    and it wins over the `provider` setting of the same thing.
   DIM_MAX_CONTEXT_TOKENS and DIM_MAX_OUTPUT_TOKENS declare positive capacities
     up to 9007199254740991; the request output allowance is derived from them.
   --autocompact overrides DIM_AUTO_COMPACT_WINDOW: auto or a positive count,
@@ -1658,6 +1661,11 @@ impl Options {
                     return Err(
                         "Use --client-secret without a value; enter the secret at the hidden prompt"
                             .into(),
+                    );
+                }
+                _ if arg == "--migrate-prompt-references" => {
+                    return Err(
+                        "Use --migrate-prompt-references as dimcode's first argument".into(),
                     );
                 }
                 _ => return Err(format!("Unknown argument: {arg}; use --help").into()),

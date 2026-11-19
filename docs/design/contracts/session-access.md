@@ -66,7 +66,7 @@ Contracts defined here are the `sessions` service with `LaunchRequest`, `InputWr
 | Keyed block effect | History projection ([history.rs](../../../crates/dim-agent-capabilities/src/history.rs)) | From the fixed prefix and compaction facts |
 | Caller progress (runs, pending `submissionId`s) | Caller's process storage | Caller's document |
 
-An input is pending from its `input/message` until either `input/applied` followed by `input/consumed`, or `input/deleted`, references its event id. `input/withdraw` alone never changes whether an input is pending; only InputQueue's result fact does. Every "pending input" derivation (Goal, AcpGateway, Scheduler, Workflow) uses exactly this rule. An id the branch does not hold answers `pending: false`, so a caller that lost a round to a restart reads the same answer as one whose round was consumed.
+An input is pending from its `input/message` until either `input/applied` followed by `input/consumed`, or `input/deleted`, references its event id. `input/withdraw` alone never changes whether an input is pending; only InputQueue's result fact does. Every "pending input" derivation (Goal, AcpGateway, Scheduler, Workflow) uses exactly this rule. The `sessions.pending` read captures the branch's published sequence after acquisition, waits for dispatch through that sequence, and then reads the current InputQueue. It does not wait for the turn to end or read history; later dispatched consumption or deletion may already be reflected. Abandoning the wait stops only that call. An id the branch does not hold answers `pending: false`, so a caller that lost a round to a restart reads the same answer as one whose round was consumed.
 
 ## 3. Flows
 
@@ -81,9 +81,9 @@ sequenceDiagram
   participant S as Session (non-interactive)
   participant TL as Branch Timeline
   participant L as InputQueue, Loop
-  C->>AI: launch {policy, starter}
+  C->>AI: launch {policy, starter, worktree?}
   AI->>AI: cap policy by the starter's current policy
-  AI-->>C: {sessionId, policy}
+  AI-->>C: {sessionId, policy, worktree?}
   C->>AI: input {sessionId, main, queue, marker dim-scheduler, submissionId}
   AI->>S: input
   S->>TL: input/message
@@ -149,7 +149,7 @@ Queue inputs are consumed when Loop starts the turn they drive. Steer inputs are
 
 | Interface | Mode | Purpose |
 | --- | --- | --- |
-| `sessions.launch(LaunchRequest) -> {sessionId, policy}` | async | Create a non-interactive Session for automation with a capped policy |
+| `sessions.launch(LaunchRequest) -> {sessionId, policy, worktree?}` | async | Create a non-interactive Session for automation with a capped policy |
 | `sessions.input(InputWrite) -> {inputId, sequence}` | async | Write input with source raw blocks |
 | `sessions.lookup({sessionId, branchId, submissionId}) -> LookupReply` | async | Find a committed input after an uncertain outcome |
 | `sessions.history(HistoryRequest) -> HistoryPage` | async | Read history, optionally as a fixed prefix bounded by the published head |
@@ -225,12 +225,12 @@ Withdrawn ([#24](https://github.com/arcships/dim/issues/24)): a caller withdraws
 
 | Method | Mode | Request | Reply | Errors |
 | --- | --- | --- | --- | --- |
-| `launch` | async | `LaunchRequest` | `{sessionId, policy}` | `rejected`, `agent_unknown`, `session_closed`, `branch_missing` (the starter), `branch_ended` (the starter), `reloading`, `failed` |
+| `launch` | async | `LaunchRequest` | `{sessionId, policy, worktree?}` | `rejected`, `agent_unknown`, `session_closed`, `branch_missing` (the starter), `branch_ended` (the starter), `reloading`, `failed` |
 | `input` | async | `InputWrite` | `{inputId, sequence}` | `rejected`, `ambiguous`, `session_closed`, `branch_missing`, `branch_ended`, `reloading`, `publication_unknown`, `failed` |
 | `lookup` | async | `{sessionId, branchId, submissionId}` | `LookupReply` | `ambiguous`, `session_closed`, `branch_missing`, `branch_ended`, `reloading` |
 | `exists` | async | `{sessionId}` | `{exists}` | `rejected`, `reloading` |
 | `history` | async | `HistoryRequest` | `HistoryPage` | `rejected`, `future_sequence`, `session_closed`, `branch_missing`, `reloading` |
-| `pending` | async | `{sessionId, branchId, inputId}` | `{pending: boolean}` | `rejected`, `session_closed`, `branch_missing`, `branch_ended`, `reloading` |
+| `pending` | async | `{sessionId, branchId, inputId}` | `{pending: boolean}` | [S2 §6.10](../appserver/sessions-service.md#610-pending) |
 | `withdraw` | async | `WithdrawRequest` | `WithdrawReply` | `rejected`, `session_closed`, `branch_missing`, `branch_ended`, `reloading`, `publication_unknown` |
 | `stop` | async | `{sessionId, branchId, reason?}` | `{sequence}` | `session_closed`, `branch_missing`, `branch_ended`, `reloading` |
 | `idle` | async | `{sessionId, branchId}` | `{sequence}` | `session_closed`, `branch_missing`, `branch_ended`, `reloading` |
@@ -242,7 +242,8 @@ Withdrawn ([#24](https://github.com/arcships/dim/issues/24)): a caller withdraws
   "cwd": "string",
   "model?": { "providerId": "string", "modelId": "string" },  // takes precedence over the profile's model
   "policy?": { /* PermissionPolicy data */ },  // narrowed request; absent: starter's or read-only default
-  "starter?": { "sessionId": "string", "branchId": "string" } } // upper bound; absent: host configuration bound
+  "starter?": { "sessionId": "string", "branchId": "string" }, // upper bound; absent: host configuration bound
+  "worktree?": { /* managed worktrees §3 request */ } }
 // InputWrite
 { "sessionId": "string", "branchId": "string",
   "mode": "queue" | "steer" | "append",
@@ -288,6 +289,8 @@ Withdrawn ([#24](https://github.com/arcships/dim/issues/24)): a caller withdraws
 Every method can also fail `failed` (A.6). Cancellation: the caller dropping an `idle` or `history` call ends it with no effect. Dropping an `input` before the reply leaves the outcome uncertain; the caller resolves it with `lookup`.
 
 `launch` creates a Session with `interactive = false`. The effective policy is the requested policy capped by the starter's current policy, which is a Timeline fact read at launch. Without a starter, a run started by a management method defaults to read-only unless the request declares a policy, and it is always capped by host configuration.
+
+The optional `worktree` request and reply members follow [managed worktrees §3](../worktree-management.md#3-创建), which owns their shapes, capability gate, absence and invalid-input behavior.
 
 `delete` is Agents' Session delete (S5c): it closes the Session if it is loaded, then removes its rows and files. An absent or already deleted Session replies `{}`, so a caller deletes again after any error ([sessions service §6.8](../appserver/sessions-service.md#68-delete)). The caller that launched a Session deletes it when it drops the last record that names it ([§8.7](../appserver/sessions-service.md#87-deleting-run-sessions)).
 
@@ -526,11 +529,13 @@ while the first write is still unpublished.
 | `lookup` | `Session::lookup(branch, submission_id)`, shared with `session.input_lookup`: a query of the branch's committed input identities; waits for the found input's publication |
 | `history` | `Session::sequence(branch)`, failing `future_sequence` below `at_least`, then `AgentIndex::history_page(id, branch, after, limit, through)` |
 | `withdraw` | `Session::service::<InputQueue>(branch)` then `InputQueue::withdraw(InputWithdrawData { input_id, reason, steer: None }) -> Result<Withdrawal, AgentError>`. The data face permits only plain withdrawal and returns `Deleted { sequence }` or `NotHeld`. `InputMethods` uses the Rust-only `withdraw_checked` for an already checked Steer candidate, retains its committed event, and confirms publication before returning the receipt (A.4). |
-| `pending` | `Session::service::<InputQueue>(branch)` then `InputQueue::pending(input_id) -> bool`: the branch's queue answers §2's rule; an id it does not hold is `false` |
+| `pending` | Capture `Session::publication(branch).sequence()`, wait through it with `Session::dispatch_watch(branch)` while observing publication closure, then `Session::service::<InputQueue>(branch)` and `InputQueue::pending(input_id) -> bool`: the branch's queue answers §2's rule; an id it does not hold is `false` |
 | `stop`, `idle` | `Session::stop`, `Session::idle` (existing) |
 | `delete` | `AgentIndex::delete(id)` (S5c, crate-internal): admission gate, close, `SessionStore::delete_session`, forget |
 | `SessionConfig` | Rust struct below |
 | Errors | `SessionsError` with the codes of A.6, mapped from `AgentError`: `Closed` → `session_closed`, `UnknownBranch` → `branch_missing`, `BranchEnded` → `branch_ended`, `Reloading` → `reloading`, `InvalidInput` → `rejected`, others → `failed` |
+
+The following is a binding excerpt, not the complete DTO definitions. See [agents/sessions.rs](../../../crates/dim-app-server/src/agents/sessions.rs) for all request and reply fields.
 
 ```rust
 pub struct LaunchRequest {

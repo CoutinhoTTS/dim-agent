@@ -77,7 +77,10 @@ use std::{
     time::Instant,
 };
 
-#[allow(dead_code)]
+#[expect(
+    dead_code,
+    reason = "the example uses part of the shared product fixture"
+)]
 #[path = "support/product.rs"]
 mod product_support;
 use product_support::{product, product_hosts};
@@ -642,7 +645,7 @@ async fn main() -> std::result::Result<(), Error> {
         defaults::mock_hosts(&mut builder);
         defaults::install(&mut builder);
     }
-    builder.timeline_store(probe.clone());
+    builder.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(probe.clone()));
     let agent = MinimalHost::start_with(&builder, |root, _| match mix == "product" {
         true => product_hosts(root),
         false => Ok(()),

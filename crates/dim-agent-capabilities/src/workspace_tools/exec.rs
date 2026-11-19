@@ -120,7 +120,7 @@ pub(super) async fn stop(
     crate::context_policy::check_cancel(cancel)?;
     let owner = branch
         .service::<BackgroundExec>()
-        .map_err(super::host_error)?;
+        .map_err(HostError::from_agent)?;
     match owner.stop(input.task_id).await {
         Ok(ended) => Ok(ToolResult {
             is_error: (ended.status == ExecStatus::Failed).then_some(true),
@@ -128,7 +128,7 @@ pub(super) async fn stop(
                 serde_json::to_string(&ended).expect("exec terminal contains JSON data"),
             )
         }),
-        Err(super::background::TaskError::Read(error)) => Err(super::host_error(error)),
+        Err(super::background::TaskError::Read(error)) => Err(HostError::from_agent(error)),
         Err(super::background::TaskError::Unknown) => Ok(failed(
             "Command is not a task of this branch. Use the Task ID returned by exec on this branch; use agent for Collaboration members. No command was stopped.",
             "exec_task_unknown",
@@ -2452,7 +2452,10 @@ pub(super) async fn execute(
 /// the background, or stops it, and returns the result with the exit it
 /// observed, when it observed one. The caller declares the call's effect
 /// (session boundary A.6).
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one parameter per input a process run carries"
+)]
 async fn run_process(
     tools: &WorkspaceTools,
     branch: &Branch,

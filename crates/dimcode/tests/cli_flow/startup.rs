@@ -198,7 +198,10 @@ fn bare_effort_at_home_lists_the_preview_models_choices() {
             let providers = wire.read("account.providers");
             wire.reply(&providers, json!([]));
             let catalog = wire.read("provider.catalog");
-            assert_eq!(catalog["params"], json!({"providerId":"preview-provider"}));
+            assert_eq!(
+                catalog["params"],
+                json!({"providerId":"preview-provider","modelId":"preview-model"})
+            );
             wire.reply(&catalog, preview_catalog());
             assert_eq!(
                 wire.trailing_request(),
@@ -339,8 +342,11 @@ fn a_model_picked_at_home_drops_the_effort_home_chose() {
     let daemon = home.daemon(move |wire| {
         wire.hello(&["session.model.preview"]);
         let preview = wire.read("session.model.preview");
-        wire.reply(&preview, json!({"model":{"providerId":"preview-provider","modelId":"preview-model"},
-            "modelPreferences":{"reasoningEffort":"high"}}));
+        wire.reply(
+            &preview,
+            json!({"model":{"providerId":"preview-provider","modelId":"preview-model"},
+            "modelPreferences":{"reasoningEffort":"high"}}),
+        );
         let mut picked = preview_catalog();
         picked["catalog"]["models"][0]["id"] = json!("other-model");
         picked["catalog"]["models"][0]["name"] = json!("Other model");
@@ -358,15 +364,19 @@ fn a_model_picked_at_home_drops_the_effort_home_chose() {
             }
             match request["method"].as_str().unwrap() {
                 "account.providers" => wire.reply(&request, json!([])),
-                "provider.list" => {
+                "provider.models.query" => {
                     picking = true;
                     wire.reply(
                         &request,
-                        json!({"providers":[{"providerId":"preview-provider","displayName":"Preview","enabled":true}]}),
+                        super::models::picker_page("preview-provider", "Preview", picked.clone()),
                     );
                 }
                 "provider.catalog" => {
-                    let listed = if picking { picked.clone() } else { previewed.clone() };
+                    let listed = if picking {
+                        picked.clone()
+                    } else {
+                        previewed.clone()
+                    };
                     wire.reply(&request, listed);
                 }
                 "provider.selection" => {
@@ -376,15 +386,21 @@ fn a_model_picked_at_home_drops_the_effort_home_chose() {
                         json!({"selection": if read { json!({"version":1}) } else { Value::Null }}),
                     );
                 }
-                "provider.select" | "provider.preferences.update" => wire.reply(&request, json!({})),
+                "provider.select" | "provider.preferences.update" => {
+                    wire.reply(&request, json!({}))
+                }
                 "session.create" => {
                     created.send(request["params"].clone()).unwrap();
-                    wire.reply(&request, json!({"sessionId":"session","sequence":8,
-                        "model":{"providerId":"preview-provider","modelId":"other-model"}}));
+                    wire.reply(
+                        &request,
+                        json!({"sessionId":"session","sequence":8,
+                        "model":{"providerId":"preview-provider","modelId":"other-model"}}),
+                    );
                 }
                 "session.attach" => {
                     let mut record = attach_record(&request);
-                    record["model"] = json!({"providerId":"preview-provider","modelId":"other-model"});
+                    record["model"] =
+                        json!({"providerId":"preview-provider","modelId":"other-model"});
                     wire.reply(&request, record);
                 }
                 "session.history" => wire.reply(
@@ -1571,29 +1587,55 @@ fn model_config_rejects_product_only_controls_before_starting_a_daemon() {
 }
 
 #[test]
-fn old_daemon_home_creation_rejects_temporary_sources_and_keeps_configured_fallback() {
-    for (configured, management) in [(false, false), (false, true), (true, true)] {
+fn home_creation_uses_the_advertised_product_or_configured_model() {
+    use sha2::{Digest, Sha256};
+
+    for (inheritance, configured, management) in [
+        (true, false, false),
+        (true, false, true),
+        (true, true, true),
+        (false, true, false),
+    ] {
         let home = Home::new();
         let provider = if configured {
             "9f556780-8461-4cda-8108-22560729b8ba"
         } else {
             "temporary-source"
         };
+        let config = home.0.join("model.json");
+        let profile = if inheritance {
+            json!({"kind":"product"})
+        } else {
+            fs::write(&config, "{}").unwrap();
+            json!({"kind":"configured","modelConfigSha256":format!("{:x}", Sha256::digest(b"{}"))})
+        };
         let daemon = home.daemon(move |wire| {
-            wire.2=true;
+            wire.2 = true;
             let mut line = String::new();
             while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
                 let request: Value = serde_json::from_str(&line).unwrap();
                 line.clear();
-                if wire.2 && wire.empty_state(&request) { continue; }
+                if wire.2 && wire.empty_state(&request) {
+                    continue;
+                }
                 let result = match request["method"].as_str().unwrap() {
                     "hello" => {
-                        let mut features = vec!["session.create", "session.history", "session.history.latestTurn", "session.input.pending.blockPresence", "session.methods", "provider.list"];
+                        let mut features = vec![
+                            "session.create",
+                            "session.history",
+                            "session.history.latestTurn",
+                            "session.input.pending.blockPresence",
+                            "session.methods",
+                            "provider.list",
+                        ];
+                        if inheritance {
+                            features.push("session.create.modelFromSession");
+                        }
                         if management {
                             features.push("provider.management");
                         }
                         json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),
-                            "protocolVersion":4,"daemonProfile":{"kind":"product"},"features":features})
+                            "protocolVersion":4,"daemonProfile":profile,"features":features})
                     }
                     "session.attach" => {
                         let mut record = attach_record(&request);
@@ -1604,26 +1646,26 @@ fn old_daemon_home_creation_rejects_temporary_sources_and_keeps_configured_fallb
                     "session.idle" => json!({"sequence":8}),
                     "account.providers" => json!([]),
                     "provider.management" => {
-                        assert!(management);
-                        assert_eq!(request["params"], json!({}), "Do not query a temporary identity as a saved Provider");
-                        let providers = if configured { json!([{"providerId":provider,"source":"user",
-                            "displayName":"Configured","preferences":{"model":{"reasoningEffort":"low","serviceTier":"priority"}}}]) } else { json!([]) };
-                        json!({"providers":providers,"errors":[]})
+                        panic!("Session inheritance must not read Provider management")
                     }
                     "session.create" => {
-                        assert!(configured, "A temporary source must not reach legacy creation");
-                        assert_eq!(request["params"]["model"], json!({"provider":provider,"modelId":"model"}));
-                        assert!(
-                            request["params"].get("modelPreferences").is_none(),
-                            "Nothing is stated, so the server applies the saved pair: {}",
-                            request["params"]
-                        );
-                        assert!(request["params"].get("startup").is_none());
-                        assert!(request["params"].get("modelFromSession").is_none());
+                        if inheritance {
+                            assert_eq!(request["params"]["modelFromSession"], "session");
+                            assert!(request["params"].get("model").is_none());
+                        } else {
+                            assert_eq!(
+                                request["params"]["model"],
+                                json!({"provider":provider,"modelId":"model"})
+                            );
+                            assert!(request["params"].get("modelFromSession").is_none());
+                        }
+                        assert!(request["params"].get("modelPreferences").is_none());
                         reject(wire, &request);
                         continue;
                     }
-                    "provider.select" | "provider.preferences.update" => panic!("Startup must not mutate shared preferences"),
+                    "provider.select" | "provider.preferences.update" => {
+                        panic!("Startup must not mutate shared preferences")
+                    }
                     _ => json!({}),
                 };
                 wire.reply(&request, result);
@@ -1631,6 +1673,9 @@ fn old_daemon_home_creation_rejects_temporary_sources_and_keeps_configured_fallb
         });
         let mut command = command(&home);
         command.args(["--resume", "session"]);
+        if !inheritance {
+            command.args(["--model-config", config.to_str().unwrap()]);
+        }
         let mut terminal = Terminal::launch_tui(command);
         terminal.resize(160, 32);
         terminal.until(&format!("{provider} / model"));
@@ -1639,22 +1684,7 @@ fn old_daemon_home_creation_rejects_temporary_sources_and_keeps_configured_fallb
         // `/new` runs; the boundary rule follows the switch's composer clear.
         terminal.until("─ new session ─");
         terminal.write(b"hello\r");
-        if configured {
-            terminal.until("startup fixture rejection");
-        } else {
-            terminal.until("Restart the daemon");
-            terminal.until("DIM_BASE_URL and DIM_API_FORMAT");
-            if management {
-                terminal.until("before starting a new Session");
-            } else {
-                assert!(!terminal.transcript.contains("or select a configured"));
-            }
-            assert!(
-                !terminal
-                    .transcript
-                    .contains("Provider management entry is missing")
-            );
-        }
+        terminal.until("startup fixture rejection");
         terminal.signal(libc::SIGKILL);
         terminal.wait();
         daemon.join().unwrap();
@@ -1947,4 +1977,264 @@ fn a_first_prompt_a_new_draft_keeps_out_is_reported() {
     let status = terminal.wait();
     daemon.join().unwrap();
     assert_eq!(status.code(), Some(0), "{}", terminal.transcript);
+}
+
+/// A model server that records the User-Agent of every chat request it
+/// receives, answers the model list, and answers each turn with "ok". A test
+/// stops it with [`IdentityFixture::stop`] once the CLI has exited.
+struct IdentityFixture {
+    address: std::net::SocketAddr,
+    seen: Arc<Mutex<Vec<String>>>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    model: thread::JoinHandle<()>,
+}
+
+impl IdentityFixture {
+    fn start() -> Self {
+        use std::io::{BufRead, Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (recorded, stopping) = (seen.clone(), stop.clone());
+        let model = thread::spawn(move || {
+            while !stopping.load(std::sync::atomic::Ordering::SeqCst) {
+                let deadline = Instant::now() + PATIENCE;
+                let stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            if stopping.load(std::sync::atomic::Ordering::SeqCst) {
+                                return;
+                            }
+                            assert!(
+                                Instant::now() < deadline,
+                                "the model was not requested for {PATIENCE:?}"
+                            );
+                            thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(error) => panic!("{error}"),
+                    }
+                };
+                stream.set_nonblocking(false).unwrap();
+                stream.set_read_timeout(Some(PATIENCE)).unwrap();
+                let mut stream = std::io::BufReader::new(stream);
+                let mut request_line = String::new();
+                assert!(stream.read_line(&mut request_line).unwrap() > 0);
+                let mut length = 0;
+                let mut user_agent = String::new();
+                loop {
+                    let mut line = String::new();
+                    assert!(stream.read_line(&mut line).unwrap() > 0);
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some(n) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = n.trim().parse().unwrap();
+                    }
+                    if let Some(value) = line.to_ascii_lowercase().strip_prefix("user-agent:") {
+                        user_agent = value.trim().to_owned();
+                    }
+                }
+                let mut body = vec![0; length];
+                stream.read_exact(&mut body).unwrap();
+                let path = request_line
+                    .split(' ')
+                    .nth(1)
+                    .unwrap_or_default()
+                    .to_owned();
+                if path.ends_with("/models") {
+                    let list = json!({"data":[{"id":"fixture-model"}]}).to_string();
+                    write!(
+                        stream.get_mut(),
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{list}",
+                        list.len()
+                    )
+                    .unwrap();
+                    stream.get_mut().flush().unwrap();
+                    continue;
+                }
+                recorded.lock().unwrap().push(user_agent);
+                let frame = |delta, finish| {
+                    format!(
+                        "data: {}\n\n",
+                        json!({"id":"fixture","choices":[{"index":0,"delta":delta,"finish_reason":finish}]})
+                    )
+                };
+                let data = frame(json!({"content":"ok"}), Value::Null)
+                    + &frame(json!({}), json!("stop"))
+                    + "data: [DONE]\n\n";
+                write!(
+                    stream.get_mut(),
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{data}",
+                    data.len()
+                )
+                .unwrap();
+                stream.get_mut().flush().unwrap();
+            }
+        });
+        Self {
+            address,
+            seen,
+            stop,
+            model,
+        }
+    }
+
+    /// The User-Agent of every chat request so far.
+    fn user_agents(&self) -> Vec<String> {
+        self.seen.lock().unwrap().clone()
+    }
+
+    /// Ends the server and joins it.
+    fn stop(self) {
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.model.join().unwrap();
+    }
+}
+
+/// The model config that points a started process at `address`.
+fn identity_model(home: &Home, address: std::net::SocketAddr) -> PathBuf {
+    let config = home.0.join("model.json");
+    fs::write(&config, json!({"defaultModel":{"providerId":"fixture","modelId":"fixture-model"},"providers":[{"id":"fixture","kind":"openai-compatible","baseUrl":format!("http://{address}/v1"),"models":[{"id":"fixture-model","contextWindow":128000,"maxOutputTokens":4096,"config":{"maxTokens":128}}]}]}).to_string()).unwrap();
+    config
+}
+
+/// `DIM_USER_AGENT` reaches the model requests of the process that hosts
+/// models, followed by the library's own parts.
+#[test]
+fn a_started_process_sends_the_dim_user_agent_from_its_environment() {
+    let home = Home::new();
+    let fixture = IdentityFixture::start();
+    let model = identity_model(&home, fixture.address);
+    let output = command(&home)
+        .env("DIM_USER_AGENT", "private-client/7")
+        .args([
+            "--model-config",
+            model.to_str().unwrap(),
+            "exec",
+            "-p",
+            "hi",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\ndaemon log: {}",
+        String::from_utf8_lossy(&output.stderr),
+        fs::read_to_string(home.0.join("rust/daemon.log")).unwrap_or_default()
+    );
+    let seen = fixture.user_agents();
+    fixture.stop();
+    assert!(!seen.is_empty(), "the fixture saw a chat request");
+    for user_agent in &seen {
+        let library = user_agent
+            .strip_prefix("private-client/7 ")
+            .unwrap_or_else(|| panic!("the environment value leads the User-Agent: {user_agent}"));
+        assert!(
+            library.starts_with("ai-sdk-openai-compatible/"),
+            "the library's parts follow: {user_agent}"
+        );
+    }
+}
+
+/// A value a request cannot carry fails the process that hosts models: exit
+/// code 1 and the validation message, before anything is served. `--help`
+/// stays reachable with the same value, because the override is read after
+/// the arguments are parsed.
+#[test]
+fn an_invalid_dim_user_agent_fails_startup() {
+    for invalid in ["", "private client\u{1}/1", "dím/1.0"] {
+        let home = Home::new();
+        // Startup fails before any request, so nothing listens here.
+        let model = identity_model(&home, "127.0.0.1:9".parse().unwrap());
+        let socket = home.0.join("rust/daemon.sock");
+        daemon_cleanup::mark_test_server(&home.0);
+        let mut command = Command::new(env!("CARGO_BIN_EXE_dimcode"));
+        command
+            .arg("app-server")
+            .arg("--unix")
+            .arg(&socket)
+            .args(["--no-ws", "--home"])
+            .arg(home.0.join("rust"))
+            .arg("--model-config")
+            .arg(&model)
+            .env("DIM_USER_AGENT", invalid)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        for name in STARTUP_ENV {
+            command.env_remove(name);
+        }
+        let output = command.output().unwrap();
+        assert_eq!(output.status.code(), Some(1), "{invalid:?}");
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            error.contains("DIM_USER_AGENT must be 1 to 512 printable ASCII characters"),
+            "{invalid:?}: {error}"
+        );
+        assert!(!error.contains(invalid) || invalid.is_empty(), "{error}");
+        assert!(!socket.exists(), "nothing was served: {invalid:?}");
+    }
+    let output = Command::new(env!("CARGO_BIN_EXE_dimcode"))
+        .args(["app-server", "--help"])
+        .env("DIM_USER_AGENT", "")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "--help does not validate the override: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let usage = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        usage.contains("dim-app-server (--product-home PATH"),
+        "--help prints usage: {usage}"
+    );
+}
+
+/// A startup connection's own `User-Agent` wins over dim's identity and over
+/// `DIM_USER_AGENT`; the library's parts still follow it.
+#[test]
+fn a_startup_connection_user_agent_wins_over_the_identity() {
+    let home = Home::new();
+    let fixture = IdentityFixture::start();
+    let base_url = format!("http://{}/v1", fixture.address);
+    let output = command(&home)
+        .envs([
+            ("DIM_BASE_URL", base_url.as_str()),
+            ("DIM_API_FORMAT", "openai-compatible"),
+            ("DIM_MODEL", "fixture-model"),
+            ("DIM_CUSTOM_HEADERS", "User-Agent: gateway-client/9"),
+            ("DIM_USER_AGENT", "private-client/7"),
+            ("DIM_MAX_CONTEXT_TOKENS", "128000"),
+            ("DIM_MAX_OUTPUT_TOKENS", "4096"),
+        ])
+        .args(["exec", "-p", "hi"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\ndaemon log: {}",
+        String::from_utf8_lossy(&output.stderr),
+        fs::read_to_string(home.0.join("rust/daemon.log")).unwrap_or_default()
+    );
+    let seen = fixture.user_agents();
+    fixture.stop();
+    assert!(!seen.is_empty(), "the fixture saw a chat request");
+    for user_agent in &seen {
+        assert!(
+            user_agent.starts_with("gateway-client/9 ai-sdk-"),
+            "the connection's own User-Agent leads: {user_agent}"
+        );
+        assert!(
+            !user_agent.contains("private-client/7"),
+            "DIM_USER_AGENT does not reach past it: {user_agent}"
+        );
+    }
 }

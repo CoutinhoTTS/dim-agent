@@ -306,7 +306,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Press Ctrl+C to stop the Web workspace." => "Ctrl+C로 Web 작업 공간 중지",
         "To resume this session:" => "세션 재개:",
 
-        // composer/commands.rs: descriptions
+        // commands.rs: descriptions
         "start a new session" => "새 세션 시작",
         "show or set the reasoning effort" => "추론 강도 보기/설정",
         "show or set the priority service tier (on|off)" => "우선 서비스 등급 보기/설정 (on|off)",
@@ -336,9 +336,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "exit" => "종료",
 
         // composer/palette.rs
-        "Enter select + default · ←/→ effort · Ctrl+B/F cursor · Ctrl+X clear saved · Esc clear/close" => {
-            "Enter 선택 및 기본 설정 · ←/→ 추론 강도 · Ctrl+B/F 커서 · Ctrl+X 저장값 지우기 · Esc 지우기/닫기"
-        }
         "Default for new sessions in {folder}: {model}" => "새 세션의 {folder} 기본 모델: {model}",
         "Default for new sessions: {model}" => "새 세션 기본 모델: {model}",
         "Enter select · Esc clear/close" => "Enter 선택 · Esc 지우기/닫기",
@@ -417,6 +414,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         // models_panel.rs
         "Select a model" => "모델 선택",
         "Loading models..." => "모델 불러오는 중…",
+        "Previous page" => "이전 페이지",
+        "Next page" => "다음 페이지",
         "No models available. Connect a provider first." => {
             "사용 가능한 모델 없음. 먼저 프로바이더 연결"
         }
@@ -481,6 +480,33 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "이름 있는 에이전트 포함, 새 멤버에 적용"
         }
         "Existing members keep their models." => "기존 멤버는 모델 유지",
+        "Conversation model" => "대화 모델",
+        "Selected: {model}" => "선택됨: {model}",
+        "Model management" => "모델 관리",
+        "Manage models" => "모델 관리하기",
+        "1 provider" => "프로바이더 1개",
+        "{count} providers" => "프로바이더 {count}개",
+        "ready" => "준비됨",
+        "no models" => "모델 없음",
+        "catalog unreadable" => "catalog를 읽을 수 없음",
+        "{count} with missing limits" => "{count}개 한도 미선언",
+        "{count} unavailable" => "{count}개 사용 불가",
+        "{count} disabled" => "{count}개 비활성",
+        "{count} without models" => "{count}개 모델 없음",
+        "{count} unreadable" => "{count}개 읽을 수 없음",
+        "{unavailable} unavailable, {disabled} disabled" => {
+            "{unavailable}개 사용 불가, {disabled}개 비활성"
+        }
+        "Enter select + default · ←/→ effort · Tab section · Esc clear/close" => {
+            "Enter 선택 및 기본 설정 · ←/→ 추론 강도 · Tab 섹션 · Esc 지우기/닫기"
+        }
+        "Enter change · Tab section · Esc clear/close" => {
+            "Enter 변경 · Tab 섹션 · Esc 지우기/닫기"
+        }
+        "Enter manage · Tab section · Esc clear/close" => {
+            "Enter 관리 · Tab 섹션 · Esc 지우기/닫기"
+        }
+        "Enter manage · Esc back" => "Enter 관리 · Esc 뒤로",
         "unknown" => "알 수 없음",
         "Subagent model policy saved" => "서브에이전트 모델 정책 저장됨",
         "Subagent model policy changed elsewhere; choose again to reread it" => {
@@ -600,6 +626,12 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "The App Server is still {server} because other clients are using it (connections: {connections}, attached Sessions: {attached}, running turns: {running}); this {client} client uses it too. Run `dimcode daemon stop` when they are done, and the next start runs {client}." => {
             "App Server가 아직 {server}입니다. 다른 클라이언트가 사용 중입니다(연결: {connections}, 연결된 세션: {attached}, 실행 중인 턴: {running}). 이 {client} 클라이언트도 그것을 사용합니다. 끝나면 `dimcode daemon stop`을 실행하세요. 다음 시작에서는 {client}가 실행됩니다."
+        }
+        "The App Server is still using a different build of {server}. Some features may be unavailable. After active work finishes, exit this client, run `{command}`, then reopen it." => {
+            "App Server가 아직 {server}의 다른 빌드를 사용하고 있습니다. 일부 기능을 사용할 수 없을 수 있습니다. 작업이 끝나면 이 클라이언트를 종료하고 `{command}`를 실행한 뒤 다시 여십시오."
+        }
+        "The App Server's build could not be verified as this client's. If features are missing after an update, wait for active work to finish, exit this client, run `{command}`, then reopen it." => {
+            "App Server의 빌드가 이 클라이언트와 같은지 확인하지 못했습니다. 업데이트 후 기능이 빠져 있다면 작업이 끝날 때까지 기다렸다가 이 클라이언트를 종료하고 `{command}`를 실행한 뒤 다시 여십시오."
         }
         "Upgrading the local store from format v{from} to v{to}; this can take a while on a large store." => {
             "로컬 저장소를 포맷 v{from}에서 v{to}(으)로 업그레이드하는 중입니다. 큰 저장소에서는 시간이 걸릴 수 있습니다."

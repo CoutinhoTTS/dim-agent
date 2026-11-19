@@ -85,7 +85,7 @@ impl ManagedProvider for SearchProvider {
             })
         })
     }
-    fn catalog(&self, _: &str) -> ManagedFuture<ManagedCatalog> {
+    fn catalog(&self, _: &str, _: CancellationToken) -> ManagedFuture<ManagedCatalog> {
         unused()
     }
     fn credential(&self, _: &str, _: &str) -> ManagedFuture<CredentialLease> {
@@ -209,7 +209,9 @@ async fn web_settings_permission_cancellation_and_restore() {
                 Some(done) = tasks.join_next() => { done.unwrap(); },
                 accepted = listener.accept() => {
                     let (mut socket, _) = accepted.unwrap();
-                    let (count, slow, closed) = (request_count.clone(), slow.clone(), closed.clone());
+                    let count = request_count.clone();
+                    let slow = slow.clone();
+                    let closed = closed.clone();
                     tasks.spawn(async move {
                         let mut header = Vec::new();
                         let mut chunk = [0; 4096];
@@ -241,11 +243,13 @@ async fn web_settings_permission_cancellation_and_restore() {
                                 "complete page ".repeat(2000)
                             };
                             let mut compressed = if raw {
-                                let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
+                                let mut encoder =
+                                    DeflateEncoder::new(Vec::new(), Compression::default());
                                 encoder.write_all(body.as_bytes()).unwrap();
                                 encoder.finish().unwrap()
                             } else {
-                                let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+                                let mut encoder =
+                                    ZlibEncoder::new(Vec::new(), Compression::default());
                                 encoder.write_all(body.as_bytes()).unwrap();
                                 encoder.finish().unwrap()
                             };
@@ -260,8 +264,11 @@ async fn web_settings_permission_cancellation_and_restore() {
                             return;
                         }
                         if request.starts_with("GET /truncated-gzip ") {
-                            let mut response = b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Encoding: gzip\r\nConnection: close\r\n\r\n".to_vec();
-                            response.extend_from_slice(&[0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 0xff, 1, 14, 0, 0xf1, 0xff]);
+                            let mut response =
+                                b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Encoding: gzip\r\nConnection: close\r\n\r\n".to_vec();
+                            response.extend_from_slice(&[
+                                0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 0xff, 1, 14, 0, 0xf1, 0xff,
+                            ]);
                             response.extend_from_slice(b"<p>partial</p>");
                             socket.write_all(&response).await.unwrap();
                             return;
@@ -785,7 +792,9 @@ async fn web_fetch_blocks_untrusted_targets_and_follows_same_host_redirects() {
                             match raw.split_once("://").and_then(|(_, rest)| {
                                 rest.find('/').map(|i| (&rest[..i], &rest[i..]))
                             }) {
-                                Some((authority, path)) => (authority.to_owned(), Some(path.to_owned())),
+                                Some((authority, path)) => {
+                                    (authority.to_owned(), Some(path.to_owned()))
+                                }
                                 None => (raw.to_owned(), Some("/".to_owned())),
                             }
                         };
@@ -802,7 +811,8 @@ async fn web_fetch_blocks_untrusted_targets_and_follows_same_host_redirects() {
                             client.write_all(b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n").await.unwrap();
                             return;
                         }
-                        let mut upstream = tokio::net::TcpStream::connect(origin_addr).await.unwrap();
+                        let mut upstream =
+                            tokio::net::TcpStream::connect(origin_addr).await.unwrap();
                         match path {
                             Some(path) => {
                                 let version = parts.next().unwrap_or("HTTP/1.1");

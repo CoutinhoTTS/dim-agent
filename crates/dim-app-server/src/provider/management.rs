@@ -11,6 +11,19 @@ use rutis::{Ctx, Error};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+/// A model write's reply: the full catalog by default, the committed version
+/// alone for a caller that rereads only the rows it needs.
+fn model_catalog_reply(
+    catalog: super::ProviderCatalog,
+    kind: super::UpdateReplyKind,
+) -> Result<serde_json::Value, RpcError> {
+    let version = catalog.version;
+    match kind {
+        super::UpdateReplyKind::Full => reply(catalog),
+        super::UpdateReplyKind::Summary => reply(serde_json::json!({"version":version})),
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ImportLegacyProviders {
@@ -20,8 +33,10 @@ pub struct ImportLegacyProviders {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ManagementScope {
+    pub page: Option<super::view::ManagementModelPage>,
+    pub provider_id: String,
     #[serde(default, deserialize_with = "optional_non_null")]
-    pub provider_id: Option<String>,
+    pub model_id: Option<String>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -29,6 +44,8 @@ pub struct UpdateProvider {
     pub provider_id: String,
     pub expected_version: u32,
     pub patch: super::ProviderPatch,
+    #[serde(default)]
+    pub reply: super::UpdateReplyKind,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -36,6 +53,8 @@ pub struct CreateModel {
     pub provider_id: String,
     pub expected_version: u32,
     pub model: crate::model_catalog::ModelEntry,
+    #[serde(default)]
+    pub reply: super::UpdateReplyKind,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -44,12 +63,22 @@ pub struct UpdatePreferences {
     pub expected_version: u32,
     pub model_id: String,
     pub patch: super::PreferencesPatch,
+    #[serde(default)]
+    pub reply: super::UpdateReplyKind,
 }
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DeleteProvider {
     pub provider_id: String,
     pub expected_version: u32,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SetModelEnabled {
+    provider_id: String,
+    expected_version: u32,
+    model_id: String,
+    enabled: bool,
 }
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -70,6 +99,8 @@ pub struct EditModel {
     pub expected_version: u32,
     pub model_id: String,
     pub edit: crate::model_catalog::ModelEdit,
+    #[serde(default)]
+    pub reply: super::UpdateReplyKind,
 }
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -77,6 +108,8 @@ pub struct ResetModel {
     pub provider_id: String,
     pub expected_version: u32,
     pub model_id: String,
+    #[serde(default)]
+    pub reply: super::UpdateReplyKind,
 }
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -107,6 +140,7 @@ pub(super) fn provide(
         "provider",
         [
             "provider.management",
+            "provider.management.list",
             "provider.create",
             "provider.update",
             "provider.probe",
@@ -114,7 +148,9 @@ pub(super) fn provide(
             "provider.models.delete",
             "provider.preferences.update",
             "provider.catalog",
+            "provider.models.query",
             "provider.refresh",
+            "provider.model.set_enabled",
             "provider.models.set_enabled",
             "provider.models.edit",
             "provider.models.reset",
@@ -131,9 +167,11 @@ pub(super) fn provide(
                 !matches!(
                     name,
                     "provider.catalog"
+                        | "provider.models.query"
                         | "provider.selection"
                         | "provider.list"
                         | "provider.management"
+                        | "provider.management.list"
                         | "provider.probe"
                 ),
                 Interruption::Drain,
@@ -150,11 +188,21 @@ pub(super) fn provide(
             Box::pin(async move {
                 let cancel = &stopping;
                 match method.as_str() {
+                    "provider.models.query" => reply(
+                        provider
+                            .query_models(params(value)?, cancel)
+                            .await
+                            .map_err(error)?,
+                    ),
+                    "provider.management.list" => {
+                        let p: super::ManagementPageRequest = params(value)?;
+                        reply(provider.management_page(p, cancel).await.map_err(error)?)
+                    }
                     "provider.management" => {
                         let p: ManagementScope = params(value)?;
                         reply(
                             provider
-                                .management(p.provider_id, cancel)
+                                .management_window(p.provider_id, p.model_id, p.page, cancel)
                                 .await
                                 .map_err(error)?,
                         )
@@ -171,52 +219,69 @@ pub(super) fn provide(
                         let p: UpdateProvider = params(value)?;
                         reply(
                             provider
-                                .update(p.provider_id, p.expected_version, p.patch, cancel)
-                                .await
-                                .map_err(error)?,
-                        )
-                    }
-                    "provider.models.create" => {
-                        let p: CreateModel = params(value)?;
-                        reply(
-                            provider
-                                .create_model(p.provider_id, p.expected_version, p.model, cancel)
-                                .await
-                                .map_err(error)?,
-                        )
-                    }
-                    "provider.models.delete" => {
-                        let p: ResetModel = params(value)?;
-                        reply(
-                            provider
-                                .delete_model(p.provider_id, p.expected_version, p.model_id, cancel)
-                                .await
-                                .map_err(error)?,
-                        )
-                    }
-                    "provider.preferences.update" => {
-                        let p: UpdatePreferences = params(value)?;
-                        reply(
-                            provider
-                                .update_preferences(
+                                .update_reply(
                                     p.provider_id,
                                     p.expected_version,
-                                    p.model_id,
                                     p.patch,
+                                    p.reply,
                                     cancel,
                                 )
                                 .await
                                 .map_err(error)?,
                         )
                     }
+                    "provider.models.create" => {
+                        let p: CreateModel = params(value)?;
+                        let catalog = provider
+                            .create_model(p.provider_id, p.expected_version, p.model, cancel)
+                            .await
+                            .map_err(error)?;
+                        model_catalog_reply(catalog, p.reply)
+                    }
+                    "provider.models.delete" => {
+                        let p: ResetModel = params(value)?;
+                        let catalog = provider
+                            .delete_model(p.provider_id, p.expected_version, p.model_id, cancel)
+                            .await
+                            .map_err(error)?;
+                        model_catalog_reply(catalog, p.reply)
+                    }
+                    "provider.preferences.update" => {
+                        let p: UpdatePreferences = params(value)?;
+                        let updated = provider
+                            .update_preferences(
+                                p.provider_id,
+                                p.expected_version,
+                                p.model_id,
+                                p.patch,
+                                cancel,
+                            )
+                            .await
+                            .map_err(error)?;
+                        match p.reply {
+                            super::UpdateReplyKind::Full => reply(updated),
+                            super::UpdateReplyKind::Summary => {
+                                reply(serde_json::json!({"version":updated.info.version}))
+                            }
+                        }
+                    }
                     "provider.catalog" => {
-                        let p: ProviderTarget = params(value)?;
-                        reply(CatalogResult {
-                            catalog: provider
-                                .catalog_for(p.provider_id, cancel)
-                                .await
-                                .map_err(error)?,
-                        })
+                        let p: ManagementScope = params(value)?;
+                        if p.page.is_some() {
+                            return Err(error(super::ProviderError::InvalidConfig(
+                                "Model pages use provider.management".into(),
+                            )));
+                        }
+                        let catalog = match p.model_id {
+                            Some(model_id) => {
+                                provider
+                                    .catalog_target(p.provider_id, model_id, cancel)
+                                    .await
+                            }
+                            None => provider.catalog_for(p.provider_id, cancel).await,
+                        }
+                        .map_err(error)?;
+                        reply(CatalogResult { catalog })
                     }
                     "provider.refresh" => {
                         let p: ProviderTarget = params(value)?;
@@ -226,6 +291,20 @@ pub(super) fn provide(
                                 .await
                                 .map_err(error)?,
                         )
+                    }
+                    "provider.model.set_enabled" => {
+                        let p: SetModelEnabled = params(value)?;
+                        let version = provider
+                            .set_model_enabled(
+                                p.provider_id,
+                                p.expected_version,
+                                p.model_id,
+                                p.enabled,
+                                cancel,
+                            )
+                            .await
+                            .map_err(error)?;
+                        reply(serde_json::json!({"version":version}))
                     }
                     "provider.models.set_enabled" => {
                         let p: SetEnabledModels = params(value)?;
@@ -243,33 +322,31 @@ pub(super) fn provide(
                     }
                     "provider.models.edit" => {
                         let p: EditModel = params(value)?;
-                        reply(
-                            provider
-                                .update_model_config(
-                                    p.provider_id,
-                                    p.expected_version,
-                                    p.model_id,
-                                    Some(p.edit),
-                                    cancel,
-                                )
-                                .await
-                                .map_err(error)?,
-                        )
+                        let catalog = provider
+                            .update_model_config(
+                                p.provider_id,
+                                p.expected_version,
+                                p.model_id,
+                                Some(p.edit),
+                                cancel,
+                            )
+                            .await
+                            .map_err(error)?;
+                        model_catalog_reply(catalog, p.reply)
                     }
                     "provider.models.reset" => {
                         let p: ResetModel = params(value)?;
-                        reply(
-                            provider
-                                .update_model_config(
-                                    p.provider_id,
-                                    p.expected_version,
-                                    p.model_id,
-                                    None,
-                                    cancel,
-                                )
-                                .await
-                                .map_err(error)?,
-                        )
+                        let catalog = provider
+                            .update_model_config(
+                                p.provider_id,
+                                p.expected_version,
+                                p.model_id,
+                                None,
+                                cancel,
+                            )
+                            .await
+                            .map_err(error)?;
+                        model_catalog_reply(catalog, p.reply)
                     }
                     "provider.selection" => {
                         let p: SelectionScope = params(value)?;

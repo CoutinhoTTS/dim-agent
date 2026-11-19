@@ -9,6 +9,9 @@
 [第二轮缺项对应表](coverage-completion.md)及[运行记录](coverage-completion-results.md)接续第一轮，逐条对应原审计的具体场景。
 下表是最初的检查清单；WaitRuntime、NestedSettlement 已扩展，以补充实验和新运行记录为准。
 
+#1732 的公共机制补充见[合同—实现—模型对应表](../timeline-contract-coverage.md)和
+[写入/发布运行记录](publication-results.md)；它们有独立源码基线与结果，不改变以下旧记录。
+
 ## 如何读结论
 
 每项先确定使用场景和承诺，再确定模型动作与代码入口，最后检查性质。下表里的“检查”指 `.cfg` 声明的
@@ -157,3 +160,28 @@ done
 消融复查：共享的查询选择和当前输入发布各保留一个模型，不为每个调用者复制；删除了恒为零的“恢复读取正文次数”
 及按有限 ID 集合自动成立的“压缩次数上限”，因为它们不能提供实现证据。保留分开的协议模型，是为了不把
 一个巨型模型的状态爆炸或一个小模型的通过误当成整个插件已验证。未增加运行时抽象、CI 门槛或证明平台。
+
+## Owner 交接
+
+[Owner 前提与交接对应表](../owner-handoff-verification.md)核对生产 `consume` 调用的 cut 来源，
+并用 [InterruptHandoff](InterruptHandoff.tla) 和 [GenerationHandoff](GenerationHandoff.tla)
+检查中断后的迟到请求、旧工作终态与新代接续。范围和复现见
+[运行记录](owner-handoff-results.md)；这两个有限交接不代表全部 owner 组合已经验证。
+
+[RequestRecovery](RequestRecovery.tla)补充旧任务停止后的 Loop → ContextPreparation → ModelProvider
+结算责任，区分三个独立 cut、未发布终态和查询/写入失败；[运行记录](request-recovery-results.md)
+与 [owner 对应](../owner-handoff-verification.md#6-loop--preparation--model-的恢复结算责任)说明范围。
+
+[ModelReloadHandoff](ModelReloadHandoff.tla) 与 [ExecWakeRecovery](ExecWakeRecovery.tla)
+补充上游仍运行的独立重启、恢复查询失败，以及补通知失败后的持久义务。
+[运行记录](live-handoff-results.md)对应真实流程及明确的成功重试前提。
+
+## 查询范围补充实验
+
+#1732 的查询范围补充见[范围、实现和模型对应](../query-range-verification.md)与
+[独立运行记录](query-range-results.md)，不替代本页旧配置的证据。
+
+## 动态消费交接补充实验
+
+#1732 C 的[合同与实现对应](../consumer-handoff-verification.md)及
+[运行记录](consumer-handoff-results.md)展开真实 consume 的注册、暂存、排空、失败和退出。

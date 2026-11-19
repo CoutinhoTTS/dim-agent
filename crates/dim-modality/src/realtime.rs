@@ -15,6 +15,7 @@ use crate::{catalog_category, evaluate, unknown_operation};
 use dim_agent_capabilities::host::{ModalityConnection, ModalityConnectionHost, ModalityTarget};
 use dim_agent_capabilities::methods::{Caller, RpcError};
 use dim_agent_types::ModelId;
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::collections::HashMap;
@@ -245,10 +246,12 @@ impl Realtime {
         let cancel_session = CancellationToken::new();
         let (events_tx, events_rx) = mpsc::channel(EVENT_BUFFER);
         let opened = tokio::select! {
-            result =
-                adapter
-                    .0
-                    .realtime_open(connection, request.params, events_tx, cancel_session.child_token()) =>
+            result = adapter.0.realtime_open(
+                connection,
+                request.params,
+                events_tx,
+                cancel_session.child_token(),
+            ) =>
             {
                 match result {
                     Ok(opened) => opened,
@@ -411,9 +414,9 @@ fn opens_until(
     shared: &Shared,
 ) -> Option<tokio::time::Instant> {
     let text = connection.as_ref()?.expires_at.as_deref()?;
-    let at = chrono::DateTime::parse_from_rfc3339(text).ok()?;
-    let delta = at.with_timezone(&chrono::Utc) - shared.clock.now();
-    let delta = delta.to_std().unwrap_or_default();
+    let at = text.parse::<Timestamp>().ok()?;
+    let delta = at.duration_since(shared.clock.now());
+    let delta = Duration::try_from(delta).unwrap_or_default();
     Some(tokio::time::Instant::now() + delta)
 }
 

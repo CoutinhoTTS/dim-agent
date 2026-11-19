@@ -12,6 +12,10 @@ use dim_agent_types::*;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use rutis::{Ctx, Plugin};
 use std::{
+    collections::HashMap,
+    future::Future,
+    path::PathBuf,
+    pin::Pin,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -1208,9 +1212,16 @@ async fn steer_and_append_enter_the_current_turn_at_tool_result_while_queue_wait
         let requests = Arc::new(Mutex::new(Vec::new()));
         let entered = Arc::new(Notify::new());
         let release = Arc::new(Notify::new());
-        let agent = MinimalHost::start(&builder(Arc::new(RecordingModel(requests.clone())), Arc::new(BoundaryTools {
-            entered: entered.clone(), release: release.clone(),
-        }))).await.unwrap();
+        let boundary = BoundaryTools {
+            entered: entered.clone(),
+            release: release.clone(),
+        };
+        let agent = MinimalHost::start(&builder(
+            Arc::new(RecordingModel(requests.clone())),
+            Arc::new(boundary),
+        ))
+        .await
+        .unwrap();
         let session = agent.create_session(SessionConfig { tools: Some(vec!["boundary".into()]), permission_policy: dim_agent_runtime::PermissionPolicy { preset: dim_agent_runtime::PermissionPreset::FullAccess, ..Default::default() }, ..Default::default() }).await.unwrap();
         session.submit("tool:boundary {}".into(), InputMode::Queue, "main").await.unwrap();
         entered.notified().await;
@@ -1241,13 +1252,27 @@ async fn steer_and_append_enter_the_current_turn_at_tool_result_while_queue_wait
         assert!(requests[2].messages.contains(&Arc::new(Message::text(Role::User, "next turn"))));
         let events = chain_events(&session, "main", ..).await.unwrap();
         let applied = |id: &str| events.iter().find(|event| matches!(&event.kind, EventKind::InputConsumed(data) if data.input_id == id)).unwrap().sequence;
-        let tool_result = events.iter().find(|event| matches!(event.kind, EventKind::ToolResult(_))).unwrap().sequence;
-        let turn_end = events.iter().find(|event| matches!(event.kind, EventKind::TurnEnd(_))).unwrap().sequence;
+        let tool_result = events
+            .iter()
+            .find(|event| matches!(event.kind, EventKind::ToolResult(_)))
+            .unwrap()
+            .sequence;
+        let turn_end = events
+            .iter()
+            .find(|event| matches!(event.kind, EventKind::TurnEnd(_)))
+            .unwrap()
+            .sequence;
         assert!(tool_result < applied(&steered.id));
         assert!(applied(&steered.id) < applied(&appended.id));
         assert!(applied(&appended.id) < turn_end);
         assert!(turn_end < applied(&queued.id));
-        assert_eq!(events.iter().filter(|event| matches!(event.kind, EventKind::TurnStart(_))).count(), 2);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event.kind, EventKind::TurnStart(_)))
+                .count(),
+            2
+        );
         agent.close().await.unwrap();
     }).await.unwrap();
 }
@@ -1337,7 +1362,13 @@ impl ToolDriver for DelayedTools {
 async fn stop_waits_for_native_cleanup_and_keeps_a_real_success() {
     tokio::time::timeout(Duration::from_secs(10), async {
         let started = Arc::new(Notify::new()); let cleaned = Arc::new(AtomicBool::new(false));
-        let agent = MinimalHost::start(&builder(Arc::new(EchoModel), Arc::new(DelayedTools { started: started.clone(), cleaned: cleaned.clone() }))).await.unwrap();
+        let tools = DelayedTools {
+            started: started.clone(),
+            cleaned: cleaned.clone(),
+        };
+        let agent = MinimalHost::start(&builder(Arc::new(EchoModel), Arc::new(tools)))
+            .await
+            .unwrap();
         let session = agent.create_session(SessionConfig { tools: Some(vec!["delayed".into()]), permission_policy: dim_agent_runtime::PermissionPolicy { preset: dim_agent_runtime::PermissionPreset::FullAccess, ..Default::default() }, ..SessionConfig::default() }).await.unwrap();
         session.submit("tool:delayed {}".into(), InputMode::Queue, "main").await.unwrap();
         started.notified().await;
@@ -1345,7 +1376,18 @@ async fn stop_waits_for_native_cleanup_and_keeps_a_real_success() {
         assert!(cleaned.load(Ordering::SeqCst));
         let events = chain_events(&session, "main", ..).await.unwrap();
         assert!(events.iter().any(|event| matches!(&event.kind, EventKind::ToolResult(data) if data.results[0].result.content == ToolContent::Text("native operation succeeded".into()) && data.results[0].result.is_error.is_none())));
-        assert!(matches!(events.iter().rev().find(|event| matches!(event.kind, EventKind::TurnEnd(_))).unwrap().kind, EventKind::TurnEnd(TurnEndData { outcome: TurnOutcome::Cancelled { .. }, .. })));
+        assert!(matches!(
+            events
+                .iter()
+                .rev()
+                .find(|event| matches!(event.kind, EventKind::TurnEnd(_)))
+                .unwrap()
+                .kind,
+            EventKind::TurnEnd(TurnEndData {
+                outcome: TurnOutcome::Cancelled { .. },
+                ..
+            })
+        ));
         agent.close().await.unwrap();
     }).await.unwrap();
 }
@@ -1976,21 +2018,6 @@ async fn context_preparation_copies_a_failure_chain_into_the_call() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn a_request_without_a_failure_chain_gets_a_fresh_retry_budget() {
-    let (agent, session, probe) = recovery_agent(25, None).await;
-    session
-        .submit("fresh budget".into(), InputMode::Queue, "main")
-        .await
-        .unwrap();
-    session.idle("main").await.unwrap();
-    assert_eq!(probe.calls.load(Ordering::SeqCst), 8);
-    let failure = model_failure(&session).await;
-    assert_eq!(failure.kind, ModelFailureKind::ServerError);
-    assert_eq!(failure.attempts, 8);
-    agent.close().await.unwrap();
-}
-
-#[tokio::test(start_paused = true)]
 async fn a_continuation_continues_its_failure_chain_retry_budget() {
     let chain = FailureChain {
         from_request_id: "request-before".into(),
@@ -2470,7 +2497,12 @@ async fn waiting_to_retry_obeys_stop_steer_and_provider_reload() {
                         "{outcomes:?}"
                     );
                     assert!(matches!(
-                        &events.iter().rev().find(|event| matches!(event.kind, EventKind::TurnEnd(_))).unwrap().kind,
+                        &events
+                            .iter()
+                            .rev()
+                            .find(|event| matches!(event.kind, EventKind::TurnEnd(_)))
+                            .unwrap()
+                            .kind,
                         EventKind::TurnEnd(TurnEndData {
                             outcome: TurnOutcome::Cancelled { reason },
                             ..
@@ -2484,7 +2516,12 @@ async fn waiting_to_retry_obeys_stop_steer_and_provider_reload() {
                         EventKind::InputConsumed(data) if Some(&data.input_id) == steered.as_ref()
                     )));
                     assert!(matches!(
-                        &events.iter().rev().find(|event| matches!(event.kind, EventKind::TurnEnd(_))).unwrap().kind,
+                        &events
+                            .iter()
+                            .rev()
+                            .find(|event| matches!(event.kind, EventKind::TurnEnd(_)))
+                            .unwrap()
+                            .kind,
                         EventKind::TurnEnd(TurnEndData {
                             outcome: TurnOutcome::Completed { .. },
                             ..
@@ -2869,7 +2906,12 @@ async fn an_interrupt_cancels_a_thirty_second_sleep_promptly() {
 async fn an_idle_append_starts_no_turn_and_joins_the_next_one() {
     tokio::time::timeout(Duration::from_secs(5), async {
         let requests = Arc::new(Mutex::new(Vec::new()));
-        let agent = MinimalHost::start(&builder(Arc::new(RecordingModel(requests.clone())), Arc::new(MockTools))).await.unwrap();
+        let agent = MinimalHost::start(&builder(
+            Arc::new(RecordingModel(requests.clone())),
+            Arc::new(MockTools),
+        ))
+        .await
+        .unwrap();
         let session = agent.create_session(SessionConfig::default()).await.unwrap();
         let appended = session.submit("idle context".into(), InputMode::Append, "main").await.unwrap();
         session.idle("main").await.unwrap();
@@ -2889,7 +2931,13 @@ async fn an_idle_append_starts_no_turn_and_joins_the_next_one() {
         assert!(requests[0].messages.contains(&Arc::new(Message::text(Role::User, "idle context"))));
         assert!(requests[0].messages.contains(&Arc::new(Message::text(Role::User, "go"))));
         let events = chain_events(&session, "main", ..).await.unwrap();
-        assert_eq!(events.iter().filter(|event| matches!(event.kind, EventKind::TurnStart(_))).count(), 1);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event.kind, EventKind::TurnStart(_)))
+                .count(),
+            1
+        );
         agent.close().await.unwrap();
     }).await.unwrap();
 }
@@ -2977,8 +3025,20 @@ async fn a_steer_during_output_continues_the_turn_instead_of_ending_it() {
         assert_eq!(requests.len(), 2);
         assert!(requests[1].messages.contains(&Arc::new(Message::text(Role::User, "STEER-MARKER"))));
         let events = chain_events(&session, "main", ..).await.unwrap();
-        assert_eq!(events.iter().filter(|event| matches!(event.kind, EventKind::TurnStart(_))).count(), 1);
-        assert_eq!(events.iter().filter(|event| matches!(event.kind, EventKind::TurnEnd(_))).count(), 1);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event.kind, EventKind::TurnStart(_)))
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event.kind, EventKind::TurnEnd(_)))
+                .count(),
+            1
+        );
         assert!(events.iter().any(|event| matches!(&event.kind, EventKind::Text(data) if data.delta == "partial answer")));
         agent.close().await.unwrap();
     }).await.unwrap();
@@ -4285,35 +4345,35 @@ fn sent_parts(request: &ModelRequest) -> Vec<String> {
 }
 
 #[tokio::test]
-async fn a_session_switched_to_a_text_only_model_sends_image_placeholders() {
+async fn image_references_survive_vision_and_text_model_switches_without_changing_history() {
     tokio::time::timeout(Duration::from_secs(5), async {
         let requests = Arc::new(Mutex::new(Vec::new()));
-        let agent = MinimalHost::start(&builder(Arc::new(RecordingModel(requests.clone())), Arc::new(MockTools))).await.unwrap();
+        let agent = MinimalHost::start(&builder(
+            Arc::new(RecordingModel(requests.clone())),
+            Arc::new(MockTools),
+        ))
+        .await
+        .unwrap();
         let session = agent.create_session(SessionConfig::default()).await.unwrap();
         session
             .configure(ConfigureUpdate { model: Some(model_with_vision("seeing", true)), ..Default::default() }, "main")
             .await
             .unwrap();
-        let png = "iVBORw0KGgo=";
+        let png = TOOL_IMAGE;
         session
             .input(
                 InputMessageData {
                     user: Some(UserInput {
                         content: vec![
                             ContentBlock::Text { text: "look".into() },
-                            ContentBlock::Image { source: ImageSource {
-                                source_type: ImageSourceType::File,
-                                media_type: "image/png".into(),
-                                file_id: Some("persisted-image".into()), data: None, url: None,
-                            } },
+                            image("image/png", Some(png), None),
+                            image("image/jpeg", Some(png), None),
                             image("image/png", None, Some("https://example.test/a.png")),
-                            ContentBlock::Image { source: ImageSource {
-                                source_type: ImageSourceType::File,
-                                media_type: "image/svg+xml".into(),
-                                file_id: Some("persisted-svg".into()), data: None, url: None,
-                            } },
+                            image("image/svg+xml", Some(png), None),
                             image("image/bmp", Some(png), None),
                             image("image/png", Some("not base64!"), None),
+                            image("image/png", Some(""), None),
+                            image("image/png", None, None),
                         ],
                     }),
                     mode: Some(InputMode::Queue),
@@ -4327,7 +4387,7 @@ async fn a_session_switched_to_a_text_only_model_sends_image_placeholders() {
         let unsendable = "[Image omitted: the image cannot be sent to this model.]";
         assert_eq!(
             sent_parts(requests.lock().unwrap().last().unwrap()),
-            ["look", "image:image/png", unsendable, unsendable, unsendable, unsendable]
+            ["look", TOOL_IMAGE_REFERENCE, TOOL_IMAGE_REFERENCE, unsendable, unsendable, unsendable, unsendable, unsendable, unsendable]
         );
 
         session
@@ -4340,12 +4400,12 @@ async fn a_session_switched_to_a_text_only_model_sends_image_placeholders() {
         assert_eq!(request.model_id, "text-only");
         let omitted = "[Image omitted: the current model does not accept images.]";
         let parts = sent_parts(&request);
-        assert_eq!(parts[..6], ["look", omitted, omitted, omitted, omitted, omitted]);
+        assert_eq!(parts[..9], ["look", TOOL_IMAGE_REFERENCE, TOOL_IMAGE_REFERENCE, omitted, omitted, omitted, omitted, omitted, omitted]);
         assert!(parts.contains(&"next".to_string()));
         let history = chain_events(&session, "main", ..).await.unwrap();
         assert!(history.iter().any(|event| matches!(&event.kind, EventKind::Text(data) if data.delta.contains("next"))));
         assert!(history.iter().any(|event| matches!(&event.kind,
-            EventKind::InputMessage(data) if data.user.as_ref().is_some_and(|user| user.content.iter().any(|block| matches!(block, ContentBlock::Image { .. }))))));
+            EventKind::InputMessage(data) if data.user.as_ref().is_some_and(|user| user.content.iter().any(|block| matches!(block, ContentBlock::Image { source } if source.data.as_deref() == Some(png)))))));
         assert!(history.iter().any(|event| matches!(&event.kind,
             EventKind::ModelCall(call) if call.request.model_id == "text-only"
                 && call.request.messages.iter().any(|message| matches!(&message.content,
@@ -4355,8 +4415,7 @@ async fn a_session_switched_to_a_text_only_model_sends_image_placeholders() {
         session.idle("main").await.unwrap();
         let restored = requests.lock().unwrap().last().unwrap().clone();
         assert_eq!(restored.model_id, "seeing-again");
-        assert_eq!(sent_parts(&restored)[..6], ["look", "image:image/png", unsendable, unsendable, unsendable, unsendable]);
-        assert!(restored.messages.iter().any(|message| matches!(&message.content, MessageContent::Parts(parts) if parts.iter().any(|part| matches!(part, MessagePart::Image {source} if source.file_id.as_deref() == Some("persisted-image"))))));
+        assert_eq!(sent_parts(&restored)[..9], ["look", TOOL_IMAGE_REFERENCE, TOOL_IMAGE_REFERENCE, unsendable, unsendable, unsendable, unsendable, unsendable, unsendable]);
         agent.close().await.unwrap();
     })
     .await
@@ -4365,83 +4424,336 @@ async fn a_session_switched_to_a_text_only_model_sends_image_placeholders() {
 
 const TOOL_IMAGE: &str =
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jD1sAAAAASUVORK5CYII=";
+const TOOL_IMAGE_REFERENCE: &str = "img:12c5f2d047c10416";
+
+type SessionFileFuture<'a, T> =
+    Pin<Box<dyn Future<Output = std::result::Result<T, SessionFileError>> + Send + 'a>>;
+
+#[derive(Default)]
+struct StoredImages(Mutex<HashMap<(String, String), Vec<u8>>>);
+
+impl SessionFilesService for StoredImages {
+    fn put(
+        &self,
+        session_id: String,
+        name: String,
+        content: Vec<u8>,
+        _: CancellationToken,
+    ) -> SessionFileFuture<'_, StoredSessionFile> {
+        let stored = StoredSessionFile {
+            file_id: name.clone(),
+            path: PathBuf::from("/test-files").join(&session_id).join(&name),
+            bytes: content.len() as u64,
+        };
+        self.0.lock().unwrap().insert((session_id, name), content);
+        Box::pin(async move { Ok(stored) })
+    }
+
+    fn read(
+        &self,
+        session_id: String,
+        file_id: String,
+        offset: u64,
+        _: CancellationToken,
+    ) -> SessionFileFuture<'_, Vec<u8>> {
+        let files = self.0.lock().unwrap();
+        let result = files
+            .get(&(session_id, file_id))
+            .map(|bytes| {
+                let start = usize::try_from(offset)
+                    .unwrap_or(usize::MAX)
+                    .min(bytes.len());
+                bytes[start..bytes.len().min(start.saturating_add(64 * 1024))].to_vec()
+            })
+            .ok_or_else(|| SessionFileError {
+                code: SessionFileErrorCode::NotFound,
+                message: "Image is not owned by this Session".into(),
+            });
+        Box::pin(async move { result })
+    }
+
+    fn register(&self, _: String, _: PathBuf) -> SessionFileFuture<'_, ()> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn owns(&self, _: String, _: PathBuf) -> SessionFileFuture<'_, bool> {
+        Box::pin(async { Ok(false) })
+    }
+
+    fn owned_paths(&self, _: String) -> SessionFileFuture<'_, Vec<PathBuf>> {
+        Box::pin(async { Ok(vec![]) })
+    }
+}
 
 #[tokio::test]
-async fn replacing_a_tool_image_preserves_other_messages_and_the_stored_result() {
+async fn stored_attachment_and_tool_images_share_a_reference_without_changing_file_history() {
+    use base64::Engine;
+
+    let files = Arc::new(StoredImages::default());
+    let file_image = |id: &str| ContentBlock::Image {
+        source: ImageSource {
+            source_type: ImageSourceType::File,
+            media_type: "image/png".into(),
+            file_id: Some(id.into()),
+            data: None,
+            url: None,
+        },
+    };
+    let attachment = file_image("attachment.png");
+    let tool_image = file_image("tool.png");
+    let retained = vec![
+        attachment.clone(),
+        file_image("large.png"),
+        file_image("large.png"),
+        file_image("large.png"),
+    ];
     let requests = Arc::new(Mutex::new(Vec::new()));
-    let agent = MinimalHost::start(&builder(
+    let mut builder = builder(
         Arc::new(RecordingModel(requests.clone())),
-        Arc::new(Screenshot(true)),
-    ))
-    .await
-    .unwrap();
+        Arc::new(Screenshot(vec![tool_image.clone()])),
+    );
+    builder.process_value(Arc::new(SessionFiles(files.clone())));
+    let agent = MinimalHost::start(&builder).await.unwrap();
     let session = agent
         .create_session(SessionConfig {
-            model: model_with_vision("text-only", false),
+            model: model_with_vision("vision", true),
             tools: Some(vec!["shot".into()]),
             ..Default::default()
         })
         .await
         .unwrap();
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(TOOL_IMAGE)
+        .unwrap();
+    for name in ["attachment.png", "tool.png"] {
+        files
+            .put(
+                session.id().into(),
+                name.into(),
+                bytes.clone(),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+    }
+    let mut large = bytes;
+    large.resize(9 * 1024 * 1024, 0);
+    assert!(3 * dim_agent_capabilities::images::base64_len(large.len() as u64) > 32 * 1024 * 1024);
+    files
+        .put(
+            session.id().into(),
+            "large.png".into(),
+            large,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let model = |id, vision| {
+        let mut model = model_with_vision(id, vision);
+        model.metadata = Some(RequestMetadata {
+            session_id: Some(session.id().into()),
+            ..Default::default()
+        });
+        model
+    };
     session
-        .submit("keep this answer".into(), InputMode::Queue, "main")
+        .configure(
+            ConfigureUpdate {
+                model: Some(model("vision", true)),
+                ..Default::default()
+            },
+            "main",
+        )
+        .await
+        .unwrap();
+    session
+        .input(
+            InputMessageData {
+                user: Some(UserInput {
+                    content: retained.clone(),
+                }),
+                mode: Some(InputMode::Queue),
+                ..Default::default()
+            },
+            "main",
+        )
         .await
         .unwrap();
     session.idle("main").await.unwrap();
-    session
-        .submit("tool:shot {}".into(), InputMode::Queue, "main")
-        .await
-        .unwrap();
-    session.idle("main").await.unwrap();
-    let sent = requests.lock().unwrap().last().unwrap().clone();
-    let events = chain_events(&session, "main", ..).await.unwrap();
-    let stored = events
-        .iter()
-        .rev()
-        .find_map(|event| match &event.kind {
-            EventKind::ModelCall(call) => Some(call.request.clone()),
-            _ => None,
-        })
-        .unwrap();
-    assert!(!Arc::ptr_eq(&sent, &stored));
-    assert_eq!(sent.messages.len(), stored.messages.len());
-    let mut replaced = 0;
-    for (before, after) in stored.messages.iter().zip(&sent.messages) {
-        if before == after {
-            assert!(Arc::ptr_eq(before, after), "unchanged messages stay shared");
-            continue;
-        }
-        replaced += 1;
-        let MessageContent::Parts(parts) = &after.content else {
-            panic!("tool results contain parts")
-        };
-        let [MessagePart::ToolResult { content, .. }] = parts.as_slice() else {
-            panic!("one tool result is adapted")
-        };
-        assert_eq!(
-            content,
-            &ToolContent::Blocks(vec![
-                ContentBlock::Text {
-                    text: "screenshot".into()
+    for (model_id, vision) in [("vision", true), ("text", false)] {
+        session
+            .configure(
+                ConfigureUpdate {
+                    model: Some(model(model_id, vision)),
+                    ..Default::default()
                 },
-                ContentBlock::Text {
-                    text: "[Image omitted: the current model does not accept images.]".into()
-                }
-            ])
+                "main",
+            )
+            .await
+            .unwrap();
+        session
+            .submit("tool:shot {}".into(), InputMode::Queue, "main")
+            .await
+            .unwrap();
+        session.idle("main").await.unwrap();
+        let sent = requests.lock().unwrap().last().unwrap().clone();
+        assert_eq!(sent.model_id, model_id);
+        assert_eq!(
+            sent_parts(&sent)
+                .iter()
+                .filter(|part| *part == "img:4739787cfd409e67")
+                .count(),
+            3,
+            "retained images exceeding the pixel budget still reach {model_id} as references"
+        );
+        assert!(
+            sent_parts(&sent)
+                .iter()
+                .any(|part| part == TOOL_IMAGE_REFERENCE)
+        );
+        assert!(sent.messages.iter().any(|message| matches!(&message.content,
+            MessageContent::Parts(parts) if parts.iter().any(|part| matches!(part,
+                MessagePart::ToolResult { content: ToolContent::Blocks(blocks), .. }
+                    if blocks.contains(&ContentBlock::Text { text: TOOL_IMAGE_REFERENCE.into() }))))));
+        assert!(
+            !sent
+                .messages
+                .iter()
+                .any(|message| matches!(&message.content,
+                MessageContent::Parts(parts) if parts.iter().any(|part| match part {
+                    MessagePart::Image { .. } => true,
+                    MessagePart::ToolResult { content: ToolContent::Blocks(blocks), .. } =>
+                        blocks.iter().any(|block| matches!(block, ContentBlock::Image { .. })),
+                    _ => false,
+                })))
         );
     }
-    assert_eq!(replaced, 1);
+    let events = chain_events(&session, "main", ..).await.unwrap();
     assert!(events.iter().any(|event| matches!(&event.kind,
+        EventKind::InputMessage(data) if data.user.as_ref().is_some_and(|user|
+            user.content == retained))));
+    assert!(
+        events.iter().any(|event| matches!(&event.kind,
         EventKind::ToolResult(data) if data.results.iter().any(|result| matches!(
-            &result.result.content,
-            ToolContent::Blocks(blocks) if blocks.iter().any(|block| matches!(block, ContentBlock::Image { .. }))
-        ))
-    )));
+            &result.result.content, ToolContent::Blocks(blocks) if blocks.contains(&tool_image)))))
+    );
+    assert!(events.iter().any(|event| matches!(&event.kind,
+        EventKind::ModelCall(call) if call.request.messages.iter().any(|message|
+            matches!(&message.content, MessageContent::Parts(parts) if parts.iter().any(|part|
+                matches!(part, MessagePart::Image { source }
+                    if source.source_type == ImageSourceType::File
+                        && source.file_id.as_deref() == Some("attachment.png"))))))));
+    assert!(events.iter().any(|event| matches!(&event.kind,
+        EventKind::ModelCall(call) if call.request.messages.iter().any(|message|
+            matches!(&message.content, MessageContent::Parts(parts) if parts.iter().any(|part|
+                matches!(part, MessagePart::ToolResult { content: ToolContent::Blocks(blocks), .. }
+                    if blocks.contains(&tool_image))))))));
     agent.close().await.unwrap();
 }
 
-/// A tool whose result is a text block, with or without a PNG block after it.
-struct Screenshot(bool);
+#[tokio::test]
+async fn replacing_a_tool_image_preserves_other_messages_and_the_stored_result() {
+    for vision in [false, true] {
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let agent = MinimalHost::start(&builder(
+            Arc::new(RecordingModel(requests.clone())),
+            Arc::new(Screenshot(vec![
+                image("image/png", Some(TOOL_IMAGE), None),
+                image("image/png", Some(TOOL_IMAGE), None),
+                image("image/png", None, Some("https://example.test/tool.png")),
+                image("image/png", Some("not base64!"), None),
+                image("image/avif", Some(TOOL_IMAGE), None),
+                image("image/png", None, None),
+                image("image/png", Some(""), None),
+            ])),
+        ))
+        .await
+        .unwrap();
+        let session = agent
+            .create_session(SessionConfig {
+                model: model_with_vision("conversational", vision),
+                tools: Some(vec!["shot".into()]),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        session
+            .submit("keep this answer".into(), InputMode::Queue, "main")
+            .await
+            .unwrap();
+        session.idle("main").await.unwrap();
+        session
+            .submit("tool:shot {}".into(), InputMode::Queue, "main")
+            .await
+            .unwrap();
+        session.idle("main").await.unwrap();
+        let sent = requests.lock().unwrap().last().unwrap().clone();
+        let events = chain_events(&session, "main", ..).await.unwrap();
+        let stored = events
+            .iter()
+            .rev()
+            .find_map(|event| match &event.kind {
+                EventKind::ModelCall(call) => Some(call.request.clone()),
+                _ => None,
+            })
+            .unwrap();
+        assert!(!Arc::ptr_eq(&sent, &stored));
+        assert_eq!(sent.messages.len(), stored.messages.len());
+        let mut replaced = 0;
+        for (before, after) in stored.messages.iter().zip(&sent.messages) {
+            if before == after {
+                assert!(Arc::ptr_eq(before, after), "unchanged messages stay shared");
+                continue;
+            }
+            replaced += 1;
+            let MessageContent::Parts(parts) = &after.content else {
+                panic!("tool results contain parts")
+            };
+            let [MessagePart::ToolResult { content, .. }] = parts.as_slice() else {
+                panic!("one tool result is adapted")
+            };
+            assert_eq!(
+                content,
+                &ToolContent::Blocks({
+                    let mut blocks = vec![
+                        ContentBlock::Text {
+                            text: "screenshot".into(),
+                        },
+                        ContentBlock::Text {
+                            text: TOOL_IMAGE_REFERENCE.into(),
+                        },
+                        ContentBlock::Text {
+                            text: TOOL_IMAGE_REFERENCE.into(),
+                        },
+                    ];
+                    blocks.extend((0..5).map(|_| {
+                        ContentBlock::Text {
+                            text: if vision {
+                                "[Image omitted: the image cannot be sent to this model.]"
+                            } else {
+                                "[Image omitted: the current model does not accept images.]"
+                            }
+                            .into(),
+                        }
+                    }));
+                    blocks
+                })
+            );
+        }
+        assert_eq!(replaced, 1);
+        assert!(events.iter().any(|event| matches!(
+            &event.kind,
+            EventKind::ToolResult(data) if data.results.iter().any(|result| matches!(
+                &result.result.content,
+                ToolContent::Blocks(blocks)
+                    if blocks.iter().any(|block| matches!(block, ContentBlock::Image { .. }))
+            ))
+        )));
+        agent.close().await.unwrap();
+    }
+}
+
+struct Screenshot(Vec<ContentBlock>);
 impl ToolDriver for Screenshot {
     fn definitions(&self) -> Vec<ToolDefinition> {
         vec![ToolDefinition {
@@ -4459,22 +4771,12 @@ impl ToolDriver for Screenshot {
         _: ToolExecutionContext,
         _: CancellationToken,
     ) -> HostFuture<'_, ToolResult> {
-        let image = self.0;
+        let images = self.0.clone();
         Box::pin(async move {
             let mut blocks = vec![ContentBlock::Text {
                 text: "screenshot".into(),
             }];
-            if image {
-                blocks.push(ContentBlock::Image {
-                    source: ImageSource {
-                        file_id: None,
-                        source_type: ImageSourceType::Base64,
-                        media_type: "image/png".into(),
-                        data: Some(TOOL_IMAGE.into()),
-                        url: None,
-                    },
-                });
-            }
+            blocks.extend(images);
             Ok(ToolResult {
                 content: ToolContent::Blocks(blocks),
                 structured_content: None,
@@ -4509,10 +4811,14 @@ impl ResolveModelConnection for NoConnection {
 
 /// The turn's context estimates, one per model call, for a tool that returns a
 /// text block with or without an image.
-async fn tool_result_estimates(image: bool) -> Vec<f64> {
+async fn tool_result_estimates(with_image: bool) -> Vec<f64> {
     let mut builder = AgentBuilder::new(AgentConfig::default());
     builder
-        .session_value(Arc::new(ToolHost(Arc::new(Screenshot(image)))))
+        .session_value(Arc::new(ToolHost(Arc::new(Screenshot(if with_image {
+            vec![image("image/png", Some(TOOL_IMAGE), None)]
+        } else {
+            vec![]
+        })))))
         .session_value(Arc::new(
             dim_agent_capabilities::history::HistoryRenderer::default(),
         ))

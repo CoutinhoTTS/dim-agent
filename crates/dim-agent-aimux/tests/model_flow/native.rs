@@ -212,6 +212,18 @@ async fn bedrock_native_auth_stream_and_continuation_are_first_party() {
             ])
         );
         assert_eq!(sent[1].headers["x-tenant"], "tenant-A");
+        assert_identity_before(
+            sent[1].headers["user-agent"].to_str().unwrap(),
+            "bedrock",
+            &[
+                "ai-sdk-amazon-bedrock/",
+                "ai-sdk-provider-utils/",
+                "ai-sdk-amazon-bedrock/",
+            ],
+            3,
+        );
+        assert_eq!(sent[1].headers["x-title"], "DimCode");
+        assert_eq!(sent[1].headers["http-referer"], "https://dimagent.com/");
         match auth {
             BedrockAuth::Bearer(_) => {
                 assert_eq!(sent[1].headers["authorization"], "Bearer bearer-asymmetric")
@@ -1118,9 +1130,13 @@ async fn codex_request_profile_is_isolated_to_responses() {
     assert_eq!(sent_headers["chatgpt-account-id"], "account-1");
     assert_eq!(sent_headers["oai-product-sku"], "codex");
     assert_eq!(sent_headers["originator"], "codex-tui");
-    assert_eq!(
-        sent_headers["user-agent"],
-        "dimagent/0.144.1 ai-sdk-provider-utils/5.0.53"
+    let user_agent = sent_headers["user-agent"].to_str().unwrap();
+    let library = user_agent
+        .strip_prefix("dimagent/0.144.1 ai-sdk-provider-utils/")
+        .unwrap_or_else(|| panic!("the connection's own User-Agent leads: {user_agent}"));
+    assert!(
+        !library.is_empty(),
+        "The library part carries a version: {user_agent}"
     );
     assert_eq!(body["store"], false);
     assert!(body.get("max_output_tokens").is_none());
@@ -1996,8 +2012,8 @@ async fn a_reset_after_headers_is_a_network_failure() {
     root.shutdown().await.unwrap();
 }
 
-/// A stream-event failure whose code is neither permanent nor transient is not
-/// retried: the event's code decides, not the status the tag synthesizes.
+/// A stream-event failure whose code is neither a condition nor a class label is
+/// not retried: the event's code decides, not the status it carries.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_stream_event_failure_with_an_unknown_code_is_not_retried() {
     let responses = NativeServer::start("openai-responses").await;
@@ -2025,6 +2041,202 @@ async fn a_stream_event_failure_with_an_unknown_code_is_not_retried() {
     );
     responses.close().await;
     root.shutdown().await.unwrap();
+}
+
+/// A gateway's generic `api_error` label beside a 422 does not make the
+/// failure retryable: the status decides, and the request is tried once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_4xx_with_a_server_class_label_is_rejected_once() {
+    let responses = NativeServer::start("openai-responses").await;
+    let agent = model_agent(responses.models(), None).await;
+    let session = agent
+        .create_session(responses.session_config())
+        .await
+        .unwrap();
+    session
+        .submit("gateway-rejected".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
+    let failure = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::ModelOutputEnd(data) => match &data.outcome {
+                ModelOutputOutcome::Failed {
+                    failure: Some(failure),
+                    ..
+                } => Some(failure.clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .expect("a failed model output");
+    assert_eq!(failure.kind, ModelFailureKind::InvalidRequest);
+    assert_eq!(failure.status, Some(422));
+    assert_eq!(
+        failure.reason.as_deref(),
+        Some("the upstream refused the request's shape")
+    );
+    assert_eq!(failure.attempts, 1, "a rejected request is not retried");
+    assert_eq!(
+        responses.endpoint.requests.lock().unwrap().len(),
+        1,
+        "a rejected request is not sent again"
+    );
+    agent.close().await.unwrap();
+    responses.close().await;
+}
+
+/// A reply that completes with neither text nor a tool call is a
+/// `malformed_response`: it is retried once, and the next attempt's answer
+/// finishes the turn.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_empty_reply_is_retried_once_and_the_answer_finishes_the_turn() {
+    let chat = NativeServer::start("openai-chat").await;
+    let agent = model_agent(chat.models(), None).await;
+    let session = agent.create_session(chat.session_config()).await.unwrap();
+    session
+        .submit("empty-reply".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(&event.kind, EventKind::Text(data) if data.delta == "after the empty reply")),
+        "{events:?}"
+    );
+    assert!(
+        matches!(
+            events
+                .iter()
+                .rfind(|event| matches!(event.kind, EventKind::TurnEnd(_)))
+                .unwrap()
+                .kind,
+            EventKind::TurnEnd(TurnEndData {
+                outcome: TurnOutcome::Completed { .. },
+                ..
+            })
+        ),
+        "{events:?}"
+    );
+    let requests = chat.endpoint.requests.lock().unwrap().len();
+    assert_eq!(requests, 2, "the empty reply and one retry");
+    agent.close().await.unwrap();
+    chat.close().await;
+}
+
+/// An empty reply twice is a `malformed_response` that ends the turn: the
+/// retry is spent on the first repeat, so no third request follows.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_empty_reply_twice_fails_the_turn_without_a_third_attempt() {
+    let chat = NativeServer::start("openai-chat").await;
+    let agent = model_agent(chat.models(), None).await;
+    let session = agent.create_session(chat.session_config()).await.unwrap();
+    session
+        .submit("empty-reply-twice".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
+    let failure = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::ModelOutputEnd(data) => match &data.outcome {
+                ModelOutputOutcome::Failed {
+                    failure: Some(failure),
+                    ..
+                } => Some(failure.clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .expect("a failed model output");
+    assert_eq!(failure.kind, ModelFailureKind::MalformedResponse);
+    assert_eq!(
+        failure.reason.as_deref(),
+        Some("the response had no text and no tool call")
+    );
+    assert_eq!(failure.attempts, 2, "one retry, then the turn fails");
+    let requests = chat.endpoint.requests.lock().unwrap().len();
+    assert_eq!(requests, 2, "no third attempt");
+    agent.close().await.unwrap();
+    chat.close().await;
+}
+
+/// A reply of thinking only completes with no answer, so it is a
+/// `malformed_response`. Its thinking is already committed, which is what the
+/// retry policy tests: today that output stops recovery after the first
+/// attempt, so the turn fails with `attempts = 1`. Replay safety narrowed to
+/// answer content would retry it once, so the second attempt's answer would
+/// finish the turn over two requests.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_thinking_only_reply_fails_after_one_attempt() {
+    let chat = NativeServer::start("openai-chat").await;
+    let agent = model_agent(chat.models(), None).await;
+    let session = agent.create_session(chat.session_config()).await.unwrap();
+    session
+        .submit("empty-reply-thinking".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(&event.kind, EventKind::Thinking(data) if data.delta == "leaked tool-call markup")),
+        "the thinking-only reply is committed as it arrives: {events:?}"
+    );
+    let failure = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::ModelOutputEnd(data) => match &data.outcome {
+                ModelOutputOutcome::Failed {
+                    failure: Some(failure),
+                    ..
+                } => Some(failure.clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .expect("a failed model output");
+    assert_eq!(failure.kind, ModelFailureKind::MalformedResponse);
+    assert_eq!(
+        failure.reason.as_deref(),
+        Some("the response had no text and no tool call")
+    );
+    // Today's behaviour: committed thinking closes replay safety, so there is
+    // no retry. Narrowing replay safety to answer content would make later
+    // implementation attempts 2 and run 2 requests, the second ending the turn
+    // with "after the thinking-only reply"; this test is the record of that
+    // change.
+    assert_eq!(
+        failure.attempts, 1,
+        "today: 1 attempt, no retry; a narrowed replay rule makes it 2"
+    );
+    assert!(
+        matches!(
+            events
+                .iter()
+                .rfind(|event| matches!(event.kind, EventKind::TurnEnd(_)))
+                .unwrap()
+                .kind,
+            EventKind::TurnEnd(TurnEndData {
+                outcome: TurnOutcome::Failed { .. },
+                ..
+            })
+        ),
+        "{events:?}"
+    );
+    let requests = chat.endpoint.requests.lock().unwrap().len();
+    assert_eq!(
+        requests, 1,
+        "today: 1 request, no retry; a narrowed replay rule makes it 2"
+    );
+    agent.close().await.unwrap();
+    chat.close().await;
 }
 
 async fn respond_native(
@@ -2056,6 +2268,23 @@ async fn respond_native(
                 json!({
                     "error": {
                         "message": format!("fixture {status}"),
+                        "fixture": "raw-body-must-not-cross"
+                    }
+                })
+                .to_string(),
+            ))
+            .unwrap();
+    }
+    if request_text.contains("gateway-rejected") {
+        return Response::builder()
+            .status(422)
+            .header("content-type", "application/json")
+            .header("x-request-id", "request-rejected")
+            .body(Body::from(
+                json!({
+                    "error": {
+                        "type": "api_error",
+                        "message": "the upstream refused the request's shape",
                         "fixture": "raw-body-must-not-cross"
                     }
                 })
@@ -2183,7 +2412,29 @@ async fn respond_native(
     let missing_stop = request.to_string().contains("native-stop-eof");
     let data = match endpoint.kind {
         "openai-chat" | "openai-compatible" => {
-            if continuation {
+            if request_text.contains("empty-reply-thinking") {
+                let attempt = endpoint.requests.lock().unwrap().len();
+                if attempt == 1 {
+                    frame(
+                        json!({"reasoning_content":"leaked tool-call markup"}),
+                        Value::Null,
+                    ) + &frame(json!({}), json!("stop"))
+                        + "data: [DONE]\n\n"
+                } else {
+                    frame(
+                        json!({"content":"after the thinking-only reply"}),
+                        json!("stop"),
+                    ) + "data: [DONE]\n\n"
+                }
+            } else if request_text.contains("empty-reply") {
+                let attempt = endpoint.requests.lock().unwrap().len();
+                if request_text.contains("empty-reply-twice") || attempt == 1 {
+                    frame(json!({}), json!("stop")) + "data: [DONE]\n\n"
+                } else {
+                    frame(json!({"content":"after the empty reply"}), json!("stop"))
+                        + "data: [DONE]\n\n"
+                }
+            } else if continuation {
                 frame(json!({"content":"finished"}), json!("stop")) + "data: [DONE]\n\n"
             } else {
                 frame(json!({"content":"before"}), Value::Null)
@@ -2375,6 +2626,7 @@ async fn respond_native(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn four_native_apis_preserve_signed_blocks_and_tool_continuation() {
+    let reference = String::from("img:12c5f2d047c10416");
     tokio::time::timeout(Duration::from_secs(30), async {
         for kind in ["openai-chat","openai-responses","anthropic","gemini"] {
             let server = NativeServer::start(kind).await;
@@ -2393,6 +2645,7 @@ async fn four_native_apis_preserve_signed_blocks_and_tool_continuation() {
             let events = chain_events(&session, "main", ..).await.unwrap();
             assert!(matches!(events.iter().rfind(|event| matches!(event.kind, EventKind::TurnEnd(_))).unwrap().kind, EventKind::TurnEnd(TurnEndData { outcome: TurnOutcome::Completed { .. }, .. })), "{kind}: {:?}", events.iter().filter_map(|e| if let EventKind::ModelOutputEnd(data)=&e.kind{Some(&data.outcome)}else{None}).collect::<Vec<_>>());
             assert!(events.iter().any(|e| matches!(&e.kind, EventKind::Text(data) if data.delta=="finished")));
+            assert!(serde_json::to_string(&events).unwrap().contains(IMAGE), "{kind}: history keeps the image source");
             let requests = server.endpoint.requests.lock().unwrap().clone();
             assert_eq!(requests.len(),2,"{kind}");
             for (uri,headers,request) in &requests {
@@ -2402,16 +2655,18 @@ async fn four_native_apis_preserve_signed_blocks_and_tool_continuation() {
                 assert_eq!(headers.get_all(header).iter().count(),1);
                 assert_eq!(headers.get_all("content-type").iter().count(),1,"{kind}");
                 assert!(!request.to_string().contains("native-secret"));
+                assert!(request.to_string().contains(&reference), "{kind}: {request}");
+                assert!(!request.to_string().contains(IMAGE), "{kind}: {request}");
                 if kind != "anthropic" {
                     assert!(!request.to_string().contains("cache_control"), "{kind}: {request}");
                 }
             }
             let first = &requests[0].2;
             match kind {
-                "anthropic" => assert_eq!(first["messages"].as_array().unwrap().iter().find(|message| message["role"]=="user").unwrap()["content"][1],json!({"type":"image","source":{"type":"base64","media_type":"image/png","data":IMAGE},"cache_control":{"type":"ephemeral"}})),
-                "gemini" => assert_eq!(*first["contents"].as_array().unwrap().iter().flat_map(|message| message["parts"].as_array().unwrap()).find(|part|part.get("inlineData").is_some()).unwrap(),json!({"inlineData":{"mimeType":"image/png","data":IMAGE}})),
-                "openai-responses" => assert_eq!(first["input"].as_array().unwrap().iter().find(|message| message["role"]=="user").unwrap()["content"][1],json!({"type":"input_image","image_url":format!("data:image/png;base64,{IMAGE}")})),
-                _ => assert_eq!(first["messages"].as_array().unwrap().iter().find(|message| message["role"]=="user").unwrap()["content"][1],json!({"type":"image_url","image_url":{"url":format!("data:image/png;base64,{IMAGE}")}})),
+                "anthropic" => assert_eq!(first["messages"].as_array().unwrap().iter().find(|message| message["role"]=="user").unwrap()["content"][1],json!({"type":"text","text":reference,"cache_control":{"type":"ephemeral"}})),
+                "gemini" => assert!(first["contents"].as_array().unwrap().iter().flat_map(|message| message["parts"].as_array().unwrap()).any(|part|part["text"]==reference)),
+                "openai-responses" => assert!(first["input"].as_array().unwrap().iter().find(|message| message["role"]=="user").unwrap()["content"].to_string().contains(&reference)),
+                _ => assert!(first["messages"].as_array().unwrap().iter().find(|message| message["role"]=="user").unwrap()["content"].to_string().contains(&reference)),
             }
             let next = &requests[1].2;
             match kind {
@@ -2458,11 +2713,16 @@ async fn four_native_apis_preserve_signed_blocks_and_tool_continuation() {
                 _ => assert_eq!(next["messages"].as_array().unwrap().last().unwrap()["content"],"result text"),
             }
             if kind!="openai-chat" {
-                let content = events.iter().find(|e|matches!(e.kind,EventKind::ModelContent(_))).unwrap();
+                let content = events
+                    .iter()
+                    .find(|e| matches!(e.kind, EventKind::ModelContent(_)))
+                    .unwrap();
                 assert!(dim_agent_types::v1::EventRef::new(content).is_none());
                 for event in &events {
                     if matches!(event.kind,EventKind::ModelCall(_) | EventKind::ContextPrepare(_)) {
-                        let wire=serde_json::to_value(dim_agent_types::v1::EventRef::new(event).unwrap()).unwrap();
+                        let wire =
+                            serde_json::to_value(dim_agent_types::v1::EventRef::new(event).unwrap())
+                                .unwrap();
                         assert!(!wire["data"]["request"]["messages"].to_string().contains("providerMetadata"));
                     }
                 }
@@ -2471,8 +2731,16 @@ async fn four_native_apis_preserve_signed_blocks_and_tool_continuation() {
             let protocol=match kind {"openai-chat"=>ModelProtocol::OpenaiChat,"openai-responses"=>ModelProtocol::OpenaiResponses,"anthropic"=>ModelProtocol::Anthropic,_=>ModelProtocol::Gemini};
             let connection=||ModelConnection::Http(HttpModelConnection{protocol,base_url:server.url.clone(),network:Default::default(),headers:Default::default(),bearer:if kind=="anthropic" {Some("bearer-secret".into())} else {None},api_key:None,preset:None});
             let request=Arc::new(ModelRequest::new("local","test-model",vec![Message::text(Role::User,"tool")]));
-            let mut unpolled=host.0.invoke(request.clone(),connection(),CancellationToken::new()).await.unwrap();
-            let mut partial=host.0.invoke(request,connection(),CancellationToken::new()).await.unwrap();
+            let mut unpolled = host
+                .0
+                .invoke(request.clone(), connection(), CancellationToken::new())
+                .await
+                .unwrap();
+            let mut partial = host
+                .0
+                .invoke(request, connection(), CancellationToken::new())
+                .await
+                .unwrap();
             while !matches!(partial.next().await.unwrap().unwrap(),ModelChunk::Text(_)) {}
             if kind=="anthropic" {
                 let requests=server.endpoint.requests.lock().unwrap();
@@ -2497,9 +2765,23 @@ async fn four_native_apis_preserve_signed_blocks_and_tool_continuation() {
                 assert!(!headers.contains_key("authorization"));
             }
             agent.close().await.unwrap();
-            for stream in [&mut unpolled,&mut partial] { assert!(matches!(stream.next().await,Some(Err(HostError::Failed{kind:HostErrorKind::OwnerClosed,..})))); }
+            for stream in [&mut unpolled, &mut partial] {
+                assert!(matches!(
+                    stream.next().await,
+                    Some(Err(HostError::Failed {
+                        kind: HostErrorKind::OwnerClosed,
+                        ..
+                    }))
+                ));
+            }
             if kind == "gemini" {
-                use aimux_core::{language_model::LanguageModel, language_model_message::{LanguageModelMessage, TextPart, UserPart}, options::CallOptions, stream_part::StreamPart, types::FinishReasonUnified};
+                use aimux_core::{
+                    language_model::LanguageModel,
+                    language_model_message::{LanguageModelMessage, TextPart, UserPart},
+                    options::CallOptions,
+                    stream_part::StreamPart,
+                    types::FinishReasonUnified,
+                };
                 use aimux_provider_utils::Resolvable;
                 use aimux_providers::vertex::{VertexProviderSettings, create_google_vertex};
                 let provider = create_google_vertex(VertexProviderSettings {
@@ -3035,7 +3317,8 @@ async fn native_content_keeps_unsigned_thinking_and_respects_committed_tools() {
             agent.close().await.unwrap();
         }
         let custom=builder(models.clone(),Arc::new(ErrorEcho));
-        let agent=model_agent(models,Some(custom)).await;let session=agent.create_session(server.session_config()).await.unwrap();
+        let agent = model_agent(models, Some(custom)).await;
+        let session = agent.create_session(server.session_config()).await.unwrap();
         session.submit("tool".into(),InputMode::Queue,"main").await.unwrap();session.idle("main").await.unwrap();
         let requests=server.endpoint.requests.lock().unwrap().clone();
         let last=&requests.last().unwrap().2;
@@ -3063,7 +3346,15 @@ async fn native_content_keeps_unsigned_thinking_and_respects_committed_tools() {
                         MessagePart::Text {text:"kept".into(),start_time:None,end_time:None,provider_metadata:None},
                     ])}
                 ]));
-                let connection=ModelConnection::Http(HttpModelConnection {protocol:ModelProtocol::Anthropic,base_url:server.url.clone(),network:Default::default(),headers:Default::default(),bearer:None,api_key:None,preset:None});
+                let connection = ModelConnection::Http(HttpModelConnection {
+                    protocol: ModelProtocol::Anthropic,
+                    base_url: server.url.clone(),
+                    network: Default::default(),
+                    headers: Default::default(),
+                    bearer: None,
+                    api_key: None,
+                    preset: None,
+                });
                 let before=server.endpoint.requests.lock().unwrap().len();
                 let mut stream=host.0.invoke(request,connection,CancellationToken::new()).await.expect("stored thinking with thinking off must not fail the request");
                 while let Some(chunk)=stream.next().await{chunk.unwrap();}
@@ -3100,7 +3391,13 @@ async fn native_content_keeps_unsigned_thinking_and_respects_committed_tools() {
             // the turn ends on its outcome; what the case pins is the extra
             // request and that neither one dispatched the announced call.
             assert_eq!(server.endpoint.requests.lock().unwrap().len(), 2, "{kind}: {prompt}: the cut request and its continuation");
-            let terminals: Vec<_> = events.iter().filter_map(|event| match &event.kind { EventKind::ModelOutputEnd(data) => Some(&data.outcome), _ => None }).collect();
+            let terminals: Vec<_> = events
+                .iter()
+                .filter_map(|event| match &event.kind {
+                    EventKind::ModelOutputEnd(data) => Some(&data.outcome),
+                    _ => None,
+                })
+                .collect();
             assert_eq!(terminals.len(), 2, "{kind}: {prompt}");
             assert!(matches!(events.iter().rfind(|event| matches!(event.kind, EventKind::TurnEnd(_))).unwrap().kind,
                 EventKind::TurnEnd(TurnEndData { outcome: TurnOutcome::Failed { ref error }, .. }) if matches!(&terminals[1], ModelOutputOutcome::Failed { error: last, .. } if last == error)),
@@ -3115,9 +3412,25 @@ async fn native_content_keeps_unsigned_thinking_and_respects_committed_tools() {
             session.submit(prompt.into(), InputMode::Queue, "main").await.unwrap();
             session.idle("main").await.unwrap();
             let events = chain_events(&session, "main", ..).await.unwrap();
-            let visible: String = events.iter().filter_map(|event| match &event.kind { EventKind::Text(data) => Some(data.delta.as_str()), _ => None }).collect();
+            let visible: String = events
+                .iter()
+                .filter_map(|event| match &event.kind {
+                    EventKind::Text(data) => Some(data.delta.as_str()),
+                    _ => None,
+                })
+                .collect();
             assert_eq!(visible, "Cannot comply.");
-            assert!(matches!(events.iter().rfind(|event| matches!(event.kind, EventKind::TurnEnd(_))).unwrap().kind, EventKind::TurnEnd(TurnEndData { outcome: TurnOutcome::Completed { .. }, .. })));
+            assert!(matches!(
+                events
+                    .iter()
+                    .rfind(|event| matches!(event.kind, EventKind::TurnEnd(_)))
+                    .unwrap()
+                    .kind,
+                EventKind::TurnEnd(TurnEndData {
+                    outcome: TurnOutcome::Completed { .. },
+                    ..
+                })
+            ));
             session.submit("follow-up".into(), InputMode::Queue, "main").await.unwrap();
             session.idle("main").await.unwrap();
             let requests = server.endpoint.requests.lock().unwrap().clone();
@@ -3165,7 +3478,15 @@ async fn native_content_keeps_unsigned_thinking_and_respects_committed_tools() {
         ] {
             let mut request=ModelRequest::new("local",server.model_id(),vec![Message::text(Role::User,"settings")]);
             request.config=Some(serde_json::from_value(config).unwrap());
-            let connection=ModelConnection::Http(HttpModelConnection {protocol:ModelProtocol::Gemini,base_url:server.url.clone(),network:Default::default(),headers:Default::default(),bearer:None,api_key:None,preset:None});
+            let connection = ModelConnection::Http(HttpModelConnection {
+                protocol: ModelProtocol::Gemini,
+                base_url: server.url.clone(),
+                network: Default::default(),
+                headers: Default::default(),
+                bearer: None,
+                api_key: None,
+                preset: None,
+            });
             let before=server.endpoint.requests.lock().unwrap().len();
             match host.0.invoke(Arc::new(request),connection,CancellationToken::new()).await {
                 Ok(mut stream)=> {
@@ -3230,7 +3551,11 @@ async fn native_model_switch_keeps_stored_thinking_for_its_protocol() {
         let events = chain_events(&session, "main", ..).await.unwrap();
         assert!(
             matches!(
-                events.iter().rfind(|event| matches!(event.kind, EventKind::TurnEnd(_))).unwrap().kind,
+                events
+                    .iter()
+                    .rfind(|event| matches!(event.kind, EventKind::TurnEnd(_)))
+                    .unwrap()
+                    .kind,
                 EventKind::TurnEnd(TurnEndData {
                     outcome: TurnOutcome::Completed { .. },
                     ..
@@ -3280,7 +3605,11 @@ async fn native_model_switch_keeps_stored_thinking_for_its_protocol() {
         let events = chain_events(&session, "main", ..).await.unwrap();
         assert!(
             matches!(
-                events.iter().rfind(|event| matches!(event.kind, EventKind::TurnEnd(_))).unwrap().kind,
+                events
+                    .iter()
+                    .rfind(|event| matches!(event.kind, EventKind::TurnEnd(_)))
+                    .unwrap()
+                    .kind,
                 EventKind::TurnEnd(TurnEndData {
                     outcome: TurnOutcome::Completed { .. },
                     ..
@@ -3316,7 +3645,11 @@ async fn native_model_switch_keeps_stored_thinking_for_its_protocol() {
         let events = chain_events(&session, "main", ..).await.unwrap();
         assert!(
             matches!(
-                events.iter().rfind(|event| matches!(event.kind, EventKind::TurnEnd(_))).unwrap().kind,
+                events
+                    .iter()
+                    .rfind(|event| matches!(event.kind, EventKind::TurnEnd(_)))
+                    .unwrap()
+                    .kind,
                 EventKind::TurnEnd(TurnEndData {
                     outcome: TurnOutcome::Completed { .. },
                     ..
@@ -3474,6 +3807,24 @@ impl ToolDriver for ImageEcho {
                             url: None,
                         },
                     },
+                    ContentBlock::Image {
+                        source: ImageSource {
+                            file_id: None,
+                            source_type: ImageSourceType::Url,
+                            media_type: "image/png".into(),
+                            data: None,
+                            url: Some("https://example.invalid/image.png".into()),
+                        },
+                    },
+                    ContentBlock::Image {
+                        source: ImageSource {
+                            file_id: None,
+                            source_type: ImageSourceType::Base64,
+                            media_type: "image/png".into(),
+                            data: Some("invalid-base64".into()),
+                            url: None,
+                        },
+                    },
                 ]),
                 structured_content: None,
                 is_error: None,
@@ -3487,7 +3838,6 @@ impl ToolDriver for ImageEcho {
 }
 
 const TOOL_IMAGE_MARKER: &str = "[Image: sent in the following user message as tool output.]";
-const TOOL_IMAGE_LABEL: &str = "Tool output from tool call";
 
 fn tool_result_events(events: &[Arc<AgentEvent>]) -> Vec<&ToolContent> {
     events
@@ -3500,20 +3850,38 @@ fn tool_result_events(events: &[Arc<AgentEvent>]) -> Vec<&ToolContent> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn tool_result_images_take_the_form_its_protocol_defines() {
+async fn tool_result_images_become_references_in_every_native_protocol() {
+    let reference = String::from("img:12c5f2d047c10416");
     tokio::time::timeout(Duration::from_secs(30), async {
         for kind in ["openai-chat", "openai-responses", "anthropic", "gemini"] {
             let server = NativeServer::start(kind).await;
             let models = server.models();
-            let agent = model_agent(models.clone(), Some(builder(models, Arc::new(ImageEcho)))).await;
+            let agent =
+                model_agent(models.clone(), Some(builder(models, Arc::new(ImageEcho)))).await;
             let session = agent.create_session(server.session_config()).await.unwrap();
             session.submit("call the tool".into(), InputMode::Queue, "main").await.unwrap();
             session.idle("main").await.unwrap();
             let events = chain_events(&session, "main", ..).await.unwrap();
             assert!(
-                matches!(events.iter().rfind(|event| matches!(event.kind, EventKind::TurnEnd(_))).unwrap().kind, EventKind::TurnEnd(TurnEndData { outcome: TurnOutcome::Completed { .. }, .. })),
+                matches!(
+                    events
+                        .iter()
+                        .rfind(|event| matches!(event.kind, EventKind::TurnEnd(_)))
+                        .unwrap()
+                        .kind,
+                    EventKind::TurnEnd(TurnEndData {
+                        outcome: TurnOutcome::Completed { .. },
+                        ..
+                    })
+                ),
                 "{kind}: {:?}",
-                events.iter().filter_map(|event| match &event.kind { EventKind::ModelOutputEnd(data) => Some(&data.outcome), _ => None }).collect::<Vec<_>>()
+                events
+                    .iter()
+                    .filter_map(|event| match &event.kind {
+                        EventKind::ModelOutputEnd(data) => Some(&data.outcome),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
             );
             for content in tool_result_events(&events) {
                 assert!(
@@ -3524,6 +3892,9 @@ async fn tool_result_images_take_the_form_its_protocol_defines() {
             let requests = server.endpoint.requests.lock().unwrap().clone();
             assert_eq!(requests.len(), 2, "{kind}");
             let next = &requests[1].2;
+            assert!(!next.to_string().contains(IMAGE), "{kind}: {next}");
+            assert!(!next.to_string().contains(TOOL_IMAGE_MARKER), "{kind}: references need no image follow-up");
+            let omitted = "[Image omitted: the image cannot be sent to this model.]";
             match kind {
                 "anthropic" => {
                     let result = next["messages"]
@@ -3535,13 +3906,9 @@ async fn tool_result_images_take_the_form_its_protocol_defines() {
                         .unwrap();
                     assert_eq!(
                         result["content"],
-                        json!([
-                            {"type":"text","text":"result text"},
-                            {"type":"image","source":{"type":"base64","media_type":"image/png","data":IMAGE}},
-                        ]),
+                        format!("result text{reference}{omitted}{omitted}"),
                         "{kind}"
                     );
-                    assert!(!next.to_string().contains(TOOL_IMAGE_MARKER), "{kind}: no marker when the protocol carries the image inside");
                 }
                 "gemini" => {
                     let contents = next["contents"].as_array().unwrap();
@@ -3550,34 +3917,23 @@ async fn tool_result_images_take_the_form_its_protocol_defines() {
                         .flat_map(|content| content["parts"].as_array().into_iter().flatten())
                         .find(|part| part.get("functionResponse").is_some())
                         .unwrap();
-                    assert!(
-                        response["functionResponse"]["response"]["content"].as_str().unwrap().contains(TOOL_IMAGE_MARKER),
-                        "{kind}: {response}"
-                    );
-                    let user = contents.last().unwrap();
-                    assert_eq!(user["role"], "user", "{kind}");
-                    let parts = user["parts"].as_array().unwrap();
-                    assert!(parts[0]["text"].as_str().unwrap().starts_with(TOOL_IMAGE_LABEL), "{kind}: {}", parts[0]);
-                    assert_eq!(parts[1], json!({"inlineData":{"mimeType":"image/png","data":IMAGE}}), "{kind}");
+                    let content = response["functionResponse"]["response"]["content"].as_str().unwrap();
+                    assert!(content.contains("result text") && content.contains(&reference), "{kind}: {response}");
+                    assert_eq!(content.matches(omitted).count(), 2, "{kind}: {response}");
                 }
                 "openai-responses" => {
                     let input = next["input"].as_array().unwrap();
                     let output = input.iter().find(|item| item["type"] == "function_call_output").unwrap();
-                    assert!(output["output"].as_str().unwrap().contains(TOOL_IMAGE_MARKER), "{kind}: {output}");
-                    let user = input.iter().rev().find(|item| item["role"] == "user").unwrap();
-                    let parts = user["content"].as_array().unwrap();
-                    assert!(parts[0]["text"].as_str().unwrap().starts_with(TOOL_IMAGE_LABEL), "{kind}: {}", parts[0]);
-                    assert_eq!(parts[1], json!({"type":"input_image","image_url":format!("data:image/png;base64,{IMAGE}")}), "{kind}");
+                    let content = output["output"].as_str().unwrap();
+                    assert!(content.contains("result text") && content.contains(&reference), "{kind}: {output}");
+                    assert_eq!(content.matches(omitted).count(), 2, "{kind}: {output}");
                 }
                 _ => {
                     let messages = next["messages"].as_array().unwrap();
                     let tool = messages.iter().find(|message| message["role"] == "tool").unwrap();
-                    assert!(tool["content"].as_str().unwrap().contains(TOOL_IMAGE_MARKER), "{kind}: {tool}");
-                    let user = messages.last().unwrap();
-                    assert_eq!(user["role"], "user", "{kind}");
-                    let parts = user["content"].as_array().unwrap();
-                    assert_eq!(parts[0]["text"], format!("{TOOL_IMAGE_LABEL} call-1: the image after this text is that call's result."), "{kind}");
-                    assert_eq!(parts[1], json!({"type":"image_url","image_url":{"url":format!("data:image/png;base64,{IMAGE}")}}), "{kind}");
+                    let content = tool["content"].as_str().unwrap();
+                    assert!(content.contains("result text") && content.contains(&reference), "{kind}: {tool}");
+                    assert_eq!(content.matches(omitted).count(), 2, "{kind}: {tool}");
                 }
             }
             session.submit("another".into(), InputMode::Queue, "main").await.unwrap();
@@ -3593,7 +3949,8 @@ async fn tool_result_images_take_the_form_its_protocol_defines() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_model_without_image_input_gets_the_placeholder_in_a_tool_result() {
+async fn a_model_without_image_input_gets_references_and_unreferenceable_image_placeholders() {
+    let reference = String::from("img:12c5f2d047c10416");
     tokio::time::timeout(Duration::from_secs(30), async {
         let server = NativeServer::start("openai-chat").await;
         let models = server.models();
@@ -3604,7 +3961,10 @@ async fn a_model_without_image_input_gets_the_placeholder_in_a_tool_result() {
                 provider_id: "local".into(),
                 model_id: server.model_id().into(),
             },
-            capabilities: ModelCapabilities { vision: false, ..ModelCapabilities::with_limits(128_000, 4_096) },
+            capabilities: ModelCapabilities {
+                vision: false,
+                ..ModelCapabilities::with_limits(128_000, 4_096)
+            },
             reasoning: None,
             service_tier: None,
         });
@@ -3612,7 +3972,17 @@ async fn a_model_without_image_input_gets_the_placeholder_in_a_tool_result() {
         session.submit("call the tool".into(), InputMode::Queue, "main").await.unwrap();
         session.idle("main").await.unwrap();
         let events = chain_events(&session, "main", ..).await.unwrap();
-        assert!(matches!(events.iter().rfind(|event| matches!(event.kind, EventKind::TurnEnd(_))).unwrap().kind, EventKind::TurnEnd(TurnEndData { outcome: TurnOutcome::Completed { .. }, .. })));
+        assert!(matches!(
+            events
+                .iter()
+                .rfind(|event| matches!(event.kind, EventKind::TurnEnd(_)))
+                .unwrap()
+                .kind,
+            EventKind::TurnEnd(TurnEndData {
+                outcome: TurnOutcome::Completed { .. },
+                ..
+            })
+        ));
         for content in tool_result_events(&events) {
             assert!(
                 matches!(content, ToolContent::Blocks(blocks) if blocks.iter().any(|block| matches!(block, ContentBlock::Image { .. }))),
@@ -3623,10 +3993,10 @@ async fn a_model_without_image_input_gets_the_placeholder_in_a_tool_result() {
         assert_eq!(requests.len(), 2);
         let next = &requests[1].2;
         let tool = next["messages"].as_array().unwrap().iter().find(|message| message["role"] == "tool").unwrap();
-        assert!(
-            tool["content"].as_str().unwrap().contains("[Image omitted: the current model does not accept images.]"),
-            "{tool}"
-        );
+        let content = tool["content"].as_str().unwrap();
+        assert!(content.contains("result text") && content.contains(&reference), "{tool}");
+        assert_eq!(content.matches("[Image omitted: the current model does not accept images.]").count(), 2, "{tool}");
+        assert!(!next.to_string().contains(IMAGE), "{next}");
         assert!(!next.to_string().contains("image_url") && !next.to_string().contains("data:image"), "no image in the wire body: {next}");
         agent.close().await.unwrap();
         server.close().await;
@@ -3913,6 +4283,9 @@ async fn a_stored_summary_index_loads_and_continues() {
                 .insert_header("content-type", "text/event-stream")
                 .set_body_string(sse(vec![
                     json!({"type":"response.created","response":{"id":"resp-1","created_at":1,"model":"alias"}}),
+                    json!({"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg-1","role":"assistant","content":[]}}),
+                    json!({"type":"response.output_text.delta","item_id":"msg-1","output_index":0,"content_index":0,"delta":"answer"}),
+                    json!({"type":"response.output_item.done","output_index":0,"item":{"type":"message","id":"msg-1","role":"assistant","content":[{"type":"output_text","text":"answer"}]}}),
                     json!({"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":1,"output_tokens":1}}}),
                 ])),
         )
@@ -4650,5 +5023,291 @@ async fn a_connection_reuses_one_tcp_connection_for_its_query_and_timeout() {
         "the timeout connection reuses the driver's pool"
     );
     proxy.join.abort();
+    server.close().await;
+}
+
+/// The default User-Agent as every test below expects it: `dim` first, then
+/// the older relay identity, both from the crate's own version.
+fn expected_default_user_agent() -> String {
+    let version = env!("CARGO_PKG_VERSION");
+    format!("dim/{version} DimAgent/{version}")
+}
+
+/// One request over `connection`, drained to its end.
+async fn send_over(host: &ModelHost, server: &NativeServer, connection: ModelConnection) {
+    let request = Arc::new(ModelRequest::new(
+        "tenant",
+        server.model_id(),
+        vec![Message::text(Role::User, "hello")],
+    ));
+    let mut stream = host
+        .0
+        .invoke(request, connection, CancellationToken::new())
+        .await
+        .unwrap();
+    while let Some(chunk) = stream.next().await {
+        chunk.unwrap();
+    }
+}
+
+/// The headers of the one request the host sent.
+fn sent_headers(server: &NativeServer) -> HeaderMap {
+    let requests = server.endpoint.requests.lock().unwrap().clone();
+    assert_eq!(requests.len(), 1, "one request");
+    requests.into_iter().next().unwrap().1
+}
+
+fn http_connection(
+    server: &NativeServer,
+    protocol: ModelProtocol,
+    preset: Option<&str>,
+    headers: std::collections::HashMap<String, String>,
+) -> ModelConnection {
+    ModelConnection::Http(HttpModelConnection {
+        protocol,
+        base_url: server.url.clone(),
+        network: Default::default(),
+        headers,
+        bearer: None,
+        api_key: None,
+        preset: preset.map(str::to_owned),
+    })
+}
+
+/// The library parts after dim's identity: each package by name and any
+/// version the dependency ships, so a routine bump does not fail the test.
+fn assert_identity_before(user_agent: &str, kind: &str, packages: &[&str], library_parts: usize) {
+    let Some(library) = user_agent
+        .strip_prefix(&expected_default_user_agent())
+        .and_then(|rest| rest.strip_prefix(' '))
+    else {
+        panic!("{kind}: dim's identity does not lead: {user_agent}");
+    };
+    let parts: Vec<&str> = library.split(' ').collect();
+    assert_eq!(parts.len(), library_parts, "{kind}: {user_agent}");
+    for (part, package) in parts.iter().zip(packages) {
+        let Some(version) = part.strip_prefix(package) else {
+            panic!("{kind}: {part} is not {package}");
+        };
+        assert!(!version.is_empty(), "{kind}: {part} carries a version");
+    }
+}
+
+/// Every protocol carries dim's own identity in the provider layer, so the
+/// library's parts follow it.
+#[tokio::test]
+async fn every_protocol_sends_dims_own_identity_before_the_library_parts() {
+    for (kind, protocol, packages) in [
+        (
+            "openai-chat",
+            ModelProtocol::OpenaiChat,
+            &["ai-sdk-openai/", "ai-sdk-provider-utils/"],
+        ),
+        (
+            "openai-compatible",
+            ModelProtocol::OpenaiCompatible,
+            &["ai-sdk-openai-compatible/", "ai-sdk-provider-utils/"],
+        ),
+        (
+            "openai-responses",
+            ModelProtocol::OpenaiResponses,
+            &["ai-sdk-openai/", "ai-sdk-provider-utils/"],
+        ),
+        (
+            "openai-compatible",
+            ModelProtocol::Xai,
+            &["ai-sdk-openai-compatible/", "ai-sdk-provider-utils/"],
+        ),
+        (
+            "openai-responses",
+            ModelProtocol::XaiResponses,
+            &["ai-sdk-xai/", "ai-sdk-provider-utils/"],
+        ),
+        (
+            "anthropic",
+            ModelProtocol::Anthropic,
+            &["ai-sdk-anthropic/", "ai-sdk-provider-utils/"],
+        ),
+        (
+            "gemini",
+            ModelProtocol::Gemini,
+            &["ai-sdk-google/", "ai-sdk-provider-utils/"],
+        ),
+    ] {
+        let server = NativeServer::start(kind).await;
+        let root = rutis::Ctx::root().unwrap();
+        root.plugin(AimuxPlugin::default()).await.unwrap();
+        let host = root.get::<ModelHost>().unwrap();
+        send_over(
+            &host,
+            &server,
+            http_connection(&server, protocol, None, Default::default()),
+        )
+        .await;
+        let headers = sent_headers(&server);
+        assert_identity_before(
+            headers["user-agent"].to_str().unwrap(),
+            kind,
+            packages,
+            packages.len(),
+        );
+        assert_eq!(headers["x-title"], "DimCode", "{kind}");
+        assert_eq!(headers["http-referer"], "https://dimagent.com/", "{kind}");
+        root.shutdown().await.unwrap();
+        server.close().await;
+    }
+}
+
+/// A registry preset is a compatible endpoint too, so it carries the same
+/// identity.
+#[tokio::test]
+async fn a_preset_connection_sends_dims_own_identity() {
+    let server = NativeServer::start("openai-compatible").await;
+    let root = rutis::Ctx::root().unwrap();
+    root.plugin(AimuxPlugin::default()).await.unwrap();
+    let host = root.get::<ModelHost>().unwrap();
+    send_over(
+        &host,
+        &server,
+        http_connection(
+            &server,
+            ModelProtocol::OpenaiCompatible,
+            Some("deepseek"),
+            Default::default(),
+        ),
+    )
+    .await;
+    let headers = sent_headers(&server);
+    let user_agent = headers["user-agent"].to_str().unwrap();
+    assert!(
+        user_agent.starts_with(&format!("{} ai-sdk-", expected_default_user_agent())),
+        "{user_agent}"
+    );
+    assert_eq!(headers["x-title"], "DimCode");
+    root.shutdown().await.unwrap();
+    server.close().await;
+}
+
+/// The impersonating path: the `openai-codex` preset sends its own Codex
+/// headers and none of dim's, not even `X-Title` or `HTTP-Referer`.
+#[tokio::test]
+async fn the_openai_codex_preset_carries_no_identity_of_dims_own() {
+    let server = NativeServer::start("openai-responses").await;
+    let root = rutis::Ctx::root().unwrap();
+    root.plugin(AimuxPlugin::default()).await.unwrap();
+    let host = root.get::<ModelHost>().unwrap();
+    let codex = "codex-tui/0.170.0 (Ubuntu 22.4.0; x86_64) xterm-256color (codex-tui; 0.170.0)";
+    let headers = std::collections::HashMap::from([
+        ("originator".into(), "codex-tui".into()),
+        ("OAI-Product-Sku".into(), "codex".into()),
+        ("User-Agent".into(), codex.into()),
+    ]);
+    send_over(
+        &host,
+        &server,
+        http_connection(
+            &server,
+            ModelProtocol::OpenaiResponses,
+            Some("openai-codex"),
+            headers,
+        ),
+    )
+    .await;
+    let headers = sent_headers(&server);
+    assert_eq!(headers["originator"], "codex-tui");
+    assert_eq!(headers["oai-product-sku"], "codex");
+    let user_agent = headers["user-agent"].to_str().unwrap();
+    let library = user_agent
+        .strip_prefix(&format!("{codex} ai-sdk-provider-utils/"))
+        .unwrap_or_else(|| {
+            panic!("only the library part follows the impersonated User-Agent: {user_agent}")
+        });
+    assert!(!library.is_empty(), "{user_agent}");
+    for absent in ["x-title", "http-referer"] {
+        assert!(!headers.contains_key(absent), "{absent} must not leak");
+    }
+    root.shutdown().await.unwrap();
+    server.close().await;
+}
+
+/// A Provider's own User-Agent wins over dim's, and so do its `X-Title` and
+/// `HTTP-Referer`.
+#[tokio::test]
+async fn a_providers_own_headers_win_over_dims_identity() {
+    let server = NativeServer::start("openai-compatible").await;
+    let root = rutis::Ctx::root().unwrap();
+    root.plugin(AimuxPlugin::default()).await.unwrap();
+    let host = root.get::<ModelHost>().unwrap();
+    let headers = std::collections::HashMap::from([
+        ("User-Agent".into(), "gateway-client/9".into()),
+        ("X-Title".into(), "Gateway Title".into()),
+        ("HTTP-Referer".into(), "https://gateway.example/".into()),
+    ]);
+    send_over(
+        &host,
+        &server,
+        http_connection(&server, ModelProtocol::OpenaiCompatible, None, headers),
+    )
+    .await;
+    let headers = sent_headers(&server);
+    assert!(
+        headers["user-agent"]
+            .to_str()
+            .unwrap()
+            .starts_with("gateway-client/9 ai-sdk-"),
+        "the provider's User-Agent replaces dim's and the library part stays"
+    );
+    assert_eq!(headers["x-title"], "Gateway Title");
+    assert_eq!(headers["http-referer"], "https://gateway.example/");
+    root.shutdown().await.unwrap();
+    server.close().await;
+}
+
+/// An override replaces the whole built-in string; the library's parts still
+/// follow it.
+#[tokio::test]
+async fn an_override_replaces_the_user_agent_and_keeps_the_library_parts() {
+    let server = NativeServer::start("openai-compatible").await;
+    let root = rutis::Ctx::root().unwrap();
+    root.plugin(
+        AimuxPlugin::default().with_identity(dim_agent_aimux::ModelIdentity::new(Some(
+            "private-client/7".into(),
+        ))),
+    )
+    .await
+    .unwrap();
+    let host = root.get::<ModelHost>().unwrap();
+    send_over(
+        &host,
+        &server,
+        http_connection(
+            &server,
+            ModelProtocol::OpenaiCompatible,
+            None,
+            Default::default(),
+        ),
+    )
+    .await;
+    let headers = sent_headers(&server);
+    let user_agent = headers["user-agent"].to_str().unwrap();
+    let library = user_agent
+        .strip_prefix("private-client/7 ")
+        .unwrap_or_else(|| panic!("the override leads: {user_agent}"));
+    let parts: Vec<&str> = library.split(' ').collect();
+    assert_eq!(parts.len(), 2, "{user_agent}");
+    for (part, package) in parts
+        .iter()
+        .zip(["ai-sdk-openai-compatible/", "ai-sdk-provider-utils/"])
+    {
+        let version = part
+            .strip_prefix(package)
+            .unwrap_or_else(|| panic!("{part} is not {package}"));
+        assert!(!version.is_empty(), "{user_agent}");
+    }
+    assert_eq!(
+        headers["x-title"], "DimCode",
+        "an override leaves the other identity headers alone"
+    );
+    root.shutdown().await.unwrap();
     server.close().await;
 }

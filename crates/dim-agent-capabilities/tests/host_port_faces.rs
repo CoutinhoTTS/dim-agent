@@ -5,7 +5,7 @@
 //! binding calls the same operations. These tests pin that the binding and the
 //! wire answer the same, that a cancelled or abandoned call ends the owner's
 //! read, and that a failure keeps the code its caller acts on
-//! ([service faces §4.10](../../docs/design/service-faces.md#410-宿主端口executionsettingshost-等五个)).
+//! ([service faces §4.10](../../../docs/design/service-faces.md#410-宿主端口executionsettingshost-等五个)).
 use dim_agent_capabilities::execution_settings::{
     ExecutionSettings, ExecutionSettingsError, ExecutionSettingsHost,
 };
@@ -213,7 +213,14 @@ async fn the_selectable_models_answer_their_documented_empty_request() {
         modality
     );
     assert_eq!(modality.models, vec![declared()]);
-    // The request object is the contract: a wrong one is the caller's error.
+    let refused = call(
+        &face(&root, "selectableModelsHost"),
+        "selectableModels",
+        json!([]),
+    )
+    .await
+    .expect_err("a positional array is not the documented request object");
+    assert_eq!(refused.code(), Some("invalid_request"));
     let refused = call(
         &face(&root, "selectableModelsHost"),
         "selectableModels",
@@ -402,23 +409,6 @@ async fn cancelled_native_and_abandoned_native_or_wire_reads_settle_the_owner() 
     }
 }
 
-#[tokio::test]
-async fn a_cancelled_binding_call_does_not_reach_the_owner() {
-    let root = Ctx::root().unwrap();
-    let entered = Arc::new(Mutex::new(false));
-    let seen = entered.clone();
-    let settings = ExecutionSettingsHost::new(Arc::new(move |_| {
-        *seen.lock().unwrap() = true;
-        Box::pin(async move { Ok(ExecutionSettings::default()) })
-    }));
-    dim_agent_capabilities::execution_settings::provide(&root, &settings).unwrap();
-    let binding = root.get::<ExecutionSettingsHost>().unwrap();
-    let cancel = CancellationToken::new();
-    cancel.cancel();
-    assert!(binding.read(cancel).await.is_err());
-    assert!(!*entered.lock().unwrap(), "a cancelled call reads nothing");
-}
-
 #[test]
 fn the_port_errors_cross_as_code_and_message() {
     let cancelled = serde_json::to_value(ModelPortError::Cancelled {
@@ -441,4 +431,180 @@ fn the_port_errors_cross_as_code_and_message() {
     })
     .unwrap();
     assert_eq!(failed, json!({"code": "failed", "message": "no document"}));
+}
+
+#[tokio::test]
+async fn command_rule_reads_cancel_the_same_owner_work_through_native_and_wire_calls() {
+    use dim_agent_capabilities::{
+        host::HostFuture,
+        permission::{CommandRules, ReadCommandRules},
+    };
+    use dim_agent_types::CommandRule;
+    struct Rules(tokio::sync::mpsc::UnboundedSender<CancellationToken>);
+    impl ReadCommandRules for Rules {
+        fn rules(&self, cancel: CancellationToken) -> HostFuture<'_, Vec<CommandRule>> {
+            self.0.send(cancel).unwrap();
+            Box::pin(std::future::pending())
+        }
+    }
+    for mode in ["native_cancel", "native_drop", "wire_drop"] {
+        let (started, mut reads) = tokio::sync::mpsc::unbounded_channel();
+        let binding = Arc::new(CommandRules(Arc::new(Rules(started))));
+        let caller = CancellationToken::new();
+        let task = if mode == "wire_drop" {
+            let face: Arc<dyn HostDispatch> = binding.clone();
+            tokio::spawn(async move {
+                call(&face, "read", json!({}))
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
+            })
+        } else {
+            let owner = binding.clone();
+            let cancel = caller.clone();
+            tokio::spawn(async move {
+                owner
+                    .read(cancel)
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
+            })
+        };
+        let owner_cancel = tokio::time::timeout(std::time::Duration::from_secs(5), reads.recv())
+            .await
+            .expect("the command rules owner receives the read")
+            .unwrap();
+        if mode == "native_cancel" {
+            caller.cancel();
+            assert!(task.await.unwrap().is_err());
+        } else {
+            task.abort();
+            assert!(task.await.unwrap_err().is_cancelled());
+            assert!(
+                !caller.is_cancelled(),
+                "dropping a read must preserve its caller token"
+            );
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(5), owner_cancel.cancelled())
+            .await
+            .expect("ending the read cancels its owner's work");
+        let cancelled = CancellationToken::new();
+        cancelled.cancel();
+        assert!(binding.read(cancelled).await.is_err());
+        assert!(
+            reads.try_recv().is_err(),
+            "a pre-cancelled read never enters the owner"
+        );
+    }
+}
+
+struct PromptRead {
+    started: Option<tokio::sync::mpsc::UnboundedSender<CancellationToken>>,
+    failure: Option<HostError>,
+}
+impl PromptRead {
+    fn read(
+        &self,
+        cancel: CancellationToken,
+    ) -> dim_agent_capabilities::host::HostFuture<'_, Option<Arc<str>>> {
+        Box::pin(async move {
+            if let Some(started) = &self.started {
+                started.send(cancel).unwrap();
+                std::future::pending::<()>().await;
+            }
+            match &self.failure {
+                Some(error) => Err(error.clone()),
+                None => Ok(None),
+            }
+        })
+    }
+}
+impl dim_agent_capabilities::prompt_sources::BasePromptSettings for PromptRead {
+    fn base(
+        &self,
+        cancel: CancellationToken,
+    ) -> dim_agent_capabilities::host::HostFuture<'_, Option<Arc<str>>> {
+        self.read(cancel)
+    }
+}
+impl dim_agent_capabilities::skills::SkillsInstructionsSettings for PromptRead {
+    fn instructions(
+        &self,
+        cancel: CancellationToken,
+    ) -> dim_agent_capabilities::host::HostFuture<'_, Option<Arc<str>>> {
+        self.read(cancel)
+    }
+}
+impl dim_agent_capabilities::summary_strategy::SummaryPromptSettings for PromptRead {
+    fn system_prompt(
+        &self,
+        cancel: CancellationToken,
+    ) -> dim_agent_capabilities::host::HostFuture<'_, Option<Arc<str>>> {
+        self.read(cancel)
+    }
+}
+fn prompt_ports(owner: Arc<PromptRead>) -> [(Arc<dyn HostDispatch>, &'static str); 3] {
+    [
+        (
+            Arc::new(dim_agent_capabilities::prompt_sources::BasePromptSettingsHost(owner.clone())),
+            "base",
+        ),
+        (
+            Arc::new(dim_agent_capabilities::skills::SkillsInstructionsSettingsHost(owner.clone())),
+            "instructions",
+        ),
+        (
+            Arc::new(dim_agent_capabilities::summary_strategy::SummaryPromptSettingsHost(owner)),
+            "systemPrompt",
+        ),
+    ]
+}
+
+#[tokio::test]
+async fn prompt_override_faces_preserve_missing_text_and_owner_failures() {
+    for failure in [None, Some(HostError::failed("prompts settings: closed"))] {
+        let owner = Arc::new(PromptRead {
+            started: None,
+            failure: failure.clone(),
+        });
+        for (port, method) in prompt_ports(owner) {
+            let result = call(&port, method, json!({})).await;
+            if let Some(error) = &failure {
+                let rejected = result.unwrap_err();
+                assert_eq!(rejected.code(), Some("failed"));
+                assert!(rejected.to_string().contains(&error.to_string()));
+            } else {
+                assert_eq!(result.unwrap(), Value::Null);
+            }
+            assert_eq!(
+                call(&port, method, json!({"extra":true}))
+                    .await
+                    .unwrap_err()
+                    .code(),
+                Some("invalid_request")
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn abandoning_each_prompt_override_face_cancels_its_owner_read() {
+    let (started, mut reads) = tokio::sync::mpsc::unbounded_channel();
+    let owner = Arc::new(PromptRead {
+        started: Some(started),
+        failure: None,
+    });
+    for (port, method) in prompt_ports(owner) {
+        let read = tokio::spawn(async move { call(&port, method, json!({})).await });
+        let cancel = tokio::time::timeout(std::time::Duration::from_secs(5), reads.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!cancel.is_cancelled());
+        read.abort();
+        let _ = read.await;
+        tokio::time::timeout(std::time::Duration::from_secs(5), cancel.cancelled())
+            .await
+            .expect("dropping the wire wait cancels the owner read");
+    }
 }

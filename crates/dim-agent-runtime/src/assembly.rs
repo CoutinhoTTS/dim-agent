@@ -152,6 +152,8 @@ impl Drop for StartupProgress {
     }
 }
 
+/// One copy of a Rust plugin, as a part registry builds it.
+type PartResult = rutis::Result<Box<dyn DynPlugin>>;
 /// A Rust plugin whose dependencies are names ([`Names`]), built for one copy.
 type PartMake =
     Arc<dyn Fn(&Names<'_>) -> std::result::Result<Box<dyn DynPlugin>, Error> + Send + Sync>;
@@ -187,14 +189,13 @@ pub(crate) struct Assembly {
     pub config: AgentConfig,
     /// Maximum inactivity interval while opening a Session or branch.
     pub startup_timeout: Duration,
-    pub store: Arc<dyn TimelineStore>,
+    pub store: Arc<TimelineStoreBinding>,
     pub ephemeral_store: Option<Arc<MemoryTimelineStore>>,
     /// Shutdowns of instances whose creation was abandoned before the
     /// instance could be found; the Agent's close waits for them.
     pub abandoned: tokio_util::task::TaskTracker,
     values: Vec<Provide>,
-    /// The names of `values`, each a Session name.
-    value_names: Vec<String>,
+    value_names: Vec<(String, bool)>,
     process_values: Vec<ProcessValue>,
     /// The process plugins the builder adds ([`AgentBuilder::plugin`]).
     plugins: Vec<PartMake>,
@@ -266,7 +267,7 @@ impl AgentBuilder {
             assembly: Assembly {
                 config,
                 startup_timeout: Duration::from_secs(10),
-                store: Arc::new(MemoryTimelineStore::default()),
+                store: TimelineStoreBinding::new(Arc::new(MemoryTimelineStore::default())),
                 ephemeral_store: None,
                 abandoned: tokio_util::task::TaskTracker::new(),
                 values: vec![],
@@ -284,7 +285,8 @@ impl AgentBuilder {
         }
     }
     /// Uses one store for every Session built by this Agent.
-    pub fn timeline_store(&mut self, store: Arc<dyn TimelineStore>) -> &mut Self {
+    /// Agents sharing a backend must receive clones of the same binding.
+    pub fn timeline_store(&mut self, store: Arc<TimelineStoreBinding>) -> &mut Self {
         self.assembly.store = store;
         self.custom_store = true;
         self
@@ -495,9 +497,30 @@ impl AgentBuilder {
     /// catalog must register the name in the Session group; installing the
     /// assembly fails otherwise.
     pub fn session_value<T: ?Sized + Send + Sync + 'static>(&mut self, value: Arc<T>) -> &mut Self {
-        self.assembly.value_names.push(crate::names::name_of::<T>());
+        self.assembly
+            .value_names
+            .push((crate::names::name_of::<T>(), false));
         self.assembly.values.push(Arc::new(move |ctx, scope| {
             ctx.provide_at::<T>(scope.key::<T>(), value.clone())?;
+            Ok(())
+        }));
+        self
+    }
+    /// Provides one Session value through its native binding and data face.
+    /// The catalog must register its name as shared in the Session group.
+    /// Both bindings belong to the Session scope and end with it.
+    pub fn session_data_value<T>(&mut self, value: Arc<T>) -> &mut Self
+    where
+        T: rutis_bridge::session::HostDispatch + 'static,
+    {
+        let name = crate::names::name_of::<T>();
+        self.assembly.value_names.push((name.clone(), true));
+        self.assembly.values.push(Arc::new(move |ctx, scope| {
+            ctx.provide_at::<T>(scope.key::<T>(), value.clone())?;
+            ctx.provide_at(
+                rutis_bridge::session::host_key_in(&name, scope.instance),
+                value.clone() as Arc<dyn rutis_bridge::session::HostDispatch>,
+            )?;
             Ok(())
         }));
         self
@@ -589,9 +612,14 @@ impl AgentBuilder {
             let branch_scope_module = modules.name("BranchScope", builtins).await;
             let mut session = vec![row(&session_scope_module)];
             let catalog = Arc::new(self.catalog.clone());
-            for name in &assembly.value_names {
+            for (name, requires_shared) in &assembly.value_names {
                 crate::names::named_in_group(&catalog, name, SESSION_GROUP)
                     .map_err(|error| AgentError::Build(format!("a Session value: {error}")))?;
+                if *requires_shared && !catalog.is_shared(name) {
+                    return Err(AgentError::Build(format!(
+                        "a Session data value: {name} is not a shared Session service"
+                    )));
+                }
             }
             if !assembly.process_values.is_empty() {
                 register_process_values(&assembly.process_values, &catalog, builtins).await?;
@@ -681,7 +709,7 @@ impl AgentBuilder {
     pub fn build(&self, loader: Loader, anchor: &Ctx) -> Agent {
         Agent::new(
             self.clone(),
-            self.finished(),
+            self.finished(anchor),
             Placement {
                 loader,
                 anchor: anchor.clone(),
@@ -708,15 +736,16 @@ impl AgentBuilder {
     pub(crate) fn opening_timeout(&self) -> Duration {
         self.assembly.startup_timeout
     }
-    fn finished(&self) -> Assembly {
+    fn finished(&self, anchor: &Ctx) -> Assembly {
         let mut assembly = self.assembly.clone();
         assembly.abandoned = tokio_util::task::TaskTracker::new();
         assembly.catalog = Arc::new(self.catalog.clone());
         if !self.custom_store {
             let store = Arc::new(MemoryTimelineStore::default());
-            assembly.store = store.clone();
+            assembly.store = TimelineStoreBinding::new(store.clone());
             assembly.ephemeral_store = Some(store);
         }
+        assembly.store.install(&anchor.root_ctx());
         assembly
     }
 }
@@ -923,7 +952,7 @@ impl DynPlugin for ProcessValuesPlugin {
 pub fn register_part(
     builtins: &mut Modules,
     catalog: &rutis_loader::ServiceCatalog,
-    make: impl Fn(&Names<'_>) -> std::result::Result<Box<dyn DynPlugin>, Error> + Send + Sync + 'static,
+    make: impl Fn(&Names<'_>) -> PartResult + Send + Sync + 'static,
 ) -> Result<String> {
     let sample = make(&Names::check(catalog, &[], None))
         .map_err(|error| AgentError::Build(format!("a process part: {error}")))?;
@@ -1076,6 +1105,10 @@ impl DynPlugin for SessionScopePlugin {
                 scope.key::<dyn TimelineStore>(),
                 owner.assembly.store.clone(),
             )?;
+            ctx.provide_at::<dyn rutis_bridge::session::HostDispatch>(
+                rutis_bridge::session::host_key("timelineStore").instance(scope.instance),
+                owner.assembly.store.clone(),
+            )?;
             ctx.provide_at(scope.key::<FaultReporter>(), Arc::new(owner.faults.clone()))?;
             for provide in &owner.assembly.values {
                 provide(ctx, &scope)?;
@@ -1122,7 +1155,9 @@ impl DynPlugin for SessionScopePlugin {
             if let Some(extension) = extension {
                 let cancel = ctx.cancellation_token();
                 let created = tokio::select! {
-                    created = (extension.configure)(owner.loader.create_instance(ctx, &extension.group)) => created
+                    created = (extension.configure)(
+                        owner.loader.create_instance(ctx, &extension.group),
+                    ) => created
                         .map_err(|error| ErrorKind::PluginFailed(loader_error(error).into()))?,
                     _ = cancel.cancelled() => return Ok(Effect::Done),
                 };
@@ -1316,10 +1351,14 @@ impl TimelineFactory {
                 session_id: parent.id.clone(),
                 branch_id: id.clone(),
             };
+            let head =
+                tokio::time::timeout(self.startup_timeout(), parent.assembly.store.head(&key));
             let sequence = tokio::select! {
-                result = tokio::time::timeout(self.startup_timeout(), parent.assembly.store.head(&key)) =>
+                result = head =>
                     result.map_err(|_| AgentError::Build("branch opening timed out".into()))??,
-                _ = cancel.cancelled() => return Err(AgentError::Cancelled("branch creation".into()).into()),
+                _ = cancel.cancelled() => {
+                    return Err(AgentError::Cancelled("branch creation".into()).into());
+                }
             };
             let owner = Arc::new(BranchAssembly {
                 session: parent.clone(),
@@ -1458,7 +1497,10 @@ pub(crate) struct Opening {
 ///
 /// `instance` reads what the creation has to wait for and the identity that
 /// locates an instance whose creation is still running.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one parameter per input an instance creation waits on"
+)]
 async fn create_instance(
     loader: &Loader,
     ctx: &Ctx,
@@ -1987,7 +2029,7 @@ fn timed_out(ctx: &Ctx, views: &[FiberView]) -> AgentError {
 pub enum AssemblyRule {
     /// A required row or view, or a plugin below one, is not `Active`.
     Ready,
-    /// A plugin reads an external service it does not declare.
+    /// A plugin requires a service it does not declare.
     UndeclaredRead,
     /// A plugin read a service generation its resolved dependencies lack.
     Generation,
@@ -2052,7 +2094,10 @@ impl std::fmt::Display for AssemblyFinding {
 /// once, by the innermost scope that contains it: a nested scope's subtree is
 /// left to that scope's own pass. A required row or view that has left the
 /// tree is reported too: nothing in the snapshot would otherwise remember it.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one parameter per part of the scope snapshot `check_scope` compares"
+)]
 pub(crate) fn check_scope(
     snapshot: &rutis::host::diagnostics::RuntimeDiagnostics,
     rows: &std::collections::HashMap<rutis::host::InstanceId, Vec<EntryInfo>>,
@@ -2121,7 +2166,8 @@ pub(crate) fn check_scope(
             );
         }
         for access in &plugin.accesses {
-            if access.external && !access.declared {
+            if access.strict && access.failure == Some(rutis::host::ServiceReadFailure::Undeclared)
+            {
                 report(
                     plugin.name.clone(),
                     AssemblyRule::UndeclaredRead,

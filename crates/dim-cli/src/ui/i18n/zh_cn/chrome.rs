@@ -124,6 +124,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Observing conversation" => "正在查看会话",
         "Conversation unavailable" => "会话不可用",
         "Session closed" => "会话已关闭",
+        "This session is closed and cannot be resumed. Read its stored history with dimcode export {id} using the same --home." => {
+            "此会话已关闭，无法继续对话。使用相同的 --home 运行 dimcode export {id} 可读取已保存的历史。"
+        }
         "Member conversation" => "成员会话内容",
         "x stop command · Esc back" => "x 停止命令 · Esc 返回",
         "Esc back" => "Esc 返回",
@@ -371,6 +374,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Enter apply · Esc back" => "Enter 应用 · Esc 返回",
         "Save ZIP" => "保存 ZIP",
         "Saved ZIP" => "ZIP 已保存至",
+        "Email the ZIP to {email}" => "可将 ZIP 作为附件发送至 {email}",
+        "Draft a GitHub issue" => "在 GitHub 起草 Issue",
+        "Give feedback on Discord" => "去 Discord 反馈",
         "Could not save ZIP" => "无法保存 ZIP",
         "Invalid report ZIP" => "报告 ZIP 无效",
         "Could not open the share destination" => "无法打开分享页面",
@@ -383,9 +389,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "↑↓/Tab move · Enter select · Esc close" => "↑↓/Tab 切换 · Enter 选择 · Esc 关闭",
         "exit" => "退出应用",
 
-        "Enter select + default · ←/→ effort · Ctrl+B/F cursor · Ctrl+X clear saved · Esc clear/close" => {
-            "Enter 选择并设为默认 · ←/→ 推理强度 · Ctrl+B/F 移动光标 · Ctrl+X 清除保存的偏好 · Esc 清除/关闭"
-        }
         "Default for new sessions in {folder}: {model}" => "新会话在 {folder} 的默认模型：{model}",
         "Default for new sessions: {model}" => "新会话的默认模型：{model}",
         "Enter select · Esc clear/close" => "Enter 选择 · Esc 清除/关闭",
@@ -456,6 +459,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
 
         "Select a model" => "选择模型",
         "Loading models..." => "正在加载模型...",
+        "Previous page" => "上一页",
+        "Next page" => "下一页",
         "No models available. Connect a provider first." => "无可用模型。请先连接 Provider。",
         "No matching models." => "无匹配的模型。",
         "current" => "当前",
@@ -514,6 +519,33 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Fixed model" => "固定模型",
         "Applies to new members, including named Agents." => "适用于新成员，包括具名 Agent。",
         "Existing members keep their models." => "已有成员保留其模型。",
+        "Conversation model" => "对话模型",
+        "Selected: {model}" => "已选择：{model}",
+        "Model management" => "模型管理",
+        "Manage models" => "管理模型",
+        "1 provider" => "1 个 Provider",
+        "{count} providers" => "{count} 个 Provider",
+        "ready" => "就绪",
+        "no models" => "没有模型",
+        "catalog unreadable" => "无法读取 catalog",
+        "{count} with missing limits" => "{count} 个缺少上限",
+        "{count} unavailable" => "{count} 个不可用",
+        "{count} disabled" => "{count} 个已禁用",
+        "{count} without models" => "{count} 个没有模型",
+        "{count} unreadable" => "{count} 个无法读取",
+        "{unavailable} unavailable, {disabled} disabled" => {
+            "{unavailable} 个不可用、{disabled} 个已禁用"
+        }
+        "Enter select + default · ←/→ effort · Tab section · Esc clear/close" => {
+            "Enter 选择并设为默认 · ←/→ 推理强度 · Tab 切换分区 · Esc 清除/关闭"
+        }
+        "Enter change · Tab section · Esc clear/close" => {
+            "Enter 更改 · Tab 切换分区 · Esc 清除/关闭"
+        }
+        "Enter manage · Tab section · Esc clear/close" => {
+            "Enter 管理 · Tab 切换分区 · Esc 清除/关闭"
+        }
+        "Enter manage · Esc back" => "Enter 管理 · Esc 返回",
         "unknown" => "未知",
         "Subagent model policy saved" => "子代理模型策略已保存",
         "Subagent model policy changed elsewhere; choose again to reread it" => {
@@ -644,6 +676,12 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "The App Server is still {server} because other clients are using it (connections: {connections}, attached Sessions: {attached}, running turns: {running}); this {client} client uses it too. Run `dimcode daemon stop` when they are done, and the next start runs {client}." => {
             "App Server 仍是 {server}，因为其他客户端正在使用它（连接：{connections}，已附加会话：{attached}，运行中的轮次：{running}）；这个 {client} 客户端也使用它。等它们结束后运行 `dimcode daemon stop`，下次启动就会运行 {client}。"
+        }
+        "The App Server is still using a different build of {server}. Some features may be unavailable. After active work finishes, exit this client, run `{command}`, then reopen it." => {
+            "App Server 仍在运行 {server} 的另一个构建。部分功能可能不可用。当前工作结束后，请退出此客户端，运行 `{command}`，然后重新打开。"
+        }
+        "The App Server's build could not be verified as this client's. If features are missing after an update, wait for active work to finish, exit this client, run `{command}`, then reopen it." => {
+            "无法确认 App Server 的构建与此客户端一致。如果更新后缺少功能，请等当前工作结束后退出此客户端，运行 `{command}`，然后重新打开。"
         }
         "Upgrading the local store from format v{from} to v{to}; this can take a while on a large store." => {
             "正在把本地库从格式 v{from} 升级到 v{to}；大库可能需要一段时间。"

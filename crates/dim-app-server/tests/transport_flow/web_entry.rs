@@ -56,6 +56,7 @@ pub(super) async fn http(address: &str, request: String) -> (u16, String, String
 fn get(address: &str, path: &str) -> String {
     format!("GET {path} HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n")
 }
+
 pub(super) fn post(address: &str, path: &str, origin: &str, body: &str) -> String {
     format!(
         "POST {path} HTTP/1.1\r\nHost: {address}\r\nOrigin: {origin}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -439,6 +440,7 @@ async fn web_entry_admits_token_holders_to_sessions_and_safe_management() {
     let features = web.features.as_array().unwrap();
     for method in [
         "session.create",
+        "session.model.preview",
         "session.branch_create",
         "session.branch_end",
         "session.permission.update",
@@ -609,7 +611,7 @@ async fn web_entry_admits_token_holders_to_sessions_and_safe_management() {
     );
     for (method, params) in [
         ("provider.list", json!({})),
-        ("provider.management", json!({})),
+        ("provider.management.list", json!({})),
         ("account.providers", json!({})),
         ("account.codex.status", json!({})),
         ("account.grok.status", json!({})),
@@ -628,6 +630,36 @@ async fn web_entry_admits_token_holders_to_sessions_and_safe_management() {
         assert_ok(&reply);
         assert!(!reply.to_string().contains("fixture-secret"), "{method}");
     }
+    let preview = web.rpc("session.model.preview", json!({"cwd":home})).await;
+    assert_ok(&preview);
+    assert_eq!(
+        preview["result"]["model"],
+        json!({"providerId":"018ec73f-0000-7000-8000-000000000011","modelId":"alpha"}),
+        "the web entry previews what its own session.create resolves"
+    );
+    assert!(!preview.to_string().contains("fixture-secret"));
+    assert_eq!(
+        web.rpc(
+            "session.model.preview",
+            json!({"cwd":home,"startup":{"contextWindow":64000}})
+        )
+        .await["error"]["data"]["appError"],
+        "local_transport_required",
+        "model startup stays a protected-local launch channel"
+    );
+    let mut bare = Client::new_version(&server, true, 3).await;
+    assert!(
+        !bare
+            .features
+            .as_array()
+            .unwrap()
+            .contains(&json!("session.model.preview"))
+    );
+    assert_eq!(
+        bare.rpc("session.model.preview", json!({"cwd":home})).await["error"]["data"]["appError"],
+        "local_transport_required",
+        "an unauthenticated connection keeps today's rules"
+    );
     let refused = web
         .rpc(
             "skills.preview",
@@ -809,4 +841,162 @@ async fn web_entry_admits_token_holders_to_sessions_and_safe_management() {
         json!({"enabled":false,"open":false,"connections":0})
     );
     server.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn closing_a_web_generation_settles_concurrent_upgrades_and_preserves_other_transports() {
+    use tokio_tungstenite::tungstenite::{Error as WsError, error::ProtocolError};
+
+    let assets = frontend_fixture();
+    let server = launch(
+        Arc::new(MockTools),
+        ServerConfig {
+            web_assets: Some(assets.clone()),
+            ..Default::default()
+        },
+    )
+    .await;
+    let mut local = Client::new_version(&server, false, 4).await;
+    let mut bare = Client::new_version(&server, true, 4).await;
+    let opened = local.rpc("web.toggle", json!({"port":0})).await;
+    assert_ok(&opened);
+    let address = opened["result"]["address"].as_str().unwrap().to_owned();
+    let bootstrap = opened["result"]["url"]
+        .as_str()
+        .unwrap()
+        .split_once("#bootstrap=")
+        .unwrap()
+        .1;
+    let (status, headers, _) = http(
+        &address,
+        post(
+            &address,
+            "/api/auth/exchange",
+            &format!("http://{address}"),
+            &json!({"token":bootstrap}).to_string(),
+        ),
+    )
+    .await;
+    assert_eq!(status, 204);
+    let cookie = headers
+        .lines()
+        .find_map(|line| line.strip_prefix("set-cookie: "))
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    let mut existing = web_client(&address, &cookie).await;
+    assert_ok(&existing.rpc("daemon.ping", json!({})).await);
+    let gate = Arc::new(tokio::sync::Barrier::new(9));
+    let mut upgrades = Vec::new();
+    for _ in 0..8 {
+        let socket = TcpStream::connect(&address).await.unwrap();
+        let mut request = format!("ws://{address}/ws").into_client_request().unwrap();
+        request.headers_mut().insert(
+            "Origin",
+            HeaderValue::from_str(&format!("http://{address}")).unwrap(),
+        );
+        request
+            .headers_mut()
+            .insert("Cookie", HeaderValue::from_str(&cookie).unwrap());
+        let gate = gate.clone();
+        upgrades.push(tokio::spawn(async move {
+            gate.wait().await;
+            tokio_tungstenite::client_async(request, socket).await
+        }));
+    }
+    gate.wait().await;
+    let disabled = local.rpc("web.disable", json!({})).await;
+    assert_ok(&disabled);
+    assert_eq!(disabled["result"]["open"], false);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        for upgrade in upgrades {
+            let mut stream = match upgrade.await.unwrap() {
+                Ok((stream, _)) => stream,
+                Err(WsError::Io(_) | WsError::Protocol(
+                    ProtocolError::HandshakeIncomplete | ProtocolError::ResetWithoutClosingHandshake
+                )) => continue,
+                Err(WsError::Http(response)) => {
+                    assert_eq!(response.status().as_u16(), 503);
+                    continue;
+                }
+                Err(error) => panic!("unexpected upgrade refusal: {error}"),
+            };
+            if let Err(error) = stream.send(Message::Text(json!({"jsonrpc":"2.0","id":1,"method":"hello","params":{"protocolVersion":4,"clientKind":"web"}}).to_string().into())).await {
+                assert!(matches!(error, WsError::ConnectionClosed | WsError::AlreadyClosed | WsError::Io(_) | WsError::Protocol(ProtocolError::SendAfterClosing | ProtocolError::ResetWithoutClosingHandshake)), "unexpected post-close write error: {error}");
+            }
+            loop {
+                match stream.next().await {
+                    None | Some(Ok(Message::Close(_))) => break,
+                    Some(Err(
+                        WsError::ConnectionClosed
+                        | WsError::AlreadyClosed
+                        | WsError::Io(_)
+                        | WsError::Protocol(ProtocolError::ResetWithoutClosingHandshake),
+                    )) => break,
+                    Some(Err(error)) => panic!("unexpected closing WebSocket error: {error}"),
+                    Some(Ok(Message::Text(reply))) => {
+                        let reply: Value = serde_json::from_str(&reply).unwrap();
+                        assert!(reply.get("result").is_none(), "a closed Web generation accepted a new hello: {reply}");
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let Transport::Ws(stream) = &mut existing.transport else { unreachable!() };
+        loop {
+            match stream.next().await {
+                None | Some(Ok(Message::Close(_))) => break,
+                Some(Err(
+                    WsError::ConnectionClosed
+                    | WsError::AlreadyClosed
+                    | WsError::Io(_)
+                    | WsError::Protocol(ProtocolError::ResetWithoutClosingHandshake),
+                )) => break,
+                Some(Err(error)) => panic!("unexpected closing WebSocket error: {error}"),
+                _ => {}
+            }
+        }
+        while local.rpc("web.status", json!({})).await["result"]["connections"] != 0 {
+            tokio::task::yield_now().await;
+        }
+    }).await.expect("old-generation Web connections finish after entry close");
+    assert_ok(&local.rpc("daemon.ping", json!({})).await);
+    assert_ok(&bare.rpc("daemon.ping", json!({})).await);
+
+    let reopened = local.rpc("web.toggle", json!({"port":0})).await;
+    assert_ok(&reopened);
+    let address = reopened["result"]["address"].as_str().unwrap();
+    assert_eq!(web_socket(address, Some(&cookie)).await.unwrap_err(), 401);
+    let bootstrap = reopened["result"]["url"]
+        .as_str()
+        .unwrap()
+        .split_once("#bootstrap=")
+        .unwrap()
+        .1;
+    let (status, headers, _) = http(
+        address,
+        post(
+            address,
+            "/api/auth/exchange",
+            &format!("http://{address}"),
+            &json!({"token":bootstrap}).to_string(),
+        ),
+    )
+    .await;
+    assert_eq!(status, 204);
+    let cookie = headers
+        .lines()
+        .find_map(|line| line.strip_prefix("set-cookie: "))
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap();
+    let mut fresh = web_client(address, cookie).await;
+    assert_ok(&fresh.rpc("daemon.ping", json!({})).await);
+    assert_ok(&local.rpc("web.disable", json!({})).await);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(assets).unwrap();
 }

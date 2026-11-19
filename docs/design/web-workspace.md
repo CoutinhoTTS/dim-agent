@@ -47,7 +47,7 @@ It is open while either reason exists and closes only when both are gone. The sw
 | `web.disable` | `{}` | `{enabled, open, address?, connections}`; used by `dimcode web --off`; it clears the switch but does not disconnect holders |
 | `web.status` | `{}` | `{enabled, open, address?, connections}` |
 
-All are management methods (local transport only, protocol v4). Without `port` the entry binds the first free port from 43201 upward; an explicit `port` that is taken fails with `address_in_use`. A local connection that calls `web.open` holds the entry; the TUI switch does not need a holder. When the last reason disappears the listener stops, every token is dropped and web connections detach. Nothing is persisted, so after a daemon restart the entry is off; `dimcode web` opens it again or `/web` enables it. `web.open`/`web.toggle` fail with `web_assets_missing` when the binary was built without the frontend or the override directory has no build (§2.4).
+All are management methods (local transport only, protocol v4). Without `port` the entry binds the first free port from 43201 upward; an explicit `port` that is taken fails with `address_in_use`. A local connection that calls `web.open` holds the entry; the TUI switch does not need a holder. When the last reason disappears the listener stops, every token is dropped and web connections detach. Each authenticated Web connection belongs to the entry generation that accepted its upgrade, including upgrades whose callbacks finish after closing starts. Such connections follow normal detachment cleanup and cannot remain usable under a later generation; closing Web does not close the daemon’s Local or Bare transports. Nothing is persisted, so after a daemon restart the entry is off; `dimcode web` opens it again or `/web` enables it. `web.open`/`web.toggle` fail with `web_assets_missing` when the binary was built without the frontend or the override directory has no build (§2.4).
 
 ### 2.2 Authentication
 
@@ -104,6 +104,7 @@ For development against the repository checkout, and for a build that must carry
 | Version | `hello` v3 with `clientKind: "web"`; v1/v2 → `protocol_version` |
 | Methods | Rpc Session built-ins and execution Session methods on every Session of the host, plus the explicit settings methods in §4.3 and the management methods below. Other management methods, including `daemon.shutdown` and Web-entry controls, return `-32601 unknown_method` |
 | Model list | The read-only management methods `provider.list`, `provider.catalog`, `provider.selection` and `account.providers` are also served (decision Q1); their replies carry no credentials (`provider.list` reports only `credentialConfigured` and header names). Managed Provider discovery follows §4.2. Switching uses the Session method `session.model.update` |
+| New Session model | `session.model.preview` is served and advertised with the authority the entry's own `session.create` already implies ([model preview](model-configuration.md#model-preview-before-creation)): `{cwd, agentId?, model?, modelPreferences?}` resolves the model a new Session would adopt, creates no Session, saves no selection and returns no credential. `startup` is refused `local_transport_required`, because [model startup](model-startup.md) is a protected-local launch channel. The bare `/ws` serves neither |
 | UI directory | UiExtensions contributes `ui.extensions.list`, which is explicitly allowlisted and advertised in `hello.features` while available. Connection forwards `ui.extensions.changed` over the reliable control channel; clients refetch the directory on this notice |
 | Error-only reports | Report contributes `report.prepare`, `report.plan`, `report.generate` and `report.cancel`. The authenticated local Web entry explicitly admits these four methods and advertises them in `hello.features` while available. They take no Session or branch ID and use no Session data. [Report contract](plugins/Report.md#4-report-methods) |
 
@@ -154,7 +155,7 @@ The frontend directory is fixed when the daemon starts (§2.4); a daemon started
 | `rpc/protocol.ts` | Hand-written types for the v3 methods and notifications the UI uses (`session.*`, `approval.*`, `session.event`, `session.state`, `session.model.progress`) |
 | `projection.ts` | Folds `session.history` pages, `session.event` and `session.model.progress` into timeline rows (user, assistant text, thinking, tool call and result, approval), following `crates/dim-cli/src/projection.rs`; also tracks the waiting `ask_user` calls of each branch (`step/tool-call` until its batch's `step/tool-result`) and applies owner reads for pending inputs/questions and current Goal state |
 | Sidebar | Workspaces group Session summaries by `cwd` after excluding rows with the [internal origin](appserver/session-classification.md#31-the-origin) and the [automation origin](appserver/session-classification.md#31-the-origin); new Session by `session.create {cwd}` with a typed path or a known workspace; a row can be hidden by the browser-local archive (§4.4) |
-| Chat | Timeline (markdown, Shiki) with a message rail (one marker per user message from three messages on, as dim-agent's rail: hover shows the message and its first reply, a click scrolls it into view and marks it for a moment; `/timeline` is not offered, dim-agent has none), composer (submit, stop, model menu and permission preset picker, below), approval prompt (`approval.request` → `approval.respond`; "Allow for this session" → `session.grants.add` and "Always allow" for a simple `exec` command → `permission.set_rules`, both before the allow), question prompt for `ask_user` (`step/tool-call` → `session.question.respond`, closed by `step/tool-result`); the approval and question prompts take the composer's place; queued messages of the main line above the composer (`input/message` until `input/consumed` or `input/deleted`; Steer and Remove → `session.input.withdraw`, Steer resends the message's content with the withdrawal); composer attachments: pasted or dropped images are sent as image content blocks (`session.submit` with `user.content`), a paste longer than 16 KiB is stored with `attachment.put` when the Session serves it and its path is named in the message, as the TUI does (`crates/dim-cli/src/attachments.rs`); `@` file mentions: the composer offers the files of the Session's workspace from `session.files.search` (WorkspaceTools; the TUI picker's index and ranking), inserts a file as `@path` and sends it as a Markdown link to its absolute path (`[@path](/abs)`, as the TUI sends it); a directory steps into `@dir/` |
+| Chat | Timeline (markdown, Shiki) with a message rail (one marker per user message from three messages on, as dim-agent's rail: hover shows the message and its first reply, a click scrolls it into view and marks it for a moment; `/timeline` is not offered, dim-agent has none), composer (submit, steer or hold, interrupt and send now, stop, model menu and permission preset picker, below), approval prompt (`approval.request` → `approval.respond`; "Allow for this session" → `session.grants.add` and "Always allow" for a simple `exec` command → `permission.set_rules`, both before the allow), question prompt for `ask_user` (`step/tool-call` → `session.question.respond`, closed by `step/tool-result`); the approval and question prompts take the composer's place, and the composer they displace keeps its draft, its images and an in-flight send-now until it returns, because a failed stop writes its recalled message back into that draft after the prompt has already arrived; queued messages of the shown line above the composer (`input/message` until `input/consumed` or `input/deleted`; Steer and Remove → `session.input.withdraw`, Steer resends the message's content with the withdrawal); composer attachments: pasted or dropped images are sent as image content blocks (`session.submit` with `user.content`), a paste longer than 16 KiB is stored with `attachment.put` when the Session serves it and its path is named in the message, as the TUI does (`crates/dim-cli/src/attachments.rs`); a message recalls into the draft with its own content in the order it was written, so an image recalled with it keeps its stored file reference and the place between the words it held; `@` file mentions: the composer offers the files of the Session's workspace from `session.files.search` (WorkspaceTools; the TUI picker's index and ranking), inserts a file as `@path` and sends it as a Markdown link to its absolute path (`[@path](/abs)`, as the TUI sends it); a directory steps into `@dir/` |
 | Session permissions | The composer and `/permissions` select the `main` preset under [ADR 018](../adr/018-permission-is-the-preset.md) and the [Permission policy contract](../architecture/rust-agent/plugins/Permission.md#policy-contract). The client reads `session.permission.get` and `permission/changed`, displays the preset and tool lists, and preserves both lists in a versioned `session.permission.update`. Conflicts refresh without retrying. Choosing Full access requires confirmation. Process isolation links to its Settings control. |
 | Lines | Right detail panel with a Lines tree and one tab per opened line; each tab folds that line's own history and sends, stops, approves and ends on its `branchId` (§4.1) |
 | i18n | `en` and `zh-CN` |
@@ -184,7 +185,7 @@ Features outside the settings scope with no v3 backend are left out rather than 
 
 A line is a Timeline of the same Session ([Timeline branches](timeline-branches.md) §1). The Web workspace follows [Clients’ bounded-window contract](clients.md#opening-a-conversation-with-a-bounded-window). Main and selected lines load at most four initial wire pages; only an explicit “Load earlier” action reads older content. Reconnect replaces opened transcripts with fresh windows. Raw pages are released after projection.
 
-The Web workspace keeps the main transcript in the center and follows lines in a right-side detail panel, modeled on the Kimi Code Web `/btw` panel (tabs, a scroll region with a composer, an empty state, and a full-screen panel on narrow shells). Unlike Kimi's read-only side chat, a Dim line continues to run tools and accepts operator input; the panel therefore includes `session.submit`, `session.stop`, approvals and `session.branch_end` for the line.
+The Web workspace keeps the default branch's transcript in the center and follows other lines in a right-side detail panel, modeled on the Kimi Code Web `/btw` panel (tabs, a scroll region with a composer, an empty state, and a full-screen panel on narrow shells). Unlike Kimi's read-only side chat, a Dim line continues to run tools and accepts operator input; the panel therefore includes `session.submit`, `session.stop`, approvals and `session.branch_end` for the line.
 
 ```
 ┌──────────────┬────────────────────────────────┬─────────────────────────────────┐
@@ -200,9 +201,9 @@ The Web workspace keeps the main transcript in the center and follows lines in a
 | --- | --- |
 | Input | `session.branches` supplies the directory. Lifecycle facts and `session.state` update it. `session.branch.get` supplies the selected line’s purpose, end details and inherited message count. Only opened lines read their own transcript windows. |
 | Derived data | `lines.ts` keeps directory metadata, not historical input identities. Unknown message counts remain absent. `projection.ts` owns visible rows and live controls. `stores/chat.ts` keeps each opened window’s fixed head, backward cursor and in-flight live queue. |
-| Actions | `session.branch_create {parentBranchId, at, prompt}`, `session.branch_end {branchId}`, `session.submit`/`session.stop` with the line's `branchId`; approvals use the request's `branchId` |
+| Actions | `session.branch_create {parentBranchId, at, prompt}`, `session.branch_end {branchId}`, `session.branch_set_default {branchId}` (continue from here), `session.submit`/`session.stop` with the line's `branchId`; approvals use the request's `branchId` |
 | Points | A user message's cut is its sequence minus one; a line's end is its newest `turn-end`. `session.branch_create` remains the validator; its refusal is shown in the dialog or line tab |
-| Switching | Opening a line adds or activates a tab; closing a tab does not end the line; main stays the center transcript |
+| Switching | Opening a line adds or activates a tab; closing a tab does not end the line; the center shows the default branch, which `session.branches` reports as `defaultBranchId`, and `session.branch_set_default` changes it. The root and that line are the two that can open a line, so the Lines tree marks both |
 | Errors | `branch_missing`, `branch_ended`, `input_blocked`, an invalid cut and a disabled Branch tool are shown at the action that raised them; an ended line is read-only |
 | State | Line tabs are per Session and live in `stores/ui.ts`; the tree is read from the existing directory on reload and reconnect. No storage format is added |
 
@@ -285,17 +286,17 @@ A daemon that does not serve `session.skills` shows the commands alone.
 | --- | --- | --- |
 | `model` | `/models` | Open the existing model picker when model selection is available |
 | `session` | `/branch <prompt>` | Create a line from the shown line's newest finished turn and use the inline prompt as its opening input |
-| `session` | `/compact` | Compact the main line's context (`session.context.compact`); listed when the Session's method table (`session.methods`) lists it. Reports the result as a notice |
-| `session` | `/usage` | Show the main line's context window usage (`session.context.usage`); listed under the same condition as `/compact` |
-| `session` | `/fork` | Fork the Session at its last finished turn (`session.fork {at}`) after a confirmation, then open the new Session; listed when the connection serves `session.fork` and main has a finished turn |
-| `session` | `/goal [words]` | Show the main line's current goal through `session.goal.get`, or write it: `/goal OBJECTIVE`, `set`, `edit`, `pause`, `resume` and `clear` call `session.goal.<call>` with `branchId: main`; listed when the Session's method table lists `session.goal.set`. The menu fills `/goal ` for its words |
-| `model` | `/effort [value]` | List the main line model's reasoning effort choices (from `provider.catalog`, when the model advertises reasoning preferences), or set one with `session.model.update {modelPreferences: {reasoningEffort}}`, as `/effort` does in the TUI (`configure.rs`). Listed only when the model has choices. `/fast` is not offered: no model advertises service tiers yet |
+| `session` | `/compact` | Compact the shown line's context (`session.context.compact` on the line currently centred, which is the default branch); listed when the Session's method table (`session.methods`) lists it. Reports the result as a notice |
+| `session` | `/usage` | Show the shown line's context window usage (`session.context.usage`, the same line); listed under the same condition as `/compact` |
+| `session` | `/fork` | Fork the Session at its last finished turn (`session.fork {at}`) after a confirmation, then open the new Session; listed when the connection serves `session.fork` and the root has a finished turn |
+| `session` | `/goal [words]` | Show the shown line's current goal through `session.goal.get`, or write it: `/goal OBJECTIVE`, `set`, `edit`, `pause`, `resume` and `clear` call `session.goal.<call>` with the shown line's `branchId` (it is the default branch), so two lines keep two goals; listed when the Session's method table lists `session.goal.set`. The menu fills `/goal ` for its words |
+| `model` | `/effort [value]` | List the shown line's model reasoning effort choices (from `provider.catalog`, when the model advertises reasoning preferences), or set one with `session.model.update {modelPreferences: {reasoningEffort}}`, as `/effort` does in the TUI (`configure.rs`). Listed only when the model has choices. `/fast` is not offered: no model advertises service tiers yet |
 | `model` | `/permissions` | Open the composer's permission selector (below). Listed where the Session serves `session.permission.get` and `session.permission.update` |
 | `session` | `/lines` | Open the existing Session lines panel |
 | `session` | `/new` | Navigate to the existing new-Session page, seeded with the current Session's working directory |
 | `session` | `/scheduled` | Open Scheduled tasks when the connection admits `schedule.list`; `/schedule` is an alternate. The current Session's `cwd` seeds creation, not the list's workspace filter |
 
-`/compact`, `/usage`, `/fork`, `/goal` and `/effort` belong to the main Session composer; a line composer does not list them, because the Session-wide cut and compaction are decided on main. `/rename` is not listed: the App Server does not serve `session.rename` yet (the SessionTitle design).
+`/compact`, `/usage`, `/goal` and `/effort` act on the line the composer is showing, which in the centre is the default branch: they name that line instead of hard-coding the root, so a Session whose conversation is on another line compacts and configures that line. `/fork` is the exception in kind, not in placement: it still copies only the root to a rest point, and the UI says so. `/rename` is not listed: the App Server does not serve `session.rename` yet (the SessionTitle design).
 
 Commands whose action is unavailable are omitted. Native-only commands are not
 advertised. Shared actions follow the TUI's canonical names and argument flow,
@@ -304,7 +305,7 @@ the menu footer displays its keyboard controls.
 
 Choosing `/branch` fills `/branch ` and focuses the composer without opening a
 dialog. Submitting a nonempty prompt creates the line and opens it in the side
-panel. In a line-panel composer its parent is that line, not `main`. With no
+panel. In a line-panel composer its parent is that line, not the root. With no
 finished turn or after a creation error, show the reason and preserve the draft;
 never submit a recognized branch command as model input unless explicitly escaped.
 Only successful creation clears the submitted draft. The existing transcript
@@ -889,8 +890,9 @@ or page by it. The consequences are deliberate:
   `withInternal`, `withAcpSessions` and `withAutomationSessions` belong to `session.catalog` — so the page lists the
   row of any origin this browser hid. [#557's](https://github.com/arcships/dim/issues/557) filters do not apply: archive
   is not a classification, and it writes no `origin` and selects none.
-- A row keeps the sidebar's fields — preview or id, workspace, last activity, model, running state — adds the `closed`
-  fact this read returns, and offers Restore, Open and Delete.
+- A row keeps the sidebar's fields — title, preview, workspace, last activity, model, running state — adds the `closed`
+  fact this read returns, and offers Restore, Open and Delete. With neither a title nor a preview, its heading is
+  localized as “Untitled session” (“未命名会话”), with the Session id below it as secondary text.
 
 **Closed Sessions.** A Session this daemon closed keeps its stored rows but is absent from a read without
 `includeClosed` ([session catalog §3.3](appserver/session-catalog.md#33-sessionsummaries)), and the closed fact lasts
@@ -985,6 +987,90 @@ target, or a lost reply) is reported while the remaining targets are deleted and
 untouched. Render the sidebar row action and the page in desktop and compact layouts; the page's states get a
 `web/tests/settings-archive.mjs` render test beside the existing settings pages, and the flows above are browser checks
 against a running entry.
+
+### 4.5 Sending during a run
+
+A draft typed while the shown line runs goes into that run or waits for the next
+one. This is the TUI's choice ([CLI commands](cli-commands.md#queued-messages)),
+made for the Web instead of the CLI: the Web workspace is its own client, and
+whoever signs in from this browser gets this browser's default rather than the
+one in the CLI home. As in the TUI the default is `steer`; only a saved `queue`
+switches it, so a missing or unknown stored value means `steer`.
+
+| Item | Contract |
+| --- | --- |
+| Default | `steer`: Enter submits the draft into the running turn at its next boundary. The alternate action holds it for the next turn. With `queue` the two swap |
+| Alternate action | A button beside Send, labelled with the other mode, through `session.submit {mode}` with the same text and attachments |
+| Interrupt and send now | `Ctrl+Enter` (`⌘+Enter` on macOS), and a button beside them. It withdraws every held message of the shown line oldest first (`session.input.withdraw`), waits for each reply, stops the run (`session.stop`), and submits the combined draft once that reply arrives. The withdrawals reach the session before the stop, and the submit only after it, because a submit written before the last interrupt cannot start a run after it |
+| Combined draft | The recalled messages in queue order, then the draft that was typed, each message keeping its own content in the order it was written: a text run stays where it stood and an image keeps the place it held between text runs, as the TUI's inline token does. Recalled text goes ahead of the typed text through the same separator rule the TUI uses: a newline before a recalled message when the draft there does not end a line, one between two adjacent text blocks, and one after the message when typed text follows |
+| Recalled images | A recalled message's stored images keep the draft offset they stood at and are sent with it as their existing file references, the text around them split at that offset; the draft's own pasted or dropped files are uploaded as usual and follow. Editing the draft moves an image with the text it stood between, and an inserted `@` file is linked within the run of text it belongs to, so a link never straddles an image. A recalled message goes in as one insertion, so an image already in the draft moves with the words it stood between, and an edit during a submit only moves offsets: the accepted message still recognizes the images it took, so text typed while it is out goes out without them. Images at one offset are ordered by the gesture that recalled them: a later gesture's images come first in queue order, so an image-only message takes its place ahead of an image-only draft, while an image ending an earlier message of the same gesture keeps its place ahead of the next one |
+| Failed stop | Nothing is submitted: the whole combined draft stays in the composer with the reason, and the withdrawals that already went are not repeated |
+| Guards | An empty draft with nothing held is a no-op. While that stop is out, no other action sends anything and the ordinary Stop is unavailable, because the gesture owns that stop; a second trigger sends no second stop: one reply decides one submit. A command or `@` menu open takes `Ctrl+Enter` as Enter itself, and text composition (IME) never reaches the gesture |
+| Destination | After a submit during a run the composer says where it went, `Sent into the running turn` or `Held for the next turn`, and clears the line when the run ends. A held message's row is the queue strip's, not a second notice |
+| Preference | `Appearance` → `Send during a run`, saved in this browser beside the theme and font size, applying immediately. Browser storage that refuses the write keeps the choice for this page and says it will not survive a reload |
+
+An idle line always submits as `queue`, whatever the default: the mode decides
+which of a run's two destinations a draft takes, and an idle line has only one.
+
+```text
+┌──────────────────────────────────────────────────────────┐
+│ Timeline: the run in flight                              │
+│                                                          │
+│ queued messages (default branch strip)                   │
+│   1  run the linter                     [Steer] [Remove] │
+│   2  then fix the warnings              [Remove]         │
+├──────────────────────────────────────────────────────────┤
+│ Held for the next turn                                   │
+│ and then commit                [model]                   │
+│                               [Queue] [⚡] [↑ Send]       │
+│                         alternate ^ Ctrl+Enter sends now │
+└──────────────────────────────────────────────────────────┘
+```
+
+Verification is the existing Web tests: `web/tests/chat-input.mjs` drives the
+default and alternate modes, the preference's effect on both, the recall order
+and the single submit of `Ctrl+Enter`, the reply order and single stop of a
+delayed withdrawal with an empty draft, a failed stop that keeps the draft, a
+message the run already adopted, recalled images in their own order, and an idle
+submit. The preference's own storage is `web/src/stores/composer.test.mjs`. The
+flows against a running entry are browser checks with an offline model that
+takes a while to answer.
+
+### 4.6 New Session model
+
+The new-Session page shows the model the Session would adopt, read from
+`session.model.preview` for the chosen directory (§2.5). It replaces the earlier
+saved-scope `provider.selection` read: that read returns only the saved default
+for one scope, so a user default, automatic fallback or Agent profile reached
+creation without being shown. The preview resolves through creation's own model
+owner, so the composer and `session.create` agree for unchanged configuration.
+The concrete model is named through the existing exact-model discovery
+(`provider.models.query` for that `{providerId, modelId}`); when that lookup
+finds no name, the model ID itself is shown.
+
+Following defaults and choosing are separate. Following sends no `model` in
+`session.create`; a model chosen here is that new Session's `model` only and
+never writes `provider.select`. The menu offers the way back, and that row names
+the model following restores, not the choice it clears. The composer
+distinguishes a pending resolution, a retryable failure and no usable model
+instead of naming all of them the default model, and a failure keeps its own
+label and a Retry. The
+preview is re-read when the directory changes and when the connection reattaches
+after a reconnect. A reply for an earlier directory is discarded, and a re-read
+never replaces a chosen model. After creation the attached Session's adopted
+configuration is authoritative: a preview is not a reservation against
+concurrent configuration changes.
+
+```text
+Composer:                 [Model name v] [Send]
+Model menu:
+  (*) Follow defaults - Model name
+  ( ) Another model
+```
+
+`web/tests/new-session-model.mjs` drives these composer and menu states, and
+`crates/dim-app-server/tests/transport_flow/web_entry.rs` holds the entry's
+authority over the read.
 
 ## 5. Build and release
 

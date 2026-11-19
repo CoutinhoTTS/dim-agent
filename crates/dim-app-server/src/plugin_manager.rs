@@ -9,13 +9,13 @@ mod record;
 mod tools;
 
 use crate::hooks_settings::HooksService;
-use crate::mcp::{McpError, McpService};
+use crate::mcp::{McpError, McpServiceBinding};
 use crate::methods::ManagementMethods;
 use crate::settings::{SettingsError, SettingsService, SourceDeclaration};
 use crate::ui_extensions::UiExtensions;
 use acquire::PluginsDir;
 use dim_agent_capabilities::methods::{Interruption, MethodCall, MethodDecl, Progress, RpcError};
-use dim_agent_capabilities::skills::{SkillIssue, SkillsCatalog};
+use dim_agent_capabilities::skills::{SkillIssue, SkillsCatalogBinding};
 use dim_agent_runtime::{Names, PartRegistry, PartScope};
 pub use record::Defaults;
 use record::{Choice, Installed, Kind, Manifest, Record, Source};
@@ -502,7 +502,8 @@ fn missing_instance_names(catalog: &ServiceCatalog, code: &record::Code) -> Vec<
         .filter(|(service, group)| {
             !matches!(
                 dim_agent_runtime::names::registered_key(catalog, service),
-                Err(LoaderError::OutsideInstance { group: held, .. }) if Some(held.as_str()) == group.as_str()
+                Err(LoaderError::OutsideInstance { group: held, .. })
+                    if Some(held.as_str()) == group.as_str()
             )
         })
         .map(|(service, _)| service.clone())
@@ -688,8 +689,8 @@ pub(crate) struct Manager {
 #[derive(Clone)]
 pub(crate) struct Owners {
     ctx: Ctx,
-    skills: Key<SkillsCatalog>,
-    mcp: Key<McpService>,
+    skills: Key<SkillsCatalogBinding>,
+    mcp: Key<McpServiceBinding>,
     hooks: Key<HooksService>,
     ui: Key<UiExtensions>,
     /// Content refusals PluginManager made itself, by plugin id and kind
@@ -2331,8 +2332,8 @@ pub(crate) struct PluginManagerPlugin {
     loader: Key<Loader>,
     methods: Key<ManagementMethods>,
     parts: Key<PartRegistry>,
-    skills: Key<SkillsCatalog>,
-    mcp: Key<McpService>,
+    skills: Key<SkillsCatalogBinding>,
+    mcp: Key<McpServiceBinding>,
     hooks: Key<HooksService>,
     ui: Key<UiExtensions>,
     runtimes: Key<crate::runtime_manager::RuntimeService>,

@@ -22,7 +22,14 @@ fn without_array_references(database: &Path) {
     let records = connection
         .prepare("SELECT session_id,branch_id,sequence,body FROM timeline_events WHERE json_extract(body,'$.encoding')='event'")
         .unwrap()
-        .query_map([], |row| Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,i64>(2)?,row.get::<_,String>(3)?)))
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
         .unwrap()
         .collect::<rusqlite::Result<Vec<_>>>()
         .unwrap();
@@ -453,7 +460,9 @@ async fn timeline_export_reads_a_live_product_home_and_its_copies() {
                 "stopping the daemon preserves every exported fact"
             );
         }
-        let stored_markers: (i64, i64) = rusqlite::Connection::open_with_flags(&database, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        let readonly = OpenFlags::SQLITE_OPEN_READ_ONLY;
+        let stored_markers: (i64, i64) =
+            rusqlite::Connection::open_with_flags(&database, readonly)
             .unwrap()
             .query_row(
                 "SELECT (SELECT count(*) FROM providers WHERE record LIKE ?1), (SELECT count(*) FROM settings_documents WHERE document LIKE ?2)",
@@ -588,6 +597,12 @@ async fn timeline_export_reads_a_live_product_home_and_its_copies() {
             } else { "" };
             changed(&database, &older, &format!("{catalog} {grants} {output} {dropped} {end_index} {worktrees} {worktree_time} {submission} {members} {text}
                 {identities}
+                DROP TABLE provider_name_keys; DROP TABLE provider_names; DROP TABLE provider_model_state;
+                DROP TABLE provider_bases; DROP TABLE provider_sources;
+                DROP TABLE provider_models;
+
+                DROP TABLE provider_catalog_revision;
+                DROP TABLE provider_bundle;
                 DROP INDEX timeline_events_branch_interrupts;
                 DROP TABLE agent_store_format;
                 CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = {version}));

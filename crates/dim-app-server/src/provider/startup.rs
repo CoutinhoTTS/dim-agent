@@ -257,11 +257,7 @@ impl ProviderService {
                 provider_id: provider_id.into(),
                 models: self
                     .bundled
-                    .bundled_models(provider_id)
-                    .unwrap_or_default()
-                    .iter()
-                    .find(|model| model.model_id == model_id)
-                    .cloned()
+                    .model(provider_id, &model_id)
                     .into_iter()
                     .collect(),
                 ..Default::default()
@@ -279,7 +275,10 @@ impl ProviderService {
                 capabilities: entry.capabilities.declared()
                     .ok_or_else(|| failure(format!("Model {model_id} declares no {}; supply DIM_MAX_CONTEXT_TOKENS and DIM_MAX_OUTPUT_TOKENS or configure the model descriptor", entry.capabilities.missing_limits().join(" or "))))?,
                 reasoning: entry.metadata.as_ref().and_then(|metadata| metadata.reasoning.clone()),
-                service_tier: entry.metadata.as_ref().and_then(|metadata| metadata.service_tier.clone()),
+                service_tier: entry
+                    .metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.service_tier.clone()),
                 },
             };
             snapshot.target.provider_id = source.id.clone();
@@ -459,7 +458,7 @@ impl ProviderService {
         }
         if let Ok(effective) = effective {
             let catalog = self
-                .catalog_for(effective.provider_id.clone(), cancel)
+                .catalog_target(effective.provider_id.clone(), model_id.to_owned(), cancel)
                 .await;
             self.check(cancel)?;
             match catalog {
@@ -478,23 +477,13 @@ impl ProviderService {
             }
         }
         let mut matches = Vec::new();
-        let mut providers: HashSet<_> = self
-            .list(cancel)
-            .await?
-            .providers
-            .into_iter()
-            .map(|provider| provider.provider_id)
-            .collect();
-        providers.extend(
-            self.oauth
-                .providers(cancel)
-                .await
-                .map_err(failure)?
-                .into_iter()
-                .map(|provider| provider.provider_id),
-        );
+        let providers = self
+            .candidate_provider_ids(Some(model_id.to_owned()), cancel)
+            .await?;
         for provider_id in providers {
-            let catalog = self.catalog_for(provider_id.clone(), cancel).await;
+            let catalog = self
+                .catalog_target(provider_id.clone(), model_id.to_owned(), cancel)
+                .await;
             self.check(cancel)?;
             let mut catalog = match catalog {
                 Ok(Some(catalog)) => catalog,

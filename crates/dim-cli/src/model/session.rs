@@ -30,7 +30,6 @@ pub enum DraftPart {
     Block(dim_agent_types::ContentBlock),
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GrantRequest {
     pub path: String,
@@ -302,6 +301,10 @@ pub enum Command {
     CloseSessions,
     /// List the models that can be chosen.
     ListModels,
+    QueryModels {
+        query: String,
+        after: Option<dim_agent_types::ModelId>,
+    },
     ReadIsolation,
     SaveIsolation {
         expected_revision: String,
@@ -345,6 +348,8 @@ pub enum Command {
         request: u64,
     },
     ClearModelPreferences {
+        query: String,
+        after: Option<dim_agent_types::ModelId>,
         provider_id: String,
         model_id: String,
         expected_version: u32,
@@ -892,7 +897,10 @@ pub enum OauthEvent {
         user_code: String,
     },
     Exchanging,
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "no producer: the login flow never reports a slow-down"
+    )]
     SlowDown(u64),
     ModelsRefreshed {
         after_login: bool,
@@ -1000,7 +1008,10 @@ pub struct ProviderEntry {
     pub status: String,
     pub is_current: bool,
     pub enabled: bool,
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "set from the provider's source; no panel reads it"
+    )]
     pub custom: bool,
     pub base_url: Option<String>,
     pub api_key_preview: Option<String>,
@@ -1048,7 +1059,8 @@ pub enum ModelOutcome {
 }
 
 /// Why a usable provider contributes no selectable model.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum EmptyReason {
     /// It lists no models: none discovered yet, or none at all. `listable`
     /// is whether `provider.refresh` can ask it for a listing.
@@ -1064,7 +1076,8 @@ pub enum EmptyReason {
 }
 
 /// A usable provider with no selectable model.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct EmptyProvider {
     pub provider_id: String,
     pub provider_name: String,
@@ -1110,13 +1123,17 @@ pub enum ModelPolicyUpdate {
 /// The models and which one is in effect.
 #[derive(Debug, Clone, Default)]
 pub struct ModelList {
+    pub query: String,
+    pub next: Option<dim_agent_types::ModelId>,
     pub models: Vec<ModelItem>,
     /// Whether the daemon manages Providers through `provider.management`:
     /// the picker offers a Provider's models for editing only when it does.
     pub manage: bool,
     pub current: Option<(String, String)>,
     /// The usable providers that offer no selectable model, with why, so the
-    /// picker can name them.
+    /// picker can name them. A provider in `limits` appears here only for its
+    /// other unavailable or disabled models; its undeclared models are not
+    /// counted again.
     pub empty: Vec<EmptyProvider>,
     /// The usable providers whose models include ones with undeclared
     /// limits, with how many.
@@ -1135,6 +1152,7 @@ pub struct SessionItem {
     /// The creation origin the daemon reports (`client`, `acp`, `internal`,
     /// `unknown`); absent from a daemon that does not report one.
     pub origin: Option<String>,
+    pub closed: bool,
 }
 
 /// The Session's stored title, unless it has none: empty, or the
@@ -1205,22 +1223,20 @@ pub enum DeleteOutcome {
     NothingRemoved,
     /// The daemon offers no `session.delete`.
     Unsupported,
-    /// The close ran but the removal failed: the rows stay, and this daemon
-    /// neither lists nor loads the Session again.
+    /// The removal failed and the reply does not say whether close ran.
+    /// The picker keeps the row and leaves an affected current Session.
     ClosedNotRemoved(String),
-    /// The call failed before any close: the row and the attachment stand.
+    /// The call failed before the removal: the row and the attachment stand.
     Failed(String),
 }
 
 impl DeleteOutcome {
-    /// Whether the call ended the Session in this daemon, so a picker showing
-    /// that Session leaves for Home.
+    /// Whether a picker showing the affected Session leaves for Home.
     pub fn ends_session(&self) -> bool {
         matches!(self, Self::Deleted | Self::ClosedNotRemoved(_))
     }
 }
 
-#[allow(dead_code)]
 pub enum Update {
     Reportable {
         error: crate::report::Captured,
@@ -1277,6 +1293,10 @@ pub enum Update {
         model: Option<String>,
     },
     /// How many files the run that just ended changed.
+    #[expect(
+        dead_code,
+        reason = "no producer: nothing reports a changed-file count"
+    )]
     FilesChanged(usize),
     /// The active session changed; snapshots that follow belong to it.
     Switched {
@@ -1322,9 +1342,6 @@ pub enum Update {
     Upgrade(crate::update::Offer),
     Models(Result<ModelList, String>),
     EffortChoices(Result<crate::configure::EffortChoices, String>),
-    /// A catalog `models()` asked `provider.refresh` to fill holds models
-    /// now: a picker that is still open reads the list again.
-    ModelsRefilled,
     /// Sent only by a daemon that advertises the policy methods.
     ModelPolicy(ModelPolicyUpdate),
     Isolation(Result<ExecutionSnapshot, String>),

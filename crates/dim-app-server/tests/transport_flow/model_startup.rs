@@ -85,11 +85,9 @@ async fn start(home: &Path) -> RunningServer {
         dim_agent_capabilities::model_provider::ModelProviderPlugin::process,
     );
     builder
-        .session_value(Arc::new(
-            dim_agent_capabilities::permission::CommandRulesHost(Arc::new(
-                dim_agent_capabilities::permission::NoCommandRules,
-            )),
-        ))
+        .session_data_value(Arc::new(dim_agent_capabilities::permission::CommandRules(
+            Arc::new(dim_agent_capabilities::permission::NoCommandRules),
+        )))
         .require_feature(
             Feature::new("PromptRegistry").session("PromptRegistry", |names| {
                 Ok(Box::new(
@@ -199,7 +197,9 @@ async fn model_preview_resolves_startup_without_creating_sessions_or_saving_choi
             )
             .await,
     );
-    let before = client.rpc("provider.management", json!({})).await;
+    let before = client
+        .rpc("provider.management", json!({"providerId":provider}))
+        .await;
     assert_ok(&before);
     for (params, expected) in [
         (json!({"cwd":home}), "alpha"),
@@ -233,7 +233,9 @@ async fn model_preview_resolves_startup_without_creating_sessions_or_saving_choi
         .await;
     assert!(invalid.get("error").is_some(), "{invalid}");
     assert!(server.agent().unwrap().sessions().is_empty());
-    let after = client.rpc("provider.management", json!({})).await;
+    let after = client
+        .rpc("provider.management", json!({"providerId":provider}))
+        .await;
     assert_eq!(before["result"], after["result"]);
     let created = client.rpc("session.create", json!({"cwd":home})).await;
     assert_ok(&created);
@@ -263,6 +265,9 @@ async fn temporary_startup_connections_execute_all_formats_without_sharing_or_pe
             .unwrap(),
     )
     .unwrap();
+    use sha2::{Digest, Sha256};
+    let digest = format!("{:x}", Sha256::digest(std::fs::read(&image_path).unwrap()));
+    let reference = format!("img:{}", &digest[..16]);
     let seen = Seen::default();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}/gateway/v1", listener.local_addr().unwrap());
@@ -373,9 +378,10 @@ async fn temporary_startup_connections_execute_all_formats_without_sharing_or_pe
                 "{format}: {uri}"
             );
             assert!(
-                body.to_string().contains(png),
-                "{format}: the provider receives image bytes: {body}"
+                body.to_string().contains(&reference),
+                "{format}: the provider receives the image reference: {body}"
             );
+            assert!(!body.to_string().contains(png), "{format}: {body}");
             assert!(!body.to_string().contains(image["fileId"].as_str().unwrap()));
             assert!(
                 history
@@ -558,8 +564,7 @@ async fn temporary_startup_connections_execute_all_formats_without_sharing_or_pe
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn startup_admission_rejects_unsafe_connections_and_ambiguous_models_without_creating_sessions()
- {
+async fn startup_admission_rejects_unsafe_connections_and_ambiguous_models_without_sessions() {
     let home = std::env::temp_dir().join(format!("dim-admission-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&home).unwrap();
     let seen = Seen::default();
@@ -956,16 +961,18 @@ async fn temporary_startup_rebinds_after_restart_and_preserves_parent_cut_connec
                         .any(|event| matches!(&event.kind, EventKind::TurnEnd(_)))
                 });
             if woken {
-                return;
+                break;
             }
             changed.changed().await.unwrap();
         }
+        session.idle("main").await.unwrap();
+        assert_ok(&client.rpc("session.detach", json!({"sessionId":sid})).await);
+        while !session.unload_if_idle().await.unwrap() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     })
     .await
-    .expect("the request's result and the turn it wakes are committed");
-    session.idle("main").await.unwrap();
-    assert_ok(&client.rpc("session.detach", json!({"sessionId":sid})).await);
-    assert!(session.unload_if_idle().await.unwrap());
+    .expect("the request settles and the detached Session unloads");
     assert_ok(&client.rpc("session.attach", json!({"sessionId":sid})).await);
     submit(&mut client, &sid, &child_id).await;
     assert_eq!(

@@ -38,6 +38,8 @@ mod modality;
 mod models;
 #[path = "cli_flow/permission.rs"]
 mod permission;
+#[path = "cli_flow/prompt_migration.rs"]
+mod prompt_migration;
 #[path = "cli_flow/prompt_suggestion.rs"]
 mod prompt_suggestion;
 #[path = "cli_flow/prompts.rs"]
@@ -72,6 +74,8 @@ mod update_entry;
 mod windows;
 #[path = "cli_flow/workflow.rs"]
 mod workflow;
+#[path = "cli_flow/worktrees.rs"]
+mod worktrees;
 
 #[path = "support/daemon.rs"]
 mod daemon_cleanup;
@@ -433,6 +437,7 @@ impl Wire {
             "session.history.latestTurn",
             "session.input.pending.blockPresence",
             "provider.list",
+            "provider.models.query",
         ];
         let empty_methods = !extra.contains(&"session.methods");
         self.2 = empty_methods || hello["params"]["clientName"] == "AcpGateway";
@@ -1349,7 +1354,7 @@ fn model_adoption_names_the_declaring_command_for_undeclared_limits() {
         );
         wire.send(json!({"jsonrpc":"2.0","id":create["id"],"error":{"code":-32000,"message":"Explicit model is unavailable","data":{"appError":"provider_invalid_config"}}}));
         let catalog = wire.read("provider.catalog");
-        assert_eq!(catalog["params"], json!({"providerId":"fixture"}));
+        assert_eq!(catalog["params"], json!({"providerId":"fixture","modelId":"narrow"}));
         wire.reply(
             &catalog,
             json!({"catalog":{"version":1,"disabledModelIds":[],"models":[
@@ -1391,7 +1396,7 @@ fn model_catalog_declares_limits_for_one_model() {
         let hello = wire.read("hello");
         wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods"]}));
         let catalog = wire.read("provider.catalog");
-        assert_eq!(catalog["params"], json!({"providerId":"fixture"}));
+        assert_eq!(catalog["params"], json!({"providerId":"fixture","modelId":"narrow"}));
         wire.reply(
             &catalog,
             json!({"catalog":{"version":1,"disabledModelIds":[],"models":[
@@ -1402,13 +1407,11 @@ fn model_catalog_declares_limits_for_one_model() {
         assert_eq!(
             edit["params"],
             json!({"providerId":"fixture","expectedVersion":1,"modelId":"narrow",
-                "edit":{"contextWindow":64000,"maxOutputTokens":8000}})
+                "edit":{"contextWindow":64000,"maxOutputTokens":8000},"reply":"summary"})
         );
-        wire.reply(&edit, json!({"version":2,"disabledModelIds":[],"models":[
-            {"id":"narrow","name":"Narrow","unavailableReason":null,"missingLimits":[]}
-        ]}));
+        wire.reply(&edit, json!({"version":2}));
         let catalog = wire.read("provider.catalog");
-        assert_eq!(catalog["params"], json!({"providerId":"fixture"}));
+        assert_eq!(catalog["params"], json!({"providerId":"fixture","modelId":"narrow"}));
         wire.reply(
             &catalog,
             json!({"catalog":{"version":2,"disabledModelIds":[],"models":[
@@ -1470,16 +1473,16 @@ fn model_catalog_declares_missing_limits_for_every_model() {
         assert_eq!(
             first["params"],
             json!({"providerId":"fixture","expectedVersion":1,"modelId":"narrow",
-                "edit":{"contextWindow":64000,"maxOutputTokens":8000}})
+                "edit":{"contextWindow":64000,"maxOutputTokens":8000},"reply":"summary"})
         );
-        wire.reply(&first, json!({"version":2,"disabledModelIds":[],"models":[]}));
+        wire.reply(&first, json!({"version":2}));
         let second = wire.read("provider.models.edit");
         assert_eq!(
             second["params"],
             json!({"providerId":"fixture","expectedVersion":2,"modelId":"wide",
-                "edit":{"maxOutputTokens":8000}})
+                "edit":{"maxOutputTokens":8000},"reply":"summary"})
         );
-        wire.reply(&second, json!({"version":3,"disabledModelIds":[],"models":[]}));
+        wire.reply(&second, json!({"version":3}));
         let catalog = wire.read("provider.catalog");
         wire.reply(
             &catalog,
@@ -5202,7 +5205,10 @@ fn interactive_configuration_commands_route_and_recover_without_submitting_comma
     }
     fn catalog(wire: &mut Wire) {
         let request = wire.read("provider.catalog");
-        assert_eq!(request["params"], json!({"providerId":"test"}));
+        assert_eq!(
+            request["params"],
+            json!({"providerId":"test","modelId":"model"})
+        );
         let mut capabilities = serde_json::to_value(
             dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384),
         )
@@ -5300,7 +5306,7 @@ fn explicit_model_selection_uses_protocol_field_names_from_tui_and_line_client()
             let home = Home::new();
             let daemon = home.daemon(move |wire| {
             let hello = wire.read("hello");
-            let mut features = vec!["session.create", "session.history", "provider.list", "provider.management"];
+            let mut features = vec!["session.create", "session.history", "provider.list", "provider.management","provider.management.list"];
             if leaf {
                 features.push("ui.leaf.2");
             }
@@ -5327,7 +5333,7 @@ fn explicit_model_selection_uses_protocol_field_names_from_tui_and_line_client()
             wire.send(json!({"jsonrpc":"2.0","id":create["id"],"error":{"code":-32000,"message":"fixture stops here","data":{"appError":"provider_failed"}}}));
             if tui {
                 let catalog = wire.read("provider.catalog");
-                assert_eq!(catalog["params"], json!({"providerId":"fixture"}));
+                assert_eq!(catalog["params"], json!({"providerId":"fixture","modelId":"fixture-model"}));
                 wire.reply(&catalog, json!({"catalog":null}));
                 assert_eq!(wire.trailing_request(), None, "a rejected creation must not attach or submit");
             }
@@ -5512,9 +5518,8 @@ fn a_new_session_shows_the_effort_its_creation_adopted() {
         let (calls, observed) = std::sync::mpsc::channel::<Value>();
         let daemon = home.daemon(move |wire| {
             wire.2 = true;
-            let mut capabilities =
-                serde_json::to_value(dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384))
-                    .unwrap();
+            let limits = dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384);
+            let mut capabilities = serde_json::to_value(limits).unwrap();
             capabilities["reasoning"] = json!(true);
             let mut line = String::new();
             while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
@@ -5539,7 +5544,7 @@ fn a_new_session_shows_the_effort_its_creation_adopted() {
                         "features":["session.create","session.history","session.history.latestTurn","session.input.pending.blockPresence","session.methods","provider.list",
                             "provider.catalog","provider.management"]}),
                     "provider.list" => json!({"providers":[{"providerId":"test","displayName":"Test","enabled":true}]}),
-                    "provider.management" => json!({"providers":[{"providerId":"test","source":"custom",
+                    "provider.management" | "provider.management.list" => json!({"providers":[{"providerId":"test","source":"custom",
                         "displayName":"Test","enabled":true,"version":1,"connection":null,
                         "preferences":{"model":{"reasoningEffort":"high"}}}],"errors":[]}),
                     "provider.catalog" => json!({"catalog":{"version":1,"disabledModelIds":[],"models":[{"id":"model","name":"Model",
@@ -5659,7 +5664,8 @@ fn home_after_new_drops_the_previous_sessions_effort() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
         wire.hello(&[
-            "provider.management",
+            "session.create.modelFromSession",
+            "provider.management.list",
             "ui.open",
             "ui.close",
             "ui.attach",
@@ -5685,7 +5691,7 @@ fn home_after_new_drops_the_previous_sessions_effort() {
 
         // `/effort high` adopts the value on the first Session.
         let catalog = wire.read("provider.catalog");
-        assert_eq!(catalog["params"], json!({"providerId":"test"}));
+        assert_eq!(catalog["params"], json!({"providerId":"test","modelId":"model"}));
         let mut capabilities = serde_json::to_value(
             dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384),
         )
@@ -5704,16 +5710,10 @@ fn home_after_new_drops_the_previous_sessions_effort() {
         );
         wire.reply(&effort, json!({"outcome":"adopted"}));
 
-        // `/new` and its first message create the next Session, which has
-        // adopted no preference yet.
-        let providers = wire.read("provider.management");
-        assert_eq!(providers["params"], json!({}));
-        wire.reply(
-            &providers,
-            json!({"providers":[{"providerId":"test","source":"user",
-                "displayName":"Test","preferences":{}}],"errors":[]}),
-        );
+        // `/new` and its first message create the next Session, which
+        // inherits the model and has adopted no preference yet.
         let create = wire.read("session.create");
+        assert_eq!(create["params"]["modelFromSession"], "session");
         assert!(
             create["params"].get("modelPreferences").is_none(),
             "{create}"
@@ -5797,6 +5797,7 @@ fn home_after_new_drops_the_previous_sessions_effort() {
 }
 
 #[test]
+#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_resizing_during_thinking_preserves_multiline_history() {
     let home = Home::new();
     fs::write(
@@ -5913,8 +5914,13 @@ fn repicking_the_current_model_keeps_the_effort() {
                     "features":["session.create","session.history","session.history.latestTurn","session.input.pending.blockPresence","session.methods","provider.list",
                         "provider.catalog","provider.management","provider.selection","provider.select"]}),
                 "provider.list" => json!({"providers":[{"providerId":"test","displayName":"Test","enabled":true}]}),
+                "provider.models.query" => {
+                    let mut page = models::picker_page("test", "Test", catalog.clone());
+                    page["models"][0]["preferences"] = json!({"reasoningEffort":"high"});
+                    page
+                },
                 "provider.catalog" => catalog.clone(),
-                "provider.management" => json!({"providers":[{"providerId":"test","source":"custom",
+                "provider.management" | "provider.management.list" => json!({"providers":[{"providerId":"test","source":"custom",
                     "displayName":"Test","enabled":true,"version":1,"connection":null,
                     "preferences":{"model":{"reasoningEffort":"high"}}}],"errors":[]}),
                 "session.create" => panic!("resuming must not create a Session"),
@@ -6257,7 +6263,10 @@ fn tui_shell_mode_runs_through_session_methods_and_shows_the_recorded_run() {
 fn tui_effort_dialog_selects_the_current_models_effort_and_cancels_without_writing() {
     fn catalog(wire: &mut Wire) {
         let request = wire.read("provider.catalog");
-        assert_eq!(request["params"], json!({"providerId":"test"}));
+        assert_eq!(
+            request["params"],
+            json!({"providerId":"test","modelId":"model"})
+        );
         let mut capabilities = serde_json::to_value(
             dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384),
         )
@@ -6369,14 +6378,16 @@ fn tui_mcp_and_configuration_commands_use_session_methods() {
         wire.reply(&request, catalog.clone());
         let start = wire.read("mcp.auth.start");
         assert_eq!((&start["params"]["id"], &start["params"]["source"]), (&json!("docs"), &json!("user")));
-        let expires = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64 + 60_000;
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap();
+        let expires = now.as_millis() as u64 + 60_000;
         wire.reply(&start, json!({"attemptId":"attempt","authorizationUrl":"https://auth.example/authorize","redirectUri":"http://localhost:1/callback","resource":"https://docs.example/mcp","issuer":"https://auth.example","expiresAt":expires}));
         let complete = wire.read("mcp.auth.complete");
         assert_eq!(complete["params"], json!({"attemptId":"attempt","callbackUrl":"http://localhost:1/callback?code=c"}));
         wire.reply(&complete, json!({}));
         let request = wire.read("provider.catalog");
-        assert_eq!(request["params"], json!({"providerId":"test"}));
-        let mut capabilities = serde_json::to_value(dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)).unwrap();
+        assert_eq!(request["params"], json!({"providerId":"test","modelId":"model"}));
+        let limits = dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384);
+        let mut capabilities = serde_json::to_value(limits).unwrap();
         capabilities["reasoning"] = json!(true);
         wire.reply(&request, json!({"catalog":{"version":1,"disabledModelIds":[],"models":[{"id":"model","name":"Model","capabilities":capabilities,
             "metadata":{"reasoning":{"supported":true,"effortOptions":["high","low"]}}}]}}));
@@ -6449,36 +6460,41 @@ fn tui_mcp_without_a_session_reports_the_catalog_only() {
     assert!(!terminal.transcript.contains("session_closed"));
 }
 
+/// At home, before any Session exists, every command that needs one answers
+/// its own notice and sends nothing: `/export` and `/queue` name the missing
+/// Session, `/agent` names the sign-in, and a valued `/effort` names the
+/// missing model.
 #[test]
-fn tui_agent_without_a_session_answers_the_no_session_notice_and_sends_nothing() {
-    let home = Home::new();
-    let (quieted, quiet_done) = std::sync::mpsc::channel();
-    let daemon = no_session_daemon(&home, quieted);
-    let mut terminal = Terminal::launch_tui(home.command());
-    terminal.until("Ask anything...");
-    terminal.write(b"/agent ghost\r");
-    terminal.until("Sign in with /login");
-    quiet_done.recv_timeout(PATIENCE).unwrap();
-    home.kill(&terminal);
-    terminal.wait();
-    daemon.join().unwrap();
-    assert!(!terminal.transcript.contains("session_closed"));
-}
-
-#[test]
-fn tui_valued_effort_at_home_without_a_model_says_what_to_do_and_sends_nothing() {
-    let home = Home::new();
-    let (quieted, quiet_done) = std::sync::mpsc::channel();
-    let daemon = no_session_daemon(&home, quieted);
-    let mut terminal = Terminal::launch_tui(home.command());
-    terminal.until("Ask anything...");
-    terminal.write(b"/effort high\r");
-    terminal.until("No model to configure");
-    quiet_done.recv_timeout(PATIENCE).unwrap();
-    home.kill(&terminal);
-    terminal.wait();
-    daemon.join().unwrap();
-    assert!(!terminal.transcript.contains("session_closed"));
+fn tui_home_commands_without_a_session_answer_and_send_nothing() {
+    for fullscreen in [false, true] {
+        let home = Home::new();
+        let (quieted, quiet_done) = std::sync::mpsc::channel();
+        let daemon = no_session_daemon(&home, quieted);
+        let mut command = home.command();
+        if fullscreen {
+            command.arg("--fullscreen");
+        }
+        let mut terminal = Terminal::launch_tui(command);
+        terminal.until("Ask anything...");
+        terminal.write(b"/export\r");
+        terminal.until("/export needs a session");
+        terminal.write(b"/queue\r");
+        terminal.until("/queue needs a session");
+        terminal.write(b"/agent ghost\r");
+        terminal.until("Sign in with /login");
+        terminal.write(b"/effort high\r");
+        terminal.until("No model to configure");
+        quiet_done.recv_timeout(PATIENCE).unwrap();
+        home.kill(&terminal);
+        terminal.wait();
+        daemon.join().unwrap();
+        assert!(!terminal.transcript.contains("session_closed"));
+        assert!(
+            !terminal.transcript.contains("Export session"),
+            "a refused export opened its dialog: {}",
+            terminal.transcript
+        );
+    }
 }
 
 #[test]
@@ -6563,6 +6579,7 @@ fn tui_pasted_images_and_long_text_submit_as_user_content() {
 }
 
 #[test]
+#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_at_mentions_pick_files_from_the_working_directory() {
     let home = Home::new();
     let project = home.0.join("project");
@@ -6671,12 +6688,12 @@ fn tui_skill_rows_come_from_the_catalog_and_complete_without_sending() {
         let mut terminal = Terminal::resume_tui(command);
         terminal.until("test / model");
 
-        // The enabled Skill is listed and its row completes the marker into
-        // the draft; no message is sent.
+        // The enabled Skill is listed and its row completes the reference into
+        // the draft, which draws the Skill's name; no message is sent.
         terminal.write(b"/comm");
         terminal.until("/skill:commit");
         terminal.raw(b"\r");
-        terminal.until_plain("/skill:commit ");
+        terminal.until_plain("/commit ");
         terminal.write(b"\x03");
 
         // A disabled or shadowed Skill is not offered: Tab completes nothing.
@@ -6797,6 +6814,7 @@ fn a_daemon_without_skill_catalog_keeps_a_working_command_palette() {
 }
 
 #[test]
+#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_palette_tab_only_completes_and_enter_still_runs() {
     for fullscreen in [false, true] {
         let home = Home::new();
@@ -6873,7 +6891,7 @@ fn tui_sends_dropped_files_as_links_and_images_by_model_capability() {
         let history = wire.read("session.history");
         wire.reply(&history,json!({"events":[],"through":8,"nextAfter":8,"done":true}));
         let catalog = wire.read("provider.catalog");
-        assert_eq!(catalog["params"], json!({"providerId":"test"}));
+        assert_eq!(catalog["params"], json!({"providerId":"test","modelId":"model"}));
         let capabilities = json!({"modalities":["text"],"toolCalling":true,"streaming":true,"structuredOutput":true,"vision":false,"audio":false,"reasoning":false,"contextWindow":128000,"maxOutputTokens":16384});
         wire.reply(&catalog, json!({"catalog":{"version":1,"disabledModelIds":[],"models":[{"id":"model","name":"Model","capabilities":capabilities}]}}));
         wire.no_context();
@@ -7005,8 +7023,8 @@ fn browser_login_hides_callback_and_refreshes_the_managed_catalog() {
     let daemon = home.daemon(|wire| {
         wire.2 = true;
         let hello = wire.read("hello");
-        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods","provider.list","provider.management","account.login.browser.begin","account.login.browser.complete","provider.refresh"]}));
-        let listed = wire.read("provider.management");
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods","provider.list","provider.management","provider.management.list","account.login.browser.begin","account.login.browser.complete","provider.refresh"]}));
+        let listed = wire.read("provider.management.list");
         wire.reply(&listed,json!({"providers":[{"providerId":"fixture","displayName":"Fixture","account":{"namespace":"account","loginMethods":["browser"]}}]}));
         let begin = wire.read("account.login.browser.begin");
         assert_eq!(begin["params"]["directory"],"https://fixture.invalid");
@@ -7056,8 +7074,8 @@ fn device_login_polls_and_cancels_the_attempt_on_ctrl_c() {
     let daemon = home.daemon(|wire| {
         wire.2 = true;
         let hello = wire.read("hello");
-        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods","provider.list","provider.management","account.login.begin","account.login.status","account.login.cancel"]}));
-        let listed = wire.read("provider.management");
+        wire.reply(&hello,json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.methods","provider.list","provider.management","provider.management.list","account.login.begin","account.login.status","account.login.cancel"]}));
+        let listed = wire.read("provider.management.list");
         wire.reply(&listed,json!({"providers":[{"providerId":"fixture","displayName":"Fixture","account":{"namespace":"account","loginMethods":["device"]}}]}));
         let begin = wire.read("account.login.begin");
         wire.reply(&begin,json!({"attemptId":"device","verificationUri":"https://fixture.invalid/device","userCode":"TEST-CODE","expiresAt":999999}));
@@ -7463,7 +7481,7 @@ fn real_daemon_profile_conflicts_preserve_the_running_daemon_and_endpoint() {
 #[test]
 #[ignore = "requires DIM_TEST_APP_SERVER pointing to the built production App Server"]
 fn configured_api_key_model_uses_production_tools_and_restores_the_same_session() {
-    use base64::{Engine, engine::general_purpose::STANDARD};
+    use sha2::{Digest, Sha256};
     let binary = std::env::var("DIM_TEST_APP_SERVER")
         .expect("Set DIM_TEST_APP_SERVER to the dim-app-server binary");
     let home = Home::new();
@@ -7471,8 +7489,8 @@ fn configured_api_key_model_uses_production_tools_and_restores_the_same_session(
     let image = home.0.join("screenshot.dat");
     let bytes = image_fixture(image::ImageFormat::Png, 1, 1);
     fs::write(&image, &bytes).unwrap();
-    let image_data = STANDARD.encode(bytes);
-    let model_image = image_data.clone();
+    let digest = format!("{:x}", Sha256::digest(&bytes));
+    let model_image = format!("img:{}", &digest[..16]);
     let outside = Home::new();
     let reference = outside.0.join("outside reference.txt");
     fs::write(&reference, "outside-attachment-marker\n").unwrap();
@@ -7545,9 +7563,10 @@ fn configured_api_key_model_uses_production_tools_and_restores_the_same_session(
                     user["content"],
                     json!([
                         {"type":"text","text":"continue"},
-                        {"type":"image_url","image_url":{"url":format!("data:image/png;base64,{model_image}")}}
+                        {"type":"text","text":model_image}
                     ])
                 );
+                assert!(!request.to_string().contains("image_url"), "{request}");
             }
             assert!(
                 request["tools"]
@@ -7594,10 +7613,8 @@ fn configured_api_key_model_uses_production_tools_and_restores_the_same_session(
                 let user = last_user();
                 let parts = user["content"].as_array().unwrap();
                 assert_eq!(parts[0], json!({"type":"text","text":"selected "}));
-                assert_eq!(
-                    parts[1],
-                    json!({"type":"image_url","image_url":{"url":format!("data:image/png;base64,{model_image}")}})
-                );
+                assert_eq!(parts[1], json!({"type":"text","text":model_image}));
+                assert!(!request.to_string().contains("image_url"), "{request}");
                 assert!(
                     user["content"]
                         .to_string()
@@ -8237,7 +8254,8 @@ fn interactive_mcp_sign_in_hides_secrets_retries_callbacks_and_drains_before_nex
         let request = wire.read("mcp.auth.start");
         assert_eq!(request["params"]["source"],"project");
         assert_eq!(request["params"]["clientSecret"],"fixture-confidential-secret");
-        let expires = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64 + 60_000;
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap();
+        let expires = now.as_millis() as u64 + 60_000;
         wire.reply(&request,json!({"attemptId":"fixture-attempt","authorizationUrl":"https://issuer.example/authorize","redirectUri":"http://localhost:1456/callback","resource":"https://resource.example/mcp","issuer":"https://issuer.example","expiresAt":expires}));
         let callback = wire.read("mcp.auth.complete");
         assert_eq!(callback["params"]["callbackUrl"],"http://localhost:1456/callback?code=wrong-code&state=wrong-state");
@@ -8490,7 +8508,8 @@ fn mcp_submitted_success_stays_successful_after_interrupt_or_expiry() {
             mcp_hello(wire);
             let catalog=wire.read("mcp.catalog"); wire.reply(&catalog,mcp_catalog("docs"));
             let start=wire.read("mcp.auth.start");
-            let now=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap();
+            let now = now.as_millis() as u64;
             wire.reply(&start,json!({"attemptId":"held","authorizationUrl":"https://issuer.example/authorize","redirectUri":"http://localhost:1456/callback","resource":"https://resource.example/mcp","issuer":"https://issuer.example","expiresAt":now+if expires {1200} else {60_000}}));
             let callback=wire.read("mcp.auth.complete"); admitted.send(()).unwrap();
             wait_release.recv_timeout(PATIENCE).unwrap();
@@ -9218,7 +9237,13 @@ fn tui_provider_management_uses_the_production_daemon_and_survives_restart() {
     terminal.until("Disconnect");
     terminal.until("Added Provider flow");
     let mut wire = connect(&home);
-    let snapshot = rpc(&mut wire, "provider.management", json!({}));
+    let overview = rpc(
+        &mut wire,
+        "provider.management.list",
+        json!({"query":"Provider flow"}),
+    );
+    let id = overview["result"]["providers"][0]["providerId"].clone();
+    let snapshot = rpc(&mut wire, "provider.management", json!({"providerId":id}));
     let provider = snapshot["result"]["providers"]
         .as_array()
         .unwrap()
@@ -9327,7 +9352,9 @@ fn tui_provider_management_uses_the_production_daemon_and_survives_restart() {
     );
     terminal.write(b"/models\r");
     terminal.until("Provider flow /");
-    terminal.write(b"Provider flow\r");
+    terminal.write(b"Provider flow");
+    terminal.until("1 provider");
+    terminal.write(b"\r");
     terminal.until("Default for new sessions: Provider flow / fixture-model");
     terminal.write(b"stale-effort-message\r");
     terminal.until("provider-updated-reply");
@@ -9344,6 +9371,7 @@ fn tui_provider_management_uses_the_production_daemon_and_survives_restart() {
     terminal.write(b"/models\r");
     terminal.until("Provider flow /");
     terminal.write(b"Provider flow");
+    terminal.until("1 provider");
     assert!(
         rpc(
             &mut wire,
@@ -9595,30 +9623,6 @@ fn tui_registers_with_the_ui_registry_and_leaves_when_asked() {
 }
 
 #[test]
-fn tui_export_and_queue_require_an_open_session() {
-    for fullscreen in [false, true] {
-        let home = Home::new();
-        let (quieted, quiet_done) = std::sync::mpsc::channel();
-        let daemon = no_session_daemon(&home, quieted);
-        let mut command = home.command();
-        if fullscreen {
-            command.arg("--fullscreen");
-        }
-        let mut terminal = Terminal::launch_tui(command);
-        terminal.until("Git branch");
-        terminal.write(b"/export\r");
-        terminal.until("/export needs a session");
-        terminal.write(b"/queue\r");
-        terminal.until("/queue needs a session");
-        quiet_done.recv_timeout(PATIENCE).unwrap();
-        home.kill(&terminal);
-        terminal.wait();
-        daemon.join().unwrap();
-        assert!(!terminal.transcript.contains("Export session"));
-    }
-}
-
-#[test]
 fn tui_export_dialog_matches_the_subcommand_and_cancel_sends_nothing() {
     for (fullscreen, locale) in [
         (false, "en"),
@@ -9731,6 +9735,7 @@ fn tui_export_dialog_matches_the_subcommand_and_cancel_sends_nothing() {
 }
 
 #[test]
+#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_queue_panel_deletes_steers_and_moves_applied_inputs_to_the_transcript() {
     for fullscreen in [false, true] {
         let home = Home::new();
@@ -10105,31 +10110,7 @@ fn tui_queue_shows_held_messages_and_steers_or_withdraws_them() {
     terminal.until("Held · third");
     terminal.write(b"\x1b[1;2D");
     terminal.until("third");
-    let plain = {
-        let mut out = String::new();
-        let mut rest = terminal.transcript.as_str();
-        while let Some(start) = rest.find('\u{1b}') {
-            out.push_str(&rest[..start]);
-            let tail = &rest[start + 1..];
-            let skipped = match tail.chars().next() {
-                Some('[') => tail
-                    .char_indices()
-                    .skip(1)
-                    .find(|(_, c)| c.is_ascii_alphabetic())
-                    .map_or(tail.len(), |(i, c)| i + c.len_utf8()),
-                Some(']') => [("\u{7}", 1), ("\u{1b}\\", 2)]
-                    .iter()
-                    .filter_map(|(end, len)| tail.find(end).map(|i| i + len))
-                    .min()
-                    .unwrap_or(tail.len()),
-                Some(c) => c.len_utf8(),
-                None => 0,
-            };
-            rest = &tail[skipped..];
-        }
-        out.push_str(rest);
-        out
-    };
+    let plain = strip_ansi(&terminal.transcript);
     assert!(!plain.contains("Queue (0)"), "{plain}");
     assert!(plain.contains("┃ first"), "{plain}");
     assert!(plain.contains("┃ second"), "{plain}");
@@ -11697,8 +11678,10 @@ fn tui_rebuilds_compaction_rows_from_history_on_resume() {
 /// #1380: context a prompt hook appended to the operator's message is not
 /// their words. The row carries what they sent, and the hook's block becomes
 /// one muted row naming its size, `▸` closed; its body opens with the detail
-/// setting, `/tools`, exactly as a compaction body does.
+/// setting, `/tools`, exactly as a compaction body does. One stored line is
+/// named in the singular, so the row never says `1 lines`.
 #[test]
+#[ignore = "TUI E2E runs in the local tmux suite"]
 fn tui_draws_a_prompt_hooks_context_as_a_status_row() {
     let home = Home::new();
     let operator = "why does the parser stall?";
@@ -11718,8 +11701,15 @@ fn tui_draws_a_prompt_hooks_context_as_a_status_row() {
                      {"type":"text","text":"<dim-hooks kind=\"prompt-submit\">\nSEARCH-MEMORY-FIRST\nis required here\n(third line)\n</dim-hooks>"}
                  ]},"mode":"queue"}},
                 {"id":"hooked-applied","sequence":10,"create_at":1,"type":"input","name":"applied",
-                 "data":{"input_id":"hooked","mode":"queue"}}],
-                "through":10,"nextAfter":10,"done":true}),
+                 "data":{"input_id":"hooked","mode":"queue"}},
+                {"id":"one-line","sequence":11,"create_at":1,"type":"input","name":"message",
+                 "data":{"user":{"content":[
+                     {"type":"text","text":"translate this"},
+                     {"type":"text","text":"<dim-hooks kind=\"prompt-submit\">\nONE-LINE-BODY\n</dim-hooks>"}
+                 ]},"mode":"queue"}},
+                {"id":"one-line-applied","sequence":12,"create_at":1,"type":"input","name":"applied",
+                 "data":{"input_id":"one-line","mode":"queue"}}],
+                "through":12,"nextAfter":12,"done":true}),
         );
         wire.no_context();
         wire.hold();
@@ -11729,27 +11719,38 @@ fn tui_draws_a_prompt_hooks_context_as_a_status_row() {
     let mut terminal = Terminal::launch_tui(command);
     terminal.until(operator);
     terminal.until("Hook context · 3 lines ▸");
+    terminal.until("Hook context · 1 line ▸");
+    assert!(
+        !terminal.transcript.contains("1 lines"),
+        "a one-line body is named in the singular:\n{}",
+        terminal.transcript
+    );
     assert!(
         !terminal.transcript.contains("<dim-hooks"),
         "the marker is the model's, not the transcript's:\n{}",
         terminal.transcript
     );
     assert!(
-        !terminal.transcript.contains("SEARCH-MEMORY-FIRST"),
+        !terminal.transcript.contains("SEARCH-MEMORY-FIRST")
+            && !terminal.transcript.contains("ONE-LINE-BODY"),
         "a closed hook context keeps its body out of the transcript:\n{}",
         terminal.transcript
     );
     // The detail setting opens the body, as it does for a compaction's summary.
     terminal.write(b"/tools\r");
     terminal.until("Hook context · 3 lines ▸");
+    terminal.until("Hook context · 1 line ▸");
     assert!(
-        !terminal.transcript.contains("SEARCH-MEMORY-FIRST"),
+        !terminal.transcript.contains("SEARCH-MEMORY-FIRST")
+            && !terminal.transcript.contains("ONE-LINE-BODY"),
         "the summary form keeps the hook body closed:\n{}",
         terminal.transcript
     );
     terminal.write(b"/tools\r");
     terminal.until("Hook context · 3 lines ▾");
     terminal.until("SEARCH-MEMORY-FIRST");
+    terminal.until("Hook context · 1 line ▾");
+    terminal.until("ONE-LINE-BODY");
     terminal.write(b"/exit\r");
     terminal.until("Bye!");
     assert!(terminal.wait().success());
@@ -11821,48 +11822,6 @@ fn tui_draws_a_stop_hooks_follow_up_as_one_row() {
     terminal.until("fix parser::tests");
     terminal.write(b"/tools\r");
     terminal.until("Stop hook follow-up · 3 lines ▸");
-    terminal.write(b"/exit\r");
-    terminal.until("Bye!");
-    assert!(terminal.wait().success());
-    daemon.join().unwrap();
-}
-
-/// #1380: one stored line reads in the singular, so the row never says
-/// `1 lines`.
-#[test]
-fn tui_names_a_one_line_hook_context_in_the_singular() {
-    let home = Home::new();
-    let daemon = home.daemon(|wire| {
-        wire.2 = true;
-        let hello = wire.read("hello");
-        wire.reply(&hello, json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.input.pending.blockPresence","session.methods"]}));
-        let attach = wire.read("session.attach");
-        wire.reply(&attach, attach_record(&attach));
-        let history = wire.read("session.history");
-        wire.reply(
-            &history,
-            json!({"events":[
-                {"id":"one","sequence":9,"create_at":1,"type":"input","name":"message",
-                 "data":{"user":{"content":[
-                     {"type":"text","text":"translate this"},
-                     {"type":"text","text":"<dim-hooks kind=\"prompt-submit\">\nONE-LINE-BODY\n</dim-hooks>"}
-                 ]},"mode":"queue"}},
-                {"id":"one-applied","sequence":10,"create_at":1,"type":"input","name":"applied",
-                 "data":{"input_id":"one","mode":"queue"}}],
-                "through":10,"nextAfter":10,"done":true}),
-        );
-        wire.no_context();
-        wire.hold();
-    });
-    let mut command = home.command();
-    command.args(["--resume", "session"]);
-    let mut terminal = Terminal::launch_tui(command);
-    terminal.until("Hook context · 1 line ▸");
-    assert!(
-        !terminal.transcript.contains("1 lines"),
-        "a one-line body is named in the singular:\n{}",
-        terminal.transcript
-    );
     terminal.write(b"/exit\r");
     terminal.until("Bye!");
     assert!(terminal.wait().success());
@@ -12016,7 +11975,7 @@ fn tui_provider_create_recovery_preserves_changed_draft_until_confirmation() {
     let daemon = home.daemon(move |wire| {
         wire.2 = true;
         let hello = wire.read("hello");
-        wire.reply(&hello, json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.input.pending.blockPresence","session.methods","provider.management","provider.create","provider.update","provider.probe"]}));
+        wire.reply(&hello, json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,"daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.input.pending.blockPresence","session.methods","provider.management","provider.management.list","provider.create","provider.update","provider.probe"]}));
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let history = wire.read("session.history");
@@ -12025,7 +11984,7 @@ fn tui_provider_create_recovery_preserves_changed_draft_until_confirmation() {
         let accounts = wire.read("account.providers");
         wire.reply(&accounts, json!([]));
         for _ in 0..2 {
-            let listed = wire.read("provider.management");
+            let listed = wire.read("provider.management.list");
             wire.reply(&listed, json!({"providers":[],"errors":[]}));
         }
         let probe = wire.read("provider.probe");
@@ -12034,10 +11993,10 @@ fn tui_provider_create_recovery_preserves_changed_draft_until_confirmation() {
         let id = create["params"]["providerId"].clone();
         let mut entry = json!({"providerId":id,"source":"custom","displayName":"Recovered provider","enabled":true,"version":1,"preferences":{},"connection":{"driverKind":"openai-compatible","auth":{"type":"bearer"},"baseUrl":"https://first.example/v1","credentialConfigured":true}});
         wire.send(json!({"jsonrpc":"2.0","id":create["id"],"error":{"code":-32000,"message":"Create reply lost"}}));
-        let listed = wire.read("provider.management");
+        let listed = wire.read("provider.management.list");
         wire.send(json!({"jsonrpc":"2.0","id":listed["id"],"error":{"code":-32000,"message":"Snapshot unavailable"}}));
         for _ in 0..2 {
-            let listed = wire.read("provider.management");
+            let listed = wire.read("provider.management.list");
             wire.reply(&listed, json!({"providers":[entry],"errors":[]}));
         }
         let probe = wire.read("provider.probe");
@@ -12048,12 +12007,14 @@ fn tui_provider_create_recovery_preserves_changed_draft_until_confirmation() {
         assert_eq!(update["params"]["providerId"], id);
         assert_eq!(update["params"]["expectedVersion"], 1);
         assert_eq!(update["params"]["patch"], probe["params"]["connection"]);
+        assert_eq!(update["params"]["reply"], "summary");
+        entry.as_object_mut().unwrap().remove("preferences");
         entry["version"] = json!(2);
         entry["connection"]["baseUrl"] = json!("https://second.example/v1");
         entry["modelsListed"] = json!("listed");
         wire.reply(&update, entry.clone());
         // The update stored the listing itself; the CLI never asks again.
-        let listed = wire.read("provider.management");
+        let listed = wire.read("provider.management.list");
         wire.reply(&listed, json!({"providers":[entry],"errors":[]}));
         wait_release.recv_timeout(PATIENCE).unwrap();
     });
@@ -12104,7 +12065,7 @@ fn tui_models_picker_edits_only_the_subagent_model_policy() {
                 "session.history" => json!({"events":[],"through":8,"nextAfter":8,"done":true}),
                 "session.idle" => json!({"sequence":8}),
                 "provider.list" => json!({"providers":[{"providerId":"test","displayName":"Test","enabled":true}]}),
-                "provider.catalog" => json!({"catalog":{"version":1,"disabledModelIds":[],"models":[
+                "provider.catalog" | "provider.models.query" => json!({"catalog":{"version":1,"disabledModelIds":[],"models":[
                     {"id":"model","name":"Model","capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)},
                     {"id":"other","name":"Other","capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)}]}}),
                 "account.providers" => json!([]),
@@ -12125,6 +12086,12 @@ fn tui_models_picker_edits_only_the_subagent_model_policy() {
                 }
                 _ => json!({}),
             };
+            let result = if request["method"] == "provider.models.query" && result.get("catalog").is_some() {
+                let mut page = models::picker_page("test", "Test", result);
+                let query = request["params"]["query"].as_str().unwrap_or("").to_lowercase();
+                page["models"].as_array_mut().unwrap().retain(|row| format!("{} {}", row["model"]["id"],row["model"]["name"]).to_lowercase().contains(&query));
+                page
+            } else { result };
             wire.reply(&request, result);
         }
     });
@@ -12133,8 +12100,10 @@ fn tui_models_picker_edits_only_the_subagent_model_policy() {
     let mut terminal = Terminal::resume_tui(command);
     terminal.until("test / model");
     terminal.write(b"/models\r");
-    terminal.until("Subagent models: Agent choice");
-    terminal.write(b"Subagent\r");
+    terminal.until("Subagent models");
+    terminal.until("Agent choice");
+    // Tab focuses the policy section; Enter opens its page.
+    terminal.raw(b"\t\r");
     terminal.until("Inherit requesting branch");
     terminal.until("Existing members keep their models.");
     terminal.raw(b"\x1b[B\r");
@@ -12142,7 +12111,8 @@ fn tui_models_picker_edits_only_the_subagent_model_policy() {
     terminal.write(b"\r");
     thread::sleep(Duration::from_millis(300));
     terminal.write(b"\r");
-    terminal.until("Subagent models: Inherit requesting branch");
+    terminal.until("Subagent models");
+    terminal.until("Inherit requesting branch");
     terminal.until("Subagent model policy saved");
     terminal.write(b"\r");
     terminal.until("Fixed model");
@@ -12152,8 +12122,11 @@ fn tui_models_picker_edits_only_the_subagent_model_policy() {
     terminal.until("Fixed model");
     terminal.raw(b"\x1b[B\r");
     terminal.until("Fixed subagent model");
-    terminal.write(b"other\r");
-    terminal.until("Subagent models: Test / other");
+    terminal.write(b"other");
+    thread::sleep(Duration::from_millis(300));
+    terminal.write(b"\r");
+    terminal.until("Subagent model policy saved");
+    terminal.until_row("Test / other", "Enter");
     home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
@@ -12188,10 +12161,13 @@ fn tui_models_picker_edits_only_the_subagent_model_policy() {
     );
 }
 
-/// `/models` lists a Provider's models without offering `Edit models` when
-/// the daemon does not advertise the area's method.
+/// `/models` lists a Provider's models without offering `Manage models` when
+/// the daemon does not advertise the area's method, and keeps the recovery
+/// guidance as a read-only line. A Provider with nothing selectable names its
+/// models with missing limits once, and its other unavailable and disabled
+/// models beside them.
 #[test]
-fn tui_models_picker_hides_edit_models_without_management_methods() {
+fn tui_models_picker_hides_manage_models_without_management_methods() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
         wire.2 = true;
@@ -12208,12 +12184,34 @@ fn tui_models_picker_hides_edit_models_without_management_methods() {
                 "session.attach" => attach_record(&request),
                 "session.history" => json!({"events":[],"through":8,"nextAfter":8,"done":true}),
                 "session.idle" => json!({"sequence":8}),
-                "provider.list" => json!({"providers":[{"providerId":"test","displayName":"Test","enabled":true}]}),
+                "provider.list" => json!({"providers":[
+                    {"providerId":"test","displayName":"Test","enabled":true},
+                    {"providerId":"bare","displayName":"Bare","enabled":true}]}),
+                "provider.catalog" if request["params"]["providerId"] == "bare" => json!({"catalog":{"version":1,"disabledModelIds":["gone"],"models":[
+                    {"id":"narrow","name":"Narrow","unavailableReason":"limits_undeclared","missingLimits":["contextWindow","maxOutputTokens"],"capabilities":dim_agent_types::CatalogCapabilities::default()},
+                    {"id":"blocked","name":"Blocked","unavailableReason":"provider_unavailable","missingLimits":[],"capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)},
+                    {"id":"gone","name":"Gone","missingLimits":[],"capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)}]}}),
                 "provider.catalog" => json!({"catalog":{"version":1,"disabledModelIds":[],"models":[
                     {"id":"model","name":"Model","capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)}]}}),
+                "provider.models.query" => json!({"models":[
+                    {"providerId":"bare","providerName":"Bare","version":1,"preferences":{},"disabled":false,"model":
+                        {"id":"narrow","name":"Narrow","unavailableReason":"limits_undeclared","missingLimits":["contextWindow","maxOutputTokens"],"capabilities":dim_agent_types::CatalogCapabilities::default()}},
+                    {"providerId":"bare","providerName":"Bare","version":1,"preferences":{},"disabled":false,"model":
+                        {"id":"blocked","name":"Blocked","unavailableReason":"provider_unavailable","missingLimits":[],"capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)}},
+                    {"providerId":"bare","providerName":"Bare","version":1,"preferences":{},"disabled":true,"model":
+                        {"id":"gone","name":"Gone","missingLimits":[],"capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)}},
+                    {"providerId":"test","providerName":"Test","version":1,"preferences":{},"disabled":false,"model":
+                        {"id":"model","name":"Model","capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)}}],
+                    "next":null,"empty":[]}),
                 "account.providers" => json!([]),
                 _ => json!({}),
             };
+            let result = if request["method"] == "provider.models.query" && result.get("catalog").is_some() {
+                let mut page = models::picker_page("test", "Test", result);
+                let query = request["params"]["query"].as_str().unwrap_or("").to_lowercase();
+                page["models"].as_array_mut().unwrap().retain(|row| format!("{} {}", row["model"]["id"],row["model"]["name"]).to_lowercase().contains(&query));
+                page
+            } else { result };
             wire.reply(&request, result);
         }
     });
@@ -12221,10 +12219,17 @@ fn tui_models_picker_hides_edit_models_without_management_methods() {
     terminal.until("test / model");
     terminal.write(b"/models\r");
     terminal.until("Test / model");
+    terminal.until("dimcode models bare --set-missing-limits");
     thread::sleep(Duration::from_millis(300));
     let opened = terminal.transcript.clone();
-    assert!(opened.contains("Model"), "{opened}");
-    assert!(!opened.contains("Edit models"), "{opened}");
+    assert!(opened.contains("Model management"), "{opened}");
+    assert!(opened.contains("Bare: 1 model needs a window"), "{opened}");
+    assert!(
+        opened.contains("Bare: 1 unavailable and 1 disabled"),
+        "{opened}"
+    );
+    assert!(!opened.contains("2 unavailable"), "{opened}");
+    assert!(!opened.contains("Manage models"), "{opened}");
     terminal.raw(b"\x1b");
     thread::sleep(Duration::from_millis(200));
     terminal.write(b"/exit\r");
@@ -12242,8 +12247,8 @@ fn tui_models_picker_cycles_reasoning_effort() {
     let (calls, observed) = std::sync::mpsc::channel::<Value>();
     let daemon = home.daemon(move |wire| {
         wire.2 = true;
-        let mut capabilities =
-            serde_json::to_value(dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)).unwrap();
+        let limits = dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384);
+        let mut capabilities = serde_json::to_value(limits).unwrap();
         capabilities["reasoning"] = json!(true);
         let catalog = json!({"catalog":{"version":4,"disabledModelIds":[],"models":[{
             "id":"model","name":"Model","capabilities":capabilities,
@@ -12268,9 +12273,14 @@ fn tui_models_picker_cycles_reasoning_effort() {
                 "session.history" => json!({"events":[],"through":8,"nextAfter":8,"done":true}),
                 "session.idle" => json!({"sequence":8}),
                 "provider.list" => json!({"providers":[{"providerId":"test","displayName":"Test","enabled":true}]}),
+                "provider.models.query" => {
+                    let mut page = models::picker_page("test", "Test", catalog.clone());
+                    page["models"][0]["preferences"] = preferences.clone();
+                    page
+                },
                 "provider.catalog" => catalog.clone(),
                 "account.providers" => json!([]),
-                "provider.management" => json!({"providers":[{"providerId":"test","source":"custom","displayName":"Test","enabled":true,"version":version,"connection":null,"preferences":{"model":preferences.clone()}}],"errors":[]}),
+                "provider.management" | "provider.management.list" => json!({"providers":[{"providerId":"test","source":"custom","displayName":"Test","enabled":true,"version":version,"connection":null,"preferences":{"model":preferences.clone()}}],"errors":[]}),
                 "provider.preferences.update" => {
                     version += 1;
                     preferences = json!({"reasoningEffort":request["params"]["patch"]["reasoningEffort"]["value"],"serviceTier":"priority"});
@@ -12281,6 +12291,12 @@ fn tui_models_picker_cycles_reasoning_effort() {
                 "provider.select" => json!({}),
                 _ => json!({}),
             };
+            let result = if request["method"] == "provider.models.query" && result.get("catalog").is_some() {
+                let mut page = models::picker_page("test", "Test", result);
+                let query = request["params"]["query"].as_str().unwrap_or("").to_lowercase();
+                page["models"].as_array_mut().unwrap().retain(|row| format!("{} {}", row["model"]["id"],row["model"]["name"]).to_lowercase().contains(&query));
+                page
+            } else { result };
             wire.reply(&request, result);
         }
     });
@@ -12363,7 +12379,7 @@ fn tui_models_picker_writes_the_default_the_launch_workspace_reads() {
                     "session.history" => json!({"events":[],"through":8,"nextAfter":8,"done":true}),
                     "session.idle" => json!({"sequence":8}),
                     "provider.list" => json!({"providers":[{"providerId":"test","displayName":"Test","enabled":true}]}),
-                    "provider.catalog" => json!({"catalog":{"version":1,"disabledModelIds":[],"models":[
+                    "provider.catalog" | "provider.models.query" => json!({"catalog":{"version":1,"disabledModelIds":[],"models":[
                         {"id":"model","name":"Model","capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)}]}}),
                     // The folder answers only the launch workspace: the
                     // attached Session's `/workspace` has no row either.
@@ -12379,7 +12395,13 @@ fn tui_models_picker_writes_the_default_the_launch_workspace_reads() {
                     "account.providers" => json!([]),
                     _ => json!({}),
                 };
-                wire.reply(&request, result);
+                let result = if request["method"] == "provider.models.query" && result.get("catalog").is_some() {
+                let mut page = models::picker_page("test", "Test", result);
+                let query = request["params"]["query"].as_str().unwrap_or("").to_lowercase();
+                page["models"].as_array_mut().unwrap().retain(|row| format!("{} {}", row["model"]["id"],row["model"]["name"]).to_lowercase().contains(&query));
+                page
+            } else { result };
+            wire.reply(&request, result);
             }
         });
         let mut command = home.command();
@@ -12452,11 +12474,17 @@ fn tui_models_picker_draws_its_hint_in_the_interface_language() {
                 "session.history" => json!({"events":[],"through":8,"nextAfter":8,"done":true}),
                 "session.idle" => json!({"sequence":8}),
                 "provider.list" => json!({"providers":[{"providerId":"test","displayName":"Test","enabled":true}]}),
-                "provider.catalog" => json!({"catalog":{"version":1,"disabledModelIds":[],"models":[
+                "provider.catalog" | "provider.models.query" => json!({"catalog":{"version":1,"disabledModelIds":[],"models":[
                     {"id":"model","name":"Model","capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)}]}}),
                 "account.providers" => json!([]),
                 _ => json!({}),
             };
+            let result = if request["method"] == "provider.models.query" && result.get("catalog").is_some() {
+                let mut page = models::picker_page("test", "Test", result);
+                let query = request["params"]["query"].as_str().unwrap_or("").to_lowercase();
+                page["models"].as_array_mut().unwrap().retain(|row| format!("{} {}", row["model"]["id"],row["model"]["name"]).to_lowercase().contains(&query));
+                page
+            } else { result };
             wire.reply(&request, result);
         }
     });
@@ -12479,391 +12507,90 @@ fn tui_models_picker_draws_its_hint_in_the_interface_language() {
     daemon.join().unwrap();
 }
 
-/// `/models` sends `provider.refresh` for a usable provider whose catalog is
-/// empty when the daemon says its models can be listed, draws its rows without
-/// waiting for that listing, shows the models a late listing returns in the
-/// same open picker, keeps the row of a refresh that fails, and asks an
-/// unchanged catalog once in a connection while a written record asks once
-/// more.
 #[test]
-fn tui_models_picker_refills_an_empty_provider_catalog() {
+fn tui_models_picker_reads_pages_on_demand_and_reopens_without_a_cache() {
     let home = Home::new();
-    let refreshed = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
-    let seen = refreshed.clone();
-    let listed = std::sync::Arc::new(std::sync::Mutex::new(0usize));
-    let counted = listed.clone();
-    let stored = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::<
-        String,
-        Value,
-    >::new()));
-    let kept = stored.clone();
-    let changed = stored.clone();
-    let (release, wait_release) = std::sync::mpsc::channel::<()>();
-    let daemon = home.daemon(move |wire| {
-        wire.2 = true;
-        // One writer at a time: the listing a provider is slow to give is
-        // answered from another thread once the test releases it, so the
-        // daemon keeps serving the requests the picker makes meanwhile.
-        let writes = std::sync::Arc::new(std::sync::Mutex::new(()));
-        let held_writes = writes.clone();
-        // One listing is held in this test; the loop serves the rest.
-        let mut wait_release = Some(wait_release);
-        let mut line = String::new();
-        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
-            let request: Value = serde_json::from_str(&line).unwrap();
-            line.clear();
-            if wire.2 && wire.empty_state(&request) { continue; }
-            let answer = match request["method"].as_str().unwrap() {
-                "hello" => Some(json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,
-                    "daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.input.pending.blockPresence","session.methods",
-                    "provider.list","provider.catalog","provider.refresh"]})),
-                "session.create" => panic!("resuming must not create a Session"),
-                "session.attach" => Some(attach_record(&request)),
-                "session.history" => Some(json!({"events":[],"through":8,"nextAfter":8,"done":true})),
-                "session.idle" => Some(json!({"sequence":8})),
-                "provider.list" => {
-                    *counted.lock().unwrap() += 1;
-                    Some(json!({"providers":[
-                        {"providerId":"fresh","displayName":"Fresh","enabled":true,"remoteModelList":true},
-                        {"providerId":"broken","displayName":"Broken","enabled":true,"remoteModelList":true},
-                        {"providerId":"unlisted","displayName":"Unlisted","enabled":true,"remoteModelList":false}]}))
-                }
-                "provider.catalog" => {
-                    let provider = request["params"]["providerId"].as_str().unwrap();
-                    let catalog = stored.lock().unwrap().get(provider).cloned().unwrap_or_else(|| {
-                        json!({"version":1,"disabledModelIds":[],"models":[]})
-                    });
-                    Some(json!({"catalog":catalog}))
-                }
-                "provider.refresh" => {
-                    let provider = request["params"]["providerId"].as_str().unwrap().to_owned();
-                    seen.lock().unwrap().push(provider.clone());
-                    if provider == "broken" {
-                        let _guard = writes.lock().unwrap();
-                        wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{"code":-32000,"message":"listing failed"}}));
-                        None
-                    } else {
-                        // Hold the listing: the picker may not wait for it.
-                        let mut socket = wire.0.get_ref().try_clone().unwrap();
-                        let stored = kept.clone();
-                        let writes = held_writes.clone();
-                        let id = request["id"].clone();
-                        let wait = wait_release.take().expect("one held listing");
-                        thread::spawn(move || {
-                            wait.recv_timeout(PATIENCE).unwrap();
-                            let catalog = json!({"version":2,"disabledModelIds":[],"models":[
-                                {"id":"vendor/model-a","name":"Model A","unavailableReason":null,
-                                    "capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)},
-                                {"id":"vendor/model-b","name":"Model B","unavailableReason":null,
-                                    "capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)}]});
-                            stored.lock().unwrap().insert(provider, catalog.clone());
-                            let _guard = writes.lock().unwrap();
-                            writeln!(socket, "{}", json!({"jsonrpc":"2.0","id":id,"result":catalog}))
-                                .unwrap();
-                            socket.flush().unwrap();
-                        });
-                        None
-                    }
-                }
-                "account.providers" => Some(json!([])),
-                _ => Some(json!({})),
-            };
-            if let Some(result) = answer {
-                let _guard = writes.lock().unwrap();
-                wire.reply(&request, result);
-            }
-        }
-    });
-    let mut command = home.command();
-    command.env("LC_ALL", "C");
-    let mut terminal = Terminal::resume_tui(command);
-    terminal.until("test / model");
-    terminal.write(b"/models\r");
-    // The listing is still held: the picker draws every row it has.
-    terminal.until("Fresh: no models · dimcode models fresh --refresh");
-    terminal.until("Broken: no models · dimcode models broken --refresh");
-    terminal.until("Unlisted: no models · add a model with provider.models.create");
-    release.send(()).unwrap();
-    // The listing that arrives late fills the picker that is already open.
-    terminal.until("Fresh / vendor/model-a");
-    terminal.until("Fresh / vendor/model-b");
-    // Closing and reopening in the same connection asks no provider again,
-    // though the failed refresh kept its row.
-    terminal.write(b"\x1b");
-    thread::sleep(Duration::from_millis(500));
-    terminal.write(b"/models\r");
-    let deadline = Instant::now() + PATIENCE;
-    while *listed.lock().unwrap() < 3 {
-        assert!(Instant::now() < deadline, "the picker did not open again");
-        thread::sleep(Duration::from_millis(10));
-    }
-    terminal.until("Broken: no models · dimcode models broken --refresh");
-    terminal.until("Fresh / vendor/model-a");
-    // Another client writes the record (an enable or a re-point), which moves
-    // its catalog version: the same empty catalog is asked once more.
-    changed.lock().unwrap().insert(
-        "broken".to_owned(),
-        json!({"version":3,"disabledModelIds":[],"models":[]}),
-    );
-    terminal.write(b"\x1b");
-    thread::sleep(Duration::from_millis(500));
-    terminal.write(b"/models\r");
-    let deadline = Instant::now() + PATIENCE;
-    while *listed.lock().unwrap() < 4 {
-        assert!(
-            Instant::now() < deadline,
-            "the picker did not open after the write"
-        );
-        thread::sleep(Duration::from_millis(10));
-    }
-    terminal.until("Broken: no models · dimcode models broken --refresh");
-    // `listed` counts provider.list calls, and a refill reply re-reads the
-    // list, so reaching 4 does not prove this open ran; a repaint of the
-    // previous picker can satisfy the row above. Wait for the refresh the
-    // assertion below checks before the deliberate kill.
-    let refresh_deadline = Instant::now() + PATIENCE;
-    while refreshed.lock().unwrap().len() < 3 {
-        assert!(
-            Instant::now() < refresh_deadline,
-            "the written catalog version was not listed again: {:?}",
-            refreshed.lock().unwrap()
-        );
-        thread::sleep(Duration::from_millis(10));
-    }
-    home.kill(&terminal);
-    terminal.wait();
-    daemon.join().unwrap();
-    assert_eq!(
-        *refreshed.lock().unwrap(),
-        ["fresh".to_owned(), "broken".to_owned(), "broken".to_owned()],
-        "one refresh per catalog version that can be listed, none on an unchanged reopen"
-    );
-}
-
-/// A refill that lands after the picker closed is recorded, so the provider
-/// is not asked again, but it starts no re-read: the next open is what reads
-/// the catalog the listing stored.
-#[test]
-fn tui_models_picker_does_not_reread_when_a_refill_lands_closed() {
-    let home = Home::new();
-    let listed = std::sync::Arc::new(std::sync::Mutex::new(0usize));
-    let counted = listed.clone();
-    let refreshed = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
-    let seen = refreshed.clone();
-    let stored = std::sync::Arc::new(std::sync::Mutex::new(Value::Null));
-    let kept = stored.clone();
-    let (release, wait_release) = std::sync::mpsc::channel::<()>();
-    let daemon = home.daemon(move |wire| {
-        wire.2 = true;
-        let mut wait_release = Some(wait_release);
-        let mut line = String::new();
-        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
-            let request: Value = serde_json::from_str(&line).unwrap();
-            line.clear();
-            if wire.2 && wire.empty_state(&request) { continue; }
-            let answer = match request["method"].as_str().unwrap() {
-                "hello" => Some(json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,
-                    "daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.input.pending.blockPresence","session.methods",
-                    "provider.list","provider.catalog","provider.refresh"]})),
-                "session.create" => panic!("resuming must not create a Session"),
-                "session.attach" => Some(attach_record(&request)),
-                "session.history" => Some(json!({"events":[],"through":8,"nextAfter":8,"done":true})),
-                "session.idle" => Some(json!({"sequence":8})),
-                "provider.list" => {
-                    *counted.lock().unwrap() += 1;
-                    Some(json!({"providers":[
-                        {"providerId":"fresh","displayName":"Fresh","enabled":true,"remoteModelList":true}]}))
-                }
-                "provider.catalog" => {
-                    let catalog = kept.lock().unwrap().clone();
-                    Some(json!({"catalog":catalog}))
-                }
-                "provider.refresh" => {
-                    seen.lock()
-                        .unwrap()
-                        .push(request["params"]["providerId"].as_str().unwrap().to_owned());
-                    let mut socket = wire.0.get_ref().try_clone().unwrap();
-                    let stored = stored.clone();
-                    let id = request["id"].clone();
-                    let wait = wait_release.take().expect("one held listing");
-                    thread::spawn(move || {
-                        wait.recv_timeout(PATIENCE).unwrap();
-                        let catalog = json!({"version":2,"disabledModelIds":[],"models":[
-                            {"id":"vendor/model-a","name":"Model A","unavailableReason":null,
-                                "capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)}]});
-                        *stored.lock().unwrap() = catalog.clone();
-                        writeln!(socket, "{}", json!({"jsonrpc":"2.0","id":id,"result":catalog}))
-                            .unwrap();
-                        socket.flush().unwrap();
-                    });
-                    None
-                }
-                "account.providers" => Some(json!([])),
-                _ => Some(json!({})),
-            };
-            if let Some(result) = answer {
-                wire.reply(&request, result);
-            }
-        }
+    let daemon = home.daemon(|wire| {
+        wire.hello(&[]);
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, attach_record(&attach));
+        let history = wire.read("session.history");
+        wire.reply(&history, json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+        wire.no_context();
+        let accounts = wire.read("account.providers");
+        wire.reply(&accounts, json!([]));
+        let first = wire.read("provider.models.query");
+        assert!(first["params"]["after"].is_null());
+        wire.reply(&first, json!({"models":[],"empty":[{"providerId":"empty","providerName":"Empty","reason":{"kind":"no_models","listable":true}}],"next":{"providerId":"empty","modelId":""}}));
+        let next = wire.read("provider.models.query");
+        assert_eq!(next["params"]["after"], json!({"providerId":"empty","modelId":""}));
+        let snapshot = json!({"catalog":{"version":1,"disabledModelIds":[],"models":[{"id":"second","name":"Second","capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000,16_384)}]}});
+        wire.reply(&next, models::picker_page("test", "Test", snapshot.clone()));
+        let reopened = wire.read("provider.models.query");
+        assert!(reopened["params"]["after"].is_null());
+        wire.reply(&reopened, models::picker_page("test", "Changed", snapshot));
+        wire.hold();
     });
     let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("test / model");
     terminal.write(b"/models\r");
-    terminal.until("Fresh: no models · dimcode models fresh --refresh");
-    terminal.write(b"\x1b");
+    terminal.until("Empty: no models");
+    terminal.until_anywhere("Next page");
+    terminal.write(b"\r");
+    terminal.until("Test / second");
+    terminal.raw(b"\x1b");
     terminal.until("Ask anything...");
-    let opens = *listed.lock().unwrap();
-    release.send(()).unwrap();
-    thread::sleep(Duration::from_millis(500));
-    assert_eq!(
-        *listed.lock().unwrap(),
-        opens,
-        "a refill that lands with the picker closed starts no re-read"
-    );
-    // The next open reads the catalog the refresh stored, and asks nothing.
     terminal.write(b"/models\r");
-    terminal.until("Fresh / vendor/model-a");
-    assert_eq!(
-        refreshed.lock().unwrap().as_slice(),
-        ["fresh".to_owned()],
-        "the provider recorded its refill; the reopen asks again"
-    );
+    terminal.until("Changed / second");
     home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
 }
 
-/// A provider that offers nothing selectable keeps a row naming it and the
-/// reason: no models with the refresh command when the daemon can list them,
-/// no models with the add method when it cannot, an unreadable catalog, or
-/// the unavailable and disabled counts together. Undeclared limits count as
-/// the reason only when declaring them would unblock the model: a model
-/// unavailable for another reason keeps that reason, and a disabled one is
-/// not counted. The picker refills only the provider whose catalog is empty
-/// and can be listed: a provider whose models are its bundled catalog's, one
-/// the daemon cannot list and one whose catalog cannot be read are never
-/// refreshed.
 #[test]
 fn tui_models_picker_names_every_provider_with_no_selectable_model() {
     let home = Home::new();
-    let refreshed = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
-    let seen = refreshed.clone();
-    // The daemon reports the re-list that follows its refill: after the
-    // second list's last catalog reply the client has nothing in flight, so
-    // the kill below cannot interrupt a reply.
-    let (settled, wait_settled) = std::sync::mpsc::channel();
-    let daemon = home.daemon(move |wire| {
-        wire.2 = true;
-        let mut version = 1u32;
-        let mut catalogs = 0usize;
-        let mut line = String::new();
-        while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
-            let request: Value = serde_json::from_str(&line).unwrap();
-            line.clear();
-            if wire.2 && wire.empty_state(&request) { continue; }
-            let model = |id: &str, reason: Option<&str>, declared: bool| {
-                let reason = reason.map_or(Value::Null, |reason| json!(reason));
-                let capabilities = if declared {
-                    dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)
-                } else {
-                    dim_agent_types::CatalogCapabilities::default()
-                };
-                let missing = if declared {
-                    json!([])
-                } else {
-                    json!(["contextWindow", "maxOutputTokens"])
-                };
-                json!({"id":id,"name":id,"unavailableReason":reason,
-                    "missingLimits":missing,"capabilities":capabilities})
-            };
-            let result = match request["method"].as_str().unwrap() {
-                "hello" => json!({"instanceId":"server","serverVersion":env!("CARGO_PKG_VERSION"),"protocolVersion":4,
-                    "daemonProfile":{"kind":"product"},"features":["session.create","session.history","session.history.latestTurn","session.input.pending.blockPresence","session.methods",
-                    "provider.list","provider.catalog"]}),
-                "session.create" => panic!("resuming must not create a Session"),
-                "session.attach" => {
-                    let mut record = attach_record(&request);
-                    record["model"] = json!({"providerId":"ready","modelId":"vendor/model-a"});
-                    record
-                }
-                "session.history" => json!({"events":[],"through":8,"nextAfter":8,"done":true}),
-                "session.idle" => json!({"sequence":8}),
-                "provider.list" => json!({"providers":[
-                    {"providerId":"ready","displayName":"Ready","enabled":true,"remoteModelList":true},
-                    {"providerId":"empty","displayName":"Empty","enabled":true},
-                    {"providerId":"mixed","displayName":"Mixed","enabled":true},
-                    {"providerId":"hidden","displayName":"All disabled","enabled":true},
-                    {"providerId":"blank","displayName":"Blank","enabled":true,"remoteModelList":true},
-                    {"providerId":"manual","displayName":"Manual","enabled":true,"remoteModelList":false},
-                    {"providerId":"broken","displayName":"Broken","enabled":true}]}),
-                "provider.catalog" => {
-                    let provider = request["params"]["providerId"].as_str().unwrap();
-                    catalogs += 1;
-                    let last = catalogs == 14;
-                    if provider == "broken" {
-                        wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
-                            "code":-32000,"message":"catalog read failed"}}));
-                        if last {
-                            settled.send(()).ok();
-                        }
-                        continue;
-                    }
-                    let (models, disabled) = match provider {
-                        "empty" => (
-                            json!([
-                                model("vendor/embed-a", Some("provider_unavailable"), false),
-                                model("vendor/embed-b", Some("provider_unavailable"), false)]),
-                            json!([]),
-                        ),
-                        "mixed" => (
-                            json!([
-                                model("vendor/embed-c", Some("provider_unavailable"), true),
-                                model("vendor/hidden-a", None, true),
-                                model("vendor/hidden-c", Some("limits_undeclared"), false)]),
-                            json!(["vendor/hidden-a", "vendor/hidden-c"]),
-                        ),
-                        "hidden" => (
-                            json!([model("vendor/hidden-b", None, true)]),
-                            json!(["vendor/hidden-b"]),
-                        ),
-                        "blank" | "manual" => (json!([]), json!([])),
-                        _ => (json!([model("vendor/model-a", None, true)]), json!([])),
-                    };
-                    wire.reply(
-                        &request,
-                        json!({"catalog":{"version":version,"disabledModelIds":disabled,"models":models}}),
-                    );
-                    if last {
-                        settled.send(()).ok();
-                    }
-                    continue;
-                }
-                "provider.refresh" => {
-                    seen.lock()
-                        .unwrap()
-                        .push(request["params"]["providerId"].as_str().unwrap().to_owned());
-                    // The refresh stores the listed catalog under a new
-                    // version, and the read reports it, so the re-list does
-                    // not ask for the same refill again.
-                    version = 2;
-                    json!({"version":version,"disabledModelIds":[],"models":[]})
-                }
-                "account.providers" => json!([]),
-                _ => json!({}),
-            };
-            wire.reply(&request, result);
+    let daemon = home.daemon(|wire| {
+        wire.hello(&[]);
+        let attach = wire.read("session.attach");
+        let mut record = attach_record(&attach);
+        record["model"] = json!({"providerId":"ready","modelId":"vendor/model-a"});
+        wire.reply(&attach, record);
+        let history = wire.read("session.history");
+        wire.reply(&history, json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+        wire.no_context();
+        let accounts = wire.read("account.providers");
+        wire.reply(&accounts, json!([]));
+        let query = wire.read("provider.models.query");
+        let mut rows = Vec::new();
+        for (provider,name,id,reason,disabled) in [
+            ("ready","Ready","vendor/model-a",None,false),
+            ("empty","Empty","vendor/embed-a",Some("provider_unavailable"),false),
+            ("empty","Empty","vendor/embed-b",Some("provider_unavailable"),false),
+            ("mixed","Mixed","vendor/embed-c",Some("provider_unavailable"),false),
+            ("mixed","Mixed","vendor/hidden-a",None,true),
+            ("mixed","Mixed","vendor/hidden-c",Some("limits_undeclared"),true),
+            ("hidden","All disabled","vendor/hidden-b",None,true),
+        ] {
+            rows.push(json!({"providerId":provider,"providerName":name,"version":1,"preferences":{},"disabled":disabled,"model":{"id":id,"name":id,"unavailableReason":reason,"capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000,16_384)}}));
         }
+        wire.reply(&query,json!({"models":rows,"next":null,"empty":[
+            {"providerId":"blank","providerName":"Blank","reason":{"kind":"no_models","listable":true}},
+            {"providerId":"manual","providerName":"Manual","reason":{"kind":"no_models","listable":false}},
+            {"providerId":"broken","providerName":"Broken","reason":{"kind":"unreadable"}}
+        ]}));
+        wire.hold();
     });
     let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("ready / vendor/model-a");
     terminal.write(b"/models\r");
     terminal.until("Ready / vendor/model-a");
-    terminal.until("Empty: 2 models unavailable · dimcode models empty");
-    terminal.until("Mixed: 2 unavailable and 1 disabled · dimcode models mixed");
-    terminal.until("All disabled: 1 model disabled · dimcode models hidden");
-    terminal.until("Blank: no models · dimcode models blank --refresh");
-    terminal.until("Manual: no models · add a model with provider.models.create");
-    terminal.until("Broken: catalog unreadable · dimcode models broken");
+    terminal.until_anywhere("Empty: 2 models unavailable · dimcode models empty");
+    terminal.until_anywhere("Mixed: 2 unavailable and 1 disabled · dimcode models mixed");
+    terminal.until_anywhere("All disabled: 1 model disabled · dimcode models hidden");
+    terminal.until_anywhere("Blank: no models · dimcode models blank --refresh");
+    terminal.until_anywhere("Manual: no models · add a model with provider.models.create");
+    terminal.until_anywhere("Broken: catalog unreadable · dimcode models broken");
     assert!(
         !terminal.transcript.contains("Ready / vendor/hidden-b"),
         "a disabled model is not selectable"
@@ -12872,18 +12599,9 @@ fn tui_models_picker_names_every_provider_with_no_selectable_model() {
         !terminal.transcript.contains("need a window"),
         "a model unavailable for another reason, and a disabled one, raise no limits row"
     );
-    wait_settled
-        .recv_timeout(PATIENCE)
-        .expect("the picker settles after its re-list");
     home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
-    let refreshed = refreshed.lock().unwrap();
-    assert_eq!(
-        refreshed.as_slice(),
-        ["blank".to_owned()],
-        "only the empty catalog the daemon can list is refreshed"
-    );
 }
 
 #[test]
@@ -12922,7 +12640,10 @@ fn member_tool_approval_requires_trusted_details_in_both_terminal_modes() {
             assert_eq!(answer["params"]["decision"], "deny");
             wire.reply(&answer, json!({}));
             wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"done","sequence":1,"create_at":1,"type":"step","name":"text","data":{"turn_id":"turn","request_id":"model","delta":"member approvals finished"}}}));
-            let mut line = String::new(); while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) { line.clear(); }
+            let mut line = String::new();
+            while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+                line.clear();
+            }
         });
         let mut command = home.command();
         command.arg(if fullscreen {
@@ -12966,7 +12687,10 @@ fn member_approval_without_the_detail_method_offers_only_rejection() {
             let answer = wire.read("approval.respond");
             assert_eq!(answer["params"]["decision"], "deny"); wire.reply(&answer, json!({}));
             wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"done","sequence":1,"create_at":1,"type":"step","name":"text","data":{"turn_id":"t","request_id":"r","delta":"unsupported approval rejected"}}}));
-            let mut line = String::new(); while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) { line.clear(); }
+            let mut line = String::new();
+            while wire.0.read_line(&mut line).is_ok_and(|read| read > 0) {
+                line.clear();
+            }
         });
         let mut command = home.command();
         command.arg(if fullscreen {

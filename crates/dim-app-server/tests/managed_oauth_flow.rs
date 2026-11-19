@@ -62,10 +62,17 @@ fn jwt(claims: Value) -> String {
         URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap())
     )
 }
-async fn token(State(f): State<Fixture>, body: String) -> Response {
+async fn token(State(f): State<Fixture>, headers: HeaderMap, body: String) -> Response {
     let fields: HashMap<_, _> = url::form_urlencoded::parse(body.as_bytes())
         .into_owned()
         .collect();
+    if fields["client_id"] == "codex-fixture" {
+        assert_eq!(
+            headers["user-agent"], "codex_cli_rs/0.170.0 (Ubuntu 22.4.0; x86_64) xterm-256color",
+            "the managed Codex token request carries the Codex CLI identity"
+        );
+        assert_eq!(headers["originator"], "codex_cli_rs");
+    }
     match fields["grant_type"].as_str() {
         "authorization_code" => {
             assert_eq!(fields["client_id"], "codex-fixture");
@@ -317,16 +324,38 @@ async fn codex_login_refresh_logout_and_restart_preserve_account_boundaries() {
     let (_root, files, plugin, a) = codex(&home, &f.base).await;
     let (_other_root, other_files, other_plugin, b) = codex(&home, &f.base).await;
     let cancel = CancellationToken::new();
+    assert!(!a.http_client_initialized(), "startup built an HTTP client");
+    assert!(!b.http_client_initialized(), "startup built an HTTP client");
     assert!(!a.status(&cancel).await.unwrap().authenticated);
+    assert!(
+        !a.http_client_initialized(),
+        "reading account state built an HTTP client"
+    );
 
     let stale = a.begin_browser(&cancel).await.unwrap();
+    assert!(
+        !a.http_client_initialized(),
+        "starting a browser attempt built an HTTP client"
+    );
     login(&b, "account-first").await;
+    assert!(
+        b.http_client_initialized(),
+        "the token exchange did not build the HTTP client"
+    );
+    assert!(
+        !a.http_client_initialized(),
+        "another service's token exchange built this one's HTTP client"
+    );
     b.logout(&cancel).await.unwrap();
     assert!(matches!(
         a.complete_browser(stale.attempt_id, callback(&stale, "stale-account"), &cancel)
             .await,
         Err(OAuthError::AccountChanged)
     ));
+    assert!(
+        a.http_client_initialized(),
+        "the token exchange did not build the HTTP client"
+    );
     assert!(read(&home).get("openaiCodex").is_none());
 
     login(&a, "账户甲乙丙丁戊庚").await;
@@ -817,8 +846,35 @@ async fn grok_device_flow_observes_slowdown_expiry_cancellation_and_uri_trust() 
     active(&plugin).await;
     let grok = root.get::<GrokOAuthService>().unwrap();
     let cancel = CancellationToken::new();
+    assert!(
+        !grok.http_client_initialized(),
+        "startup built an HTTP client"
+    );
+    assert!(!grok.status(&cancel).await.unwrap().authenticated);
+    assert!(
+        !grok.http_client_initialized(),
+        "reading account state built an HTTP client"
+    );
+    grok.fail_next_http_client_build();
+    let cancelled = CancellationToken::new();
+    cancelled.cancel();
+    assert!(matches!(
+        grok.begin_device(&cancelled).await,
+        Err(OAuthError::Closed)
+    ));
+    assert!(!grok.http_client_initialized());
+    assert!(matches!(
+        grok.begin_device(&cancel).await,
+        Err(OAuthError::Transient(None))
+    ));
+    assert!(!grok.http_client_initialized());
+    assert_eq!(f.device_requests.load(Ordering::SeqCst), 0);
     let started = std::time::Instant::now();
     let begin = grok.begin_device(&cancel).await.unwrap();
+    assert!(
+        grok.http_client_initialized(),
+        "the device request did not build the HTTP client"
+    );
     assert_eq!(begin.user_code, "USER-42");
     assert_eq!(
         begin.verification_uri.as_str(),
@@ -1216,8 +1272,14 @@ async fn managed_provider_selection_http_recovery_and_restart_flow() {
                 assert_eq!(headers["originator"], "codex-tui");
                 assert_eq!(
                     headers["user-agent"],
-                    "codex-tui/0.144.1 (Ubuntu 22.4.0; x86_64) xterm-256color (codex-tui; 0.144.1) ai-sdk-provider-utils/5.0.53"
+                    "codex-tui/0.170.0 (Ubuntu 22.4.0; x86_64) xterm-256color (codex-tui; 0.170.0) ai-sdk-provider-utils/5.0.53"
                 );
+                for absent in ["x-title", "http-referer"] {
+                    assert!(
+                        !headers.contains_key(absent),
+                        "the managed Codex path carries no Dim identity header: {absent}"
+                    );
+                }
                 assert_eq!(body["store"], false);
                 assert!(body.get("max_output_tokens").is_none());
             } else {
@@ -1225,6 +1287,16 @@ async fn managed_provider_selection_http_recovery_and_restart_flow() {
                 assert!(!headers.contains_key("chatgpt-account-id"));
                 assert!(!headers.contains_key("oai-product-sku"));
                 assert_eq!(body["max_tokens"], 4321);
+                let version = env!("CARGO_PKG_VERSION");
+                assert_eq!(
+                    headers["user-agent"],
+                    format!(
+                        "dim/{version} DimAgent/{version} ai-sdk-openai-compatible/3.0.62 ai-sdk-provider-utils/5.0.53"
+                    ),
+                    "the managed Grok provider sends Dim's identity like any other provider"
+                );
+                assert_eq!(headers["x-title"], "DimCode");
+                assert_eq!(headers["http-referer"], "https://dimagent.com/");
             }
         }
         rejected.finish_rejected(cancel.clone()).await.unwrap();
@@ -1370,7 +1442,7 @@ async fn managed_provider_selection_http_recovery_and_restart_flow() {
         )
         .await
         .unwrap();
-    assert!(updated.connection.unwrap().credential_configured);
+    assert!(updated.info.connection.unwrap().credential_configured);
     let old_request = {
         let selection = provider
             .configuration(

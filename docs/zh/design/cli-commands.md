@@ -37,10 +37,24 @@ Skill 行补全 `/skill:<name> ` 标记。没有匹配项时草稿保持不变�
 
 Skill 行读作 `/skill:<name>`，带其描述。只列出已启用、未被其他来源遮蔽、且可被用户调用、名称可被 token 承载的 Skill：名称含 `A-Z`、`a-z`、`0-9`、`_`、`-`、`.` 之外字符，或以句点结尾的 Skill 无法被引用，因此也不列出。列表跟随会话的目录：
 客户端在挂载、切换会话、`/reload-skills` 之后以及 `/skills` 中的改动之后重新读取。不提供 `skills.catalog` 的守护进程只显示命令，不报错。
-用 `Enter` 或 `Tab` 选择 Skill 行只填入 `/skill:<name> `，绝不发送；该 token 随消息文本一起提交，草稿把它画成一个高亮单位。
+用 `Enter` 或 `Tab` 选择 Skill 行只填入 `/skill:<name> `，绝不发送；该 token 随消息文本一起提交，草稿把它画成一个高亮单位，读作该 Skill 的名称。
 输入 `/skill:` 会把菜单缩到只剩 Skill：`skill:` 命名空间之后的查询只匹配 Skill 名称。以 `/skill:` 开头的草稿作为消息发送，绝不当作命令执行；token 只要位于消息开头或空白之后，就可以出现在句中。Skill 排在命令之后；
 只有当查询是某个 Skill 名称的前缀、且不是任何命令名或别名的前缀时，Skill 才排在前面；因此与命令同名的 Skill 两行都保留，命令在前。
 `/` 是唯一的触发器：`@` 仍是文件选择器。
+
+草稿把从菜单填入的引用画成 Skill 的名称：选中 `status` 后输入框读作 `/status`，而不是解析器前缀 `/skill:status`。
+
+```text
+› /stat|                 › /status |
+  ├─ /skill:status       ├─ 填入的 /skill:status
+  └─ /skill:staged       └─ 画作名称，发送 /skill:status
+```
+
+只有填入的引用才画作名称；操作者自己输入的文本按原样显示，半写或写错的引用仍然可见。
+草稿的文本仍是 `/skill:<name> `，提交和输入历史都保留它。终端原生选区复制的是显示出来的 `/status`，粘贴该标签不会恢复 Skill 引用；
+需重新选择 Skill，或粘贴完整 token。光标把引用当作一个单位跨过，一次删除整个引用，换行按显示名称计算。
+名称同时是输入框会派发的命令时（如 `/models`），草稿保留规范 token（`/skill:models`），因为裸名称会让草稿看起来像那条命令，而草稿仍是消息。
+两种模式下菜单行都读作 `/skill:<name>`，说明它填入哪个 token；对话记录保留提交的 token。
 
 两种模式下，菜单都适应终端可用的列数和行数。命令名优先于描述和快捷键标签。
 快捷键标签会挤占命令名时省略标签，但不改变按键绑定。
@@ -164,7 +178,8 @@ Home / End          滚动（fullscreen，草稿为空） 滚动（fullscreen，
 
 默认发送模式是 TUI 的设置：ACP client 自行决定运行期间输入的消息如何暂存，中断并立即发送
 在 ACP 上是 `session/cancel` 之后发送新的 `session/prompt`
-（[AcpGateway §4.2](../plugins/AcpGateway.md#42-prompt-与取消)）。Web 输入框见 #1601。
+（[AcpGateway §4.2](../plugins/AcpGateway.md#42-prompt-与取消)）。Web 工作区提供同样的两种模式，缺省值保存在浏览器，
+中断并立即发送的步骤也相同（[Web 工作区 §4.5](../../design/web-workspace.md#45-sending-during-a-run)）。
 
 草稿为空时按 Enter 只有在更早的分支都不适用时才打开 `/tasks`：先是两种模式下的
 shell 运行拦截，再是 steer 最早的排队消息，只有在没有排队消息时才轮到它。任务行必须
@@ -761,9 +776,27 @@ Ctrl+T 立即运行所选任务，并报告所有者为手动窗口记录的投�
 
 `dimcode scheduled add PATH`（`-` 表示 stdin）是不经编辑器的创建；`dimcode scheduled history ID` 打印详情显示的那些行；`dimcode scheduled remove ID` 不经面板的确认直接删除。
 
+### 模型选择读取
+
+打开 `/models` 时向 [`provider.models.query`](appserver/provider-management.md#模型显示查询) 请求一页。输入在服务器上搜索并重置页游标；Next/Previous 替换显示的页；关闭选择面板释放其结果。已采用模型的能力读取带上它的提供方与模型 ID。目录刷新是提供方/账号面板里显式的管理操作。选择面板诊断中的计数针对当前显示的页。
+
+```text
+/models -> 第一页 -> Next page -> 下一页
+               ^                         |
+               +------ Previous page ----+
+输入查询 -> 第一个匹配页
+Esc      -> 清除查询；查询为空时关闭并释放结果
+```
+
+`--set-limits` 指定单个模型时，写入前只读取该模型，写入后也只回读并展示该模型。
+
+```text
+read MODEL -> write MODEL -> display MODEL
+```
+
 ### Models 领域
 
-Models 领域（#818）：`/models` 里的 `Edit models` 打开单个提供方的面板，`dimcode models PROVIDER enable|disable|remove|inspect MODEL`、`edit MODEL`、`set MODEL PATH` 与 `add PATH` 是它在命令行上的同一领域，经 `provider.management` 与 `provider.models.*` 写入（[提供方管理](appserver/provider-management.md)）。提供方是领域的一部分，所以另一个提供方的回复不会落到面板里，面板标题也写明提供方（`Models · <name>`）。`dimcode models PROVIDER` 保持原有列表与四个标志；`--refresh` 就是该领域在命令行上的 reload。
+Models 领域（#818）：`/models` 里的 `Manage models` 先打开提供方列表，再打开单个提供方的面板，`dimcode models PROVIDER enable|disable|remove|inspect MODEL`、`edit MODEL`、`set MODEL PATH` 与 `add PATH` 是它在命令行上的同一领域，经 `provider.management` 与 `provider.models.*` 写入（[提供方管理](appserver/provider-management.md)）。提供方是领域的一部分，所以另一个提供方的回复不会落到面板里，面板标题也写明提供方（`Models · <name>`）。`dimcode models PROVIDER` 保持原有列表与四个标志；`--refresh` 就是该领域在命令行上的 reload。
 
 一个模型是一个条目。标签是显示名，详情是 id、两个上限（或 `undeclared`）、端点及其覆盖，以及所有者报告的不可用原因。条目按所有者报告的来源分组：默认模型在 `catalog`，descriptor 覆盖在 `overrides`，用户新增在 `added`，顺序固定。所有者报告为不可用的模型保留 `unavailable` 状态词，详情说明原因。账号条目在没有目录记录时没有条目；本次读取的 issue 说明它还没有目录。
 
@@ -795,20 +828,41 @@ Ctrl+R 读取该领域，并在提供方的 actions 含 `refresh` 时先发送 `
 ╰──── Enter toggle · Ctrl+E edit · Ctrl+R reload · Ctrl+N add · Ctrl+X remove · Tab inspect ─╯
 ```
 
-选择器为每个提供方增加一行：`Edit models`，位于该提供方的块内，detail 写明提供方，因此没有可选模型的提供方也能打开。守护进程未声明 `provider.management` 时没有这一行。它在选择器的位置打开该领域，在那里按 Esc 关闭到提示符，而不是回到选择器。
+`/models` 把对话模型候选、子代理模型策略与提供方管理放在三个固定分区里（#1676）；只有候选列表滚动。候选只包含可选模型：一行写提供方名称、模型 id、目录声明时的 `ZDR`、声明的推理强度与 `current` 标记。列表下方的选中摘要写明所选候选的 id 是如何识别的；候选行本身保持简短，摘要区为空时不显示说明文字。
+
+Tab / Shift+Tab 在守护进程提供的分区之间移动，Up/Down 停留在当前分区内；footer 写明该分区的 Enter 做什么。搜索只过滤候选：它从不隐藏策略或管理入口，没有匹配时两者保持原位。选中项从当前模型开始。`←`/`→` 只在候选分区循环推理强度，`Ctrl+X` 也只在那里清除所选模型的已保存偏好。在根层，Escape 先清除搜索，再关闭。
+
+策略分区显示当前策略，Enter 打开既有的 Agent choice / Inherit requesting branch / Fixed model 流程；固定模型页只列模型候选。守护进程未声明策略方法时没有这一分区（[子代理模型策略](../../design/subagent-model-policy.md#5-native-cli-interaction)）。
+
+管理分区包含一个 `Manage models` 入口与紧凑的诊断：缺少上限的模型、不可用与已禁用的模型、没有模型的提供方，以及所有者无法读取的目录。提供方缺少上限的模型就是它的原因，所以不会再计为不可用。Enter 打开提供方列表，每行写明提供方及其状态；没有可选模型的提供方也列在这里。选择提供方打开它既有的模型管理领域，沿用其编辑、启停用、刷新与检查操作。关闭该领域回到提供方列表，再关闭则回到各分区，搜索、选中项与列表位置保持原样；Read Models 再次运行，使候选显示所有者现在提供的内容。守护进程未声明 `provider.management` 时没有任何操作：诊断及其恢复指引保留为只读行。
 
 ```text
-Select a model
-> Ready / flash              ZDR  ‹ high ›  current
-  Ready / plain              low
-  Ready / sonnet             —
-  Edit models                Ready  ready
-  Other / model-x
-  Edit models                Other  other
-  Manual: no models · add a model with provider.models.create
-  Edit models                Manual  manual
-  Subagent models: Agent choice
-Enter select + default · ←/→ effort · Ctrl+B/F cursor · Ctrl+X clear saved · Esc clear/close
+╭─ Models ──────────────────────────────────────────────────────────────────────────────────────╮
+│ Conversation model                                                                            │
+│                                                                                               │
+│ >                                                                                             │
+│                                                                                               │
+│ › Ready / flash                         ZDR  ‹ high ›  current                                │
+│   Other / model-x                       low                                                   │
+│   Manual / house-model                                                                        │
+│ Selected: Ready / flash  identified: flash at ready                                           │
+│ Subagent models                                                                               │
+│ › Agent choice                                                                          Enter │
+│ Model management                                                                              │
+│ › Manage models                                                                   3 providers │
+│   4 with missing limits / 2 unavailable                                                       │
+╰───────────────────────── Enter select + default · ←/→ effort · Tab section · Esc clear/close ─╯
+```
+
+```text
+╭─ Manage models ───────────────────────────────────────────────────────────────────────────────╮
+│ >                                                                                             │
+│ › Ready                     ready · 4 with missing limits                                     │
+│   Other                     ready                                                             │
+│   Manual                    no models                                                         │
+│   Relay                     2 unavailable                                                     │
+│   Ready: 4 models need a window · dimcode models ready --set-missing-limits                   │
+╰─────────────────────────────────── Enter manage · Esc back ───────────────────────────────────╯
 ```
 
 `dimcode models PROVIDER remove MODEL` 不经面板的确认直接移除；`dimcode models PROVIDER inspect MODEL` 打印详情显示的那些行。
@@ -955,6 +1009,7 @@ Remove 先在提示栏询问，`Remove deny prefix git push? Enter confirm · Es
 | `/export markdown PATH` 或 `/export json PATH` | 交互客户端空闲时把当前主分支导出到文件。 |
 | `dimcode export SESSION_ID [--output PATH] [--database PATH]` | 不经守护进程，把 Session 的完整 Timeline 写成带版本的 JSONL（[Timeline 导出](appserver/timeline-export.md)）；未给输出路径时写到 stdout。 |
 | `dimcode daemon vacuum [--database PATH]` | 先删除离线原生库中没有任何存储引用到达的内容行（仅 `node`/`message`，每个 Session 一个事务），再用 SQLite `VACUUM` 重写，回收这些行与已删除 Session 留下的页；打印操作前后的大小、删除的行数及其正文字节数，某个 Session 指向库中不存在的内容时不删除任何东西（[存储格式](appserver/native-storage-format.md#sqlite-运行参数与空间回收)）；守护进程持库时失败，也不创建或升级库。 |
+| `dimcode --migrate-prompt-references --database PATH --session ID --branch NAME` | 离线写出守卫的显式迁移提示所要求的已保存引用结果，并打印写入结果（[显式旧引用迁移](../../design/prompt-state-read.md#显式旧引用迁移入口)）；它必须是第一个参数，拒绝不存在的库、被守护进程持有的库和不在当前格式的库，从不创建或升级库，重复运行不写入任何内容并报告 `Wrote 0`。 |
 | `dimcode skills list` | 经 `skills.catalog` 列出工作区的 Skills：每个条目的名称、来源、状态、文件与描述，然后是目录的 issues。 |
 | `dimcode skills enable\|disable ID` | 经 `skills.set_enabled` 启用或停用单个 Skill，然后再次报告目录。 |
 | `dimcode skills reload` | 经 `skills.refresh` 重新扫描用户与项目根，并通过 [Skills 管理界面](#管理界面)报告结果。 |

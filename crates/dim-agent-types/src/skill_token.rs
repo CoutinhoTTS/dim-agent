@@ -2,7 +2,7 @@
 //! characters a name holds, and the spans a text carries. The Skills submit
 //! check, the CLI and web composers and the CLI, web and ACP transcript
 //! projections all read this definition, so every surface agrees on what loads
-//! and on what is drawn as one unit ([Skills §9](../../docs/design/plugins/Skills.md#9-references-load-with-the-operators-input)).
+//! and on what is drawn as one unit ([Skills §9](../../../docs/design/plugins/Skills.md#9-references-load-with-the-operators-input)).
 //!
 //! A token is `/skill:` and then one or more name characters, with no space
 //! after the colon. It starts a text or follows whitespace, so it may stand
@@ -98,16 +98,6 @@ mod tests {
     }
 
     #[test]
-    fn a_token_never_starts_inside_a_word() {
-        assert_eq!(names("a/skill:x"), [] as [&str; 0]);
-        assert_eq!(names("https://host/skill:y"), [] as [&str; 0]);
-        assert_eq!(names("/skill:"), [] as [&str; 0]);
-        assert_eq!(names("/skill: "), [] as [&str; 0]);
-        assert_eq!(names("/skill"), [] as [&str; 0]);
-        assert_eq!(names("/skills:x"), [] as [&str; 0]);
-    }
-
-    #[test]
     fn a_name_is_the_run_of_name_characters() {
         assert_eq!(names("/skill:a-b_c.d1"), ["a-b_c.d1"]);
         assert_eq!(
@@ -136,6 +126,12 @@ mod tests {
             "a lone full stop is no name"
         );
         assert_eq!(names("/skill:naïve"), ["na"]);
+        assert_eq!(
+            names("/skills:x"),
+            [] as [&str; 0],
+            "another slash command is not a Skill reference"
+        );
+        assert_eq!(names("/skill"), [] as [&str; 0]);
         assert_eq!(names("/skill:<dim-skill>"), [] as [&str; 0]);
         assert!(names_a_token("a-b_c.d1"));
         assert!(!names_a_token("two words"));

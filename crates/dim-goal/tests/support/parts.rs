@@ -2,7 +2,10 @@
 //! TimelineTree, SessionMethods, ToolRegistry, PromptGuide, storage and
 //! Settings, with only the parts Goal needs. The facts the Loop, InputQueue
 //! and TimelineTree would write are the test's.
-#![allow(dead_code)]
+#![expect(
+    dead_code,
+    reason = "each test binary uses the helpers it needs; the rest are shared"
+)]
 use dim_agent_capabilities::host::ToolExecutionContext;
 use dim_agent_capabilities::methods::RpcError;
 use dim_agent_capabilities::timeline_tree::TreeCommands;
@@ -25,7 +28,7 @@ use dim_agent_types::{
     AgentEvent, BranchSource, DeltaData, EventKind, InputBlock, InputMessageData, InputMode,
     StepData, ToolCall, ToolDefinition, ToolResult,
 };
-use dim_app_server::settings::{SettingsPlugin, SettingsService};
+use dim_app_server::settings::{Settings, SettingsPlugin};
 use rutis::Ctx;
 use rutis::host::{CtxHost, DynPlugin, Effect, Key, TypeKey};
 use rutis_loader::resolve::Build;
@@ -904,7 +907,7 @@ impl Env {
         let mut builder = AgentBuilder::new(AgentConfig::default());
         dim_goal::install(&mut builder);
         dim_agent_capabilities::register_names(&mut builder);
-        dim_agent_runtime::names::register::<SettingsService>(builder.catalog_mut(), None);
+        dim_agent_runtime::names::register::<Settings>(builder.catalog_mut(), None);
         builder
             .require_feature(Feature::new("SessionMethods").session(
                 "SessionMethods",
@@ -950,13 +953,13 @@ impl Env {
             Arc::new(dim_agent_capabilities::adapters::MockTools),
         );
         if let Some(store) = store {
-            builder.timeline_store(store);
+            builder.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(store));
         }
         if let Some(store) = &refusing {
-            builder.timeline_store(store.clone());
+            builder.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(store.clone()));
         }
         if let Some(store) = &gated {
-            builder.timeline_store(store.clone());
+            builder.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(store.clone()));
         }
         let catalog = builder.catalog().clone();
         let build = Build::default();
@@ -1433,7 +1436,8 @@ impl Env {
         events
             .iter()
             .filter(|event| {
-                matches!(&event.kind, EventKind::InputMessage(data) if data.effective_mode() != InputMode::Append)
+                matches!(&event.kind, EventKind::InputMessage(data)
+                    if data.effective_mode() != InputMode::Append)
                     && !consumed.contains(event.id.as_str())
                     && !deleted.contains(event.id.as_str())
             })

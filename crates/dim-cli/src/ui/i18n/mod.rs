@@ -161,7 +161,7 @@ mod tests {
                 "Prompt suggestion",
                 "Prompt suggestion: {error}",
                 "Suggestions are paused in this session because offers went unused. Turn them off and on in /settings to resume.",
-                "Enter select + default · ←/→ effort · Ctrl+B/F cursor · Ctrl+X clear saved · Esc clear/close",
+                "Enter select + default · ←/→ effort · Tab section · Esc clear/close",
                 "Default for new sessions in {folder}: {model}",
                 "Default for new sessions: {model}",
                 "Hook context · {count} line",
@@ -310,6 +310,63 @@ mod tests {
         set(previous);
     }
 
+    /// The `/models` sections: their titles, the management rows and the
+    /// focus-specific hints, with the counts kept.
+    #[test]
+    fn every_locale_translates_the_models_section_strings() {
+        let previous = active();
+        for (locale, code, _) in LOCALES {
+            if locale == Locale::En {
+                continue;
+            }
+            for key in [
+                "Conversation model",
+                "Selected: {model}",
+                "Model management",
+                "Manage models",
+                "1 provider",
+                "{count} providers",
+                "ready",
+                "no models",
+                "catalog unreadable",
+                "{count} with missing limits",
+                "{count} unavailable",
+                "{count} disabled",
+                "{count} without models",
+                "{count} unreadable",
+                "{unavailable} unavailable, {disabled} disabled",
+                "Enter select + default · ←/→ effort · Tab section · Esc clear/close",
+                "Enter change · Tab section · Esc clear/close",
+                "Enter manage · Tab section · Esc clear/close",
+                "Enter manage · Esc back",
+            ] {
+                let translated = table(locale, key);
+                assert!(translated.is_some(), "{code} lacks {key:?}");
+                assert_ne!(translated.unwrap(), key, "{code} copies {key:?}");
+            }
+            set(locale);
+            for (key, args) in [
+                ("Selected: {model}", vec![("model", "fixture-model")]),
+                ("{count} providers", vec![("count", "2")]),
+                ("{count} with missing limits", vec![("count", "2")]),
+                ("{count} unavailable", vec![("count", "2")]),
+                ("{count} disabled", vec![("count", "2")]),
+                ("{count} without models", vec![("count", "2")]),
+                ("{count} unreadable", vec![("count", "2")]),
+                (
+                    "{unavailable} unavailable, {disabled} disabled",
+                    vec![("unavailable", "2"), ("disabled", "3")],
+                ),
+            ] {
+                let text = tf(key, &args);
+                for (_, value) in args {
+                    assert!(text.contains(value), "{code} drops {value} from {key:?}");
+                }
+            }
+        }
+        set(previous);
+    }
+
     #[test]
     fn every_locale_translates_the_model_failure_strings() {
         let previous = active();
@@ -426,6 +483,8 @@ mod tests {
         const COUNTS: &str = crate::DAEMON_BUSY_COUNTS;
         const TOO_OLD: &str = crate::DAEMON_TOO_OLD;
         const TOO_OLD_COUNTS: &str = crate::DAEMON_TOO_OLD_COUNTS;
+        const BUILD_DIFFERENT: &str = crate::DAEMON_BUILD_DIFFERENT;
+        const BUILD_UNVERIFIED: &str = crate::DAEMON_BUILD_UNVERIFIED;
         const UPGRADING: &str = crate::DAEMON_UPGRADING;
         const UPGRADING_PROGRESS: &str = crate::DAEMON_UPGRADING_PROGRESS;
         let previous = active();
@@ -438,6 +497,8 @@ mod tests {
                 COUNTS,
                 TOO_OLD,
                 TOO_OLD_COUNTS,
+                BUILD_DIFFERENT,
+                BUILD_UNVERIFIED,
                 UPGRADING,
                 UPGRADING_PROGRESS,
                 crate::UPGRADE_STAGE_LINES[0],
@@ -490,6 +551,17 @@ mod tests {
                     ],
                 ),
                 (UPGRADING, vec![("from", "33"), ("to", "34")]),
+                (
+                    BUILD_DIFFERENT,
+                    vec![
+                        ("server", "9.9.9"),
+                        ("command", "fixture-client daemon stop"),
+                    ],
+                ),
+                (
+                    BUILD_UNVERIFIED,
+                    vec![("command", "fixture-client daemon stop")],
+                ),
                 (
                     UPGRADING_PROGRESS,
                     vec![("seconds", "12"), ("stage", "fixture-stage")],

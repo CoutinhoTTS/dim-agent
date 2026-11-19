@@ -149,7 +149,10 @@ impl TimelineContext {
     }
 
     /// Starts dispatch once every capability of the subtree is Active.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one parameter per handle a branch's TimelineContext is built from"
+    )]
     pub(crate) fn start(
         id: String,
         ctx: Ctx,
@@ -232,10 +235,18 @@ impl TimelineContext {
                 drop(inner);
                 signal = match phase.as_mut() {
                     Some(rx) => {
-                        tokio::select! {_=stop.cancelled()=>return,_=rx.changed()=>true,_=dispatcher.changed()=>true}
+                        tokio::select! {
+                            _ = stop.cancelled() => return,
+                            _ = rx.changed() => true,
+                            _ = dispatcher.changed() => true,
+                        }
                     }
                     None => {
-                        tokio::select! {_=stop.cancelled()=>return,_=dispatcher.changed()=>true,_=tokio::time::sleep(LOOP_RETURN_POLL)=>false}
+                        tokio::select! {
+                            _ = stop.cancelled() => return,
+                            _ = dispatcher.changed() => true,
+                            _ = tokio::time::sleep(LOOP_RETURN_POLL) => false,
+                        }
                     }
                 };
             }
@@ -685,13 +696,18 @@ impl TimelineContext {
     }
     /// Loop's state channel. A reloading Loop is a restart of Loop: its
     /// successor takes over from the committed history, the interrupt
-    /// included, so this waits for it. Closed once the branch closes and
-    /// Loop is gone for good.
+    /// included, so this waits for it. When the branch is closing and Loop
+    /// is gone, returns the recorded Dispatcher fault, or Closed if none exists.
     async fn loop_watch(&self) -> Result<watch::Receiver<LoopSnapshot>> {
         loop {
             match self.loop_state() {
                 Ok(state) => return Ok(state.watch()),
-                Err(_) if self.close.started() => return Err(AgentError::Closed(self.id().into())),
+                Err(_) if self.close.started() => {
+                    return Err(self
+                        .dispatcher
+                        .failure()
+                        .unwrap_or_else(|| AgentError::Closed(self.id().into())));
+                }
                 Err(AgentError::Reloading(_)) => {}
                 Err(error) => return Err(error),
             }

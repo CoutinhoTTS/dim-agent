@@ -2,6 +2,30 @@
 use super::*;
 use crate::model_catalog::FieldUpdate;
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum UpdateReplyKind {
+    #[default]
+    Full,
+    Summary,
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+pub enum UpdateReply {
+    Full(Box<ManagementProvider>),
+    Summary(Box<ManagementUpdateSummary>),
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagementUpdateSummary {
+    #[serde(flatten)]
+    pub info: ManagementInfo,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub models_listed: Option<ModelsListed>,
+}
+
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ConnectionInput {
@@ -331,7 +355,7 @@ impl ProviderService {
                         let id = provider_id.clone();
                         let mut record = owner
                             .db
-                            .run_read(move |db| read_static(db, &id))
+                            .run_read(move |db| read_stored_static(db, &id))
                             .await?
                             .ok_or(ProviderError::NotFound)?;
                         connection.apply(&mut record)?;
@@ -385,17 +409,39 @@ impl ProviderService {
         let provider_id = input.provider_id;
         let id = provider_id.clone();
         let db = self.db.clone();
-        let record = self.owned(cancel, move |_| Box::pin(async move {
-            db.run(move |connection| Ok((|| -> Result<_, ProviderError> {
-                let tx = connection.transaction()?;
-                if tx.query_row("SELECT 1 FROM providers WHERE provider_id=?1", [&id], |_| Ok(())).optional()?.is_some() {
-                    return Err(ProviderError::Conflict("Provider ID already exists".into()));
-                }
-                tx.execute("INSERT INTO providers(provider_id,version,record) VALUES (?1,?2,?3)", params![id, record.version, serde_json::to_string(&record)?])?;
-                tx.commit()?;
-                Ok(record)
-            })())).await?
-        })).await?;
+        let record = self
+            .owned(cancel, move |_| {
+                Box::pin(async move {
+                    db.run(move |connection| {
+                        Ok((|| -> Result<_, ProviderError> {
+                            let tx = connection.transaction()?;
+                            if tx
+                                .query_row(
+                                    "SELECT 1 FROM providers WHERE provider_id=?1",
+                                    [&id],
+                                    |_| Ok(()),
+                                )
+                                .optional()?
+                                .is_some()
+                            {
+                                return Err(ProviderError::Conflict(
+                                    "Provider ID already exists".into(),
+                                ));
+                            }
+                            persistence::write(
+                                &tx,
+                                &id,
+                                record.version,
+                                &serde_json::to_string(&record)?,
+                            )?;
+                            tx.commit()?;
+                            Ok(record)
+                        })())
+                    })
+                    .await?
+                })
+            })
+            .await?;
         self.static_management(provider_id, record, cancel).await
     }
 
@@ -406,6 +452,29 @@ impl ProviderService {
         patch: ProviderPatch,
         cancel: &CancellationToken,
     ) -> Result<ManagementProvider, ProviderError> {
+        match self
+            .update_reply(
+                provider_id,
+                expected_version,
+                patch,
+                UpdateReplyKind::Full,
+                cancel,
+            )
+            .await?
+        {
+            UpdateReply::Full(provider) => Ok(*provider),
+            UpdateReply::Summary(_) => unreachable!("full reply was requested"),
+        }
+    }
+
+    pub async fn update_reply(
+        self: &Arc<Self>,
+        provider_id: String,
+        expected_version: u32,
+        patch: ProviderPatch,
+        reply: UpdateReplyKind,
+        cancel: &CancellationToken,
+    ) -> Result<UpdateReply, ProviderError> {
         if self.oauth.contains(&provider_id, cancel).await? {
             return Err(ProviderError::Unsupported(
                 "Managed Provider configuration belongs to its account owner".into(),
@@ -416,23 +485,129 @@ impl ProviderService {
                 "Provider patch must not be empty".into(),
             ));
         }
-        let (record, models_listed) = if patch.changes_endpoint() {
+        self.adopt_provider(&provider_id, cancel).await?;
+        let id = provider_id.clone();
+        let db = self.db.clone();
+        let header = self
+            .owned(cancel, move |_| {
+                Box::pin(async move {
+                    db.run_read(move |c| {
+                        persistence::static_read(c, &id, persistence::Models::Header)
+                    })
+                    .await
+                    .map_err(ProviderError::from)
+                })
+            })
+            .await?
+            .ok_or(ProviderError::NotFound)?;
+        if header.version != expected_version {
+            return Err(ProviderError::Conflict(
+                "Provider version changed; reread before retrying".into(),
+            ));
+        }
+        let bundled_models =
+            self.bundled.provider_header(&provider_id).is_some() && !header.remote_models;
+        let (record, models_listed) = if patch.glued_prefix.is_none()
+            && (!patch.changes_endpoint()
+                || bundled_models
+                || !self.remote_model_list(&provider_id, &header))
+        {
+            let listed = patch.changes_endpoint().then_some(
+                if patch.enabled == Some(false) || (patch.enabled.is_none() && !header.enabled) {
+                    ModelsListed::Disabled
+                } else if bundled_models {
+                    ModelsListed::Bundled
+                } else {
+                    ModelsListed::Unsupported
+                },
+            );
+            let db = self.db.clone();
+            let id = provider_id.clone();
+            let bundled = self.bundled.clone();
+            let record = self
+                .owned(cancel, move |cancel| {
+                    Box::pin(async move {
+                        db.run(move |connection| {
+                            Ok((|| -> Result<_, ProviderError> {
+                                let tx = connection.transaction()?;
+                                let mut record = persistence::static_read(
+                                    &tx,
+                                    &id,
+                                    persistence::Models::Header,
+                                )?
+                                .ok_or(ProviderError::NotFound)?;
+                                if record.version != expected_version {
+                                    return Err(ProviderError::Conflict(
+                                        "Provider version changed; reread before retrying".into(),
+                                    ));
+                                }
+                                patch.apply(&mut record)?;
+                                if record.enabled
+                                    && record.credential_authority == CredentialAuthority::Static
+                                    && record.auth != StaticAuth::Anonymous
+                                    && record.credential.is_none()
+                                {
+                                    return Err(ProviderError::AuthRequired);
+                                }
+                                record.version =
+                                    record.version.checked_add(1).ok_or(ProviderError::Failed)?;
+                                validate_static_record(&id, &mut record)
+                                    .map_err(|e| ProviderError::InvalidConfig(e.to_string()))?;
+                                if cancel.is_cancelled() {
+                                    return Err(ProviderError::Cancelled);
+                                }
+                                let first_configuration = persistence::write_header(
+                                    &tx,
+                                    &id,
+                                    record.version,
+                                    &serde_json::to_string(&record)?,
+                                )?;
+                                if first_configuration {
+                                    persistence::admit_base(&tx, &id, &record, &bundled)?;
+                                }
+                                if reply == UpdateReplyKind::Full {
+                                    record = read_stored_static(&tx, &id)?
+                                        .ok_or(ProviderError::NotFound)?;
+                                }
+                                tx.commit()?;
+                                Ok(record)
+                            })())
+                        })
+                        .await?
+                    })
+                })
+                .await?;
+            (record, listed)
+        } else if patch.changes_endpoint() {
             self.update_connection(provider_id.clone(), expected_version, patch, cancel)
                 .await?
         } else {
-            let record = self
-                .mutate_static(
+            (
+                self.mutate_static(
                     provider_id.clone(),
                     expected_version,
                     move |record, _| patch.apply(record),
                     cancel,
                 )
-                .await?;
-            (record, None)
+                .await?,
+                None,
+            )
         };
-        let mut provider = self.static_management(provider_id, record, cancel).await?;
-        provider.models_listed = models_listed;
-        Ok(provider)
+        match reply {
+            UpdateReplyKind::Full => {
+                let mut provider = self.static_management(provider_id, record, cancel).await?;
+                provider.models_listed = models_listed;
+                Ok(UpdateReply::Full(Box::new(provider)))
+            }
+            UpdateReplyKind::Summary => {
+                Ok(UpdateReply::Summary(Box::new(ManagementUpdateSummary {
+                    info: self
+                        .static_management_info(provider_id, &record, cancel)
+                        .await?,
+                    models_listed,
+                })))
+            }
+        }
     }
 
     /// Applies a patch that changes the endpoint and, when the record's models
@@ -452,7 +627,7 @@ impl ProviderService {
                 let id = provider_id.clone();
                 let record = owner
                     .db
-                    .run_read(move |db| read_static(db, &id))
+                    .run_read(move |db| read_stored_static(db, &id))
                     .await
                     .map_err(ProviderError::from)?
                     .ok_or(ProviderError::NotFound)?;
@@ -473,15 +648,11 @@ impl ProviderService {
                 }
                 validate_static_record(&provider_id, &mut admitted)
                     .map_err(|error| ProviderError::InvalidConfig(error.to_string()))?;
-                let bundled_models =
-                    owner.bundled.provider(&provider_id).is_some() && !admitted.remote_models;
+                let bundled_models = owner.bundled.provider_ids().any(|id| id == provider_id)
+                    && !admitted.remote_models;
                 let own_models =
                     !bundled_models && owner.remote_model_list(&provider_id, &admitted);
                 let (models, models_listed) = if !admitted.enabled {
-                    // A re-pointed disabled record drops the old endpoint's
-                    // models in this same write, without a request: they are
-                    // not the new endpoint's, and the empty, listable catalog
-                    // is what the picker refills once the record is enabled.
                     (own_models.then(Vec::new), ModelsListed::Disabled)
                 } else if bundled_models {
                     // The bundled catalog defines these models; a later
@@ -511,7 +682,7 @@ impl ProviderService {
                     .run(move |db| {
                         Ok((|| -> Result<_, ProviderError> {
                             let tx = db.transaction()?;
-                            let current = read_static(&tx, &provider_id)?
+                            let current = read_stored_static(&tx, &provider_id)?
                                 .map(serde_json::to_value)
                                 .transpose()?;
                             if current.as_ref() != Some(&expected) {
@@ -519,13 +690,11 @@ impl ProviderService {
                                     "Provider version or admitted configuration changed".into(),
                                 ));
                             }
-                            tx.execute(
-                                "UPDATE providers SET version=?2,record=?3 WHERE provider_id=?1",
-                                params![
-                                    provider_id,
-                                    admitted.version,
-                                    serde_json::to_string(&admitted)?
-                                ],
+                            persistence::write(
+                                &tx,
+                                &provider_id,
+                                admitted.version,
+                                &serde_json::to_string(&admitted)?,
                             )?;
                             tx.commit()?;
                             Ok((admitted, Some(models_listed)))

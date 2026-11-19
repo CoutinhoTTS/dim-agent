@@ -5,7 +5,6 @@ use dim_agent_capabilities::{
     history::HistoryRenderer,
     host::*,
     input_queue::InputQueue,
-    model_provider::ModelProvider,
     tool_executor::ToolExecutor,
 };
 use dim_agent_runtime::testing::MinimalHost;
@@ -166,7 +165,7 @@ struct Extension {
     barrier: Arc<ExtensionBarrier>,
     dispatcher: Key<Dispatcher>,
     context_preparation: Key<ContextPreparation>,
-    model_provider: Key<ModelProvider>,
+    model_progress: Key<StateCell<ModelProgress>>,
     tool_executor: Key<ToolExecutor>,
 }
 impl Extension {
@@ -175,7 +174,7 @@ impl Extension {
             barrier,
             dispatcher: names.key()?,
             context_preparation: names.key()?,
-            model_provider: names.key()?,
+            model_progress: names.state_cell()?,
             tool_executor: names.key()?,
         })
     }
@@ -188,7 +187,7 @@ impl DynPlugin for Extension {
         vec![
             self.dispatcher.erase(),
             self.context_preparation.erase(),
-            self.model_provider.erase(),
+            self.model_progress.erase(),
             self.tool_executor.erase(),
         ]
     }
@@ -894,7 +893,7 @@ async fn a_stop_during_output_keeps_its_text_and_closes_every_started_call() {
     let (model, chunks) = channel_model();
     let store = Arc::new(MemoryTimelineStore::default());
     let mut builder = channel_builder(model.clone());
-    builder.timeline_store(store.clone());
+    builder.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(store.clone()));
     defaults::install(&mut builder);
     let agent = MinimalHost::start(&builder).await.unwrap();
     let session = soon(agent.create_session(SessionConfig::default()))
@@ -1825,7 +1824,9 @@ async fn an_interrupt_while_a_later_segment_waits_cancels_those_calls() {
     });
     let mut builder = AgentBuilder::new(AgentConfig::default());
     builder
-        .timeline_store(Arc::new(dim_agent_runtime::MemoryTimelineStore::default()))
+        .timeline_store(dim_agent_runtime::TimelineStoreBinding::new(Arc::new(
+            dim_agent_runtime::MemoryTimelineStore::default(),
+        )))
         .session_value(Arc::new(HistoryRenderer::default()))
         .process_value(Arc::new(ModelHost(Arc::new(BatchModel))))
         .session_value(Arc::new(ToolHost(tools)))

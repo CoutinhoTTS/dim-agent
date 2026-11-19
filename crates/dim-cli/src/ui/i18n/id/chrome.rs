@@ -334,7 +334,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Press Ctrl+C to stop the Web workspace." => "Ctrl+C untuk menghentikan workspace Web.",
         "To resume this session:" => "Lanjutkan sesi ini:",
 
-        // composer/commands.rs: descriptions
+        // commands.rs: descriptions
         "start a new session" => "mulai sesi baru",
         "show or set the reasoning effort" => "lihat/atur tingkat penalaran",
         "show or set the priority service tier (on|off)" => {
@@ -368,9 +368,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "exit" => "keluar",
 
         // composer/palette.rs
-        "Enter select + default · ←/→ effort · Ctrl+B/F cursor · Ctrl+X clear saved · Esc clear/close" => {
-            "Enter pilih + default · ←/→ upaya · Ctrl+B/F kursor · Ctrl+X hapus simpanan · Esc hapus/tutup"
-        }
         "Default for new sessions in {folder}: {model}" => {
             "Model default untuk sesi baru di {folder}: {model}"
         }
@@ -455,6 +452,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         // models_panel.rs
         "Select a model" => "Pilih model",
         "Loading models..." => "Memuat model…",
+        "Previous page" => "Halaman sebelumnya",
+        "Next page" => "Halaman berikutnya",
         "No models available. Connect a provider first." => {
             "Tak ada model. Hubungkan provider dulu."
         }
@@ -519,6 +518,33 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "Untuk anggota baru, termasuk Agen bernama."
         }
         "Existing members keep their models." => "Anggota lama tetap pakai modelnya.",
+        "Conversation model" => "Model percakapan",
+        "Selected: {model}" => "Dipilih: {model}",
+        "Model management" => "Manajemen model",
+        "Manage models" => "Kelola model",
+        "1 provider" => "1 penyedia",
+        "{count} providers" => "{count} penyedia",
+        "ready" => "siap",
+        "no models" => "tanpa model",
+        "catalog unreadable" => "catalog tak terbaca",
+        "{count} with missing limits" => "{count} tanpa batas",
+        "{count} unavailable" => "{count} tidak tersedia",
+        "{count} disabled" => "{count} nonaktif",
+        "{count} without models" => "{count} tanpa model",
+        "{count} unreadable" => "{count} tak terbaca",
+        "{unavailable} unavailable, {disabled} disabled" => {
+            "{unavailable} tidak tersedia, {disabled} nonaktif"
+        }
+        "Enter select + default · ←/→ effort · Tab section · Esc clear/close" => {
+            "Enter pilih + default · ←/→ upaya · Tab bagian · Esc hapus/tutup"
+        }
+        "Enter change · Tab section · Esc clear/close" => {
+            "Enter ubah · Tab bagian · Esc hapus/tutup"
+        }
+        "Enter manage · Tab section · Esc clear/close" => {
+            "Enter kelola · Tab bagian · Esc hapus/tutup"
+        }
+        "Enter manage · Esc back" => "Enter kelola · Esc kembali",
         "unknown" => "tak diketahui",
         "Subagent model policy saved" => "Kebijakan model subagen disimpan",
         "Subagent model policy changed elsewhere; choose again to reread it" => {
@@ -638,6 +664,12 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "The App Server is still {server} because other clients are using it (connections: {connections}, attached Sessions: {attached}, running turns: {running}); this {client} client uses it too. Run `dimcode daemon stop` when they are done, and the next start runs {client}." => {
             "App Server masih {server} karena klien lain sedang memakainya (koneksi: {connections}, sesi terlampir: {attached}, giliran berjalan: {running}); klien {client} ini juga memakainya. Jalankan `dimcode daemon stop` setelah mereka selesai; mulai berikutnya akan menjalankan {client}."
+        }
+        "The App Server is still using a different build of {server}. Some features may be unavailable. After active work finishes, exit this client, run `{command}`, then reopen it." => {
+            "App Server masih memakai build lain dari {server}. Sebagian fitur mungkin tidak tersedia. Setelah pekerjaan yang berjalan selesai, keluar dari klien ini, jalankan `{command}`, lalu buka lagi."
+        }
+        "The App Server's build could not be verified as this client's. If features are missing after an update, wait for active work to finish, exit this client, run `{command}`, then reopen it." => {
+            "Build App Server tidak dapat dipastikan sama dengan klien ini. Jika fitur hilang setelah pembaruan, tunggu pekerjaan yang berjalan selesai, keluar dari klien ini, jalankan `{command}`, lalu buka lagi."
         }
         "Upgrading the local store from format v{from} to v{to}; this can take a while on a large store." => {
             "Memutakhirkan penyimpanan lokal dari format v{from} ke v{to}; ini bisa memakan waktu pada penyimpanan besar."

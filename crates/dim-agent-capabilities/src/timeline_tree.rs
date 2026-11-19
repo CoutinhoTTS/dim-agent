@@ -17,7 +17,7 @@ use futures_util::{FutureExt, future::join_all};
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use rutis::service;
 use rutis::{Ctx, Error};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     num::NonZeroU64,
@@ -237,8 +237,9 @@ impl TreeCommands {
             tree.store.batch_end_at(&key, target).await
         }
     }
-    /// Computes properties of one line at a fixed cutoff. Chain scope is invalid.
-    /// An ended line reads its persisted facts and has no publishing tail.
+    /// Computes properties at a fixed cutoff. Chain scope reads only published
+    /// facts, with each ancestor bounded by its inherited cut. An ended line
+    /// reads its persisted facts and has no publishing tail.
     pub async fn query(
         &self,
         id: String,
@@ -812,8 +813,12 @@ impl TimelineTree {
                     }
                 }
                 if let Some((timeline, through)) = &validate {
+                    let validation = tokio::time::timeout(
+                        owner.factory.startup_timeout(),
+                        crate::history::validate_context_boundary_at(timeline, *through),
+                    );
                     let boundary = tokio::select! {
-                        result = tokio::time::timeout(owner.factory.startup_timeout(), crate::history::validate_context_boundary_at(timeline, *through)) =>
+                        result = validation =>
                             result.map_err(|_| AgentError::Build("branch opening timed out".into()))??,
                         _ = owner.cancel.cancelled() => return Err(AgentError::Cancelled("branch creation".into())),
                     };
@@ -854,8 +859,12 @@ impl TimelineTree {
                     // through the existing path and the parent keeps
                     // dispatching.
                     let key = parent_key();
+                    let live = tokio::time::timeout(
+                        owner.factory.startup_timeout(),
+                        owner.keyed_live(parent, timeline, *cut, &key),
+                    );
                     let carried = tokio::select! {
-                        result = tokio::time::timeout(owner.factory.startup_timeout(), owner.keyed_live(parent, timeline, *cut, &key)) =>
+                        result = live =>
                             result.map_err(|_| AgentError::Build("branch opening timed out".into()))??,
                         _ = owner.cancel.cancelled() => return Err(AgentError::Cancelled("branch creation".into())),
                     };
@@ -865,8 +874,12 @@ impl TimelineTree {
                 }
                 let opened = context.timeline().append(opening.into())?;
                 tokio::select! {
-                    result = context.finish_opening(opened.sequence, owner.factory.startup_timeout()) => result?,
-                    _ = owner.cancel.cancelled() => return Err(AgentError::Cancelled("branch creation".into())),
+                    result = context.finish_opening(
+                        opened.sequence,
+                        owner.factory.startup_timeout(),
+                    ) => result?,
+                    _ = owner.cancel.cancelled() =>
+                        return Err(AgentError::Cancelled("branch creation".into())),
                 }
                 if let Some(first) = first {
                     context.branch().input(first).await?;
@@ -968,9 +981,9 @@ impl TimelineTree {
         id: &str,
         query: TimelineQuery,
     ) -> Result<dim_agent_runtime::TimelineQueryReply> {
-        if query.scope != TimelineQueryScope::Branch {
+        if query.scope == TimelineQueryScope::Chain && query.include_publishing {
             return Err(AgentError::InvalidInput(
-                "a tree query reads one line's own facts".into(),
+                "a tree chain query stops at the published head".into(),
             ));
         }
         if let Some(context) = self.owned_context(id) {
@@ -991,22 +1004,45 @@ impl TimelineTree {
                 "future timeline sequence {through}"
             )));
         }
-        let from = match query.from {
-            Some(position)
-                if position.branch_id == id
-                    && position.sequence > 0
-                    && position.sequence <= through =>
-            {
-                position.sequence
+        let mut scope = self.stored_scope(id, 1, through);
+        if query.scope == TimelineQueryScope::Chain {
+            let state = self.state.lock().unwrap();
+            let mut info = &state.ended.get(id).expect("the line ended").info;
+            let mut ancestors = Vec::new();
+            while let Some(parent) = &info.parent {
+                let cut = info
+                    .branch_point
+                    .expect("a child records its inherited cut");
+                if cut > 0 {
+                    ancestors.extend(self.stored_scope(parent, 1, cut).segments);
+                }
+                info = state
+                    .nodes
+                    .get(parent)
+                    .map(|node| &node.info)
+                    .or_else(|| state.ended.get(parent).map(|line| &line.info))
+                    .expect("the directory retains each ancestor");
             }
-            Some(_) => {
+            ancestors.reverse();
+            ancestors.extend(scope.segments);
+            scope.segments = ancestors;
+        }
+        if let Some(from) = query.from {
+            let index = scope
+                .segments
+                .iter()
+                .position(|segment| segment.branch_id == from.branch_id)
+                .ok_or_else(|| {
+                    AgentError::InvalidInput("query start is outside its branch scope".into())
+                })?;
+            if from.sequence == 0 || from.sequence > scope.segments[index].through {
                 return Err(AgentError::InvalidInput(
-                    "query start is outside its branch scope or sequence range".into(),
+                    "query start is outside its sequence range".into(),
                 ));
             }
-            None => 1,
-        };
-        let scope = self.stored_scope(id, from, through);
+            scope.segments.drain(..index);
+            scope.segments[0].from = from.sequence;
+        }
         let result = self
             .store
             .query(&scope, &query.query, query.page.as_ref())
@@ -1148,8 +1184,11 @@ impl TimelineTree {
                     unreachable!("input block projections retain array positions")
                 };
                 for (found, retire) in keys.iter().zip(retires).rev() {
-                    if matches!(found, QueryValue::Value { value: serde_json::Value::String(found) } if found == key)
-                    {
+                    let selected = match found {
+                        QueryValue::Value { value } => value.as_str() == Some(key),
+                        _ => false,
+                    };
+                    if selected {
                         return Ok(!matches!(
                             retire,
                             QueryValue::Value {
@@ -2340,8 +2379,9 @@ impl DynPlugin for BranchToolPlugin {
         })
     }
 }
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum LineRole {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum LineRole {
     Main,
     Tool,
     Host,
@@ -2634,6 +2674,7 @@ pub struct BranchLine {
     changed: tokio::sync::Notify,
     stop: CancellationToken,
 }
+#[service]
 impl BranchLine {
     async fn block(&self, key: &str) -> Result<Option<(String, String, bool)>> {
         let reply = self
@@ -2707,8 +2748,10 @@ impl BranchLine {
             unreachable!("branch block projections")
         };
         for ((found, text), retire) in keys.iter().zip(texts).zip(retires).rev() {
-            if matches!(found, QueryValue::Value { value: serde_json::Value::String(found) } if found == key)
-            {
+            if matches!(
+                found,
+                QueryValue::Value { value: serde_json::Value::String(found) } if found == key
+            ) {
                 let QueryValue::Value {
                     value: serde_json::Value::String(text),
                 } = text
@@ -3078,11 +3121,11 @@ impl BranchLine {
         }
     }
     /// The line committed its own `branch/end`.
-    fn ending(&self) -> bool {
+    pub fn ending(&self) -> bool {
         self.view.lock().unwrap().ending
     }
     /// The `nextCursor` of the line's latest successful read of `target`.
-    async fn cursor(&self, target: &str) -> Result<Option<u64>> {
+    pub async fn cursor(&self, target: &str) -> Result<Option<u64>> {
         if let Some(cursor) = self.view.lock().unwrap().cursors.get(target).copied() {
             return Ok(Some(cursor));
         }
@@ -3256,7 +3299,7 @@ impl BranchLine {
             .unwrap_or(0)
     }
     /// The line's role and parent, from its directory record.
-    fn resolved(&self) -> Option<(LineRole, Option<String>)> {
+    pub fn resolved(&self) -> Option<(LineRole, Option<String>)> {
         {
             let view = self.view.lock().unwrap();
             if let Some(role) = view.role {

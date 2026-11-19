@@ -346,7 +346,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "To resume this session:" => "Para retomar esta sessão:",
 
-        // composer/commands.rs: descriptions
+        // commands.rs: descriptions
         "start a new session" => "iniciar nova sessão",
         "show or set the reasoning effort" => "ver ou definir o esforço de raciocínio",
         "show or set the priority service tier (on|off)" => {
@@ -386,9 +386,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "exit" => "sair",
 
         // composer/palette.rs
-        "Enter select + default · ←/→ effort · Ctrl+B/F cursor · Ctrl+X clear saved · Esc clear/close" => {
-            "Enter selecionar + predefinido · ←/→ esforço · Ctrl+B/F cursor · Ctrl+X limpar guardado · Esc limpar/fechar"
-        }
         "Default for new sessions in {folder}: {model}" => {
             "Modelo predefinido para novas sessões em {folder}: {model}"
         }
@@ -473,6 +470,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         // models_panel.rs
         "Select a model" => "Selecionar modelo",
         "Loading models..." => "A carregar modelos…",
+        "Previous page" => "Página anterior",
+        "Next page" => "Página seguinte",
         "No models available. Connect a provider first." => {
             "Sem modelos disponíveis. Ligue primeiro um fornecedor."
         }
@@ -535,6 +534,33 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "Aplica-se a novos membros, incluindo agentes com nome."
         }
         "Existing members keep their models." => "Membros existentes mantêm os seus modelos.",
+        "Conversation model" => "Modelo da conversa",
+        "Selected: {model}" => "Selecionado: {model}",
+        "Model management" => "Gestão de modelos",
+        "Manage models" => "Gerir modelos",
+        "1 provider" => "1 fornecedor",
+        "{count} providers" => "{count} fornecedores",
+        "ready" => "pronto",
+        "no models" => "sem modelos",
+        "catalog unreadable" => "catálogo ilegível",
+        "{count} with missing limits" => "{count} sem limites",
+        "{count} unavailable" => "{count} indisponíveis",
+        "{count} disabled" => "{count} desativados",
+        "{count} without models" => "{count} sem modelos",
+        "{count} unreadable" => "{count} ilegíveis",
+        "{unavailable} unavailable, {disabled} disabled" => {
+            "{unavailable} indisponíveis, {disabled} desativados"
+        }
+        "Enter select + default · ←/→ effort · Tab section · Esc clear/close" => {
+            "Enter selecionar + predefinido · ←/→ esforço · Tab secção · Esc limpar/fechar"
+        }
+        "Enter change · Tab section · Esc clear/close" => {
+            "Enter alterar · Tab secção · Esc limpar/fechar"
+        }
+        "Enter manage · Tab section · Esc clear/close" => {
+            "Enter gerir · Tab secção · Esc limpar/fechar"
+        }
+        "Enter manage · Esc back" => "Enter gerir · Esc voltar",
         "unknown" => "desconhecido",
         "Subagent model policy saved" => "Política de modelos de subagentes guardada",
         "Subagent model policy changed elsewhere; choose again to reread it" => {
@@ -656,6 +682,12 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "The App Server is still {server} because other clients are using it (connections: {connections}, attached Sessions: {attached}, running turns: {running}); this {client} client uses it too. Run `dimcode daemon stop` when they are done, and the next start runs {client}." => {
             "O App Server continua a ser {server} porque outros clientes o estão a utilizar (ligações: {connections}, sessões associadas: {attached}, turnos em execução: {running}); este cliente {client} também o utiliza. Execute `dimcode daemon stop` quando terminarem; o próximo arranque executa {client}."
+        }
+        "The App Server is still using a different build of {server}. Some features may be unavailable. After active work finishes, exit this client, run `{command}`, then reopen it." => {
+            "O App Server continua a usar outra compilação de {server}. Algumas funcionalidades podem não estar disponíveis. Quando o trabalho em curso terminar, saia deste cliente, execute `{command}` e volte a abri-lo."
+        }
+        "The App Server's build could not be verified as this client's. If features are missing after an update, wait for active work to finish, exit this client, run `{command}`, then reopen it." => {
+            "Não foi possível confirmar que a compilação do App Server é a deste cliente. Se faltarem funcionalidades após uma atualização, aguarde o fim do trabalho em curso, saia deste cliente, execute `{command}` e volte a abri-lo."
         }
         "Upgrading the local store from format v{from} to v{to}; this can take a while on a large store." => {
             "A atualizar o armazenamento local do formato v{from} para v{to}; isto pode demorar algum tempo num armazenamento grande."

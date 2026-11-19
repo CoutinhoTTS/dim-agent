@@ -38,14 +38,6 @@ struct Capture {
     service: Arc<OnceLock<Arc<McpService>>>,
     mcp: Key<McpService>,
 }
-impl Capture {
-    fn new(names: &Names<'_>, service: Arc<OnceLock<Arc<McpService>>>) -> rutis::Result<Self> {
-        Ok(Self {
-            service,
-            mcp: names.key()?,
-        })
-    }
-}
 impl DynPlugin for Capture {
     fn name(&self) -> &str {
         "McpHttpTest"
@@ -116,7 +108,10 @@ impl Fixture {
                     .unwrap(),
             ),
             root.plugin(McpPlugin::new(&names, 0).unwrap()),
-            root.plugin(Capture::new(&names, capture.clone()).unwrap()),
+            root.plugin(Capture {
+                service: capture.clone(),
+                mcp: dim_app_server::mcp::owner_key(),
+            }),
         ];
         wait_active(
             &root,
@@ -1879,7 +1874,8 @@ async fn legacy_sse_accepts_default_message_events() {
         move || { let rx = messages.subscribe(); let stop = stop.clone(); async move {
             let endpoint = futures_util::stream::once(async { Ok::<_, Infallible>(Event::default().event("endpoint").data("/post?sessionId=fixture")) });
             let replies = futures_util::stream::unfold(rx, |mut rx| async move {
-                rx.recv().await.ok().map(|data| (Ok::<_, Infallible>(Event::default().data(data)), rx))
+                let data = rx.recv().await.ok()?;
+                Some((Ok::<_, Infallible>(Event::default().data(data)), rx))
             });
             Sse::new(endpoint.chain(replies).take_until(stop.cancelled_owned()))
         }}

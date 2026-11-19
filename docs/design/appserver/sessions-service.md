@@ -85,7 +85,7 @@ the contract refinements in §12.
 | D3 | The cap takes the lower preset, the union of `disallowedTools`, and keeps an `allowedTools` entry only when both sides allow that tool unconditionally | The lower preset alone; rejecting requests wider than the bound | The preset alone lets a requested `allowedTools` entry exceed the bound, which is unsound. The contract caps a wider request rather than rejecting it |
 | D4 | Without a starter, the bound is the host's Session defaults (`ServerConfig.session_defaults.permission_policy`) | A new host setting for automation | It is the host's existing answer to what a Session may do when nobody chose its policy. It adds no configuration, and a separate setting can be added later without breaking anything |
 | D5 | A starter that cannot be read fails the launch: `session_closed` or `branch_missing` when it is gone, `failed` when it cannot be restored, `reloading` while its Permission reloads | Falling back to the host bound | The launch fails closed: the host bound may be wider than the starter's policy |
-| D6 | `launch` replies `{sessionId, policy}` with the effective policy | `{sessionId}` only | The caller can record the authority a run got, and see that a cap took effect, without another read |
+| D6 | `launch` replies `{sessionId, policy, worktree?}` with the effective policy and, when requested, the [managed-worktree reply](../worktree-management.md#3-创建) | `{sessionId}` only | The caller can record the authority a run got, and see that a cap took effect, without another read |
 | D7 | `LaunchRequest.model` is `{providerId, modelId}` | A bare model id string | A model id is unique only within its provider. `{providerId, modelId}` is `ModelId`, the type of Agent profiles and of `session.create`'s explicit model |
 | D8 | `input` replies after publication | Replying at commit | `history {atLeast: sequence}` right after the reply must succeed (finding 7) |
 | D9 | `lookup` waits for pending publication, then scans; Rpc's `session.input_lookup` uses the same code | Scanning at once; a second scanner | An input that is committed but not yet published would read `unknown`, and Scheduler would mark a running input `lost` |
@@ -130,6 +130,8 @@ The call path from a consumer to a Session (a call path, not an assembly graph):
 | Session facade, Permission, Loop | Session, branch | Unchanged; read through public calls |
 | InputQueue withdrawal service | Branch | Added by S1 |
 
+`AgentDirectory` is private owner state shared by the Agents directory, index and Agent scope through a typed key. It has no public catalog name; public Session operations use `sessions`. The private dependency still controls assembly and cleanup ordering.
+
 ## 5. Service shape
 
 | Item | Content |
@@ -164,9 +166,12 @@ are the contract's ([A.1](../contracts/session-access.md#a1-the-sessions-service
   "policy?": { /* PermissionPolicy */ },
   "starter?": { "sessionId": "string", "branchId": "string" },
   "origin?": "automation",                             // absent: the caller's own work, `internal`
-  "title?": "string" }                                  // absent: none; SessionTitle writes it
+  "title?": "string",                                  // absent: none; SessionTitle writes it
+  "worktree?": { "base?": "string", "branch?": "string" } }
 // reply
-{ "sessionId": "string", "policy": { /* the effective PermissionPolicy */ } }
+{ "sessionId": "string", "policy": { /* the effective PermissionPolicy */ },
+  "worktree?": { "taskId": "string", "root": "string", "cwd": "string",
+                 "repository": "string", "base": "string", "branch": "string" } }
 ```
 
 **Policy.** The starter's current policy is the `PermissionState` of the starter's branch: Permission's dispatched
@@ -204,7 +209,7 @@ side's preset.
 | --- | --- |
 | Agent | `agent`, else the default Agent. An unknown id fails `agent_unknown` |
 | System prompt, tools | The Agent profile over the host Session defaults (`session_config`), as `session.create` without overrides |
-| `cwd` | Absolute, UTF-8 and canonicalized: the rule `session.create` applies, shared as one check |
+| `cwd` | Absolute, UTF-8 and canonicalized: the rule `session.create` applies, shared as one check. With `worktree`, this is the source workspace; the stored Session cwd is its mapped subtree in the new worktree |
 | `model` | The request's `model`, else the profile's. With a model-selection host (the product profile), it is resolved through the host Agents looks up on each call (`AgentIndex::model_selection`), as for Collaboration members; with none active, `reloading`. Otherwise the ids replace the defaults |
 | `permissionPolicy` | The effective policy |
 | `interactive` | `false` |
@@ -214,10 +219,12 @@ side's preset.
 | Protocol version | `PROTOCOL_VERSION` (3): written to the record, and registered with `insert_version` after creation, as `session.create` and Collaboration do. Rpc serves a loaded Session only once its version is registered, and current clients list it. Creation and registration run in one task, so they finish together even if the caller stops waiting |
 | Record | Prepared creation (`AgentIndex::create_session`): project authorization, then the owned record, as for `session.create` |
 
+**Managed worktree.** The optional `worktree` request and reply use the same owner types and creation/association/rollback path as `session.create`; their meaning belongs to [managed worktrees §3](../worktree-management.md#3-创建). Callers send the member only when `hello.features` advertises `sessions.launch.worktree` (native store and product home required). Without it, creation and the reply are unchanged. Git creation starts inside the owned creation task, so dropping the caller's result cannot abandon a half-created worktree. A failed Session creation invokes the owner's uncancelled, non-forcing cleanup and leaves unsafe-to-remove residue visible to `worktree.list`. Launch's existing policy cap, origin and non-interactive behavior are unchanged.
+
 Errors: `rejected` (shape, `cwd`, empty tool names in `policy`, an `origin` other than `automation`, a `title` that
 is not a string), `agent_unknown`, `session_closed` or `branch_missing` (the starter), `reloading` (also while the
 starter's Permission reloads), `failed` (model resolution, project authorization, storage, an unavailable stored
-Agent, a starter that cannot be restored, Session build).
+Agent, a starter that cannot be restored, Session build, or managed-worktree creation). A managed-worktree failure includes the owner's `worktree_*` code in its message; cleanup never replaces the original failure.
 
 A launch is not idempotent. If the reply is lost, the result can be an empty Session that no caller knows about. It
 is non-interactive and listed like any other Session — by `session.summaries`, and by `session.catalog` under the
@@ -478,9 +485,9 @@ a caller keeps its records and asks again later.
 
 ### 6.10 pending
 
-`{sessionId, branchId, inputId}` → `{pending}`; errors `rejected`, `session_closed`, `branch_missing`, `branch_ended`, `reloading`.
+`{sessionId, branchId, inputId}` → `{pending}`; errors `rejected`, `session_closed`, `branch_missing`, `branch_ended`, `reloading`, `failed`.
 
-The read answers whether the input is still pending on that branch under the rule of [session access §2](../contracts/session-access.md#2-data-and-state): pending from its `input/message` until `input/applied` followed by `input/consumed`, or `input/deleted`, references it. The branch's own InputQueue holds exactly that set, so the method reads it with `Session::service::<InputQueue>(branch)` — the path `withdraw` uses (§6.6) — and reads no Timeline. It acquires the Session like every method except `launch`, `delete` and `exists`, so an unloaded branch is restored for the answer.
+The read answers whether the input is still pending on that branch under the rule of [session access §2](../contracts/session-access.md#2-data-and-state): pending from its `input/message` until `input/applied` followed by `input/consumed`, or `input/deleted`, references it. The read synchronizes with dispatch at the captured published head as defined in session access §2, then reads the same InputQueue through `Session::service::<InputQueue>(branch)` — the path `withdraw` uses (§6.6). It reads no history and does not wait for turn completion. Dispatch failures return `failed`; branch closure and index reload end the wait with the existing lifecycle errors. It acquires the Session like every method except `launch`, `delete` and `exists`, so an unloaded branch is restored for the answer.
 
 An `inputId` the branch does not hold answers `false`; that covers both an id that was consumed or deleted and one a restart lost. A fixed loop reads this before it delivers its next window, so a round still held behind a running turn defers that window instead of queueing a second one.
 
@@ -611,7 +618,7 @@ job every five minutes adds about 288 a day. So the consumers delete them (D14):
 | `future_sequence` | `history` | `atLeast` or `through` beyond the published head | false |
 | `ambiguous` | `input`, `lookup` | More than one input has that `submissionId`, written before branches accepted each id once; nothing written | false |
 | `publication_unknown` | `input`, `withdraw` | Committed, publication not confirmed; resubmit, `lookup` or `history` after recovery | true |
-| `failed` | All | Session fault, storage, model resolution, project authorization, Session build; for `delete`, the Session's command output or rows could not be removed (§6.8) | false |
+| `failed` | All | Session fault, storage, model resolution, project authorization, Session build, [managed-worktree creation](../worktree-management.md#3-创建); for `delete`, the Session's command output or rows could not be removed (§6.8) | false |
 
 ## 10. Timing and conflicts
 
@@ -654,13 +661,13 @@ job every five minutes adds about 288 a day. So the consumers delete them (D14):
 
 - **Intro, §4, Appendix B, §8 (D3).** An Agents reload fails the calls in flight with `reloading`; callers do not
   reload (D1, #35).
-- **§3.1.** The `launch` arrow loses `source` and the reply gains `policy`.
+- **§3.1.** The `launch` arrow loses `source` and gains optional `worktree`; the reply gains `policy` and optional `worktree`.
 - **§7.** The policy cap is a convention for trusted callers, not a security boundary (§11).
 - **A.1.**
   - The sentence "A caller's `source` is fixed by Agents …" is removed: rutis passes no caller identity, and §9.3
     already withdrew the requirement.
-  - `launch` replies `{sessionId, policy}` and gains the errors `agent_unknown`, `session_closed` and
-    `branch_missing`.
+  - `launch` replies `{sessionId, policy, worktree?}` and gains the errors `agent_unknown`, `session_closed` and
+    `branch_missing`. Its optional `worktree` request and reply link to [managed worktrees §3](../worktree-management.md#3-创建).
   - `model` becomes `{providerId, modelId}`.
   - `stop` gains `reason?`.
   - `HistoryRequest` gains `limit?`, and `HistoryPage.events` are `AgentEvent` records of the branch.
@@ -910,7 +917,7 @@ changes are included; Scheduler and Workflow keep the existing S2 interface.
 ## Appendix A. Rust binding
 
 The types live next to `AgentIndex` in [agents/sessions.rs](../../../crates/dim-app-server/src/agents/sessions.rs). A Rust
-plugin in another crate uses the named service.
+plugin in another crate uses the named service. The following is a binding excerpt, not the complete DTO definitions; the linked source defines all request and reply fields.
 
 ```rust
 pub struct SessionRef { pub session_id: String, pub branch_id: String }

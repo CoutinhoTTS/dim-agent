@@ -10,15 +10,12 @@ use std::{
     io::Write,
     panic::{AssertUnwindSafe, catch_unwind},
     path::{Path, PathBuf},
-    sync::{
-        Arc, Mutex, MutexGuard, PoisonError, TryLockError,
-        atomic::{AtomicUsize, Ordering},
-    },
+    sync::{Arc, Condvar, Mutex, PoisonError},
     time::Duration,
 };
 
 /// The native store format this daemon creates and opens.
-pub const FORMAT: u32 = 50;
+pub const FORMAT: u32 = 52;
 /// The oldest schema the startup transaction upgrades: the first step of
 /// `UPGRADES`, which is ordered oldest first.
 const MIN_FORMAT: u32 = UPGRADES[0].0;
@@ -28,10 +25,9 @@ const MIN_FORMAT: u32 = UPGRADES[0].0;
 const CHECKPOINT_BYTES: u64 = 4 * 1024 * 1024;
 /// The WAL file is truncated to this size when a checkpoint restarts it.
 const WAL_LIMIT_BYTES: i64 = 64 * 1024 * 1024;
-/// The process connection's page cache in KiB. A measurement over a 650 MB
-/// store with 2,300 Sessions put their hot tail pages (about 20 MB) in cache
-/// from 32 MiB on; larger caches read no fewer bytes.
-const PAGE_CACHE_KIB: i64 = 32 * 1024;
+// #1673
+const WRITER_CACHE_KIB: i64 = 512;
+const READER_CACHE_KIB: i64 = 256;
 /// Indexes a format range had and the current schema no longer creates, with
 /// the first and last format that had them.
 const LEGACY_INDEXES: &[(&str, &str, u32, u32)] = &[
@@ -54,10 +50,48 @@ const LEGACY_INDEXES: &[(&str, &str, u32, u32)] = &[
         31,
     ),
 ];
+const PROVIDER_V51: &[(&str, &str)] = &[
+    (
+        "provider_bundle",
+        "CREATE TABLE provider_bundle (provider_id TEXT PRIMARY KEY, fingerprint TEXT, definition_fingerprint TEXT, pending INTEGER NOT NULL CHECK(pending IN (0,1)))",
+    ),
+    (
+        "provider_catalog_revision",
+        "CREATE TABLE provider_catalog_revision (id INTEGER PRIMARY KEY CHECK(id=1), revision TEXT NOT NULL)",
+    ),
+    (
+        "provider_query_records",
+        "CREATE TABLE provider_query_records (provider_id TEXT PRIMARY KEY REFERENCES providers(provider_id) ON DELETE CASCADE, enabled INTEGER NOT NULL, kind TEXT, credential_configured INTEGER NOT NULL, record TEXT NOT NULL)",
+    ),
+    (
+        "provider_query_records_by_state",
+        "CREATE INDEX provider_query_records_by_state ON provider_query_records(enabled,credential_configured,provider_id)",
+    ),
+    (
+        "provider_query_records_by_kind",
+        "CREATE INDEX provider_query_records_by_kind ON provider_query_records(kind,provider_id)",
+    ),
+    (
+        "provider_models",
+        "CREATE TABLE provider_models (provider_id TEXT NOT NULL REFERENCES providers(provider_id) ON DELETE CASCADE, model_id TEXT NOT NULL, source TEXT NOT NULL, entry TEXT NOT NULL, PRIMARY KEY(provider_id,model_id,source))",
+    ),
+    (
+        "provider_models_by_model",
+        "CREATE INDEX provider_models_by_model ON provider_models(model_id,provider_id)",
+    ),
+    (
+        "provider_models_insert",
+        "CREATE TRIGGER provider_models_insert AFTER INSERT ON providers BEGIN DELETE FROM provider_query_records WHERE provider_id=NEW.provider_id; INSERT INTO provider_query_records SELECT NEW.provider_id,coalesce(json_extract(record,'$.enabled'),0),json_extract(record,'$.kind'),coalesce(json_extract(record,'$.credential') IS NOT NULL OR json_extract(record,'$.auth.type')='anonymous' OR coalesce(json_extract(record,'$.credentialAuthority'),'static')!='static',0),json_remove(record,'$.models','$.userModels','$.modelConfigOverrides') FROM (SELECT CASE WHEN json_valid(NEW.record) THEN NEW.record ELSE '{}' END AS record); DELETE FROM provider_models WHERE provider_id=NEW.provider_id; INSERT OR IGNORE INTO provider_models SELECT NEW.provider_id,coalesce(json_extract(CASE WHEN type='object' THEN value ELSE '{}' END,'$.modelId'),json_extract(CASE WHEN type='object' THEN value ELSE '{}' END,'$.entry.modelId')),'default',value FROM json_each(CASE WHEN json_valid(NEW.record) THEN NEW.record ELSE '{}' END,'$.models') WHERE coalesce(json_extract(CASE WHEN type='object' THEN value ELSE '{}' END,'$.modelId'),json_extract(CASE WHEN type='object' THEN value ELSE '{}' END,'$.entry.modelId')) IS NOT NULL; INSERT OR IGNORE INTO provider_models SELECT NEW.provider_id,json_extract(CASE WHEN type='object' THEN value ELSE '{}' END,'$.modelId'),'user',value FROM json_each(CASE WHEN json_valid(NEW.record) THEN NEW.record ELSE '{}' END,'$.userModels') WHERE json_extract(CASE WHEN type='object' THEN value ELSE '{}' END,'$.modelId') IS NOT NULL; INSERT OR IGNORE INTO provider_models SELECT NEW.provider_id,json_extract(CASE WHEN type='object' THEN value ELSE '{}' END,'$.modelId'),'override',value FROM json_each(CASE WHEN json_valid(NEW.record) THEN NEW.record ELSE '{}' END,'$.modelConfigOverrides') WHERE json_extract(CASE WHEN type='object' THEN value ELSE '{}' END,'$.modelId') IS NOT NULL; END",
+    ),
+    (
+        "provider_models_update",
+        "CREATE TRIGGER provider_models_update AFTER UPDATE ON providers BEGIN DELETE FROM provider_query_records WHERE provider_id=NEW.provider_id; INSERT INTO provider_query_records SELECT NEW.provider_id,coalesce(json_extract(record,'$.enabled'),0),json_extract(record,'$.kind'),coalesce(json_extract(record,'$.credential') IS NOT NULL OR json_extract(record,'$.auth.type')='anonymous' OR coalesce(json_extract(record,'$.credentialAuthority'),'static')!='static',0),json_remove(record,'$.models','$.userModels','$.modelConfigOverrides') FROM (SELECT CASE WHEN json_valid(NEW.record) THEN NEW.record ELSE '{}' END AS record); DELETE FROM provider_models WHERE provider_id=NEW.provider_id; INSERT OR IGNORE INTO provider_models SELECT NEW.provider_id,coalesce(json_extract(CASE WHEN type='object' THEN value ELSE '{}' END,'$.modelId'),json_extract(CASE WHEN type='object' THEN value ELSE '{}' END,'$.entry.modelId')),'default',value FROM json_each(CASE WHEN json_valid(NEW.record) THEN NEW.record ELSE '{}' END,'$.models') WHERE coalesce(json_extract(CASE WHEN type='object' THEN value ELSE '{}' END,'$.modelId'),json_extract(CASE WHEN type='object' THEN value ELSE '{}' END,'$.entry.modelId')) IS NOT NULL; INSERT OR IGNORE INTO provider_models SELECT NEW.provider_id,json_extract(CASE WHEN type='object' THEN value ELSE '{}' END,'$.modelId'),'user',value FROM json_each(CASE WHEN json_valid(NEW.record) THEN NEW.record ELSE '{}' END,'$.userModels') WHERE json_extract(CASE WHEN type='object' THEN value ELSE '{}' END,'$.modelId') IS NOT NULL; INSERT OR IGNORE INTO provider_models SELECT NEW.provider_id,json_extract(CASE WHEN type='object' THEN value ELSE '{}' END,'$.modelId'),'override',value FROM json_each(CASE WHEN json_valid(NEW.record) THEN NEW.record ELSE '{}' END,'$.modelConfigOverrides') WHERE json_extract(CASE WHEN type='object' THEN value ELSE '{}' END,'$.modelId') IS NOT NULL; END",
+    ),
+];
 pub(super) const SCHEMA: &[(&str, &str)] = &[
     (
         "agent_store_format",
-        "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 50))",
+        "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 52))",
     ),
     (
         "settings_documents",
@@ -70,6 +104,46 @@ pub(super) const SCHEMA: &[(&str, &str)] = &[
     (
         "providers",
         "CREATE TABLE providers (provider_id TEXT NOT NULL PRIMARY KEY, version INTEGER NOT NULL CHECK(version > 0), record TEXT NOT NULL)",
+    ),
+    (
+        "provider_bundle",
+        "CREATE TABLE provider_bundle (provider_id TEXT PRIMARY KEY, fingerprint TEXT, definition_fingerprint TEXT, pending INTEGER NOT NULL CHECK(pending IN (0,1)), attempted INTEGER NOT NULL, naming_revision TEXT NOT NULL)",
+    ),
+    (
+        "provider_catalog_revision",
+        "CREATE TABLE provider_catalog_revision (id INTEGER PRIMARY KEY CHECK(id=1), revision TEXT NOT NULL, activation INTEGER NOT NULL)",
+    ),
+    (
+        "provider_sources",
+        "CREATE TABLE provider_sources (revision TEXT NOT NULL UNIQUE, image BLOB NOT NULL)",
+    ),
+    (
+        "provider_bases",
+        "CREATE TABLE provider_bases (provider_id TEXT PRIMARY KEY REFERENCES providers(provider_id) ON DELETE CASCADE, revision TEXT NOT NULL REFERENCES provider_sources(revision))",
+    ),
+    (
+        "provider_models",
+        "CREATE TABLE provider_models (provider_id TEXT NOT NULL REFERENCES providers(provider_id) ON DELETE CASCADE, model_id TEXT NOT NULL, source TEXT NOT NULL, position INTEGER NOT NULL, entry TEXT NOT NULL, PRIMARY KEY(provider_id,model_id,source))",
+    ),
+    (
+        "provider_models_by_model",
+        "CREATE INDEX provider_models_by_model ON provider_models(model_id,provider_id)",
+    ),
+    (
+        "provider_models_by_position",
+        "CREATE INDEX provider_models_by_position ON provider_models(provider_id,source,position)",
+    ),
+    (
+        "provider_names",
+        "CREATE TABLE provider_names (provider_id TEXT NOT NULL REFERENCES providers(provider_id) ON DELETE CASCADE, model_id TEXT NOT NULL, display_name TEXT NOT NULL, label TEXT, zdr INTEGER NOT NULL, PRIMARY KEY(provider_id,model_id))",
+    ),
+    (
+        "provider_model_state",
+        "CREATE TABLE provider_model_state (provider_id TEXT NOT NULL REFERENCES providers(provider_id) ON DELETE CASCADE, model_id TEXT NOT NULL, field TEXT NOT NULL, position INTEGER NOT NULL, value TEXT NOT NULL, PRIMARY KEY(provider_id,model_id,field))",
+    ),
+    (
+        "provider_name_keys",
+        "CREATE TABLE provider_name_keys (provider_id TEXT NOT NULL, key TEXT NOT NULL, model_id TEXT NOT NULL, PRIMARY KEY(provider_id,key,model_id), FOREIGN KEY(provider_id,model_id) REFERENCES provider_names(provider_id,model_id) ON DELETE CASCADE)",
     ),
     (
         "provider_selections",
@@ -276,7 +350,7 @@ const V45_COLUMNS: &str = "ALTER TABLE worktree_directories ADD COLUMN last_used
 /// The one-way upgrade steps, oldest first: the format a step starts from
 /// and the `SCHEMA` entries it adds, which are created in `SCHEMA` order,
 /// tables before their indexes. An upgrade also replaces the marker table.
-const UPGRADES: [(u32, &[&str]); 36] = [
+const UPGRADES: [(u32, &[&str]); 38] = [
     (
         13,
         &[
@@ -407,6 +481,29 @@ const UPGRADES: [(u32, &[&str]); 36] = [
     (47, &[]),
     (48, &[]),
     (49, &[]),
+    (
+        50,
+        &[
+            "provider_query_records",
+            "provider_query_records_by_state",
+            "provider_query_records_by_kind",
+            "provider_bundle",
+            "provider_catalog_revision",
+            "provider_models",
+            "provider_models_by_model",
+        ],
+    ),
+    (
+        51,
+        &[
+            "provider_model_state",
+            "provider_sources",
+            "provider_bases",
+            "provider_names",
+            "provider_name_keys",
+            "provider_models_by_position",
+        ],
+    ),
 ];
 
 fn format_table(version: u32) -> String {
@@ -419,6 +516,9 @@ fn format_table(version: u32) -> String {
 fn schema_of(version: u32) -> Vec<(&'static str, String)> {
     SCHEMA
         .iter()
+        .chain(PROVIDER_V51.iter().filter(|(name, _)| {
+            version == 51 && !SCHEMA.iter().any(|(current, _)| current == name)
+        }))
         .chain(super::text::SCHEMA)
         .chain(super::members::SCHEMA)
         .chain(super::arrays::SCHEMA)
@@ -455,6 +555,11 @@ fn schema_of(version: u32) -> Vec<(&'static str, String)> {
                         .expect("index definition")
                         .to_owned()
                 }
+                _ if version == 51 && name.starts_with("provider_") => PROVIDER_V51
+                    .iter()
+                    .find(|(n, _)| *n == name)
+                    .map_or(sql, |(_, sql)| *sql)
+                    .to_owned(),
                 _ => sql.to_owned(),
             };
             (name, sql)
@@ -970,44 +1075,141 @@ pub struct SqliteStorage {
     converted: Option<super::image_upgrade::Converted>,
 }
 /// The read-only connections that serve reads while the writer keeps its own
-/// (#599). Four let the catalog scan, a history page and the settings,
-/// provider and Session-file reads run together; reads are short calls, and a
-/// fifth connection adds a page cache without a measured gain.
+/// (#599). Up to four let a catalog scan, a history page and the settings,
+/// provider and Session-file reads run together. A reader is opened by the read
+/// that needs it, never at open, and idle holds at most one (#1673).
 const READ_CONNECTIONS: usize = 4;
 pub(super) struct Readers {
-    pub(super) connections: Vec<Mutex<Option<Connection>>>,
-    next: AtomicUsize,
+    state: Mutex<ReaderState>,
+    available: Condvar,
+    demand: bool,
+}
+struct ReaderState {
+    idle: Vec<Connection>,
+    open: usize,
+    running: usize,
+}
+struct ReaderLease<'a> {
+    readers: &'a Readers,
+    connection: Option<Connection>,
+}
+impl Drop for ReaderLease<'_> {
+    fn drop(&mut self) {
+        let mut state = self
+            .readers
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        state.running -= 1;
+        if let Some(connection) = self.connection.take() {
+            state.idle.push(connection);
+        }
+        if state.running == 0 {
+            while state.idle.len() > 1 {
+                close_reader(state.idle.pop().unwrap());
+                state.open -= 1;
+            }
+        }
+        self.readers.available.notify_one();
+    }
 }
 impl Readers {
-    /// Opens `READ_CONNECTIONS` read-only connections beside the writer.
-    fn open(path: &Path) -> Result<Self> {
-        let mut connections = Vec::with_capacity(READ_CONNECTIONS);
-        for _ in 0..READ_CONNECTIONS {
-            let connection = Connection::open_with_flags(
-                path,
-                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-            )
-            .map_err(storage)?;
-            connection
-                .busy_timeout(Duration::from_secs(5))
-                .map_err(storage)?;
-            connection
-                .pragma_update(None, "cache_size", -PAGE_CACHE_KIB)
-                .map_err(storage)?;
-            functions(&connection)?;
-            connections.push(Mutex::new(Some(connection)));
+    /// Readers for the daemon store, created on demand.
+    fn demand() -> Self {
+        Self {
+            state: Mutex::new(ReaderState {
+                idle: Vec::new(),
+                open: 0,
+                running: 0,
+            }),
+            available: Condvar::new(),
+            demand: true,
         }
-        Ok(Self {
-            connections,
-            next: AtomicUsize::new(0),
-        })
     }
     /// The read-only export opens one connection that serves its reads.
     fn none() -> Self {
         Self {
-            connections: Vec::new(),
-            next: AtomicUsize::new(0),
+            state: Mutex::new(ReaderState {
+                idle: Vec::new(),
+                open: 0,
+                running: 0,
+            }),
+            available: Condvar::new(),
+            demand: false,
         }
+    }
+    /// Runs `operation` on a reader.
+    fn run<T>(
+        &self,
+        path: &Path,
+        operation: impl FnOnce(&mut Connection) -> Result<T>,
+    ) -> Result<T> {
+        let mut lease = ReaderLease {
+            readers: self,
+            connection: None,
+        };
+        lease.connection = Some(self.acquire(path)?);
+        operation(
+            lease
+                .connection
+                .as_mut()
+                .expect("a reader was acquired above"),
+        )
+    }
+    /// An idle reader, a new one while below `READ_CONNECTIONS`, or a sleeping
+    /// wait for one to return.
+    fn acquire(&self, path: &Path) -> Result<Connection> {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.running += 1;
+        loop {
+            if let Some(connection) = state.idle.pop() {
+                return Ok(connection);
+            }
+            if state.open < READ_CONNECTIONS {
+                state.open += 1;
+                drop(state);
+                return match reader_connection(path) {
+                    Ok(connection) => Ok(connection),
+                    Err(error) => {
+                        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+                        state.open -= 1;
+                        Err(error)
+                    }
+                };
+            }
+            state = self
+                .available
+                .wait(state)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+    /// Read-only connections currently open. Feature `testing` only.
+    #[cfg(feature = "testing")]
+    fn live(&self) -> usize {
+        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.open
+    }
+}
+/// Opens one read-only reader (#599). It sets only the read path's pragmas and
+/// the query functions, not the writer's journal, sync or WAL settings.
+fn reader_connection(path: &Path) -> Result<Connection> {
+    let connection = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(storage)?;
+    connection
+        .busy_timeout(Duration::from_secs(5))
+        .map_err(storage)?;
+    connection
+        .pragma_update(None, "cache_size", -READER_CACHE_KIB)
+        .map_err(storage)?;
+    functions(&connection)?;
+    Ok(connection)
+}
+fn close_reader(connection: Connection) {
+    if let Err((_, failure)) = connection.close() {
+        tracing::error!(phase = "reader", %failure, "storage.transaction");
     }
 }
 /// SQLite's busy handler for the writer and a copy connection (#599): retry
@@ -1266,6 +1468,9 @@ impl SqliteStorage {
                         .chain(super::identities::SCHEMA)
                         .filter(|(name, _)| added.contains(name))
                         .filter(|(name, _)| {
+                            !(*from == 51 && *name == "provider_models_by_position")
+                        })
+                        .filter(|(name, _)| {
                             !(resume && *name == "timeline_events_branch_interrupts")
                         })
                     {
@@ -1315,6 +1520,39 @@ impl SqliteStorage {
                             connection.execute_batch(sql).map_err(storage)?;
                         }
                         super::members::backfill_v42(&connection)?;
+                    }
+                    if *from == 51 {
+                        if upgrade_from == 51 {
+                            connection.execute_batch("DROP TRIGGER provider_models_insert; DROP TRIGGER provider_models_update; DROP TABLE provider_query_records; DROP TABLE provider_models; ALTER TABLE provider_bundle ADD COLUMN attempted INTEGER NOT NULL DEFAULT 0; ALTER TABLE provider_bundle ADD COLUMN naming_revision TEXT NOT NULL DEFAULT '';  ALTER TABLE provider_catalog_revision ADD COLUMN activation INTEGER NOT NULL DEFAULT 0;").map_err(storage)?;
+                            for (_, sql) in SCHEMA.iter().filter(|(name, _)| {
+                                matches!(*name, "provider_models" | "provider_models_by_model")
+                            }) {
+                                connection.execute_batch(sql).map_err(storage)?;
+                            }
+                            for table in ["provider_bundle", "provider_catalog_revision"] {
+                                connection
+                                    .execute_batch(&format!(
+                                        "ALTER TABLE {table} RENAME TO {table}_old"
+                                    ))
+                                    .map_err(storage)?;
+                                connection
+                                    .execute_batch(
+                                        SCHEMA.iter().find(|(name, _)| *name == table).unwrap().1,
+                                    )
+                                    .map_err(storage)?;
+                                connection.execute_batch(&format!("INSERT INTO {table} SELECT * FROM {table}_old; DROP TABLE {table}_old")).map_err(storage)?;
+                            }
+                        }
+                        connection
+                            .execute_batch(
+                                SCHEMA
+                                    .iter()
+                                    .find(|(name, _)| *name == "provider_models_by_position")
+                                    .unwrap()
+                                    .1,
+                            )
+                            .map_err(storage)?;
+                        crate::provider::persistence::migrate(&connection)?;
                     }
                     if *from == 38 {
                         super::arrays::backfill(&connection)?;
@@ -1415,7 +1653,7 @@ impl SqliteStorage {
             .pragma_update(None, "journal_size_limit", WAL_LIMIT_BYTES)
             .map_err(storage)?;
         connection
-            .pragma_update(None, "cache_size", -PAGE_CACHE_KIB)
+            .pragma_update(None, "cache_size", -WRITER_CACHE_KIB)
             .map_err(storage)?;
         connection
             .pragma_update(None, "foreign_keys", true)
@@ -1425,7 +1663,7 @@ impl SqliteStorage {
             .pragma_update(None, "fullfsync", true)
             .map_err(storage)?;
         let _ = std::fs::remove_file(startup_note_path(&path));
-        let readers = Readers::open(&path)?;
+        let readers = Readers::demand();
         Ok(Arc::new(Self {
             connection: Mutex::new(Some(connection)),
             readers,
@@ -1521,48 +1759,45 @@ impl SqliteStorage {
             let connection = guard
                 .as_mut()
                 .ok_or_else(|| storage("SQLite storage is closed"))?;
-            let result = catch_unwind(AssertUnwindSafe(|| operation(connection)));
-            outcome(connection, result)
+            guarded(connection, operation)
         })
         .await
         .map_err(storage)?
     }
-    /// Runs a read on one of the read-only connections (#599). A read sees the
-    /// last commit when its statement starts and does not wait for the
-    /// writer's transaction or fsync. An available reader is reused before
-    /// waiting for a busy reader; sequential reads reuse its page cache.
-    /// The read-only export store's one connection serves both.
+    /// Runs a read on a read-only connection (#599), opening a reader when the
+    /// read needs one. A read sees the last commit when its statement starts
+    /// and does not wait for the writer's transaction or fsync. An available
+    /// reader is reused before waiting for a busy reader; sequential reads
+    /// reuse its page cache. The read-only export store reads on its one
+    /// connection.
     pub(crate) async fn run_read<T: Send + 'static>(
         self: &Arc<Self>,
         operation: impl FnOnce(&mut Connection) -> Result<T> + Send + 'static,
     ) -> Result<T> {
         let admitted = self.admit()?;
         tokio::task::spawn_blocking(move || {
-            let reader = admitted.0.reader();
-            match reader {
-                Some(mut guard) => {
-                    let connection = guard
-                        .as_mut()
-                        .ok_or_else(|| storage("SQLite storage is closed"))?;
-                    let result = catch_unwind(AssertUnwindSafe(|| operation(connection)));
-                    outcome(connection, result)
-                }
-                None => {
-                    let mut guard = admitted
-                        .0
-                        .connection
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner);
-                    let connection = guard
-                        .as_mut()
-                        .ok_or_else(|| storage("SQLite storage is closed"))?;
-                    let result = catch_unwind(AssertUnwindSafe(|| operation(connection)));
-                    outcome(connection, result)
-                }
+            if admitted.0.readers.demand {
+                return admitted.0.readers.run(&admitted.0.path, |connection| {
+                    guarded(connection, operation)
+                });
             }
+            let mut guard = admitted
+                .0
+                .connection
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let connection = guard
+                .as_mut()
+                .ok_or_else(|| storage("SQLite storage is closed"))?;
+            guarded(connection, operation)
         })
         .await
         .map_err(storage)?
+    }
+    /// Read-only connections currently open. Feature `testing` only.
+    #[cfg(feature = "testing")]
+    pub fn reader_connections(&self) -> usize {
+        self.readers.live()
     }
     fn admit(self: &Arc<Self>) -> Result<Operation> {
         let mut admission = self.admission.lock().unwrap();
@@ -1595,7 +1830,7 @@ impl SqliteStorage {
                 .pragma_update(None, "journal_size_limit", WAL_LIMIT_BYTES)
                 .map_err(storage)?;
             connection
-                .pragma_update(None, "cache_size", -PAGE_CACHE_KIB)
+                .pragma_update(None, "cache_size", -WRITER_CACHE_KIB)
                 .map_err(storage)?;
             connection
                 .pragma_update(None, "foreign_keys", false)
@@ -1609,25 +1844,6 @@ impl SqliteStorage {
         })
         .await
         .map_err(storage)?
-    }
-    fn reader(&self) -> Option<MutexGuard<'_, Option<Connection>>> {
-        let readers = &self.readers;
-        if readers.connections.is_empty() {
-            return None;
-        }
-        for connection in &readers.connections {
-            match connection.try_lock() {
-                Ok(guard) => return Some(guard),
-                Err(TryLockError::Poisoned(error)) => return Some(error.into_inner()),
-                Err(TryLockError::WouldBlock) => {}
-            }
-        }
-        let index = readers.next.fetch_add(1, Ordering::Relaxed) % readers.connections.len();
-        Some(
-            readers.connections[index]
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner),
-        )
     }
     pub(crate) async fn run_read_cancellable<T: Send + 'static>(
         self: &Arc<Self>,
@@ -1716,15 +1932,19 @@ impl SqliteStorage {
                 idle.await;
             }
             tokio::task::spawn_blocking(move || {
-                for reader in &db.readers.connections {
-                    let mut slot = reader.lock().unwrap_or_else(PoisonError::into_inner);
-                    if let Some(connection) = slot.take()
-                        && let Err((connection, failure)) = connection.close()
-                    {
-                        *slot = Some(connection);
+                let mut readers = db
+                    .readers
+                    .state
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
+                while let Some(connection) = readers.idle.pop() {
+                    if let Err((connection, failure)) = connection.close() {
+                        readers.idle.push(connection);
                         return Err(storage(failure));
                     }
+                    readers.open -= 1;
                 }
+                drop(readers);
                 let mut guard = db
                     .connection
                     .lock()
@@ -1756,6 +1976,15 @@ impl SqliteStorage {
     }
 }
 
+/// Runs `operation` on a connection and rolls back a panic so the connection
+/// returns to the writer or the reader pool usable.
+fn guarded<T>(
+    connection: &mut Connection,
+    operation: impl FnOnce(&mut Connection) -> Result<T>,
+) -> Result<T> {
+    let result = catch_unwind(AssertUnwindSafe(|| operation(connection)));
+    outcome(connection, result)
+}
 /// The result of a connection call, with a panic rolled back so the
 /// connection stays usable.
 fn outcome<T>(connection: &Connection, result: std::thread::Result<Result<T>>) -> Result<T> {
@@ -1774,6 +2003,124 @@ fn outcome<T>(connection: &Connection, result: std::thread::Result<Result<T>>) -
             Err(failure)
         }
     }
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn saturated_reads_drain_errors_panics_and_cancellation_before_close() {
+    use std::{future::Future, task::Poll};
+
+    let directory = std::env::temp_dir().join(format!("dim-reader-close-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let db = SqliteStorage::open(directory.join("dimcode.sqlite")).unwrap();
+    db.run(|connection| {
+        connection
+            .execute(
+                "INSERT INTO settings_documents (source, version, document, imported_revision) \
+                 VALUES ('user/test', 1, 'committed', 'revision')",
+                [],
+            )
+            .map_err(storage)?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+
+    let (entered, mut ready) = tokio::sync::mpsc::unbounded_channel();
+    let mut releases = Vec::new();
+    let mut holders = Vec::new();
+    for index in 0..READ_CONNECTIONS {
+        let db = db.clone();
+        let entered = entered.clone();
+        let (release, blocked) = std::sync::mpsc::channel();
+        releases.push(release);
+        holders.push(tokio::spawn(async move {
+            db.run_read(move |connection| {
+                entered.send(()).unwrap();
+                blocked.recv_timeout(Duration::from_secs(10)).unwrap();
+                match index {
+                    0 => {
+                        connection.execute_batch("BEGIN").map_err(storage)?;
+                        panic!("reader flow panic")
+                    }
+                    1 => Err(storage("reader flow error")),
+                    _ => Ok(()),
+                }
+            })
+            .await
+        }));
+    }
+    for _ in 0..READ_CONNECTIONS {
+        ready.recv().await.unwrap();
+    }
+    let mut reads = Vec::new();
+    for _ in 0..24 {
+        let db = db.clone();
+        reads.push(tokio::spawn(async move {
+            db.run_read(|connection| {
+                assert!(
+                    connection.is_autocommit(),
+                    "a panic must roll back its read transaction"
+                );
+                connection
+                    .query_row(
+                        "SELECT document FROM settings_documents WHERE source='user/test'",
+                        [],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .map_err(storage)
+            })
+            .await
+        }));
+    }
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let cancelled = {
+        let db = db.clone();
+        let cancel = cancel.clone();
+        tokio::spawn(async move {
+            db.run_read_cancellable(cancel, |_| -> Result<()> {
+                panic!("cancelled queued reads must not start SQL")
+            })
+            .await
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if db.readers.state.lock().unwrap().running == READ_CONNECTIONS + 25 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("the reader pool must saturate before shutdown");
+    assert_eq!(db.reader_connections(), READ_CONNECTIONS);
+    cancel.cancel();
+    let mut close = Box::pin(db.close());
+    assert!(std::future::poll_fn(|cx| Poll::Ready(close.as_mut().poll(cx).is_pending())).await);
+    assert!(db.run_read(|_| Ok(())).await.is_err());
+    for release in releases {
+        release.send(()).unwrap();
+    }
+    tokio::time::timeout(Duration::from_secs(10), async {
+        for (index, holder) in holders.into_iter().enumerate() {
+            assert_eq!(holder.await.unwrap().is_err(), index < 2);
+        }
+        for read in reads {
+            assert_eq!(read.await.unwrap().unwrap(), "committed");
+        }
+        assert!(matches!(
+            cancelled.await.unwrap(),
+            Err(AgentError::Cancelled(_))
+        ));
+        close.await.unwrap();
+    })
+    .await
+    .expect("every accepted read and shutdown must finish after the pool is released");
+    assert_eq!(db.reader_connections(), 0);
+    let reopened = SqliteStorage::open(directory.join("dimcode.sqlite")).unwrap();
+    reopened.close().await.unwrap();
+    std::fs::remove_dir_all(directory).unwrap();
 }
 
 /// What `vacuum_store` reclaimed, as bytes on disk before and after, and the
@@ -1802,6 +2149,16 @@ pub(super) fn validate_backup_schema(connection: &Connection) -> Result<()> {
         return Err(storage("Backup requires the current native storage schema"));
     }
     Ok(())
+}
+
+/// Whether `connection`'s database is exactly the current [`FORMAT`]'s schema
+/// with its marker: what an offline tool requires before it touches a store it
+/// did not create.
+pub(super) fn is_current_format(connection: &Connection) -> Result<bool> {
+    Ok(
+        known_format(&schema(connection)?, Some(i64::from(FORMAT))) == Some(FORMAT)
+            && markers(connection)? == [i64::from(FORMAT)],
+    )
 }
 
 /// Reclaims free pages in an existing store by rewriting it with `VACUUM`

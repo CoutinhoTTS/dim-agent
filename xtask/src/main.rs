@@ -1,6 +1,7 @@
 mod allocation;
 mod app_server;
 mod catalog;
+mod comment_links;
 mod modules;
 mod npm;
 mod plugins;
@@ -67,6 +68,7 @@ async fn run() -> std::result::Result<(), Box<dyn std::error::Error>> {
             catalog::check(&root()).await?;
             types::check(&root())?;
             npm::check(&root())?;
+            comment_links::check(&root())?;
         }
         Some("types") => types::write(&root())?,
         _ => {
@@ -85,44 +87,15 @@ async fn migrate_prompt_references() -> std::result::Result<(), Box<dyn std::err
             "usage: cargo run -p xtask -- migrate-prompt-references DB SESSION BRANCH".into(),
         );
     };
-    let storage = dim_app_server::storage::SqliteStorage::open(PathBuf::from(database))?;
-    let store = dim_app_server::storage::SqliteTimelineStore::new(storage);
-    let directory = store
-        .branches(session)
-        .await?
-        .into_iter()
-        .map(|stored| (stored.info.id.clone(), stored.info))
-        .collect::<BTreeMap<_, _>>();
-    let mut current = directory.get(branch).ok_or("branch not found")?;
-    let mut ancestors = Vec::new();
-    while let Some(parent) = &current.parent {
-        if ancestors.len() >= directory.len() {
-            return Err("branch directory cycle".into());
-        }
-        ancestors.push((
-            parent.clone(),
-            current.branch_point.ok_or("missing branch point")?,
-        ));
-        current = directory.get(parent).ok_or("parent branch not found")?;
-    }
-    ancestors.reverse();
-    let timeline = Arc::new(
-        Timeline::restore(
-            rutis::Ctx::root()?,
-            TimelineKey {
-                session_id: session.clone(),
-                branch_id: branch.clone(),
-            },
-            ancestors,
-            store,
-        )
-        .await?,
-    );
-    let result = dim_agent_capabilities::prompt::migrate_prompt_references(timeline.clone()).await;
-    dim_agent_runtime::core::close_timeline(&timeline).await?;
+    let migrated = dim_app_server::storage::migrate_prompt_references(
+        PathBuf::from(database),
+        session.clone(),
+        branch.clone(),
+    )
+    .await?;
     println!(
         "{}",
-        json!({"sessionId":session,"branchId":branch,"written":result?})
+        json!({"sessionId":session,"branchId":branch,"written":migrated.written})
     );
     Ok(())
 }
@@ -136,7 +109,7 @@ async fn agent_with_store(store: Arc<dyn TimelineStore>) -> dim_agent_runtime::R
     let mut builder = AgentBuilder::new(AgentConfig::default());
     dim_agent_capabilities::defaults::mock_hosts(&mut builder);
     dim_agent_capabilities::defaults::install(&mut builder);
-    builder.timeline_store(store);
+    builder.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(store));
     MinimalHost::start(&builder).await
 }
 fn root() -> PathBuf {

@@ -15,13 +15,13 @@ use crate::{
     timeline_tree::TreeCommands,
     tool_registry::{ToolConcurrency, ToolContribution, ToolHandler, ToolRegistry, definition},
 };
-use chrono::{DateTime, TimeZone, Utc};
 use dim_agent_runtime::{
-    AgentBuilder, AgentError, CAPABILITY_RELOADING, Feature, Names, QueryEvent, QueryFilter,
-    QueryOperand, QueryOrder, QueryOrderKey, QueryOutput, QueryPage, QuerySelect, QuerySpec,
-    TimelineQuery, TimelineQueryDirection, TimelineQueryScope,
+    AgentBuilder, Feature, Names, QueryEvent, QueryFilter, QueryOperand, QueryOrder, QueryOrderKey,
+    QueryOutput, QueryPage, QuerySelect, QuerySpec, TimelineQuery, TimelineQueryDirection,
+    TimelineQueryScope,
 };
 use dim_agent_types::*;
+use jiff::Timestamp;
 use rutis::Ctx;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use serde_json::{Value, json};
@@ -130,20 +130,16 @@ impl DynPlugin for RecallPlugin {
 struct RecallTool(Arc<TreeCommands>);
 
 impl RecallTool {
-    fn facade_error(error: AgentError) -> HostError {
-        match error {
-            AgentError::Reloading(_) => HostError::Cancelled(CAPABILITY_RELOADING.into()),
-            error => HostError::failed(error.to_string()),
-        }
-    }
-
     async fn run(
         &self,
         call: ToolCall,
         context: ToolExecutionContext,
         cancel: CancellationToken,
     ) -> Result<ToolResult, HostError> {
-        let branch = self.0.get(&context.branch_id).map_err(Self::facade_error)?;
+        let branch = self
+            .0
+            .get(&context.branch_id)
+            .map_err(HostError::from_agent)?;
         let arguments = match Arguments::parse(&call.input) {
             Ok(arguments) => arguments,
             Err(message) => return Ok(ToolResult::error(message)),
@@ -151,19 +147,31 @@ impl RecallTool {
         if arguments.open.is_none() && (arguments.about.is_some() || arguments.tool.is_some()) {
             return tokio::select! {
                 _ = cancel.cancelled() => Err(HostError::Cancelled("recall".into())),
-                result = search::run(&self.0, &branch, &context.branch_id, &arguments, &cancel) => result,
+                result = search::run(&self.0, &branch, &context.branch_id, &arguments, &cancel) =>
+                    result,
             };
         }
         let head = branch.sequence();
         if arguments.open.is_some() {
             return tokio::select! {
                 _ = cancel.cancelled() => Err(HostError::Cancelled("recall".into())),
-                answer = search::open(&self.0, &branch, &context.branch_id, head, &arguments, &cancel) => answer,
+                answer =
+                    search::open(&self.0, &branch, &context.branch_id, head, &arguments, &cancel) =>
+                    answer,
             };
         }
         tokio::select! {
             _ = cancel.cancelled() => Err(HostError::Cancelled("recall".into())),
-            answer = search::index(&self.0, &branch, &context.branch_id, &context.turn_id, head, &arguments, &cancel) => answer,
+            answer = search::index(
+                &self.0,
+                &branch,
+                &context.branch_id,
+                &context.turn_id,
+                head,
+                &arguments,
+                &cancel,
+            ) =>
+                answer,
         }
     }
 }
@@ -1772,18 +1780,16 @@ fn preset(preset: &PermissionPreset) -> &'static str {
     }
 }
 
-fn time(millis: u64) -> DateTime<Utc> {
-    Utc.timestamp_millis_opt(millis as i64)
-        .single()
-        .unwrap_or_default()
+fn time(millis: u64) -> Timestamp {
+    Timestamp::from_millisecond(millis as i64).unwrap_or(Timestamp::UNIX_EPOCH)
 }
 
 fn clock(millis: u64) -> String {
-    time(millis).format("%H:%M").to_string()
+    time(millis).strftime("%H:%M").to_string()
 }
 
 fn date(millis: u64) -> String {
-    time(millis).format("%Y-%m-%d").to_string()
+    time(millis).strftime("%Y-%m-%d").to_string()
 }
 
 /// The projection behind `recall`, for flow tests that answer recorded

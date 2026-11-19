@@ -1,7 +1,10 @@
 //! A local account service and relay for DimOAuth flows: device and browser
 //! token grants, refresh rotation, userinfo, the `type=dim` model list, usage
 //! and a streaming chat endpoint.
-#![allow(dead_code)]
+#![expect(
+    dead_code,
+    reason = "the fixture serves every account flow; each test uses part of it"
+)]
 use axum::{
     Json, Router,
     body::Body,
@@ -19,6 +22,8 @@ use std::{
     },
 };
 
+type Svc = Arc<Service>;
+
 #[derive(Default)]
 pub struct Service {
     /// `METHOD path` of every request, with its grant type for tokens.
@@ -35,6 +40,8 @@ pub struct Service {
     /// `expires_in` of the next issued token only; absent means one hour.
     pub expires_in: Mutex<Option<Value>>,
     pub models: Mutex<Option<Value>>,
+    pub models_wait: AtomicBool,
+    pub models_release: tokio::sync::Notify,
     pub reset_keys: Mutex<Vec<String>>,
     pub reset_forbidden: AtomicBool,
     pub title_requests: Mutex<Vec<(String, Value)>>,
@@ -131,7 +138,7 @@ pub async fn start() -> Fixture {
     let app = Router::new()
         .route(
             "/oauth/device_authorization",
-            post(move |State(s): State<Arc<Service>>, body: String| {
+            post(move |State(s): State<Svc>, body: String| {
                 let base = device_base.clone();
                 let form = form(&body);
                 async move {
@@ -143,7 +150,7 @@ pub async fn start() -> Fixture {
         )
         .route(
             "/oauth/token",
-            post(|State(s): State<Arc<Service>>, body: String| async move {
+            post(|State(s): State<Svc>, body: String| async move {
                 let form = form(&body);
                 let grant = form.get("grant_type").cloned().unwrap_or_default();
                 s.record(format!("POST /oauth/token {grant}"));
@@ -168,7 +175,7 @@ pub async fn start() -> Fixture {
         )
         .route(
             "/oauth/userinfo",
-            get(|State(s): State<Arc<Service>>, headers: HeaderMap| async move {
+            get(|State(s): State<Svc>, headers: HeaderMap| async move {
                 s.record("GET /oauth/userinfo".into());
                 if bearer(&headers).is_empty() {
                     return unauthorized();
@@ -179,7 +186,7 @@ pub async fn start() -> Fixture {
         )
         .route(
             "/oauth/revoke",
-            post(|State(s): State<Arc<Service>>, body: String| async move {
+            post(|State(s): State<Svc>, body: String| async move {
                 let form = form(&body);
                 s.record(format!("POST /oauth/revoke {}", form["token"]));
                 StatusCode::OK
@@ -187,17 +194,19 @@ pub async fn start() -> Fixture {
         )
         .route(
             "/v1/models",
-            get(|State(s): State<Arc<Service>>, headers: HeaderMap| async move {
+            get(|State(s): State<Svc>, headers: HeaderMap| async move {
                 s.record("GET /v1/models".into());
+                if s.models_wait.load(Ordering::SeqCst) { s.models_release.notified().await; }
                 if s.rejects(&headers) {
                     return unauthorized();
                 }
-                Json(s.models.lock().unwrap().clone().unwrap_or_else(default_models)).into_response()
+                let models = s.models.lock().unwrap().clone().unwrap_or_else(default_models);
+                Json(models).into_response()
             }),
         )
         .route(
             "/api/me/usage",
-            get(|State(s): State<Arc<Service>>, headers: HeaderMap| async move {
+            get(|State(s): State<Svc>, headers: HeaderMap| async move {
                 s.record("GET /api/me/usage".into());
                 if s.rejects(&headers) {
                     return unauthorized();
@@ -217,7 +226,7 @@ pub async fn start() -> Fixture {
         )
         .route(
             "/api/me/referral",
-            get(|State(s): State<Arc<Service>>, headers: HeaderMap| async move {
+            get(|State(s): State<Svc>, headers: HeaderMap| async move {
                 s.record("GET /api/me/referral".into());
                 if s.rejects(&headers) { return unauthorized(); }
                 Json(json!({"success":true,"data":{"enabled":true,"eligible":true,
@@ -227,7 +236,7 @@ pub async fn start() -> Fixture {
         )
         .route(
             "/api/me/usage-resets",
-            get(|State(s): State<Arc<Service>>, headers: HeaderMap| async move {
+            get(|State(s): State<Svc>, headers: HeaderMap| async move {
                 s.record("GET /api/me/usage-resets".into());
                 if s.rejects(&headers) { return unauthorized(); }
                 Json(json!({"success":true,"data":{"window":{"batches":[{
@@ -238,7 +247,7 @@ pub async fn start() -> Fixture {
         )
         .route(
             "/api/me/usage-resets/apply",
-            post(|State(s): State<Arc<Service>>, headers: HeaderMap, Json(body): Json<Value>| async move {
+            post(|State(s): State<Svc>, headers: HeaderMap, Json(body): Json<Value>| async move {
                 s.record(format!("POST /api/me/usage-resets/apply {body}"));
                 if s.rejects(&headers) { return unauthorized(); }
                 if s.reset_forbidden.load(Ordering::SeqCst) {
@@ -261,7 +270,7 @@ pub async fn start() -> Fixture {
         )
         .route(
             "/v1/web-search",
-            post(|State(s): State<Arc<Service>>, headers: HeaderMap, Json(body): Json<Value>| async move {
+            post(|State(s): State<Svc>, headers: HeaderMap, Json(body): Json<Value>| async move {
                 s.record(format!(
                     "POST /v1/web-search {}:{}",
                     body["query"].as_str().unwrap_or_default(),
@@ -279,7 +288,7 @@ pub async fn start() -> Fixture {
         )
         .route(
             "/v1/session/rename",
-            post(|State(s): State<Arc<Service>>, headers: HeaderMap, Json(body): Json<Value>| async move {
+            post(|State(s): State<Svc>, headers: HeaderMap, Json(body): Json<Value>| async move {
                 s.record("POST /v1/session/rename".into());
                 s.title_requests.lock().unwrap().push((bearer(&headers), body));
                 if s.rejects(&headers) {
@@ -295,7 +304,7 @@ pub async fn start() -> Fixture {
         )
         .route(
             "/v1/chat/completions",
-            post(|State(s): State<Arc<Service>>, headers: HeaderMap| async move {
+            post(|State(s): State<Svc>, headers: HeaderMap| async move {
                 s.record("POST /v1/chat/completions".into());
                 s.chat_bearers.lock().unwrap().push(bearer(&headers));
                 if s.rejects(&headers) {

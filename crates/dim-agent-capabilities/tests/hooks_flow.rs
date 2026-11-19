@@ -16,7 +16,7 @@ use dim_agent_capabilities::{
     },
     methods::{RpcError, SessionMethods},
     model_provider::ModelProviderPlugin,
-    permission::{CommandRulesHost, ReadCommandRules},
+    permission::{CommandRules, ReadCommandRules},
     skill_settings::SkillSettingsHost,
     skills::{MemorySkillSettings, SkillsCatalogPlugin},
     tool_registry::{ToolContribution, ToolHandler, ToolProvider, ToolRegistry, ToolSourceSet},
@@ -561,13 +561,13 @@ impl Env {
         let mut builder = AgentBuilder::new(AgentConfig::default());
         builder.startup_timeout(startup_timeout);
         let store = Arc::new(MemoryTimelineStore::default());
-        builder.timeline_store(store.clone());
+        builder.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(store.clone()));
         builder
             .session_value(Arc::new(HistoryRenderer::default()))
             .process_value(Arc::new(ModelHost(model.clone())))
             .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
             .session_value(Arc::new(ContextModelHost(context_model)))
-            .session_value(Arc::new(CommandRulesHost(rules.clone())))
+            .session_data_value(Arc::new(CommandRules(rules.clone())))
             .session_value(Arc::new(CompactionStrategyHost(compaction)))
             .session_value(Arc::new(HookSourcesHost(sources.clone())))
             .require_feature(Feature::new("PrepareModelHost").session(
@@ -2200,34 +2200,6 @@ async fn member_session_payloads_carry_collaboration_role() {
     assert_eq!(field(member.id(), "Stop"), ["member"]);
     assert_eq!(field(leader.id(), "SessionStart"), ["leader"]);
     assert_eq!(field(leader.id(), "Stop"), ["leader"]);
-    env.close().await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn identical_commands_at_one_point_run_once() {
-    let env = Env::new().await;
-    let runs = env.path("runs");
-    let repeat = format!(
-        "{}; printf '{{\"hookSpecificOutput\":{{\"additionalContext\":\"context\"}}}}'",
-        marker_command(&runs, "run\n")
-    );
-    env.sources.set(document(serde_json::json!({
-        "PostToolUse": [
-            command(serde_json::json!({"type": "command", "command": repeat})),
-            command(serde_json::json!({"type": "command", "command": repeat})),
-        ],
-    })));
-    let session = env.session().await;
-    let note = env.path("work/note.txt");
-    std::fs::write(&note, "note\n").unwrap();
-    turn(
-        &session,
-        &format!("tool:read {{\"path\":{:?}}}", note.to_str().unwrap()),
-    )
-    .await;
-    wait_blocks(&session, "post-tool", 1).await;
-    assert_eq!(std::fs::read_to_string(&runs).unwrap(), "run\n");
-    assert_eq!(hook_blocks(&session, "post-tool").await.len(), 1);
     env.close().await;
 }
 

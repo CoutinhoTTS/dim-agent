@@ -416,10 +416,12 @@ impl DynPlugin for TransportPlugin {
                             Ok(accepted) => accepted,
                             Err(error) => {
                                 tracing::warn!(%error, "Unix accept failed; retrying");
+                                let retry =
+                                    tokio::time::sleep(std::time::Duration::from_millis(100));
                                 tokio::select! {
                                     biased;
                                     _ = closing() => return Ok(()),
-                                    _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {},
+                                    _ = retry => {}
                                 }
                                 continue;
                             }
@@ -538,7 +540,8 @@ async fn upgrade(
         .on_upgrade(move |socket| async move {
             let tracker = hub.tasks.clone();
             let task = tracker.spawn(async move {
-                run_ws(hub, socket, Entry::Bare).await;
+                let closing = hub.closing();
+                run_ws(hub, socket, Entry::Bare, closing).await;
             });
             let _ = task.await;
         })
@@ -621,31 +624,46 @@ impl Writer {
 #[cfg(any(unix, windows))]
 async fn run_local(hub: Arc<ConnectionHub>, stream: LocalStream) {
     let (read, write) = tokio::io::split(stream);
+    let closing = hub.closing();
     run_connection(
         hub,
         Reader::Local(BufReader::new(read), Vec::new()),
         Writer::Local(write),
         Entry::Local,
+        closing,
     )
     .await;
 }
-pub(crate) async fn run_ws(hub: Arc<ConnectionHub>, socket: WebSocket, entry: Entry) {
+pub(crate) async fn run_ws(
+    hub: Arc<ConnectionHub>,
+    socket: WebSocket,
+    entry: Entry,
+    closing: CancellationToken,
+) {
     let (write, read) = socket.split();
-    run_connection(hub, Reader::Ws(read), Writer::Ws(write), entry).await;
+    run_connection(hub, Reader::Ws(read), Writer::Ws(write), entry, closing).await;
 }
 async fn run_connection(
     hub: Arc<ConnectionHub>,
     mut reader: Reader,
     mut writer: Writer,
     entry: Entry,
+    closing: CancellationToken,
 ) {
     let local = entry == Entry::Local;
-    let (connection, mut outbound) = Connection::new(hub.clone(), entry);
+    let (connection, mut outbound) = Connection::new(hub.clone(), entry, closing);
     let closed = connection.closed.clone();
     let timeout = hub.config().write_timeout;
     let writer_task = tokio::spawn(async move {
         loop {
-            let mut frame = tokio::select! {biased;_=closed.cancelled()=>break,frame=outbound.recv()=>match frame{Some(frame)=>frame,None=>break}};
+            let mut frame = tokio::select! {
+                biased;
+                _ = closed.cancelled() => break,
+                frame = outbound.recv() => match frame {
+                    Some(frame) => frame,
+                    None => break,
+                },
+            };
             let bytes = std::mem::take(&mut frame.bytes);
             let result = tokio::time::timeout(timeout, writer.write(bytes)).await;
             if !matches!(result, Ok(Ok(()))) {
@@ -755,6 +773,8 @@ async fn run_connection(
                             Ok(Reply::Hello(HelloResult {
                                 instance_id,
                                 server_version: SERVER_VERSION,
+                                build_id: dim_agent_capabilities::build::build_id()
+                                    .map(str::to_owned),
                                 protocol_version: params.protocol_version,
                                 daemon_profile: hub.config().daemon_profile.clone(),
                                 features: (params.protocol_version >= 3).then(|| {
@@ -772,6 +792,7 @@ async fn run_connection(
                                                 methods.push("session.catalog.origins");
                                                 methods.push("session.catalog.workspaces");
                                                 methods.push("session.catalog.includeClosed");
+                                                methods.push("session.catalog.acpHistory");
                                                 methods.push("session.catalog.automation");
                                             }
                                             methods
@@ -805,7 +826,10 @@ async fn run_connection(
                                         if hub.config().database_path.is_some()
                                             && hub.config().product_home.is_some()
                                         {
-                                            features.push("session.create.worktree");
+                                            features.extend([
+                                                "session.create.worktree",
+                                                "sessions.launch.worktree",
+                                            ]);
                                         }
                                         if params.protocol_version >= 3 {
                                             features.extend([
@@ -813,7 +837,7 @@ async fn run_connection(
                                                 "session.history.detail",
                                             ]);
                                         }
-                                        if local {
+                                        if trusted {
                                             features.push("session.model.preview");
                                         }
                                         if local && hub.config().product_home.is_some() {

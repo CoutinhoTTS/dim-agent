@@ -2,7 +2,7 @@
 //! name through its `dyn HostDispatch` key as a process plugin calls it.
 use super::*;
 use dim_agent_capabilities::permission::{
-    CommandRulesHost, NoCommandRules, Permission, PermissionState,
+    CommandRules, NoCommandRules, Permission, PermissionState,
 };
 use dim_agent_runtime::testing::{branch_events, chain_events};
 use dim_agent_runtime::{Agent, Session};
@@ -14,6 +14,9 @@ use std::sync::OnceLock;
 
 #[path = "workflow_reports.rs"]
 mod workflow_reports;
+
+#[path = "sessions_launch_worktree.rs"]
+mod managed_launch;
 
 #[path = "idle_unload.rs"]
 pub(super) mod idle_unload;
@@ -128,18 +131,9 @@ struct HeldRules {
 }
 struct HeldRulesPart(
     HeldRules,
-    Key<CommandRulesHost>,
+    Key<CommandRules>,
     rutis::host::Key<dim_app_server::collaboration::Collaboration>,
 );
-impl HeldRulesPart {
-    fn new(
-        names: &dim_agent_runtime::Names<'_>,
-        a0: HeldRules,
-        a1: Key<CommandRulesHost>,
-    ) -> rutis::Result<Self> {
-        Ok(Self(a0, a1, names.key()?))
-    }
-}
 impl rutis::host::DynPlugin for HeldRulesPart {
     fn name(&self) -> &str {
         "held-rules"
@@ -159,7 +153,7 @@ impl rutis::host::DynPlugin for HeldRulesPart {
             }
             ctx.provide_at(
                 self.1.clone(),
-                Arc::new(CommandRulesHost(Arc::new(NoCommandRules))),
+                Arc::new(CommandRules(Arc::new(NoCommandRules))),
             )?;
             Ok(rutis::host::Effect::Done)
         })
@@ -184,6 +178,54 @@ struct Setup {
     loads: Option<idle_unload::Loads>,
     /// The model instead of the echo model.
     model: Option<Arc<dyn dim_agent_capabilities::host::ModelDriver>>,
+    creation: Option<managed_launch::CreationControl>,
+    dispatch_gate: Option<Arc<PendingDispatchGate>>,
+}
+
+#[derive(Default)]
+struct PendingDispatchGate {
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+struct PendingDispatchPart {
+    gate: Arc<PendingDispatchGate>,
+    dispatcher: Key<dim_agent_runtime::Dispatcher>,
+}
+
+impl rutis::host::DynPlugin for PendingDispatchPart {
+    fn name(&self) -> &str {
+        "pending-dispatch-gate"
+    }
+    fn injects(&self) -> Vec<rutis::host::TypeKey> {
+        vec![self.dispatcher.erase()]
+    }
+    fn apply<'a>(
+        &'a self,
+        ctx: &'a rutis::Ctx,
+    ) -> rutis::host::BoxFuture<'a, rutis::Result<rutis::host::Effect>> {
+        Box::pin(async move {
+            let gate = self.gate.clone();
+            ctx.require_at(&self.dispatcher)?.subscribe(
+                ctx,
+                "pending-dispatch-gate",
+                &["input/message"],
+                move |event| {
+                    let gate = gate.clone();
+                    Box::pin(async move {
+                        if matches!(&event.kind, EventKind::InputMessage(data)
+                            if data.submission_id.as_deref() == Some("pending:dispatch-gate"))
+                        {
+                            gate.entered.notify_one();
+                            gate.release.notified().await;
+                        }
+                        Ok(())
+                    })
+                },
+            )?;
+            Ok(rutis::host::Effect::Done)
+        })
+    }
 }
 pub(super) async fn serve_sessions(database: Option<std::path::PathBuf>) -> Served {
     serve_with(Setup {
@@ -215,11 +257,11 @@ async fn serve_with(setup: Setup) -> Served {
     config.session_defaults.tools = Some(vec!["confirm".into()]);
     config.session_defaults.permission_policy = serde_json::from_value(host_policy()).unwrap();
     let mut builder = AgentBuilder::new(AgentConfig::default());
-    builder.timeline_store(
+    builder.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(
         setup
             .store
             .unwrap_or_else(|| Arc::new(dim_agent_runtime::MemoryTimelineStore::default())),
-    );
+    ));
     if let Some(controls) = setup.controls {
         builder.require_feature(super::session_typescript::ControlledGate::feature(controls));
     }
@@ -232,15 +274,15 @@ async fn serve_with(setup: Setup) -> Served {
                 prompt::InitialPromptConfiguration,
             };
             builder
-                .session_value(Arc::new(PromptHost(Arc::new(EmptyPromptHost))))
+                .session_data_value(Arc::new(PromptHost(Arc::new(EmptyPromptHost))))
                 .session_value(Arc::new(InitialPromptConfiguration::fixed(None)))
                 .require_feature(
                     Feature::new("held-rules").session("held-rules", move |names| {
-                        Ok(Box::new(HeldRulesPart::new(
-                            names,
+                        Ok(Box::new(HeldRulesPart(
                             rules.clone(),
                             names.key()?,
-                        )?))
+                            Key::of(),
+                        )))
                     }),
                 );
             defaults::install_with_prompt_capability(&mut builder, ModelProviderPlugin::new);
@@ -273,6 +315,20 @@ async fn serve_with(setup: Setup) -> Served {
         }),
     );
     sessions.install(&mut builder);
+    if let Some(creation) = setup.creation {
+        creation.install(&mut builder);
+    }
+    if let Some(gate) = setup.dispatch_gate {
+        builder.require_feature(Feature::new("pending-dispatch-gate").branch(
+            "pending-dispatch-gate",
+            move |names| {
+                Ok(Box::new(PendingDispatchPart {
+                    gate: gate.clone(),
+                    dispatcher: names.key()?,
+                }))
+            },
+        ));
+    }
     if let Some(loads) = setup.loads {
         loads.install(&mut builder);
     }
@@ -1116,20 +1172,17 @@ async fn history_pages_the_branch_through_a_fixed_sequence_on_batch_boundaries()
 
     let mut after = 0;
     let mut events = vec![];
-    let mut through = None;
-    while through != Some(after) {
-        let mut request = at(json!({"after":after,"limit":1}));
-        if let Some(through) = through {
-            request["through"] = json!(through);
-        }
+    let mut through = head;
+    while through != after {
+        let request = at(json!({"after":after,"through":through,"limit":1}));
         let page = sessions.ok("history", request).await;
-        through = Some(page["through"].as_u64().unwrap());
+        through = page["through"].as_u64().unwrap();
         let page = page["events"].as_array().unwrap().clone();
         assert!(!page.is_empty());
         after = page.last().unwrap()["sequence"].as_u64().unwrap();
         events.extend(page);
     }
-    assert_eq!(through, Some(head));
+    assert_eq!(through, head);
     assert_eq!(
         Value::Array(events),
         serde_json::to_value(branch_events(&session, "main", ..=head).await.unwrap()).unwrap()
@@ -1141,6 +1194,7 @@ async fn history_pages_the_branch_through_a_fixed_sequence_on_batch_boundaries()
         first
     );
 
+    let future = 1_000_000;
     for (request, code) in [
         (at(json!({"after":inside})), "rejected"),
         (at(json!({"through":inside})), "rejected"),
@@ -1148,8 +1202,8 @@ async fn history_pages_the_branch_through_a_fixed_sequence_on_batch_boundaries()
         (at(json!({"limit":0})), "rejected"),
         (at(json!({"limit":257})), "rejected"),
         (at(json!({"atLeast":first,"through":first})), "rejected"),
-        (at(json!({"atLeast":head + 1})), "future_sequence"),
-        (at(json!({"through":head + 1})), "future_sequence"),
+        (at(json!({"atLeast":future})), "future_sequence"),
+        (at(json!({"through":future})), "future_sequence"),
         (
             json!({"sessionId":session.id(),"branchId":"missing"}),
             "branch_missing",
@@ -2204,6 +2258,102 @@ async fn node_crash_resubmission_gets_the_original_receipt() {
     let recovered = sessions.ok("lookup", json!({"sessionId":target.id(),"branchId":"main","submissionId":"settlement:crash:append"})).await;
     assert_eq!(recovered["inputId"], receipt["value"]["inputId"]);
     assert_eq!(branch_events(&target, "main", ..).await.unwrap().iter().filter(|event| matches!(&event.kind, EventKind::InputMessage(data) if data.submission_id.as_deref() == Some("settlement:crash:append"))).count(), 1);
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pending_waits_for_published_input_dispatch_and_abandonment_is_local() {
+    let gate = Arc::new(PendingDispatchGate::default());
+    let Served {
+        server,
+        agent,
+        sessions,
+        mut client,
+        ..
+    } = serve_with(Setup {
+        dispatch_gate: Some(gate.clone()),
+        ..Default::default()
+    })
+    .await;
+    client_session(&mut client, &agent, host_policy()).await;
+    let session = awaiting_approval(&sessions, &agent).await;
+    sessions
+        .ok(
+            "input",
+            input(
+                &session,
+                "pending:dispatch-gate",
+                json!([{"type":"text","text":"hold dispatch"}]),
+            ),
+        )
+        .await;
+    tokio::time::timeout(Duration::from_secs(5), gate.entered.notified())
+        .await
+        .unwrap();
+    let held = sessions
+        .ok(
+            "input",
+            input(
+                &session,
+                "pending:behind-dispatch",
+                json!([{"type":"text","text":"later"}]),
+            ),
+        )
+        .await;
+    let sequence = held["sequence"].as_u64().unwrap();
+    assert!(session.sequence("main").unwrap() >= sequence);
+    assert!(session.dispatch_watch("main").unwrap().borrow().sequence < sequence);
+    let request = json!({"sessionId":session.id(),"branchId":"main","inputId":held["inputId"]});
+    {
+        let waiting = sessions.ok("pending", request.clone());
+        tokio::pin!(waiting);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut waiting)
+                .await
+                .is_err(),
+            "pending must wait for the acknowledged input to reach InputQueue"
+        );
+    }
+    assert!(
+        !session.is_closing(),
+        "abandoning a read must not close its Session"
+    );
+    assert!(session.dispatch_watch("main").unwrap().borrow().sequence < sequence);
+    {
+        let waiting = sessions.call("pending", request.clone());
+        tokio::pin!(waiting);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut waiting)
+                .await
+                .is_err()
+        );
+        server.restart("Agents").await.unwrap();
+        let reply = tokio::time::timeout(Duration::from_secs(5), &mut waiting)
+            .await
+            .unwrap();
+        assert_eq!(reply["error"]["code"], "reloading", "{reply}");
+    }
+    let waiting = sessions.ok("pending", request.clone());
+    tokio::pin!(waiting);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut waiting)
+            .await
+            .is_err()
+    );
+    gate.release.notify_one();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(5), &mut waiting)
+            .await
+            .unwrap(),
+        json!({"pending":true})
+    );
+    assert!(
+        session.state("main").unwrap().running,
+        "pending does not wait for the approval-held turn to end"
+    );
+    session.close().await.unwrap();
+    assert_eq!(sessions.error("pending", request).await, "session_closed");
     server.shutdown();
     server.join().await.unwrap();
 }

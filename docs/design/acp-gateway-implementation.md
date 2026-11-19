@@ -109,7 +109,10 @@ Zed 保持原有启动入口：npm 包的 `dim` 与 `dimcode` 别名指向同一
 
 可选：`session.list` / `session.summaries`、`session.close`、`session.delete`、`session.fork`、`session.permission.get/update`、`approval.respond`；临时 MCP 使用 `mcp.temporary.capabilities`、`session.mcp_temporary.attach/renew/detach`；每 Session 用 `session.methods` 发现 `session.input.withdraw`、`session.question.respond`、`session.context.usage` 和 `attachment.put`。缺少撤回时取消直接走现有 `session.stop`，并披露已接收输入可能保留的限制。
 
-模型选择只读取 `provider.list`、`provider.catalog`、`provider.selection` 的安全投影。Provider 管理已有独立插件和公开读写接口，接线及尚未满足的 ACP 合同见 §4.5；首版不通过这些接口写入共享产品配置。账户认证只允许 §4.4 列出的 `account.providers/status` 和属于当前连接的 login attempt 调用；§4.7 的 `/usage` 额外允许当前模型 provider 的 `account.usage` 安全读取。不开放 `account.*` 代理、recover/logout、settings、持久 MCP 配置、插件管理或凭据接口。也不把 ACP 方法名直接转成原生 RPC 方法名。
+模型选择通过 `provider.models.query` 的 `selectableOnly:true` 获取可用模型页，按 `next` 继续读取，组成 ACP 要求的完整选项列表；过滤条件由 Provider 拥有方执行。Provider 管理已有独立插件和公开读写接口，接线及尚未满足的 ACP 合同见 §4.5；首版不通过这些接口写入共享产品配置。账户认证只允许 §4.4 列出的 `account.providers/status` 和属于当前连接的 login attempt 调用；§4.7 的 `/usage` 额外允许当前模型 provider 的 `account.usage` 安全读取。不开放 `account.*` 代理、recover/logout、settings、持久 MCP 配置、插件管理或凭据接口。也不把 ACP 方法名直接转成原生 RPC 方法名。
+
+模型和 effort 配置选项需要 `provider.models.query` 与 `session.model.update`；
+仅提供 `provider.catalog` 不满足该功能的依赖。版本边界沿用 §2，不增加全目录查询回退。
 
 ## 4. 稳定 ACP v1 方法逐项映射
 
@@ -160,7 +163,7 @@ new/load/resume/fork 通过独立的 [TemporaryMcp](plugins/TemporaryMcp.md) Ses
 | 表面 | 首版 | 原生路径 / 缺口 |
 | --- | --- | --- |
 | `session/fork` | 仅在原生同时声明 `session.fork` 与 `session.turn.get` 时提供；单独启用 SDK `unstable_session_fork` | 无锚点时固定 main head；有 Lody turnId 时定位该真实 turn 的 `turn/end` sequence。`session.fork {sessionId,at}` → 新 id → attach。原生 rest-point 检查决定能否 fork；活动 turn 内的切点失败，不偷偷改成早一点的切点 |
-| `providers/list` | 读取可复用；整组语义待选择 | `provider.management {}` → 安全可配置 Provider 投影；ACP 的 providers capability 同时承诺三个方法，不能只凭 list 可读就声明，见 §4.5 |
+| `providers/list` | 读取可复用；整组语义待选择 | `provider.management.list {after?,limit?}` 逐页读取安全可配置 Provider 概要；ACP 的 providers capability 同时承诺三个方法，不能只凭 list 可读就声明，见 §4.5 |
 | `providers/set` | 编辑可复用；共享设置或临时覆盖待选择 | `provider.management {providerId}` → 同版本 `provider.update` 是共享设置的路径；全量 headers、固定 driver/auth 和凭据归属须准确转换。临时覆盖另缺采用接口，见 §4.5 |
 | `providers/disable` | 禁用可复用；共享设置或临时覆盖待选择 | 同版本 `provider.update {patch:{enabled:false}}` 是持久化禁用，不是 CLI disconnect、delete、logout 或清除临时 override；不能混淆，见 §4.5 |
 | `mcp/message` | 不支持 | 没有现成 MCP-over-ACP 入口 |
@@ -240,7 +243,7 @@ Provider 业务已经由 daemon 的 [ProviderPlugin](../../crates/dim-app-server
 
 | ACP 方法 | 可复用的原生调用 | 必须保留的语义 |
 | --- | --- | --- |
-| `providers/list {}` | `provider.management {}` → `{drivers,providers,errors}` | `providerId` 保留原值；只列能兑现配置合同的记录。静态连接的 driver/实际 endpoint 决定 `supported` 和 `current.apiType`；enabled=false 才投影 `current:null`，不能把未登录、缺凭据或缺模型伪装成禁用。只返回非秘密 `apiType/baseUrl`，不返回 headers、credential、secret ref、账户或 proxy 身份。损坏记录按原生 errors 处理，不能伪装为已禁用记录 |
+| `providers/list {}` | `provider.management.list {after?,limit?}` → `{drivers,providers,errors,next}`，按 `next` 读完所请求列表 | `providerId` 保留原值；只列能兑现配置合同的记录。静态连接的 driver/实际 endpoint 决定 `supported` 和 `current.apiType`；enabled=false 才投影 `current:null`，不能把未登录、缺凭据或缺模型伪装成禁用。只返回非秘密 `apiType/baseUrl`，不返回 headers、credential、secret ref、账户或 proxy 身份。损坏记录按原生 errors 处理，不能伪装为已禁用记录 |
 | `providers/set {providerId,apiType,baseUrl,headers?}` | 先 `provider.management {providerId}`，取得当前 `version/connection/actions`；再 `provider.update {providerId,expectedVersion,patch}` | 已知 id、可编辑记录、可表达的协议和认证方式才能进入写入；patch 组合 `baseUrl`、`enabled:true`、完整 header 操作及必要的 credential 操作，在原生一次 CAS 事务中提交。成功只返回 ACP `{}`，不返回原生管理快照 |
 | `providers/disable {providerId}` | 同样读取管理快照，再 `provider.update {providerId,expectedVersion,patch:{enabled:false}}` | 保留凭据、路由、模型和 Provider 身份；禁用后仍可发现且 `current:null`。明确未知 id 按草案幂等返回 `{}`；已存在但受限、损坏或管理读取失败不是未知 id。required=true 必须拒绝，不能以当前模型选中了该 Provider 就推导 required |
 
@@ -411,17 +414,20 @@ cancel 到达 submit reply 之前时保留 cancel 标志，等拿到 input id �
 
 ## 7. 输出投影
 
+出站 ACP 消息只用协议 crate 的类型（response 类型、`SessionUpdate`），字段在序列化前设好；不在序列化后再按 JSON Pointer 回读补字段。`_meta.lody` 走类型的 `meta`，`_meta["dim/history"]` 走 session response 的 `meta`。session update 只在 `projection::notification` 这一处变成 wire JSON：crate 会省略等于自身默认值的字段，而 tool call 的 `kind`/`status` 一直是客户端能读到的，所以这里把两者写全。
+
 | 原生数据 | ACP 输出 / 首版处理 |
 | --- | --- |
-| main `session.model.progress` 与 `step/text` / `step/thinking` | agent message/thought chunks；每 request 维护已发 Unicode scalar 区间。committed delta 是事实，progress 是可替换预览；重放、重连及 emoji 不重复、不截断 |
-| main `input/message` + applied/consumed/deleted | 有效 user message chunks；raw-only inputs 不显示，deleted 输入不进入有效回放；自己发出的 prompt 不重复 echo |
-| `step/tool-use-start`、`step/tool-use`、`step/tool-call`、`step/tool-start` | tool_call / tool_call_update，真实工具名、输入、位置和 pending/in_progress；ACP toolCallId 由 `(branchId,requestId,callId)` 确定性编码，避免模型在后续 request 重用 callId。native 回答仍用原始身份，显示 id 不充当 task id |
+| main `session.model.progress` 与 `step/text` / `step/thinking` | agent message/thought chunks；每 request 维护已发 Unicode scalar 区间。committed delta 是事实，progress 是可替换预览；重放、重连及 emoji 不重复、不截断。每个 chunk 带 `messageId`：assistant 文本/思考用产生它的 model request id，实时流与 `session/load` 重放同一条消息得到同一个 id |
+| main `input/message` + applied/consumed/deleted | 有效 user message chunks；raw-only inputs 不显示，deleted 输入不进入有效回放；自己发出的 prompt 不重复 echo。chunk 的 `messageId` 是该输入自己的 Timeline event id，加载的 Skill 那一行属于操作者的这条消息 |
+| Gateway 自己产生的文本（submit check 的拒绝、命令失败） | 仍是 agent message chunk，`messageId` 由产生它的那次操作决定，放在 `gateway` 命名空间下，因此不可能是 model request id 或 input event id：拒绝用 `["gateway","refusal",<submissionId>]`，命令失败用 `["gateway","command",<commandId>]`。这两条都不是某个模型答复的延续，id 只承诺同一操作稳定、不同操作不同，客户端据此把提示归到发起它的操作 |
+| `step/tool-use-start`、`step/tool-use`、`step/tool-call`、`step/tool-start` | tool_call / tool_call_update，真实工具名、输入、位置和 pending/in_progress；ACP toolCallId 由 `(branchId,requestId,callId)` 确定性编码，避免模型在后续 request 重用 callId。native 回答仍用原始身份，显示 id 不充当 task id。title 命名工具作用的对象而非工具名：`read`/`write`/`edit` 用路径（`read` 给了范围时带行区间），`glob`/`grep` 用模式加被搜索路径，`web_fetch` 用 URL，`exec` 用模型自己的 `title` 或压成一行的命令，`web_search` 用其 `query`；kind 按工具映射到 `ToolKind`；带路径调用输出 `locations`，`read` 带起始行。Dim 在模型开始写调用时就发 `tool-use-start`，此时参数未知，因此第一条消息只命名工具，携带 `rawInput` 的那条消息才带 title/kind/locations |
 | `step/tool-completed` | 工具已执行的预览；不能提前宣称 tool batch 已提交到上下文 |
-| `step/tool-result` | 对应 tool_call_update completed/failed；只读 ToolResult.content 作为文本，最多 16 KiB；保留失败标记，不把 structuredContent 当模型结果 |
+| `step/tool-result` | 对应 tool_call_update completed/failed；编辑类工具的文件变更作为 `ToolCallContent::Diff` 前置：`edit` 每个替换各一条，带它自己的 `oldText`/`newText`；`write` 只有 `newText`（整文件写没有旧文本），失败结果不带 diff；随后只读 ToolResult.content 作为文本，最多 16 KiB；保留失败标记，不把 structuredContent 当模型结果 |
 | `approval.request`、`approval.resolved`、`approval.cancelled` | permission 请求和本地 waiter 结算；all branches 的审批均转交。显式保留 branchId/requestId，不能用 callId 单独关联 |
 | `SessionStore` title notice / native list metadata | 标准 session_info_update；按 revision 更新。manual 可映射 explicit；auto 不足以区分 generated/fallback，省略不可靠的 titleSource |
 | `session.context.usage` | 有值时 `usage_update {used:ceil(estimatedInputTokens),size:floor(contextWindow)}`，两个字段按 ACP 的 `u64` 输出 JSON 整数。这是估算上下文量。缺数据时不发送，未知 cost 省略，不能写 cost:0。不要把累计 token 消耗当上下文占用 |
-| `context/compaction-start`、`context/compaction`、完成压缩显示摘要 | 真正的 compaction activity；start/terminal 配对，completed/skipped/failed/cancelled 区分。显示摘要按 start（缺省时按终态 sequence）完成同一活动并释放开始记录；只透传真实 diagnostics，摘要不补造节省量/耗时。回放与实时重复事实不重复发送活动 |
+| `context/compaction-start`、`context/compaction`、完成压缩显示摘要 | 客户端在 initialize 声明 `session.compaction` 时走标准 `compaction_update`：`in_progress` 从 `compaction-start` 发出，终态从 `context/compaction` 或完成显示摘要发出，`compactionId` 由 start sequence 决定、两者相同；`failed`/`cancelled` 各自映射协议状态，真实原因放进 `error`。skipped 没有对应的协议状态，按 `completed` 结束且不带 `error`，也不带未声明客户端看到的 `Skipped: <reason>` 内容。不发 `summary` 字段：终态 `context/compaction` 的 `replacement` 是模型的新上下文，按产出原样保存，`replacement_parts` 定位其策略文本、digest 与 pinned 部分，它不是为用户写的摘要；完成显示摘要只有 start、strategy 与 insufficient_space，不带文本。未声明的客户端保持原工具活动：`tool_call`/`tool_call_update`，title `Context compaction`，`_meta.lody.activity` 带 automatic、diagnostics 与 failureReason；skipped 的原因作为该次活动的文本内容出现。两种形态都按 start/terminal 配对，回放与实时重复事实不重复发送 |
 | `exec/started`、`exec/ended` | 后台任务的真实开始/终态，按 §8.3 生成独立 tool lifecycle + task metadata；不把原 exec 工具返回当后台结束 |
 | `collaboration/request`、`collaboration/delivered`、`collaboration/result` | 按 §8.3 投影最小 subagent snapshot 流；执行身份是 request，不能把可复用的 member Session 当作一次执行 |
 | child branch 普通内容 | 首版不混入主线 assistant 输出，也不借状态流声明已经接入 child 输出流 |
@@ -449,7 +455,7 @@ Core README 在 capability catalog 中提到 sessionConfig，但固定版本的 
 | --- | --- | --- |
 | `_lody/session/history/read` / sessionHistory | 有 history | 已登记 Session；请求必须指定 version:2；拒绝本连接 prompt 在途。一次只输出一个有界展示页，返回 through/before/complete；不累积完整历史，旧完整读取合同明确报错。其他客户端仍可能运行，按固定头处理，不假定 Session 全局静止 |
 | `_meta.lody.forkAtTurn` / forkAtTurn | 有 native turn id、turn/end、session.fork | 只接有终态的真实 main turn，按 §4.3 调用；锚点未知、非 main、未结束均报错。标准更新带真实 turnId；不拿 tool call id 或 request id 冒充 turnId |
-| compaction / `_meta.lody.activity` | 有完整 compaction facts | §7；metadata 只增强标准工具活动，普通 ACP 仍可显示 |
+| compaction / `_meta.lody.activity` | 有完整 compaction facts | §7；声明了 `session.compaction` 的客户端收标准 `compaction_update`，其余收 §7 的 `_meta.lody.activity` 工具活动 |
 | `_lody/session/usage_update` / usage / usageScopeId | 有 model/usage；aimux 保留输入/输出总量、可选 cache，丢失 reasoning/text 分区，cost/currency 为 None | 首版不支持。costUSD、reasoningOutputTokens、cacheCreationInputTokens 是可选，不因缺费用而禁用。实际缺口是必填 outputTokens 必须排除 reasoning，cacheReadInputTokens 也必填；上游未知分区不能补零或把总 completion 当文本。后续按 §8.4 从真实事实投影，无需新累计 RPC |
 | `_lody/rate_limits/get`、`_lody/rate_limits/update` / rateLimits | 有 account.usage；窗口能表达部分 quota，credits 是单位而非货币，完整 account/model 过滤尚未定义 | 首版暂不接，属于接线/交付范围，不能宣称 App Server 没有额度能力。以后复用真实 usage windows，cap>0 才算百分比，durationHours 转秒，过期时间转 epoch 秒；同长度窗口保留各自项，wallet 缺币种/金额时省略。get 是非 Session 绑定读取，不能强制要求 sessionId；不得造空列表掩盖读取失败 |
 | `_lody/session/steer`、`_lody/session/steer_applied`、prompt steer / steering | mode=steer 存在，但不能原子限定目标活跃 turn；空闲 steer 可驱动新 turn | 首版不支持。Core 允许 request/prompt、same/handoff、active/apply，不能把仅缺 same-turn 当作整个协议绝对不可实现。当前也没有已接入的“原生换 turn、同一 ACP prompt 继续承接并确认 injected”的 handoff 路径；不能把下一次 Queue 或闲时新 turn 冒充 handoff。请求报 method-not-found，prompt steer 控制在提交前报 unsupported |

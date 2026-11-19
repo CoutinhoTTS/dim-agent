@@ -202,7 +202,9 @@ async fn start_in(home: PathBuf) -> RunningServer {
         ..Default::default()
     };
     let mut builder = AgentBuilder::new(AgentConfig::default());
-    builder.timeline_store(Arc::new(dim_agent_runtime::MemoryTimelineStore::default()));
+    builder.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(Arc::new(
+        dim_agent_runtime::MemoryTimelineStore::default(),
+    )));
     dim_agent_capabilities::defaults::install(&mut builder);
     dim_agent_capabilities::defaults::mock_model_hosts(&mut builder);
     dim_agent_capabilities::defaults::tool_host(&mut builder, Arc::new(MockTools));
@@ -245,7 +247,9 @@ async fn start_with_specialized(home: PathBuf) -> RunningServer {
         ..Default::default()
     };
     let mut builder = AgentBuilder::new(AgentConfig::default());
-    builder.timeline_store(Arc::new(dim_agent_runtime::MemoryTimelineStore::default()));
+    builder.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(Arc::new(
+        dim_agent_runtime::MemoryTimelineStore::default(),
+    )));
     dim_agent_capabilities::defaults::install(&mut builder);
     dim_agent_capabilities::defaults::mock_model_hosts(&mut builder);
     dim_agent_capabilities::defaults::tool_host(&mut builder, Arc::new(MockTools));
@@ -804,7 +808,10 @@ async fn a_realtime_session_relays_its_frames_and_events_over_the_socket() {
     let address = listener.local_addr().unwrap();
     let stub = tokio::spawn(async move {
         // tungstenite's own `ErrorResponse` size is not ours to box.
-        #[allow(clippy::result_large_err)]
+        #[expect(
+            clippy::result_large_err,
+            reason = "tungstenite's `Callback` hands back its own `ErrorResponse`, which is not ours to box"
+        )]
         fn checked(
             request: &WsRequest,
             response: WsResponse,

@@ -137,7 +137,7 @@ pub fn session_entry(body: String, scope: PromptScope) -> Option<PromptEntry> {
 
 /// Mirrors TS `formatCurrentDate`.
 pub fn local_today() -> String {
-    chrono::Local::now().format("%Y-%m-%d").to_string()
+    jiff::Zoned::now().strftime("%Y-%m-%d").to_string()
 }
 
 pub(crate) fn sha256_version(text: &str) -> String {
@@ -359,6 +359,33 @@ pub trait BasePromptSettings: Send + Sync + 'static {
 }
 
 pub struct BasePromptSettingsHost(pub Arc<dyn BasePromptSettings>);
+
+impl rutis_bridge::session::HostDispatch for BasePromptSettingsHost {
+    fn methods(&self) -> Option<serde_json::Value> {
+        Some(serde_json::json!({"base":"async"}))
+    }
+
+    fn invoke(
+        &self,
+        method: &str,
+        args: rutis_bridge::session::Value,
+    ) -> rutis_bridge::session::Reply {
+        const NAME: &str = "basePromptSettingsHost";
+        if method != "base" {
+            return Err(crate::port_faces::unknown_method(NAME, method));
+        }
+        let crate::port_faces::Empty {} = crate::port_faces::request(NAME, args)?;
+        let owner = self.0.clone();
+        crate::port_faces::serving(NAME, async move {
+            let cancel = CancellationToken::new();
+            let _abandoned = cancel.clone().drop_guard();
+            owner
+                .base(cancel)
+                .await
+                .map_err(crate::host::ModelPortError::from)
+        })
+    }
+}
 /// The Session's reply language, when the operator selected one: the live
 /// value the `dim/language` source reads and the App Server's
 /// `session.language.*` methods change. It starts from `SessionConfig.language`
@@ -654,13 +681,24 @@ impl DynPlugin for PromptSourcesBranchPlugin {
                 }
                 loop {
                     let mut changed = Vec::new();
-                    for target in targets(CHECKED).into_iter().filter(|target| target.source != LANGUAGE) {
+                    for target in targets(CHECKED)
+                        .into_iter()
+                        .filter(|target| target.source != LANGUAGE)
+                    {
                         let current = tokio::select! {
                             _ = lifecycle.cancelled() => return,
-                            loaded = host.0.load(target.clone(), lifecycle.child_token()) => loaded,
+                            loaded = host.load(target.clone(), lifecycle.child_token()) => loaded,
                         };
                         match current {
-                            Ok(current) if current.as_ref() != prompts.borrow().entries.get(&(target.source.clone(), target.scope.clone())) => changed.push((target, current)),
+                            Ok(current)
+                                if current.as_ref()
+                                    != prompts
+                                        .borrow()
+                                        .entries
+                                        .get(&(target.source.clone(), target.scope.clone())) =>
+                            {
+                                changed.push((target, current));
+                            }
                             Ok(_) => {}
                             Err(error) => tracing::warn!(%error, source = target.source, "prompt source was not checked"),
                         }
@@ -669,11 +707,17 @@ impl DynPlugin for PromptSourcesBranchPlugin {
                     let target = targets([LANGUAGE]).pop().expect("language target");
                     let current = tokio::select! {
                         _ = lifecycle.cancelled() => return,
-                        loaded = host.0.load(target.clone(), lifecycle.child_token()) => loaded,
+                        loaded = host.load(target.clone(), lifecycle.child_token()) => loaded,
                     };
                     let mut language_changed = false;
                     match current {
-                        Ok(current) if current.as_ref() != prompts.borrow().entries.get(&(target.source.clone(), target.scope.clone())) => {
+                        Ok(current)
+                            if current.as_ref()
+                                != prompts
+                                    .borrow()
+                                    .entries
+                                    .get(&(target.source.clone(), target.scope.clone())) =>
+                        {
                             changed.push((target, current));
                             language_changed = true;
                         }
@@ -684,9 +728,11 @@ impl DynPlugin for PromptSourcesBranchPlugin {
                     if !changed.is_empty() {
                         tokio::select! {
                             _ = lifecycle.cancelled() => return,
-                            result = configure.clone().configure_loaded(None, changed) => if let Err(error) = result {
-                                tracing::warn!(%error, "changed prompt sources were not adopted");
-                            },
+                            result = configure.clone().configure_loaded(None, changed) => {
+                                if let Err(error) = result {
+                                    tracing::warn!(%error, "changed prompt sources were not adopted");
+                                }
+                            }
                         }
                     }
                     drop(_language_gate);
