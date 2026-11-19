@@ -1097,8 +1097,6 @@ fn two_vendors_claiming_one_id_report_ambiguity() {
     );
 }
 
-/// Two providers selling one model under one name with one set of numbers are
-/// one model, not a conflict, and the API entry beside them settles it.
 /// A plan's own provider keeps the plan's numbers even when the vendor's API
 /// entry disagrees, since the provider answers for the subscription it sells.
 #[test]

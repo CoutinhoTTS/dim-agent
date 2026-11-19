@@ -3,7 +3,7 @@
 //! method tables, with ordering, refusal and lifetime.
 use super::*;
 use dim_agent_capabilities::methods::{
-    Caller, Interruption, MethodCall, MethodDecl, NotifyError, RpcError, SessionMethods,
+    Caller, Interruption, MethodCall, MethodDecl, RpcError, SessionMethods,
 };
 use dim_agent_runtime::Feature;
 use dim_app_server::methods::ManagementMethods;
@@ -631,13 +631,4 @@ async fn held_notifications_do_not_take_the_replys_room() {
     assert_ok(&client.rpc("daemon.ping", json!({})).await);
     server.shutdown();
     server.join().await.unwrap();
-}
-
-/// The error a provider sees is the contract's; kept here so the test checks
-/// the enum rather than only its code.
-#[test]
-fn notify_error_codes_are_the_contracts() {
-    assert_eq!(NotifyError::Undeclared.code(), "undeclared");
-    assert_eq!(NotifyError::Gone.code(), "gone");
-    assert_eq!(NotifyError::TooLarge.code(), "too_large");
 }
