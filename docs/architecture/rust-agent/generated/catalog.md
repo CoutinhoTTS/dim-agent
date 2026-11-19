@@ -21,7 +21,7 @@ Each catalog name a part of the assembly provides or injects. `data` means share
 | `eventSubscriptions` | process | eventhub | data | `list` sync, `sources` sync, `subscribe` async, `unsubscribe` async |
 | `executionSettingsHost` | process | ExecutionSettings | data | `read` async |
 | `fileStorage` | process | FileStorage | internal(object) | — |
-| `fsHost` | process | FileStorage | data | `closeRead` async, `createDirectory` async, `list` async, `openRead` async, `readAt` async, `remove` async |
+| `fsHost` | process | FileStorage | data | `backup` async, `closeRead` async, `createDirectory` async, `list` async, `lock` async, `openRead` async, `readAt` async, `readBytes` async, `remove` async, `replace` async, `stat` async, `unlock` async |
 | `grokOAuthService` | process | GrokOAuth | internal(secret) | — |
 | `hooksService` | process | HooksSettings | data | `plugins` async, `refusal` sync, `register` async, `withdraw` async |
 | `hostPlatform` | process | HostPlatform | internal(object) | — |

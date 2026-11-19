@@ -165,7 +165,7 @@ flowchart LR
   p10 -->|"dim_app_server::methods::ManagementMethods"| p36
   p10 -->|"dim_app_server::methods::ManagementMethods"| p35
   p18 -->|"dim_app_server::settings::SettingsService"| p35
-  p4 -->|"dim_agent_capabilities::file_storage::FileStorage"| p34
+  p4 -->|"dim_agent_capabilities::file_storage::face::FsHost"| p34
   p10 -->|"dim_app_server::methods::ManagementMethods"| p34
   p18 -->|"dim_app_server::settings::SettingsService"| p34
   p10 -->|"dim_app_server::methods::ManagementMethods"| p33
