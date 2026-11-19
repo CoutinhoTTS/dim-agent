@@ -14465,6 +14465,7 @@
         "path AgentError",
         "path AgentError::AmbiguousSubmission",
         "path AgentError::BranchEnded",
+        "path AgentError::BranchRefused",
         "path AgentError::Build",
         "path AgentError::Closed",
         "path AgentError::Framework",

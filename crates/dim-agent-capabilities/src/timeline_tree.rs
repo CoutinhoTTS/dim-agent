@@ -1553,9 +1553,8 @@ impl TimelineTree {
             return Err(AgentError::Closed("TimelineTree".into()));
         }
         if id == ROOT_BRANCH_ID {
-            return Err(AgentError::refused(
-                BranchRefusal::CannotEnd,
-                "the root cannot end; closing the Session is not an end",
+            return Err(AgentError::InvalidInput(
+                "`main` cannot end; closing the Session is not an end".into(),
             ));
         }
         if state.ended.contains_key(id) {

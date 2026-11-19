@@ -61,8 +61,9 @@ pub enum BranchRefusal {
     /// The target or an ancestor of it is ending or ended, so an end already
     /// on its way to it wins.
     Protected,
-    /// The target cannot end: the root, the current default branch, or an
-    /// ancestor of the default branch.
+    /// The target cannot end: the current default branch, or an ancestor of
+    /// the default branch. The root's own refusal is the operation's input
+    /// error, which its callers already answer.
     CannotEnd,
 }
 

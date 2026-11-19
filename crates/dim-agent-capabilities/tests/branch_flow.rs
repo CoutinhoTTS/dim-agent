@@ -1964,10 +1964,10 @@ async fn ending_a_line_ends_its_children_first_and_records_one_result_each() {
     let source = BranchSource::Host {
         operation_id: "op:end".into(),
     };
-    assert_eq!(
-        refusal(&session.end_branch("main", source.clone()).await).0,
-        "branch_cannot_end",
-        "the root never ends"
+    let root = session.end_branch("main", source.clone()).await;
+    assert!(
+        matches!(&root, Err(AgentError::InvalidInput(message)) if message.contains("cannot end")),
+        "the root never ends: {root:?}"
     );
     assert!(matches!(
         session.end_branch("missing", source.clone()).await,
@@ -8700,7 +8700,10 @@ async fn ending_the_root_the_default_branch_or_an_ancestor_is_refused() {
         operation_id: "end".into(),
     };
     let root = tree.end("main".into(), user.clone()).await;
-    assert_eq!(refusal(&root).0, "branch_cannot_end", "{root:?}");
+    assert!(
+        matches!(&root, Err(AgentError::InvalidInput(message)) if message.contains("cannot end")),
+        "the root's end is the input error its callers already receive: {root:?}"
+    );
     soon(session.set_default_branch(
         &inner,
         BranchSource::User {
