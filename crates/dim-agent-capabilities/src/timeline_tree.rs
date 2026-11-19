@@ -1853,8 +1853,9 @@ impl TimelineTree {
     }
     /// Waits until `timeline` publishes `sequence`: the store committed the
     /// batch, not only queued it. A failed transaction leaves it unpublished
-    /// and its fault answers here; a timeline that closes first can no longer
-    /// publish it, and answers `Closed` instead of waiting forever (design §5,
+    /// and its fault answers here. A close waits for every accepted batch to
+    /// publish or fail before it sets `closed`, so `closed` is not a path a
+    /// close takes here: it ends a publication channel that stops (design §5,
     /// §20.21).
     async fn published(timeline: &Timeline, sequence: u64) -> Result<()> {
         let mut published = timeline.watch();
@@ -2437,9 +2438,10 @@ impl TimelineTree {
             owner.builds.close();
             owner.builds.wait().await;
             // Every admitted operation has handed its settlement over by now,
-            // so closing the tracker loses none of them. The contexts close
-            // before the tasks are joined: a task waiting for its fact's
-            // publication ends when its timeline closes.
+            // so closing the tracker loses none of them. Each context's close
+            // waits for the store's answer to every batch its timeline
+            // accepted, and the settling tasks act on those answers; joining
+            // them last means close answers only after their live updates ran.
             owner.settled_admissions().await;
             owner.settling.close();
             let (contexts, failures): (Vec<_>, Vec<_>) = {
