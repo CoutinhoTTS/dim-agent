@@ -13,7 +13,7 @@ export default definePlugin({
     let release: (() => void) | undefined
     await ctx.use<ManagementMethods>('managementMethods').register(
       'storefixture',
-      ['status', 'file_ownership', 'selection', 'agent_records', 'read_user', 'import_user', 'replace_user', 'report', 'create', 'cycle', 'remove', 'refuse', 'release', 'invalid_id'].map(name => ({ name: `storefixture.${name}`, mutating: true, interruption: 'report', progress: false })),
+      ['status', 'reserve_file', 'file_ownership', 'selection', 'agent_records', 'read_user', 'import_user', 'replace_user', 'report', 'create', 'cycle', 'remove', 'refuse', 'release', 'invalid_id'].map(name => ({ name: `storefixture.${name}`, mutating: true, interruption: 'report', progress: false })),
       async (call: { method: string; params: any }): Promise<MethodReply> => {
         const params = call.params
         if (call.method === 'storefixture.status') return { kind: 'value', value: {} }
@@ -28,10 +28,12 @@ export default definePlugin({
             (error: unknown) => error instanceof Error && 'code' in error && error.code === 'conflict')
           return {kind:'value', value: await sqlite.readSelection({scope})}
         }
+        if (call.method === 'storefixture.reserve_file') {
+          return { kind: 'value', value: await sqlite.reserveFile(params.file) }
+        }
         if (call.method === 'storefixture.file_ownership') {
-          const { sessionId, path } = params
-          const file = { sessionId, fileId: 'fixture-owned-file', generation: 'fixture' }
-          assert.equal(await sqlite.reserveFile(file), true)
+          const { file, path } = params
+          const { sessionId } = file
           assert.equal(await sqlite.commitFile({ ...file, generation: 'other' }), 'superseded')
           assert.equal(await sqlite.commitFile(file), 'owned')
           assert.equal(await sqlite.ownsFile({ sessionId, fileId: file.fileId }), true)
