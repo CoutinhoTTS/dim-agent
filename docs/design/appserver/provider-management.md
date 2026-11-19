@@ -976,6 +976,8 @@ stored entry does not mark it, and only a limit no source declares is deleted.
 
 ### 3.6 Selectable models for process owners
 
+The [target process binding](../contracts/process-owner-operations.md) moves `modelSelectionHost.resolve`, both `selectableModelsHost` reads and `auxiliaryModel.complete` to the data face `providerService` on the configured profile. Consumers switch their injection and retain the operation arguments, results and credential ownership. The separate binding names below describe the pre-migration catalog.
+
 A process owner that routes work by model capability cannot keep its own copy of
 the availability rules of the models it routes to. The port below has one provider
 per profile — Provider in the product profile, the configured model profile

@@ -1,5 +1,7 @@
 # 服务面：跨语言形状的策略、盘点与第一批改造
 
+进程服务的目标调用方、替代名称与提供方见[进程操作](contracts/process-owner-operations.md)。
+
 状态：Draft。对应 [#1289](https://github.com/arcships/dim/issues/1289)（标记与检查）、[#1300](https://github.com/arcships/dim/issues/1300)（盘点）、[#1292](https://github.com/arcships/dim/issues/1292)（迁移）。父 issue [#1288](https://github.com/arcships/dim/issues/1288)。研究背景见 `docs/design/research/remote-plugins.md`（由 [#1299](https://github.com/arcships/dim/pull/1299) 引入）。
 
 本文是改动设计，不是实现记录。所有 API 都是目标形状；现有代码位置用于说明改哪里。
@@ -109,7 +111,7 @@ Rust 产品装配的现状以 [生成的 catalog](../architecture/rust-agent/gen
 | --- | --- | --- |
 | `agentIndex` | `sessions` | 目录查询走 `sessions` |
 | `settingsService` | `settings` | GoalBranch 的取消契约见 §4.1。 |
-| `modelHost` | `modelHost.invoke` | 完整模型请求直接调用所选配置的执行入口；辅助请求使用 `providerService.complete`。 |
+| `modelHost` | `modelHost` | 完整模型请求直接调用所选配置的执行入口；辅助请求使用 `providerService.complete`。 |
 | `loader` | `rutis/loader` | 插件管理走数据面 |
 | `sessionStore` | `sessionMetadata`、`sessionFiles` | 行与文件分开 |
 | `timelineTree`、`timelineTreeControl` | `treeCommands` | 建/读分支走 `treeCommands` |
@@ -183,7 +185,6 @@ Rust 产品装配的现状以 [生成的 catalog](../architecture/rust-agent/gen
 
 ### 3.6 入口、凭据与宿主资源
 
-Proposed target operations: [Process owner operations](contracts/process-owner-operations.md).
 
 
 按 #1292 逐批确定各项的公共操作，并按 §2.6 迁移登记。状态、资源和凭据留在各自的 owner。`managedSearch` 的搜索操作见 §4.6。`skillsCatalog` 的插件内容操作见 [Skills owner 契约](../architecture/rust-agent/plugins/Skills.md#plugin-content-data-face)。
@@ -220,7 +221,7 @@ PromptSettings 的三个只读端口按 [prompt overrides §3.1](appserver/promp
 
 ### 4.2 `modelHost`：保留完整模型请求
 
-迁移前 `PromptSuggestion` 继续用类型化调用。模型 owner 在 #1292 的批次内定义能承载完整 `ModelRequest` 的公开操作，保留当轮 provider、model、system、tools、config、cached prefix、流式回复与取消。现有 `auxiliaryModel.complete` 用于精简请求。PromptSuggestion 切到同一数据契约的 Rust 绑定时，覆盖 tools、config 和缓存前缀。
+迁移前 `PromptSuggestion` 继续用类型化调用。模型 owner 在 #1292 的批次内定义能承载完整 `ModelRequest` 的公开操作，保留当轮 provider、model、system、tools、config、cached prefix、流式回复与取消。精简请求迁往 `providerService.complete`，随后移除 `auxiliaryModel`。PromptSuggestion 切到同一数据契约的 Rust 绑定时，覆盖 tools、config 和缓存前缀。
 
 ### 4.3 `scheduleJobs`
 

@@ -1,5 +1,7 @@
 # Process owner operations
 
+The target removes `sessionPermissions`, `selectableModelsHost`, `modelSelectionHost` and `auxiliaryModel` from the catalog when their consumers move to the owners below.
+
 ## Retained operations
 
 | Caller → owner | API to use |
@@ -55,4 +57,4 @@
 | `hooks?` | `prepare(protocol or null) → ModelConfig or null` runs once after resolution. `beforeAttempt() → admitted or {rejected: message}` checks the summary budget before each attempt. `waiting(progress or null)` reports the existing retry schedule. |
 | Completion | Cancellation or driver shutdown releases a suspended consumer and joins accepted work. Invalid wire input returns `invalid_request`. Consumer exceptions remain consumer errors. |
 
-Provider (managed profile), ConfiguredModels (API-key profile), or the standalone local model host serves `modelHost.invoke`. The selected owner resolves the request, invokes its driver, and settles credential recovery with the account owner. The local host uses its local connection. The caller receives output or a host error. Aimux owns its native driver, pool and unload signal.
+The full-request consumer injects only `modelHost`. The managed profile registers Provider at that name; the API-key profile registers ConfiguredModels; standalone local configuration registers the local host. Each profile registers exactly one dispatcher at `modelHost`. Aimux relinquishes the catalog name and supplies the existing native driver. The selected owner resolves the request, invokes its driver, and settles credential recovery with the account owner. The local host uses its local connection. The caller receives output or a host error. Aimux owns its native driver, pool and unload signal.
