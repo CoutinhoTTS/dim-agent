@@ -231,6 +231,7 @@ fn restart(_: &std::path::Path, _: &ui::tui::UpdateRequest) -> Result<i32> {
 /// The arguments of the interface invocation, without the first message,
 /// Session or new worktree it opened with, in the mode it left and on the
 /// Session it showed.
+#[cfg(unix)]
 fn restart_args(
     original: impl IntoIterator<Item = std::ffi::OsString>,
     request: &ui::tui::UpdateRequest,

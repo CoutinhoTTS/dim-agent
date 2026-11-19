@@ -490,15 +490,15 @@ pub fn restart_launcher() -> Option<PathBuf> {
     let executable = std::env::current_exe().ok()?;
     let installation = installer(&executable, &package, "x")?;
     #[cfg(unix)]
-    if installation.manager == Manager::Staged {
-        return Some(
-            installation
-                .directory
-                .join("bin")
-                .join(entry_point(&package)),
-        );
-    }
-    None
+    let staged = installation.manager == Manager::Staged;
+    #[cfg(not(unix))]
+    let staged = false;
+    staged.then(|| {
+        installation
+            .directory
+            .join("bin")
+            .join(entry_point(&package))
+    })
 }
 
 /// The command word that starts this installation for a shell.
