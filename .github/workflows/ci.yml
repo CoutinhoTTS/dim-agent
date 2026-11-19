@@ -165,7 +165,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo fmt --all -- --check
+          cargo fmt --all -- --check --config error_on_line_overflow=true
           features=()
           if [[ '${{ needs.changes.outputs.eval }}' == true ]]; then
             features+=(--features xtask/eval-tests)
