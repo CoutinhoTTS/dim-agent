@@ -1390,7 +1390,7 @@ fn render(notice: Message, session_id: &str, display: &mut Display) -> Result<()
                     && sequence > display.cursor.max(display.permission_seen)
                 {
                     display.record(&format!(
-                        "[permission] permission preset: {}",
+                        "[permission] main branch preset: {}",
                         permission::name(policy.preset)
                     ))?;
                     display.permission_seen = sequence;
