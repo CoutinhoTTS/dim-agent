@@ -101,7 +101,7 @@ Rust 产品装配的现状以 [生成的 catalog](../architecture/rust-agent/gen
 | `worktreeAssociations` | `worktreeAssociations.associate` | 形状见 §4.8。 |
 | `toolSourcesView` | `toolSourcesView.get/observe` | 同一 ToolRegistry owner 的独立只读观察面；贡献注册仍由 `toolRegistry` 负责，见 [工具贡献 §7.5](../architecture/rust-agent/tool-contributions.md#75-服务接口)。 |
 
-宿主读取端口的数据面（§4.10）包括 `executionSettingsHost`、`toolchainSourceHost`、`promptSuggestionSettingsHost`、`selectableModelsHost` 和 `modelSelectionHost`。模型选择与列表的目标绑定见[进程操作](contracts/process-owner-operations.md)；其余读取端口沿用现名。
+宿主读取端口的数据面（§4.10）包括 `executionSettingsHost`、`toolchainSourceHost`、`promptSuggestionSettingsHost`。模型选择与列表统一由 `providerService` 提供；调用方和配置见[进程操作](contracts/process-owner-operations.md)；其余读取端口沿用现名。
 
 ### 3.3 所有者 API，已有数据兄弟
 
@@ -185,8 +185,6 @@ Rust 产品装配的现状以 [生成的 catalog](../architecture/rust-agent/gen
 
 ### 3.6 入口、凭据与宿主资源
 
-
-
 按 #1292 逐批确定各项的公共操作，并按 §2.6 迁移登记。状态、资源和凭据留在各自的 owner。`managedSearch` 的搜索操作见 §4.6。`skillsCatalog` 的插件内容操作见 [Skills owner 契约](../architecture/rust-agent/plugins/Skills.md#plugin-content-data-face)。
 
 | 名字 | scope | provider | reason |
@@ -201,7 +199,7 @@ Rust 产品装配的现状以 [生成的 catalog](../architecture/rust-agent/gen
 | `mentionIndex` | process | WorkspaceToolsOwner | host-resource |
 | `mcpService` | process | Mcp | host-resource |
 | `hooksService` | process | HooksSettings | host-resource |
-| `providerService` | process | Provider | secret |
+| `providerService` | process | Provider | 当前为 secret，迁移后通过数据操作使用凭据 |
 | `providerConnectionResolver` | process | Provider | host-resource |
 | `sessionLoader` | session | SessionScope | control |
 | `timelineFactory` | session | SessionScope | control |
@@ -353,7 +351,7 @@ eventSubscriptions.list {sessionId} -> reply
 
 ### 4.10 宿主端口：`executionSettingsHost` 等五个
 
-这五个读取端口持有 owner 的闭包，Rust 绑定直接调用类型化操作；dispatcher 只在跨语言边界解码请求、调用同一个操作并编码回复，不写第二份业务逻辑。Rust 调用不经过 JSON，也不为读取另起桥接任务。每次异步调用持有独立的子取消 token：取消或丢弃调用会取消该次 owner 读取，不取消调用方的父 token。跨语言回复使用 `cancellable_future`，放弃等待会丢弃同一个读取；owner 的生命周期仍约束其工作。
+这些读取操作持有 owner 的闭包，Rust 绑定直接调用类型化操作；dispatcher 只在跨语言边界解码请求、调用同一个操作并编码回复，不写第二份业务逻辑。Rust 调用不经过 JSON，也不为读取另起桥接任务。每次异步调用持有独立的子取消 token：取消或丢弃调用会取消该次 owner 读取，不取消调用方的父 token。跨语言回复使用 `cancellable_future`，放弃等待会丢弃同一个读取；owner 的生命周期仍约束其工作。
 
 ```text
 executionSettingsHost.read({}) -> {sandbox, network}
@@ -362,9 +360,9 @@ toolchainSourceHost.list({}) -> {toolchains: [{bin, root}]}          # sync
   -> error {code: failed, message}
 promptSuggestionSettingsHost.read({}) -> {enabled, maxChars}
   -> error {code: failed, message}
-selectableModelsHost.selectableModels({}) -> {models: [ModelCapabilitySnapshot]}
-selectableModelsHost.selectableForModality({}) -> {models: [ModalityModelSnapshot]}
-modelSelectionHost.resolve({explicit?: ModelId, cwd?}) -> ModelSelection
+providerService.selectableModels({}) -> {models: [ModelCapabilitySnapshot]}
+providerService.selectableForModality({}) -> {models: [ModalityModelSnapshot]}
+providerService.resolve({explicit?: ModelId, cwd?}) -> ModelSelection
   -> error {code: cancelled | owner_closed | invalid_request | model_unavailable | failed, message}
 ```
 
