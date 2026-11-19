@@ -114,6 +114,25 @@ pub enum EntryKind {
     Other,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum FileStat {
+    File { size: u64 },
+    Directory,
+    Other,
+    Missing,
+}
+
+impl FileStat {
+    fn from_entry(kind: EntryKind, size: u64) -> Self {
+        match kind {
+            EntryKind::File => Self::File { size },
+            EntryKind::Directory => Self::Directory,
+            EntryKind::Other => Self::Other,
+        }
+    }
+}
+
 /// Names reserved for this module's lock, temporary and account-marker resources.
 fn reserved_name(name: &OsStr) -> bool {
     name.to_string_lossy().starts_with(RESOURCE_PREFIX) || name == "auth.json.lock"
@@ -2072,6 +2091,19 @@ mod native {
             _ => EntryKind::Other,
         }
     }
+    pub fn file_stat(parent: &File, name: &OsStr) -> Result<FileStat> {
+        let Some(stat) = stat(parent, name)? else {
+            return Ok(FileStat::Missing);
+        };
+        if reserved(parent)?
+            .into_iter()
+            .flatten()
+            .any(|id| id == identity(&stat))
+        {
+            return Err(FileStorageError::InvalidPath("reserved storage resource"));
+        }
+        Ok(FileStat::from_entry(kind(&stat), stat.st_size as u64))
+    }
     pub fn entry_kind(parent: &File, name: &OsStr) -> io::Result<Option<EntryKind>> {
         Ok(stat(parent, name)?.as_ref().map(kind))
     }
@@ -2525,6 +2557,9 @@ mod unsupported {
     }
     pub fn open_key(_: &File, _: &OsStr) -> io::Result<File> {
         Err(unsupported())
+    }
+    pub fn file_stat(_: &File, _: &OsStr) -> Result<FileStat> {
+        Err(FileStorageError::Unsupported)
     }
     pub fn entry_kind(_: &File, _: &OsStr) -> io::Result<Option<EntryKind>> {
         Err(unsupported())

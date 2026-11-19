@@ -2008,6 +2008,19 @@ async fn node_fs_readers_share_pinned_files_and_release_with_the_caller() {
             .await,
     );
     std::fs::write(directory.join("contents"), b"payload").unwrap();
+    let link = directory.join("link");
+    std::os::unix::fs::symlink(directory.join("contents"), &link).unwrap();
+    for (path, expected) in [
+        (directory.clone(), json!({"kind":"directory"})),
+        (directory.join("contents"), json!({"kind":"file","size":7})),
+        (link.clone(), json!({"kind":"other"})),
+        (directory.join("absent/file"), json!({"kind":"missing"})),
+    ] {
+        let response = client.rpc("fsreader.stat", json!({"path":path})).await;
+        assert_ok(&response);
+        assert_eq!(response["result"], expected);
+    }
+    std::fs::remove_file(link).unwrap();
     #[cfg(target_os = "linux")]
     {
         use std::os::unix::ffi::OsStrExt;

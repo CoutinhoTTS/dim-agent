@@ -140,6 +140,22 @@ impl FsHost {
             .map_err(|_| FileStorageError::Closed)
     }
 
+    pub async fn stat(&self, path: &Path, cancel: &CancellationToken) -> Result<super::FileStat> {
+        let path = self.0.resolve(path)?;
+        let relative = path.relative.clone();
+        self.0
+            .run(&path, cancel, move |root, _, _| {
+                let (parent, name) = match super::native::parent(root, &relative) {
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        return Ok(super::FileStat::Missing);
+                    }
+                    result => result?,
+                };
+                super::native::file_stat(&parent, &name)
+            })
+            .await
+    }
+
     pub async fn read_bytes(
         &self,
         path: &Path,
@@ -388,6 +404,7 @@ impl FileStorage {
 #[derive(Deserialize)]
 #[serde(tag = "method", content = "request", rename_all = "camelCase")]
 enum Request {
+    Stat(PathRequest),
     Lock(PathRequest),
     Unlock(LeaseRequest),
     ReadBytes(ReadBytes),
@@ -450,7 +467,7 @@ struct Close {
 impl HostDispatch for FsHost {
     fn methods(&self) -> Option<serde_json::Value> {
         Some(
-            serde_json::json!({"replace":"async","backup":"async","lock":"async", "unlock":"async", "readBytes":"async", "openRead":"async", "readAt":"async", "closeRead":"async", "createDirectory":"async", "list":"async", "remove":"async"}),
+            serde_json::json!({"stat":"async","replace":"async","backup":"async","lock":"async", "unlock":"async", "readBytes":"async", "openRead":"async", "readAt":"async", "closeRead":"async", "createDirectory":"async", "list":"async", "remove":"async"}),
         )
     }
 
@@ -469,6 +486,12 @@ impl HostDispatch for FsHost {
             let cancel = CancellationToken::new();
             let _dropped = cancel.clone().drop_guard();
             let reply = match request {
+                Request::Stat(request) => serde_json::json!(
+                    owner
+                        .stat(Path::new(&request.path), &cancel)
+                        .await
+                        .map_err(failure)?
+                ),
                 Request::Lock(request) => {
                     let caller = caller
                         .ok_or_else(|| Error::Value("fsHost.lock requires a calling row".into()))?;

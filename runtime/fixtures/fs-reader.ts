@@ -10,12 +10,13 @@ export default definePlugin({
     const files = ctx.use<FsHost>('fsHost')
     await ctx.use<ManagementMethods>('managementMethods').register(
       'fsreader',
-      ['status', 'open', 'read', 'close', 'mkdir', 'list', 'remove', 'lock', 'unlock', 'replace', 'backup', 'read_bytes'].map(name => ({ name: `fsreader.${name}`, mutating: true, interruption: 'report', progress: false })),
+      ['status', 'stat', 'open', 'read', 'close', 'mkdir', 'list', 'remove', 'lock', 'unlock', 'replace', 'backup', 'read_bytes'].map(name => ({ name: `fsreader.${name}`, mutating: true, interruption: 'report', progress: false })),
       async (call: { method: string; params: any }) => {
         if (call.method === 'fsreader.status') {
           await assert.rejects(() => Reflect.apply(files.openRead, files, [['/unused']]), /request must be an object/)
           return { kind: 'value', value: { pid: process.pid } }
         }
+        if (call.method === 'fsreader.stat') return { kind: 'value', value: await files.stat(call.params) }
         if (call.method === 'fsreader.lock') return { kind: 'value', value: await files.lock(call.params) }
         if (call.method === 'fsreader.unlock') return { kind: 'value', value: await files.unlock(call.params) }
         if (call.method === 'fsreader.replace') return { kind: 'value', value: await files.replace(call.params) }

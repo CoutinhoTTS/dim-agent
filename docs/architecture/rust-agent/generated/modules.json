@@ -12775,6 +12775,8 @@
         "path Result",
         "path super::FileLease",
         "path super::FilePath",
+        "path super::FileStat",
+        "path super::FileStat::Missing",
         "path super::ReadLimitExceeded",
         "path super::ReplacementMode",
         "path super::ReplacementMode::Native",
@@ -12788,6 +12790,30 @@
       ]
     },
     {
+      "from": "dim_agent_capabilities::file_storage::face",
+      "to": "dim_agent_capabilities::file_storage::native",
+      "references": [
+        "path super::native::file_stat",
+        "path super::native::parent"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::file_storage::face",
+      "to": "dim_agent_capabilities::file_storage::unsupported",
+      "references": [
+        "path super::native::file_stat",
+        "path super::native::parent"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::file_storage::face",
+      "to": "dim_agent_capabilities::file_storage::windows",
+      "references": [
+        "path super::native::file_stat",
+        "path super::native::parent"
+      ]
+    },
+    {
       "from": "dim_agent_capabilities::file_storage::native",
       "to": "dim_agent_capabilities::file_storage",
       "references": [
@@ -12796,6 +12822,9 @@
         "path EntryKind::Directory",
         "path EntryKind::File",
         "path EntryKind::Other",
+        "path FileStat",
+        "path FileStat::Missing",
+        "path FileStat::from_entry",
         "path FileStorageError::InvalidPath",
         "path LOCK_DIRECTORY",
         "path Result",
@@ -12822,6 +12851,7 @@
       "references": [
         "path DirectoryEntry",
         "path EntryKind",
+        "path FileStat",
         "path FileStorageError::Unsupported",
         "path Result",
         "path Tree"
@@ -12836,6 +12866,9 @@
         "path EntryKind::Directory",
         "path EntryKind::File",
         "path EntryKind::Other",
+        "path FileStat",
+        "path FileStat::Missing",
+        "path FileStat::from_entry",
         "path FileStorageError::Cleanup",
         "path FileStorageError::InvalidPath",
         "path FileStorageError::Io",
