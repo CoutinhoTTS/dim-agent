@@ -29,6 +29,30 @@
 | Check providers and input admission → SubmitChecks | `register(name, check) → void`; `check({entry, branchId, user?, mode}, cancelled) → proceed{blocks, warnings} or block{message}`. Run in name order through the first block. Interrupted checks write nothing. |
 | Compaction, stop and activity callers → `agentLoop` | `agentLoop.compact({}) → sequence`, `stopTurn({turnId, reason}) → sequence or null`; `agentLoop.state({}) → {phase, turnId?}`, `observe(listener)` delivers that snapshot. |
 
+### Calls from a Session to a selected branch
+
+Within a branch, inject its owner face directly. For Session callers the existing
+`timelineTree` face gains `call({branchId,operation}, cancelled) → operation reply`.
+TimelineTree resolves the admitted live branch once using its existing branch lookup and
+dispatches on that branch instance. The operation is a tagged union of the calls below;
+Direct variants use the owner method's arguments, reply and error. The compact RPC variant below returns the existing settled client result. The Session caller gets data.
+Ended and unknown branches retain their original errors. Calls admitted before close stay
+with that generation. Tree history, directory and batch input continue to use the tree's
+own methods.
+
+| Session caller | Target operation |
+| --- | --- |
+| Context RPC / PromptSuggestion | `contextUsage.read`. The `compactAndWait` variant runs the existing compact RPC handler: it calls `agentLoop.compact` and waits for the compaction fact matching that command sequence and returns the existing completed/skipped/failed reply. The committed sequence watch and bounded query run inside the selected branch for that wait. |
+| Session language / Agent configuration / Report | `prompt.configure` or `prompt.adoptedConfiguration` with the existing source, model and outcome records. |
+| InputQueue management / Collaboration | `inputQueue.withdraw` with the existing command; the caller runs the existing submit checks for steer before writing. `approval.pending` returns the branch's existing pending requests, and `approval.decide` settles the selected request. Collaboration retains its ended response on closed/ended/unknown detail lookup. |
+
+For a live main branch, Report captures its published head once at draft capture (`directory({id:"main"}).head`)
+and stores it as `conversationThrough` on that draft. Activity evidence and later opt-in
+conversation extraction call `timelineTree.query` with the same explicit `through`,
+existing bounded window and `includePublishing:false`. Zero yields an empty window.
+A draft without a captured cutoff does not fetch a conversation. Plan generation never
+substitutes a newer head.
+
 ### Prompt, configuration and files
 
 | Caller → owner | New API |
