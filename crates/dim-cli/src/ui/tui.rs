@@ -3,6 +3,7 @@
 //! unclosed tail and the composer box live at the bottom and repaint by row
 //! diff (2.3). The terminal layer (2.2) guarantees the exit contract.
 
+use dim_agent_types::ROOT_BRANCH_ID;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -3918,7 +3919,7 @@ impl App {
         let Some(snapshot) = self
             .snapshot
             .as_ref()
-            .filter(|s| !s.focus.is_empty() && s.focus != "main")
+            .filter(|s| !s.focus.is_empty() && s.focus != ROOT_BRANCH_ID)
         else {
             return workspace_label(&self.workspace, branch, cells);
         };
@@ -3990,7 +3991,7 @@ impl App {
     fn ask_fork(&mut self, at: u64, text: String, before: Option<String>) {
         match &self.snapshot {
             None => self.set_notice(t("No active session")),
-            Some(snapshot) if snapshot.focus != "main" => {
+            Some(snapshot) if snapshot.focus != ROOT_BRANCH_ID => {
                 self.set_notice(t("A fork copies main; b opens a line here"));
             }
             Some(_) => {
@@ -5792,7 +5793,7 @@ impl App {
         if ready && let Some(shown) = self.pending_line.take() {
             let lines = self.snapshot.as_ref().map_or(&[][..], |s| &s.lines[..]);
             let label = match line_name(lines, &shown) {
-                name if shown == "main" || name == short_id(&shown) => format!("⑂ {name}"),
+                name if shown == ROOT_BRANCH_ID || name == short_id(&shown) => format!("⑂ {name}"),
                 name => format!("⑂ {name} · {}", short_id(&shown)),
             };
             let row = boundary_line(&label, width);
@@ -7751,7 +7752,7 @@ impl App {
             self.session_id.clone(),
             self.snapshot
                 .as_ref()
-                .map_or("main", |snapshot| snapshot.focus.as_str())
+                .map_or(ROOT_BRANCH_ID, |snapshot| snapshot.focus.as_str())
                 .to_owned(),
         )
     }

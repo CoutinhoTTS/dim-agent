@@ -653,7 +653,10 @@ export interface TreeCommands {
   create(parent: string, at: number | bigint, options: BranchOptions, cancelled: () => void | Promise<void>): Promise<string>
 }
 
-export type LineRole = "main" | "tool" | "host"
+export type LineRole =
+  | /** The root: the line with no parent. Its wire value stays `main`, the root's id on the wire and in storage. */ "main"
+  | "tool"
+  | "host"
 
 export interface BranchLine {
   /** The line committed its own `branch/end`. */

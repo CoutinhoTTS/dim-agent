@@ -6,6 +6,7 @@ use crate::ui::prompts::Effect;
 use crate::ui::render::markdown::MarkdownRenderer;
 use crate::ui::terminal::{KeyCode, KeyEvent, Modifiers};
 use crate::ui::theme::Palette;
+use dim_agent_types::ROOT_BRANCH_ID;
 
 const HINT: &str = "Enter show the line · x end it · Esc close";
 
@@ -199,7 +200,7 @@ impl LinesPanel {
             && self.list.filter_is_empty()
             && let Some(id) = self.list.selected_id()
         {
-            if id == "main" {
+            if id == ROOT_BRANCH_ID {
                 return Effect::Notice(
                     t("main is the session itself; a line ends, main does not").into(),
                 );

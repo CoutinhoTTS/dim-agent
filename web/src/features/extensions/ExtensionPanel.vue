@@ -2,6 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue"
 import { useI18n } from "vue-i18n"
 import type { Dispose, PanelActivity, PanelEnvironment, PanelModule } from "../../../../npm/ui"
+import { DEFAULT_BRANCH_ID } from "../../rpc/protocol"
 import { readSessionMethods } from "../../rpc/read"
 import { useAppearanceStore } from "../../stores/appearance"
 import { useChatStore } from "../../stores/chat"
@@ -23,7 +24,7 @@ const surface = ref<HTMLElement>()
 const failure = ref("")
 const loading = ref(false)
 const attempt = ref(0)
-const branchId = computed(() => ui.activeLineTab[props.sessionId] ?? "main")
+const branchId = computed(() => ui.activeLineTab[props.sessionId] ?? DEFAULT_BRANCH_ID)
 const view = computed(() => chat.views[props.sessionId])
 const lineOptions = computed(() => (view.value?.lines ?? []).map((line) => ({ label: line.purpose || line.id, value: line.id })))
 const extension = computed(() => extensions.directory?.extensions.find(extension => extension.pluginName === ui.extension?.pluginName))
@@ -32,17 +33,17 @@ const icon = computed(() => panel.value?.icon && extension.value ? resourceUrl(e
 const failedIcon = ref<string>()
 const title = computed(() => panel.value ? panelTitle(panel.value, locale.value) : t("extensions"))
 const ended = computed(() => view.value?.status === "closed" || view.value?.lines.some(line => line.id === branchId.value && (line.state.kind.startsWith("ended") || line.state.kind === "creation-failed")))
-const ready = computed(() => view.value?.status === "ready" && (branchId.value === "main" || view.value.branches[branchId.value]?.status === "ready"))
+const ready = computed(() => view.value?.status === "ready" && (branchId.value === DEFAULT_BRANCH_ID || view.value.branches[branchId.value]?.status === "ready"))
 const status = computed(() => connection.phase !== "connected" ? t("disconnected") : ended.value ? t("ended") : !ready.value ? t("syncing") : !panel.value ? t("unavailable") : failure.value || (loading.value ? t("loading") : ""))
 const activity = computed<PanelActivity>(() => {
   const current = view.value!
-  const branch = branchId.value === "main" ? current : current.branches[branchId.value]!
+  const branch = branchId.value === DEFAULT_BRANCH_ID ? current : current.branches[branchId.value]!
   return Object.freeze({ branch: Object.freeze({ running: branch.running, stopping: branch.stopping }), sessionRunning: current.sessionRunning })
 })
 const environment = computed<PanelEnvironment>(() => Object.freeze({ sessionId: props.sessionId, branchId: branchId.value, theme: appearance.resolvedTheme, locale: locale.value }))
 let dispose: Dispose | undefined
 
-watch([() => props.sessionId, branchId], ([sessionId, branchId]) => { if (branchId !== "main") chat.ensureLine(sessionId, branchId) }, { immediate: true })
+watch([() => props.sessionId, branchId], ([sessionId, branchId]) => { if (branchId !== DEFAULT_BRANCH_ID) chat.ensureLine(sessionId, branchId) }, { immediate: true })
 watch(surface, async element => {
   if (element instanceof HTMLDialogElement && !element.open) element.showModal()
   await nextTick()

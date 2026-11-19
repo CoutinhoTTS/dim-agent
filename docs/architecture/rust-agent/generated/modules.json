@@ -7956,6 +7956,13 @@
     },
     {
       "from": "dim_acp::commands",
+      "to": "dim_agent_types::events",
+      "references": [
+        "use dim_agent_types::DEFAULT_BRANCH_ID"
+      ]
+    },
+    {
+      "from": "dim_acp::commands",
       "to": "dim_agent_types::goal",
       "references": [
         "path GoalRead",
@@ -7974,6 +7981,13 @@
       "references": [
         "path Rpc",
         "use crate::rpc::Rpc"
+      ]
+    },
+    {
+      "from": "dim_acp::config",
+      "to": "dim_agent_types::events",
+      "references": [
+        "use dim_agent_types::DEFAULT_BRANCH_ID"
       ]
     },
     {
@@ -8158,10 +8172,12 @@
       "from": "dim_acp::gateway",
       "to": "dim_agent_types::events",
       "references": [
+        "path DEFAULT_BRANCH_ID",
         "path TurnOutcome",
         "path TurnOutcome::Cancelled",
         "path TurnOutcome::Completed",
         "path TurnOutcome::Failed",
+        "use dim_agent_types::DEFAULT_BRANCH_ID",
         "use dim_agent_types::TurnOutcome"
       ]
     },
@@ -8485,7 +8501,14 @@
       "from": "dim_acp::projection::tests",
       "to": "dim_acp::projection",
       "references": [
-        "path Projection::default"
+        "path Projection::new"
+      ]
+    },
+    {
+      "from": "dim_acp::projection::tests",
+      "to": "dim_client::question",
+      "references": [
+        "path dim_client::question::Call"
       ]
     },
     {
@@ -13471,6 +13494,7 @@
         "path InputMode::Append",
         "path InputMode::Queue",
         "path InputMode::Steer",
+        "path ROOT_BRANCH_ID",
         "path ToolResultData",
         "path UserInput",
         "use dim_agent_types::AgentEvent",
@@ -13481,6 +13505,7 @@
         "use dim_agent_types::InputBlock",
         "use dim_agent_types::InputMessageData",
         "use dim_agent_types::InputMode",
+        "use dim_agent_types::ROOT_BRANCH_ID",
         "use dim_agent_types::ToolResultData",
         "use dim_agent_types::TurnOutcome",
         "use dim_agent_types::UserInput"
@@ -15696,6 +15721,13 @@
     },
     {
       "from": "dim_agent_capabilities::prompt_registry",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path ROOT_BRANCH_ID"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::prompt_registry",
       "to": "dim_agent_types::prompt",
       "references": [
         "path PromptEntry",
@@ -16109,6 +16141,7 @@
       "from": "dim_agent_capabilities::prompt_suggestion",
       "to": "dim_agent_types::events",
       "references": [
+        "path DEFAULT_BRANCH_ID",
         "path EventKind",
         "path EventKind::InputApplied",
         "path EventKind::InputMessage",
@@ -16120,6 +16153,7 @@
         "path EventKind::ToolUseStart",
         "path EventKind::TurnEnd",
         "path EventKind::TurnStart",
+        "use dim_agent_types::DEFAULT_BRANCH_ID",
         "use dim_agent_types::EventKind",
         "use dim_agent_types::TurnOutcome"
       ]
@@ -16784,9 +16818,11 @@
       "from": "dim_agent_capabilities::shell_input",
       "to": "dim_agent_types::events",
       "references": [
+        "path DEFAULT_BRANCH_ID",
         "path InputMessageData",
         "path InputMessageData::default",
         "path InputMode::Append",
+        "use dim_agent_types::DEFAULT_BRANCH_ID",
         "use dim_agent_types::InputMessageData",
         "use dim_agent_types::InputMode"
       ]
@@ -18111,6 +18147,7 @@
         "path InputMode::Append",
         "path InputMode::Queue",
         "path InputMode::Steer",
+        "path ROOT_BRANCH_ID",
         "path TextData",
         "path ToolUseStartData",
         "path TurnEndData",
@@ -21647,8 +21684,10 @@
         "path BranchCreateAt::Create",
         "path BranchCreateAt::Sequence",
         "path EventKind::BranchCreate",
+        "path ROOT_BRANCH_ID",
         "use dim_agent_types::BranchCreateAt",
-        "use dim_agent_types::EventKind"
+        "use dim_agent_types::EventKind",
+        "use dim_agent_types::ROOT_BRANCH_ID"
       ]
     },
     {
@@ -22526,8 +22565,10 @@
       "from": "dim_agent_scheduler::document",
       "to": "dim_agent_types::events",
       "references": [
+        "path DEFAULT_BRANCH_ID",
         "path InputMode",
         "path InputMode::Queue",
+        "use dim_agent_types::DEFAULT_BRANCH_ID",
         "use dim_agent_types::InputMode"
       ]
     },
@@ -22639,7 +22680,10 @@
       "to": "dim_agent_types::events",
       "references": [
         "path InputMode::Queue",
-        "use dim_agent_types::InputMode"
+        "path ROOT_BRANCH_ID",
+        "use dim_agent_types::DEFAULT_BRANCH_ID",
+        "use dim_agent_types::InputMode",
+        "use dim_agent_types::ROOT_BRANCH_ID"
       ]
     },
     {
@@ -23156,6 +23200,14 @@
     },
     {
       "from": "dim_agent_scheduler::session",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path DEFAULT_BRANCH_ID",
+        "use dim_agent_types::DEFAULT_BRANCH_ID"
+      ]
+    },
+    {
+      "from": "dim_agent_scheduler::session",
       "to": "dim_agent_types::tool",
       "references": [
         "path ToolCall",
@@ -23407,6 +23459,14 @@
       "to": "dim_agent_scheduler::wakeup_pass",
       "references": [
         "path crate::wakeup_pass::pause"
+      ]
+    },
+    {
+      "from": "dim_agent_scheduler::wakeups",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path DEFAULT_BRANCH_ID",
+        "use dim_agent_types::DEFAULT_BRANCH_ID"
       ]
     },
     {
@@ -24821,7 +24881,11 @@
       "from": "dim_app_server::agents",
       "to": "dim_agent_types::events",
       "references": [
-        "path dim_agent_types::AgentEvent"
+        "path DEFAULT_BRANCH_ID",
+        "path ROOT_BRANCH_ID",
+        "path dim_agent_types::AgentEvent",
+        "use dim_agent_types::DEFAULT_BRANCH_ID",
+        "use dim_agent_types::ROOT_BRANCH_ID"
       ]
     },
     {
@@ -25076,6 +25140,14 @@
     },
     {
       "from": "dim_app_server::agents::configuration",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path DEFAULT_BRANCH_ID",
+        "use dim_agent_types::DEFAULT_BRANCH_ID"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents::configuration",
       "to": "dim_agent_types::prompt",
       "references": [
         "path ModelSelection",
@@ -25178,8 +25250,10 @@
       "to": "dim_agent_types::events",
       "references": [
         "path AgentEvent",
+        "path ROOT_BRANCH_ID",
         "use dim_agent_types::AgentEvent",
-        "use dim_agent_types::EventKind"
+        "use dim_agent_types::EventKind",
+        "use dim_agent_types::ROOT_BRANCH_ID"
       ]
     },
     {
@@ -26420,6 +26494,7 @@
         "path CollaborationTarget::Agent",
         "path CollaborationTarget::Member",
         "path CollaborationTarget::Temporary",
+        "path DEFAULT_BRANCH_ID",
         "path EventKind",
         "path EventKind::CollaborationCancel",
         "path EventKind::CollaborationClose",
@@ -26447,6 +26522,7 @@
         "path InterruptScope",
         "path InterruptScope::Branch",
         "path InterruptScope::Turn",
+        "path ROOT_BRANCH_ID",
         "path TurnOutcome::Cancelled",
         "path TurnOutcome::Completed",
         "path TurnOutcome::Failed",
@@ -27135,7 +27211,11 @@
       "from": "dim_app_server::connection",
       "to": "dim_agent_types::events",
       "references": [
+        "path DEFAULT_BRANCH_ID",
+        "path ROOT_BRANCH_ID",
+        "use dim_agent_types::DEFAULT_BRANCH_ID",
         "use dim_agent_types::InputMessageData",
+        "use dim_agent_types::ROOT_BRANCH_ID",
         "use dim_agent_types::UserInput"
       ]
     },
@@ -27612,9 +27692,11 @@
         "path EventKind::ApprovalCancelled",
         "path EventKind::ApprovalRequest",
         "path EventKind::ApprovalRespond",
+        "path ROOT_BRANCH_ID",
         "path dim_agent_types::ApprovalRequestData",
         "use dim_agent_types::AgentEvent",
-        "use dim_agent_types::EventKind"
+        "use dim_agent_types::EventKind",
+        "use dim_agent_types::ROOT_BRANCH_ID"
       ]
     },
     {
@@ -27856,6 +27938,7 @@
       "to": "dim_agent_types::events",
       "references": [
         "path BranchSource::Host",
+        "path DEFAULT_BRANCH_ID",
         "path InputBlock",
         "path InputBlock::Raw",
         "path InputMessageData",
@@ -27864,6 +27947,7 @@
         "path UserInput",
         "path dim_agent_types::AgentEvent",
         "use dim_agent_types::BranchSource",
+        "use dim_agent_types::DEFAULT_BRANCH_ID",
         "use dim_agent_types::InputBlock",
         "use dim_agent_types::InputMode"
       ]
@@ -33061,6 +33145,14 @@
     },
     {
       "from": "dim_app_server::session_language",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path ROOT_BRANCH_ID",
+        "use dim_agent_types::ROOT_BRANCH_ID"
+      ]
+    },
+    {
+      "from": "dim_app_server::session_language",
       "to": "dim_app_server::storage::face",
       "references": [
         "path Store",
@@ -35497,16 +35589,20 @@
         "path AgentEvent",
         "path BranchCreateAt::Create",
         "path BranchCreateAt::Sequence",
+        "path DEFAULT_BRANCH_ID",
         "path EventKind::BranchCreate",
         "path EventKind::InputMessage",
         "path EventKind::SessionForked",
         "path EventKind::Text",
         "path EventKind::Thinking",
+        "path ROOT_BRANCH_ID",
         "path SessionForkedData",
         "path dim_agent_types::InputMessageData::text",
         "use dim_agent_types::AgentEvent",
         "use dim_agent_types::BranchCreateAt",
+        "use dim_agent_types::DEFAULT_BRANCH_ID",
         "use dim_agent_types::EventKind",
+        "use dim_agent_types::ROOT_BRANCH_ID",
         "use dim_agent_types::SessionForkedData"
       ]
     },
@@ -37818,6 +37914,13 @@
     },
     {
       "from": "dim_cli::configure",
+      "to": "dim_agent_types::events",
+      "references": [
+        "use dim_agent_types::DEFAULT_BRANCH_ID"
+      ]
+    },
+    {
+      "from": "dim_cli::configure",
       "to": "dim_agent_types::model",
       "references": [
         "path ModelPreferences",
@@ -38076,6 +38179,14 @@
       "to": "dim_cli::goal",
       "references": [
         "path Request::Objective"
+      ]
+    },
+    {
+      "from": "dim_cli::goal_command",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path DEFAULT_BRANCH_ID",
+        "use dim_agent_types::DEFAULT_BRANCH_ID"
       ]
     },
     {
@@ -38952,6 +39063,14 @@
       "references": [
         "path Client",
         "use crate::client::Client"
+      ]
+    },
+    {
+      "from": "dim_cli::management::scheduler",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path DEFAULT_BRANCH_ID",
+        "use dim_agent_types::DEFAULT_BRANCH_ID"
       ]
     },
     {
@@ -40290,7 +40409,8 @@
       "to": "dim_agent_types::events",
       "references": [
         "path ApprovalCallData",
-        "use dim_agent_types::ApprovalCallData"
+        "use dim_agent_types::ApprovalCallData",
+        "use dim_agent_types::DEFAULT_BRANCH_ID"
       ]
     },
     {
@@ -40657,6 +40777,7 @@
         "path ModelFailure",
         "path ModelFailureKind",
         "path ModelOutputOutcome::Failed",
+        "path ROOT_BRANCH_ID",
         "path ReplacementParts",
         "path TurnOutcome",
         "path TurnOutcome::Cancelled",
@@ -40685,6 +40806,7 @@
         "use dim_agent_types::ModelFailure",
         "use dim_agent_types::ModelFailureKind",
         "use dim_agent_types::ModelOutputOutcome",
+        "use dim_agent_types::ROOT_BRANCH_ID",
         "use dim_agent_types::ReplacementParts",
         "use dim_agent_types::TurnOutcome",
         "use dim_agent_types::UserInput"
@@ -41087,6 +41209,14 @@
     },
     {
       "from": "dim_cli::question::line",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path ROOT_BRANCH_ID",
+        "use dim_agent_types::ROOT_BRANCH_ID"
+      ]
+    },
+    {
+      "from": "dim_cli::question::line",
       "to": "dim_agent_types::question",
       "references": [
         "path dim_agent_types::PendingQuestionBatch"
@@ -41334,8 +41464,10 @@
       "to": "dim_agent_types::events",
       "references": [
         "path ApprovalCallData",
+        "path DEFAULT_BRANCH_ID",
         "path UserInput",
         "use dim_agent_types::ApprovalCallData",
+        "use dim_agent_types::DEFAULT_BRANCH_ID",
         "use dim_agent_types::UserInput"
       ]
     },
@@ -41601,6 +41733,14 @@
     },
     {
       "from": "dim_cli::session::window",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path DEFAULT_BRANCH_ID",
+        "use dim_agent_types::DEFAULT_BRANCH_ID"
+      ]
+    },
+    {
+      "from": "dim_cli::session::window",
       "to": "dim_cli",
       "references": [
         "path Result",
@@ -41697,8 +41837,12 @@
         "path ApprovalCallData",
         "path ApprovalDecision::Allow",
         "path ApprovalDecision::Deny",
+        "path DEFAULT_BRANCH_ID",
+        "path ROOT_BRANCH_ID",
         "use dim_agent_types::ApprovalCallData",
-        "use dim_agent_types::ApprovalDecision"
+        "use dim_agent_types::ApprovalDecision",
+        "use dim_agent_types::DEFAULT_BRANCH_ID",
+        "use dim_agent_types::ROOT_BRANCH_ID"
       ]
     },
     {
@@ -42434,6 +42578,7 @@
       "to": "dim_agent_types::events",
       "references": [
         "path ContextCompactionData",
+        "path ROOT_BRANCH_ID",
         "use dim_agent_types::ContextCompactionData",
         "use dim_agent_types::ContextCompactionResult"
       ]
@@ -42534,6 +42679,13 @@
       "to": "dim_agent_types::activity",
       "references": [
         "path dim_agent_types::ToolRead"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host::member",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path DEFAULT_BRANCH_ID"
       ]
     },
     {
@@ -42811,6 +42963,7 @@
       "references": [
         "path BranchCreateFailedData::Cancelled",
         "path BranchCreateFailedData::Failed",
+        "path DEFAULT_BRANCH_ID",
         "use dim_agent_types::BranchCreateFailedData"
       ]
     },
@@ -45198,6 +45351,14 @@
     },
     {
       "from": "dim_cli::ui::lines_panel",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path ROOT_BRANCH_ID",
+        "use dim_agent_types::ROOT_BRANCH_ID"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::lines_panel",
       "to": "dim_cli::model::view",
       "references": [
         "path LineState",
@@ -46574,6 +46735,14 @@
       "to": "dim_cli::ui::theme::detect",
       "references": [
         "path Env"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::prompts",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path ROOT_BRANCH_ID",
+        "use dim_agent_types::ROOT_BRANCH_ID"
       ]
     },
     {
@@ -48297,6 +48466,14 @@
     },
     {
       "from": "dim_cli::ui::tasks_panel",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path ROOT_BRANCH_ID",
+        "use dim_agent_types::ROOT_BRANCH_ID"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tasks_panel",
       "to": "dim_cli::model::view",
       "references": [
         "path MemberConversationState",
@@ -49877,7 +50054,9 @@
       "from": "dim_cli::ui::tui",
       "to": "dim_agent_types::events",
       "references": [
-        "path dim_agent_types::UserInput"
+        "path ROOT_BRANCH_ID",
+        "path dim_agent_types::UserInput",
+        "use dim_agent_types::ROOT_BRANCH_ID"
       ]
     },
     {
@@ -52933,6 +53112,14 @@
     },
     {
       "from": "dim_goal::session",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path DEFAULT_BRANCH_ID",
+        "use dim_agent_types::DEFAULT_BRANCH_ID"
+      ]
+    },
+    {
+      "from": "dim_goal::session",
       "to": "dim_agent_types::tool",
       "references": [
         "path ToolCall",
@@ -53778,6 +53965,7 @@
         "path ModelContentData",
         "path ModelOutputEndData",
         "path ModelOutputOutcome::Completed",
+        "path ROOT_BRANCH_ID",
         "path TextData",
         "path ThinkingData",
         "path ToolCallResult",
@@ -55609,6 +55797,7 @@
         "path AgentEvent",
         "path BranchCreateFailedData::Cancelled",
         "path BranchCreateFailedData::Failed",
+        "path DEFAULT_BRANCH_ID",
         "path EventKind",
         "path EventKind::BranchCreateFailed",
         "path EventKind::BranchEnd",
@@ -55633,6 +55822,7 @@
         "path TurnOutcome::Failed",
         "use dim_agent_types::AgentEvent",
         "use dim_agent_types::BranchCreateFailedData",
+        "use dim_agent_types::DEFAULT_BRANCH_ID",
         "use dim_agent_types::EventKind",
         "use dim_agent_types::FinishReason",
         "use dim_agent_types::ModelOutputOutcome",
@@ -55853,9 +56043,11 @@
         "path EventKind::InputApplied",
         "path InputBlock",
         "path InputBlock::Raw",
+        "path ROOT_BRANCH_ID",
         "path UserInput",
         "use dim_agent_types::EventKind",
         "use dim_agent_types::InputBlock",
+        "use dim_agent_types::ROOT_BRANCH_ID",
         "use dim_agent_types::UserInput"
       ]
     },

@@ -20,7 +20,8 @@ use dim_agent_runtime::{
     panic_message,
 };
 use dim_agent_types::{
-    AgentEvent, BranchCreateAt, EventKind, ModelRequest, RecoverySnapshot, SessionForkedData,
+    AgentEvent, BranchCreateAt, DEFAULT_BRANCH_ID, EventKind, ModelRequest, ROOT_BRANCH_ID,
+    RecoverySnapshot, SessionForkedData,
     grant::{GrantKind, GrantMode, SessionGrant},
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
@@ -1737,7 +1738,7 @@ fn create_session(
         )
         .map_err(error)?;
     let info = BranchRecord {
-        id: "main".into(),
+        id: ROOT_BRANCH_ID.into(),
         parent: None,
         branch_point: None,
         create_anchor: None,
@@ -2053,7 +2054,7 @@ fn write_batch(
             sql_sequence(sequence)?
         ])
         .map_err(error)?;
-    if batch.key.branch_id == "main" {
+    if batch.key.branch_id == DEFAULT_BRANCH_ID {
         // The batch's own activity, newest first: a housekeeping batch does
         // not touch the stored activity time (issue #1099).
         if let Some(last) = batch
@@ -2492,9 +2493,9 @@ fn copy_fork_rows(
             .map_err(error)?;
         for (id, info) in &branches {
             let parsed: BranchRecord = serde_json::from_str(info).map_err(error)?;
-            let head = if id == "main" {
+            let head = if id == ROOT_BRANCH_ID {
                 cut
-            } else if parsed.parent.as_deref() == Some("main")
+            } else if parsed.parent.as_deref() == Some(ROOT_BRANCH_ID)
                 && parsed.create_anchor.is_some_and(|anchor| anchor <= at)
             {
                 0
@@ -2556,7 +2557,7 @@ fn copy_fork_rows(
                 super::text::row_through(
                     tx,
                     fork,
-                    "main",
+                    ROOT_BRANCH_ID,
                     read_sequence(row, 0).map_err(error)?,
                     &row.get::<_, String>(2).map_err(error)?,
                     at,
@@ -2566,7 +2567,7 @@ fn copy_fork_rows(
                     super::identities::row(
                         tx,
                         fork,
-                        "main",
+                        ROOT_BRANCH_ID,
                         read_sequence(row, 0).map_err(error)?,
                         &row.get::<_, String>(2).map_err(error)?,
                         at,
@@ -2575,7 +2576,7 @@ fn copy_fork_rows(
                 super::members::row(
                     tx,
                     fork,
-                    "main",
+                    ROOT_BRANCH_ID,
                     &row.get::<_, String>(1).map_err(error)?,
                     &row.get::<_, String>(2).map_err(error)?,
                 )?;
@@ -2659,10 +2660,10 @@ fn copy_fork_rows(
             };
             let key = TimelineKey {
                 session_id: fork.to_owned(),
-                branch_id: "main".into(),
+                branch_id: ROOT_BRANCH_ID.into(),
             };
             let wire = codec::encode(&forked, std::iter::empty())?;
-            super::text::event(tx, fork, "main", at + 1, &wire.event)?;
+            super::text::event(tx, fork, ROOT_BRANCH_ID, at + 1, &wire.event)?;
             insert_event(
                 tx,
                 &key,
@@ -3223,7 +3224,7 @@ fn directory_rows(connection: &Connection, session: &str) -> Result<Vec<StoredBr
         );
     }
     let main = branches
-        .get("main")
+        .get(ROOT_BRANCH_ID)
         .ok_or_else(|| error("Session main directory is missing"))?;
     if main.info.parent.is_some()
         || main.info.branch_point.is_some()
@@ -3232,7 +3233,7 @@ fn directory_rows(connection: &Connection, session: &str) -> Result<Vec<StoredBr
         return Err(error("invalid main branch directory"));
     }
     for (id, branch) in &branches {
-        if id == "main" {
+        if id == ROOT_BRANCH_ID {
             continue;
         }
         let parent = branch

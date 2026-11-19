@@ -25,7 +25,7 @@ use dim_agent_runtime::{
     AgentBuilder, Names, SessionConfig, SessionHold, SessionIdentity, SessionLifecycle,
     SessionPhase,
 };
-use dim_agent_types::{InputMessageData, InputMode};
+use dim_agent_types::{DEFAULT_BRANCH_ID, InputMessageData, InputMode};
 use rutis::Ctx;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use serde::{Deserialize, Serialize};
@@ -75,14 +75,14 @@ struct RunParams {
     /// Read by Rpc to route the call; the provider already serves this Session.
     #[serde(rename = "sessionId")]
     _session_id: String,
-    #[serde(default = "main_branch")]
+    #[serde(default = "default_branch")]
     branch_id: String,
     run_id: String,
     command: String,
     mode: Mode,
 }
-fn main_branch() -> String {
-    "main".into()
+fn default_branch() -> String {
+    DEFAULT_BRANCH_ID.into()
 }
 
 #[derive(Deserialize)]

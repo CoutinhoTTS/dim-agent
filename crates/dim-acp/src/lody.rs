@@ -164,12 +164,13 @@ impl Subagents {
     pub(crate) fn pending(
         &mut self,
         session: &str,
+        branch: &str,
         request: &dim_agent_types::PendingDelegation,
     ) -> Value {
         let run = Run {
             id: json!([self.activation, request.event_id]).to_string(),
             parent_tool: tool_id(
-                "main",
+                branch,
                 &request.request.request_id,
                 &request.request.call_id,
             ),
@@ -190,7 +191,7 @@ impl Subagents {
         snapshot
     }
 
-    pub(crate) fn event(&mut self, session: &str, event: &Event) -> Vec<Value> {
+    pub(crate) fn event(&mut self, session: &str, branch: &str, event: &Event) -> Vec<Value> {
         let mut output = Vec::new();
         if event.sequence <= self.through {
             return output;
@@ -203,7 +204,7 @@ impl Subagents {
                 }
                 let run = Run {
                     id: json!([self.activation, event.id]).to_string(),
-                    parent_tool: tool_id("main", &data.request_id, &data.call_id),
+                    parent_tool: tool_id(branch, &data.request_id, &data.call_id),
                     description: data.prompt.chars().take(4096).collect(),
                     started: event.create_at as f64 / 1000.,
                     state: "pending",

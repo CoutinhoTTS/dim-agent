@@ -9,6 +9,7 @@ use std::{cell::Cell, collections::BTreeMap};
 
 use crate::model::session::PromptField;
 use crate::question::{Answer, Call, Question};
+use dim_agent_types::ROOT_BRANCH_ID;
 use serde_json::Value;
 
 use crate::ui::i18n::{t, tf};
@@ -586,7 +587,7 @@ impl PermissionPrompt {
                 fg(if text.is_empty() { " " } else { &text }, color)
             })
             .collect();
-        let branch = (self.branch_id != "main").then(|| {
+        let branch = (self.branch_id != ROOT_BRANCH_ID).then(|| {
             fg(
                 &truncate_cells(
                     &tf(
@@ -1479,7 +1480,7 @@ impl AskUserPrompt {
 
     pub fn render(&self, width: usize, max_rows: usize, p: &Palette) -> Vec<String> {
         let (inner, lines) = self.layout(width, max_rows);
-        let origin = if self.call.branch_id == "main" {
+        let origin = if self.call.branch_id == ROOT_BRANCH_ID {
             String::new()
         } else {
             line_text(

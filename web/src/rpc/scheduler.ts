@@ -1,5 +1,5 @@
 import { ProtocolError, readPermissionPolicy } from "./read"
-import type { PermissionPolicy, PermissionPreset } from "./protocol"
+import { DEFAULT_BRANCH_ID, type PermissionPolicy, type PermissionPreset } from "./protocol"
 
 export type Schedule = { every_minutes: number } | { at: string } | { cron: string; tz?: string }
 type Origin = "user" | { tool: { session_id: string; branch_id: string } }
@@ -55,7 +55,7 @@ function inputMode(value: unknown): InputMode {
 }
 function target(value: unknown): Target {
   const v = object(value)
-  if (v.kind === "session") return { kind: "session", session_id: string(v.session_id), branch_id: v.branch_id === undefined || v.branch_id === null ? "main" : string(v.branch_id), input_mode: inputMode(v.input_mode) }
+  if (v.kind === "session") return { kind: "session", session_id: string(v.session_id), branch_id: v.branch_id === undefined || v.branch_id === null ? DEFAULT_BRANCH_ID : string(v.branch_id), input_mode: inputMode(v.input_mode) }
   if (v.kind === "launch") return { kind: "launch", cwd: string(v.cwd), agent_id: optional(v.agent_id, string), policy: optional(v.policy, preset), max_run_minutes: v.max_run_minutes === undefined || v.max_run_minutes === null ? 60 : integer(v.max_run_minutes) }
   throw new ProtocolError("Invalid Scheduler target")
 }
