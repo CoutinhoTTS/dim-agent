@@ -48,9 +48,9 @@ const HOMES: [(&str, &str); 2] = [
 ];
 
 /// Production uses of `"main"` that are not about lines, each with the file's
-/// path from the repository root, text that must be on the literal's own line,
-/// and why the use is unrelated.
-const UNRELATED: [(&str, &str, &str); 7] = [
+/// path from the repository root, the expression or attribute that must span
+/// the literal on its own line, and why the use is unrelated.
+const UNRELATED: [(&str, &str, &str); 9] = [
     (
         "crates/dim-app-server/src/storage/sqlite.rs",
         "is_readonly(\"main\")",
@@ -73,15 +73,29 @@ const UNRELATED: [(&str, &str, &str); 7] = [
     ),
     (
         "web/src/features/chat/ComposerPanel.vue",
-        "variant",
-        "a layout variant",
+        ":data-variant=\"variant ?? 'main'\"",
+        "a layout variant's default",
+    ),
+    (
+        "web/src/features/chat/ComposerPanel.vue",
+        "variant?: \"main\" | \"panel\"",
+        "a layout variant's type",
     ),
     (
         "web/src/features/chat/TimelineView.vue",
-        "variant",
-        "a layout variant",
+        ":data-variant=\"variant ?? 'main'\"",
+        "a layout variant's default",
     ),
-    ("web/src/i18n", "\"lines.main\"", "the root line's label"),
+    (
+        "web/src/features/chat/TimelineView.vue",
+        "variant?: \"main\" | \"panel\"",
+        "a layout variant's type",
+    ),
+    (
+        "web/src/i18n",
+        "\"lines.main\": \"main\"",
+        "the root line's label",
+    ),
 ];
 
 /// Checks every production source under `root`. Each failure names the file,
@@ -102,21 +116,21 @@ pub fn check(root: &Path) -> Result<()> {
     }
 }
 
-/// The lines `text` uses the literal on, whose repository-relative path is
-/// `file`, by the rule its spelling earns; answers how many uses `UNRELATED`
-/// allows and adds every other use to `errors`. A Rust source the parser cannot
-/// read is an error naming the file: the rule fails closed rather than skipping
-/// a file it cannot see into.
+/// The uses `text` has, whose repository-relative path is `file`, by the rule a
+/// use earns; answers how many uses `UNRELATED` allows and adds every other use
+/// to `errors`. A Rust source the parser cannot read is an error naming the
+/// file: the rule fails closed rather than skipping a file it cannot see into.
 fn findings(file: &str, text: &str, errors: &mut Vec<String>) -> Result<usize> {
     let mut allowed = 0;
-    let lines = match uses(file, text) {
-        Ok(lines) => lines,
+    let offsets = match uses(file, text) {
+        Ok(offsets) => offsets,
         Err(error) => {
             errors.push(error.to_string());
             return Ok(0);
         }
     };
-    for line in lines {
+    for offset in offsets {
+        let line = line_at(text, offset);
         let source = text.lines().nth(line.saturating_sub(1)).unwrap_or_default();
         if names_the_id(file, source) {
             continue;
@@ -129,7 +143,7 @@ fn findings(file: &str, text: &str, errors: &mut Vec<String>) -> Result<usize> {
             ));
             continue;
         }
-        if unrelated(file, source) {
+        if unrelated(file, text, offset) {
             allowed += 1;
             continue;
         }
@@ -141,20 +155,14 @@ fn findings(file: &str, text: &str, errors: &mut Vec<String>) -> Result<usize> {
     Ok(allowed)
 }
 
-/// The 1-based lines of `text` that use the literal as code, by the file's
-/// spelling.
+/// The byte offsets of `text`'s `main` literals that are code, by the file's
+/// spelling. Each offset is the literal's opening quote.
 fn uses(file: &str, text: &str) -> Result<Vec<usize>> {
     let extension = file.rsplit_once('.').map_or("", |(_, extension)| extension);
     match extension {
         "rs" => rust_uses(file, text).map_err(Into::into),
-        "vue" => Ok(vue_uses(text)
-            .into_iter()
-            .map(|offset| line_at(text, offset))
-            .collect()),
-        _ => Ok(javascript_uses(text)
-            .into_iter()
-            .map(|offset| line_at(text, offset))
-            .collect()),
+        "vue" => Ok(vue_uses(text)),
+        _ => Ok(javascript_uses(text)),
     }
 }
 
@@ -203,11 +211,21 @@ fn declares(line: &str, spelling: &str) -> bool {
     })
 }
 
-/// Whether an allowlist entry covers the literal on `line` of `file`.
-fn unrelated(file: &str, line: &str) -> bool {
-    UNRELATED
-        .iter()
-        .any(|(path, text, _)| file.starts_with(path) && line.contains(text))
+/// Whether an allowlist entry covers the literal at `offset` in `text`: the
+/// entry's file must match, and one occurrence of its text on the literal's own
+/// line must span the literal's position. An entry names the expression or
+/// attribute that holds the literal, so a second literal on the same line is
+/// not covered by it.
+fn unrelated(file: &str, text: &str, offset: usize) -> bool {
+    let start = text[..offset].rfind('\n').map_or(0, |newline| newline + 1);
+    let line = text[start..].split('\n').next().unwrap_or_default();
+    let column = offset - start;
+    UNRELATED.iter().any(|(path, entry, _)| {
+        file.starts_with(path)
+            && line
+                .match_indices(entry)
+                .any(|(at, found)| at <= column && column < at + found.len())
+    })
 }
 
 /// Every production source the rule reads: each crate's `src`, and the Web
@@ -276,25 +294,25 @@ fn is_production(name: &str, kind: Kind) -> bool {
 
 // ---------------------------------------------------------------- Rust
 
-/// The 1-based lines of the `main` literals in `text` that are production.
+/// The byte offsets of the `main` literals in `text` that are production.
 fn rust_uses(file: &str, text: &str) -> std::result::Result<Vec<usize>, String> {
     let parsed = syn::parse_file(text).map_err(|error| {
         format!("{file}: the literal-main rule cannot parse this source: {error}")
     })?;
     let mut visitor = RustLiterals {
-        lines: Vec::new(),
+        offsets: Vec::new(),
         gated: false,
     };
     visitor.visit_file(&parsed);
-    Ok(visitor.lines)
+    Ok(visitor.offsets)
 }
 
-/// Collects the lines of the `main` literals that are production, and nothing
-/// from an item a test-only `cfg` gates. The gate is read from the parsed
-/// attributes, so a doc line that mentions `#[cfg(test)]` is not a gate: it is
-/// an attribute whose body is a doc string, and `cfg` is not its path.
+/// Collects the byte offsets of the `main` literals that are production, and
+/// nothing from an item a test-only `cfg` gates. The gate is read from the
+/// parsed attributes, so a doc line that mentions `#[cfg(test)]` is not a gate:
+/// it is an attribute whose body is a doc string, and `cfg` is not its path.
 struct RustLiterals {
-    lines: Vec<usize>,
+    offsets: Vec<usize>,
     /// Whether the node being visited is inside a test-only `cfg`, which every
     /// literal below it inherits.
     gated: bool,
@@ -393,13 +411,13 @@ impl<'ast> Visit<'ast> for RustLiterals {
 
     fn visit_lit_str(&mut self, node: &'ast syn::LitStr) {
         if !self.gated && node.value() == "main" {
-            self.lines.push(node.span().start().line);
+            self.offsets.push(node.span().byte_range().start);
         }
     }
 
     fn visit_macro(&mut self, node: &'ast syn::Macro) {
         if !self.gated {
-            self.lines.extend(macro_literals(&node.tokens));
+            self.offsets.extend(macro_offsets(&node.tokens));
         }
         syn::visit::visit_macro(self, node);
     }
@@ -562,25 +580,25 @@ fn test_only_meta(meta: &syn::Meta) -> bool {
     }
 }
 
-/// The 1-based lines of the `main` literals in a macro's tokens, read through
-/// the same parser a source literal goes through: `json!({"branchId": "main"})`
-/// and a `format!` argument are uses like any other.
-fn macro_literals(tokens: &TokenStream) -> Vec<usize> {
+/// The byte offsets of the `main` literals in a macro's tokens, read through the
+/// same parser a source literal goes through: `json!({"branchId": "main"})` and
+/// a `format!` argument are uses like any other.
+fn macro_offsets(tokens: &TokenStream) -> Vec<usize> {
     tokens
         .clone()
         .into_iter()
         .flat_map(|tree| match tree {
             TokenTree::Literal(literal) => {
                 // The value comes from a parse of the token's text, which is a
-                // new span; the line comes from the token itself, which is the
-                // one the source wrote.
+                // new span; the position comes from the token itself, which is
+                // the one the source wrote.
                 let value = syn::parse_str::<syn::LitStr>(&literal.to_string());
                 match value.is_ok_and(|literal| literal.value() == "main") {
-                    true => vec![literal.span().start().line],
+                    true => vec![literal.span().byte_range().start],
                     false => Vec::new(),
                 }
             }
-            TokenTree::Group(group) => macro_literals(&group.stream()),
+            TokenTree::Group(group) => macro_offsets(&group.stream()),
             _ => Vec::new(),
         })
         .collect()
@@ -1496,6 +1514,14 @@ mod tests {
         ("web/src/a.ts", "const re = /[/']/\nconst id = 'main'\n"),
         ("web/src/a.ts", "const r = a / b; const id = 'main'\n"),
         ("web/src/a.ts", "return /'/.test(x) ? y : 'main'\n"),
+        (
+            "web/src/features/chat/TimelineView.vue",
+            "<template>\n  <div :data-variant=\"variant\" @click=\"openLine('main')\"></div>\n</template>\n",
+        ),
+        (
+            "crates/dim-app-server/src/storage/sqlite.rs",
+            "fn check(connection: &Connection) {\n    if let Ok(false) = connection.is_readonly(\"main\") { let b = \"main\"; }\n}\n",
+        ),
     ];
 
     #[test]
@@ -1680,5 +1706,26 @@ mod tests {
         assert_eq!(errors.len(), 1, "{errors:?}");
         let errors = bounded("web/src/a.ts", "return /'/.test(x) ? y : 'main'\n");
         assert_eq!(errors.len(), 1, "{errors:?}");
+    }
+
+    #[test]
+    fn an_allowlist_entry_covers_only_the_literal_it_spans() {
+        let codoggys = "<template>\n  <div :data-variant=\"variant\" @click=\"openLine('main')\"></div>\n</template>\n";
+        let errors = bounded("web/src/features/chat/TimelineView.vue", codoggys);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(
+            errors[0].contains("TimelineView.vue:2: `\"main\"` names neither"),
+            "{errors:?}"
+        );
+        let real = "<template>\n  <div :data-variant=\"variant ?? 'main'\"></div>\n</template>\n";
+        let errors = bounded("web/src/features/chat/TimelineView.vue", real);
+        assert!(errors.is_empty(), "{errors:?}");
+        let both = "fn check(connection: &Connection) {\n    if let Ok(false) = connection.is_readonly(\"main\") { let b = \"main\"; }\n}\n";
+        let errors = bounded("crates/dim-app-server/src/storage/sqlite.rs", both);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(
+            errors[0].contains("storage/sqlite.rs:2: `\"main\"` names neither"),
+            "{errors:?}"
+        );
     }
 }
