@@ -27,8 +27,8 @@ use dim_agent_runtime::{
 };
 use dim_agent_types::{
     AgentEvent, ApprovalDecision, ApprovalRequestData, BranchSource, ContentBlock, EventKind,
-    InputBlock, InputMessageData, InputMode, JsonObject, PermissionPreset, TimelinePosition,
-    ToolCall, ToolResultData, TurnOutcome, UserInput,
+    InputBlock, InputMessageData, InputMode, JsonObject, PermissionPreset, ROOT_BRANCH_ID,
+    TimelinePosition, ToolCall, ToolResultData, TurnOutcome, UserInput,
 };
 use rutis::Ctx;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
@@ -58,8 +58,6 @@ const CONTEXT_LIMIT: usize = 16 * 1024;
 /// Consecutive `Stop` follow-ups (A8).
 const STOP_FOLLOW_UP_LIMIT: u32 = 3;
 const FOLLOW_UP_TAG: &str = "hooks:stop-follow-up:";
-/// The root branch, where `SessionStart` is derived.
-const MAIN_BRANCH: &str = "main";
 /// The key prefix of a `SessionStart` block, which tells a started Session
 /// from one that has not run it.
 const SESSION_START_KEY: &str = "hooks:session-start/";
@@ -1723,7 +1721,7 @@ impl Branch {
     }
 
     async fn start_session(self: &Arc<Self>) -> dim_agent_runtime::Result<()> {
-        if self.branch_id != MAIN_BRANCH {
+        if self.branch_id != ROOT_BRANCH_ID {
             return Ok(());
         }
         let trigger = {

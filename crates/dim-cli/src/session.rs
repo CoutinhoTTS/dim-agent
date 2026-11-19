@@ -13,10 +13,9 @@ use crate::{
     permission, permission_command,
     question::line::Questions,
 };
-use dim_agent_types::{ApprovalCallData, ContentBlock, PermissionPolicy, UserInput};
-
-/// The branch a line-mode command acts on: the prompt shows `main`.
-const MAIN_BRANCH: &str = "main";
+use dim_agent_types::{
+    ApprovalCallData, ContentBlock, DEFAULT_BRANCH_ID, PermissionPolicy, UserInput,
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
@@ -120,7 +119,7 @@ async fn start_shell(
         return Ok(None);
     }
     let run_id = uuid::Uuid::new_v4().to_string();
-    let request = client.send("shell.run", json!({"sessionId":session_id,"branchId":"main","runId":run_id,"command":command,"mode":mode})).await?;
+    let request = client.send("shell.run", json!({"sessionId":session_id,"branchId":DEFAULT_BRANCH_ID,"runId":run_id,"command":command,"mode":mode})).await?;
     display.record(&format!("[shell started] {mode}"))?;
     Ok(Some(ShellRun {
         request: Some(request),
@@ -458,7 +457,7 @@ pub async fn chat(
                     if let Err(error) = loop_command::command(
                         client,
                         &session_id,
-                        MAIN_BRANCH,
+                        DEFAULT_BRANCH_ID,
                         text,
                         &mut display,
                         &mut interrupts,
@@ -637,7 +636,7 @@ async fn read_history_mode(
     let mut through = None;
     loop {
         let mut params =
-            json!({"sessionId":session_id,"branchId":"main","after":after,"limit":256});
+            json!({"sessionId":session_id,"branchId":DEFAULT_BRANCH_ID,"after":after,"limit":256});
         if let Some(through) = through {
             params["through"] = json!(through);
         }
@@ -728,7 +727,7 @@ async fn wait_turn(
         }
         Some(Submission::Message(mut user)) => {
             crate::images::import(client, session_id, &mut user.content).await?;
-            let mut params = json!({"sessionId":session_id,"branchId":"main","submissionId":uuid::Uuid::new_v4().to_string(),"mode":"queue"});
+            let mut params = json!({"sessionId":session_id,"branchId":DEFAULT_BRANCH_ID,"submissionId":uuid::Uuid::new_v4().to_string(),"mode":"queue"});
             match user.content.as_slice() {
                 [ContentBlock::Text { text }] => params["text"] = json!(text),
                 _ => params["user"] = json!(user),
@@ -742,7 +741,7 @@ async fn wait_turn(
             client
                 .send(
                     "session.idle",
-                    json!({"sessionId":session_id,"branchId":"main"}),
+                    json!({"sessionId":session_id,"branchId":DEFAULT_BRANCH_ID}),
                 )
                 .await?,
         )
@@ -883,7 +882,7 @@ async fn wait_turn(
                         client
                             .send(
                                 "session.stop",
-                                json!({"sessionId":session_id,"branchId":"main","reason":reason}),
+                                json!({"sessionId":session_id,"branchId":DEFAULT_BRANCH_ID,"reason":reason}),
                             )
                             .await?,
                     );
@@ -926,7 +925,7 @@ async fn wait_turn(
                     code = 130;
                     approvals.clear(); prompted = false;
                     questions.interrupt(client, session_id).await?;
-                    stop = Some(client.send("session.stop", json!({"sessionId":session_id,"branchId":"main","reason":"CLI interrupted"})).await?);
+                    stop = Some(client.send("session.stop", json!({"sessionId":session_id,"branchId":DEFAULT_BRANCH_ID,"reason":"CLI interrupted"})).await?);
                     continue;
                 }
                 line = async {
@@ -1015,7 +1014,7 @@ async fn wait_turn(
                     }
                     if line.is_none() && stop.is_none() && settled.is_none() {
                         code = 130;
-                        stop = Some(client.send("session.stop", json!({"sessionId":session_id,"branchId":"main","reason":"CLI input closed"})).await?);
+                        stop = Some(client.send("session.stop", json!({"sessionId":session_id,"branchId":DEFAULT_BRANCH_ID,"reason":"CLI input closed"})).await?);
                     }
                     continue;
                 }
@@ -1125,7 +1124,7 @@ async fn wait_turn(
                         client
                             .send(
                                 "session.idle",
-                                json!({"sessionId":session_id,"branchId":"main"}),
+                                json!({"sessionId":session_id,"branchId":DEFAULT_BRANCH_ID}),
                             )
                             .await?,
                     );
@@ -1264,7 +1263,7 @@ async fn wait_turn(
                     display.record("Interactive approval required; the operation was denied. Rerun in a terminal to review it")?;
                     approval_replies.insert(client.send("approval.respond", json!({"sessionId":session_id,"branchId":approval.branch_id,"requestId":approval.request_id,"decision":"deny"})).await?);
                     code = 3;
-                    stop = Some(client.send("session.stop", json!({"sessionId":session_id,"branchId":"main","reason":"Interactive approval required"})).await?);
+                    stop = Some(client.send("session.stop", json!({"sessionId":session_id,"branchId":DEFAULT_BRANCH_ID,"reason":"Interactive approval required"})).await?);
                 } else {
                     approvals.push_back(approval);
                 }
@@ -1366,7 +1365,7 @@ fn render(notice: Message, session_id: &str, display: &mut Display) -> Result<()
             }
             let event = &params["event"];
             if method == "session.event"
-                && params["branchId"] == "main"
+                && params["branchId"] == DEFAULT_BRANCH_ID
                 && event["type"] == "turn"
                 && event["name"] == "end"
                 && event["data"]["status"] == "failed"
@@ -1386,12 +1385,12 @@ fn render(notice: Message, session_id: &str, display: &mut Display) -> Result<()
             } else {
                 decode(params, &method)?
             };
-            if notice.session_id == session_id && notice.branch_id == "main" {
+            if notice.session_id == session_id && notice.branch_id == DEFAULT_BRANCH_ID {
                 if let Some((sequence, policy)) = changed
                     && sequence > display.cursor.max(display.permission_seen)
                 {
                     display.record(&format!(
-                        "[permission] main branch preset: {}",
+                        "[permission] permission preset: {}",
                         permission::name(policy.preset)
                     ))?;
                     display.permission_seen = sequence;
@@ -1401,7 +1400,7 @@ fn render(notice: Message, session_id: &str, display: &mut Display) -> Result<()
         }
         "session.model.progress" => {
             let notice: Progress = decode(params, &method)?;
-            if notice.session_id == session_id && notice.branch_id == "main" {
+            if notice.session_id == session_id && notice.branch_id == DEFAULT_BRANCH_ID {
                 display.progress(notice)?;
             }
         }

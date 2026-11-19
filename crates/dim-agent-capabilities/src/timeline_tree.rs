@@ -1386,7 +1386,7 @@ impl TimelineTree {
             if state.closing {
                 return Err(AgentError::Closed("TimelineTree".into()));
             }
-            if id == "main" {
+            if id == ROOT_BRANCH_ID {
                 return Err(AgentError::InvalidInput(
                     "`main` cannot end; closing the Session is not an end".into(),
                 ));
@@ -1892,7 +1892,7 @@ impl TimelineTreeControl for TimelineTree {
                 let ready = self.reserve(
                     &mut state,
                     TimelineInfo {
-                        id: "main".into(),
+                        id: ROOT_BRANCH_ID.into(),
                         parent: None,
                         branch_point: None,
                         create_anchor: None,
@@ -1902,7 +1902,7 @@ impl TimelineTreeControl for TimelineTree {
                 )?;
                 self.launch(
                     &mut state,
-                    "main".into(),
+                    ROOT_BRANCH_ID.into(),
                     vec![],
                     None,
                     Opening::Start {
@@ -2155,7 +2155,7 @@ impl TimelineTreeControl for TimelineTree {
             }
         }
         entries.sort_by(|a, b| {
-            let order = |id: &str| id != "main";
+            let order = |id: &str| id != ROOT_BRANCH_ID;
             (order(&a.info.id), &a.info.id).cmp(&(order(&b.info.id), &b.info.id))
         });
         entries
@@ -2382,6 +2382,8 @@ impl DynPlugin for BranchToolPlugin {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum LineRole {
+    /// The root: the line with no parent. Its wire value stays `main`, the
+    /// root's id on the wire and in storage.
     Main,
     Tool,
     Host,

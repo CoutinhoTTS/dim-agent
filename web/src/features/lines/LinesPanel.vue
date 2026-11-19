@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from "vue"
 import { useI18n } from "vue-i18n"
-import { MAIN_BRANCH } from "../../rpc/protocol"
+import { ROOT_BRANCH_ID } from "../../rpc/protocol"
 import { useChatStore } from "../../stores/chat"
 import { useToastStore } from "../../stores/toast"
 import { useUiStore } from "../../stores/ui"
@@ -18,7 +18,7 @@ const toast = useToastStore()
 const view = computed(() => chat.views[props.sessionId])
 const tabs = computed(() => ui.lineTabs[props.sessionId] ?? [])
 const active = computed(() => ui.activeLineTab[props.sessionId])
-const lineCount = computed(() => view.value?.lines.filter((line) => line.id !== MAIN_BRANCH).length ?? 0)
+const lineCount = computed(() => view.value?.lines.filter((line) => line.id !== ROOT_BRANCH_ID).length ?? 0)
 
 function line(branchId: string) {
   return view.value?.lines.find((candidate) => candidate.id === branchId)
@@ -63,7 +63,7 @@ function newLine(): void {
     toast.push({ tone: "info", title: t("lines.noFinishedTurn") })
     return
   }
-  ui.requestNewLine({ sessionId: props.sessionId, parentBranchId: MAIN_BRANCH, at, text: "" })
+  ui.requestNewLine({ sessionId: props.sessionId, parentBranchId: ROOT_BRANCH_ID, at, text: "" })
 }
 
 function onKeydown(event: KeyboardEvent): void {

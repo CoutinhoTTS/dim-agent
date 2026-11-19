@@ -12,7 +12,7 @@ use crate::{
     session::{CancelParams, CreateParams, ListParams, nonempty, wakeup_request, wire_scheduled},
 };
 use dim_agent_capabilities::session_broadcast::{SessionNotice, notify};
-use dim_agent_types::markup::escaped;
+use dim_agent_types::{DEFAULT_BRANCH_ID, markup::escaped};
 use jiff::{SignedDuration, Timestamp};
 use rutis_bridge::session::{Error as BridgeError, HostDispatch, Reply, Value as BridgeValue};
 use serde::{Deserialize, Serialize};
@@ -559,7 +559,9 @@ impl HostDispatch for WakeupsFace {
                         Ok(args) => args,
                         Err(error) => return face_failure(error),
                     };
-                let branch = request.branch_id.unwrap_or_else(|| "main".into());
+                let branch = request
+                    .branch_id
+                    .unwrap_or_else(|| DEFAULT_BRANCH_ID.into());
                 if let Err(error) = nonempty(&request.session_id, "sessionId")
                     .and_then(|()| nonempty(&branch, "branchId"))
                 {

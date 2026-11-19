@@ -5,7 +5,7 @@ use crate::{
     rpc::{self, Native, Rpc},
 };
 use agent_client_protocol::{Client, ConnectionTo, Error, UntypedMessage, schema::v1 as acp};
-use dim_agent_types::TurnOutcome;
+use dim_agent_types::{DEFAULT_BRANCH_ID, ROOT_BRANCH_ID, TurnOutcome};
 use dim_client::window::Window;
 use dim_client::wire::{
     Attached, Configuration, DisplayNotice, DisplayPage, Event, EventContent, EventNotice,
@@ -918,7 +918,7 @@ impl Gateway {
                 let rpc = self.rpc.clone();
                 self.spawn(async move {
                     let mut query =
-                        json!({"sessionId":args.session_id,"branchId":"main","limit":limit});
+                        json!({"sessionId":args.session_id,"branchId":DEFAULT_BRANCH_ID,"limit":limit});
                     if rpc.supports("session.history.display.transcript") {
                         query["tail"] = json!(true);
                         query["transcript"] = json!(true);
@@ -999,7 +999,7 @@ impl Gateway {
                         {
                             return Err(Error::invalid_params());
                         }
-                        let mut params = json!({"sessionId":source,"branchId":"main"});
+                        let mut params = json!({"sessionId":source,"branchId":ROOT_BRANCH_ID});
                         if let Some(turn) = &controls.fork_turn {
                             params["turnId"] = json!(turn);
                         }
@@ -1120,7 +1120,7 @@ impl Gateway {
                         };
                         if uploading.is_cancelled() { return Err(Error::new(-32800, "Request cancelled before submission")); }
                         sent = true;
-                        rpc.typed("session.submit", json!({"sessionId":id,"branchId":"main","submissionId":submission,"user":user,"mode":"queue"})).await
+                        rpc.typed("session.submit", json!({"sessionId":id,"branchId":DEFAULT_BRANCH_ID,"submissionId":submission,"user":user,"mode":"queue"})).await
                     }.await;
                     Work::Submitted { id, submission, result,sent }
                 });
@@ -1227,7 +1227,7 @@ impl Gateway {
                                 let current = rpc
                                     .typed(
                                         "session.permission.get",
-                                        json!({"sessionId":id,"branchId":"main"}),
+                                        json!({"sessionId":id,"branchId":DEFAULT_BRANCH_ID}),
                                     )
                                     .await;
                                 current.ok().map(|policy| {
@@ -1366,15 +1366,18 @@ impl Gateway {
                     let value = rpc
                         .call(
                             "session.input.withdraw",
-                            json!({"sessionId":id,"branchId":"main","inputId":input}),
+                            json!({"sessionId":id,"branchId":DEFAULT_BRANCH_ID,"inputId":input}),
                         )
                         .await?;
                     if value["status"] == "deleted" {
                         return Ok(value);
                     }
                 }
-                rpc.call("session.stop", json!({"sessionId":id,"branchId":"main"}))
-                    .await
+                rpc.call(
+                    "session.stop",
+                    json!({"sessionId":id,"branchId":DEFAULT_BRANCH_ID}),
+                )
+                .await
             }
             .await;
             Work::Cancelled {
@@ -1566,7 +1569,7 @@ impl Gateway {
                             if index % 32 == 0 {
                                 tokio::task::yield_now().await;
                             }
-                            fold_questions(&mut session.questions, "main", &event);
+                            fold_questions(&mut session.questions, ROOT_BRANCH_ID, &event);
                             let updates = session.projection.event(&event);
                             let snapshots = session.subagents.event(&id, &event);
                             if self.subagent_events {
@@ -1609,7 +1612,7 @@ impl Gateway {
                                     .notify(&self.cx, "_lody/subagents/event", snapshot)?;
                             }
                         }
-                        session.questions.clear_branch("main");
+                        session.questions.clear_branch(ROOT_BRANCH_ID);
                         for (branch, (cut, batches)) in prepared.questions {
                             session.questions.clear_branch(&branch);
                             session.question_through.insert(branch.clone(), cut);
@@ -2127,7 +2130,7 @@ impl Gateway {
                             } else {
                                 self.event_notice(EventNotice {
                                     session_id: id.clone(),
-                                    branch_id: "main".into(),
+                                    branch_id: ROOT_BRANCH_ID.into(),
                                     event,
                                 })
                                 .await?;
@@ -2337,7 +2340,7 @@ impl Gateway {
             }
             "session.model.progress" => {
                 let progress: Progress = decode_native(params)?;
-                if progress.branch_id != "main" {
+                if progress.branch_id != DEFAULT_BRANCH_ID {
                     return Ok(());
                 }
                 let id = progress.session_id.clone();
@@ -2641,7 +2644,7 @@ impl Gateway {
                         loop {
                             let query = json!({
                                 "sessionId":id,
-                                "branchId":"main",
+                                "branchId":DEFAULT_BRANCH_ID,
                                 "submissionId":submission,
                             });
                             match rpc.typed("session.input_lookup", query).await? {
@@ -2665,7 +2668,7 @@ impl Gateway {
                         .or(accepted_input);
                     let prompt_turn = if turn_id.is_some() || input_id.is_some() {
                         let mut query =
-                            json!({"sessionId":id,"branchId":"main","through":prepared.through});
+                            json!({"sessionId":id,"branchId":DEFAULT_BRANCH_ID,"through":prepared.through});
                         if let Some(turn) = turn_id {
                             query["turnId"] = json!(turn);
                         } else if let Some(input) = input_id {
@@ -2727,7 +2730,7 @@ impl Gateway {
             }
             self.questions(&notice.session_id);
         }
-        if notice.branch_id != "main" {
+        if notice.branch_id != DEFAULT_BRANCH_ID {
             return Ok(());
         }
         let Some(Slot::Ready(session)) = self.sessions.get_mut(&notice.session_id) else {
@@ -2937,7 +2940,7 @@ impl Gateway {
                 result: rpc
                     .call(
                         "session.context.usage",
-                        json!({"sessionId":id,"branchId":"main"}),
+                        json!({"sessionId":id,"branchId":DEFAULT_BRANCH_ID}),
                     )
                     .await,
                 id,
@@ -3074,7 +3077,7 @@ async fn read_history(
         loop {
             let args = window.params_with_display(
                 id,
-                "main",
+                ROOT_BRANCH_ID,
                 rpc.supports("session.history.display.tail"),
                 rpc.supports("session.history.display.transcript"),
             );
@@ -3103,7 +3106,7 @@ async fn read_history(
     let config = Config::read(rpc, id, model).await?;
     let mut questions = HashMap::new();
     if config.methods.contains("session.question.pending") {
-        let mut branches = vec!["main".to_owned()];
+        let mut branches = vec![ROOT_BRANCH_ID.to_owned()];
         if rpc.supports("session.branches") {
             let directory: dim_client::wire::BranchDirectory = rpc
                 .typed("session.branches", json!({"sessionId":id}))
@@ -3117,7 +3120,7 @@ async fn read_history(
         }
         for branch in branches {
             let mut params = json!({"sessionId":id,"branchId":branch});
-            if branch == "main" {
+            if branch == ROOT_BRANCH_ID {
                 params["through"] = json!(through);
             }
             let mut batches = Vec::new();
@@ -3154,7 +3157,7 @@ async fn read_history(
         if !config.methods.contains(method) {
             continue;
         }
-        let mut params = json!({"sessionId":id,"branchId":"main","through":through});
+        let mut params = json!({"sessionId":id,"branchId":DEFAULT_BRANCH_ID,"through":through});
         loop {
             let value = rpc.call(method, params.clone()).await?;
             let (branch, cut, next) = match method {
@@ -3174,7 +3177,7 @@ async fn read_history(
                     (page.branch_id, page.through, page.next)
                 }
             };
-            if branch != "main" || cut != through {
+            if branch != ROOT_BRANCH_ID || cut != through {
                 return Err(Error::internal_error());
             }
             let Some(next) = next else {
@@ -3189,7 +3192,7 @@ async fn read_history(
     let turn: TurnRead = rpc
         .typed(
             "session.turn.get",
-            json!({"sessionId":id,"branchId":"main","through":through}),
+            json!({"sessionId":id,"branchId":DEFAULT_BRANCH_ID,"through":through}),
         )
         .await?;
     let output = turn.output;

@@ -14,7 +14,7 @@ use dim_agent_capabilities::{
     tool_registry::{ToolContribution, ToolHandler, ToolRegistry},
 };
 use dim_agent_runtime::{Names, SessionIdentity, TimelineKey};
-use dim_agent_types::{ToolCall, ToolDefinition, ToolResult, ToolSource};
+use dim_agent_types::{DEFAULT_BRANCH_ID, ToolCall, ToolDefinition, ToolResult, ToolSource};
 use rutis::Ctx;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use serde_json::{Value, json};
@@ -212,11 +212,12 @@ impl Owner {
     }
 }
 
-/// The branch a change names: `main` when the call omits `branchId`, else a
-/// non-empty string. A present `null` is not an omitted member.
+/// The branch a change names: the default branch when the call omits
+/// `branchId`, else a non-empty string. A present `null` is not an omitted
+/// member.
 fn branch_of(params: &Value) -> Result<String, RpcError> {
     match params.get("branchId") {
-        None => Ok("main".to_owned()),
+        None => Ok(DEFAULT_BRANCH_ID.to_owned()),
         Some(Value::String(branch)) if !branch.is_empty() => Ok(branch.clone()),
         Some(_) => Err(RpcError::invalid("branchId must be a non-empty string")),
     }

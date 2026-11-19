@@ -2,8 +2,8 @@
 
 use agent_client_protocol::schema::v1 as acp;
 use dim_agent_types::{
-    CompactionTrigger, ContentBlock, ContextCompactionResult, ExecStatus, ImageSource, ToolContent,
-    ToolResult, UserInput, markup,
+    CompactionTrigger, ContentBlock, ContextCompactionResult, ExecStatus, ImageSource,
+    ROOT_BRANCH_ID, ToolContent, ToolResult, UserInput, markup,
 };
 use dim_client::wire::{Event, EventContent, Progress};
 use serde_json::{Value, json};
@@ -531,7 +531,7 @@ impl Projection {
             &task.description,
             Value::Null,
             acp::ToolCallStatus::InProgress,
-            ToolFields::default().lody(json!({"task":{"version":1,"taskId":task.task_id,"kind":"background","status":"in_progress","description":task.description,"parentToolCallId":tool_id("main", &task.request_id, &task.call_id),"startedAtEpochSeconds":task.started_at as f64 / 1000.}})),
+            ToolFields::default().lody(json!({"task":{"version":1,"taskId":task.task_id,"kind":"background","status":"in_progress","description":task.description,"parentToolCallId":tool_id(ROOT_BRANCH_ID, &task.request_id, &task.call_id),"startedAtEpochSeconds":task.started_at as f64 / 1000.}})),
             &mut messages,
         );
         messages.updates.pop().expect("task update")
@@ -721,7 +721,7 @@ impl Projection {
                     .committed(&data.delta),
             ),
             EventContent::ToolUseStart(data) => self.tool(
-                tool_id("main", &data.request_id, &data.call_id),
+                tool_id(ROOT_BRANCH_ID, &data.request_id, &data.call_id),
                 &data.name,
                 Value::Null,
                 acp::ToolCallStatus::Pending,
@@ -729,7 +729,7 @@ impl Projection {
                 &mut messages,
             ),
             EventContent::ToolUse(data) => self.tool(
-                tool_id("main", &data.request_id, &data.call.id),
+                tool_id(ROOT_BRANCH_ID, &data.request_id, &data.call.id),
                 &data.call.name,
                 json!(data.call.input),
                 acp::ToolCallStatus::Pending,
@@ -739,7 +739,7 @@ impl Projection {
             EventContent::ToolCall(data) => {
                 for call in &data.calls {
                     self.tool(
-                        tool_id("main", &data.request_id, &call.id),
+                        tool_id(ROOT_BRANCH_ID, &data.request_id, &call.id),
                         &call.name,
                         json!(call.input),
                         acp::ToolCallStatus::Pending,
@@ -749,14 +749,14 @@ impl Projection {
                 }
             }
             EventContent::ToolStart(data) => Self::tool_update(
-                tool_id("main", &data.request_id, &data.call_id),
+                tool_id(ROOT_BRANCH_ID, &data.request_id, &data.call_id),
                 acp::ToolCallStatus::InProgress,
                 ToolFields::default(),
                 &mut messages,
             ),
             EventContent::ToolResult(data) => {
                 for call in &data.results {
-                    let id = tool_id("main", &data.request_id, &call.call_id);
+                    let id = tool_id(ROOT_BRANCH_ID, &data.request_id, &call.call_id);
                     if !self.calls.contains_key(&id) {
                         self.tool(
                             id.clone(),
@@ -775,7 +775,7 @@ impl Projection {
                             acp::ToolCallStatus::Completed
                         },
                         ToolFields::default().content(self.result_content(
-                            &tool_id("main", &data.request_id, &call.call_id),
+                            &tool_id(ROOT_BRANCH_ID, &data.request_id, &call.call_id),
                             &call.result,
                         )),
                         &mut messages,
@@ -783,7 +783,7 @@ impl Projection {
                 }
             }
             EventContent::ToolCompleted(data) => {
-                let id = tool_id("main", &data.request_id, &data.call_id);
+                let id = tool_id(ROOT_BRANCH_ID, &data.request_id, &data.call_id);
                 Self::tool_update(
                     id.clone(),
                     acp::ToolCallStatus::InProgress,
@@ -798,7 +798,7 @@ impl Projection {
                     &data.description,
                     Value::Null,
                     acp::ToolCallStatus::InProgress,
-                    ToolFields::default().lody(json!({"task":{"version":1,"taskId":data.task_id,"kind":"background","status":"in_progress","description":data.description,"parentToolCallId":tool_id("main",&data.request_id,&data.call_id),"startedAtEpochSeconds":event.create_at as f64/1000.}})),
+                    ToolFields::default().lody(json!({"task":{"version":1,"taskId":data.task_id,"kind":"background","status":"in_progress","description":data.description,"parentToolCallId":tool_id(ROOT_BRANCH_ID,&data.request_id,&data.call_id),"startedAtEpochSeconds":event.create_at as f64/1000.}})),
                     &mut messages,
                 );
             }
