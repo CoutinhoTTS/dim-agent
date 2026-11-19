@@ -3152,14 +3152,6 @@ enum Decision {
         other: String,
     },
 }
-/// Where a status note is appended: through the line's own Timeline while it
-/// loads, before the tree has registered the line, and through the tree's
-/// command once the line runs.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum NoteWrite {
-    Load,
-    Live,
-}
 /// BranchLine's fold of its own line's facts.
 #[derive(Default)]
 struct LineView {
@@ -4289,13 +4281,8 @@ impl BranchLine {
                 became_default,
                 other,
             } => {
-                self.write_default_note(
-                    role,
-                    parent.as_deref(),
-                    Some((became_default, other)),
-                    NoteWrite::Live,
-                )
-                .await
+                self.write_move_note(role, parent.as_deref(), became_default, other)
+                    .await
             }
             Decision::Parent => {
                 let Some(parent) = parent.filter(|_| role != LineRole::Main) else {
@@ -4494,66 +4481,104 @@ impl BranchLine {
         };
         Ok(prompt.clone())
     }
-    /// Writes the one status note this line's role and the default branch call
-    /// for, unless its latest block already states the same role and the same
-    /// other line: `moved` carries the committed transition this line took part
-    /// in, whose own role and other participant the note states; without one, a
-    /// load that finds the block and the latest fact disagreeing writes the
-    /// missing note (design §5, §12.1, §20.21).
-    async fn write_default_note(
+    /// Writes the note a load owes, comparing one thing only: whether this
+    /// line is the default branch now, against the role its latest
+    /// `branch:line` block states, where a missing `default` attribute means
+    /// not default. A line that took no part in the latest move keeps the
+    /// counterpart its own note named, so a move between other lines does not
+    /// rewrite it, and a load that finds the roles in agreement writes nothing
+    /// (design §5).
+    async fn write_load_note(&self, role: LineRole, parent: Option<&str>) -> Result<()> {
+        if !receives_note(role) {
+            return Ok(());
+        }
+        let default = self.tree.default_branch()?;
+        let (is_default, other) = match default == self.own {
+            true => (
+                true,
+                self.tree
+                    .default_from()
+                    .unwrap_or_else(|| ROOT_BRANCH_ID.into()),
+            ),
+            false => (false, default),
+        };
+        // The fold has seen no block on a load, so the comparison starts from
+        // the latest one stored, read on the line's own Timeline before the
+        // tree registers the line.
+        let block = if self.view.lock().unwrap().roster.is_none() {
+            self.load_block(&line_key()).await?
+        } else {
+            None
+        };
+        if self.record_status(block).unwrap_or(false) == is_default {
+            return Ok(());
+        }
+        let Some(text) = self.note_text(parent, is_default, &other).await? else {
+            return Ok(());
+        };
+        let data = InputMessageData {
+            blocks: vec![crate::context_block::raw(text.clone(), Some(line_key()))],
+            mode: Some(InputMode::Append),
+            ..InputMessageData::default()
+        };
+        crate::branch_input::append_own(&self.timeline, data, Vec::new()).map(|_| ())?;
+        self.view.lock().unwrap().roster = Some((text, false));
+        Ok(())
+    }
+    /// Writes the note a committed move owes this line: the role the move
+    /// gives it and the other participant it names, unless the latest block
+    /// already states both. A move to another line is a later note even though
+    /// this line's own role did not change (design §5, §20.21).
+    async fn write_move_note(
         &self,
         role: LineRole,
         parent: Option<&str>,
-        moved: Option<(bool, String)>,
-        write: NoteWrite,
+        became_default: bool,
+        other: String,
     ) -> Result<()> {
-        if role == LineRole::Main || role == LineRole::Host {
+        if !receives_note(role) {
             return Ok(());
         }
-        let (is_default, other) = match moved {
-            Some((became_default, other)) => (became_default, other),
-            None => {
-                let is_default = self.tree.default_branch()? == self.own;
-                let other: String = if is_default {
-                    self.tree
-                        .default_from()
-                        .unwrap_or_else(|| ROOT_BRANCH_ID.into())
-                } else {
-                    self.tree.default_branch()?
-                };
-                (is_default, other)
-            }
+        let block = if self.view.lock().unwrap().roster.is_none() {
+            self.block(&line_key()).await?
+        } else {
+            None
         };
-        // The fold has seen no block on a load, so the comparison starts from
-        // the latest one stored: a birth block carries no `default` attribute
-        // and a missing one means not default (design §5).
-        if self.view.lock().unwrap().roster.is_none()
-            && let Some((id, text, retire)) = if write == NoteWrite::Load {
-                self.load_block(&line_key()).await?
-            } else {
-                self.block(&line_key()).await?
-            }
-        {
-            self.view
-                .lock()
-                .unwrap()
-                .input_block(&id, &text, &line_key(), retire);
-        }
+        let stated = self.record_status(block);
+        let Some(text) = self.note_text(parent, became_default, &other).await? else {
+            return Ok(());
+        };
         let latest = self.view.lock().unwrap().roster.clone();
-        let stated = latest
-            .as_ref()
-            .and_then(|(text, _)| default_attribute(text));
-        if !is_default && stated.is_none() {
+        if stated == Some(became_default) && latest.is_some_and(|(latest, _)| latest == text) {
             return Ok(());
         }
+        let data = InputMessageData {
+            blocks: vec![crate::context_block::raw(text.clone(), Some(line_key()))],
+            mode: Some(InputMode::Append),
+            ..InputMessageData::default()
+        };
+        // Once the line runs, input goes through the tree, which refuses it on
+        // an ended line.
+        self.tree.input(self.own.clone(), data).await?;
+        self.view.lock().unwrap().roster = Some((text, false));
+        Ok(())
+    }
+    /// The text of the status note either decision writes, `None` when this
+    /// line has nothing to state it on: no parent or no source (design §12.1).
+    async fn note_text(
+        &self,
+        parent: Option<&str>,
+        is_default: bool,
+        other: &str,
+    ) -> Result<Option<String>> {
         let Some(parent) = parent else {
-            return Ok(());
+            return Ok(None);
         };
         let Some(info) = self.tree.info(self.own.clone()).ok() else {
-            return Ok(());
+            return Ok(None);
         };
         let Some(source) = info.source else {
-            return Ok(());
+            return Ok(None);
         };
         let purpose = match source {
             BranchSource::Tool { .. } => {
@@ -4565,40 +4590,27 @@ impl BranchLine {
             _ => String::new(),
         };
         let idle_notice = self.view.lock().unwrap().idle_notice;
-        let text = status_note(
+        Ok(Some(status_note(
             &self.own,
             parent,
             &source,
             &purpose,
             idle_notice,
             is_default,
-            &other,
-        );
-        // The same role is not enough: a block that says `default="false"`
-        // names the line that holds the role now, and a move to another line
-        // is a later note even though this line's own role did not change
-        // (design §5, §20.21, §20.24a).
-        if stated == Some(is_default) && latest.is_some_and(|(latest, _)| latest == text) {
-            return Ok(());
+            other,
+        )))
+    }
+    /// Records `block` as this line's latest `branch:line` block and answers
+    /// the role it states, where a missing `default` attribute means not
+    /// default (design §5).
+    fn record_status(&self, block: Option<(String, String, bool)>) -> Option<bool> {
+        let mut view = self.view.lock().unwrap();
+        if let Some((id, text, retire)) = block {
+            view.input_block(&id, &text, &line_key(), retire);
         }
-        let data = InputMessageData {
-            blocks: vec![crate::context_block::raw(text.clone(), Some(line_key()))],
-            mode: Some(InputMode::Append),
-            ..InputMessageData::default()
-        };
-        match write {
-            // The tree registers a line only after its parts apply, so a load
-            // appends through the line's own Timeline; once it runs, input
-            // goes through the tree, which refuses it on an ended line.
-            NoteWrite::Load => {
-                crate::branch_input::append_own(&self.timeline, data, Vec::new()).map(|_| ())?
-            }
-            NoteWrite::Live => {
-                self.tree.input(self.own.clone(), data).await?;
-            }
-        }
-        self.view.lock().unwrap().roster = Some((text, false));
-        Ok(())
+        view.roster
+            .as_ref()
+            .and_then(|(text, _)| default_attribute(text))
     }
     /// Writes the note the tree's default fact earns this line as it loads,
     /// before the line is ready and the Session publishes, so the note is in
@@ -4608,8 +4620,7 @@ impl BranchLine {
         let Some((role, parent)) = self.resolved() else {
             return Ok(());
         };
-        self.write_default_note(role, parent.as_deref(), None, NoteWrite::Load)
-            .await
+        self.write_load_note(role, parent.as_deref()).await
     }
 }
 /// The block under `key` in a block query's last row.
@@ -5468,6 +5479,12 @@ fn default_attribute(text: &str) -> Option<bool> {
 }
 fn parent_key() -> String {
     "branch:parent".into()
+}
+/// Whether this line receives a status note at all: never the root, which
+/// opens lines and never ends, and never a plugin line, which follows its
+/// creator's protocol (design §5, §12.1).
+fn receives_note(role: LineRole) -> bool {
+    !matches!(role, LineRole::Main | LineRole::Host)
 }
 
 fn first_input(parent: &str, data: &BranchCreateData, idle_notice: IdleNotice) -> InputMessageData {

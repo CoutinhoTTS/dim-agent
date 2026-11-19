@@ -10311,6 +10311,88 @@ async fn a_restart_delivers_a_tool_ends_final_message_exactly_once() {
     soon(again.close()).await.unwrap();
 }
 
+/// §5: a clean restart writes nothing. After `main -> B -> C -> D` has
+/// settled, B's latest note says it handed the role to C and C's says it
+/// handed it to D, while the fact names D: neither B nor C took part in
+/// `C -> D`. A restart compares each line's own role with the tree and finds
+/// them in agreement, so B keeps the counterpart its own note named instead
+/// of gaining one that names D.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_clean_restart_writes_no_status_note() {
+    let store = Arc::new(MemoryTimelineStore::default());
+    let agent = MinimalHost::start(&builder_with_store(
+        &Arc::new(Probe::default()),
+        store.clone(),
+    ))
+    .await
+    .unwrap();
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let b = open_line(&session, "the purpose of B").await;
+    let c = open_line(&session, "the purpose of C").await;
+    let d = open_line(&session, "the purpose of D").await;
+    soon(session.idle("main")).await.unwrap();
+    let switch = |line: &str| {
+        let session = session.clone();
+        let line = line.to_owned();
+        async move {
+            soon(session.set_default_branch(
+                &line,
+                BranchSource::User {
+                    operation_id: "switch".into(),
+                },
+            ))
+            .await
+            .unwrap()
+        }
+    };
+    switch(&b).await;
+    switch(&c).await;
+    switch(&d).await;
+    owed_notes(&session, &b, 2).await;
+    owed_notes(&session, &c, 2).await;
+    owed_notes(&session, &d, 1).await;
+    let before = default_notes(&session, &["main", &b, &c, &d]).await;
+    let latest = status_notes(&local_events(&session, &b).await)
+        .pop()
+        .expect("B holds its notes");
+    assert!(
+        latest.contains(&format!("Line {c} is now the session's default branch")),
+        "B's latest note names C before the restart: {latest}"
+    );
+    let id = session.id().to_owned();
+    soon(session.close()).await.unwrap();
+    soon(agent.close()).await.unwrap();
+    let again = MinimalHost::start(&builder_with_store(&Arc::new(Probe::default()), store))
+        .await
+        .unwrap();
+    let session = soon(again.restore_session(id.clone())).await.unwrap();
+    assert_eq!(session.default_branch().unwrap(), d, "the fact stands");
+    for line in [&b, &c, &d] {
+        soon(session.submit("next request".into(), InputMode::Queue, line))
+            .await
+            .unwrap();
+        until_events(&session, line, |events| {
+            request_after_resume(events).is_some()
+        })
+        .await;
+    }
+    let latest = status_notes(&local_events(&session, &b).await)
+        .pop()
+        .expect("B holds its notes");
+    assert!(
+        latest.contains(&format!("Line {c} is now the session's default branch")),
+        "B's latest note still names C: {latest}"
+    );
+    assert_eq!(
+        default_notes(&session, &["main", &b, &c, &d]).await,
+        before,
+        "a clean restart adds no status note"
+    );
+    soon(again.close()).await.unwrap();
+}
+
 /// §20.24a: a move that stopped between its fact and its notes is completed at
 /// load. The first move runs live, so B holds the note production wrote; the
 /// second move's fact is appended to the root by hand, with no note beside it,
