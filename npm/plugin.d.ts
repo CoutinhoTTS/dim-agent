@@ -624,7 +624,7 @@ export type StoredAgentProfile = {
   name: string; description: string; systemPrompt: string; tools?: string[]; model?: ModelId;
 };
 export type StoredProviderSelection = { provider_id: string; model_id: string; version: number };
-export interface SqliteStorage {
+export interface SqliteStorage extends Pick<TimelineStore, "createSession" | "sessionConfig" | "branches" | "head" | "batchEnd" | "batchEndAt"> {
   commitTimelineRound(request: { batches: TimelineAppend[] }): Promise<{ sessions: { sessionId: string; result: { Ok: null } | { Err: { code: string; message: string } } }[] }>;
   readSelection(request: { scope: string }): Promise<StoredProviderSelection | null>;
   writeSelection(request: { scope: string; expectedVersion?: number | null; selection: ModelId }): Promise<StoredProviderSelection>;

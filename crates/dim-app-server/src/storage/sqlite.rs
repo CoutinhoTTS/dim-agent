@@ -2396,7 +2396,7 @@ struct SqliteDispatch(Arc<SqliteStorage>);
 impl HostDispatch for SqliteDispatch {
     fn methods(&self) -> Option<serde_json::Value> {
         Some(
-            serde_json::json!({"commitTimelineRound":"async","storageReport":"async","readUser":"async","importUserIfAbsent":"async","replaceUser":"async","agents":"async","owners":"async","save":"async","delete":"async","members":"async","ledMembers":"async","ownedAgents":"async","memberSessions":"async","agentOwner":"async","unfinishedOwned":"async","readSelection":"async","writeSelection":"async","readPreferences":"async","reserveFile":"async","commitFile":"async","abandonFile":"async","ownsFile":"async","ownsOutput":"async","ownedPaths":"async","registerOutput":"async"}),
+            serde_json::json!({"batchEnd":"async","batchEndAt":"async","createSession":"async","sessionConfig":"async","branches":"async","head":"async","commitTimelineRound":"async","storageReport":"async","readUser":"async","importUserIfAbsent":"async","replaceUser":"async","agents":"async","owners":"async","save":"async","delete":"async","members":"async","ledMembers":"async","ownedAgents":"async","memberSessions":"async","agentOwner":"async","unfinishedOwned":"async","readSelection":"async","writeSelection":"async","readPreferences":"async","reserveFile":"async","commitFile":"async","abandonFile":"async","ownsFile":"async","ownsOutput":"async","ownedPaths":"async","registerOutput":"async"}),
         )
     }
 
@@ -2416,6 +2416,12 @@ impl HostDispatch for SqliteDispatch {
             deny_unknown_fields
         )]
         enum Request {
+            BatchEnd(dim_agent_runtime::TimelinePositionRequest),
+            BatchEndAt(dim_agent_runtime::TimelinePositionRequest),
+            CreateSession(Box<dim_agent_runtime::TimelineCreateRequest>),
+            SessionConfig(dim_agent_runtime::TimelineSessionRequest),
+            Branches(dim_agent_runtime::TimelineSessionRequest),
+            Head(dim_agent_runtime::TimelineKey),
             CommitTimelineRound {
                 batches: Vec<dim_agent_runtime::TimelineAppend>,
             },
@@ -2508,6 +2514,46 @@ impl HostDispatch for SqliteDispatch {
         let db = self.0.clone();
         Ok(BridgeValue::cancellable_future(async move {
             let value = match request {
+                Request::BatchEnd(p) => {
+                    db.batch_end(
+                        dim_agent_runtime::TimelineKey {
+                            session_id: p.session_id,
+                            branch_id: p.branch_id,
+                        },
+                        p.sequence,
+                    )
+                    .await
+                    .map_err(dim_agent_runtime::timeline_store_failure)?;
+                    serde_json::json!({})
+                }
+                Request::BatchEndAt(p) => {
+                    let sequence = db
+                        .batch_end_at(
+                            dim_agent_runtime::TimelineKey {
+                                session_id: p.session_id,
+                                branch_id: p.branch_id,
+                            },
+                            p.sequence,
+                        )
+                        .await
+                        .map_err(dim_agent_runtime::timeline_store_failure)?;
+                    serde_json::json!({"sequence":sequence})
+                }
+                Request::CreateSession(p) => {
+                    db.create_session(p.session_id, p.config)
+                        .await
+                        .map_err(dim_agent_runtime::timeline_store_failure)?;
+                    serde_json::json!({})
+                }
+                Request::SessionConfig(p) => {
+                    serde_json::json!({"config":db.session_config(p.session_id).await.map_err(dim_agent_runtime::timeline_store_failure)?})
+                }
+                Request::Branches(p) => {
+                    serde_json::json!({"branches":db.branches(p.session_id).await.map_err(dim_agent_runtime::timeline_store_failure)?})
+                }
+                Request::Head(key) => {
+                    serde_json::json!({"sequence":db.head(key).await.map_err(dim_agent_runtime::timeline_store_failure)?})
+                }
                 Request::CommitTimelineRound { batches } => {
                     let operation = db.admit().map_err(storage_failure)?;
                     let sessions = tokio::task::spawn_blocking(move || {
