@@ -1640,11 +1640,11 @@ impl TimelineTree {
             && self.undelivered(id)
         {
             drop(_operations);
-            let admitted = self.admit()?;
             let owner = self
                 .weak
                 .upgrade()
                 .ok_or_else(|| AgentError::Closed("TimelineTree".into()))?;
+            let admitted = self.admit()?;
             let line = id.to_owned();
             let (answer, wait) = oneshot::channel();
             self.settling.spawn(async move {
@@ -1770,6 +1770,10 @@ impl TimelineTree {
     /// point does not leave the fact unapplied.
     async fn set_default_branch(&self, id: &str, source: BranchSource) -> Result<String> {
         let operations = self.operations.clone().lock_owned().await;
+        let owner = self
+            .weak
+            .upgrade()
+            .ok_or_else(|| AgentError::Closed("TimelineTree".into()))?;
         let admitted = self.admit()?;
         let (root, from) = {
             let state = self.state.lock().unwrap();
@@ -1796,10 +1800,6 @@ impl TimelineTree {
         };
         let timeline = root.timeline().clone();
         let event = timeline.append(EventKind::BranchDefault(data).into())?;
-        let owner = self
-            .weak
-            .upgrade()
-            .ok_or_else(|| AgentError::Closed("TimelineTree".into()))?;
         let branch = id.to_owned();
         let wait = self.settle(operations, async move {
             Self::published(&timeline, event.sequence).await?;
