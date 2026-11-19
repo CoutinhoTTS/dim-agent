@@ -37105,6 +37105,13 @@
     },
     {
       "from": "dim_cli",
+      "to": "dim_cli::ui::composer::history",
+      "references": [
+        "path ui::composer::history::flush"
+      ]
+    },
+    {
+      "from": "dim_cli",
       "to": "dim_cli::ui::config",
       "references": [
         "path ui::config::save_fullscreen",
