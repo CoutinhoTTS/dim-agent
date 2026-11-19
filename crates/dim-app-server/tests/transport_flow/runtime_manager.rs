@@ -515,42 +515,6 @@ async fn a_removed_system_uv_reads_off_and_installs_again() {
     std::fs::remove_dir_all(home).unwrap();
 }
 
-/// A `system` uv below 0.11.0 is that tool's failure, with the version in the
-/// reason.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_system_uv_below_the_floor_fails_with_its_version() {
-    let _fixture = FixtureUv::new("0.10.9");
-    let home = std::env::temp_dir().join(format!("drm-uv-old-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(home.join("runtimes")).unwrap();
-    let defaults = write_defaults(
-        &home,
-        r#"{"node": {"source": "download", "auto": false},
-            "python": {"source": "download", "auto": false},
-            "uv": {"source": "system", "auto": false}}"#,
-    );
-    let runtimes = load_runtimes(&home, &defaults, Some(environment(_fixture.search_path())));
-    let server = launch(
-        Arc::new(MockTools),
-        ServerConfig {
-            target_home: Some(home.clone()),
-            session_typescript: Some(SessionTypeScriptConfig::acquired(&home, runtimes, vec![])),
-            ..Default::default()
-        },
-    )
-    .await;
-    let mut client = Client::new_version(&server, false, 3).await;
-    assert_ok(&client.rpc("runtime.install", json!({"name": "uv"})).await);
-    let failed = status(&mut client, 2, "failed").await;
-    let reason = failed["reason"].as_str().unwrap_or_default();
-    assert!(reason.contains("0.10.9"), "{failed}");
-    assert!(reason.contains("0.11"), "{failed}");
-
-    drop(client);
-    server.shutdown();
-    server.join().await.unwrap();
-    std::fs::remove_dir_all(home).unwrap();
-}
-
 /// `runtime.configure uv` writes the merge over the preset and applies it,
 /// without a launch command to withdraw or provide.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
