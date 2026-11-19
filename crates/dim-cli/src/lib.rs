@@ -161,11 +161,11 @@ async fn open_tui(
         leaf_end: std::sync::Mutex::new(Some(leaf_end)),
     });
     (&tui).await.map_err(plugin_error)?;
-    let code = tokio::select! {
-        code = &mut left => code,
+    let leave = tokio::select! {
+        leave = &mut left => leave,
         ended = leaf_ended => {
             if ended.is_ok() {
-                Ok(0)
+                Ok(ui::tui::Leave::Exit(0))
             } else {
                 left.await
             }
@@ -174,7 +174,93 @@ async fn open_tui(
     .map_err(|_| "the terminal interface ended without a result")?;
     tui.dispose().await?;
     link.dispose().await?;
-    Ok(code)
+    match leave {
+        ui::tui::Leave::Exit(code) => Ok(code),
+        ui::tui::Leave::Update(request) => update_after_tui(options, locale, request).await,
+    }
+}
+
+/// `Update now`: the interface has left and dropped its connection, so this
+/// home's daemon is stopped if it is idle, the installation is updated as
+/// `update` does, and the new version opens where the interface left off. A
+/// refusal or failure stops nothing more and says how to finish by hand.
+async fn update_after_tui(
+    options: &Options,
+    locale: locale::Locale,
+    request: ui::tui::UpdateRequest,
+) -> Result<i32> {
+    let command = update::entry_command();
+    let resume = |code: i32| {
+        if let Some(session) = &request.session_id {
+            eprintln!("Resume this session with: {command} --resume {session}");
+        }
+        Ok(code)
+    };
+    let launcher = update::restart_launcher();
+    if let Err(error) = client::stop_idle_for_update(options, locale).await {
+        eprintln!("Could not update: {error}");
+        return resume(1);
+    }
+    if let Err(error) = update::run().await {
+        eprintln!("Error: {error}");
+        return resume(1);
+    }
+    let Some(launcher) = launcher else {
+        eprintln!("Start {command} again to use the new version.");
+        return resume(0);
+    };
+    restart(&launcher, &request)
+}
+
+/// Replaces this process with the updated `launcher`, in the interface mode
+/// it left and on its Session.
+#[cfg(unix)]
+fn restart(launcher: &std::path::Path, request: &ui::tui::UpdateRequest) -> Result<i32> {
+    use std::os::unix::process::CommandExt;
+    let error = std::process::Command::new(launcher)
+        .args(restart_args(std::env::args_os().skip(1), request))
+        .exec();
+    Err(format!("Cannot start {}: {error}", launcher.display()).into())
+}
+
+#[cfg(not(unix))]
+fn restart(_: &std::path::Path, _: &ui::tui::UpdateRequest) -> Result<i32> {
+    unreachable!("only a staged unix installation names a restart launcher")
+}
+
+/// The arguments of the interface invocation, without the first message,
+/// Session or new worktree it opened with, in the mode it left and on the
+/// Session it showed.
+fn restart_args(
+    original: impl IntoIterator<Item = std::ffi::OsString>,
+    request: &ui::tui::UpdateRequest,
+) -> Vec<std::ffi::OsString> {
+    let mut args = Vec::new();
+    let mut original = original.into_iter();
+    while let Some(arg) = original.next() {
+        match arg.to_str() {
+            Some("--fullscreen" | "--scrollback" | "--worktree") => {}
+            Some(
+                "--resume" | "--prompt" | "-p" | "--image" | "--worktree-base"
+                | "--worktree-branch",
+            ) => {
+                original.next();
+            }
+            _ => args.push(arg),
+        }
+    }
+    args.push(
+        if request.fullscreen {
+            "--fullscreen"
+        } else {
+            "--scrollback"
+        }
+        .into(),
+    );
+    if let Some(session) = &request.session_id {
+        args.extend(["--resume".into(), session.into()]);
+    }
+    args
 }
 
 /// Links the daemon and loads `WebHold`; returns when the hold ends.
@@ -687,8 +773,8 @@ async fn run_acp(
 }
 
 async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
-    if let Action::Update { legacy_exited } = options.action {
-        return update::run(legacy_exited).await;
+    if matches!(options.action, Action::Update) {
+        return update::run().await;
     }
     update::hold_installation()?;
     // `block_on` polls `act` on this thread, so the thread-local language
@@ -1062,7 +1148,7 @@ async fn act(root: &rutis::Ctx, mut options: Options) -> Result<i32> {
         | Action::Migration(_)
         | Action::Help
         | Action::Version
-        | Action::Update { .. }
+        | Action::Update
         | Action::DaemonStop
         | Action::DaemonVacuum { .. }
         | Action::Timeline { .. }

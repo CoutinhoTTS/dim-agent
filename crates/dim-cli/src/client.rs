@@ -715,6 +715,47 @@ async fn shutdown_if_idle(client: &mut Client) -> Result<IdleShutdown> {
     .map_err(|_| "Daemon shutdown timed out; it is still settling and was not force-killed")?
 }
 
+/// Stops this home's daemon for an update, only while it is idle: no client,
+/// attached Session, running turn or accepted work. A client that has just
+/// disconnected may still be counted for a moment, so a refusal is asked
+/// again for a short while. `Err` names what keeps the daemon and the next
+/// step; nothing is stopped then.
+pub async fn stop_idle_for_update(options: &Options, locale: crate::locale::Locale) -> Result<()> {
+    let command = crate::update::entry_command();
+    let mut options = options.clone();
+    options.action = crate::args::Action::DaemonStop;
+    let Some(Link { mut client, .. }) = connect_inner(&options, false, locale).await? else {
+        return Ok(());
+    };
+    if !client.offers("daemon.shutdown.ifIdle") {
+        return Err(format!(
+            "The running server is too old to stop safely.\nClose all DimCode windows, run `{command} daemon stop`, then run: {command} update"
+        )
+        .into());
+    }
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        match shutdown_if_idle(&mut client).await? {
+            IdleShutdown::Stopped => return Ok(()),
+            IdleShutdown::Busy(_) if tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            IdleShutdown::Busy(counts) => {
+                let detail = counts.map_or_else(String::new, |counts| {
+                    format!(
+                        " (clients: {}, attached sessions: {}, running turns: {})",
+                        counts.connections, counts.attached_sessions, counts.running
+                    )
+                });
+                return Err(format!(
+                    "Other DimCode windows or tasks are using the server{detail}.\nClose them or let them finish, then run: {command} update"
+                )
+                .into());
+            }
+        }
+    }
+}
+
 /// Whether an older daemon's `session.summaries` reports a client attached to
 /// a Session or a running turn. The call is advertised together with
 /// `daemon.shutdown.completed`; a failed call or an unexpected answer counts

@@ -437,8 +437,10 @@ async fn run(
     if update::enabled() {
         let offers = updates.clone();
         let home = options.home.clone();
+        let managed = options.server.is_none();
         tokio::spawn(async move {
-            if let Some(offer) = update::available(&home, env!("CARGO_PKG_VERSION")).await {
+            if let Some(mut offer) = update::available(&home, env!("CARGO_PKG_VERSION")).await {
+                offer.direct &= managed;
                 let _ = offers.send(Update::Upgrade(offer));
             }
         });
@@ -1641,6 +1643,17 @@ impl Worker {
             Command::Earlier => self.earlier(),
             Command::Goal(request) => self.goal(request).await,
             Command::Loop(request) => self.loop_command(request).await,
+            Command::CheckUpdate => {
+                let updates = self.updates.clone();
+                let managed = self.options.server.is_none();
+                tokio::spawn(async move {
+                    let mut checked = update::check(env!("CARGO_PKG_VERSION")).await;
+                    if let Ok(Some(offer)) = &mut checked {
+                        offer.direct &= managed;
+                    }
+                    let _ = updates.send(Update::UpgradeChecked(checked));
+                });
+            }
             Command::ToggleWeb => {
                 let result: crate::Result<WebToggled> =
                     self.client.typed("web.toggle", json!({})).await;

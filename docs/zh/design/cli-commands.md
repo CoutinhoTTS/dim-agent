@@ -1518,10 +1518,18 @@ npm 装在 `<prefix>\node_modules` 下并把命令 shim 直接放在 `<prefix>`�
 进程同样失败，因此可识别的消费者不会在未登记的情况下运行。锁文件创建时所有用户可读，
 释放后保留；运行中删除它会允许另一个进程在新 inode 上独立加锁。
 
-旧版不持有该锁，所以管理器根目录下没有 `.dimcode-consumers` 时 `update` 也会拒绝。
-操作者退出全部客户端、停止全部旧服务器后运行 `update --confirm-legacy-exited`，创建
-该标记并安装。该标志只对旧进程作声明，不能绕过存在的锁。源码构建和无法识别的布局
-不持有锁，也不会被更新。
+`update` 从不停止服务器，即使它空闲：当前 home 的 daemon 持有租约时，操作者先用
+`daemon stop` 停止它；其他 home 持有的租约到那个 home 处理。刚退出的进程可能还会短暂
+持有租约，所以 `update` 最多等待两秒再拒绝，并使用运行它的入口命令：
+
+```text
+$ dima update
+Error: DimCode is currently running (another window, server, or update is active).
+Close all DimCode windows, run `dima daemon stop`, and try again.
+```
+
+早于租约机制的旧版不持有该锁，`update` 看不到它们；首次更新前由操作者退出它们。
+源码构建和无法识别的布局不持有锁，也不会被更新。
 
 ```text
 $ dima update
@@ -1531,9 +1539,53 @@ $ dima update
 | Updatin… (alpha) · 5s
 ```
 
-更新对话框本身不安装。它给出新版本，以及在所有客户端退出、服务器停止后应执行的命令
-（可识别的安装为 `dima update`，否则是包管理器自己的命令），并提供“跳过此版本”和
-“关闭”。fullscreen 和 scrollback 使用相同布局，并适应可用列数和行数。较长的版本和命令
+更新对话框给出新版本。可识别的安装且服务器由客户端管理（没有 `--server`）时，提供
+“立即升级”“跳过此版本”和“关闭”，默认聚焦“立即升级”：
+
+```text
+╭──────────────────────────────────────────────────────────────╮
+│ Update available                                             │
+│                                                              │
+│ Version 0.1.0-alpha.26 is available (you have 0.1.0-alpha.25).│
+│                                                              │
+│ › Update now   Skip this version   Close                     │
+│                                                              │
+│ ←→ move · Enter confirm · Esc close                          │
+╰──────────────────────────────────────────────────────────────╯
+```
+
+其他安装，或连接外部 `--server` 的客户端，只有“跳过此版本”和“关闭”，并给出退出 DimCode
+后要执行的命令（`dima update`，或包管理器自己的命令）：
+
+```text
+│ Version 0.1.0-alpha.26 is available (you have 0.1.0-alpha.25).│
+│ To update, exit DimCode and run: dima update                 │
+│                                                              │
+│ › Skip this version   Close                                  │
+```
+
+“立即升级”不在界面保持连接时升级：
+
+1. 当前 Session 有运行中的轮次、前台 Shell 命令，或待处理的审批或提问时，对话框保留，
+   提示先完成或停止这些工作，不询问 daemon。
+2. 否则界面像退出一样离开：恢复终端并关闭连接，它自己的 attach 不再计入。
+3. 同一进程用 `daemon.shutdown {ifIdle: true}` 请求当前 home 的 daemon 停止（空闲判断
+   由 [Tui](../../design/plugins/Tui.md) 拥有）。刚关闭的连接可能仍被计入，因此拒绝后最多重试两秒。
+4. daemon 已停止或本来没有运行时，按 `update` 的方式安装，进度行和错误相同。
+5. npm 暂存安装随后用更新后的入口命令替换当前进程，保留离开时的模式（`--fullscreen`
+   或 `--scrollback`），有 Session 时带上 `--resume <session>`；新客户端自行启动 daemon。
+   其他布局提示重新启动 DimCode。
+
+daemon 忙碌、daemon 不支持 `daemon.shutdown.ifIdle`、租约被其他地方持有或安装失败时，
+不再停止任何东西：CLI 打印阻塞原因和下一步，再给出恢复会话的命令，并以非零状态退出。
+
+```text
+Could not update: Other DimCode windows or tasks are using the server (clients: 1, attached sessions: 1, running turns: 0).
+Close them or let them finish, then run: dima update
+Resume this session with: dima --resume s-42
+```
+
+对话框在 fullscreen 和 scrollback 使用相同布局，并适应可用列数和行数。较长的版本和命令
 文字换行，必要时用 Up/Down 滚动。标题和动作行保持可见。所有动作无法放在同一行时，只
 显示当前聚焦的动作及其序号；Left/Right 和 Tab/BackTab 仍循环切换所有动作，Enter 确认，
 Esc 关闭。宽屏空间足够时保留确认布局。
@@ -1547,14 +1599,13 @@ Esc 关闭。宽屏空间足够时保留确认布局。
 +----------- Up/Down 1-2/7-+
 ```
 
-`/update` 就是那条命令在两种终端 UI 模式下的客户端侧报告。它不执行任何安装：更新命令持有
-安装的排他租约，而界面本身就是持有该租约共享锁的客户端，服务操作者期间无法释放。因此
-`/update` 只给出对话框会给的命令：可识别的安装给出该命令，其他布局给出[手动与重建
-说明](#更新对话框)，并且不查询渠道——自动启动检查仍独占对话框与跳过列表。
+`/update` 在两种终端 UI 模式下按需查询当前构建的渠道，包括用户跳过的版本。有新版本时
+打开更新对话框；否则在记录中说明已是最新版本，源码构建或无法识别的布局则给出[手动与
+重建说明](#更新对话框)。启动检查仍遵循跳过列表。
 
 ```text
 > /update
-要升级，请退出所有客户端并停止服务器，然后运行 dima update
+DimCode 0.1.0-alpha.26 已是最新版本。
 ```
 
 ### 客户端／服务器协调升级
@@ -1596,12 +1647,9 @@ daemon 的程序镜像、同时替换其插件或 Web 文件不构成隔离，�
   以独占方式加锁；存在任何租约时拒绝，且不启动包管理器。更新持有锁期间，租约持有方
   无法启动。进程退出时 OS 释放租约，崩溃不会留下过期占用。源码构建或无法识别的布局不
   持有租约，也不会被更新。
-- **首次迁移：**旧版不持有租约，所以支持租约的新版无法证明它们已退出。管理器根目录下
-  没有 `.dimcode-consumers` 时 `update` 拒绝。操作者退出全部客户端、停止全部旧服务器后，
-  运行 `update --confirm-legacy-exited`，创建该标记并安装。该标志只对旧进程作信任声明，
-  存在活动租约时仍然拒绝。
-- **尚未完成：**关闭前的进程准入静默、Windows 的安全替换以及新客户端启用后继服务器，
-  尚不属于该命令。
+- **尚未完成：**Windows 的安全替换尚不属于该命令，`update` 本身也不停止服务器。
+  “立即升级”只通过 `daemon.shutdown {ifIdle: true}` 停止当前 home 的 daemon，后继服务器
+  由它启动的新客户端启用。
 - **影响及归属：**静默操作改变准入，不改变 Timeline 顺序、批次、恢复格式或已受理
   工作。App Server／生命周期所有者实现并验证通用操作；原生启动与安装所有者实现
   跨进程租约和新客户端启用，升级器消费这些合同。

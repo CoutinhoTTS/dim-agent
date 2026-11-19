@@ -36728,6 +36728,7 @@
         "path Action::Worktree",
         "path Options",
         "path Options::parse",
+        "path args",
         "use args::Action",
         "use args::Options"
       ]
@@ -36767,6 +36768,7 @@
         "path client::UpgradeStage::Verify",
         "path client::connect_inner",
         "path client::stop",
+        "path client::stop_idle_for_update",
         "path client::web_assets"
       ]
     },
@@ -37067,6 +37069,7 @@
       "to": "dim_cli::session",
       "references": [
         "mod session",
+        "path session",
         "path session::chat"
       ]
     },
@@ -37132,6 +37135,9 @@
       "from": "dim_cli",
       "to": "dim_cli::ui::tui",
       "references": [
+        "path ui::tui::Leave::Exit",
+        "path ui::tui::Leave::Update",
+        "path ui::tui::UpdateRequest",
         "path ui::tui::is_interactive"
       ]
     },
@@ -37140,9 +37146,11 @@
       "to": "dim_cli::update",
       "references": [
         "mod update",
+        "path update::entry_command",
         "path update::hold_installation",
         "path update::recover_startup",
         "path update::registry",
+        "path update::restart_launcher",
         "path update::run"
       ]
     },
@@ -37482,7 +37490,8 @@
       "from": "dim_cli::client",
       "to": "dim_cli::update",
       "references": [
-        "path crate::update::entry"
+        "path crate::update::entry",
+        "path crate::update::entry_command"
       ]
     },
     {
@@ -40539,6 +40548,7 @@
       "to": "dim_cli::ui::tui",
       "references": [
         "path WebOpened",
+        "path ui::tui::Leave",
         "path ui::tui::print_web_panel",
         "path ui::tui::run",
         "use crate::ui::tui::WebOpened"
@@ -41901,6 +41911,7 @@
         "path Command::Approval",
         "path Command::AskAnswers",
         "path Command::AskCancel",
+        "path Command::CheckUpdate",
         "path Command::ClearModelPreferences",
         "path Command::CloseSessions",
         "path Command::CloseSide",
@@ -42091,6 +42102,7 @@
         "path Update::Toast",
         "path Update::TurnCompleted",
         "path Update::Upgrade",
+        "path Update::UpgradeChecked",
         "path Update::Usage",
         "path Update::UsageReport",
         "path Update::Web",
@@ -42306,6 +42318,7 @@
       "references": [
         "path update",
         "path update::available",
+        "path update::check",
         "path update::enabled",
         "use crate::update"
       ]
@@ -49977,6 +49990,7 @@
         "path Command::Approval",
         "path Command::AskAnswers",
         "path Command::AskCancel",
+        "path Command::CheckUpdate",
         "path Command::ClearModelPreferences",
         "path Command::CloseSessions",
         "path Command::CloseSide",
@@ -50144,6 +50158,7 @@
         "path Update::Toast",
         "path Update::TurnCompleted",
         "path Update::Upgrade",
+        "path Update::UpgradeChecked",
         "path Update::Usage",
         "path Update::UsageReport",
         "path Update::Web",
@@ -50552,6 +50567,7 @@
         "path Effect::ThemePreview",
         "path Effect::ThemeRestore",
         "path Effect::Timeline",
+        "path Effect::UpgradeNow",
         "path Effect::UpgradeSkip",
         "path EffortPrompt",
         "path EffortPrompt::new",
@@ -51045,7 +51061,6 @@
       "from": "dim_cli::ui::tui",
       "to": "dim_cli::update",
       "references": [
-        "path crate::update::command",
         "path crate::update::skip"
       ]
     },
@@ -51223,6 +51238,7 @@
         "path Update::SuggestionSetting",
         "path Update::Switched",
         "path Update::Upgrade",
+        "path Update::UpgradeChecked",
         "path Update::UsageReport",
         "path Update::Withdrawn",
         "path crate::model::session::Account",
@@ -51595,6 +51611,7 @@
       "to": "dim_cli::ui::i18n",
       "references": [
         "path t",
+        "path tf",
         "use crate::ui::i18n::t",
         "use crate::ui::i18n::tf"
       ]
@@ -51606,6 +51623,7 @@
         "path Effect",
         "path Effect::Close",
         "path Effect::None",
+        "path Effect::UpgradeNow",
         "path Effect::UpgradeSkip",
         "use crate::ui::prompts::Effect"
       ]

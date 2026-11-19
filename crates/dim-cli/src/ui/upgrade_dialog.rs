@@ -1,14 +1,14 @@
-//! The update dialog: a newer version on this build's channel and the command
-//! that installs it once every client and the server have exited.
+//! The update dialog: a newer version on this build's channel. A recognised
+//! installation whose server this client manages updates with `Update now`,
+//! which leaves the interface first; any other names the command to run.
 //!
 //! ```text
 //! ╭──────────────────────────────────────────────────────────────╮
 //! │ Update available                                             │
 //! │                                                              │
 //! │ Version 0.1.0-alpha.2 is available (you have 0.1.0-alpha.1). │
-//! │ To update, run: dima update                                  │
 //! │                                                              │
-//! │ › Skip this version   Close                                  │
+//! │ › Update now   Skip this version   Close                     │
 //! │                                                              │
 //! │ ←→ move · Enter confirm · Esc close                          │
 //! ╰──────────────────────────────────────────────────────────────╯
@@ -27,6 +27,7 @@ use crate::update::Offer;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Choice {
+    Update,
     Skip,
     Close,
 }
@@ -34,6 +35,7 @@ enum Choice {
 impl Choice {
     fn label(self) -> &'static str {
         match self {
+            Self::Update => t("Update now"),
             Self::Skip => t("Skip this version"),
             Self::Close => t("Close"),
         }
@@ -42,6 +44,8 @@ impl Choice {
 
 pub struct UpgradeDialog {
     pub offer: Offer,
+    /// `Update now` was refused because this Session is still working.
+    blocked: bool,
     focused: usize,
     offset: Cell<usize>,
 }
@@ -50,13 +54,23 @@ impl UpgradeDialog {
     pub fn new(offer: Offer) -> Self {
         Self {
             offer,
+            blocked: false,
             focused: 0,
             offset: Cell::new(0),
         }
     }
 
+    /// Says why `Update now` cannot leave yet; the dialog stays open.
+    pub fn block(&mut self) {
+        self.blocked = true;
+    }
+
     fn choices(&self) -> &'static [Choice] {
-        &[Choice::Skip, Choice::Close]
+        if self.offer.direct {
+            &[Choice::Update, Choice::Skip, Choice::Close]
+        } else {
+            &[Choice::Skip, Choice::Close]
+        }
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Effect {
@@ -69,6 +83,7 @@ impl UpgradeDialog {
             KeyCode::Esc => return Effect::Close,
             KeyCode::Enter => {
                 return match self.choices()[self.focused.min(count - 1)] {
+                    Choice::Update => Effect::UpgradeNow,
                     Choice::Skip => Effect::UpgradeSkip(self.offer.version.clone()),
                     Choice::Close => Effect::Close,
                 };
@@ -80,16 +95,21 @@ impl UpgradeDialog {
 
     pub fn render(&self, width: usize, height: usize, p: &Palette) -> Vec<String> {
         let version = self.offer.version.as_str();
-        let body = vec![
-            tf(
-                "Version {latest} is available (you have {current}).",
-                &[("latest", version), ("current", &self.offer.current)],
-            ),
-            tf(
-                "To update, run: {command}",
+        let mut body = vec![tf(
+            "Version {latest} is available (you have {current}).",
+            &[("latest", version), ("current", &self.offer.current)],
+        )];
+        if self.blocked {
+            body.push(
+                t("Finish or stop the current work first (a running turn, shell command, or pending prompt).")
+                    .to_owned(),
+            );
+        } else if !self.offer.direct {
+            body.push(tf(
+                "To update, exit DimCode and run: {command}",
                 &[("command", &self.offer.manual)],
-            ),
-        ];
+            ));
+        }
         let labels: Vec<String> = self
             .choices()
             .iter()

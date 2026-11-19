@@ -92,7 +92,7 @@ pub struct Tui {
     pub env: ui::Env,
     pub options: Options,
     /// Taken by the load; the render thread sends the result once.
-    pub leave: Mutex<Option<oneshot::Sender<i32>>>,
+    pub leave: Mutex<Option<oneshot::Sender<ui::tui::Leave>>>,
     pub leaf_end: Mutex<Option<oneshot::Sender<()>>>,
 }
 

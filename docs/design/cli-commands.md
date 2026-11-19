@@ -2653,11 +2653,21 @@ opened also fails the starting process, so a recognised consumer never runs unre
 The lock file is created readable by every user and remains in place after release;
 deleting it while an update runs would allow another inode to be locked independently.
 
-Older builds hold no lock, so `update` also refuses until `.dimcode-consumers` exists at
-the manager root. After exiting every client and stopping every old server, the operator
-runs `update --confirm-legacy-exited`, which creates the marker and installs. The flag
-vouches for older processes only and never overrides a live lock. Source builds and
-unrecognised layouts hold no lock and are not updated.
+`update` never stops a server, not even an idle one: while this home's daemon holds its
+lease, the operator stops it with `daemon stop` first, and a lease from another home is
+settled in that home. A process that has just exited can keep its lease for a moment, so
+`update` waits up to two seconds for the lock before it refuses, naming the entry point
+that runs it:
+
+```text
+$ dima update
+Error: DimCode is currently running (another window, server, or update is active).
+Close all DimCode windows, run `dima daemon stop`, and try again.
+```
+
+Builds older than the lease hold no lock, so `update` cannot see them; the operator exits
+them before the first update. Source builds and unrecognised layouts hold no lock and are
+not updated.
 
 ```text
 $ dima update
@@ -2674,10 +2684,61 @@ $ dima update
 Updated dimcode-alpha on the alpha channel.
 ```
 
-The update dialog installs nothing. It names the new version and the command to run
-(`dima update` for a recognised installation, else the package manager's own command)
-once every client has exited and the server has stopped, and offers `Skip this version`
-and `Close`. It uses the same layout in fullscreen and scrollback. It fits the available
+The update dialog names the new version. For a recognised installation whose server the
+client manages (no `--server`), it offers `Update now`, `Skip this version` and `Close`,
+with `Update now` focused:
+
+```text
+╭──────────────────────────────────────────────────────────────╮
+│ Update available                                             │
+│                                                              │
+│ Version 0.1.0-alpha.26 is available (you have 0.1.0-alpha.25).│
+│                                                              │
+│ › Update now   Skip this version   Close                     │
+│                                                              │
+│ ←→ move · Enter confirm · Esc close                          │
+╰──────────────────────────────────────────────────────────────╯
+```
+
+Any other installation, or a client of an external `--server`, gets `Skip this version`
+and `Close` with the command to run once DimCode has exited (`dima update`, or the package
+manager's own command):
+
+```text
+│ Version 0.1.0-alpha.26 is available (you have 0.1.0-alpha.25).│
+│ To update, exit DimCode and run: dima update                 │
+│                                                              │
+│ › Skip this version   Close                                  │
+```
+
+`Update now` updates without the interface staying connected:
+
+1. While this Session has a running turn, a foreground shell command, or a pending
+   approval or question, the dialog stays and says to finish or stop that work first. The
+   daemon is not asked.
+2. Otherwise the interface leaves as it does on exit, restoring the terminal and closing
+   its connection, so its own attachment no longer counts.
+3. The same process asks this home's daemon to stop with `daemon.shutdown {ifIdle: true}`
+   ([Tui](plugins/Tui.md) owns the idle decision). A refusal from a connection that has
+   only just closed is asked again for up to two seconds.
+4. With the daemon stopped, or none running, it installs exactly as `update` does, with
+   the same progress row and errors.
+5. A staged npm installation then starts the updated entry point in place of this
+   process, in the mode it left (`--fullscreen` or `--scrollback`) and with
+   `--resume <session>` when a Session was open; the new client starts its own daemon.
+   Any other layout says to start DimCode again.
+
+A busy daemon, a daemon without `daemon.shutdown.ifIdle`, a lease held elsewhere, or a
+failed install stops nothing more: the CLI prints what blocked it and the next step, then
+the resume command, and exits nonzero.
+
+```text
+Could not update: Other DimCode windows or tasks are using the server (clients: 1, attached sessions: 1, running turns: 0).
+Close them or let them finish, then run: dima update
+Resume this session with: dima --resume s-42
+```
+
+The dialog uses the same layout in fullscreen and scrollback. It fits the available
 columns and rows: long version and command text wraps, with Up/Down scrolling when
 needed. The title and action row remain visible. If the actions do not fit on one row,
 show the focused action and its index; Left/Right and Tab/BackTab still cycle all
@@ -2693,17 +2754,15 @@ when it fits.
 +----------- Up/Down 1-2/7-+
 ```
 
-`/update` is that command as a client-side report in both terminal UI modes. It
-runs nothing: the update command holds the installation's exclusive lease, and
-the interface itself is a client whose share of that lease it cannot release
-while it serves the operator. So `/update` names the command the dialog would
-name, for a recognised installation, or the [manual and rebuild
-instructions](#update-dialog) for any other layout, and it never consults the
-channel: the automatic startup check keeps owning the dialog and its skip list.
+`/update` checks this build's channel on demand in both terminal UI modes, including a
+version the user skipped. A newer version opens the update dialog; otherwise the
+transcript says the build is up to date, or, for a source build or unrecognised layout,
+gives the [manual and rebuild instructions](#update-dialog). The startup check keeps
+honouring the skip list.
 
 ```text
 > /update
-To update, exit every client and stop the server, then run dima update
+DimCode 0.1.0-alpha.26 is up to date.
 ```
 
 ### Coordinated client/server upgrade
@@ -2763,13 +2822,10 @@ below; the remaining items need alignment with the lifecycle and launch owners (
   update holds the lock. The OS releases a lease when its process dies, so a crash never
   leaves a stale occupant. A source build or unrecognised layout holds no lease and is never
   updated.
-- **First migration:** older builds hold no lease, so a lease-aware install cannot prove
-  they have exited. Until `.dimcode-consumers` exists at the manager root, `update` refuses.
-  After exiting every client and stopping every old server, the operator runs
-  `update --confirm-legacy-exited`, which creates the marker and installs. The flag trusts
-  that statement for older processes only: a live lease still refuses.
-- **Remaining:** quiescing process admission before shutdown, safe replacement on Windows,
-  and successor activation by the new client are not part of the command yet.
+- **Remaining:** safe replacement on Windows is not part of the command yet, and
+  `update` itself stops no server. `Update now` stops this home's daemon only through
+  `daemon.shutdown {ifIdle: true}` and leaves successor activation to the new client it
+  starts.
 - **Effects and ownership:** quiescence changes admission, not Timeline order, batching,
   recovery formats or already accepted work. The App Server/lifecycle owners implement
   and verify the generic operation; native launch and installation owners implement the

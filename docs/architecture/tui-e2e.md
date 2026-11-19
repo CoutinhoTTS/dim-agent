@@ -332,7 +332,7 @@ flows.
 
 **`update_entry`** — 1 case
 
-- unreviewed (#1802), CI — `update_names_the_command_and_sends_no_input`
+- unreviewed (#1802), CI — `update_reports_a_source_build_and_sends_no_input`
 
 **`windows`** — 2 cases
 
