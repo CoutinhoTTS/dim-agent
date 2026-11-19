@@ -24536,6 +24536,13 @@
     },
     {
       "from": "dim_app_server",
+      "to": "dim_app_server::settings::declared",
+      "references": [
+        "path settings::Settings"
+      ]
+    },
+    {
+      "from": "dim_app_server",
       "to": "dim_app_server::settings_methods",
       "references": [
         "mod settings_methods",
@@ -30833,16 +30840,16 @@
       "to": "dim_app_server::settings",
       "references": [
         "path SettingsError",
-        "path SettingsService",
-        "use crate::settings::SettingsError",
-        "use crate::settings::SettingsService"
+        "use crate::settings::SettingsError"
       ]
     },
     {
       "from": "dim_app_server::plugin_manager",
       "to": "dim_app_server::settings::declared",
       "references": [
+        "path Settings",
         "path SourceDeclaration",
+        "use crate::settings::Settings",
         "use crate::settings::SourceDeclaration"
       ]
     },
@@ -31005,10 +31012,8 @@
       "from": "dim_app_server::plugin_manager::tools",
       "to": "dim_app_server::settings::declared",
       "references": [
-        "path Writer::Owner",
         "path holds_write_only",
         "path without_write_only",
-        "use crate::settings::Writer",
         "use crate::settings::holds_write_only",
         "use crate::settings::without_write_only"
       ]
