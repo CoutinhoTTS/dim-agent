@@ -71,13 +71,47 @@ retention attaches to the same Session generation. The caller that checks an inh
 connection receives success or the existing error; the HTTP connection stays inside
 Provider. This startup contract belongs with the process/model face in #1857.
 
-For the SQLite edge, the minimum *additional public repository API* is zero **if**
-the credential-bearing persistent Provider operations execute at the database owner.
-That is a placement decision requiring approval. With today's two independent rows,
-their raw run/read closures still cross the boundary. A general row getter would
-return inline credentials and a document-wide replacement would lose selective reads
-and per-model CAS. Neither is an approved alternative. Preserve the existing Provider
-operations, database writer and feature unload semantics when deciding placement.
+## Native storage placement
+
+The native product mounts the database-backed implementations of Provider and Settings
+**at the owner of the open database**. The existing store owner opens the database once
+and holds its lock, readers and writer. At that owner, a private constructor builds the
+Provider persistence implementation and another builds the Settings persistence
+implementation. They execute the existing SQL on that engine. Only those implementations
+access it. Their source code and business rules stay in their respective modules.
+
+The product profile selects the same Provider and Settings rows as before. In the native
+profile their factories come from the native owner: they mount each feature's public
+bindings in its own rutis lifetime. Each binding publishes the feature operations directly
+from its owner. It receives only its domain implementation; it cannot obtain a connection
+or submit SQL. There is one registered implementation per face and instance. Replace the
+old top-level factories that require SqliteStorage. Do not pass the same database object
+to those factories under a different key or in an assembly closure.
+
+| Caller | Face and result | Private work at the native owner |
+| --- | --- | --- |
+| Management client → registered Provider handler | Existing provider.list/catalog, provider.models.query, provider.create/update and the other [Provider requests](../appserver/provider-management.md#3-management-contract), with their current versioned replies. | Provider validates changes and executes the existing selective queries and atomic edits through its private repository. |
+| Session/model consumer → Provider | Session selection and startup operations above; full invocation uses the model operation defined with #1857. | Provider resolves the credential locally and invokes its native driver. Aimux keeps its own driver lifetime and pool. Managed OAuth retains its account lifecycle. |
+| Declared-source plugin → Settings | settings.register/read/update/projects. An update still returns its committed snapshot or the existing Settings error. | Settings selects file or native user persistence. Native import writes content and provenance together. CAS and protected-field comparison run against the same stored revision. Notify after commit in commit order. |
+| Native-source feature → its owner | Use the feature operation or source-bound operation below. Local management retains the current client contract. | For a secret-bearing source the native owner mounts its feature-specific codec and secret-using operation together. For example, MCP connection setup consumes the effective credentials there. No general source lookup returns raw MCP credentials. |
+
+The three Settings repository operations below are private functions. Provider's repository
+likewise has no public wire contract. Neither feature injects sqliteStorage, store.run,
+a connection factory or a replacement SQL service. File-only Settings uses its existing
+factory without starting SQLite. Provider is mounted only in the profiles that select it.
+
+Feature enable, disable and reload address each binding's own row. Closing Provider stops
+admission, settles that generation's work and temporary credentials, and withdraws its faces;
+Settings and the database remain usable. Closing Settings drains its admitted updates and
+withdraws its registrations while Provider remains usable subject to its declared dependencies.
+Native store shutdown closes its dependent rows and joins their work before releasing the
+database lock. A new generation binds to the same engine without reopening the file.
+
+Acceptance for these two edges: the assembled inject/read graph has no Provider or Settings
+read of SqliteStorage; foreign and native calls hit the same owner; CAS, secret handling,
+selective query counts and independent reload retain their current behavior. Once the other
+native consumers in #1292 are migrated, delete the SqliteStorage catalog registration.
+The database driver remains a private implementation of the storage owner.
 
 ## Settings
 
@@ -115,7 +149,6 @@ revision. This is a proposed binding for non-secret data, not an additional glob
 A second feature row uses its owner's projection (for example commandRules.read), rather
 than registering the same source twice. For MCP, publication refresh already runs inside
 McpPublication; no other plugin needs to call refresh to support its settings subscription.
-Keep server decoding, secret use and connection setup on the MCP side. Co-locating secret-bearing
-persistence/codec and the operation using it requires an owner decision, as for Provider.
+Keep server decoding, secret use and connection setup on the MCP side. Mount the secret-bearing persistence/codec with its consuming operation as specified above.
 A native type parameter, storage closure or another row's database handle is never a
 wire argument.
