@@ -7,7 +7,7 @@ use crate::protocol::{Catalog, CatalogResult, SessionInfo, SessionSummary};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use dim_agent_runtime::{AgentError, Result};
 use dim_agent_types::{
-    ContentBlock, EventKind, InputMessageData, ModelId, markup::runtime_context,
+    ContentBlock, EventKind, InputMessageData, ModelId, ROOT_BRANCH_ID, markup::runtime_context,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use sha2::{Digest, Sha256};
@@ -24,7 +24,7 @@ pub(super) fn create(connection: &Connection, session: &str) -> Result<()> {
 /// Call inside the transaction that inserts those rows, before committing.
 pub fn initialize_session_catalog(connection: &Connection, session: &str) -> Result<()> {
     create(connection, session)?;
-    refresh(connection, session)
+    refresh(connection, session, ROOT_BRANCH_ID)
 }
 
 pub(crate) fn truncate_preview(value: &str, limit: usize) -> String {
@@ -76,14 +76,17 @@ fn activity_selection() -> String {
     )
 }
 
-pub(super) fn refresh(connection: &Connection, session: &str) -> Result<()> {
+/// Rebuilds `session`'s catalog row: its most recent activity on `default`, the
+/// line its conversation is on, and its first words from the root, which is the
+/// line that holds them.
+pub(super) fn refresh(connection: &Connection, session: &str, default: &str) -> Result<()> {
     let last: Option<String> = connection
         .query_row(
             &format!(
-                "SELECT body FROM timeline_events WHERE session_id=?1 AND branch_id='main' AND {} ORDER BY sequence DESC LIMIT 1",
+                "SELECT body FROM timeline_events WHERE session_id=?1 AND branch_id=?2 AND {} ORDER BY sequence DESC LIMIT 1",
                 activity_selection()
             ),
-            [session],
+            params![session, default],
             |row| row.get(0),
         )
         .optional()
@@ -199,7 +202,7 @@ pub(super) fn backfill(connection: &Connection) -> Result<()> {
         if !present {
             create(connection, &session)?;
         }
-        refresh(connection, &session)?;
+        refresh(connection, &session, ROOT_BRANCH_ID)?;
     }
     Ok(())
 }
