@@ -51001,6 +51001,7 @@
         "path Detail::Summary",
         "path ToolGroup",
         "path action_at",
+        "path body_disclosure_at",
         "path card_actions",
         "path card_rows",
         "path disclosure_at",
@@ -51013,6 +51014,7 @@
         "use crate::ui::transcript::tool_group::State",
         "use crate::ui::transcript::tool_group::ToolGroup",
         "use crate::ui::transcript::tool_group::action_at",
+        "use crate::ui::transcript::tool_group::body_disclosure_at",
         "use crate::ui::transcript::tool_group::card_actions",
         "use crate::ui::transcript::tool_group::card_rows",
         "use crate::ui::transcript::tool_group::disclosure_at",
@@ -57369,6 +57371,10 @@
     },
     {
       "module": "dim_cli::ui::tui::tests",
+      "path": "MemberTarget::Session"
+    },
+    {
+      "module": "dim_cli::ui::tui::tests",
       "path": "ModelFailureKind::Network"
     },
     {
@@ -57494,6 +57500,10 @@
     {
       "module": "dim_cli::ui::tui::tests",
       "path": "State::Row"
+    },
+    {
+      "module": "dim_cli::ui::tui::tests",
+      "path": "TaskKind::Member"
     },
     {
       "module": "dim_cli::ui::tui::tests",
