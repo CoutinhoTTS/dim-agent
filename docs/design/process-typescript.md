@@ -444,7 +444,8 @@ stable boundary. Session and branch parts resolve this same shared service
 through the existing catalog; a Session-only configuration must not require a
 dummy process row.
 
-The scope offers `withLock`, `list(prefix)` and `remove(name)`; the lease offers
+The scope offers `withLock`, `list(prefix)`, `remove(name)`, `directory(name)`,
+`openRead(name)` and `writeStream(name, next)`. The lease offers
 `read`, `replace`, `backup`, `readBytes` and `replaceBytes`. `list` returns one
 level of a directory prefix, sorted, each entry its name relative to the
 authorized root and its kind, and never enters a directory entry; a returned
@@ -464,7 +465,8 @@ store stay up, and the same holds for any call argument, a large text
 `replace` included.
 `scope.directory(name)` creates missing parents and returns the node-local work path.
 `scope.openRead(name)` returns a pinned reader ID and size, or null for a missing file.
-Use `fsHost.readAt` and `fsHost.closeRead`; unloading the opening row closes its readers.
+Use `fsHost.readAt` to read. The reader remains valid across `scope.close()` until
+`fsHost.closeRead` or unload of the opening row.
 `scope.writeStream(name, next)` consumes byte chunks until null and replaces the file atomically.
 Source failure or cancellation discards the partial replacement.
 
@@ -473,12 +475,11 @@ operations and cleanup; it is not a per-package directory sandbox. Consumers
 use their declared relative paths, under their own id directory. PluginManager
 creates `<root>/<id>/` when it turns a plugin with code on
 ([PluginManager §2.1](plugins/PluginManager.md#21-the-plugin-directory-and-its-manifest));
-an embedding host that supplies rows itself provisions the directories. The
-existing file API does not create missing parents. Scheduler and Workflow use
-`scheduler/` and `workflow/`, their ids. Provisioning belongs to installation,
-not feature-specific App Server branches or a new filesystem method. If a parent is
-not provisioned, the first `withLock` fails with the existing `io` result before
-the callback can read or write. The consumer surfaces that storage failure and
+an embedding host that supplies rows itself provisions the consumer directories
+at installation. Scheduler uses `scheduler/` and Workflow uses `workflow/`.
+Only `scope.directory` creates missing parents. For an absent parent,
+`writeStream` returns `io`, `openRead` returns null, and `withLock` returns `io`
+before invoking its callback. The consumer surfaces that storage failure and
 starts no run effect; it does not create a Session or submit input without the
 required durable transition.
 
