@@ -1024,13 +1024,21 @@ fn javascript_uses(text: &str) -> Vec<usize> {
 }
 
 /// The keywords after which a `/` begins a regular-expression literal rather
-/// than dividing: each cannot end an expression.
-const KEYWORDS: [&str; 14] = [
+/// than dividing: none of them can end an expression, each is followed by an
+/// expression or a statement body. `await`, `delete`, `typeof`, `void` and
+/// `yield` take a unary operand, `new` its constructor's member expression,
+/// `in`, `instanceof` and `of` a right operand, `case` its expression, `return`
+/// and `throw` their value, `else` and `do` a statement body, which a `/`
+/// begins as an expression statement, `default` the expression of
+/// `export default`, and `extends` a class's heritage.
+const KEYWORDS: [&str; 16] = [
     "await",
     "case",
+    "default",
     "delete",
     "do",
     "else",
+    "extends",
     "in",
     "instanceof",
     "new",
@@ -1840,6 +1848,25 @@ mod tests {
         ("web/src/a.ts", "const r = {} /\"main\"/ 2;\n"),
         ("web/src/a.ts", "class A {}\n/\"main\"/.test(s);\n"),
         ("web/src/a.ts", "class A {}/\"main\"/.test(s);\n"),
+        ("web/src/a.ts", "export default /\"main\"/.test(label);\n"),
+        ("web/src/a.ts", "export default \"main\";\n"),
+        (
+            "web/src/a.ts",
+            "const r = obj.default / 2; const b = \"main\";\n",
+        ),
+        (
+            "web/src/a.ts",
+            "export default { a: 1 } / 2; const b = \"main\";\n",
+        ),
+        (
+            "web/src/a.ts",
+            "export default function f() {}\n/\"main\"/.test(s);\n",
+        ),
+        ("web/src/a.ts", "class A extends /\"main\"/ {}\n"),
+        (
+            "web/src/a.ts",
+            "class A extends base {}\nconst b = \"main\";\n",
+        ),
         (
             "web/src/features/chat/TimelineView.vue",
             "<template>\n  <div :data-variant=\"variant\" @click=\"openLine('main')\"></div>\n</template>\n",
@@ -2152,6 +2179,26 @@ mod tests {
             ("const r = {} /\"main\"/ 2;\n", 1),
             ("class A {}\n/\"main\"/.test(s);\n", 0),
             ("class A {}/\"main\"/.test(s);\n", 0),
+        ] {
+            let found = bounded("web/src/a.ts", text).len();
+            if found != uses {
+                failures.push(format!("{text:?}: left {found}, right {uses}"));
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    #[test]
+    fn a_slash_after_a_keyword_with_an_expression_operand_opens_a_regex() {
+        let mut failures = Vec::new();
+        for (text, uses) in [
+            ("export default /\"main\"/.test(label);\n", 0),
+            ("export default \"main\";\n", 1),
+            ("const r = obj.default / 2; const b = \"main\";\n", 1),
+            ("export default { a: 1 } / 2; const b = \"main\";\n", 1),
+            ("export default function f() {}\n/\"main\"/.test(s);\n", 0),
+            ("class A extends /\"main\"/ {}\n", 0),
+            ("class A extends base {}\nconst b = \"main\";\n", 1),
         ] {
             let found = bounded("web/src/a.ts", text).len();
             if found != uses {
