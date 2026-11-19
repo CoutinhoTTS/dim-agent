@@ -1670,12 +1670,14 @@ Ordinary v44 opening does not rebuild indexes or scan history. Disposable-store
 verification covers both v43 and both v42 families, reopen, current-member
 semantics, preserved Steer candidates, automation origins and rollback.
 
-## Storage size report
+## SQLite owner operations
 
 Persistent Agents calls `sqliteStorage.agents`, `owners`, `save` and `delete` for its directory and Session ownership. Delegation reads use `members`, `ledMembers`, `ownedAgents`, `memberSessions` and `agentOwner`. Startup repair reads both lists from `unfinishedOwned`. SQLite owns all record reads and writes.
 
 Provider reads stored selections and the single model preferences field through `sqliteStorage.readSelection({scope})` and `readPreferences({providerId, modelId})`. A missing row returns null. After Provider validates a target, `writeSelection({scope, expectedVersion, selection})` commits it at the expected version and returns the stored selection.
 
 Settings reads user documents through `sqliteStorage.readUser({source})`. A missing row returns null. A present row returns its integer `version` and stored `document` text, including any inline credentials. Settings decodes it using the source's registered format. On a miss, Settings validates the legacy file and calls `importUserIfAbsent({source, document, importedRevision})`. SQLite inserts the document with its provenance if absent and returns the winning row in the same transaction. `replaceUser({source, expectedVersion, decision})` checks the version before applying a write or protected-field rejection. A successful write returns the new version. Settings publishes the change in commit order.
+
+### Storage size report
 
 StorageMethods serves `storage.report` from the SQLite owner operation `sqliteStorage.storageReport({})`. Both return `{databaseBytes, walBytes, reclaimableBytes}`. SQLite reads the current file sizes and counts free database pages.
