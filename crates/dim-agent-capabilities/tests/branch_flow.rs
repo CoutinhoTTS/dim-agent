@@ -1248,6 +1248,12 @@ struct TestStore {
     reads: AtomicUsize,
     armed: Mutex<Option<String>>,
     refuse_ranges: bool,
+    /// The branch whose next append answers its publish callback with an
+    /// error, the failure shape a store reports after accepting a batch.
+    fail_append: Mutex<Option<String>>,
+    /// The branch whose next submission lookup fails at the read, before the
+    /// store writes anything: a transitory failure a delivery can retry.
+    fail_lookup: Mutex<Option<String>>,
 }
 impl TestStore {
     /// A store over `memory` that refuses every range read.
@@ -1265,6 +1271,14 @@ impl TestStore {
     }
     fn disarm(&self) {
         *self.armed.lock().unwrap() = None;
+    }
+    /// Fails the next append to `branch` through its publish callback.
+    fn fail_next_append(&self, branch: &str) {
+        *self.fail_append.lock().unwrap() = Some(branch.into());
+    }
+    /// Fails the next submission lookup on `branch`, then answers normally.
+    fn fail_next_lookup(&self, branch: &str) {
+        *self.fail_lookup.lock().unwrap() = Some(branch.into());
     }
     /// The pages `branch` was read with while selecting exactly `kinds`.
     fn pages(&self, branch: &str, kinds: &[&str]) -> usize {
@@ -1321,6 +1335,18 @@ impl TimelineStore for TestStore {
             {
                 return Err(AgentError::Storage("injected opening read failure".into()));
             }
+            let lookup = matches!(
+                &query.select,
+                dim_agent_runtime::QuerySelect::Fields { fields }
+                    if fields.iter().map(String::as_str).eq(["id", "position.sequence"])
+            );
+            if lookup {
+                let mut armed = self.fail_lookup.lock().unwrap();
+                if armed.as_deref() == Some(scope.key.branch_id.as_str()) {
+                    *armed = None;
+                    return Err(AgentError::Storage("injected lookup failure".into()));
+                }
+            }
             self.queries
                 .lock()
                 .unwrap()
@@ -1363,6 +1389,20 @@ impl TimelineStore for TestStore {
         events: Vec<StoredEvent>,
         publish: PublishCallback,
     ) -> Result<()> {
+        let failed = {
+            let mut armed = self.fail_append.lock().unwrap();
+            let failed = armed.as_deref() == Some(key.branch_id.as_str());
+            if failed {
+                *armed = None;
+            }
+            failed
+        };
+        if failed {
+            publish(Err(AgentError::Storage(
+                "injected append failure after the batch was accepted".into(),
+            )));
+            return Ok(());
+        }
         self.memory.append(key, events, publish)
     }
     fn batch_end<'a>(
@@ -8388,6 +8428,250 @@ async fn a_restore_of_a_fork_that_opened_a_line_keeps_the_root_default() {
         "a fork's default branch is its root, and its restore panics on no fact"
     );
     soon(agent.close()).await.unwrap();
+}
+
+/// #1862: an end whose final message fails to reach its parent must not be
+/// finalized, or restore skips the ended line and the message is lost. The line
+/// stays ending; the next restore delivers the message once under the id the
+/// end derives, and a second restore writes nothing (design §10, §20.26b).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_end_whose_final_message_fails_is_delivered_by_the_next_restore() {
+    let store = Arc::new(TestStore::default());
+    let agent = setup_with(&store).await;
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let session_id = session.id().to_owned();
+    let line = open_line(&session, "deliver me").await;
+    let tree = session.session_service::<TreeCommands>().unwrap();
+    store.fail_next_append("main");
+    let failed = tree
+        .end_with_final(
+            line.clone(),
+            BranchSource::Tool {
+                turn_id: "turn".into(),
+                request_id: "request".into(),
+                call_id: "call".into(),
+            },
+            Some("the result".into()),
+        )
+        .await;
+    assert!(failed.is_err(), "the delivery failure reaches the caller");
+    let entry = session
+        .directory()
+        .into_iter()
+        .find(|entry| entry.info.id == line)
+        .expect("the ending line is still listed");
+    assert_eq!(entry.state, BranchDirectoryState::Ending);
+    let end_event = entry.end_event.expect("the line's end is recorded");
+    let submission = format!("branch-final:{line}:{end_event}");
+    let deliveries = |events: &[Arc<AgentEvent>], submission: &str| {
+        events
+            .iter()
+            .filter(|event| match &event.kind {
+                EventKind::InputMessage(data) => data.submission_id.as_deref() == Some(submission),
+                _ => false,
+            })
+            .count()
+    };
+    assert_eq!(
+        deliveries(&local_events(&session, "main").await, &submission),
+        0,
+        "the failed delivery left nothing on the parent"
+    );
+    // A store that publishes an error faults the Session, so its close is the
+    // point where the end has settled.
+    let _ = soon(session.close()).await;
+    assert!(
+        session.ended_head(&line).is_none(),
+        "an undelivered final message leaves the line ending"
+    );
+    let _ = soon(agent.close()).await;
+
+    let restored = MinimalHost::start(&builder_with_store(
+        &Arc::new(Probe::default()),
+        store.clone(),
+    ))
+    .await
+    .unwrap();
+    let session = soon(restored.restore_session(session_id.clone()))
+        .await
+        .unwrap();
+    let events = local_events(&session, "main").await;
+    assert_eq!(
+        deliveries(&events, &submission),
+        1,
+        "the next restore delivers the final message once"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(
+                |event| matches!(&event.kind, EventKind::BranchEnded(data) if data.branch == line)
+            )
+            .count(),
+        1,
+        "the line is recorded as ended once"
+    );
+    soon(session.close()).await.unwrap();
+    soon(restored.close()).await.unwrap();
+
+    let again = MinimalHost::start(&builder_with_store(
+        &Arc::new(Probe::default()),
+        store.clone(),
+    ))
+    .await
+    .unwrap();
+    let session = soon(again.restore_session(session_id)).await.unwrap();
+    assert_eq!(
+        deliveries(&local_events(&session, "main").await, &submission),
+        1,
+        "a second restore writes no copy of the final message"
+    );
+    soon(session.close()).await.unwrap();
+    soon(again.close()).await.unwrap();
+}
+
+/// #1862: a final message the store refused is a state of the line, not a
+/// one-shot error. A later end answers the same failure while the store still
+/// refuses and retries the delivery once it reads again, under the id
+/// `branch/end` derives, so the message arrives once and the line is recorded
+/// as ended (design §10, §20.26b).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_second_end_retries_an_undelivered_final_message() {
+    let store = Arc::new(TestStore::default());
+    let agent = setup_with(&store).await;
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let line = open_line(&session, "deliver me").await;
+    soon(session.idle("main")).await.unwrap();
+    let tree = session.session_service::<TreeCommands>().unwrap();
+    let source = || BranchSource::Tool {
+        turn_id: "turn".into(),
+        request_id: "request".into(),
+        call_id: "call".into(),
+    };
+    store.fail_next_lookup("main");
+    let first = soon(tree.end_with_final(line.clone(), source(), Some("the result".into()))).await;
+    assert!(
+        first.is_err(),
+        "the delivery failure reaches the caller: {first:?}"
+    );
+    let start = session
+        .directory()
+        .into_iter()
+        .find(|entry| entry.info.id == line)
+        .expect("the ending line is still listed");
+    assert_eq!(start.state, BranchDirectoryState::Ending);
+    let end_event = start.end_event.expect("the line's end is recorded");
+    let submission = format!("branch-final:{line}:{end_event}");
+    let deliveries = |events: &[Arc<AgentEvent>], submission: &str| {
+        events
+            .iter()
+            .filter(|event| match &event.kind {
+                EventKind::InputMessage(data) => data.submission_id.as_deref() == Some(submission),
+                _ => false,
+            })
+            .count()
+    };
+    store.fail_next_lookup("main");
+    let second = soon(tree.end_with_final(line.clone(), source(), Some("the result".into()))).await;
+    let third = soon(tree.end_with_final(line.clone(), source(), Some("the result".into()))).await;
+    // Bounded: a caller left waiting, or a line never recorded as ended, fails
+    // here instead of stalling the suite.
+    soon(async {
+        while session.ended_head(&line).is_none() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    assert!(
+        matches!(second, Err(AgentError::Storage(_))),
+        "while the store still fails, the later end answers its error: {second:?}"
+    );
+    assert!(
+        third.is_ok(),
+        "the end that finds the store reading again answers: {third:?}"
+    );
+    assert_eq!(
+        deliveries(&local_events(&session, "main").await, &submission),
+        1,
+        "the retry delivers the final message exactly once"
+    );
+    assert!(
+        session.ended_head(&line).is_some(),
+        "the line is recorded as ended"
+    );
+    // The refused deliveries stay in the tree's cleanup errors, which close
+    // reports.
+    let _ = soon(agent.close()).await;
+}
+
+/// #1862: ending a line whose descendant still owes a final message answers
+/// instead of waiting. The cascade retries the descendant; because the parent
+/// is ending, the delivery answers `branch_ended` and the descendant is
+/// recorded as ended, then the ancestor's own end completes (design §10,
+/// §20.26b).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ending_the_parent_of_a_line_with_an_undelivered_message_answers() {
+    let store = Arc::new(TestStore::default());
+    let agent = setup_with(&store).await;
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let parent = open_line(&session, "outer").await;
+    let child = soon(session.branch(
+        parent.clone(),
+        0,
+        BranchOptions {
+            prompt: "inner".into(),
+            source: BranchSource::User {
+                operation_id: "nested".into(),
+            },
+        },
+    ))
+    .await
+    .unwrap();
+    soon(session.idle(&child)).await.unwrap();
+    let tree = session.session_service::<TreeCommands>().unwrap();
+    store.fail_next_lookup(&parent);
+    let failed = soon(tree.end_with_final(
+        child.clone(),
+        BranchSource::Tool {
+            turn_id: "turn".into(),
+            request_id: "request".into(),
+            call_id: "call".into(),
+        },
+        Some("the inner result".into()),
+    ))
+    .await;
+    assert!(
+        failed.is_err(),
+        "the delivery failure reaches the caller: {failed:?}"
+    );
+    assert_eq!(
+        session.ended_head(&child),
+        None,
+        "the child is still ending"
+    );
+    let ended = soon(tree.end(
+        parent.clone(),
+        BranchSource::User {
+            operation_id: "end".into(),
+        },
+    ))
+    .await;
+    assert!(ended.is_ok(), "ending the parent answers: {ended:?}");
+    assert!(
+        session.ended_head(&parent).is_some(),
+        "the parent is recorded as ended"
+    );
+    assert!(
+        session.ended_head(&child).is_some(),
+        "the cascade retried the child and recorded its end"
+    );
+    let _ = soon(agent.close()).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

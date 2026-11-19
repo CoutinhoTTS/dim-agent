@@ -71,11 +71,24 @@ struct PendingEnd {
     sequence: u64,
     data: BranchEndData,
 }
+/// An end whose final message the store refused. The line stays ending, every
+/// waiter answers the error, and a later end retries the delivery under the id
+/// `branch/end` derives, so a retry cannot deliver the message twice (design
+/// §10, §20.26b).
+#[derive(Clone)]
+struct Undelivered {
+    end_event: u64,
+    data: BranchEndData,
+    error: AgentError,
+}
 struct TreeState {
     nodes: BTreeMap<String, Node>,
     ended: BTreeMap<String, EndedLine>,
     /// Lines waiting for the turn end that a tool-sourced end belongs to.
     pending: BTreeMap<String, PendingEnd>,
+    /// Ends whose final message is still owed to the parent (design §10,
+    /// §20.26b).
+    undelivered: BTreeMap<String, Undelivered>,
     /// The line the Session's conversation is on (design §4, §5). The root
     /// until a `branch/default` says otherwise, and it never names an ended,
     /// plugin or pre-upgrade `host` line.
@@ -102,6 +115,9 @@ pub struct TimelineTree {
     /// The default branch after each move, so each line's BranchLine writes its
     /// own status note (design §5, §12.1). A load reconciles from the fact.
     default_moved: watch::Sender<Option<String>>,
+    /// Serialises the retries of one line's refused final message, so two
+    /// waiters cannot both deliver and record it (design §10, §20.26b).
+    retry: tokio::sync::Mutex<()>,
     /// Serialises the operations that read the tree and then write on it, an
     /// end and a move: each admits under the state lock and keeps the lock
     /// until its fact commits, so of two conflicting operations exactly one is
@@ -799,6 +815,7 @@ impl TimelineTree {
                 nodes: BTreeMap::new(),
                 ended: BTreeMap::new(),
                 pending: BTreeMap::new(),
+                undelivered: BTreeMap::new(),
                 default: ROOT_BRANCH_ID.into(),
                 default_from: None,
                 closing: false,
@@ -814,6 +831,7 @@ impl TimelineTree {
             close_started: AtomicBool::new(false),
             end_notify: tokio::sync::Notify::new(),
             default_moved: watch::channel(None).0,
+            retry: tokio::sync::Mutex::new(()),
             operations: tokio::sync::Mutex::new(()),
         })
     }
@@ -1477,7 +1495,7 @@ impl TimelineTree {
             ancestor: None,
             final_message,
         };
-        context.timeline().append_registered(
+        let appended = context.timeline().append_registered(
             EventKind::BranchEnd(data.clone()).into(),
             |event| {
                 if context.ended() {
@@ -1486,7 +1504,17 @@ impl TimelineTree {
                 context.mark_ended(event.sequence);
                 Ok(())
             },
-        )?;
+        );
+        // A line that already committed its end keeps the first call's message
+        // as its last word; a later end only retries a delivery still owed. Its
+        // branch is already closed by then, so the append answers `Closed`.
+        if let Err(AgentError::BranchEnded(_) | AgentError::Closed(_)) = &appended
+            && self.undelivered(id)
+        {
+            drop(_operations);
+            return self.retry_undelivered(id).await;
+        }
+        appended?;
         drop(_operations);
         loop {
             let notified = self.end_notify.notified();
@@ -1494,6 +1522,9 @@ impl TimelineTree {
             notified.as_mut().enable();
             {
                 let state = self.state.lock().unwrap();
+                if let Some(undelivered) = state.undelivered.get(id) {
+                    return Err(undelivered.error.clone());
+                }
                 // After the commit above, `on_end` parks a tool-sourced end of
                 // a running line in `pending`; the tool call belongs to the
                 // turn the close waits for, so `end()` returns there.
@@ -1798,26 +1829,54 @@ impl TimelineTree {
         let sequence = match sequence {
             Ok(event) => event.sequence,
             Err(AgentError::BranchEnded(_)) => return self.wait_ended(id).await,
+            Err(AgentError::Closed(_)) if context.ended() => {
+                return self.wait_ended(id).await;
+            }
             Err(error) => return Err(error),
         };
         self.close_and_record(id, sequence, data).await
     }
-    /// Waits until the line is recorded as ended.
+    /// Whether the line is ending with a final message the parent did not
+    /// receive.
+    fn undelivered(&self, id: &str) -> bool {
+        self.state.lock().unwrap().undelivered.contains_key(id)
+    }
+    /// Runs a refused end's delivery and completion again. One retry at a
+    /// time, so a waiter that loses the race finds the state cleared instead
+    /// of writing a second copy (design §10, §20.26b).
+    async fn retry_undelivered(&self, id: &str) -> Result<()> {
+        let _retry = self.retry.lock().await;
+        let pending = self.state.lock().unwrap().undelivered.get(id).cloned();
+        let Some(undelivered) = pending else {
+            // The retry that held the lock recorded the end and cleared the
+            // state; the line is no longer owed anything.
+            return Ok(());
+        };
+        self.close_and_record(id, undelivered.end_event, undelivered.data)
+            .await
+    }
+    /// Waits until the line is recorded as ended, retrying the final message
+    /// the store refused (design §10, §20.26b).
     async fn wait_ended(&self, id: &str) -> Result<()> {
         loop {
             let notified = self.end_notify.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
-            let pending = {
+            let (retry, pending) = {
                 let mut state = self.state.lock().unwrap();
-                if state.ended.contains_key(id) {
+                if state.undelivered.contains_key(id) {
+                    (true, None)
+                } else if state.ended.contains_key(id) {
                     return Ok(());
-                }
-                if state.closing {
+                } else if state.closing {
                     return Err(AgentError::Closed("TimelineTree".into()));
+                } else {
+                    (false, state.pending.remove(id))
                 }
-                state.pending.remove(id)
             };
+            if retry {
+                return self.retry_undelivered(id).await;
+            }
             if let Some(pending) = pending {
                 return self
                     .close_and_record(id, pending.sequence, pending.data)
@@ -1847,6 +1906,7 @@ impl TimelineTree {
         };
         let parent = info.parent.clone();
         let mut errors = Vec::new();
+        let mut undelivered = false;
         if let Some(final_message) = &data.final_message
             && let Some(parent) = &parent
         {
@@ -1857,11 +1917,31 @@ impl TimelineTree {
                 .await
             {
                 Ok(()) | Err(AgentError::BranchEnded(_) | AgentError::Closed(_)) => {}
-                Err(error) => errors.push(error),
+                Err(error) => {
+                    errors.push(error);
+                    undelivered = true;
+                }
             }
         }
         if let Err(error) = context.branch().close().await {
             errors.push(error);
+        }
+        if undelivered {
+            // The message is still owed: recording the end now would make
+            // restore skip the line and lose it. Leave the line ending, with
+            // its `branch/end` as the message's source, and keep the failure
+            // for every waiter and for the end that retries it (design §10,
+            // §20.26b).
+            let error = AgentError::aggregate(errors).expect_err("the delivery failed");
+            self.state.lock().unwrap().undelivered.insert(
+                id.into(),
+                Undelivered {
+                    end_event,
+                    data,
+                    error: error.clone(),
+                },
+            );
+            return Err(error);
         }
         let head = context.timeline().sequence();
         let recorded = parent.as_deref().map_or(Ok(()), |parent| {
@@ -1885,6 +1965,7 @@ impl TimelineTree {
         {
             let mut state = self.state.lock().unwrap();
             state.pending.remove(id);
+            state.undelivered.remove(id);
             state.nodes.remove(id);
             state.ended.insert(
                 id.into(),
