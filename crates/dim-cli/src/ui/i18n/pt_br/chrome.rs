@@ -576,9 +576,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         // keys.rs
         "show the key bindings" => "mostrar atalhos de teclado",
-        "show the command that updates this installation" => {
-            "mostrar o comando que atualiza esta instalação"
-        }
+        "check for a newer version" => "verificar se há uma versão mais recente",
         "Application keys" => "Atalhos do app",
         "Enter submit when idle · Shift+Enter / Alt+Enter / Ctrl+J newline · ↑↓ history" => {
             "Enter envia sem execução ativa · Shift+Enter / Alt+Enter / Ctrl+J nova linha · ↑↓ histórico"

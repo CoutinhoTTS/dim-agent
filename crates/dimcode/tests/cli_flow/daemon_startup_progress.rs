@@ -95,6 +95,14 @@ fn note_write(note: &std::path::Path, pid: &str, counter: usize) -> String {
     )
 }
 
+/// The same writer, reporting the assembly that follows a store's opening.
+fn assembly_note_write(note: &std::path::Path, pid: &str, counter: usize) -> String {
+    format!(
+        "printf 'dimcode-startup-progress v1 pid=%s\\nassembly progress=%s\\n' \"{pid}\" {counter} > '{note}.tmp.$$'\nchmod 0600 '{note}.tmp.$$'\nmv '{note}.tmp.$$' '{note}'",
+        note = note.display()
+    )
+}
+
 /// A server that reports progress past the start bound and then
 /// serves is waited for: the client connects, and says so once on stderr.
 #[test]
@@ -311,15 +319,26 @@ fn progress_for_another_pid_does_not_extend_the_wait() {
 /// A note written as the daemon does: a private temp file renamed over the
 /// target.
 fn write_progress_note(note: &std::path::Path, pid: u32, counter: u64) {
+    write_note_body(
+        note,
+        pid,
+        &format!("store-upgrade from=33 to=34 progress={counter}"),
+    );
+}
+
+/// The same writer, reporting the assembly that follows a store's opening.
+fn write_assembly_note(note: &std::path::Path, pid: u32, counter: u64) {
+    write_note_body(note, pid, &format!("assembly progress={counter}"));
+}
+
+fn write_note_body(note: &std::path::Path, pid: u32, body: &str) {
     let temp = note.with_file_name(format!(
-        "{}.{counter}.tmp",
+        "{}.{body}.tmp",
         note.file_name().unwrap().to_string_lossy()
     ));
     fs::write(
         &temp,
-        format!(
-            "dimcode-startup-progress v1 pid={pid}\nstore-upgrade from=33 to=34 progress={counter}\n"
-        ),
+        format!("dimcode-startup-progress v1 pid={pid}\n{body}\n"),
     )
     .unwrap();
     fs::set_permissions(&temp, fs::Permissions::from_mode(0o600)).unwrap();
@@ -1019,5 +1038,219 @@ fn a_silent_server_names_what_the_hello_wait_was_for() {
     assert!(
         stderr.contains("did not answer hello") && stderr.contains("daemon.log"),
         "the error names the wait and where to look: {stderr}"
+    );
+}
+
+/// Answers `hello` and the fixture's catalog after the hold. A client that
+/// already gave up closed the socket; that is the assertion's business, not a
+/// daemon-thread panic.
+fn answer_after_hold(wire: &mut Wire, hold: Duration, released: &AtomicBool) {
+    let started = Instant::now();
+    while started.elapsed() < hold && !released.load(Ordering::SeqCst) {
+        thread::sleep(Duration::from_millis(20));
+    }
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| wire.hello(&[]))).is_err() {
+        return;
+    }
+    let catalog = wire.read("provider.catalog");
+    wire.reply(&catalog, json!({"catalog":null}));
+}
+
+/// A daemon that binds before it is ready reports its ordinary assembly in the
+/// startup note: the client follows those counters in the `hello` wait, just as
+/// it follows a store upgrade, and prints nothing for them.
+#[test]
+fn an_assembly_note_is_waited_for_before_hello() {
+    let home = Home::new();
+    let note = note_path(&home);
+    let hold = Duration::from_secs(4);
+    let released = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&released);
+    let daemon = home.daemon(move |wire| answer_after_hold(wire, hold, &flag));
+    let writing = {
+        let note = note.clone();
+        let flag = Arc::clone(&released);
+        thread::spawn(move || {
+            let mut counter = 0;
+            while !flag.load(Ordering::SeqCst) && counter < 100 {
+                counter += 1;
+                write_assembly_note(&note, 424242, counter);
+                thread::sleep(Duration::from_millis(200));
+            }
+        })
+    };
+    let started = Instant::now();
+    let output = home
+        .command()
+        .env("DIM_TEST_DAEMON_START_TIMEOUT_MS", "1500")
+        .args(["models", "fixture"])
+        .output()
+        .unwrap();
+    let elapsed = started.elapsed();
+    released.store(true, Ordering::SeqCst);
+    writing.join().unwrap();
+    daemon.join().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "an assembly note is progress the hello wait follows: {stderr}"
+    );
+    assert!(
+        !stderr.contains(UPGRADING),
+        "an assembly note prints no upgrade line: {stderr}"
+    );
+    assert!(
+        !stderr.contains("Upgrading the local store · "),
+        "an assembly note prints no stage display: {stderr}"
+    );
+    assert!(
+        elapsed >= hold,
+        "the handshake was given up before the server answered: {elapsed:?}"
+    );
+}
+
+/// The spawn wait follows the same assembly counters: a child that binds and
+/// reports while it assembles is waited for past the bound it was given.
+#[test]
+fn an_assembly_note_is_waited_for_before_the_spawn_answers() {
+    let home = Home::new();
+    let note = note_path(&home);
+    let mut body = String::new();
+    for counter in 1..=12 {
+        body.push_str(&assembly_note_write(&note, "$$", counter));
+        body.push_str("\nsleep 0.3\n");
+    }
+    body.push_str(&format!(
+        "exec '{}' app-server \"$@\"",
+        env!("CARGO_BIN_EXE_dimcode")
+    ));
+    let server = script(&home, "assembly-server", &body);
+    let output = home
+        .command()
+        .env("DIM_TEST_DAEMON_START_TIMEOUT_MS", "1500")
+        .args(["--server", server.to_str().unwrap(), "models", "fixture"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "the spawn wait follows assembly progress: {stderr}\ndaemon log: {}",
+        fs::read_to_string(home.0.join("rust/daemon.log")).unwrap_or_default()
+    );
+    assert!(
+        !stderr.contains(UPGRADING),
+        "an assembly note prints no upgrade line: {stderr}"
+    );
+    assert!(
+        !stderr.contains("Upgrading the local store · "),
+        "an assembly note prints no stage display: {stderr}"
+    );
+}
+
+/// An assembly that stops reporting fails one bound after its last counter, not
+/// earlier: the note is a bound on inactivity, not a total-time allowance.
+#[test]
+fn an_assembly_note_that_stops_fails_one_bound_after_the_last_progress() {
+    let home = Home::new();
+    let note = note_path(&home);
+    let (accepted, connected) = std::sync::mpsc::channel::<()>();
+    let (keep, kept) = std::sync::mpsc::channel::<()>();
+    let daemon = home.daemon(move |wire| {
+        accepted.send(()).unwrap();
+        let _held = wire;
+        let _ = kept.recv_timeout(Duration::from_secs(30));
+    });
+    let client = home
+        .command()
+        .env("DIM_TEST_DAEMON_START_TIMEOUT_MS", "1500")
+        .args(["models", "fixture"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    connected
+        .recv_timeout(Duration::from_secs(30))
+        .expect("the client connected");
+    // Two notes, the second one after the client is already waiting. A fixed
+    // bound from spawn ends before the second note's bound would.
+    thread::sleep(Duration::from_millis(400));
+    write_assembly_note(&note, 424242, 1);
+    thread::sleep(Duration::from_millis(200));
+    write_assembly_note(&note, 424242, 2);
+    let last = Instant::now();
+    let output = wait(client);
+    let elapsed = last.elapsed();
+    let _ = keep.send(());
+    daemon.join().unwrap();
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("did not answer hello") && stderr.contains("daemon.log"),
+        "the error names the wait and where to look: {stderr}"
+    );
+    assert!(
+        elapsed >= Duration::from_millis(1400),
+        "the wait ended before one bound after the last note: {elapsed:?}"
+    );
+    assert!(
+        elapsed <= Duration::from_millis(2600),
+        "the wait outlived one bound after the last note: {elapsed:?}"
+    );
+}
+
+/// Only a store upgrade prints; an assembly that takes over the note neither
+/// prints again nor hides the upgrade's one line. The assembly's counter also
+/// starts at one after the upgrade's higher counter, which is a new series.
+#[test]
+fn an_assembly_note_after_a_store_upgrade_prints_no_second_line() {
+    let home = Home::new();
+    let note = note_path(&home);
+    let hold = Duration::from_secs(4);
+    let released = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&released);
+    let (accepted, connected) = std::sync::mpsc::channel::<()>();
+    let daemon = home.daemon(move |wire| {
+        accepted.send(()).unwrap();
+        answer_after_hold(wire, hold, &flag);
+    });
+    let writing = {
+        let note = note.clone();
+        let flag = Arc::clone(&released);
+        thread::spawn(move || {
+            // The client is in its hello wait now, so the upgrade line is
+            // printed before the assembly replaces the note.
+            connected.recv_timeout(Duration::from_secs(30)).unwrap();
+            write_progress_note(&note, 424242, 9);
+            thread::sleep(Duration::from_millis(400));
+            let mut counter = 0;
+            while !flag.load(Ordering::SeqCst) && counter < 100 {
+                counter += 1;
+                write_assembly_note(&note, 424242, counter);
+                thread::sleep(Duration::from_millis(200));
+            }
+        })
+    };
+    let output = home
+        .command()
+        .env("DIM_TEST_DAEMON_START_TIMEOUT_MS", "1500")
+        .args(["models", "fixture"])
+        .output()
+        .unwrap();
+    released.store(true, Ordering::SeqCst);
+    writing.join().unwrap();
+    daemon.join().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "the assembly's counters are followed after the upgrade's: {stderr}"
+    );
+    assert_eq!(
+        stderr.matches(UPGRADING).count(),
+        1,
+        "only the store upgrade prints: {stderr}"
+    );
+    assert!(
+        !stderr.contains("Upgrading the local store · "),
+        "an assembly note prints no stage display: {stderr}"
     );
 }

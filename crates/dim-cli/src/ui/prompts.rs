@@ -105,6 +105,8 @@ pub enum Effect {
     Close,
     Fork,
     Exit,
+    /// `Update now`: leave the interface and update.
+    UpgradeNow,
     /// Never offer this version again.
     UpgradeSkip(String),
     /// Answer an approval request.

@@ -181,8 +181,24 @@ pub fn is_interactive() -> bool {
     std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
 }
 
-pub fn run(host: Box<dyn SessionPort>, surroundings: Env) -> i32 {
-    let code = run_terminal(host, surroundings);
+/// `Update now`: the interface left so this process can update the
+/// installation and start the new version, which reopens this.
+pub struct UpdateRequest {
+    pub fullscreen: bool,
+    /// The Session to resume, when one was in use.
+    pub session_id: Option<String>,
+}
+
+/// Runs the interface and returns its exit code. `Update now` is sent on
+/// `update` once the terminal is restored and before the interface closes its
+/// connection, so the composition root can act on it without waiting for the
+/// rest of the interface's end.
+pub fn run(
+    host: Box<dyn SessionPort>,
+    surroundings: Env,
+    update: tokio::sync::oneshot::Sender<UpdateRequest>,
+) -> i32 {
+    let code = run_terminal(host, surroundings, update);
     history::flush();
     code
 }
@@ -233,7 +249,11 @@ fn write_notifications(
     Ok(())
 }
 
-fn run_terminal(host: Box<dyn SessionPort>, surroundings: Env) -> i32 {
+fn run_terminal(
+    host: Box<dyn SessionPort>,
+    surroundings: Env,
+    update: tokio::sync::oneshot::Sender<UpdateRequest>,
+) -> i32 {
     let mut terminal = match Terminal::enter() {
         Ok(terminal) => terminal,
         Err(TerminalError::NotATerminal) => {
@@ -821,9 +841,20 @@ fn run_terminal(host: Box<dyn SessionPort>, surroundings: Env) -> i32 {
     };
     let resume =
         (app.session_active() && !app.session_id.is_empty()).then_some(app.session_id.as_str());
-    bytes.extend(format!("\r\n{}\r\n", goodbye_panel(resume).join("\r\n")).into_bytes());
+    let request = app.update_requested.then(|| UpdateRequest {
+        fullscreen: app.fullscreen,
+        session_id: (!app.session_id.is_empty()).then(|| app.session_id.clone()),
+    });
+    if request.is_some() {
+        bytes.extend(b"\r\n");
+    } else {
+        bytes.extend(format!("\r\n{}\r\n", goodbye_panel(resume).join("\r\n")).into_bytes());
+    }
     let _ = terminal.write(&bytes);
     terminal.leave();
+    if let Some(request) = request {
+        let _ = update.send(request);
+    }
     app.host.shutdown();
     code
 }
@@ -1268,6 +1299,8 @@ struct App {
     /// The update dialog while another prompt has the screen; it comes
     /// back once that one closes.
     upgrade: Option<UpgradeDialog>,
+    /// `Update now` was chosen: the interface leaves to update.
+    update_requested: bool,
     /// A line about to open on the shown line: the next submit is its
     /// opening input (timeline UI §4.2).
     line_draft: Option<LineDraft>,
@@ -1643,6 +1676,7 @@ impl App {
             member_target: None,
             compaction_targets: None,
             upgrade: None,
+            update_requested: false,
             line_draft: None,
             fork_draft: None,
             management_edits: Vec::new(),
@@ -3050,6 +3084,32 @@ impl App {
                 self.upgrade = Some(UpgradeDialog::new(offer));
                 self.reopen_upgrade();
             }
+            Update::UpgradeChecked(checked) => {
+                if self
+                    .notice
+                    .as_ref()
+                    .is_some_and(|(text, _)| text == t("Checking for updates…"))
+                {
+                    self.notice = None;
+                }
+                match checked {
+                    Ok(Some(offer)) => {
+                        self.upgrade = Some(UpgradeDialog::new(offer));
+                        self.reopen_upgrade();
+                    }
+                    Ok(None) => self.reports.push(Block::Status {
+                        text: tf(
+                            "DimCode {version} is up to date.",
+                            &[("version", env!("CARGO_PKG_VERSION"))],
+                        ),
+                        tone: Tone::Muted,
+                    }),
+                    Err(reason) => self.reports.push(Block::Status {
+                        text: reason,
+                        tone: Tone::Warning,
+                    }),
+                }
+            }
             Update::ApprovalPending {
                 branch_id,
                 request_id,
@@ -3999,6 +4059,17 @@ impl App {
                 }
             }
             Effect::Exit => return Outcome::Exit(130),
+            Effect::UpgradeNow => {
+                if self.shell.is_some() || self.busy_reason().is_some() {
+                    if let Some(Prompt::Upgrade(dialog)) = &mut self.prompt {
+                        dialog.block();
+                    }
+                } else {
+                    self.prompt = None;
+                    self.update_requested = true;
+                    return Outcome::Exit(0);
+                }
+            }
             Effect::UpgradeSkip(version) => {
                 self.prompt = None;
                 match crate::update::skip(&self.home, &version) {
@@ -5632,19 +5703,8 @@ impl App {
                 Outcome::Continue
             }
             "update" => {
-                self.reports.push(match crate::update::command() {
-                    Ok(command) => Block::Status {
-                        text: tf(
-                            "To update, exit every client and stop the server, then run {command}",
-                            &[("command", &command)],
-                        ),
-                        tone: Tone::Muted,
-                    },
-                    Err(reason) => Block::Status {
-                        text: reason,
-                        tone: Tone::Warning,
-                    },
-                });
+                self.set_notice(t("Checking for updates…"));
+                self.host.send(Command::CheckUpdate);
                 Outcome::Continue
             }
             "settings" => {
@@ -6425,7 +6485,12 @@ impl App {
             Some(Prompt::Settings(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Isolation(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Exit(prompt)) => Some(prompt.render(outer, p)),
-            Some(Prompt::Upgrade(prompt)) => Some(prompt.render(outer, panel_rows, p)),
+            Some(Prompt::Upgrade(prompt)) => Some(prompt.render(
+                outer,
+                panel_rows,
+                self.shell.is_some() || self.busy_reason().is_some(),
+                p,
+            )),
             Some(Prompt::Permission(prompt)) => Some(prompt.render_sized(outer, panel_rows, p)),
             Some(Prompt::Ask(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Effort(prompt)) => Some(prompt.render(outer, panel_rows, p)),
@@ -9952,6 +10017,7 @@ mod tests {
                         current: "0.12.0-alpha.123".into(),
                         version: "0.12.0-alpha.124".into(),
                         manual: "dima update".into(),
+                        direct: false,
                     };
                     drawn.app.apply(Update::Upgrade(offer.clone()));
                     assert!(shown(&mut drawn).contains(&format!("› {}", t("Skip this version"))));
@@ -10003,6 +10069,7 @@ mod tests {
                         current: "1.0.0".into(),
                         version: "2.0.0".into(),
                         manual: "dima update".into(),
+                        direct: true,
                     }));
                     let frame = drawn.app.frame(size);
                     assert!(
@@ -10038,6 +10105,74 @@ mod tests {
             }
         }
         i18n::set(i18n::Locale::En);
+    }
+
+    /// `/update` checks on demand and opens the dialog; `Update now` leaves
+    /// the interface only once this Session is idle.
+    #[test]
+    fn update_now_leaves_the_interface_once_the_session_is_idle() {
+        let offer = crate::update::Offer {
+            current: "0.1.0-alpha.25".into(),
+            version: "0.1.0-alpha.26".into(),
+            manual: "dima update".into(),
+            direct: true,
+        };
+        for fullscreen in [false, true] {
+            let mut drawn = Drawn::new((80, 24), None, true);
+            drawn.app.fullscreen = fullscreen;
+            let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+            drawn.app.host = Box::new(Recorder(sent.clone()));
+
+            drawn.app.run_command("update", "");
+            assert!(matches!(sent.borrow().last(), Some(Command::CheckUpdate)));
+            drawn.app.apply(Update::UpgradeChecked(Ok(None)));
+            assert!(drawn.app.prompt.is_none());
+            assert!(drawn.app.reports.iter().any(|block| matches!(
+                block,
+                Block::Status { text, .. } if text.contains("is up to date")
+            )));
+
+            drawn
+                .app
+                .apply(Update::UpgradeChecked(Ok(Some(offer.clone()))));
+            let screen = drawn.app.frame((80, 24)).live.join("\n");
+            assert!(screen.contains("› Update now"), "{screen}");
+            assert!(screen.contains("Skip this version"), "{screen}");
+            assert!(!screen.contains("dima update"), "{screen}");
+
+            drawn.app.snapshot = Some(ViewSnapshot {
+                running: true,
+                ..ViewSnapshot::default()
+            });
+            assert!(matches!(
+                drawn.app.handle(InputEvent::Key(KeyEvent::new(
+                    KeyCode::Enter,
+                    Modifiers::NONE
+                ))),
+                Outcome::Continue
+            ));
+            assert!(!drawn.app.update_requested);
+            let screen = drawn.app.frame((80, 24)).live.join("\n");
+            assert!(
+                screen.contains("Finish or stop the current work"),
+                "{screen}"
+            );
+
+            drawn.app.snapshot = Some(ViewSnapshot::default());
+            let screen = drawn.app.frame((80, 24)).live.join("\n");
+            assert!(
+                !screen.contains("Finish or stop the current work"),
+                "{screen}"
+            );
+            assert!(matches!(
+                drawn.app.handle(InputEvent::Key(KeyEvent::new(
+                    KeyCode::Enter,
+                    Modifiers::NONE
+                ))),
+                Outcome::Exit(0)
+            ));
+            assert!(drawn.app.update_requested);
+        }
     }
 
     /// An empty composer shows the locale's placeholder; typing replaces it.

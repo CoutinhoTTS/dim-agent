@@ -4348,7 +4348,8 @@
       "unexpandedMacros": [
         "assert",
         "assert_eq",
-        "format"
+        "format",
+        "panic"
       ]
     },
     {
@@ -5412,7 +5413,9 @@
       "crate": "dim_cli",
       "parent": "dim_cli::ui::composer",
       "file": "crates/dim-cli/src/ui/composer/history.rs",
-      "unexpandedMacros": []
+      "unexpandedMacros": [
+        "matches"
+      ]
     },
     {
       "id": "dim_cli::ui::composer::history::tests",
@@ -24604,6 +24607,7 @@
       "from": "dim_app_server",
       "to": "dim_app_server::storage::sqlite",
       "references": [
+        "path storage::AssemblyProgress::new",
         "path storage::SqliteStorage",
         "path storage::SqliteStoragePlugin::new"
       ]
@@ -34078,6 +34082,7 @@
       "to": "dim_app_server::storage::sqlite",
       "references": [
         "mod sqlite",
+        "use sqlite::AssemblyProgress",
         "use sqlite::FORMAT",
         "use sqlite::SqliteStorage",
         "use sqlite::SqliteStoragePlugin",
@@ -36869,6 +36874,7 @@
         "path Action::Worktree",
         "path Options",
         "path Options::parse",
+        "path args",
         "use args::Action",
         "use args::Options"
       ]
@@ -36907,6 +36913,7 @@
         "path client::UpgradeStage::Index",
         "path client::UpgradeStage::Verify",
         "path client::connect_inner",
+        "path client::invocation",
         "path client::stop",
         "path client::web_assets"
       ]
@@ -37208,6 +37215,7 @@
       "to": "dim_cli::session",
       "references": [
         "mod session",
+        "path session",
         "path session::chat"
       ]
     },
@@ -37243,6 +37251,13 @@
     },
     {
       "from": "dim_cli",
+      "to": "dim_cli::ui::composer::history",
+      "references": [
+        "path ui::composer::history::flush_within"
+      ]
+    },
+    {
+      "from": "dim_cli",
       "to": "dim_cli::ui::config",
       "references": [
         "path ui::config::save_fullscreen",
@@ -37273,6 +37288,7 @@
       "from": "dim_cli",
       "to": "dim_cli::ui::tui",
       "references": [
+        "path ui::tui::UpdateRequest",
         "path ui::tui::is_interactive"
       ]
     },
@@ -37281,9 +37297,11 @@
       "to": "dim_cli::update",
       "references": [
         "mod update",
+        "path update",
         "path update::hold_installation",
         "path update::recover_startup",
         "path update::registry",
+        "path update::restart_launcher",
         "path update::run"
       ]
     },
@@ -37623,7 +37641,8 @@
       "from": "dim_cli::client",
       "to": "dim_cli::update",
       "references": [
-        "path crate::update::entry"
+        "path crate::update::entry",
+        "path crate::update::entry_command"
       ]
     },
     {
@@ -37652,9 +37671,17 @@
       "from": "dim_cli::client::progress_note_tests",
       "to": "dim_cli::client",
       "references": [
+        "path ProgressKind::Assembly",
+        "path ProgressKind::StoreUpgrade",
         "path ProgressNote",
+        "path ProgressReport::StoreUpgrade",
+        "path ProgressWatch::default",
+        "path UpgradeStage",
         "path read_progress_note",
+        "use super::ProgressKind",
         "use super::ProgressNote",
+        "use super::ProgressReport",
+        "use super::ProgressWatch",
         "use super::UpgradeStage",
         "use super::read_progress_note"
       ]
@@ -40704,6 +40731,7 @@
       "to": "dim_cli::ui::tui",
       "references": [
         "path WebOpened",
+        "path ui::tui::UpdateRequest",
         "path ui::tui::print_web_panel",
         "path ui::tui::run",
         "use crate::ui::tui::WebOpened"
@@ -42091,6 +42119,7 @@
         "path Command::Approval",
         "path Command::AskAnswers",
         "path Command::AskCancel",
+        "path Command::CheckUpdate",
         "path Command::ClearModelPreferences",
         "path Command::CloseSessions",
         "path Command::CloseSide",
@@ -42281,6 +42310,7 @@
         "path Update::Toast",
         "path Update::TurnCompleted",
         "path Update::Upgrade",
+        "path Update::UpgradeChecked",
         "path Update::Usage",
         "path Update::UsageReport",
         "path Update::Web",
@@ -42496,6 +42526,7 @@
       "references": [
         "path update",
         "path update::available",
+        "path update::check",
         "path update::enabled",
         "use crate::update"
       ]
@@ -50202,6 +50233,7 @@
         "path Command::Approval",
         "path Command::AskAnswers",
         "path Command::AskCancel",
+        "path Command::CheckUpdate",
         "path Command::ClearModelPreferences",
         "path Command::CloseSessions",
         "path Command::CloseSide",
@@ -50369,6 +50401,7 @@
         "path Update::Toast",
         "path Update::TurnCompleted",
         "path Update::Upgrade",
+        "path Update::UpgradeChecked",
         "path Update::Usage",
         "path Update::UsageReport",
         "path Update::Web",
@@ -50777,6 +50810,7 @@
         "path Effect::ThemePreview",
         "path Effect::ThemeRestore",
         "path Effect::Timeline",
+        "path Effect::UpgradeNow",
         "path Effect::UpgradeSkip",
         "path EffortPrompt",
         "path EffortPrompt::new",
@@ -51270,7 +51304,6 @@
       "from": "dim_cli::ui::tui",
       "to": "dim_cli::update",
       "references": [
-        "path crate::update::command",
         "path crate::update::skip"
       ]
     },
@@ -51448,6 +51481,7 @@
         "path Update::SuggestionSetting",
         "path Update::Switched",
         "path Update::Upgrade",
+        "path Update::UpgradeChecked",
         "path Update::UsageReport",
         "path Update::Withdrawn",
         "path crate::model::session::Account",
@@ -51821,6 +51855,7 @@
       "to": "dim_cli::ui::i18n",
       "references": [
         "path t",
+        "path tf",
         "use crate::ui::i18n::t",
         "use crate::ui::i18n::tf"
       ]
@@ -51832,6 +51867,7 @@
         "path Effect",
         "path Effect::Close",
         "path Effect::None",
+        "path Effect::UpgradeNow",
         "path Effect::UpgradeSkip",
         "use crate::ui::prompts::Effect"
       ]
@@ -51935,6 +51971,7 @@
       "from": "dim_cli::update",
       "to": "dim_cli::plugins",
       "references": [
+        "path crate::plugins::Signals",
         "path crate::plugins::Signals::listen"
       ]
     },
@@ -51943,6 +51980,7 @@
       "to": "dim_cli::update::staged",
       "references": [
         "mod staged",
+        "path staged",
         "path staged::update"
       ]
     },
