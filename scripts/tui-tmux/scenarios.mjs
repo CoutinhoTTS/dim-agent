@@ -262,6 +262,76 @@ const scenarios = [
     },
   },
   {
+    name: 'fullscreen_tool_body_click_collapses_only_its_node',
+    area: 'terminal-modes',
+    title: 'In fullscreen, clicking an expanded tool output row collapses only that call while drags and double-clicks keep selection',
+    async run(tui) {
+      await tui.setup({
+        respond: (request) => {
+          if ((request.tools ?? []).length === 0) return {text: ANSWER};
+          if (lastMessage(request).role === 'tool') return {text: 'Counted to eight.'};
+          return {toolCalls: [{name: 'exec', arguments: {command: 'seq 1 8'}}]};
+        },
+      });
+      const terminal = await tui.launch(['--fullscreen'], {waitForComposer: true});
+      const cellOf = (needle, text = needle) => {
+        const lines = terminal.capture({join: false}).split('\n');
+        const index = lines.findIndex((line) => (needle instanceof RegExp ? needle.test(line) : line.includes(needle)));
+        assert(index !== -1, `pane missing ${needle}\n${lines.join('\n')}`);
+        const col = lines[index].indexOf(text);
+        assert(col !== -1, `row ${index + 1} missing ${text}: ${lines[index]}`);
+        return {col: col + 1, row: index + 1};
+      };
+      const mouse = (button, col, row, release = false) =>
+        terminal.bytes(Buffer.from(`\u001b[<${button};${col};${row}${release ? 'm' : 'M'}`, 'utf8'));
+      const click = ({col, row}) => {
+        mouse(0, col, row, false);
+        mouse(0, col, row, true);
+      };
+
+      terminal.send('count to eight');
+      terminal.key('Enter');
+      await terminal.waitFor('Permission required');
+      terminal.key('y');
+      await terminal.waitFor('Counted to eight.');
+      await terminal.waitFor('▸ ✓ Ran 1 command');
+      await terminal.untilComposer();
+
+      click(cellOf('▸ ✓ Ran 1 command', 'Ran 1 command'));
+      await terminal.waitFor('▾ ✓ Ran 1 command');
+      await terminal.waitFor('▸ $ seq 1 8');
+
+      const outputRow = (n) => new RegExp(`^ {4,}${n}(?:\\s*[\\u2581-\\u2588])?\\s*$`, 'm');
+      click(cellOf('▸ $ seq 1 8', 'seq 1 8'));
+      await terminal.waitFor('▾ $ seq 1 8');
+      await terminal.waitFor(outputRow(5), {describe: 'expanded seq output row 5'});
+      await terminal.waitFor(outputRow(8), {describe: 'expanded seq output row 8'});
+
+      const five = cellOf(outputRow(5), '5');
+      mouse(0, five.col, five.row, false);
+      mouse(32, five.col + 2, five.row, false);
+      mouse(0, five.col + 2, five.row, true);
+      await sleep(550);
+      assert(terminal.capture().includes('▾ $ seq 1 8'), 'dragging across tool output does not collapse the call');
+      terminal.key('Escape');
+
+      click(five);
+      await sleep(60);
+      click(five);
+      await sleep(550);
+      assert(terminal.capture().includes('▾ $ seq 1 8'), 'double-clicking tool output does not collapse the call');
+      terminal.key('Escape');
+
+      click(five);
+      await terminal.waitFor('▸ $ seq 1 8', {describe: 'collapsed tool call after body click'});
+      const after = terminal.capture({join: false});
+      assert(after.includes('▾ ✓ Ran 1 command'), `batch header stays open:\n${after}`);
+      assert(!outputRow(5).test(after), `tool output is hidden after collapse:\n${after}`);
+
+      await exitWith(terminal);
+    },
+  },
+  {
     name: 'resize_rewraps_history_without_losing_rows',
     area: 'terminal-modes',
     title: 'Resizing rewraps a long message and its answer in place',

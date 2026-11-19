@@ -95,10 +95,11 @@ pub trait Document {
     fn disclosure(&self, _block: Option<usize>, _cols: usize, _row: usize) -> Option<String> {
         None
     }
-    /// An identity only for actual rows of an expanded thought body.
-    /// The key includes the view, Session, branch, request and source block,
-    /// and changes when that target is replaced or its expansion is reset.
-    fn thinking_body(&self, _block: Option<usize>, _cols: usize, _row: usize) -> Option<String> {
+    /// An identity only for actual rows of an expanded collapsible body
+    /// (thought or tool node). The key includes the view, Session, branch,
+    /// gesture and target identity, and changes when that target is replaced
+    /// or its expansion is reset.
+    fn collapsible_body(&self, _block: Option<usize>, _cols: usize, _row: usize) -> Option<String> {
         None
     }
     /// Whether a panel thought identity is current; body rows must still be expanded.
@@ -1031,7 +1032,7 @@ impl FullScreen {
                 let pressing = target.is_some();
                 let body = match &spot {
                     MouseOutcome::Click { block, row } if link.is_none() && target.is_none() => {
-                        doc.thinking_body(*block, self.layout_cols, *row)
+                        doc.collapsible_body(*block, self.layout_cols, *row)
                     }
                     MouseOutcome::Thought { key, body: true } if link.is_none() => {
                         Some(key.clone())
@@ -1567,7 +1568,9 @@ impl FullScreen {
             .is_some_and(|click| match &click.spot {
                 MouseOutcome::Click { block, row } => {
                     block.is_some_and(|block| block < dropped || block - dropped >= doc.len())
-                        || doc.thinking_body(*block, self.layout_cols, *row).as_ref()
+                        || doc
+                            .collapsible_body(*block, self.layout_cols, *row)
+                            .as_ref()
                             != Some(&click.key)
                 }
                 MouseOutcome::Thought { .. } => !doc.panel_thought(&click.key, true),
@@ -1583,7 +1586,7 @@ impl FullScreen {
                 let MouseOutcome::Click { block, row } = press.spot else {
                     return true;
                 };
-                doc.thinking_body(block, self.layout_cols, row).as_ref() != Some(key)
+                doc.collapsible_body(block, self.layout_cols, row).as_ref() != Some(key)
             })
         {
             self.cancel_click();
@@ -2400,7 +2403,12 @@ mod tests {
         fn disclosure(&self, block: Option<usize>, _cols: usize, row: usize) -> Option<String> {
             self.headers.get(&(block, row)).cloned()
         }
-        fn thinking_body(&self, block: Option<usize>, _cols: usize, row: usize) -> Option<String> {
+        fn collapsible_body(
+            &self,
+            block: Option<usize>,
+            _cols: usize,
+            row: usize,
+        ) -> Option<String> {
             self.bodies.get(&(block, row)).cloned()
         }
         fn panel_thought(&self, key: &str, body: bool) -> bool {

@@ -116,6 +116,7 @@ struct Line {
     /// A member card's line: the delegation (request event id) it opens.
     action: Option<String>,
     disclosure: Option<(String, bool)>,
+    body_of: Option<String>,
 }
 
 fn header_line(indent: usize, mark: Mark, spans: Vec<Span>) -> Line {
@@ -127,6 +128,7 @@ fn header_line(indent: usize, mark: Mark, spans: Vec<Span>) -> Line {
         hang: 0,
         action: None,
         disclosure: None,
+        body_of: None,
     }
 }
 
@@ -139,6 +141,7 @@ fn body_line(indent: usize, text: impl Into<String>, tone: Tone, overflow: Overf
         hang: 0,
         action: None,
         disclosure: None,
+        body_of: None,
     }
 }
 
@@ -434,16 +437,28 @@ fn project(
                     .and_then(|row| row.call_id.as_deref())
             })
             .flatten();
-        append_interactive(&mut body, &items, rows, parent, 2, detail, choices);
+        append_interactive(
+            &mut body,
+            &Interactive {
+                items: &items,
+                rows,
+                detail,
+                choices,
+            },
+            parent,
+            &id,
+            2,
+        );
         if single_program && children.is_empty() && state == State::Running {
-            body.push(body_line(
-                4,
-                t("Waiting for result…"),
-                Tone::Muted,
-                Overflow::Wrap,
-            ));
+            let mut line = body_line(4, t("Waiting for result…"), Tone::Muted, Overflow::Wrap);
+            line.body_of = Some(id.clone());
+            body.push(line);
         } else if single_program && state == State::Failed {
+            let before = body.len();
             append_error(&mut body, roots[0].call(), 4);
+            for line in &mut body[before..] {
+                line.body_of = Some(id.clone());
+            }
         }
         let mut first = header_line(0, mark, header);
         first.disclosure = (!body.is_empty()).then_some((id.clone(), open));
@@ -536,15 +551,26 @@ fn project(
     }
 }
 
+struct Interactive<'a> {
+    items: &'a [Item<'a>],
+    rows: &'a [&'a ViewRow],
+    detail: Detail,
+    choices: Option<&'a HashMap<String, bool>>,
+}
+
 fn append_interactive(
     lines: &mut Vec<Line>,
-    items: &[Item<'_>],
-    rows: &[&ViewRow],
+    ctx: &Interactive<'_>,
     parent: Option<&str>,
+    owner: &str,
     indent: usize,
-    detail: Detail,
-    choices: Option<&HashMap<String, bool>>,
 ) {
+    let Interactive {
+        items,
+        rows,
+        detail,
+        choices,
+    } = *ctx;
     for (item, row) in items.iter().zip(rows) {
         let belongs = match parent {
             Some(parent) => item.call().parent == Some(parent),
@@ -770,7 +796,11 @@ fn append_interactive(
             });
         let mut header = content.remove(0);
         header.indent = indent;
-        header.disclosure = foldable.then_some((id, open));
+        if foldable {
+            header.disclosure = Some((id.clone(), open));
+        } else if header.action.is_none() {
+            header.body_of = Some(owner.to_owned());
+        }
         if call.state == State::Running {
             header
                 .spans
@@ -782,18 +812,13 @@ fn append_interactive(
         }
         for mut line in content {
             line.indent += indent;
+            if line.action.is_none() {
+                line.body_of = Some(id.clone());
+            }
             lines.push(line);
         }
         if children > 0 {
-            append_interactive(
-                lines,
-                items,
-                rows,
-                row.call_id.as_deref(),
-                indent + 2,
-                detail,
-                choices,
-            );
+            append_interactive(lines, ctx, row.call_id.as_deref(), &id, indent + 2);
         }
     }
 }
@@ -1250,6 +1275,7 @@ fn append_section(lines: &mut Vec<Line>, section: Section, items: &[&Item<'_>], 
                     hang: 0,
                     action: None,
                     disclosure: None,
+                    body_of: None,
                 });
             }
         }
@@ -1483,6 +1509,7 @@ fn append_command(lines: &mut Vec<Line>, call: &Call<'_>, command: &str) {
         hang: 0,
         action: None,
         disclosure: None,
+        body_of: None,
     });
     if call.state == State::Running || (call.background() && call.state == State::Done) {
         return;
@@ -1709,6 +1736,7 @@ fn append_diff(lines: &mut Vec<Line>, diff: &[DiffLine], compare: bool) {
             hang: numbers.len() + 3,
             action: None,
             disclosure: None,
+            body_of: None,
         });
     }
     let hidden = diff.len() - shown.len();
@@ -2094,6 +2122,15 @@ pub fn disclosure_rows(group: &ToolGroup, width: usize, p: &Palette) -> Vec<usiz
         .collect()
 }
 
+pub fn body_disclosure_at<'a>(
+    group: &'a ToolGroup,
+    width: usize,
+    p: &Palette,
+    row: usize,
+) -> Option<&'a str> {
+    line_at(group, width, p, row)?.body_of.as_deref()
+}
+
 /// The delegation a row of the drawn group opens: a member card's line.
 pub fn action_at<'a>(
     group: &'a ToolGroup,
@@ -2101,6 +2138,10 @@ pub fn action_at<'a>(
     p: &Palette,
     row: usize,
 ) -> Option<&'a str> {
+    line_at(group, width, p, row)?.action.as_deref()
+}
+
+fn line_at<'a>(group: &'a ToolGroup, width: usize, p: &Palette, row: usize) -> Option<&'a Line> {
     let (rows, starts) = lay_out_group(group, width, p, RUNNING_MARK);
     if row >= rows.len() {
         return None;
@@ -2108,7 +2149,7 @@ pub fn action_at<'a>(
     let line = starts
         .partition_point(|start| *start <= row)
         .checked_sub(1)?;
-    group.lines()[line].action.as_deref()
+    Some(&group.lines()[line])
 }
 
 /// The Session cards a keyboard pick can stop on, in drawing order.

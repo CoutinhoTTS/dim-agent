@@ -51,17 +51,20 @@ Scrollback                         Fullscreen
 ```
 
 In fullscreen, collapsed closes the batch; summary opens its call list with
-call details closed; expanded opens both containers and details. A click toggles
-only its actual batch, codemode or call header between open and closed. Closing
+call details closed; expanded opens both containers and details. A click on a
+batch, codemode or call header immediately toggles only that node between open
+and closed. A single click on a detail/body row of an expanded tool node
+collapses only the nearest enclosing node (call, codemode or batch) after the
+400ms multi-click window, without re-opening a closed node. Closing
 a parent hides its descendants without changing their choices. Siblings and
 other batches never change. Children belong to their actual parent call, not a
 category inferred from indentation; category labels add no disclosure layer.
 A single codemode may use the batch header without a duplicate container.
 
 ```text
-▾ ✓ Edited 2 files
-  ▾ ✓ Edit src/a.rs +2 −1
-        Old New   Changes
+▾ ✓ Edited 2 files                <- header click: toggle batch immediately
+  ▾ ✓ Edit src/a.rs +2 −1         <- header click: toggle call immediately
+        Old New   Changes         <- body click (after 400ms): collapse src/a.rs
          12     − old
              12 + new
   ▸ ✓ Edit src/b.rs +1 −1
@@ -91,16 +94,20 @@ when their details are closed. Open command details show available output, or
 status and body without changing any node's expansion. Spinner-only title
 updates do not invalidate a press on the same stable header.
 
-Hover highlights only the actionable title, pressed feedback is stronger without
-moving its text, and a successful click retains a subtle position indication.
+Hover and pressed feedback stay on actionable titles only (not on tool detail
+rows): hover highlights only the title, pressed feedback is stronger without
+moving its text, and a successful header click retains a subtle position
+indication.
 Tool-title feedback uses normal text on the theme's subtle surface, falling back
 to a neutral gray background where the terminal palette supports one. Without a
 subtle background, titles use an underline. Pressed and keyboard-focused titles
 also use bold text instead of accent colors.
 Neither feedback nor new output changes expansion. A click requires release on
-the same still-valid target without a drag. Text selection, safe links and the
-explicit member-conversation entry keep separate actions; the member's tool
-header toggles its details instead of navigating. Existing Tab/Shift+Tab
+the same still-valid target without a drag. Text selection, double/triple-click
+selection, safe links and the explicit member-conversation entry take priority
+and keep separate actions; the member's tool header toggles its details instead
+of navigating, and any new press, drag, scroll, resize, view change, overlay,
+mouse-off or keyboard input cancels a pending body collapse. Existing Tab/Shift+Tab
 transcript traversal includes committed tool headers; Enter/Space toggles only
 the focused tool. A press on the scrollbar column drags the view instead of
 selecting: the view moves as far as the thumb moves with the pointer, so a
@@ -146,7 +153,7 @@ request, RPC, Timeline fact or persisted setting. See the
 Fullscreen and the line side panel retain their existing expanded previews.
 Their expanded and collapsed thought titles share the same gutter and label
 column; the body bar occupies that gutter, not an extra indentation layer.
-Fullscreen mouse gestures, including thought-body collapse and selection
+Fullscreen mouse gestures, including thought- and tool-body collapse and selection
 priority, follow the [CLI interaction contract](../../crates/dim-cli/README.md).
 
 ## Command menu
