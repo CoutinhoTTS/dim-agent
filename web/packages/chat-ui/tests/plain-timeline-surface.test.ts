@@ -147,7 +147,6 @@ function makeProps(overrides: SurfaceOverrides = {}): ChatUiPlainTimelineSurface
       restoreCovered: false,
       restoreCoverVisible: false,
       restoreTransitionSuppressed: true,
-      sendLandingSettling: false,
       layoutResizing: false,
       canLoadOlder: true,
       hasNewerGap: false,

@@ -86,7 +86,7 @@ npm run check:boundary -w @dimcode/chat-ui
 npm run check:budget -w @dimcode/chat-ui
 ```
 
-Workspace consumers resolve the package source (`src/index.ts`). The release build emits ESM, declarations, and the CSS entry into `dist/`; `arcships/dim#1839` switches the published entry points to that output and narrows the pack to `dist/`. The default bundle budget is 900KB gzip; override it with `CHAT_UI_MAX_GZIP_BYTES`.
+Workspace consumers resolve the package source (`src/index.ts`), which imports the package CSS. The release build emits ESM, declarations, and a separate `dist/chat-ui.css`; `arcships/dim#1839` switches the published entry points to that output and narrows the pack to `dist/`. When that switch happens, every host must import `@dimcode/chat-ui/styles.css` explicitly, because the extracted JS does not import its CSS. The default bundle budget is 900KB gzip; override it with `CHAT_UI_MAX_GZIP_BYTES`.
 
 The web integration must keep the `@terrastruct/d2` alias in its Vite config. Without it, the shared markdown surface pulls an extra D2 chunk (about 8.2MB minified / 6.0MB gzip in the probe).
 

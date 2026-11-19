@@ -116,7 +116,6 @@ export interface ChatUiPlainTimelineSurfaceState {
   restoreCovered: boolean
   restoreCoverVisible: boolean
   restoreTransitionSuppressed: boolean
-  sendLandingSettling: boolean
   layoutResizing: boolean
   canLoadOlder: boolean
   hasNewerGap: boolean

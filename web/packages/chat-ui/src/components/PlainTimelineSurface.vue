@@ -35,7 +35,7 @@ defineExpose({
   <div
     ref="timelineRootRef"
     class="relative h-full min-h-0 w-full flex-1 shrink-0"
-    :class="{ 'timeline--layout-resizing': props.state.layoutResizing, 'timeline--restoring': props.state.restoreTransitionSuppressed, 'timeline--send-landing-settling': props.state.sendLandingSettling }"
+    :class="{ 'timeline--layout-resizing': props.state.layoutResizing, 'timeline--restoring': props.state.restoreTransitionSuppressed }"
     data-testid="chat-timeline"
     :data-timeline-prepend-anchor-outcome="props.diagnostics.prependAnchor?.outcome"
     :data-timeline-prepend-anchor-row-key="props.diagnostics.prependAnchor?.rowKey"
@@ -441,8 +441,5 @@ defineExpose({
   100% {
     background-position: -200% 0;
   }
-}
-.timeline--send-landing-settling :deep(.collapse-grid) {
-  transition: none !important;
 }
 </style>

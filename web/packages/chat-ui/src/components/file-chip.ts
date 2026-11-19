@@ -4,7 +4,7 @@
  * relative href; the package never opens files itself.
  */
 export interface ChatUiFileChipOpenPayload {
-  /** Absolute path, when known (file:// chips, absolute inline-code paths). */
+  /** Absolute path, when known (file:// chips). */
   absolutePath?: string
   /** Path relative to the session cwd (Markdown workspace links). */
   relativeHref?: string

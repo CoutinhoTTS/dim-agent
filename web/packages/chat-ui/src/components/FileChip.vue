@@ -8,9 +8,9 @@ defineOptions({
 })
 
 const props = withDefaults(defineProps<{
-  /** Absolute path (file:// chips, absolute inline-code paths). */
+  /** Absolute path (file:// chips). */
   absolutePath?: string
-  /** Workspace-relative path (Markdown relative links, inline-code paths). */
+  /** Workspace-relative path (Markdown relative links). */
   relativeHref?: string
   /** Directory (no file extension) → folder icon + system file manager. */
   isDirectory?: boolean

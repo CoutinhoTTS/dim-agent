@@ -10,43 +10,6 @@ const WINDOWS_UNC_ABSOLUTE_PATH = /^\\\\[^\\]+\\[^\\]+/
 // POSIX-style Windows path that models sometimes emit: `/C:/Users/...` or `/C:\Users\...`.
 const WINDOWS_SLASH_DRIVE_PATH = /^\/[A-Za-z]:[\\/]/
 const AUTOLINKED_HTTP_URL = /^https?:\/\/(.+)$/i
-const JAVASCRIPT_REGEX_FLAGS = /^[dgimsuvy]*$/
-const JAVASCRIPT_REGEX_META = '^$.*+?(){}|'
-
-function looksLikeJavaScriptRegexLiteral(value: string): boolean {
-  if (!value.startsWith('/')) {
-    return false
-  }
-
-  let escaped = false
-  let inCharacterClass = false
-  let hasRegexSyntax = false
-
-  // A regex literal ends at its first unescaped `/` outside a character class,
-  // so a multi-segment path (`/tmp/x+/`) can never be one. Syntax validity is
-  // intentionally not checked — `/(/` is still regex-shaped text.
-  for (let index = 1; index < value.length; index += 1) {
-    const character = value[index]
-
-    if (escaped) {
-      escaped = false
-    } else if (character === '\\') {
-      escaped = true
-      hasRegexSyntax = true
-    } else if (character === '[') {
-      inCharacterClass = true
-      hasRegexSyntax = true
-    } else if (character === ']' && inCharacterClass) {
-      inCharacterClass = false
-    } else if (character === '/' && !inCharacterClass) {
-      return JAVASCRIPT_REGEX_FLAGS.test(value.slice(index + 1)) && hasRegexSyntax
-    } else if (!inCharacterClass && JAVASCRIPT_REGEX_META.includes(character)) {
-      hasRegexSyntax = true
-    }
-  }
-
-  return false
-}
 
 export function decodePathText(value: string): string {
   try {
@@ -206,16 +169,6 @@ export function resolveRelativeWorkspaceLinkFromFile(
     parts.push(part)
   }
   return `${absolutePrefix}${parts.join('/')}`
-}
-
-export function resolveMarkdownInlineCodeFileReference(
-  rawValue: string | null | undefined,
-): MarkdownFileReference | null {
-  const value = String(rawValue ?? '').trim()
-  if (looksLikeJavaScriptRegexLiteral(value)) {
-    return null
-  }
-  return resolveMarkdownFileReference(value)
 }
 
 export function resolveMarkdownFileReference(rawValue: string | null | undefined): MarkdownFileReference | null {
