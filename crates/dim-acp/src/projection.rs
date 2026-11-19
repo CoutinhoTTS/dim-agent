@@ -2,8 +2,8 @@
 
 use agent_client_protocol::schema::v1 as acp;
 use dim_agent_types::{
-    CompactionTrigger, ContentBlock, ContextCompactionResult, ExecStatus, ImageSource,
-    ROOT_BRANCH_ID, ToolContent, ToolResult, UserInput, markup,
+    CompactionTrigger, ContentBlock, ContextCompactionResult, ExecStatus, ImageSource, ToolContent,
+    ToolResult, UserInput, markup,
 };
 use dim_client::wire::{Event, EventContent, Progress};
 use serde_json::{Value, json};
@@ -63,6 +63,8 @@ impl TextCursor {
 #[derive(Default)]
 pub(crate) struct Projection {
     pub(crate) through: u64,
+    /// The branch whose conversation this projection shows.
+    pub(crate) branch: String,
     cwd: PathBuf,
     compaction_updates: bool,
     pub(crate) turn: Option<String>,
@@ -490,11 +492,17 @@ fn replacements(input: &Value) -> Vec<(&str, &str)> {
 }
 
 impl Projection {
+    /// `branch` is the branch whose conversation this projection shows.
     /// `cwd` is the session directory a relative tool path resolves against.
     /// `compaction_updates` says the client declared `session.compaction`, so a
     /// compaction is sent as the standard entity rather than as a tool call.
-    pub(crate) fn new(cwd: impl Into<PathBuf>, compaction_updates: bool) -> Self {
+    pub(crate) fn new(
+        branch: impl Into<String>,
+        cwd: impl Into<PathBuf>,
+        compaction_updates: bool,
+    ) -> Self {
         Self {
+            branch: branch.into(),
             cwd: cwd.into(),
             compaction_updates,
             ..Self::default()
@@ -531,7 +539,7 @@ impl Projection {
             &task.description,
             Value::Null,
             acp::ToolCallStatus::InProgress,
-            ToolFields::default().lody(json!({"task":{"version":1,"taskId":task.task_id,"kind":"background","status":"in_progress","description":task.description,"parentToolCallId":tool_id(ROOT_BRANCH_ID, &task.request_id, &task.call_id),"startedAtEpochSeconds":task.started_at as f64 / 1000.}})),
+            ToolFields::default().lody(json!({"task":{"version":1,"taskId":task.task_id,"kind":"background","status":"in_progress","description":task.description,"parentToolCallId":tool_id(&self.branch, &task.request_id, &task.call_id),"startedAtEpochSeconds":task.started_at as f64 / 1000.}})),
             &mut messages,
         );
         messages.updates.pop().expect("task update")
@@ -721,7 +729,7 @@ impl Projection {
                     .committed(&data.delta),
             ),
             EventContent::ToolUseStart(data) => self.tool(
-                tool_id(ROOT_BRANCH_ID, &data.request_id, &data.call_id),
+                tool_id(&self.branch, &data.request_id, &data.call_id),
                 &data.name,
                 Value::Null,
                 acp::ToolCallStatus::Pending,
@@ -729,7 +737,7 @@ impl Projection {
                 &mut messages,
             ),
             EventContent::ToolUse(data) => self.tool(
-                tool_id(ROOT_BRANCH_ID, &data.request_id, &data.call.id),
+                tool_id(&self.branch, &data.request_id, &data.call.id),
                 &data.call.name,
                 json!(data.call.input),
                 acp::ToolCallStatus::Pending,
@@ -739,7 +747,7 @@ impl Projection {
             EventContent::ToolCall(data) => {
                 for call in &data.calls {
                     self.tool(
-                        tool_id(ROOT_BRANCH_ID, &data.request_id, &call.id),
+                        tool_id(&self.branch, &data.request_id, &call.id),
                         &call.name,
                         json!(call.input),
                         acp::ToolCallStatus::Pending,
@@ -749,14 +757,14 @@ impl Projection {
                 }
             }
             EventContent::ToolStart(data) => Self::tool_update(
-                tool_id(ROOT_BRANCH_ID, &data.request_id, &data.call_id),
+                tool_id(&self.branch, &data.request_id, &data.call_id),
                 acp::ToolCallStatus::InProgress,
                 ToolFields::default(),
                 &mut messages,
             ),
             EventContent::ToolResult(data) => {
                 for call in &data.results {
-                    let id = tool_id(ROOT_BRANCH_ID, &data.request_id, &call.call_id);
+                    let id = tool_id(&self.branch, &data.request_id, &call.call_id);
                     if !self.calls.contains_key(&id) {
                         self.tool(
                             id.clone(),
@@ -775,7 +783,7 @@ impl Projection {
                             acp::ToolCallStatus::Completed
                         },
                         ToolFields::default().content(self.result_content(
-                            &tool_id(ROOT_BRANCH_ID, &data.request_id, &call.call_id),
+                            &tool_id(&self.branch, &data.request_id, &call.call_id),
                             &call.result,
                         )),
                         &mut messages,
@@ -783,7 +791,7 @@ impl Projection {
                 }
             }
             EventContent::ToolCompleted(data) => {
-                let id = tool_id(ROOT_BRANCH_ID, &data.request_id, &data.call_id);
+                let id = tool_id(&self.branch, &data.request_id, &data.call_id);
                 Self::tool_update(
                     id.clone(),
                     acp::ToolCallStatus::InProgress,
@@ -798,7 +806,7 @@ impl Projection {
                     &data.description,
                     Value::Null,
                     acp::ToolCallStatus::InProgress,
-                    ToolFields::default().lody(json!({"task":{"version":1,"taskId":data.task_id,"kind":"background","status":"in_progress","description":data.description,"parentToolCallId":tool_id(ROOT_BRANCH_ID,&data.request_id,&data.call_id),"startedAtEpochSeconds":event.create_at as f64/1000.}})),
+                    ToolFields::default().lody(json!({"task":{"version":1,"taskId":data.task_id,"kind":"background","status":"in_progress","description":data.description,"parentToolCallId":tool_id(&self.branch,&data.request_id,&data.call_id),"startedAtEpochSeconds":event.create_at as f64/1000.}})),
                     &mut messages,
                 );
             }
@@ -986,7 +994,7 @@ mod tests {
 
     /// The messages an input replays, as the wire carries them.
     fn replay(blocks: Value) -> Vec<Value> {
-        let mut projection = Projection::default();
+        let mut projection = Projection::new("main", "", false);
         assert!(
             projection
                 .event(&event(json!({
@@ -1061,6 +1069,36 @@ mod tests {
             texts,
             ["Explain the change"],
             "context a hook appended is the model's, not the operator's words"
+        );
+    }
+
+    /// A tool call is named by the branch the projection shows, so the same
+    /// call carries one id in the transcript and in an interaction.
+    #[test]
+    fn a_tool_call_and_its_interaction_share_one_id_on_another_branch() {
+        let branch = "branch-x";
+        let mut projection = Projection::new(branch, "", false);
+        let updates = projection.event(&event(json!({
+            "id":"call-event","sequence":2,"create_at":1,
+            "type":"step","name":"tool-call",
+            "data":{"turn_id":"turn-1","request_id":"request-1","calls":[
+                {"id":"call-1","name":"read","input":{}},
+            ]},
+        })));
+        let update = serde_json::to_value(&updates[0]).expect("an ACP session update is JSON");
+        let projected = update["toolCallId"]
+            .as_str()
+            .expect("a tool call names its id");
+        let call = dim_client::question::Call {
+            branch_id: branch.into(),
+            request_id: "request-1".into(),
+            call_id: "call-1".into(),
+            questions: Vec::new(),
+        };
+        assert_eq!(
+            projected,
+            &*crate::interaction::tool_call_id(&call).0,
+            "the transcript and the interaction name the same tool call"
         );
     }
 
