@@ -12,7 +12,7 @@ only active lines read their opening source. Parent-child adjacency orders the d
 A Session with one line is on its root without a query; a Session with more reads the root's
 newest `branch/default` or `session/forked` through the kind index to find the default branch.
 The App Server only maps these owner-produced properties into its wire fields.
-`TreeCommands.page_end` resolves a raw-event page endpoint using atomic-batch metadata through the live Timeline or the ended line’s store. It decodes no event body and has no wire binding. The default branch's answer and its write are `TreeCommands` methods too: `default_branch()` reads the fact and `set_default_branch(id, source)` writes `branch/default` on the root and the two status notes.
+`TreeCommands.page_end` resolves a raw-event page endpoint using atomic-batch metadata through the live Timeline or the ended line’s store. It decodes no event body and has no wire binding. The default branch's answer and its write are `TreeCommands` methods too: `default_branch()` answers the line the Session's conversation is on, restored from the root's newest `branch/default` or `session/forked`, and `set_default_branch(id, source)` admits an open conversation line whose chain is not ending, then writes `branch/default` on the root. Its refusals are `branch_already_default`, `branch_not_selectable` and `branch_target_protected`, and it writes nothing for any of them. A move signals every line, and each line's own BranchLine writes the one status note its role earns; a load whose latest `branch:line` block disagrees with the tree writes the missing note once.
 
 ## TimelineTree
 
@@ -81,7 +81,13 @@ Session close, and closing is not deletion of persisted history.
 `ending_a_line_ends_its_children_first_and_records_one_result_each`,
 `a_restart_completes_an_end_without_its_result`,
 `a_host_line_opens_with_its_identity_block_and_the_creator_prompt`,
-`a_line_reports_the_source_its_create_recorded_open_or_restored`.
+`a_line_reports_the_source_its_create_recorded_open_or_restored`,
+`the_default_branch_starts_at_the_root_and_survives_a_restart`,
+`a_restore_reads_one_fact_for_a_multi_line_session_and_none_for_a_single_line`,
+`ending_the_root_the_default_branch_or_an_ancestor_is_refused`,
+`a_user_opened_line_records_its_own_source`,
+`a_default_branch_that_was_a_tool_line_stops_sending_its_idle_notice`,
+`a_switched_line_keeps_its_identity_after_a_compaction`.
 
 <!-- generated:plugin TimelineTree — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
 | 项 | 值 |

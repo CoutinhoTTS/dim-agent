@@ -17992,6 +17992,7 @@
       "references": [
         "path AgentError",
         "path AgentError::BranchEnded",
+        "path AgentError::BranchRefused",
         "path AgentError::Build",
         "path AgentError::Cancelled",
         "path AgentError::Closed",
@@ -18000,9 +18001,15 @@
         "path AgentError::UnknownBranch",
         "path AgentError::aggregate",
         "path AgentError::fault",
+        "path AgentError::refused",
+        "path BranchRefusal::AlreadyDefault",
+        "path BranchRefusal::CannotEnd",
+        "path BranchRefusal::NotSelectable",
+        "path BranchRefusal::Protected",
         "path Result",
         "path crate::host::panic_message",
         "use dim_agent_runtime::AgentError",
+        "use dim_agent_runtime::BranchRefusal",
         "use dim_agent_runtime::Result"
       ]
     },
@@ -18110,15 +18117,18 @@
         "path BranchCreateFailedData",
         "path BranchCreateFailedData::Cancelled",
         "path BranchCreateFailedData::Failed",
+        "path BranchDefaultData",
         "path BranchEndData",
         "path BranchEndedData",
         "path BranchResumeData",
         "path BranchSource",
         "path BranchSource::Host",
         "path BranchSource::Tool",
+        "path BranchSource::User",
         "path BranchStartData",
         "path EventKind::BranchCreate",
         "path EventKind::BranchCreateFailed",
+        "path EventKind::BranchDefault",
         "path EventKind::BranchEnd",
         "path EventKind::BranchEnded",
         "path EventKind::BranchResume",
@@ -27930,6 +27940,7 @@
       "to": "dim_agent_types::events",
       "references": [
         "path BranchSource::Host",
+        "path BranchSource::User",
         "path DEFAULT_BRANCH_ID",
         "path InputBlock",
         "path InputBlock::Raw",
@@ -34150,8 +34161,10 @@
         "path EventKind",
         "path EventKind::InputMessage",
         "path InputMessageData",
+        "path ROOT_BRANCH_ID",
         "use dim_agent_types::EventKind",
-        "use dim_agent_types::InputMessageData"
+        "use dim_agent_types::InputMessageData",
+        "use dim_agent_types::ROOT_BRANCH_ID"
       ]
     },
     {
@@ -35572,8 +35585,8 @@
         "path AgentEvent",
         "path BranchCreateAt::Create",
         "path BranchCreateAt::Sequence",
-        "path DEFAULT_BRANCH_ID",
         "path EventKind::BranchCreate",
+        "path EventKind::BranchDefault",
         "path EventKind::InputMessage",
         "path EventKind::SessionForked",
         "path EventKind::Text",
@@ -35583,7 +35596,6 @@
         "path dim_agent_types::InputMessageData::text",
         "use dim_agent_types::AgentEvent",
         "use dim_agent_types::BranchCreateAt",
-        "use dim_agent_types::DEFAULT_BRANCH_ID",
         "use dim_agent_types::EventKind",
         "use dim_agent_types::ROOT_BRANCH_ID",
         "use dim_agent_types::SessionForkedData"
@@ -40716,6 +40728,7 @@
         "path BranchCreateFailedData::Failed",
         "path BranchSource::Host",
         "path BranchSource::Tool",
+        "path BranchSource::User",
         "path CollaborationDelivery::Error",
         "path CollaborationDelivery::Ok",
         "path CollaborationOutcome::Cancelled",
@@ -56159,11 +56172,11 @@
     },
     {
       "module": "dim_agent_capabilities::timeline_tree",
-      "path": "Wake::Lost"
+      "path": "Wake::Defaults"
     },
     {
       "module": "dim_agent_capabilities::timeline_tree",
-      "path": "Wake::Parent"
+      "path": "Wake::Parents"
     },
     {
       "module": "dim_agent_capabilities::timeline_tree",

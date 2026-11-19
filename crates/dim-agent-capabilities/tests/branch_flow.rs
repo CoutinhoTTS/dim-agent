@@ -372,6 +372,14 @@ impl DynPlugin for CleanupWriter {
 async fn setup(probe: &Arc<Probe>) -> MinimalHost {
     MinimalHost::start(&builder(probe)).await.unwrap()
 }
+async fn setup_with(store: &Arc<TestStore>) -> MinimalHost {
+    MinimalHost::start(&builder_with_store(
+        &Arc::new(Probe::default()),
+        store.clone(),
+    ))
+    .await
+    .unwrap()
+}
 fn builder(probe: &Arc<Probe>) -> AgentBuilder {
     builder_with(probe, defaults::install)
 }
@@ -1916,10 +1924,11 @@ async fn ending_a_line_ends_its_children_first_and_records_one_result_each() {
     let source = BranchSource::Host {
         operation_id: "op:end".into(),
     };
-    assert!(matches!(
-        session.end_branch("main", source.clone()).await,
-        Err(AgentError::InvalidInput(_))
-    ));
+    assert_eq!(
+        refusal(&session.end_branch("main", source.clone()).await).0,
+        "branch_cannot_end",
+        "the root never ends"
+    );
     assert!(matches!(
         session.end_branch("missing", source.clone()).await,
         Err(AgentError::UnknownBranch(_))
@@ -1960,8 +1969,7 @@ async fn ending_a_line_ends_its_children_first_and_records_one_result_each() {
             source: end,
             ancestor,
             ..
-        }))
-            if *end == source && ancestor.as_deref() == Some(parent.as_str())
+        })) if *end == source && ancestor.as_deref() == Some(parent.as_str())
     ));
     let parent_events = line_events(&session, &parent).await.unwrap();
     assert!(matches!(
@@ -1973,8 +1981,7 @@ async fn ending_a_line_ends_its_children_first_and_records_one_result_each() {
             source: end,
             ancestor,
             ..
-        }))
-            if *end == source && ancestor.is_none()
+        })) if *end == source && ancestor.is_none()
     ));
     let child_result = parent_events
         .iter()
@@ -5690,49 +5697,6 @@ async fn a_restore_writes_a_due_parent_block_once_and_none_without_movement() {
     soon(agent.close()).await.unwrap();
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_user_opened_line_records_its_own_source() {
-    let probe = Arc::new(Probe::default());
-    let agent = setup(&probe).await;
-    let session = soon(agent.create_session(SessionConfig::default()))
-        .await
-        .unwrap();
-    let line = soon(session.branch(
-        "main".into(),
-        0,
-        BranchOptions {
-            prompt: "the user opened this".into(),
-            source: BranchSource::User {
-                operation_id: "client-op".into(),
-            },
-        },
-    ))
-    .await
-    .unwrap();
-    soon(session.idle(&line)).await.unwrap();
-    let info = session
-        .branches()
-        .into_iter()
-        .find(|info| info.id == line)
-        .unwrap();
-    assert_eq!(
-        info.source,
-        Some(BranchSource::User {
-            operation_id: "client-op".into()
-        })
-    );
-    let opening = blocks_with(&local_events(&session, &line).await, "<dim-branch-line");
-    assert_eq!(opening.len(), 1, "{opening:?}");
-    assert!(
-        opening[0].starts_with(&format!(
-            "<dim-branch-line branch=\"{line}\" parent=\"main\" source=\"user\">"
-        )),
-        "{}",
-        opening[0]
-    );
-    soon(agent.close()).await.unwrap();
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_ending_line_and_main_get_no_parent_block() {
     let store = Arc::new(MemoryTimelineStore::default());
@@ -8230,4 +8194,1499 @@ async fn timeline_store_binding_preserves_memory_batch_publication_and_wire_read
         .unwrap();
     assert!(native.session_config("parity").await.unwrap().is_none());
     host.close().await.unwrap();
+}
+
+/// The tree's refusal code and message for a `TreeCommands` call.
+fn refusal(error: &Result<()>) -> (&'static str, String) {
+    match error {
+        Err(AgentError::BranchRefused { refusal, message }) => (refusal.code(), message.clone()),
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_default_branch_starts_at_the_root_and_survives_a_restart() {
+    let probe = Arc::new(Probe::default());
+    let agent = setup(&probe).await;
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    assert_eq!(session.default_branch().unwrap(), "main");
+    let line = open_line(&session, "a line to continue on").await;
+    let tree = session.session_service::<TreeCommands>().unwrap();
+    assert_eq!(
+        tree.default_branch().unwrap(),
+        "main",
+        "a new line does not take the role"
+    );
+    let moved = soon(session.set_default_branch(
+        &line,
+        BranchSource::User {
+            operation_id: "switch".into(),
+        },
+    ))
+    .await
+    .unwrap();
+    assert_eq!(moved, line);
+    assert_eq!(session.default_branch().unwrap(), line);
+    let fact = local_events(&session, "main")
+        .await
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::BranchDefault(data) => Some(data.clone()),
+            _ => None,
+        })
+        .expect("the move is one fact on the root");
+    assert_eq!(fact.branch, line);
+    assert_eq!(fact.from, None);
+    let id = session.id();
+    soon(session.close()).await.unwrap();
+    let session = soon(agent.restore_session(id.into())).await.unwrap();
+    soon(session.idle("main")).await.unwrap();
+    assert_eq!(
+        session.default_branch().unwrap(),
+        line,
+        "the fact survives a restart"
+    );
+    soon(agent.close()).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_restore_reads_one_fact_for_a_multi_line_session_and_none_for_a_single_line() {
+    let single = Arc::new(TestStore::default());
+    let agent = setup_with(&single).await;
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let id = session.id();
+    soon(session.close()).await.unwrap();
+    soon(agent.close()).await.unwrap();
+    let restored = MinimalHost::start(&builder_with_store(
+        &Arc::new(Probe::default()),
+        single.clone(),
+    ))
+    .await
+    .unwrap();
+    let session = soon(restored.restore_session(id.into())).await.unwrap();
+    assert_eq!(session.default_branch().unwrap(), "main");
+    assert_eq!(
+        single.pages("main", &["branch/default", "session/forked"]),
+        0,
+        "a Session with one line reads no fact"
+    );
+    soon(restored.close()).await.unwrap();
+
+    let multi = Arc::new(TestStore::default());
+    let agent = setup_with(&multi).await;
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let line = open_line(&session, "one more line").await;
+    soon(session.set_default_branch(
+        &line,
+        BranchSource::User {
+            operation_id: "switch".into(),
+        },
+    ))
+    .await
+    .unwrap();
+    let id = session.id();
+    soon(session.close()).await.unwrap();
+    soon(agent.close()).await.unwrap();
+    let restored = MinimalHost::start(&builder_with_store(
+        &Arc::new(Probe::default()),
+        multi.clone(),
+    ))
+    .await
+    .unwrap();
+    let session = soon(restored.restore_session(id.into())).await.unwrap();
+    soon(session.idle("main")).await.unwrap();
+    assert_eq!(
+        multi.pages("main", &["branch/default", "session/forked"]),
+        1,
+        "a Session with more lines reads exactly one fact"
+    );
+    assert_eq!(session.default_branch().unwrap(), line);
+    soon(restored.close()).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ending_the_root_the_default_branch_or_an_ancestor_is_refused() {
+    let probe = Arc::new(Probe::default());
+    let agent = setup(&probe).await;
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let line = open_line(&session, "outer").await;
+    let inner = soon(session.branch(
+        line.clone(),
+        0,
+        BranchOptions {
+            prompt: "inner".into(),
+            source: BranchSource::User {
+                operation_id: "nested".into(),
+            },
+        },
+    ))
+    .await
+    .unwrap();
+    soon(session.idle(&inner)).await.unwrap();
+    let tree = session.session_service::<TreeCommands>().unwrap();
+    let user = BranchSource::User {
+        operation_id: "end".into(),
+    };
+    let root = tree.end("main".into(), user.clone()).await;
+    assert_eq!(refusal(&root).0, "branch_cannot_end", "{root:?}");
+    soon(session.set_default_branch(
+        &inner,
+        BranchSource::User {
+            operation_id: "switch".into(),
+        },
+    ))
+    .await
+    .unwrap();
+    for (target, code) in [
+        (inner.as_str(), "branch_cannot_end"),
+        (line.as_str(), "branch_cannot_end"),
+    ] {
+        let refused = tree.end(target.into(), user.clone()).await;
+        assert_eq!(refusal(&refused).0, code, "{target}: {refused:?}");
+    }
+    assert!(
+        tree.list()
+            .iter()
+            .any(|info| info.id == inner && info.parent.as_deref() == Some(line.as_str())),
+        "a refused end leaves both lines open"
+    );
+    let write = local_events(&session, &inner).await;
+    assert!(
+        !write
+            .iter()
+            .any(|event| matches!(event.kind, EventKind::BranchEnd(_))),
+        "a refused end writes no end command"
+    );
+    soon(agent.close()).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_user_opened_line_records_its_own_source() {
+    let probe = Arc::new(Probe::default());
+    let agent = setup(&probe).await;
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let line = soon(session.branch(
+        "main".into(),
+        0,
+        BranchOptions {
+            prompt: "the user opened this".into(),
+            source: BranchSource::User {
+                operation_id: "client-op".into(),
+            },
+        },
+    ))
+    .await
+    .unwrap();
+    soon(session.idle(&line)).await.unwrap();
+    let info = session
+        .branches()
+        .into_iter()
+        .find(|info| info.id == line)
+        .unwrap();
+    assert_eq!(
+        info.source,
+        Some(BranchSource::User {
+            operation_id: "client-op".into()
+        })
+    );
+    let opening = blocks_with(&local_events(&session, &line).await, "<dim-branch-line");
+    assert_eq!(opening.len(), 1, "{opening:?}");
+    assert!(
+        opening[0].starts_with(&format!(
+            "<dim-branch-line branch=\"{line}\" parent=\"main\" source=\"user\">"
+        )),
+        "{}",
+        opening[0]
+    );
+    soon(agent.close()).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_default_branch_that_was_a_tool_line_stops_sending_its_idle_notice() {
+    let probe = Arc::new(Probe::default());
+    let agent = setup(&probe).await;
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let line = open_line(&session, "work alone").await;
+    // The opening turn ends without a word, so its idle notice is what a line
+    // that is not the default branch sends; wait for it to land so the count
+    // below is a baseline rather than a race.
+    until_events(&session, "main", |events| {
+        !blocks_with(events, "<dim-branch-idle").is_empty()
+    })
+    .await;
+    soon(session.set_default_branch(
+        &line,
+        BranchSource::User {
+            operation_id: "switch".into(),
+        },
+    ))
+    .await
+    .unwrap();
+    let notices = blocks_with(&local_events(&session, "main").await, "<dim-branch-idle").len();
+    assert!(notices > 0, "an idle line tells main when its turn ends");
+    let ended = local_events(&session, &line)
+        .await
+        .iter()
+        .filter(|event| matches!(&event.kind, EventKind::TurnEnd(_)))
+        .count();
+    soon(session.submit("answer the user".into(), InputMode::Queue, &line))
+        .await
+        .unwrap();
+    soon(session.idle(&line)).await.unwrap();
+    let turn_end = until_events(&session, &line, |events| {
+        events
+            .iter()
+            .filter(|event| matches!(&event.kind, EventKind::TurnEnd(_)))
+            .count()
+            > ended
+    })
+    .await
+    .last()
+    .expect("the turn ended")
+    .sequence;
+    // The ordering point. The line's dispatcher runs its subscribers before it
+    // reports the sequence, so reaching this `turn/end` means BranchLine folded
+    // it and queued its idle decision; the parent block below is written by the
+    // same writer later in that queue, so by the time it lands the idle decision
+    // has been decided.
+    let mut dispatched = session.dispatch_watch(&line).unwrap();
+    while dispatched.borrow().sequence < turn_end {
+        dispatched.changed().await.unwrap();
+    }
+    move_main(&session).await;
+    until_events(&session, &line, |events| {
+        parent_block_events(events)
+            .last()
+            .is_some_and(|(sequence, _)| *sequence > turn_end)
+    })
+    .await;
+    assert_eq!(
+        blocks_with(&local_events(&session, "main").await, "<dim-branch-idle").len(),
+        notices,
+        "the default branch sends no idle notice for the turn that ended at {turn_end}"
+    );
+    let (code, text) = call(&session, &line, r#"{"action":"end","content":"done"}"#).await;
+    assert_eq!(code, "branch_cannot_end", "{text}");
+    assert!(text.contains("default branch"), "{text}");
+    soon(agent.close()).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_switched_line_keeps_its_identity_after_a_compaction() {
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    builder
+        .timeline_store(dim_agent_runtime::TimelineStoreBinding::new(Arc::new(
+            MemoryTimelineStore::default(),
+        )))
+        .session_value(Arc::new(HistoryRenderer::default()))
+        .process_value(Arc::new(ModelHost(Arc::new(EchoModel))))
+        .session_value(Arc::new(ToolHost(Arc::new(MockTools))))
+        .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
+        .session_value(Arc::new(ContextModelHost(Some(Arc::new(Compact)))))
+        .session_value(Arc::new(CompactionStrategyHost(Some(Arc::new(Compact)))))
+        .require_feature(
+            Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
+                Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
+            }),
+        );
+    defaults::install(&mut builder);
+    let agent = MinimalHost::start(&builder).await.unwrap();
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let line = open_line(&session, "the parser race").await;
+    soon(session.set_default_branch(
+        &line,
+        BranchSource::User {
+            operation_id: "switch".into(),
+        },
+    ))
+    .await
+    .unwrap();
+    for text in ["x".repeat(1500), "y".repeat(1500)] {
+        session.submit(text, InputMode::Queue, &line).await.unwrap();
+        soon(session.idle(&line)).await.unwrap();
+    }
+    let note = line_block(&chain_events(&session, &line, ..).await.unwrap())
+        .expect("the note is the latest block of the key");
+    assert!(
+        note.0.starts_with(&format!(
+            "<dim-branch-line branch=\"{line}\" parent=\"main\" source=\"tool\" default=\"true\">"
+        )),
+        "{}",
+        note.0
+    );
+    assert!(
+        note.0.contains("Your purpose, as main wrote it:"),
+        "{}",
+        note.0
+    );
+    assert!(note.0.contains("the parser race"), "{}", note.0);
+    assert!(
+        note.0.contains("you cannot call end on yourself"),
+        "the note's own end rule: {}",
+        note.0
+    );
+    assert!(!note.1, "the note is live");
+    soon(agent.close()).await.unwrap();
+}
+
+/// A move appends one note at the end of the line's own history, so everything
+/// the line had before it is unchanged: that is what keeps the new default
+/// branch's cached request prefix intact (design §7.3).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_move_leaves_the_new_default_branchs_prefix_unchanged() {
+    let probe = Arc::new(Probe::default());
+    let agent = setup(&probe).await;
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let line = open_line(&session, "keep this prefix").await;
+    let inherited = chain_events(&session, &line, ..=0).await.unwrap();
+    let before = local_events(&session, &line).await;
+    let ids: Vec<&str> = before.iter().map(|event| event.id.as_str()).collect();
+    soon(session.set_default_branch(
+        &line,
+        BranchSource::User {
+            operation_id: "switch".into(),
+        },
+    ))
+    .await
+    .unwrap();
+    let after = until_events(&session, &line, |events| {
+        line_block(events).is_some_and(|(text, _)| text.contains("default=\"true\""))
+    })
+    .await;
+    assert_eq!(
+        chain_events(&session, &line, ..=0).await.unwrap(),
+        inherited,
+        "the inherited prefix the cache holds is untouched"
+    );
+    assert_eq!(
+        after[..ids.len()]
+            .iter()
+            .map(|event| event.id.as_str())
+            .collect::<Vec<_>>(),
+        ids,
+        "the line's own history before the move is unchanged"
+    );
+    let added: Vec<&str> = after[ids.len()..]
+        .iter()
+        .map(|event| event.kind.key())
+        .collect();
+    assert_eq!(
+        added,
+        ["input/message", "input/applied"],
+        "the move appends the note and nothing else"
+    );
+    let note = line_block(&after).expect("the note is the latest block");
+    assert!(note.0.contains("default=\"true\""), "{}", note.0);
+    soon(agent.close()).await.unwrap();
+}
+
+/// E3: cold restore of a single-line and a multi-line Session (design §5,
+/// §20.20). Run with `--release --ignored --nocapture`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore]
+async fn measure_e3_cold_restore_single_and_multi_line() {
+    for lines in [0, 3] {
+        let mut elapsed = Vec::new();
+        for _ in 0..5 {
+            let probe = Arc::new(Probe::default());
+            let agent = setup(&probe).await;
+            let session = soon(agent.create_session(SessionConfig::default()))
+                .await
+                .unwrap();
+            for line in 0..lines {
+                let id = open_line(&session, &format!("line {line}")).await;
+                if line == 1 {
+                    soon(session.set_default_branch(
+                        &id,
+                        BranchSource::User {
+                            operation_id: "switch".into(),
+                        },
+                    ))
+                    .await
+                    .unwrap();
+                }
+            }
+            let id = session.id();
+            soon(session.close()).await.unwrap();
+            let started = std::time::Instant::now();
+            let restored = soon(agent.restore_session(id.into())).await.unwrap();
+            soon(restored.idle("main")).await.unwrap();
+            elapsed.push(started.elapsed());
+            soon(agent.close()).await.unwrap();
+        }
+        elapsed.sort();
+        println!(
+            "E3 cold restore with {lines} extra lines: median {:.1} ms",
+            elapsed[elapsed.len() / 2].as_secs_f64() * 1e3
+        );
+    }
+}
+
+/// E4: a move on a warm Session, and the line it makes the default branch
+/// (design §5, §14). Run with `--release --ignored --nocapture`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore]
+async fn measure_e4_move_on_a_warm_session() {
+    let probe = Arc::new(Probe::default());
+    let agent = setup(&probe).await;
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let line = open_line(&session, "warm target").await;
+    let mut elapsed = Vec::new();
+    for round in 0..10 {
+        let target = if round % 2 == 0 { &line } else { "main" };
+        let started = std::time::Instant::now();
+        soon(session.set_default_branch(
+            target,
+            BranchSource::User {
+                operation_id: format!("switch-{round}"),
+            },
+        ))
+        .await
+        .unwrap();
+        elapsed.push(started.elapsed());
+    }
+    elapsed.sort();
+    println!(
+        "E4 move on a warm Session: median {:.2} ms",
+        elapsed[elapsed.len() / 2].as_secs_f64() * 1e3
+    );
+    soon(agent.close()).await.unwrap();
+}
+
+/// The number of status notes each line holds, by the line they are on. A note
+/// is a `branch:line` block with a `default` attribute; a birth identity has
+/// none, so this counts only what a move wrote.
+async fn default_notes(session: &Session, lines: &[&str]) -> Vec<(String, usize)> {
+    let mut counted = Vec::new();
+    for line in lines {
+        let events = local_events(session, line).await;
+        let notes = blocks_with(&events, "<dim-branch-line ")
+            .iter()
+            .filter(|text| text.contains(" default=\""))
+            .count();
+        counted.push(((*line).to_owned(), notes));
+    }
+    counted
+}
+
+/// §20.21: every participant of a move that is not the root receives exactly
+/// one note, and the root receives none in either direction.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_move_writes_one_note_per_participant_that_is_not_the_root() {
+    let probe = Arc::new(Probe::default());
+    let agent = setup(&probe).await;
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let b = open_line(&session, "b").await;
+    soon(session.idle("main")).await.unwrap();
+    let switch = |line: String| {
+        let session = session.clone();
+        async move {
+            soon(session.set_default_branch(
+                &line,
+                BranchSource::User {
+                    operation_id: "switch".into(),
+                },
+            ))
+            .await
+            .unwrap()
+        }
+    };
+    switch(b.clone()).await;
+    until_events(&session, &b, |events| {
+        line_block(events).is_some_and(|(text, _)| text.contains(r#"default="true""#))
+    })
+    .await;
+    assert_eq!(
+        default_notes(&session, &["main", &b]).await,
+        [("main".to_owned(), 0), (b.clone(), 1)],
+        "main → B writes one note, to B"
+    );
+    let note = line_block(&local_events(&session, &b).await).expect("B holds its note");
+    assert!(
+        note.0.starts_with(&format!(
+            "<dim-branch-line branch=\"{b}\" parent=\"main\" source=\"tool\" default=\"true\">"
+        )),
+        "{}",
+        note.0
+    );
+    switch("main".into()).await;
+    until_events(&session, &b, |events| {
+        line_block(events).is_some_and(|(text, _)| text.contains(r#"default="false""#))
+    })
+    .await;
+    assert_eq!(
+        default_notes(&session, &["main", &b]).await,
+        [("main".to_owned(), 0), (b.clone(), 2)],
+        "B → main writes one more note, to B, and none to the root"
+    );
+    let c = open_line(&session, "c").await;
+    soon(session.idle("main")).await.unwrap();
+    switch(b.clone()).await;
+    until_events(&session, &b, |events| {
+        line_block(events).is_some_and(|(text, _)| text.contains(r#"default="true""#))
+    })
+    .await;
+    switch(c.clone()).await;
+    until_events(&session, &c, |events| {
+        line_block(events).is_some_and(|(text, _)| text.contains(r#"default="true""#))
+    })
+    .await;
+    until_events(&session, &b, |events| {
+        line_block(events).is_some_and(|(text, _)| text.contains(r#"default="false""#))
+    })
+    .await;
+    assert_eq!(
+        default_notes(&session, &["main", &b, &c]).await,
+        [("main".to_owned(), 0), (b.clone(), 4), (c.clone(), 1)],
+        "B → C writes two notes, one per participant, and the root gets none"
+    );
+    soon(agent.close()).await.unwrap();
+}
+
+/// §20.20, last sentence: a recorded target that is a plugin line or was
+/// created through a client before the upgrade answers the root, as one that
+/// has ended does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_restore_falls_back_to_the_root_for_a_target_it_cannot_select() {
+    for source in [
+        BranchSource::Host {
+            operation_id: "plugin-line".into(),
+        },
+        BranchSource::Host {
+            operation_id: "pre-upgrade-client".into(),
+        },
+    ] {
+        let store = Arc::new(MemoryTimelineStore::default());
+        let probe = Arc::new(Probe::default());
+        let agent = MinimalHost::start(&builder_with_store(&probe, store.clone()))
+            .await
+            .unwrap();
+        let session = soon(agent.create_session(SessionConfig::default()))
+            .await
+            .unwrap();
+        let line = soon(session.branch(
+            "main".into(),
+            0,
+            BranchOptions {
+                prompt: "a line".into(),
+                source: source.clone(),
+            },
+        ))
+        .await
+        .unwrap();
+        soon(session.idle(&line)).await.unwrap();
+        let root = probe.main_timeline.lock().unwrap().clone().unwrap();
+        root.append(
+            EventKind::BranchDefault(BranchDefaultData {
+                branch: line.clone(),
+                from: None,
+                source: BranchSource::User {
+                    operation_id: "switch".into(),
+                },
+            })
+            .into(),
+        )
+        .unwrap();
+        let id = session.id();
+        soon(session.close()).await.unwrap();
+        soon(agent.close()).await.unwrap();
+        let restored = MinimalHost::start(&builder_with_store(&Arc::new(Probe::default()), store))
+            .await
+            .unwrap();
+        let session = soon(restored.restore_session(id.into())).await.unwrap();
+        assert_eq!(
+            session.default_branch().unwrap(),
+            "main",
+            "a {source:?} line cannot hold the role"
+        );
+        let tree = session.session_service::<TreeCommands>().unwrap();
+        let refused = tree
+            .set_default_branch(
+                line.clone(),
+                BranchSource::User {
+                    operation_id: "switch".into(),
+                },
+            )
+            .await;
+        assert_eq!(
+            match refused {
+                Err(AgentError::BranchRefused { refusal, .. }) => refusal.code(),
+                other => panic!("expected a refusal, got {other:?}"),
+            },
+            "branch_not_selectable",
+            "and it cannot be chosen either"
+        );
+        assert_eq!(
+            local_events(&session, "main")
+                .await
+                .iter()
+                .filter(|event| matches!(event.kind, EventKind::BranchDefault(_)))
+                .count(),
+            1,
+            "the refusal wrote no second fact"
+        );
+        soon(restored.close()).await.unwrap();
+    }
+}
+
+/// §20.20: a recorded target that has ended answers the root, because a move
+/// can never select a line that is already ending or ended.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_restore_falls_back_to_the_root_for_a_target_that_has_ended() {
+    let store = Arc::new(MemoryTimelineStore::default());
+    store
+        .create_session("saved", &SessionConfig::default())
+        .await
+        .unwrap();
+    let root = || rutis::Ctx::root().unwrap();
+    let main = Timeline::new(
+        root(),
+        TimelineKey {
+            session_id: "saved".into(),
+            branch_id: "main".into(),
+        },
+        vec![],
+        store.clone(),
+    );
+    let create = main
+        .append(
+            EventKind::BranchCreate(BranchCreateData {
+                at: BranchCreateAt::Create {},
+                source: options("a line").source,
+                branch: "line".into(),
+                prompt: "a line".into(),
+            })
+            .into(),
+        )
+        .unwrap();
+    let child = Timeline::new(
+        root(),
+        TimelineKey {
+            session_id: "saved".into(),
+            branch_id: "line".into(),
+        },
+        vec![("main".into(), create.sequence)],
+        store.clone(),
+    );
+    child
+        .append(
+            EventKind::BranchStart(BranchStartData {
+                parent: Some("main".into()),
+                create_event: Some(create.sequence),
+            })
+            .into(),
+        )
+        .unwrap();
+    child
+        .append(
+            EventKind::InputMessage(InputMessageData::text("work", Some(InputMode::Queue))).into(),
+        )
+        .unwrap();
+    child
+        .append(
+            EventKind::BranchEnd(BranchEndData {
+                source: options("end").source,
+                ancestor: None,
+                final_message: None,
+            })
+            .into(),
+        )
+        .unwrap();
+    main.append(
+        EventKind::BranchDefault(BranchDefaultData {
+            branch: "line".into(),
+            from: None,
+            source: BranchSource::User {
+                operation_id: "switch".into(),
+            },
+        })
+        .into(),
+    )
+    .unwrap();
+    for timeline in [&child, &main] {
+        dim_agent_runtime::core::close_timeline(timeline)
+            .await
+            .unwrap();
+    }
+    let probe = Arc::new(Probe::default());
+    let agent = MinimalHost::start(&builder_with_store(&probe, store.clone()))
+        .await
+        .unwrap();
+    let session = soon(agent.restore_session("saved".into())).await.unwrap();
+    assert_eq!(
+        session.default_branch().unwrap(),
+        "main",
+        "an ended target answers the root"
+    );
+    soon(agent.close()).await.unwrap();
+}
+
+/// §20.21: each refusal of a move writes nothing. The four cases are the line
+/// already holding the role, a plugin line, an ended line and a line whose own
+/// end has committed but whose close is still ahead.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn every_refusal_of_a_move_writes_nothing() {
+    let probe = Arc::new(Probe::default());
+    let agent = setup(&probe).await;
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let tree = session.session_service::<TreeCommands>().unwrap();
+    let switch = |line: &str| {
+        let tree = tree.clone();
+        let line = line.to_owned();
+        async move {
+            tree.set_default_branch(
+                line,
+                BranchSource::User {
+                    operation_id: "switch".into(),
+                },
+            )
+            .await
+        }
+    };
+    let code = |result: Result<String>| match result {
+        Err(AgentError::BranchRefused { refusal, .. }) => refusal.code(),
+        Err(AgentError::BranchEnded(_)) => "branch_ended",
+        Err(AgentError::UnknownBranch(_)) => "unknown_branch",
+        other => panic!("expected a refusal, got {other:?}"),
+    };
+    let facts = |events: &[Arc<AgentEvent>]| {
+        events
+            .iter()
+            .filter(|event| matches!(event.kind, EventKind::BranchDefault(_)))
+            .count()
+    };
+    assert_eq!(
+        code(switch("main").await),
+        "branch_already_default",
+        "the root is refused while it is the default branch"
+    );
+    let plugin = open_host_line(&session, "main", "a plugin line").await;
+    assert_eq!(
+        code(switch(&plugin).await),
+        "branch_not_selectable",
+        "a plugin line can never hold the role"
+    );
+    let line = open_line(&session, "a tool line").await;
+    let ended = open_line(&session, "a line to end").await;
+    soon(session.end_branch(
+        &ended,
+        BranchSource::User {
+            operation_id: "end".into(),
+        },
+    ))
+    .await
+    .unwrap();
+    assert_eq!(
+        code(switch(&ended).await),
+        "branch_ended",
+        "an ended line answers that it ended"
+    );
+    assert_eq!(
+        local_events(&session, "main")
+            .await
+            .iter()
+            .filter(|event| { matches!(event.kind, EventKind::BranchDefault(_)) })
+            .count(),
+        0,
+        "no refusal wrote a fact, and the root still holds the role"
+    );
+    assert_eq!(session.default_branch().unwrap(), "main");
+    soon(tree.set_default_branch(
+        line.clone(),
+        BranchSource::User {
+            operation_id: "switch".into(),
+        },
+    ))
+    .await
+    .unwrap();
+    let facts_before = facts(&local_events(&session, "main").await);
+    assert_eq!(facts_before, 1, "the admitted move is the only fact");
+    soon(agent.close()).await.unwrap();
+}
+
+/// §20.25: after two moves no stale instruction is left. The root holds no
+/// note, A holds the note saying it lost the role, and A's end is refused while
+/// it is B's ancestor and admitted once the root holds the role again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_former_default_branch_keeps_no_stale_instruction_and_ends_after_a_move_back() {
+    let probe = Arc::new(Probe::default());
+    let agent = setup(&probe).await;
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let a = open_line(&session, "a").await;
+    soon(session.idle("main")).await.unwrap();
+    let switch = |line: String| {
+        let session = session.clone();
+        async move {
+            soon(session.set_default_branch(
+                &line,
+                BranchSource::User {
+                    operation_id: "switch".into(),
+                },
+            ))
+            .await
+            .unwrap()
+        }
+    };
+    switch(a.clone()).await;
+    until_events(&session, &a, |events| {
+        line_block(events).is_some_and(|(text, _)| text.contains(r#"default="true""#))
+    })
+    .await;
+    let b = open_line(&session, "b").await;
+    soon(session.idle("main")).await.unwrap();
+    let cut = session.sequence(&a).unwrap();
+    let nested = soon(session.branch(
+        a.clone(),
+        cut,
+        BranchOptions {
+            prompt: "nested".into(),
+            source: BranchSource::User {
+                operation_id: "nested".into(),
+            },
+        },
+    ))
+    .await
+    .unwrap();
+    soon(session.idle(&nested)).await.unwrap();
+    switch(nested.clone()).await;
+    until_events(&session, &a, |events| {
+        line_block(events).is_some_and(|(text, _)| text.contains(r#"default="false""#))
+    })
+    .await;
+    assert_eq!(
+        default_notes(&session, &["main", &a, &nested]).await,
+        [("main".to_owned(), 0), (a.clone(), 2), (nested.clone(), 1)],
+        "the root has no note and A holds the one that says it lost the role"
+    );
+    let tree = session.session_service::<TreeCommands>().unwrap();
+    let refused = tree
+        .end(
+            a.clone(),
+            BranchSource::User {
+                operation_id: "end".into(),
+            },
+        )
+        .await;
+    assert_eq!(
+        match refused {
+            Err(AgentError::BranchRefused { refusal, .. }) => refusal.code(),
+            other => panic!("expected a refusal, got {other:?}"),
+        },
+        "branch_cannot_end",
+        "A is an ancestor of the default branch"
+    );
+    assert_eq!(
+        session
+            .branches()
+            .iter()
+            .filter(|info| info.id == a)
+            .count(),
+        1,
+        "the refused end leaves A open"
+    );
+    switch("main".into()).await;
+    soon(tree.end(
+        a.clone(),
+        BranchSource::User {
+            operation_id: "end".into(),
+        },
+    ))
+    .await
+    .unwrap();
+    assert_eq!(
+        session
+            .branches()
+            .iter()
+            .filter(|info| info.id == a)
+            .count(),
+        0,
+        "with the root holding the role, A may end"
+    );
+    let b_notes = default_notes(&session, &[&b]).await;
+    assert_eq!(b_notes, [(b.clone(), 0)], "B never held the role");
+    soon(agent.close()).await.unwrap();
+}
+
+/// §20.23, second half: once another line holds the role, the former tool line
+/// sends its idle notice again and may end itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_former_default_branch_resumes_its_idle_notice_and_may_end_itself() {
+    let probe = Arc::new(Probe::default());
+    let agent = setup(&probe).await;
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let line = open_line(&session, "a line").await;
+    let other = open_line(&session, "another line").await;
+    soon(session.idle("main")).await.unwrap();
+    soon(session.set_default_branch(
+        &line,
+        BranchSource::User {
+            operation_id: "switch".into(),
+        },
+    ))
+    .await
+    .unwrap();
+    let notices = blocks_with(&local_events(&session, "main").await, "<dim-branch-idle").len();
+    soon(session.set_default_branch(
+        &other,
+        BranchSource::User {
+            operation_id: "switch".into(),
+        },
+    ))
+    .await
+    .unwrap();
+    assert_eq!(session.default_branch().unwrap(), other);
+    let ended = local_events(&session, &line)
+        .await
+        .iter()
+        .filter(|event| matches!(&event.kind, EventKind::TurnEnd(_)))
+        .count();
+    soon(session.submit("answer again".into(), InputMode::Queue, &line))
+        .await
+        .unwrap();
+    soon(session.idle(&line)).await.unwrap();
+    until_events(&session, &line, |events| {
+        events
+            .iter()
+            .filter(|event| matches!(&event.kind, EventKind::TurnEnd(_)))
+            .count()
+            > ended
+    })
+    .await;
+    until_events(&session, "main", |events| {
+        blocks_with(events, "<dim-branch-idle").len() > notices
+    })
+    .await;
+    let result = tool_call(&session, &line, r#"{"action":"end","content":"done"}"#).await;
+    assert_eq!(result.is_error, None, "{:?}", result.content);
+    until_events(&session, "main", |events| {
+        events
+            .iter()
+            .any(|event| matches!(&event.kind, EventKind::BranchEnded(data) if data.branch == line))
+    })
+    .await;
+    soon(agent.close()).await.unwrap();
+}
+
+/// §20.26: a switch and an end are admitted in one order, and the refused one
+/// writes nothing. The order is the order the two calls are made in: a switch
+/// makes B the default branch, which puts A above it, and an end of A ends every
+/// line below it, so whichever call completes first decides the other's answer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_switch_and_an_end_admit_in_one_order_and_the_refusal_writes_nothing() {
+    for end_first in [true, false] {
+        let probe = Arc::new(Probe::default());
+        let agent = setup(&probe).await;
+        let session = soon(agent.create_session(SessionConfig::default()))
+            .await
+            .unwrap();
+        let a = open_line(&session, "a").await;
+        soon(session.idle("main")).await.unwrap();
+        let cut = session.sequence(&a).unwrap();
+        let b = soon(session.branch(
+            a.clone(),
+            cut,
+            BranchOptions {
+                prompt: "b".into(),
+                source: BranchSource::User {
+                    operation_id: "b".into(),
+                },
+            },
+        ))
+        .await
+        .unwrap();
+        soon(session.idle(&b)).await.unwrap();
+        let switch = session.set_default_branch(
+            &b,
+            BranchSource::User {
+                operation_id: "switch".into(),
+            },
+        );
+        let end = session.end_branch(
+            &a,
+            BranchSource::User {
+                operation_id: "end".into(),
+            },
+        );
+        let (switch_refused, end_refused) = if end_first {
+            let ended = soon(end).await;
+            assert!(ended.is_ok(), "the end is admitted first: {ended:?}");
+            let switched = soon(switch).await;
+            (switched.is_err(), false)
+        } else {
+            let switched = soon(switch).await;
+            assert!(
+                switched.is_ok(),
+                "the switch is admitted first: {switched:?}"
+            );
+            let ended = soon(end).await;
+            (false, ended.is_err())
+        };
+        assert!(
+            switch_refused ^ end_refused,
+            "exactly one of the two is refused (end first: {end_first})"
+        );
+        let facts = local_events(&session, "main")
+            .await
+            .iter()
+            .filter(|event| matches!(event.kind, EventKind::BranchDefault(_)))
+            .count();
+        assert_eq!(
+            facts,
+            usize::from(!end_first),
+            "only an admitted switch writes a fact"
+        );
+        let ends = local_events(&session, &a)
+            .await
+            .iter()
+            .filter(|event| matches!(event.kind, EventKind::BranchEnd(_)))
+            .count();
+        assert_eq!(
+            ends,
+            usize::from(end_first),
+            "only an admitted end writes a command"
+        );
+        soon(agent.close()).await.unwrap();
+    }
+}
+
+/// §20.28, the tree half: a line whose stored source is `host`, as a client's
+/// pre-upgrade `session.branch_create` row wrote it, is refused as a target with
+/// `branch_not_selectable`, and a line opened with `User` is accepted. The
+/// storage half is `a_format_52_store_is_refused_by_this_daemon_and_migrated_in_place`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pre_upgrade_host_line_is_refused_and_a_user_line_is_accepted() {
+    let probe = Arc::new(Probe::default());
+    let agent = setup(&probe).await;
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let legacy = soon(session.branch("main".into(), 0, options("opened before the upgrade")))
+        .await
+        .unwrap();
+    soon(session.idle(&legacy)).await.unwrap();
+    let line = soon(session.branch(
+        "main".into(),
+        0,
+        BranchOptions {
+            prompt: "opened by the user".into(),
+            source: BranchSource::User {
+                operation_id: "client".into(),
+            },
+        },
+    ))
+    .await
+    .unwrap();
+    soon(session.idle(&line)).await.unwrap();
+    let tree = session.session_service::<TreeCommands>().unwrap();
+    let refused = tree
+        .set_default_branch(
+            legacy.clone(),
+            BranchSource::User {
+                operation_id: "switch".into(),
+            },
+        )
+        .await;
+    assert_eq!(
+        match refused {
+            Err(AgentError::BranchRefused { refusal, .. }) => refusal.code(),
+            other => panic!("expected a refusal, got {other:?}"),
+        },
+        "branch_not_selectable",
+        "a pre-upgrade host line is not a conversation line"
+    );
+    assert_eq!(session.default_branch().unwrap(), "main");
+    soon(tree.set_default_branch(
+        line.clone(),
+        BranchSource::User {
+            operation_id: "switch".into(),
+        },
+    ))
+    .await
+    .unwrap();
+    assert_eq!(
+        session.default_branch().unwrap(),
+        line,
+        "a line the user opened after the upgrade is accepted"
+    );
+    assert_eq!(
+        local_events(&session, "main")
+            .await
+            .iter()
+            .filter(|event| matches!(event.kind, EventKind::BranchDefault(_)))
+            .count(),
+        1,
+        "the refusal left no fact behind"
+    );
+    soon(agent.close()).await.unwrap();
+}
+
+/// §20.26a: a switch and a tool line's own end are admitted in one order, and a
+/// refused end writes no `branch/end` and no final message.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_switch_and_a_tool_lines_end_admit_in_one_order_without_a_refused_ones_message() {
+    for end_first in [true, false] {
+        let probe = Arc::new(Probe::default());
+        let agent = setup(&probe).await;
+        let session = soon(agent.create_session(SessionConfig::default()))
+            .await
+            .unwrap();
+        let line = open_line(&session, "the line that ends").await;
+        soon(session.idle("main")).await.unwrap();
+        let tree = session.session_service::<TreeCommands>().unwrap();
+        let source = BranchSource::Tool {
+            turn_id: "turn".into(),
+            request_id: "request".into(),
+            call_id: "call".into(),
+        };
+        let switch = session.set_default_branch(
+            &line,
+            BranchSource::User {
+                operation_id: "switch".into(),
+            },
+        );
+        let end = tree.end_with_final(line.clone(), source, Some("the leak is in cache.rs".into()));
+        let (switch_refused, end_refused) = if end_first {
+            let ended = soon(end).await;
+            assert!(ended.is_ok(), "the end is admitted first: {ended:?}");
+            let switched = soon(switch).await;
+            (switched.is_err(), false)
+        } else {
+            let switched = soon(switch).await;
+            assert!(
+                switched.is_ok(),
+                "the switch is admitted first: {switched:?}"
+            );
+            let ended = soon(end).await;
+            (false, ended.is_err())
+        };
+        assert!(
+            switch_refused ^ end_refused,
+            "exactly one of the two is admitted (end first: {end_first})"
+        );
+        let finals = blocks_with(
+            &local_events(&session, "main").await,
+            &format!("<dim-branch-message from=\"{line}\" to=\"main\" final=\"true\">"),
+        );
+        let commands = local_events(&session, &line)
+            .await
+            .iter()
+            .filter(|event| matches!(event.kind, EventKind::BranchEnd(_)))
+            .count();
+        if end_first {
+            assert_eq!(finals.len(), 1, "an admitted end delivers its message");
+            assert_eq!(commands, 1);
+            assert_eq!(session.default_branch().unwrap(), "main");
+        } else {
+            assert!(
+                finals.is_empty(),
+                "a refused end publishes no message: {finals:?}"
+            );
+            assert_eq!(commands, 0, "a refused end writes no command");
+            assert_eq!(
+                session.default_branch().unwrap(),
+                line,
+                "the line is still open and holds the role"
+            );
+            assert!(
+                session.branches().iter().any(|info| info.id == line),
+                "the refused end leaves the line open"
+            );
+        }
+        soon(agent.close()).await.unwrap();
+    }
+}
+
+/// §20.26b: a tool end's final message survives a stop between its `branch/end`
+/// and the parent's steer. Restore delivers it once, and a second restart writes
+/// nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_restart_delivers_a_tool_ends_final_message_exactly_once() {
+    let store = Arc::new(MemoryTimelineStore::default());
+    store
+        .create_session("saved", &SessionConfig::default())
+        .await
+        .unwrap();
+    let root = || rutis::Ctx::root().unwrap();
+    let main = Timeline::new(
+        root(),
+        TimelineKey {
+            session_id: "saved".into(),
+            branch_id: "main".into(),
+        },
+        vec![],
+        store.clone(),
+    );
+    let create = main
+        .append(
+            EventKind::BranchCreate(BranchCreateData {
+                at: BranchCreateAt::Create {},
+                source: options("watch the tests").source,
+                branch: "child".into(),
+                prompt: "watch the tests".into(),
+            })
+            .into(),
+        )
+        .unwrap();
+    let child = Timeline::new(
+        root(),
+        TimelineKey {
+            session_id: "saved".into(),
+            branch_id: "child".into(),
+        },
+        vec![("main".into(), create.sequence)],
+        store.clone(),
+    );
+    child
+        .append(
+            EventKind::BranchStart(BranchStartData {
+                parent: Some("main".into()),
+                create_event: Some(create.sequence),
+            })
+            .into(),
+        )
+        .unwrap();
+    child
+        .append(
+            EventKind::InputMessage(InputMessageData::text(
+                "watch the tests",
+                Some(InputMode::Queue),
+            ))
+            .into(),
+        )
+        .unwrap();
+    let end = child
+        .append(
+            EventKind::BranchEnd(BranchEndData {
+                source: BranchSource::Tool {
+                    turn_id: "turn".into(),
+                    request_id: "request".into(),
+                    call_id: "call".into(),
+                },
+                ancestor: None,
+                final_message: Some("done: the leak is fixed".into()),
+            })
+            .into(),
+        )
+        .unwrap();
+    for timeline in [&child, &main] {
+        dim_agent_runtime::core::close_timeline(timeline)
+            .await
+            .unwrap();
+    }
+    let finals = |events: &[Arc<AgentEvent>]| {
+        blocks_with(
+            events,
+            "<dim-branch-message from=\"child\" to=\"main\" final=\"true\">",
+        )
+    };
+    let agent = MinimalHost::start(&builder_with_store(
+        &Arc::new(Probe::default()),
+        store.clone(),
+    ))
+    .await
+    .unwrap();
+    let session = soon(agent.restore_session("saved".into())).await.unwrap();
+    let events = until_events(&session, "main", |events| !finals(events).is_empty()).await;
+    let delivered = finals(&events);
+    assert_eq!(delivered.len(), 1, "{delivered:?}");
+    assert!(
+        delivered[0].contains("done: the leak is fixed"),
+        "{}",
+        delivered[0]
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(&event.kind, EventKind::BranchEnded(data)
+            if data.branch == "child" && data.end_event == end.sequence)),
+        "the result follows the delivery"
+    );
+    let expected = format!("branch-final:child:{}", end.sequence);
+    let input = events
+        .iter()
+        .find(|event| {
+            matches!(&event.kind, EventKind::InputMessage(data)
+            if data.submission_id.as_deref() == Some(expected.as_str()))
+        })
+        .expect("the derived id is what a second delivery would look up");
+    assert_eq!(
+        input.sequence,
+        events
+            .iter()
+            .find(|event| matches!(&event.kind, EventKind::InputMessage(data)
+                if finals(std::slice::from_ref(event)).len() == 1 && data.blocks.iter().any(|block| matches!(block, InputBlock::Raw { text, .. } if text.starts_with("<dim-branch-message")))))
+            .expect("the final message is an input")
+            .sequence,
+        "one input, under the id derived from the end"
+    );
+    let head = session.sequence("main").unwrap();
+    let id = session.id();
+    soon(session.close()).await.unwrap();
+    soon(agent.close()).await.unwrap();
+    let again = MinimalHost::start(&builder_with_store(&Arc::new(Probe::default()), store))
+        .await
+        .unwrap();
+    let session = soon(again.restore_session(id.into())).await.unwrap();
+    soon(session.idle("main")).await.unwrap();
+    let events = local_events(&session, "main").await;
+    assert_eq!(
+        finals(&events).len(),
+        1,
+        "a second restart writes nothing: {:#?}",
+        finals(&events)
+    );
+    assert!(
+        events.last().expect("history").sequence >= head,
+        "the restored line keeps its history"
+    );
+    soon(again.close()).await.unwrap();
+}
+
+/// §20.24a: a move that stopped between its fact and its notes is completed at
+/// load. The first move runs live, so B holds the note production wrote; the
+/// second move's fact is appended to the root by hand, with no note beside it,
+/// which is what a daemon that stopped right after the commit leaves. After the
+/// restart B gets its `default="false"` note and C its `default="true"` one, C's
+/// names B from the fact's `from`, `main` gets none, and a second restart writes
+/// nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_move_that_stopped_between_its_fact_and_its_notes_is_completed_at_load() {
+    let store = Arc::new(MemoryTimelineStore::default());
+    let agent = MinimalHost::start(&builder_with_store(
+        &Arc::new(Probe::default()),
+        store.clone(),
+    ))
+    .await
+    .unwrap();
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let b = open_line(&session, "the purpose of B").await;
+    let c = open_line(&session, "the purpose of C").await;
+    soon(session.idle("main")).await.unwrap();
+    soon(session.set_default_branch(
+        &b,
+        BranchSource::User {
+            operation_id: "switch-to-b".into(),
+        },
+    ))
+    .await
+    .unwrap();
+    until_events(&session, &b, |events| {
+        line_block(events).is_some_and(|(text, _)| text.contains(r#"default="true""#))
+    })
+    .await;
+    let id = session.id().to_owned();
+    soon(session.close()).await.unwrap();
+    soon(agent.close()).await.unwrap();
+
+    // The store now holds a completed first move. The second move's fact is the
+    // one write the stopped daemon made.
+    {
+        let root_store: Arc<dyn TimelineStore> = store.clone();
+        let head = root_store
+            .head(&TimelineKey {
+                session_id: id.clone(),
+                branch_id: "main".into(),
+            })
+            .await
+            .unwrap();
+        let main = Timeline::restore(
+            rutis::Ctx::root().unwrap(),
+            TimelineKey {
+                session_id: id.clone(),
+                branch_id: "main".into(),
+            },
+            Vec::new(),
+            root_store,
+        )
+        .await
+        .unwrap();
+        assert_eq!(main.sequence(), head, "the root reads at its stored head");
+        main.append(
+            EventKind::BranchDefault(BranchDefaultData {
+                branch: c.clone(),
+                from: Some(b.clone()),
+                source: BranchSource::User {
+                    operation_id: "switch-to-c".into(),
+                },
+            })
+            .into(),
+        )
+        .unwrap();
+        dim_agent_runtime::core::close_timeline(&main)
+            .await
+            .unwrap();
+    }
+
+    let agent = MinimalHost::start(&builder_with_store(
+        &Arc::new(Probe::default()),
+        store.clone(),
+    ))
+    .await
+    .unwrap();
+    let session = soon(agent.restore_session(id.clone())).await.unwrap();
+    assert_eq!(session.default_branch().unwrap(), c, "the fact stands");
+    until_events(&session, &b, |events| {
+        line_block(events).is_some_and(|(text, _)| text.contains(r#"default="false""#))
+    })
+    .await;
+    let note = until_events(&session, &c, |events| {
+        line_block(events).is_some_and(|(text, _)| text.contains(r#"default="true""#))
+    })
+    .await;
+    let note = line_block(&note).expect("C holds its note").0;
+    assert!(
+        note.contains(&format!("switched from line {b}")),
+        "C's note names the line the move started from: {note}"
+    );
+    assert_eq!(
+        default_notes(&session, &["main", &b, &c]).await,
+        [("main".to_owned(), 0), (b.clone(), 2), (c.clone(), 1)],
+        "B holds both notes it earned, C its one, and main none"
+    );
+    let heads = (session.sequence(&b).unwrap(), session.sequence(&c).unwrap());
+    soon(session.close()).await.unwrap();
+    soon(agent.close()).await.unwrap();
+    let again = MinimalHost::start(&builder_with_store(&Arc::new(Probe::default()), store))
+        .await
+        .unwrap();
+    let session = soon(again.restore_session(id.clone())).await.unwrap();
+    soon(session.idle("main")).await.unwrap();
+    assert_eq!(
+        default_notes(&session, &["main", &b, &c]).await,
+        [("main".to_owned(), 0), (b.clone(), 2), (c.clone(), 1)],
+        "a second restart writes nothing"
+    );
+    assert!(
+        session.sequence(&b).unwrap() >= heads.0 && session.sequence(&c).unwrap() >= heads.1,
+        "the restored lines keep their history"
+    );
+    soon(again.close()).await.unwrap();
 }

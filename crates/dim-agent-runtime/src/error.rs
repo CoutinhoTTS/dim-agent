@@ -13,6 +13,13 @@ pub enum AgentError {
     /// The line has ended: it accepts no input and no new operation.
     #[error("branch has ended: {0}")]
     BranchEnded(String),
+    /// The tree refused an operation on a line for the named reason; the
+    /// refusal's code is what the protocol answers.
+    #[error("{message}")]
+    BranchRefused {
+        refusal: BranchRefusal,
+        message: String,
+    },
     #[error("storage: {0}")]
     Storage(String),
     /// A write was accepted, but its publication or required outcome was not
@@ -42,7 +49,43 @@ pub enum AgentError {
     Multiple(Vec<AgentError>),
 }
 
+/// Why the tree refused an operation on a line, named the way the protocol's
+/// `appError` names it ([timeline branches §14](../../../docs/design/timeline-branches.md#14-clients)).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BranchRefusal {
+    /// The target is already the Session's default branch.
+    AlreadyDefault,
+    /// The target cannot be the default branch: a plugin line, or a line a
+    /// client opened before `FORMAT` 53.
+    NotSelectable,
+    /// The target or an ancestor of it is ending or ended, so an end already
+    /// on its way to it wins.
+    Protected,
+    /// The target cannot end: the root, the current default branch, or an
+    /// ancestor of the default branch.
+    CannotEnd,
+}
+
+impl BranchRefusal {
+    /// The code the protocol answers this refusal with.
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::AlreadyDefault => "branch_already_default",
+            Self::NotSelectable => "branch_not_selectable",
+            Self::Protected => "branch_target_protected",
+            Self::CannotEnd => "branch_cannot_end",
+        }
+    }
+}
+
 impl AgentError {
+    /// The tree's refusal of an operation on a line.
+    pub fn refused(refusal: BranchRefusal, message: impl Into<String>) -> Self {
+        Self::BranchRefused {
+            refusal,
+            message: message.into(),
+        }
+    }
     pub fn fault(component: impl Into<String>, message: impl Into<String>) -> Self {
         Self::Fault {
             component: component.into(),
