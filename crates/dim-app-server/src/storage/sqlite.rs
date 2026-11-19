@@ -2566,6 +2566,7 @@ impl HostDispatch for SqliteDispatch {
                             #[cfg(feature = "testing")]
                             None,
                         );
+                        operation.0.checkpoint();
                         outcomes
                             .into_iter()
                             .map(|(session, result)| {
