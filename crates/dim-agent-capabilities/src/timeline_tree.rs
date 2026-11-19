@@ -1408,6 +1408,7 @@ impl TimelineTree {
         let data = BranchEndData {
             source,
             ancestor: None,
+            final_message: None,
         };
         context.timeline().append_registered(
             EventKind::BranchEnd(data.clone()).into(),
@@ -1566,6 +1567,7 @@ impl TimelineTree {
         let data = BranchEndData {
             source: source.clone(),
             ancestor: Some(ancestor.into()),
+            final_message: None,
         };
         let sequence = context.timeline().append_registered(
             EventKind::BranchEnd(data.clone()).into(),
@@ -2387,6 +2389,9 @@ pub enum LineRole {
     Main,
     Tool,
     Host,
+    /// A line a client opened through `session.branch_create`: the user is its
+    /// opener, so it is a conversation line the user ends (design §4).
+    User,
 }
 #[derive(Clone, Copy, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -3313,6 +3318,7 @@ impl BranchLine {
             None => LineRole::Main,
             Some(BranchSource::Tool { .. }) => LineRole::Tool,
             Some(BranchSource::Host { .. }) => LineRole::Host,
+            Some(BranchSource::User { .. }) => LineRole::User,
         };
         let mut view = self.view.lock().unwrap();
         view.role = Some(role);
@@ -4009,7 +4015,9 @@ impl BranchTool {
         };
         let permitted = match own.role {
             LineRole::Main => kin(own, &target),
-            LineRole::Tool | LineRole::Host => own.parent.as_deref() == Some(target.id.as_str()),
+            LineRole::Tool | LineRole::Host | LineRole::User => {
+                own.parent.as_deref() == Some(target.id.as_str())
+            }
         };
         if !permitted {
             return Ok(self.not_kin());
@@ -4159,7 +4167,7 @@ fn kin(own: &OwnLine, target: &TimelineInfo) -> bool {
     match own.role {
         LineRole::Tool => target.id == own.parent.clone().unwrap_or_default(),
         LineRole::Main => target.parent.as_deref() == Some(own.id.as_str()),
-        LineRole::Host => false,
+        LineRole::Host | LineRole::User => false,
     }
 }
 fn message_block(from: &str, to: &str, content: &str, final_message: bool) -> InputBlock {
@@ -4485,6 +4493,14 @@ fn first_input(parent: &str, data: &BranchCreateData, idle_notice: IdleNotice) -
                 }],
             }),
         ),
+        BranchSource::User { .. } => (
+            vec![user_line_identity(&data.branch, parent)],
+            Some(UserInput {
+                content: vec![ContentBlock::Text {
+                    text: data.prompt.clone(),
+                }],
+            }),
+        ),
     };
     InputMessageData {
         blocks,
@@ -4555,6 +4571,26 @@ fn host_line_identity(line: &str, parent: &str) -> InputBlock {
             ),
         ),
         Some(line_key()),
+    )
+}
+
+/// The block a line the user opened gets: the user is its opener, so it ends
+/// the line and the line does not end itself (design §4, §12.1).
+fn user_line_identity(line: &str, parent: &str) -> InputBlock {
+    crate::context_block::raw(
+        crate::context_block::element(
+            "dim-branch-line",
+            &[("branch", line), ("parent", parent), ("source", "user")],
+            &user_line_body(line, parent),
+        ),
+        Some(line_key()),
+    )
+}
+
+/// The birth sentences of a line the user opened (design §12.1).
+fn user_line_body(line: &str, parent: &str) -> String {
+    format!(
+        "You are line {line} of this session, opened by the user from line {parent} at this point of its history. You are the same agent as {parent}: everything above is your own history, and you continue from here on your own line, in parallel with {parent}. You can read {parent}'s work after this point. Unless the user makes this line the default branch, you cannot call end on yourself. Messages above that were addressed to {parent} are {parent}'s, not yours. The message after this one is from the user for this line."
     )
 }
 

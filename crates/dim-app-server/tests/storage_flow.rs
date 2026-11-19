@@ -2207,6 +2207,7 @@ async fn branch_end_events_restore_unchanged_and_the_line_stays_ended() {
             call_id: "call".into(),
         },
         ancestor: None,
+        final_message: None,
     });
     append(
         &store,

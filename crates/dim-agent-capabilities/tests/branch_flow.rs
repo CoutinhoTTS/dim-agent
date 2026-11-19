@@ -974,6 +974,7 @@ async fn a_restart_completes_an_end_without_its_result() {
             EventKind::BranchEnd(BranchEndData {
                 source: source.clone(),
                 ancestor: None,
+                final_message: None,
             })
             .into(),
         )
@@ -1148,6 +1149,7 @@ async fn a_restart_completes_an_interrupted_descendants_end_first() {
             EventKind::BranchEnd(BranchEndData {
                 source: source.clone(),
                 ancestor: None,
+                final_message: None,
             })
             .into(),
         )
@@ -1157,6 +1159,7 @@ async fn a_restart_completes_an_interrupted_descendants_end_first() {
             EventKind::BranchEnd(BranchEndData {
                 source: source.clone(),
                 ancestor: Some("X".into()),
+                final_message: None,
             })
             .into(),
         )
@@ -1462,6 +1465,7 @@ async fn a_restore_reads_a_line_end_in_one_page_and_no_range() {
             EventKind::BranchEnd(BranchEndData {
                 source: source.clone(),
                 ancestor: None,
+                final_message: None,
             })
             .into(),
         )
@@ -1952,7 +1956,11 @@ async fn ending_a_line_ends_its_children_first_and_records_one_result_each() {
             .iter()
             .find(|event| matches!(event.kind, EventKind::BranchEnd(_)))
             .map(|event| &event.kind),
-        Some(EventKind::BranchEnd(BranchEndData { source: end, ancestor }))
+        Some(EventKind::BranchEnd(BranchEndData {
+            source: end,
+            ancestor,
+            ..
+        }))
             if *end == source && ancestor.as_deref() == Some(parent.as_str())
     ));
     let parent_events = line_events(&session, &parent).await.unwrap();
@@ -1961,7 +1969,11 @@ async fn ending_a_line_ends_its_children_first_and_records_one_result_each() {
             .iter()
             .find(|event| matches!(event.kind, EventKind::BranchEnd(_)))
             .map(|event| &event.kind),
-        Some(EventKind::BranchEnd(BranchEndData { source: end, ancestor }))
+        Some(EventKind::BranchEnd(BranchEndData {
+            source: end,
+            ancestor,
+            ..
+        }))
             if *end == source && ancestor.is_none()
     ));
     let child_result = parent_events
@@ -5678,6 +5690,49 @@ async fn a_restore_writes_a_due_parent_block_once_and_none_without_movement() {
     soon(agent.close()).await.unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_user_opened_line_records_its_own_source() {
+    let probe = Arc::new(Probe::default());
+    let agent = setup(&probe).await;
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let line = soon(session.branch(
+        "main".into(),
+        0,
+        BranchOptions {
+            prompt: "the user opened this".into(),
+            source: BranchSource::User {
+                operation_id: "client-op".into(),
+            },
+        },
+    ))
+    .await
+    .unwrap();
+    soon(session.idle(&line)).await.unwrap();
+    let info = session
+        .branches()
+        .into_iter()
+        .find(|info| info.id == line)
+        .unwrap();
+    assert_eq!(
+        info.source,
+        Some(BranchSource::User {
+            operation_id: "client-op".into()
+        })
+    );
+    let opening = blocks_with(&local_events(&session, &line).await, "<dim-branch-line");
+    assert_eq!(opening.len(), 1, "{opening:?}");
+    assert!(
+        opening[0].starts_with(&format!(
+            "<dim-branch-line branch=\"{line}\" parent=\"main\" source=\"user\">"
+        )),
+        "{}",
+        opening[0]
+    );
+    soon(agent.close()).await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_ending_line_and_main_get_no_parent_block() {
     let store = Arc::new(MemoryTimelineStore::default());
@@ -5739,6 +5794,7 @@ async fn an_ending_line_and_main_get_no_parent_block() {
             EventKind::BranchEnd(BranchEndData {
                 source: options("watch the tests").source,
                 ancestor: None,
+                final_message: None,
             })
             .into(),
         )

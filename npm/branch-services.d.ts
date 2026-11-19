@@ -9,7 +9,8 @@ export interface RustError<Name extends string = string, Code extends string = s
 
 export type BranchSource =
   | { kind: "tool"; turn_id: string; request_id: string; call_id: string }
-  | { kind: "host"; operation_id: string }
+  | /** A host operation: a client's own entry, or a plugin's id. */ { kind: "host"; operation_id: string }
+  | /** A line a client opened through `session.branch_create`, whose opener is the user. It is a conversation line, so the core tells it from a plugin's without reading the operation's id. */ { kind: "user"; operation_id: string }
 
 export interface ApprovalCallData {
   name: string
@@ -657,6 +658,7 @@ export type LineRole =
   | /** The root: the line with no parent. Its wire value stays `main`, the root's id on the wire and in storage. */ "main"
   | "tool"
   | "host"
+  | /** A line a client opened through `session.branch_create`: the user is its opener, so it is a conversation line the user ends (design §4). */ "user"
 
 export interface BranchLine {
   /** The line committed its own `branch/end`. */
