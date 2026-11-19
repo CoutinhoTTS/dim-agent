@@ -8907,6 +8907,74 @@ async fn a_switched_line_keeps_its_identity_after_a_compaction() {
     soon(agent.close()).await.unwrap();
 }
 
+/// #1862: a tool line's purpose is the structured prompt its `branch/create`
+/// recorded, so a move and a compaction restate every paragraph and the
+/// escaped characters byte for byte (design §12.1).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_multi_paragraph_purpose_survives_a_move_and_a_compaction() {
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    builder
+        .timeline_store(dim_agent_runtime::TimelineStoreBinding::new(Arc::new(
+            MemoryTimelineStore::default(),
+        )))
+        .session_value(Arc::new(HistoryRenderer::default()))
+        .process_value(Arc::new(ModelHost(Arc::new(EchoModel))))
+        .session_value(Arc::new(ToolHost(Arc::new(MockTools))))
+        .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
+        .session_value(Arc::new(ContextModelHost(Some(Arc::new(Compact)))))
+        .session_value(Arc::new(CompactionStrategyHost(Some(Arc::new(Compact)))))
+        .require_feature(
+            Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
+                Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
+            }),
+        );
+    defaults::install(&mut builder);
+    let agent = MinimalHost::start(&builder).await.unwrap();
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let line = open_line(
+        &session,
+        "the first paragraph\n\nand a second one with <tag> & text",
+    )
+    .await;
+    soon(session.set_default_branch(
+        &line,
+        BranchSource::User {
+            operation_id: "switch".into(),
+        },
+    ))
+    .await
+    .unwrap();
+    let purpose = "Your purpose, as main wrote it:\n\
+                   the first paragraph\n\n\
+                   and a second one with &lt;tag&gt; &amp; text\n\n\
+                   How you work with main:";
+    let noted = until_events(&session, &line, |events| {
+        line_block(events).is_some_and(|(text, _)| text.contains("default=\"true\""))
+    })
+    .await;
+    let note = line_block(&noted).expect("the note is the latest block of the key");
+    assert!(
+        note.0.contains(purpose),
+        "the whole purpose survives: {}",
+        note.0
+    );
+    for text in ["x".repeat(1500), "y".repeat(1500)] {
+        session.submit(text, InputMode::Queue, &line).await.unwrap();
+        soon(session.idle(&line)).await.unwrap();
+    }
+    let note = line_block(&chain_events(&session, &line, ..).await.unwrap())
+        .expect("the note is still the latest block of the key");
+    assert!(
+        note.0.contains(purpose),
+        "the whole purpose survives the compaction: {}",
+        note.0
+    );
+    assert!(!note.1, "the note is live");
+    soon(agent.close()).await.unwrap();
+}
+
 /// A move appends one note at the end of the line's own history, so everything
 /// the line had before it is unchanged: that is what keeps the new default
 /// branch's cached request prefix intact (design §7.3).

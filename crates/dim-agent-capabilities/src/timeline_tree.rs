@@ -2889,8 +2889,6 @@ struct LineView {
     /// The `default` attribute of the latest live `branch:line` block on this
     /// line: `None` for a birth block or none at all.
     default_note: Option<bool>,
-    /// The purpose a tool line's birth block carried, for a note to restate.
-    purpose: String,
 }
 impl LineView {
     fn input_block(&mut self, id: &str, text: &str, key: &str, retire: bool) {
@@ -2905,9 +2903,6 @@ impl LineView {
                 })
             {
                 self.idle_notice = IdleNotice::None;
-            }
-            if birth && !retire {
-                self.purpose = purpose_of(text);
             }
             self.default_note = match default_attribute(text) {
                 Some(true) => Some(true),
@@ -4151,6 +4146,60 @@ impl BranchLine {
     }
 }
 impl BranchLine {
+    /// The purpose this line's opening `branch/create` recorded on `parent` at
+    /// `at`, unchanged: the note restates the structured value rather than a
+    /// rendered block (design §12.1).
+    async fn recorded_purpose(&self, parent: &str, at: u64) -> Result<String> {
+        let reply = self
+            .tree
+            .query(
+                parent.to_owned(),
+                TimelineQuery {
+                    scope: TimelineQueryScope::Branch,
+                    from: Some(TimelinePosition {
+                        branch_id: parent.to_owned(),
+                        sequence: at,
+                    }),
+                    through: Some(at),
+                    include_publishing: true,
+                    query: QuerySpec {
+                        filter: None,
+                        select: QuerySelect::Fields {
+                            fields: vec!["data.prompt".into()],
+                        },
+                        group_by: vec![],
+                        pick: None,
+                        order_by: vec![],
+                    },
+                    page: Some(QueryPage {
+                        limit: NonZeroU64::MIN,
+                        after: None,
+                    }),
+                },
+            )
+            .await?;
+        let QueryOutput::Rows { rows } = reply.result else {
+            unreachable!("creation prompt")
+        };
+        let Some(row) = rows.into_iter().next() else {
+            return Err(AgentError::Storage(format!(
+                "line {} has no branch/create at {at}",
+                self.own
+            )));
+        };
+        let [
+            QueryValue::Value {
+                value: serde_json::Value::String(prompt),
+            },
+        ] = row.values.as_slice()
+        else {
+            return Err(AgentError::Storage(format!(
+                "the branch/create of line {} at {at} carries no prompt",
+                self.own
+            )));
+        };
+        Ok(prompt.clone())
+    }
     /// Writes the one status note this line's role and the tree's current
     /// default branch call for, unless its latest block already says so: a
     /// move writes the note to each of its two participants that is not the
@@ -4185,7 +4234,15 @@ impl BranchLine {
         let Some(source) = info.source else {
             return Ok(());
         };
-        let purpose = self.view.lock().unwrap().purpose.clone();
+        let purpose = match source {
+            BranchSource::Tool { .. } => {
+                let at = info.create_anchor.ok_or_else(|| {
+                    AgentError::Storage(format!("line {} has no creation position", self.own))
+                })?;
+                self.recorded_purpose(parent, at).await?
+            }
+            _ => String::new(),
+        };
         let idle_notice = self.view.lock().unwrap().idle_notice;
         let other = if is_default {
             self.tree
@@ -5024,32 +5081,6 @@ fn default_attribute(text: &str) -> Option<bool> {
         true => Some(true),
         false => rest.contains(r#" default="false""#).then_some(false),
     }
-}
-/// The purpose a tool line's birth block carries, in its unescaped form: the
-/// lines after the purpose label, up to the blank line before the rules.
-fn purpose_of(text: &str) -> String {
-    let mut lines = text.lines();
-    let body = lines.by_ref().skip(1);
-    let mut purpose = Vec::new();
-    let mut reading = false;
-    for line in body {
-        if line.starts_with("Your purpose, as ") && line.ends_with(" wrote it:") {
-            reading = true;
-            continue;
-        }
-        if reading {
-            if line.is_empty() {
-                break;
-            }
-            purpose.push(line);
-        }
-    }
-    let escaped = purpose.join("\n");
-    escaped
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&amp;", "&")
 }
 fn parent_key() -> String {
     "branch:parent".into()
