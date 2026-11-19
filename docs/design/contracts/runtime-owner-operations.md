@@ -1,52 +1,50 @@
 # Session and branch owner operations
 
-Proposed plugin API. IDs address the Session or branch owning the operation. Request, reply
-and event names denote existing owner data unless defined here. A subscription delivers
-the owner's initial observation and subsequent updates under the same ordering contract;
-closing the caller releases its registration.
+## Existing APIs
 
-## Admission, opening and branch control
-
-| Catalog entry | Public operation and ownership |
+| Caller → owner | Reuse on main |
 | --- | --- |
-| `timelineTree`, `timelineTreeControl` | Plugins use treeCommands.create/end/info/input/list/page/query. Directory reads that distinguish ending and ended use directory({}) → [{info,head,state,endEvent?}]. Restoration, branch handle lookup, main creation and Session close remain within the tree/runtime owner. |
-| `timelineFactory` | Branch creation returns the branch identity from treeCommands.create. Runtime builds, publishes and disposes its branch internally. |
-| `sessionLoader` | create({group,definitionId,instanceData}) → {instanceId}; remove({instanceId}) → void. The definition and instance data are serializable. Owner-local resources are resolved at their owning node. The owning Session anchors creation. MCP supplies its connection definition and installs its owner-local driver and credentials in that scope. |
-| `branchOpening` | register(completion) → void admits a receipt during opening. The callback settles with success or the original error. Opening waits for all admitted receipts with its original deadline and joins work on close. |
-| `faultReporter` | report(error) → void, failure({}) → AgentError or null, observe(listener) → subscription. Retain the first fault and the existing precedence of a storage fault. |
-| `submitChecks` | register(name, check) → void; check({entry,branchId,user?,mode}, cancelled) → proceed{blocks,warnings} or block{message}. The caller owns the registration until unload. Retain name order, first block and interrupted-without-write. |
-| `agentLoop` | compact({}) → sequence; stopTurn({turnId,reason}) → sequence or null. Loop owns admission and writes the same facts. |
-| `loopState` | state({}) → {phase,turnId?}; observe(listener) delivers the same snapshot on change. States are idle, running and stopping. |
+| Branch management and input callers → TimelineTree | `treeCommands.create/end/info/input/list/page/query`. Creation returns the branch identity. TimelineTree and the runtime own branch construction, restoration and disposal (`timelineFactory`, `timelineTreeControl`). |
+| Language readers → PromptSources | `sessionLanguage.get`. |
+| Prompt → PromptRegistry; guide and tool contributors → their registries | `initialPromptConfiguration.get`, `promptHost.load`, `guideEntries.register`, `toolRegistry.register`, `toolSourcesView.get/observe`. |
+| Session and branch parts → their lifecycle; branch fact consumers → Dispatcher | `sessionLifecycle.activated/closing/hold/release`, `branchLifecycle.activated/closing`, `dispatcher.listen/consume/committed`. |
 
-## Prompt, configuration and files
+## New rutis APIs on existing owners
 
-| Catalog entry | Public operation and ownership |
+### Admission and branch control
+
+| Caller → owner | New API |
 | --- | --- |
-| `prompt` | initialCompletion({}) → void or the original opening error. Prompt owns loading and adoption. |
-| `configureControl` | configure({sources,model?}) → unchanged, adopted or superseded. Prompt preserves ordering across overlapping updates. |
-| `configurationPublisher` | publish({adopted,changes,model?,toolAdoption?,inputs}) → sequence or null; awaitPublished({sequence}) → sequence. Prompt prepares input data and the publication owner performs the existing atomic adoption, registration and publication at the commit boundary. Guide adoption uses the same owner operation with its guide revision. |
-| `promptSourcesBranch` | The Session language owner serves sessionLanguage.get and set({language}) → the existing language/outcome reply. The owner serializes persistence, cell replacement and configure delivery in that order. Loaded side branches retain their adoption behavior. |
-| `fileReads` | binding({path}) → TextFileBinding or null; writeBinding({path}) → absent, compacted or bound; record({path,binding,established}) → void. The established sequence is captured at the original read. read/edit/write return their existing tool results and binding at the resource boundary. The branch owns the binding history, including compacted-history validation; the file node owns actual I/O. |
+| Branch directory readers → TimelineTree | `treeCommands.directory({}) → [{info, head, state, endEvent?}]`, including ending and ended branches. |
+| MCP publication → Session loader | `sessionLoader.create({group, definitionId, instanceData}) → {instanceId}`; `remove({instanceId}) → void`. The Session anchors the instance; MCP supplies its definition and resolves its driver and credentials locally. |
+| Prompt and ToolBinding → BranchOpening | `register(completion) → void`. Opening waits for admitted completions under its existing deadline and propagates their errors. |
+| Fault producers and Session observers → FaultReporter | `report(error) → void`, `failure({}) → AgentError or null`, `observe(listener) → subscription`. First fault wins with existing storage-fault precedence. |
+| Check providers and input admission → SubmitChecks | `register(name, check) → void`; `check({entry, branchId, user?, mode}, cancelled) → proceed{blocks, warnings} or block{message}`. Run in name order through the first block. Interrupted checks write nothing. |
+| Compaction, stop and activity callers → Loop | `agentLoop.compact({}) → sequence`, `stopTurn({turnId, reason}) → sequence or null`; `loopState.state({}) → {phase, turnId?}`, `observe(listener)` delivers that snapshot. |
 
-## Model preparation, history and tools
+### Prompt, configuration and files
 
-| Catalog entry | Public operation and ownership |
+| Caller → owner | New API |
 | --- | --- |
-| `prepareModelHost` | prepare({turnId,requestId,history,availableTools}) → ModelSettings. Preserve pinned definitions and ordering. |
-| `prepareContextHost` | prepare({request,source:{turnId,requestId,through}}, cancelled) → ModelRequest. The native caller can retain the unchanged request allocation. |
-| `contextModelHost` | describe(model selection and metadata) → {contextWindow,outputTokens,thresholdTokens,algorithm?}; count(request) → tokens; contributions({model,fixed?,messages}) → {algorithm,fixed?,messages}; estimate({model,algorithm,contribution}) → tokens. Compute message contributions together. Recovery uses saved contributions under the matching algorithm. |
-| `compactionStrategyHost` | describe(model facts) → {name,replacementSize}; compact(input,cancelled) → completed, skipped or failed with existing StrategyDiagnostics. Input contains history, checkpoint, request, legal cuts, trigger, budgets, prior diagnostics and model facts. Counting uses the model owner. Replay applies the committed result. |
-| `historyRenderer` | Render a branch at an explicit through sequence: context({branchId,through}) → ContextHistory and renderedContext({branchId,through}) → {context,history:HistoryEntry[]}. snapshot({context,retainFrom,anchor}) → RecoverySnapshot. streamCheckpoint({branchId,through,retainFrom,batch}) returns ProjectionCheckpoint. Preserve the checkpoint and existing bounded read path. |
-| `contextPreparation` | prepare({source:ContextPrepareData,projection?},cancelled) → ModelRequest; validate({requestId,request},cancelled) → void. Transfer any already-prepared projection as part of the request handoff. Use the same request identity and cutoff and avoid a second Timeline read. |
-| `contextUsage` | read({through?},cancelled) → {through,contextWindow,outputTokens,thresholdTokens,estimatedInputTokens,baselineSource}. Preserve not-configured, not-ready, model and storage failures. |
-| `toolBinding` | bind({requestId,through,tools,toolSources}) → void and bindCurrent({requestId,declared?}) → ToolDefinition[] pin the tool set; definitions({requestId}) returns ToolDefinition[]; transfer({from,to}) and release({requestId}) delimit retention. The owner claims and invokes the selected handler under its pinned request and call ID. |
-| `toolExecutor` | definitions({requestId}) → ToolDefinition[]; open({parentCallId,context},cancelled) → gateId; invoke({gateId,call}) → ToolResult; close({gateId}) joins children and returns their ordered ToolEffect[]. The owner validates the current batch and parent, releases the gate on interruption and settles children before the parent. |
+| Branch startup and configuration callers → Prompt | `prompt.initialCompletion({}) → void or opening error`; `configureControl.configure({sources, model?}) → unchanged, adopted or superseded`. |
+| Prompt and guide adoption → ContextPreparation | `configurationPublisher.publish({adopted, changes, model?, toolAdoption?, inputs}) → sequence or null`; `awaitPublished({sequence}) → sequence`. Publication commits adoption atomically. |
+| Language updates → Session language owner | Add `sessionLanguage.set({language}) → existing language/outcome reply`. The owner persists the value, replaces the cell and delivers configuration to loaded branches (`promptSourcesBranch`). |
+| File read/edit/write tools → branch FileReads | `binding({path}) → TextFileBinding or null`, `writeBinding({path}) → absent, compacted or bound`, `record({path, binding, established}) → void`. The original read supplies the established sequence; file I/O stays on the file node. |
 
-Implementation order is opening/admission, branch controls, Prompt/configuration, tool
-handoff, then model preparation and recovery. Reuse the [Timeline contract](../../architecture/rust-agent/time-bus.md),
-[Loop](../../architecture/rust-agent/plugins/Loop.md), [Prompt](../../architecture/rust-agent/plugins/Prompt.md),
-[ContextPreparation](../../architecture/rust-agent/plugins/ContextPreparation.md) and
-[ToolExecution](../../architecture/rust-agent/plugins/ToolExecution.md) facts and batch
-boundaries. Wire callbacks run outside commit locks. Verify unchanged idle/stop behavior,
-opening failure, concurrent configuration, recovery, read counts, pinned generation,
-and unload during a nested call with native and foreign callers.
+### Model preparation, history and tools
+
+| Caller → owner | New API |
+| --- | --- |
+| Loop → PrepareModelHost | `prepare({turnId, requestId, history, availableTools}) → ModelSettings`, with pinned tool definitions in order. |
+| ContextPreparation → PrepareContextHost | `prepare({request, source:{turnId, requestId, through}}, cancelled) → ModelRequest`. |
+| Context accounting and compaction → ContextModelHost | `describe(model facts) → {contextWindow, outputTokens, thresholdTokens, algorithm?}`, `count(request) → tokens`, `contributions({model, fixed?, messages}) → {algorithm, fixed?, messages}`, `estimate({model, algorithm, contribution}) → tokens`. |
+| Loop and ContextPreparation → CompactionStrategyHost | `describe(model facts) → {name, replacementSize}`; `compact(input, cancelled) → completed, skipped or failed` with StrategyDiagnostics. Input carries history, checkpoint, request, legal cuts, trigger, budgets, prior diagnostics and model facts. |
+| Loop and ContextPreparation → HistoryRenderer | `context({branchId, through}) → ContextHistory`, `renderedContext({branchId, through}) → {context, history: HistoryEntry[]}`, `snapshot({context, retainFrom, anchor}) → RecoverySnapshot`, `streamCheckpoint({branchId, through, retainFrom, batch}) → ProjectionCheckpoint`. |
+| Loop and ModelProvider → ContextPreparation | `prepare({source: ContextPrepareData, projection?}, cancelled) → ModelRequest`, `validate({requestId, request}, cancelled) → void`. Reuse the prepared projection at the original cutoff. |
+| ContextPreparation and usage readers → ContextUsage | `read({through?}, cancelled) → {through, contextWindow, outputTokens, thresholdTokens, estimatedInputTokens, baselineSource}`. |
+| Loop and ToolExecutor → ToolBinding | `bind({requestId, through, tools, toolSources}) → void`, `bindCurrent({requestId, declared?}) → ToolDefinition[]`, `definitions({requestId}) → ToolDefinition[]`, `transfer({from, to}) → void`, `release({requestId}) → void`. ToolBinding retains the pinned handler generation. |
+| Nested tool callers → ToolExecutor | `definitions({requestId}) → ToolDefinition[]`, `open({parentCallId, context}, cancelled) → gateId`, `invoke({gateId, call}) → ToolResult`, `close({gateId}) → ToolEffect[]`. Close joins children in order; interruption releases the gate. |
+
+## Objects
+
+All methods belong to existing Session or branch owners. The draft adds no plugin, service instance or persistent business object. Loader calls return an existing instance's ID. Nested tool calls expose a temporary `gateId` for an existing parent call's child gate. Opening and registration use callbacks; observations deliver the initial state and ordered updates. Registrations end on caller unload, and callbacks run outside commit locks.
