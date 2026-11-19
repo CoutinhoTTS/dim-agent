@@ -21,6 +21,9 @@ export interface FileLease {
 }
 
 export interface FileScope {
+  writeStream(name: string, next: () => Uint8Array | null | Promise<Uint8Array | null>): Promise<FileResult<null>>;
+  directory(name: string): Promise<FileResult<string>>;
+  openRead(name: string): Promise<FileResult<Awaited<ReturnType<FsHost["openRead"]>> | null>>;
   withLock<T>(path: string, work: (file: FileLease) => T | Promise<T>, cancelled?: Promise<void>): Promise<FileResult<T>>;
   /** One level of the directory `prefix`, sorted, never entering a directory
    * entry and never listing the root itself. */

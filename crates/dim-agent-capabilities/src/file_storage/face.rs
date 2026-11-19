@@ -289,13 +289,14 @@ impl FsHost {
     }
 
     /// Pins a file until close or the calling row's unload.
-    pub fn open_read<'a>(
-        &'a self,
-        caller: &'a Ctx,
+    pub async fn open_read(
+        &self,
+        caller: &Ctx,
         path: String,
-        cancel: &'a CancellationToken,
-    ) -> impl Future<Output = Result<OpenRead>> + Send + 'a {
-        self.0.open_reader(caller, path, cancel)
+        cancel: &CancellationToken,
+    ) -> Result<OpenRead> {
+        let path = self.0.resolve(Path::new(&path))?;
+        self.0.open_reader(caller, &path, cancel).await
     }
 
     /// Reads the same pinned file, capped by the owner's existing 64 KiB limit.
@@ -316,14 +317,14 @@ impl FsHost {
 }
 
 impl FileStorage {
-    async fn open_reader(
+    /// Opens a scoped storage path and binds the public reader ID to its calling row.
+    pub async fn open_reader(
         self: &Arc<Self>,
         caller: &Ctx,
-        path: String,
+        path: &super::FilePath,
         cancel: &CancellationToken,
     ) -> Result<OpenRead> {
-        let path = self.resolve(Path::new(&path))?;
-        let reader = self.open_read(&path, cancel).await?;
+        let reader = self.open_read(path, cancel).await?;
         let id = reader.0.id;
         let size = reader.len();
         let owner = Arc::downgrade(self);

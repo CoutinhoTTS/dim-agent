@@ -152,6 +152,39 @@ async fn node_public_plugin_files_process_storage_and_close_drain() {
         std::fs::read(home.join("public-files/blob.bin")).unwrap(),
         vec![0, 1, 2, 250, 255, 128]
     );
+    let directory = client.rpc("files.directory", json!({})).await;
+    assert_eq!(directory["result"]["ok"], true);
+    let work = std::path::Path::new(directory["result"]["value"].as_str().unwrap());
+    assert!(work.is_absolute());
+    assert_eq!(
+        work.canonicalize().unwrap(),
+        home.join("media/work").canonicalize().unwrap()
+    );
+    assert_eq!(
+        client.rpc("files.stream", json!({})).await["result"],
+        json!({"ok":true,"value":null})
+    );
+    assert_eq!(
+        client.rpc("files.failed_stream", json!({})).await["result"],
+        json!({"ok":false,"error":"io"})
+    );
+    assert_eq!(
+        client.rpc("files.cancel_stream", json!({})).await["result"],
+        json!({"ok":false,"error":"closed"})
+    );
+    let contents = std::fs::read(work.join("input.bin")).unwrap();
+    assert_eq!(contents.len(), 17 * 1024 * 1024);
+    for (index, chunk) in contents.chunks(1024 * 1024).enumerate() {
+        assert!(chunk.iter().all(|&byte| byte as usize == index + 1));
+    }
+    assert_eq!(
+        client.rpc("files.absent", json!({})).await["result"],
+        json!({"ok":true,"value":null})
+    );
+    assert_eq!(
+        client.rpc("files.pinned", json!({})).await["result"],
+        json!({"bytes":"AQL6","size":6})
+    );
     assert_eq!(
         client.rpc("files.envelope", json!({})).await["result"],
         json!({"ok":true,"value":{"ok":true,"value":"{\"version\":1,\"text\":\"public process text\"}"}})
