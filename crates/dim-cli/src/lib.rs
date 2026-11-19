@@ -180,7 +180,11 @@ async fn open_tui(
     link.dispose().await?;
     match ended {
         Ok(code) => Ok(code),
-        Err(request) => update_after_tui(options, locale, request).await,
+        Err(request) => {
+            let code = update_after_tui(options, locale, request).await;
+            ui::composer::history::flush();
+            code
+        }
     }
 }
 
@@ -234,6 +238,7 @@ async fn update_after_tui(
 #[cfg(unix)]
 fn restart(launcher: &std::path::Path, fullscreen: bool, session: Option<&str>) -> Result<i32> {
     use std::os::unix::process::CommandExt;
+    ui::composer::history::flush();
     let error = std::process::Command::new(launcher)
         .args(restart_args(
             std::env::args_os().skip(1),

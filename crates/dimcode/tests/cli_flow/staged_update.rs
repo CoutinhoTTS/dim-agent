@@ -1398,8 +1398,9 @@ printf 'Updated launcher started\n'
 
     /// With the real App Server, the interface's own leave ends its UI leaf
     /// while the input history is still being written. A history lock held
-    /// by another process keeps that write waiting well past the exit budget,
-    /// and `Update now` still runs the update and starts the new version once.
+    /// by another process keeps that write waiting well past the exit budget:
+    /// `Update now` still installs, and starts the new version once, only after
+    /// the write lands.
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn update_now_survives_a_history_write_that_waits_for_its_lock() {
@@ -1491,8 +1492,16 @@ printf 'Updated launcher started\n'
         terminal.write(b"/update\r");
         terminal.until_plain("Update now");
         terminal.write(b"\r");
-        let status = terminal.wait();
+        terminal.until_plain("Updated dimcode-alpha on the alpha channel.");
+        thread::sleep(Duration::from_secs(2));
+        assert!(
+            !marker.exists(),
+            "the new version must not start before the history write lands"
+        );
         drop(history_lock);
+        let status = terminal.wait();
+        let history = fs::read_to_string(home.0.join("input-history.json")).unwrap();
+        assert!(history.contains("\"hello\""), "{history}");
         let output = strip_ansi(&terminal.transcript);
         assert!(status.success(), "{output}");
         assert_eq!(
