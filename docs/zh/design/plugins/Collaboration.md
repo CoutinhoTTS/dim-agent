@@ -109,6 +109,7 @@ Team 关系也是进程内存：`CollaborationDirectory` 持有这个进程已�
 ### 6.3 寿命
 
 - 重启从持久事实恢复 Team：被拥有的 Agent 以被拥有状态装载，成员 Session 连同 leader 一起装载。卸载、未被读取或重载都不会让任何记录变成公开。
+- 重启还会恢复尚无 `collaboration/result` 的请求：每个被恢复的请求在它的 `collaboration/delivered` 事实所指成员输入所在的那条线上停止，绝不在成员当前的默认分支上停止。事实没有指出输入，或成员的任何未结束线都不持有它时，恢复不停止任何东西并记下这条跳过；delivery 事实不新增字段。
 - `close` 在本进程内结算请求并关闭成员 Session。Session 记录、它的 leader 与它 Agent 的记录都保留，因此重启后该成员作为普通 Session 重新装载，leader 仍能寻址它；closed 是进程状态，不写入存储。
 - 删除 leader Session 会结束它的 Team，由 Agents 执行：对 leader 领导的每个成员，执行该成员自己的删除（已装载则关闭、结算其工作、删除命令输出，并由 SessionStore 在它自己的事务里删除行）；然后关闭 leader 拥有的每个 Agent 并删除其记录；最后关闭并删除 leader 自己。Team 之间没有单一事务：成员行引用 leader，所以先删成员；中途失败或崩溃会留下 leader 与残缺的 Team，重试即可完成。删除已经不在的 Agent 记录会成功，因此最后一个成员自己的删除与这次删除都可能移除它。挂在成员上的客户端会看到它像自己的删除一样先关闭再消失，进行中的成员工作由该关闭结算。
 - 删除被拥有 Agent 的最后一个成员 Session 时，在成员行消失后关闭该 Agent 并删除其记录。两步之间失败会留下没有成员的被拥有 Agent，由启动清理。公开 Agent 不会因为删除成员 Session 而被删。
