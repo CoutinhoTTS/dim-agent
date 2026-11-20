@@ -20943,6 +20943,8 @@
       "to": "dim_agent_runtime::timeline_store_face",
       "references": [
         "mod timeline_store_face",
+        "use timeline_store_face::CommitFailure",
+        "use timeline_store_face::TimelineAppend",
         "use timeline_store_face::TimelineStoreBinding"
       ]
     },
@@ -35473,6 +35475,14 @@
     },
     {
       "from": "dim_app_server::storage::sqlite",
+      "to": "dim_agent_runtime::timeline_store_face",
+      "references": [
+        "path dim_agent_runtime::CommitFailure::from",
+        "path dim_agent_runtime::TimelineAppend"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::sqlite",
       "to": "dim_agent_types::profile",
       "references": [
         "path dim_agent_types::AgentProfile",
@@ -35506,6 +35516,13 @@
       "to": "dim_app_server::storage::catalog",
       "references": [
         "path super::catalog::backfill"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::sqlite",
+      "to": "dim_app_server::storage::codec",
+      "references": [
+        "path super::codec::CONTENT_BUDGET"
       ]
     },
     {
@@ -35557,6 +35574,14 @@
         "path super::text::SCHEMA",
         "path super::text::backfill",
         "path super::text::restrict_coverage"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::sqlite",
+      "to": "dim_app_server::storage::timeline",
+      "references": [
+        "path super::timeline::Memo",
+        "path super::timeline::TimelineBatch"
       ]
     },
     {
@@ -35673,6 +35698,7 @@
         "path AgentError::Closed",
         "path AgentError::InvalidInput",
         "path Result",
+        "path Result::is_err",
         "use dim_agent_runtime::AgentError",
         "use dim_agent_runtime::Result",
         "use dim_agent_runtime::panic_message"
@@ -35718,6 +35744,7 @@
       "references": [
         "path TimelineStoreBinding",
         "path TimelineStoreBinding::new",
+        "path dim_agent_runtime::TimelineAppend",
         "use dim_agent_runtime::TimelineStoreBinding"
       ]
     },
@@ -57141,6 +57168,10 @@
     {
       "module": "dim_app_server::storage::sqlite",
       "path": "Request::CommitFile"
+    },
+    {
+      "module": "dim_app_server::storage::sqlite",
+      "path": "Request::CommitTimelineRound"
     },
     {
       "module": "dim_app_server::storage::sqlite",

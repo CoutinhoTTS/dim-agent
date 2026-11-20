@@ -41,4 +41,4 @@ pub use state::*;
 pub use timeline_context::*;
 pub use timeline_query::*;
 pub use timeline_store::*;
-pub use timeline_store_face::TimelineStoreBinding;
+pub use timeline_store_face::{CommitFailure, TimelineAppend, TimelineStoreBinding};

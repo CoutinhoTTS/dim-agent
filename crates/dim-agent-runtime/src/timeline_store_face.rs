@@ -31,7 +31,7 @@ struct Completion {
     result: Result<(), CommitFailure>,
 }
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
-struct CommitFailure {
+pub struct CommitFailure {
     code: String,
     message: String,
 }
@@ -263,11 +263,11 @@ struct SaveSnapshot {
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Append {
-    session_id: String,
-    branch_id: String,
-    batch_id: String,
-    events: Vec<StoredEvent>,
+pub struct TimelineAppend {
+    pub session_id: String,
+    pub branch_id: String,
+    pub batch_id: String,
+    pub events: Vec<StoredEvent>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -418,7 +418,7 @@ impl HostDispatch for TimelineStoreBinding {
                     "Timeline append must run beside its state owner".into(),
                 )));
             }
-            let p: Append =
+            let p: TimelineAppend =
                 serde_json::from_value(request).map_err(|error| Error::Value(error.to_string()))?;
             if p.events.is_empty() {
                 return Err(failure(AgentError::InvalidInput(

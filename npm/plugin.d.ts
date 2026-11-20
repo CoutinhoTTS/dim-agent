@@ -629,6 +629,7 @@ export type StoredAgentProfile = {
 };
 export type StoredProviderSelection = { provider_id: string; model_id: string; version: number };
 export interface SqliteStorage {
+  commitTimelineRound(request: { batches: TimelineAppend[] }): Promise<{ sessions: { sessionId: string; result: { Ok: null } | { Err: { code: string; message: string } } }[] }>;
   readSelection(request: { scope: string }): Promise<StoredProviderSelection | null>;
   writeSelection(request: { scope: string; expectedVersion?: number | null; selection: ModelId }): Promise<StoredProviderSelection>;
   /** Plugins write through sessionFiles. Only the SessionFiles owner supplies its active generation for reserve, commit and abandon. */
@@ -714,9 +715,10 @@ export interface TimelineStoreCompletion {
   through: number;
   result: 'committed' | { code: string; message: string };
 }
+export type TimelineAppend = { sessionId: string; branchId: string; batchId: string; events: StoredTimelineEvent[] };
 export interface TimelineStore {
   /** Synchronous admission is host-local; callers across a link are rejected. */
-  append(request: { sessionId: string; branchId: string; batchId: string; events: StoredTimelineEvent[] }): { accepted: true };
+  append(request: TimelineAppend): { accepted: true };
   /** Registration completes before return; observe later admissions, without replay of earlier batches. */
   commits(request: { sessionId: string }, listener: (completion: TimelineStoreCompletion) => void | Promise<void>): Promise<{ subscriptionId: string }>;
   closeCommits(request: { subscriptionId: string }): Promise<{}>;

@@ -1214,6 +1214,8 @@ fn slow_upgrade_report() {
 /// The process connection and maintenance admission. Business modules never
 /// open a second connection to this database.
 pub struct SqliteStorage {
+    pub(super) defaults: Mutex<std::collections::BTreeMap<String, String>>,
+    pub(super) timeline_memo: Mutex<super::timeline::Memo>,
     pub(super) connection: Mutex<Option<Connection>>,
     pub(super) readers: Readers,
     admission: Mutex<Admission>,
@@ -1816,6 +1818,8 @@ impl SqliteStorage {
         let _ = std::fs::remove_file(startup_note_path(&path));
         let readers = Readers::demand();
         Ok(Arc::new(Self {
+            defaults: Mutex::default(),
+            timeline_memo: Mutex::default(),
             connection: Mutex::new(Some(connection)),
             readers,
             admission: Mutex::new(Admission {
@@ -1865,6 +1869,8 @@ impl SqliteStorage {
         }
         Ok((
             Arc::new(Self {
+                defaults: Mutex::default(),
+                timeline_memo: Mutex::default(),
                 connection: Mutex::new(Some(connection)),
                 readers: Readers::none(),
                 admission: Mutex::new(Admission {
@@ -2540,7 +2546,7 @@ struct SqliteDispatch(Arc<SqliteStorage>);
 impl HostDispatch for SqliteDispatch {
     fn methods(&self) -> Option<serde_json::Value> {
         Some(
-            serde_json::json!({"storageReport":"async","readUser":"async","importUserIfAbsent":"async","replaceUser":"async","agents":"async","owners":"async","save":"async","delete":"async","members":"async","ledMembers":"async","ownedAgents":"async","memberSessions":"async","agentOwner":"async","unfinishedOwned":"async","readSelection":"async","writeSelection":"async","readPreferences":"async","reserveFile":"async","commitFile":"async","abandonFile":"async","ownsFile":"async","ownsOutput":"async","ownedPaths":"async","registerOutput":"async"}),
+            serde_json::json!({"commitTimelineRound":"async","storageReport":"async","readUser":"async","importUserIfAbsent":"async","replaceUser":"async","agents":"async","owners":"async","save":"async","delete":"async","members":"async","ledMembers":"async","ownedAgents":"async","memberSessions":"async","agentOwner":"async","unfinishedOwned":"async","readSelection":"async","writeSelection":"async","readPreferences":"async","reserveFile":"async","commitFile":"async","abandonFile":"async","ownsFile":"async","ownsOutput":"async","ownedPaths":"async","registerOutput":"async"}),
         )
     }
 
@@ -2560,6 +2566,9 @@ impl HostDispatch for SqliteDispatch {
             deny_unknown_fields
         )]
         enum Request {
+            CommitTimelineRound {
+                batches: Vec<dim_agent_runtime::TimelineAppend>,
+            },
             #[serde(rename_all = "camelCase")]
             AbandonFile {
                 file_id: String,
@@ -2649,6 +2658,31 @@ impl HostDispatch for SqliteDispatch {
         let db = self.0.clone();
         Ok(BridgeValue::cancellable_future(async move {
             let value = match request {
+                Request::CommitTimelineRound { batches } => {
+                    let operation = db.admit().map_err(storage_failure)?;
+                    let sessions = tokio::task::spawn_blocking(move || {
+                        let batches: Vec<super::timeline::TimelineBatch> =
+                            batches.into_iter().map(Into::into).collect();
+                        let outcomes = operation.0.commit_timeline_round(
+                            batches.iter(),
+                            super::codec::CONTENT_BUDGET,
+                            true,
+                            #[cfg(feature = "testing")]
+                            None,
+                        );
+                        operation.0.checkpoint();
+                        outcomes
+                            .into_iter()
+                            .map(|(session, result)| {
+                                let result = result.map_err(dim_agent_runtime::CommitFailure::from);
+                                serde_json::json!({"sessionId":session,"result":result})
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .await
+                    .map_err(|failure| storage_failure(storage(failure)))?;
+                    serde_json::json!({"sessions":sessions})
+                }
                 Request::AbandonFile {
                     file_id,
                     generation,
