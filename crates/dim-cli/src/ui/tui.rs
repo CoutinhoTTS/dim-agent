@@ -8327,10 +8327,19 @@ impl App {
 
     /// The composer's bottom-left status corner: the run status, the slot (a
     /// notice in the highlight colour), background task count, goal and
-    /// context use, fitted to `budget` cells. The slot outranks every other
-    /// part and is kept whole when it fits the border; the caller clips it
-    /// from its end only when the slot alone is wider than the border. The
-    /// optional parts go first, then the run status's reason.
+    /// context use, fitted to `budget` cells. The first candidate that fits
+    /// wins, in this order:
+    ///
+    /// 1. the full run status (phase and retry reason) with every optional part;
+    /// 2. the phase with the slot and the optional parts, dropping context,
+    ///    then goal, then background tasks;
+    /// 3. the optional parts with the slot and without the phase, dropped the
+    ///    same way;
+    /// 4. the slot alone.
+    ///
+    /// The slot outranks every other part, so it is never dropped for one.
+    /// When the slot alone is wider than the border, it is returned and the
+    /// caller clips it from its end.
     fn dock_status(&self, run: Option<(&str, &str)>, budget: usize) -> Option<String> {
         let p = &self.palette;
         let slot = self.slot().map(|slot| {
@@ -12395,6 +12404,71 @@ mod tests {
             assert!(!bottom.contains("goal"), "{bottom}");
             assert!(!bottom.contains("dima-probe"), "{bottom}");
             app.notice = None;
+
+            // While running a retry, the same long notice still leads the corner.
+            app.apply(Update::Snapshot(Box::new(ViewSnapshot {
+                session_id: "s1".into(),
+                running: true,
+                retry: Some(crate::model::view::RetryView {
+                    attempt: 2,
+                    max_attempts: 8,
+                    retry_at_ms: retry_at(60_000),
+                    kind: dim_agent_types::ModelFailureKind::ServerError,
+                    reason: Some("The provider reported a server error".into()),
+                }),
+                tasks: vec![background_task("t1", "cargo build")],
+                goal: Some(dim_agent_types::GoalView {
+                    objective: "ship".into(),
+                    status: dim_agent_types::GoalViewStatus::Active,
+                    evaluator: false,
+                }),
+                ..ViewSnapshot::default()
+            })));
+            app.set_notice("Interrupt requested; Ctrl+C again to exit");
+            let (_, bottom, _) = composer_chrome(&mut app, 40);
+            assert!(
+                bottom.starts_with(" ╰─ Interrupt requested; Ctrl+C aga"),
+                "fullscreen {fullscreen}: the notice leads the running corner: {bottom}"
+            );
+            assert!(
+                !bottom.contains("Retrying"),
+                "fullscreen {fullscreen}: {bottom}"
+            );
+            app.notice = None;
+
+            // Without a notice and without a background task, the phase goes
+            // before the goal: at 40 columns the phase with the slot does not
+            // fit, so the slot keeps the goal.
+            app.apply(Update::Snapshot(Box::new(ViewSnapshot {
+                session_id: "s1".into(),
+                running: true,
+                retry: Some(crate::model::view::RetryView {
+                    attempt: 2,
+                    max_attempts: 8,
+                    retry_at_ms: retry_at(60_000),
+                    kind: dim_agent_types::ModelFailureKind::ServerError,
+                    reason: Some("The provider reported a server error".into()),
+                }),
+                goal: Some(dim_agent_types::GoalView {
+                    objective: "ship".into(),
+                    status: dim_agent_types::GoalViewStatus::Active,
+                    evaluator: false,
+                }),
+                ..ViewSnapshot::default()
+            })));
+            let (_, bottom, _) = composer_chrome(&mut app, 40);
+            assert!(
+                bottom.contains("esc interrupt"),
+                "fullscreen {fullscreen}: {bottom}"
+            );
+            assert!(
+                bottom.contains("◎ goal active"),
+                "fullscreen {fullscreen}: {bottom}"
+            );
+            assert!(
+                !bottom.contains("Retrying"),
+                "fullscreen {fullscreen}: {bottom}"
+            );
         }
     }
 
