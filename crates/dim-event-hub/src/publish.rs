@@ -145,46 +145,82 @@ pub(crate) async fn publish(
     // Admission, source ownership and the type all answer first: only an
     // admitted publish resolves its omitted targets, so a refused one never
     // restores a cold Session (design §2.3, timeline branches §20.22).
-    let to = resolved_to(&shared, request.to).await?;
+    let (to, unresolved) = resolved_to(&shared, request.to).await?;
     let request = PublishRequest { to, ..request };
     // Once the publish starts it runs to completion in a task EventHub owns:
     // a caller that drops its reply, or a reload, neither stops it nor frees
     // the event lock (design §2.4).
     tokio::spawn(async move {
         let _activity = activity;
-        publish_to_completion(shared, request, declaration, declared_mode).await
+        publish_to_completion(shared, request, unresolved, declaration, declared_mode).await
     })
     .await
     .map_err(|error| EventHubError::transport(format!("the publish task ended: {error}")))?
 }
 
+/// A `to` target whose omitted branch could not be resolved: its failure is
+/// the target's own receipt entry, and the rest of the publish is planned and
+/// delivered as usual (design §2.3, §3.2).
+struct UnresolvedTarget {
+    session_id: String,
+    code: String,
+    message: String,
+}
+
 /// One explicit `to` target with its branch filled in (timeline branches
 /// §20.22); an admitted `publish` resolves them once per request before the
 /// task starts, reading a Session named by two entries once and holding the
-/// hub's delivery budget across each cold read.
+/// hub's delivery budget across each cold read. A target that cannot be
+/// resolved is answered in its own receipt entry instead of failing the
+/// publish; a link that fails as a whole, such as the Sessions service
+/// reloading, still refuses the publish.
 async fn resolved_to(
     shared: &Shared,
     to: Vec<crate::model::ToTarget>,
-) -> Result<Vec<crate::model::ToTarget>, EventHubError> {
+) -> Result<(Vec<crate::model::ToTarget>, Vec<UnresolvedTarget>), EventHubError> {
     let mut defaults: HashMap<String, String> = HashMap::new();
     let mut resolved = Vec::with_capacity(to.len());
+    let mut unresolved = Vec::new();
     for mut target in to {
         if target.branch_id.is_none() {
             let branch_id = match defaults.get(&target.session_id) {
-                Some(branch_id) => branch_id.clone(),
+                Some(branch_id) => Some(branch_id.clone()),
                 None => {
                     let permit = shared.state.delivery_permit().await;
-                    let branch_id = shared.default_branch(&target.session_id).await?;
+                    let answer = shared.default_branch(&target.session_id).await;
                     drop(permit);
-                    defaults.insert(target.session_id.clone(), branch_id.clone());
-                    branch_id
+                    match answer {
+                        Ok(branch_id) => {
+                            defaults.insert(target.session_id.clone(), branch_id.clone());
+                            Some(branch_id)
+                        }
+                        Err(error) if whole_publish(&error) => return Err(error),
+                        Err(error) => {
+                            unresolved.push(UnresolvedTarget {
+                                session_id: target.session_id.clone(),
+                                code: error.code.to_owned(),
+                                message: error.message,
+                            });
+                            None
+                        }
+                    }
                 }
+            };
+            let Some(branch_id) = branch_id else {
+                continue;
             };
             target.branch_id = Some(branch_id);
         }
         resolved.push(target);
     }
-    Ok(resolved)
+    Ok((resolved, unresolved))
+}
+
+/// Whether a resolution failure refuses the whole publish instead of one
+/// target: the Sessions link is unavailable (reloading) or broke (transport),
+/// so no target's state could be read.
+fn whole_publish(error: &EventHubError) -> bool {
+    matches!(error.code, "reloading" | TRANSPORT)
 }
 
 /// One publish from taking its event lock to its receipt, in the task
@@ -192,6 +228,7 @@ async fn resolved_to(
 async fn publish_to_completion(
     shared: Arc<Shared>,
     request: PublishRequest,
+    unresolved: Vec<UnresolvedTarget>,
     declaration: Declaration,
     declared_mode: InputMode,
 ) -> Result<Value, EventHubError> {
@@ -288,8 +325,18 @@ async fn publish_to_completion(
         .buffered(width)
         .collect()
         .await;
-    let (deliveries, refreshes): (Vec<Delivery>, Vec<Option<GuideRecord>>) =
+    let (mut deliveries, refreshes): (Vec<Delivery>, Vec<Option<GuideRecord>>) =
         outcomes.into_iter().unzip();
+    // A target whose line was never resolved has no branch to plan; its answer
+    // follows the planned deliveries as the same failed receipt entry a
+    // delivery to a gone Session would give (design §2.3, §3.2).
+    deliveries.extend(unresolved.into_iter().map(|target| Delivery::Failed {
+        session_id: target.session_id,
+        branch_id: String::new(),
+        subscription_ids: Vec::new(),
+        code: target.code,
+        message: target.message,
+    }));
     let refreshes: Vec<GuideRecord> = refreshes.into_iter().flatten().collect();
     // A Session Agents says is gone takes its subscriptions with it (design
     // §3.4); the notice stays the prompt path.

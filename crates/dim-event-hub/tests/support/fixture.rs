@@ -222,11 +222,20 @@ impl HostDispatch for FakeSessions {
                 }));
             }
             // The `sessions.defaultBranchId` read (timeline branches §20.22):
-            // every fixture Session is on its root.
+            // every fixture Session is on its root, and one the fixture was
+            // told is gone answers as a closed Session does.
             "defaultBranchId" => {
                 self.inner.defaults.fetch_add(1, Ordering::SeqCst);
+                let session = write["sessionId"].as_str().unwrap_or_default().to_owned();
+                let gone = self.inner.missing.lock().unwrap().contains(&session);
                 return Ok(Value::future(async move {
-                    Ok(json!({ "ok": true, "value": { "defaultBranchId": "main" } }).into())
+                    if gone {
+                        Ok(json!({ "ok": false, "error": { "code": "session_closed",
+                            "message": "the Session is closed" } })
+                        .into())
+                    } else {
+                        Ok(json!({ "ok": true, "value": { "defaultBranchId": "main" } }).into())
+                    }
                 }));
             }
             "input" => {}

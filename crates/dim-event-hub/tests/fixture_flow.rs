@@ -759,3 +759,76 @@ async fn a_refused_publish_reads_no_target_default() {
         "one read for a Session named twice: {receipt}"
     );
 }
+
+/// The delivery a receipt names for `session`.
+fn delivery_for<'a>(receipt: &'a Value, session: &str) -> &'a Value {
+    receipt["deliveries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|delivery| delivery["sessionId"] == json!(session))
+        .unwrap_or_else(|| panic!("a delivery for {session}: {receipt}"))
+}
+
+/// One target whose omitted branch cannot be resolved answers in its own
+/// receipt entry: every other target and every matching subscription is
+/// planned and delivered as usual (design §2.3, §3.1, §3.2; timeline
+/// branches §20.22).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn one_unresolvable_target_keeps_the_rest_of_the_publish() {
+    let (_directory, fixture) = mounted().await;
+    fixture
+        .subscribe("subscriber", &["im.*"], None)
+        .await
+        .unwrap();
+    fixture.sessions.deleted("gone");
+    let mut request = event("partial");
+    request.to = vec![
+        ToTarget {
+            session_id: "valid".into(),
+            branch_id: Some("main".into()),
+            mode: None,
+        },
+        ToTarget {
+            session_id: "gone".into(),
+            branch_id: None,
+            mode: None,
+        },
+    ];
+    let receipt = fixture.producer.publish(request).await.unwrap();
+    assert_eq!(
+        delivery_for(&receipt, "valid")["status"],
+        json!("delivered"),
+        "{receipt}"
+    );
+    let gone = delivery_for(&receipt, "gone");
+    assert_eq!(gone["status"], json!("failed"), "{receipt}");
+    assert_eq!(gone["code"], json!("session_closed"), "{receipt}");
+    assert_eq!(
+        delivery_for(&receipt, "subscriber")["status"],
+        json!("delivered"),
+        "{receipt}"
+    );
+}
+
+/// The declared types answer before an omitted branch is resolved, so a
+/// refused subscribe never reads the target's default and never restores a
+/// cold Session for it (design §3.3; timeline branches §20.22).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_subscribe_checks_the_type_before_it_resolves_the_branch() {
+    let (_directory, fixture) = mounted().await;
+    let before = fixture.sessions.default_reads();
+    let error = fixture
+        .call(
+            "eventhub.subscribe",
+            json!({"types": ["im.unknown"], "target": {"sessionId": "cold"}}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(app_code(&error), "unknown_type");
+    assert_eq!(
+        fixture.sessions.default_reads(),
+        before,
+        "no target branch was resolved"
+    );
+}
