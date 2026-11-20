@@ -677,6 +677,7 @@ impl Connection {
                     | Call::Delete(_)
                     | Call::Fork(_)
                     | Call::BranchEnd(_)
+                    | Call::BranchSetDefault(_)
             )
         {
             return Err(RpcError::app(
@@ -759,6 +760,12 @@ impl Connection {
                 (None, None)
             }
             Call::BranchEnd(p) => {
+                if p.branch_id.is_empty() {
+                    return Err(RpcError::invalid("branchId must not be empty"));
+                }
+                (Some(&p.session_id), None)
+            }
+            Call::BranchSetDefault(p) => {
                 if p.branch_id.is_empty() {
                     return Err(RpcError::invalid("branchId must not be empty"));
                 }
@@ -947,6 +954,7 @@ impl Connection {
             Call::Attach(p) => Some(&p.session_id),
             Call::BranchCreate(p) => Some(&p.session_id),
             Call::BranchEnd(p) => Some(&p.session_id),
+            Call::BranchSetDefault(p) => Some(&p.session_id),
             Call::SessionMethods(p) => Some(&p.session_id),
             Call::Close(p) if rpc.index.session_available(&p.session_id) => Some(&p.session_id),
             _ => None,
@@ -1395,6 +1403,7 @@ impl Connection {
             }
             Call::BranchCreate(params) => self.create_branch(rpc, params).await,
             Call::BranchEnd(params) => self.end_branch(rpc, params).await,
+            Call::BranchSetDefault(params) => self.set_default_branch(rpc, params).await,
             Call::SessionMethods(_) => crate::methods::session_listed(
                 &rpc.management,
                 &usage.expect("session.methods pins its Session").session,

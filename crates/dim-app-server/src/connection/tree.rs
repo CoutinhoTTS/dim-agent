@@ -537,8 +537,10 @@ impl Connection {
         params: Branches,
     ) -> Result<Reply, RpcError> {
         let session = self.session(rpc, &params.session_id)?;
+        let default_branch_id = session.default_branch().map_err(RpcError::from)?;
         Ok(Reply::Branches(wire::BranchesResult {
             branches: session.directory().into_iter().map(Into::into).collect(),
+            default_branch_id,
         }))
     }
 
@@ -578,6 +580,30 @@ impl Connection {
             .await
             .map_err(RpcError::from)?;
         Ok(Reply::empty())
+    }
+
+    /// The user's entry to the default branch (design §14): the tree admits the
+    /// target and writes one `branch/default` on the root, and this call
+    /// answers the line the Session's conversation is on now. A refusal writes
+    /// nothing, and the tree's own codes reach the client unchanged.
+    pub(super) async fn set_default_branch(
+        &self,
+        rpc: &RpcService,
+        params: BranchSetDefault,
+    ) -> Result<Reply, RpcError> {
+        let session = self.session(rpc, &params.session_id)?;
+        let default_branch_id = session
+            .set_default_branch(
+                &params.branch_id,
+                BranchSource::User {
+                    operation_id: uuid::Uuid::new_v4().to_string(),
+                },
+            )
+            .await
+            .map_err(RpcError::from)?;
+        Ok(Reply::BranchSetDefault(wire::SetDefaultResult {
+            default_branch_id,
+        }))
     }
 
     pub(super) async fn create_branch(

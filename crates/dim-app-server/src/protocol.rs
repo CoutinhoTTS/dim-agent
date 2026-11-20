@@ -118,6 +118,7 @@ pub enum Call {
     ApprovalRespond(ApprovalRespond),
     BranchCreate(BranchCreate),
     BranchEnd(BranchEnd),
+    BranchSetDefault(BranchSetDefault),
     Branches(Branches),
     BranchGet(BranchRequest),
     AgentCreate(AgentCreate),
@@ -858,6 +859,14 @@ pub struct BranchEnd {
     pub branch_id: String,
 }
 
+/// `session.branch_set_default`: the line the user continues on (design §14).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BranchSetDefault {
+    pub session_id: String,
+    pub branch_id: String,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Branches {
@@ -877,7 +886,7 @@ pub struct BranchCreate {
 /// Methods still decoded by the built-in protocol cannot be shadowed by
 /// runtime contributions. Session-looking names not listed here remain valid
 /// contributed names (for example `session.shell`).
-const BUILTIN_METHODS: [&str; 40] = [
+const BUILTIN_METHODS: [&str; 41] = [
     "hello",
     "daemon.ping",
     "daemon.shutdown",
@@ -912,6 +921,7 @@ const BUILTIN_METHODS: [&str; 40] = [
     "approval.respond",
     "session.branch_create",
     "session.branch_end",
+    "session.branch_set_default",
     "session.branches",
     "session.branch.get",
     "agent.create",
@@ -1006,6 +1016,7 @@ pub fn decode(bytes: &[u8]) -> Result<Request, (Option<RequestId>, RpcError)> {
             "approval.respond" => Call::ApprovalRespond(params(raw_params)?),
             "session.branch_create" => Call::BranchCreate(params(raw_params)?),
             "session.branch_end" => Call::BranchEnd(params(raw_params)?),
+            "session.branch_set_default" => Call::BranchSetDefault(params(raw_params)?),
             "session.branches" => Call::Branches(params(raw_params)?),
             "session.branch.get" => Call::BranchGet(params(raw_params)?),
             "agent.create" => Call::AgentCreate(params(raw_params)?),
@@ -1407,6 +1418,7 @@ pub enum Reply {
     BranchGet(crate::tree_protocol::BranchDirectoryView),
     Keys(crate::tree_protocol::KeysResult),
     BranchCreate(crate::tree_protocol::CreateResult),
+    BranchSetDefault(crate::tree_protocol::SetDefaultResult),
     Barrier(crate::tree_protocol::BarrierResult),
     AgentCreated(AgentCreated),
     Agents(Vec<AgentInfo>),

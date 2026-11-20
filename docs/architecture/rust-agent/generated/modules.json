@@ -27470,6 +27470,7 @@
         "path Call::BranchCreate",
         "path Call::BranchEnd",
         "path Call::BranchGet",
+        "path Call::BranchSetDefault",
         "path Call::Branches",
         "path Call::Catalog",
         "path Call::CatalogCancel",
@@ -28080,6 +28081,7 @@
         "path BranchCreate",
         "path BranchEnd",
         "path BranchRequest",
+        "path BranchSetDefault",
         "path Branches",
         "path History",
         "path HistoryDetail",
@@ -28090,6 +28092,7 @@
         "path Reply",
         "path Reply::BranchCreate",
         "path Reply::BranchGet",
+        "path Reply::BranchSetDefault",
         "path Reply::Branches",
         "path Reply::History",
         "path Reply::HistoryDetail",
@@ -28122,6 +28125,7 @@
         "path wire::KeysResult",
         "path wire::ProductEvent::new",
         "path wire::ProductEvent::query_filter",
+        "path wire::SetDefaultResult",
         "use crate::tree_protocol"
       ]
     },
@@ -31367,7 +31371,8 @@
         "path crate::tree_protocol::CreateResult",
         "path crate::tree_protocol::DisplayResult",
         "path crate::tree_protocol::HistoryResult",
-        "path crate::tree_protocol::KeysResult"
+        "path crate::tree_protocol::KeysResult",
+        "path crate::tree_protocol::SetDefaultResult"
       ]
     },
     {
