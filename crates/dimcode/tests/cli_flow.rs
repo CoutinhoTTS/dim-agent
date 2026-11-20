@@ -6023,10 +6023,16 @@ fn effort_snapshot(efforts: &[&str]) -> Value {
 
 /// A resumed line-mode Session folds the shown line from the cursor its attach
 /// reply carries: a configuration fact at that sequence is already the reply's
-/// model, and a later one reaches `/effort` (design §14).
+/// model, and a later one reaches `/effort`. The reply is authoritative: the
+/// directory only answers for a server that does not carry the field (design
+/// §14).
 #[test]
 fn a_resumed_line_mode_session_folds_the_default_branchs_cursor() {
-    for (line, cursor) in [("main", 8), ("line-1", 5)] {
+    for (line, cursor, listed) in [
+        ("main", 8, "main"),
+        ("line-1", 5, "line-1"),
+        ("line-1", 5, "main"),
+    ] {
         let home = Home::new();
         let daemon = home.daemon(move |wire| {
             wire.hello(&["session.branches"]);
@@ -6035,7 +6041,7 @@ fn a_resumed_line_mode_session_folds_the_default_branchs_cursor() {
             if line != "main" {
                 entries.push(json!({"branchId":line,"parentBranchId":"main","branchPoint":1,"state":"open","head":8}));
             }
-            wire.reply(&branches, json!({"defaultBranchId":line,"branches":entries}));
+            wire.reply(&branches, json!({"defaultBranchId":listed,"branches":entries}));
             let attach = wire.read("session.attach");
             let mut record = attach_record(&attach);
             record["defaultBranch"] = json!({"branchId":line,"sequence":cursor});

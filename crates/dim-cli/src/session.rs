@@ -269,7 +269,7 @@ pub async fn chat(
         }
         created.session_id
     };
-    let conversation = conversation(client, &session_id).await?;
+    let listed = conversation(client, &session_id).await?;
     let selected = if let (Some(preset), Some(_)) = (options.permission, &options.resume) {
         if !client.supports(&permission::PRESET_METHODS) {
             return Err(
@@ -277,7 +277,7 @@ pub async fn chat(
             );
         }
         Some(
-            permission::select(client, &session_id, &conversation, preset)
+            permission::select(client, &session_id, &listed, preset)
                 .await
                 .map_err(|error| {
                     crate::client::resume_failure("Cannot set the permission preset", error)
@@ -303,7 +303,7 @@ pub async fn chat(
             ..Default::default()
         })),
         (None, None) if interactive && client.supports(&["session.permission.get"]) => Some(
-            permission::read(client, &session_id, &conversation)
+            permission::read(client, &session_id, &listed)
                 .await
                 .map(|state| state.policy),
         ),
@@ -325,6 +325,13 @@ pub async fn chat(
     }
     let attached: Attached = client.typed("session.attach", params).await?;
     let session_cwd = attached.cwd;
+    // The attach reply names the line the conversation is on, beside the
+    // root's `sequence`; a server that predates the field leaves the directory
+    // as its answer (design §14).
+    let conversation = attached
+        .default_branch
+        .as_ref()
+        .map_or(listed, |cursor| cursor.branch_id.clone());
     if options.resume.is_some() {
         crate::session_host::adopt_startup(client, options, &session_id).await?;
     }

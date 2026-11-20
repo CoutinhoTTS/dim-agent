@@ -7,6 +7,12 @@ use super::*;
 /// The requests every flow meets besides the ones it asserts, answered here so
 /// each flow reads only the requests it is about.
 fn next(wire: &mut Wire) -> Value {
+    next_usage(wire, &mut |_| None)
+}
+
+/// The same requests, with the context reading answered when `usage` returns
+/// one and reported unknown otherwise.
+fn next_usage(wire: &mut Wire, usage: &mut impl FnMut(&Value) -> Option<Value>) -> Value {
     loop {
         let request = wire.read_any();
         let branch = request["params"]["branchId"].clone();
@@ -41,11 +47,12 @@ fn next(wire: &mut Wire) -> Value {
             ),
             "account.providers" => wire.reply(&request, json!([])),
             "provider.list" => wire.reply(&request, json!({"providers":[]})),
-            "session.context.usage" => {
-                wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
-                "code":-32601,"message":"Unknown method: session.context.usage",
-                "data":{"appError":"unknown_method"}}}))
-            }
+            "session.context.usage" => match usage(&request) {
+                Some(reading) => wire.reply(&request, reading),
+                None => wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+                        "code":-32601,"message":"Unknown method: session.context.usage",
+                        "data":{"appError":"unknown_method"}}})),
+            },
             _ => return request,
         }
     }
@@ -286,12 +293,24 @@ fn tui_a_refused_continue_is_shown_in_the_lines_panel() {
 
 /// The shown line resumes from the cursor its attach reply carries: a line's
 /// own sequence, and the root's `sequence` when the conversation is the root
-/// (design §14).
+/// (design §14). The attach reply is authoritative: the directory only
+/// answers for a server that does not carry the field.
 #[test]
 fn tui_resumes_the_shown_line_from_the_attach_cursor() {
-    for (line, cursor, entries) in [
-        ("main", 8, &[("main", None)][..]),
-        ("line-1", 5, &[("main", None), ("line-1", Some("main"))][..]),
+    for (line, cursor, listed, entries) in [
+        ("main", 8, "main", &[("main", None)][..]),
+        (
+            "line-1",
+            5,
+            "line-1",
+            &[("main", None), ("line-1", Some("main"))][..],
+        ),
+        (
+            "line-1",
+            5,
+            "main",
+            &[("main", None), ("line-1", Some("main"))][..],
+        ),
     ] {
         let home = Home::new();
         let daemon = home.daemon(move |wire| {
@@ -313,7 +332,7 @@ fn tui_resumes_the_shown_line_from_the_attach_cursor() {
             wire.reply(&attach, record);
             let branches = next(wire);
             assert_eq!(branches["method"], "session.branches");
-            wire.reply(&branches, directory(line, entries));
+            wire.reply(&branches, directory(listed, entries));
             let window = next(wire);
             assert_eq!(window["method"], "session.history.display");
             assert_eq!(window["params"]["branchId"], json!(line));
@@ -351,4 +370,233 @@ fn tui_resumes_the_shown_line_from_the_attach_cursor() {
         terminal.wait();
         daemon.join().unwrap();
     }
+}
+
+/// Another client's adoption on a line reaches the bar when the user continues
+/// there, and that line's own facts are read then (timeline UI §5, design §14).
+fn adopted(wire: &mut Wire, branch: &str, sequence: u64, model: &str, preferences: Value) {
+    wire.notice(
+        "session.event",
+        json!({"sessionId":"session","branchId":branch,
+            "event":configured_event(sequence, model, preferences)}),
+    );
+}
+
+/// A context reading as `session.context.usage` reports one.
+fn reading(input: f64) -> Value {
+    json!({"contextWindow":256000.0,"outputTokens":32000.0,"thresholdTokens":200000.0,
+        "estimatedInputTokens":input,"baselineSource":"estimate"})
+}
+
+fn policy(preset: &str) -> Value {
+    json!({"preset":preset,"allowedTools":[],"disallowedTools":[]})
+}
+
+/// `/resume` applies the launch preset to the resumed Session's default
+/// branch, the line its conversation is on, not to the root the interface is
+/// leaving (design §14).
+#[test]
+fn tui_resume_applies_the_preset_to_the_resumed_default_branch() {
+    let home = Home::new();
+    let workspace = std::fs::canonicalize(&home.0).unwrap();
+    let workspace = workspace.to_str().unwrap().to_owned();
+    let (chosen, preset) = std::sync::mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        wire.hello(&[
+            "session.methods",
+            "session.catalog",
+            "session.branches",
+            "session.permission.get",
+            "session.permission.update",
+        ]);
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
+        let catalog = wire.read("session.catalog");
+        wire.reply(
+            &catalog,
+            json!({"sessions":[{"sessionId":"session","cwd":workspace,
+                "preview":"on the line","model":{"providerId":"test","modelId":"model"},
+                "updatedAt":5}]}),
+        );
+        let directory = || directory("line-1", &[("main", None), ("line-1", Some("main"))]);
+        loop {
+            let request = next(wire);
+            match request["method"].as_str().unwrap_or_default() {
+                "session.branches" => wire.reply(&request, directory()),
+                "session.permission.get" => {
+                    chosen.send(request["params"]["branchId"].clone()).unwrap();
+                    wire.reply(
+                        &request,
+                        json!({"version":1,"policy":policy("workspace-write")}),
+                    );
+                    break;
+                }
+                other => panic!("unexpected {other}: {request}"),
+            }
+        }
+        let update = next(wire);
+        assert_eq!(update["method"], "session.permission.update");
+        chosen.send(update["params"]["branchId"].clone()).unwrap();
+        wire.reply(&update, json!({"version":2,"policy":policy("read-only")}));
+        loop {
+            let request = next(wire);
+            match request["method"].as_str().unwrap_or_default() {
+                "session.branches" => wire.reply(&request, directory()),
+                "session.permission.get" => {
+                    wire.reply(&request, json!({"version":2,"policy":policy("read-only")}))
+                }
+                "session.attach" => {
+                    let mut record = attach_record(&request);
+                    record["defaultBranch"] = json!({"branchId":"line-1","sequence":5});
+                    wire.reply(&request, record);
+                }
+                "session.history" => wire.reply(&request, history(5, vec![])),
+                other => panic!("unexpected {other}: {request}"),
+            }
+        }
+    });
+    let mut command = home.command();
+    command.args(["--permission", "read-only"]);
+    sized(&mut command, 100, 32);
+    let mut terminal = Terminal::launch_tui(command);
+    terminal.until("Read only");
+    terminal.write(b"/resume\r");
+    terminal.until("on the line");
+    terminal.write(b"\r");
+    terminal.until("test / model");
+    for step in 0..2 {
+        let branch = preset.recv_timeout(PATIENCE).unwrap();
+        assert_eq!(
+            branch,
+            json!("line-1"),
+            "step {step} of the launch preset must reach the resumed Session's default branch"
+        );
+    }
+    home.kill(&terminal);
+    terminal.wait();
+    daemon.join().unwrap();
+}
+
+/// `p` continues on the moved line: its transcript, and its own model,
+/// permission and context in the top bar, with its configuration facts folding
+/// from then on even at a sequence below the root's (design §14, timeline UI §5).
+#[test]
+fn tui_p_shows_the_moved_lines_own_model_permission_and_usage() {
+    let home = Home::new();
+    let (moved, move_seen) = std::sync::mpsc::channel();
+    let (preset, presets) = std::sync::mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        wire.hello(&[
+            "session.methods",
+            "session.branches",
+            "session.branch.get",
+            "session.branch_set_default",
+            "session.branch_end",
+            "session.permission.get",
+            "session.permission.update",
+            "session.context.usage",
+        ]);
+        let attach = wire.read("session.attach");
+        let mut record = attach_record(&attach);
+        record["defaultBranch"] = json!({"branchId":"main","sequence":8});
+        wire.reply(&attach, record);
+        let branches = next(wire);
+        assert_eq!(branches["method"], "session.branches");
+        wire.reply(
+            &branches,
+            directory("main", &[("main", None), ("line-1", Some("main"))]),
+        );
+        let root = next(wire);
+        assert_eq!(root["method"], "session.history");
+        wire.reply(&root, history(8, vec![]));
+        // Each line reports its own context: the root's, then the line's.
+        let mut usage = |request: &Value| {
+            let branch = request["params"]["branchId"].as_str().unwrap_or_default();
+            Some(reading(if branch == "line-1" { 64000. } else { 1800. }))
+        };
+        let mut root_preset = false;
+        loop {
+            let request = next_usage(wire, &mut usage);
+            let branch = request["params"]["branchId"].as_str().unwrap_or_default();
+            match request["method"].as_str().unwrap_or_default() {
+                "session.permission.get" => match branch {
+                    "main" => {
+                        assert!(!root_preset, "the root's preset was read twice");
+                        root_preset = true;
+                        wire.reply(
+                            &request,
+                            json!({"version":1,"policy":policy("workspace-write")}),
+                        );
+                        // Another client adopts a model on the line while the
+                        // root is still the default branch.
+                        adopted(
+                            wire,
+                            "line-1",
+                            3,
+                            "replacement",
+                            json!({"reasoningEffort":"high"}),
+                        );
+                    }
+                    "line-1" => {
+                        preset.send(branch.to_owned()).unwrap();
+                        wire.reply(
+                            &request,
+                            json!({"version":4,"policy":policy("full-access")}),
+                        );
+                    }
+                    other => panic!("permission read on {other}"),
+                },
+                "session.branch_set_default" => {
+                    assert_eq!(branch, "line-1");
+                    wire.reply(&request, json!({"defaultBranchId":"line-1"}));
+                    moved.send(()).unwrap();
+                }
+                "session.branch.get" => wire.reply(&request, entry("line-1", "main")),
+                "session.history" => {
+                    let through = if branch == "line-1" { 3 } else { 8 };
+                    wire.reply(&request, history(through, vec![]));
+                }
+                "session.submit" => {
+                    assert_eq!(branch, "line-1");
+                    wire.reply(&request, json!({"event":{}}));
+                    // A fact below the root's cursor is still the line's own.
+                    adopted(
+                        wire,
+                        "line-1",
+                        4,
+                        "chosen",
+                        json!({"reasoningEffort":"low"}),
+                    );
+                    break;
+                }
+                other => panic!("unexpected {other}: {request}"),
+            }
+        }
+        wire.hold();
+    });
+    let mut command = home.command();
+    sized(&mut command, 110, 34);
+    let mut terminal = Terminal::resume_tui(command);
+    terminal.until("test / model");
+    terminal.until("1.8K / 256K");
+    terminal.until("Workspace write");
+    terminal.write(b"/lines\r");
+    terminal.until("Main line");
+    terminal.write(b"\x1b[B");
+    terminal.write(b"p");
+    move_seen.recv_timeout(PATIENCE).unwrap();
+    terminal.write(b"\x1b");
+    terminal.until_anywhere("test / replacement · high");
+    terminal.until_anywhere("⏵⏵ Full access");
+    terminal.until_anywhere("64K / 256K");
+    assert_eq!(
+        presets.recv_timeout(PATIENCE).unwrap(),
+        "line-1",
+        "the moved line's own preset is read"
+    );
+    terminal.write(b"hello\r");
+    terminal.until("test / chosen · low");
+    home.kill(&terminal);
+    terminal.wait();
+    daemon.join().unwrap();
 }

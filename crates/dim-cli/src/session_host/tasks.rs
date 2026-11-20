@@ -96,6 +96,7 @@ impl Worker {
         self.cursors.clear();
         self.tool_origins.clear();
         self.default_branch = ROOT_BRANCH_ID.into();
+        self.line_configurations.clear();
         self.focus = DEFAULT_BRANCH_ID.into();
         self.side = None;
         self.lines.clear();
