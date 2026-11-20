@@ -6277,69 +6277,67 @@ impl App {
             }
         }
         let box_top = live.len();
-        let activity = |label: &str| fg(label, &p.activity);
         let shell_title = shell.map(|shell| match shell {
             Shell::Recorded => t("! shell mode"),
             Shell::Private => t("!! shell mode · not sent to the model"),
         });
-        let tinted = |label: &str| fg(label, shell_color);
-        let top_status = status.as_deref().filter(|_| !self.fullscreen);
-        let title = match (top_status, shell_title) {
-            (Some(text), _) => Some((text, &activity as &dyn Fn(&str) -> String)),
-            (None, Some(title)) => Some((title, &tinted as &dyn Fn(&str) -> String)),
-            (None, None) => None,
-        };
         let border = if shell.is_some() && self.prompt.is_none() {
             shell_color
         } else {
             &p.border
         };
         let edge = |edge: &str| fg(edge, border);
-        let mut composer_box = boxed(&rows, cols, &edge, &|_, body| body.to_owned(), title);
-        if self.fullscreen {
-            let outer = cols.saturating_sub(2 + MARGIN).max(4);
-            let margin = " ".repeat(MARGIN);
-            let room = outer.saturating_sub(2);
-            let left = title.as_ref().map_or(0, |(text, _)| width_of(text) + 3);
-            let model = self
-                .label
-                .as_ref()
-                .and_then(|label| label.fitted(|text| left + width_of(text) + 3 < room))
-                .map(|label| fg(&label, &p.highlight));
-            if self.prompt.is_none()
-                && let Some(model) = &model
-            {
-                let end = MARGIN + outer - 3;
-                frame.model_label = Some((box_top, end - width_of(model)..end));
-            }
-            let title = title.map(|(text, label)| label(text));
-            let docked = self.dock_status(status.as_deref());
-            let place = self.composer_place(docked.as_deref(), outer);
-            let last = composer_box.len() - 1;
-            composer_box[0] = format!(
-                "{margin}{}",
-                border_line(("╭", "╮"), title.as_deref(), model.as_deref(), outer, &edge)
-            );
-            composer_box[last] = format!(
-                "{margin}{}",
-                border_line(
-                    ("╰", "╯"),
-                    docked.as_deref(),
-                    place.as_deref(),
-                    outer,
-                    &edge
-                )
-            );
-        } else {
-            let outer = cols.saturating_sub(2 + MARGIN).max(4);
-            let margin = " ".repeat(MARGIN);
-            let place = self.composer_place(None, outer);
-            let last = composer_box.len() - 1;
-            composer_box[last] = format!(
-                "{margin}{}",
-                border_line(("╰", "╯"), None, place.as_deref(), outer, &edge)
-            );
+        let mut composer_box = boxed(&rows, cols, &edge, &|_, body| body.to_owned(), None);
+        let outer = cols.saturating_sub(2 + MARGIN).max(4);
+        let margin = " ".repeat(MARGIN);
+        let room = outer.saturating_sub(2);
+        let max_border = outer.saturating_sub(6);
+        let title = shell_title
+            .map(|text| clip(text, max_border).0)
+            .filter(|text| !text.is_empty())
+            .map(|text| fg(&text, shell_color));
+        let left = title.as_deref().map_or(0, |text| width_of(text) + 3);
+        let model = self
+            .label
+            .as_ref()
+            .and_then(|label| label.fitted(|text| left + width_of(text) + 3 < room))
+            .map(|label| fg(&label, &p.highlight));
+        if self.fullscreen
+            && self.prompt.is_none()
+            && let Some(model) = &model
+        {
+            let end = MARGIN + outer - 3;
+            frame.model_label = Some((box_top, end - width_of(model)..end));
         }
+        let docked = self.dock_status(status.as_deref()).and_then(|text| {
+            if width_of(&text) <= max_border {
+                return Some(text);
+            }
+            let (mut clipped, used) = clip(&text, max_border);
+            if used == 0 {
+                return None;
+            }
+            if clipped.contains('\x1b') && !clipped.ends_with("\x1b[0m") {
+                clipped.push_str("\x1b[0m");
+            }
+            Some(clipped)
+        });
+        let place = self.composer_place(docked.as_deref(), outer);
+        let last = composer_box.len() - 1;
+        composer_box[0] = format!(
+            "{margin}{}",
+            border_line(("╭", "╮"), title.as_deref(), model.as_deref(), outer, &edge)
+        );
+        composer_box[last] = format!(
+            "{margin}{}",
+            border_line(
+                ("╰", "╯"),
+                docked.as_deref(),
+                place.as_deref(),
+                outer,
+                &edge
+            )
+        );
         let replaced = !command_entry
             && matches!(
                 self.prompt,
@@ -8230,17 +8228,6 @@ impl App {
         }
     }
 
-    fn slot_outranks_model(&self) -> bool {
-        match &self.notice {
-            Some(_) => true,
-            None if self.failure.is_some() => true,
-            None => matches!(
-                &self.snapshot,
-                Some(s) if !s.questions.is_empty() || !s.approvals.is_empty()
-            ),
-        }
-    }
-
     /// How many tasks the Session runs apart from the turn, as its own
     /// status segment: none while every task has ended, so an idle Session
     /// with nothing in the background draws no segment at all.
@@ -8310,8 +8297,9 @@ impl App {
         }
     }
 
-    /// Fullscreen's bottom border label, the status corner: the run
-    /// status, the slot (a notice in the highlight colour) and the context use.
+    /// The composer's bottom-left border label, the status corner: the run
+    /// status, the slot (a notice in the highlight colour), background task
+    /// count, goal and context use.
     fn dock_status(&self, run: Option<&str>) -> Option<String> {
         let p = &self.palette;
         let mut parts: Vec<String> = Vec::new();
@@ -8390,84 +8378,7 @@ impl App {
         let hint = fg(t("(shift+tab to cycle)"), &p.muted);
         let total = cols.saturating_sub(2);
         let prefix = format!("{}{permission}", " ".repeat(MARGIN));
-        if self.fullscreen {
-            return clip(&format!("{prefix} {hint}"), total).0;
-        }
-        let goal = self
-            .goal_label()
-            .map(|goal| fg(&format!("  {goal}"), &p.muted));
-        let context = self.context_label().map(|context| {
-            let color = if self.context_near() {
-                &p.warning
-            } else {
-                &p.muted
-            };
-            fg(&format!("  {context}"), color)
-        });
-        let slot = self.slot().map(|slot| {
-            let color = if self.notice.is_some() {
-                &p.highlight
-            } else {
-                &p.muted
-            };
-            fg(&format!("  {slot}"), color)
-        });
-        let background = self
-            .background_label()
-            .map(|background| fg(&format!("  {background}"), &p.muted));
-        let width = |part: &Option<String>| part.as_ref().map_or(0, |text| width_of(text));
-        let prefix_width = width_of(&prefix);
-        let kept = if self.slot_outranks_model() {
-            width(&slot)
-        } else {
-            0
-        };
-        let label = self.label.as_ref().and_then(|label| {
-            label.fitted(|text| prefix_width + kept + 2 + width_of(text) <= total)
-        });
-        let render = |with_hint: bool| {
-            let mut head = prefix.clone();
-            if with_hint {
-                head.push_str(&format!(" {hint}"));
-            }
-            let head_width = width_of(&head);
-            let label_width = label.as_ref().map_or(0, |text| width_of(text) + 2);
-            let room = total.saturating_sub(head_width + label_width);
-            let lead: String = [goal.clone(), context.clone()]
-                .into_iter()
-                .flatten()
-                .collect();
-            let lead = if kept == 0 {
-                lead
-            } else {
-                clip(&lead, room.saturating_sub(kept + width(&background))).0
-            };
-            let mut rest = lead;
-            rest.push_str(slot.as_deref().unwrap_or_default());
-            rest.push_str(background.as_deref().unwrap_or_default());
-            let (rest, rest_used) = clip(&rest, room);
-            let content = head_width + rest_used;
-            let line = format!("{head}{rest}");
-            match label {
-                Some(ref text) => {
-                    let gap = total - content - width_of(text);
-                    let line = format!(
-                        "{line}{}{}",
-                        " ".repeat(gap),
-                        fg(text, &self.palette.highlight)
-                    );
-                    (line, content)
-                }
-                None => (line, content),
-            }
-        };
-        let (line, used) = render(false);
-        let label_room = label.as_ref().map_or(0, |text| 2 + width_of(text));
-        if used + 1 + width_of(&hint) + label_room <= total {
-            render(true).0
-        } else {
-            line
-        }
+        clip(&format!("{prefix} {hint}"), total).0
     }
 }
 
@@ -12086,6 +11997,22 @@ mod tests {
             home.path().to_path_buf(),
             "/work".into(),
         );
+        let bottom = |app: &mut App| -> (String, String) {
+            let rows: Vec<String> = app
+                .frame((160, 24))
+                .live
+                .iter()
+                .map(|row| strip_escapes(row))
+                .collect();
+            let border = rows
+                .iter()
+                .rev()
+                .find(|row| row.contains('╰'))
+                .cloned()
+                .expect("composer bottom border");
+            let footer = rows.last().cloned().expect("footer line");
+            (border, footer)
+        };
         app.apply(Update::Snapshot(Box::new(ViewSnapshot {
             session_id: "s1".into(),
             running: true,
@@ -12095,39 +12022,41 @@ mod tests {
             ],
             ..ViewSnapshot::default()
         })));
-        let line = strip_escapes(&app.status_line(160));
-        assert!(line.contains("esc interrupt"), "{line}");
-        assert!(line.contains("2 in background · /tasks"), "{line}");
-
-        let docked = app
-            .dock_status(Some("· working…  1s"))
-            .expect("a status corner");
-        let docked = strip_escapes(&docked);
-        assert!(docked.contains("esc interrupt"), "{docked}");
-        assert!(docked.contains("2 in background · /tasks"), "{docked}");
+        for fullscreen in [false, true] {
+            app.fullscreen = fullscreen;
+            let (border, footer) = bottom(&mut app);
+            assert!(border.contains("esc interrupt"), "{border}");
+            assert!(border.contains("2 in background · /tasks"), "{border}");
+            assert!(footer.contains("Workspace write"), "{footer}");
+            assert!(!footer.contains("esc interrupt"), "{footer}");
+            assert!(!footer.contains("in background"), "{footer}");
+        }
 
         let mut no_tasks = ViewSnapshot {
             session_id: "s1".into(),
             running: true,
             ..ViewSnapshot::default()
         };
+        app.fullscreen = false;
         app.apply(Update::Snapshot(Box::new(no_tasks.clone())));
-        let line = strip_escapes(&app.status_line(160));
-        assert!(line.contains("esc interrupt"), "{line}");
-        assert!(!line.contains("in background"), "{line}");
+        let (border, footer) = bottom(&mut app);
+        assert!(border.contains("esc interrupt"), "{border}");
+        assert!(!border.contains("in background"), "{border}");
+        assert!(!footer.contains("esc interrupt"), "{footer}");
 
         no_tasks.tasks = vec![background_task("t3", "cargo fmt")];
         app.apply(Update::Snapshot(Box::new(no_tasks)));
+        let (border, _) = bottom(&mut app);
         assert!(
-            strip_escapes(&app.status_line(160)).contains("1 in background · /tasks"),
-            "a new task counts again"
+            border.contains("1 in background · /tasks"),
+            "a new task counts again: {border}"
         );
     }
 
     /// A session that keeps every command the interface sends.
     struct Recorder(std::rc::Rc<std::cell::RefCell<Vec<Command>>>);
 
-    /// An 80-column scrollback app carrying `provider / model` with `effort`.
+    /// A scrollback app carrying `provider / model` with `effort`.
     fn status_app(provider: &str, model: &str, effort: Option<&str>) -> (App, tempfile::TempDir) {
         let theme = test_theme();
         let home = tempfile::tempdir().unwrap();
@@ -12136,7 +12065,7 @@ mod tests {
             MarkdownRenderer::new(&theme),
             theme.palette.clone(),
             home.path().to_path_buf(),
-            "/work".into(),
+            "/private/tmp/dima-probe".into(),
         );
         app.apply(Update::Ready(Configuration {
             provider_id: provider.into(),
@@ -12150,78 +12079,224 @@ mod tests {
         (app, home)
     }
 
-    fn status_rows(app: &App) -> String {
+    fn composer_chrome(app: &mut App, cols: u16) -> (String, String, String) {
         use crate::ui::render::panel::strip_escapes;
-        strip_escapes(&app.status_line(80))
+        let rows: Vec<String> = app
+            .frame((cols, 24))
+            .live
+            .iter()
+            .map(|row| strip_escapes(row))
+            .collect();
+        let top = rows
+            .iter()
+            .find(|row| row.contains('╭'))
+            .cloned()
+            .expect("composer top border");
+        let bottom = rows
+            .iter()
+            .rev()
+            .find(|row| row.contains('╰'))
+            .cloned()
+            .expect("composer bottom border");
+        let footer = rows.last().cloned().expect("footer line");
+        (top, bottom, footer)
     }
 
     #[test]
-    fn a_slot_that_asks_the_user_keeps_its_text_before_the_shortcut_hint() {
-        let (mut app, _home) = status_app("test", "model", None);
-        app.set_notice("Press Ctrl+C again to exit");
-        let line = status_rows(&app);
-        assert!(line.contains("Press Ctrl+C again to exit"), "{line}");
-        assert!(line.contains("test / model"), "{line}");
-        assert!(!line.contains("(shift+tab to cycle)"), "{line}");
-        assert!(line.starts_with(" ⏵⏵ Workspace write"), "{line}");
+    fn both_modes_unify_composer_borders_and_keep_permission_only_on_the_footer() {
+        let (mut app, _home) = status_app("local", "fixture-model", Some("high"));
+        app.context = Some(crate::model::session::ContextReading {
+            input: 98_300,
+            window: 1_000_000,
+            threshold: 900_000,
+        });
 
-        app.set_notice("/rename needs a session");
-        let line = status_rows(&app);
-        assert!(line.contains("/rename needs a session"), "{line}");
-        assert!(line.contains("test / model"), "{line}");
-        assert!(!line.contains("(shift+tab to cycle)"), "{line}");
-    }
+        // Idle: both borders carry no run status or interrupt hint.
+        for fullscreen in [false, true] {
+            app.fullscreen = fullscreen;
+            let (top, bottom, footer) = composer_chrome(&mut app, 100);
+            assert!(top.contains("local / fixture-model · high"), "{top}");
+            assert!(
+                !top.contains("thinking…") && !top.contains("working…"),
+                "{top}"
+            );
+            assert!(
+                !bottom.contains("thinking…") && !bottom.contains("working…"),
+                "{bottom}"
+            );
+            assert!(!bottom.contains("esc interrupt"), "{bottom}");
+            assert!(bottom.contains("98.3K / 1M"), "{bottom}");
+            assert!(bottom.contains("/private/tmp/dima-probe"), "{bottom}");
+            assert!(
+                footer.contains("⏵⏵ Workspace write (shift+tab to cycle)"),
+                "{footer}"
+            );
+            assert!(!footer.contains("local / fixture-model"), "{footer}");
+            assert!(!footer.contains("98.3K / 1M"), "{footer}");
+        }
 
-    #[test]
-    fn a_slot_that_asks_the_user_outranks_a_long_model_label() {
-        let (mut app, _home) = status_app("deepseek", "deepseek-v4.1-flash", Some("max"));
-        app.set_notice("Press Ctrl+C again to exit");
-        let line = status_rows(&app);
-        assert!(line.contains("Press Ctrl+C again to exit"), "{line}");
-        assert!(
-            !line.contains("deepseek / deepseek-v4.1-flash"),
-            "the model name gives up its cells and then its place: {line}"
-        );
-    }
-
-    #[test]
-    fn a_run_state_slot_still_yields_to_the_model_label() {
-        let (mut app, _home) = status_app("deepseek", "deepseek-v4.1-flash", Some("max"));
+        // Running thinking turn: status, slot and usage share bottom-left; model sits top-right;
+        // nothing is duplicated onto the footer.
+        let mut thinking_row = (*message(false)).clone();
+        thinking_row.row_id = "t1".into();
+        thinking_row.kind = RowKind::Thinking;
+        thinking_row.text = "thinking about it".into();
+        thinking_row.streaming = true;
         app.apply(Update::Snapshot(Box::new(ViewSnapshot {
             session_id: "s1".into(),
             running: true,
+            rows: vec![std::sync::Arc::new(thinking_row)],
             ..ViewSnapshot::default()
         })));
-        let line = status_rows(&app);
-        assert!(line.contains("esc interrupt"), "{line}");
-        assert!(
-            line.contains("deepseek / deepseek-v4.1-flash · max"),
-            "the model keeps its place and its effort: {line}"
-        );
+        for fullscreen in [false, true] {
+            app.fullscreen = fullscreen;
+            let (top, bottom, footer) = composer_chrome(&mut app, 100);
+            assert!(top.contains("local / fixture-model · high"), "{top}");
+            assert!(!top.contains("thinking…"), "{top}");
+            assert!(bottom.contains("thinking…"), "{bottom}");
+            assert!(bottom.contains("esc interrupt"), "{bottom}");
+            assert!(bottom.contains("98.3K / 1M"), "{bottom}");
+            assert!(bottom.contains("/private/tmp/dima-probe"), "{bottom}");
+            assert!(
+                footer.contains("⏵⏵ Workspace write (shift+tab to cycle)"),
+                "{footer}"
+            );
+            assert!(!footer.contains("esc interrupt"), "{footer}");
+            assert!(!footer.contains("98.3K / 1M"), "{footer}");
+            assert!(!footer.contains("local / fixture-model"), "{footer}");
 
-        let (mut wide, _home) =
-            status_app("anthropic", "gpt-5-codex-long-context-preview-2026", None);
-        wide.apply(Update::Snapshot(Box::new(ViewSnapshot {
-            session_id: "s1".into(),
-            running: true,
-            ..ViewSnapshot::default()
-        })));
-        let line = status_rows(&wide);
-        assert!(
-            line.contains("anthropic / gpt-5-codex-long-context-preview-2026"),
-            "a run state yields to the model label: {line}"
-        );
+            // Narrow (60 cols): status, slot and usage fit bottom-left; place cuts from left.
+            let (top, bottom, footer) = composer_chrome(&mut app, 60);
+            assert!(top.contains("local / fixture-model · high"), "{top}");
+            assert!(!top.contains("thinking…"), "{top}");
+            assert!(bottom.contains("thinking…"), "{bottom}");
+            assert!(bottom.contains("esc interrupt"), "{bottom}");
+            assert!(bottom.contains("98.3K / 1M"), "{bottom}");
+            assert!(
+                bottom.contains('…'),
+                "place shortens from the left: {bottom}"
+            );
+            assert!(!footer.contains("esc interrupt"), "{footer}");
+            assert!(!footer.contains("local / fixture-model"), "{footer}");
+
+            // Very narrow (24 cols): status keeps its phase ahead of elapsed/slot; model drops.
+            let (top, bottom, _) = composer_chrome(&mut app, 24);
+            assert!(!top.contains("local / fixture-model"), "{top}");
+            assert!(bottom.contains("thinking…"), "{bottom}");
+        }
     }
 
     #[test]
-    fn a_wide_status_line_shows_the_hint_the_model_and_the_slot() {
-        use crate::ui::render::panel::strip_escapes;
-        let (mut app, _home) = status_app("test", "model", None);
+    fn scrollback_composer_handles_notices_approvals_questions_retry_disconnect_shell_and_unread() {
+        use crate::model::view::{ApprovalView, RetryView};
+        use dim_agent_types::ModelFailureKind;
+
+        let (mut app, _home) = status_app("local", "fixture-model", None);
+
+        // Notice: bottom border, while model stays top-right and permission stays on footer.
         app.set_notice("Press Ctrl+C again to exit");
-        let line = strip_escapes(&app.status_line(160));
-        assert!(line.contains("(shift+tab to cycle)"), "{line}");
-        assert!(line.contains("Press Ctrl+C again to exit"), "{line}");
-        assert!(line.contains("test / model"), "{line}");
+        let (top, bottom, footer) = composer_chrome(&mut app, 100);
+        assert!(top.contains("local / fixture-model"), "{top}");
+        assert!(bottom.contains("Press Ctrl+C again to exit"), "{bottom}");
+        assert!(
+            footer.contains("⏵⏵ Workspace write (shift+tab to cycle)"),
+            "{footer}"
+        );
+        assert!(!footer.contains("Press Ctrl+C again to exit"), "{footer}");
+        assert!(!footer.contains("local / fixture-model"), "{footer}");
+        app.notice = None;
+
+        // Approval slot (when composer is visible).
+        app.apply(Update::Snapshot(Box::new(ViewSnapshot {
+            session_id: "s1".into(),
+            approvals: vec![ApprovalView {
+                member: None,
+                branch_id: "main".into(),
+                request_id: "req-1".into(),
+                tool_name: "exec".into(),
+                reason: "run".into(),
+                tool_input: serde_json::json!({"command": "echo hi"}),
+                always: None,
+            }],
+            ..ViewSnapshot::default()
+        })));
+        app.prompt = None;
+        let (_, bottom, footer) = composer_chrome(&mut app, 100);
+        assert!(bottom.contains("permission required"), "{bottom}");
+        assert!(!footer.contains("permission required"), "{footer}");
+
+        // Question slot (when composer is visible).
+        app.apply(Update::Snapshot(Box::new(ViewSnapshot {
+            session_id: "s1".into(),
+            questions: vec![questions()],
+            ..ViewSnapshot::default()
+        })));
+        app.prompt = None;
+        let (_, bottom, footer) = composer_chrome(&mut app, 100);
+        assert!(bottom.contains("answer required"), "{bottom}");
+        assert!(!footer.contains("answer required"), "{footer}");
+
+        // Retry countdown at 100 and 60 cols: stays on bottom border and is clipped rather than dropped.
+        app.apply(Update::Snapshot(Box::new(ViewSnapshot {
+            session_id: "s1".into(),
+            running: true,
+            retry: Some(RetryView {
+                attempt: 2,
+                max_attempts: 8,
+                retry_at_ms: retry_at(30_000),
+                kind: ModelFailureKind::ServerError,
+                reason: Some("The server is overloaded".into()),
+            }),
+            ..ViewSnapshot::default()
+        })));
+        for cols in [100, 60] {
+            let (top, bottom, footer) = composer_chrome(&mut app, cols);
+            assert!(!top.contains("Retrying"), "{cols}: {top}");
+            assert!(bottom.contains("Retrying 2/8 in"), "{cols}: {bottom}");
+            assert!(!footer.contains("Retrying"), "{cols}: {footer}");
+        }
+
+        // Disconnect notice on bottom border.
+        app.apply(Update::Snapshot(Box::new(ViewSnapshot {
+            session_id: "s1".into(),
+            ..ViewSnapshot::default()
+        })));
+        app.failure = Some("daemon disconnected".into());
+        let (_, bottom, footer) = composer_chrome(&mut app, 100);
+        assert!(bottom.contains("Disconnected · draft kept"), "{bottom}");
+        assert!(!footer.contains("Disconnected · draft kept"), "{footer}");
+        app.failure = None;
+
+        // Shell mode keeps top-border left title beside top-right model label.
+        app.handle_input(InputEvent::Key(crate::ui::terminal::KeyEvent::new(
+            KeyCode::Char('!'),
+            Modifiers::NONE,
+        )));
+        let (top, bottom, _) = composer_chrome(&mut app, 100);
+        assert!(top.contains("! shell mode"), "{top}");
+        assert!(top.contains("local / fixture-model"), "{top}");
+        assert!(!bottom.contains("! shell mode"), "{bottom}");
+        app.handle_input(InputEvent::Key(crate::ui::terminal::KeyEvent::new(
+            KeyCode::Backspace,
+            Modifiers::NONE,
+        )));
+
+        // Unread badge shares bottom-right with place and yields to left status at narrow width.
+        let mut unread = ViewSnapshot {
+            session_id: "s1".into(),
+            running: true,
+            ..ViewSnapshot::default()
+        };
+        unread.unread_lines.insert("b-7c".into());
+        app.apply(Update::Snapshot(Box::new(unread)));
+        let (_, wide_bottom, _) = composer_chrome(&mut app, 100);
+        assert!(wide_bottom.contains("working…"), "{wide_bottom}");
+        assert!(wide_bottom.contains("esc interrupt"), "{wide_bottom}");
+        assert!(wide_bottom.contains("Unread (1) · /lines"), "{wide_bottom}");
+        let (_, narrow_bottom, _) = composer_chrome(&mut app, 60);
+        assert!(narrow_bottom.contains("working…"), "{narrow_bottom}");
+        assert!(narrow_bottom.contains("esc interrupt"), "{narrow_bottom}");
+        assert!(narrow_bottom.contains("/lines (1)"), "{narrow_bottom}");
     }
 
     impl SessionPort for Recorder {
@@ -12270,9 +12345,9 @@ mod tests {
                 });
                 assert_eq!(
                     label,
-                    match (fullscreen, cols) {
-                        (_, 100) => Some("test / model · high"),
-                        (true, 26) => Some("test / model"),
+                    match cols {
+                        100 => Some("test / model · high"),
+                        26 => Some("test / model"),
                         _ => None,
                     }
                 );
@@ -12729,7 +12804,7 @@ mod tests {
         let live = crate::ui::render::panel::strip_escapes(&app.frame((100, 40)).live.join("\n"));
         let row = live
             .lines()
-            .find(|line| line.contains("Prompt suggestion"))
+            .find(|line| line.contains('│') && line.contains("Prompt suggestion"))
             .expect("the switch's row");
         assert!(
             row.contains(t("Not available")),

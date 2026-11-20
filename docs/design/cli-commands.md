@@ -3109,11 +3109,11 @@ Assistant: ...
 Both TUI modes draw a live permission footer under the composer, without an `AGENT` prefix;
 the preset, colors, localized shortcut hint and key behavior are defined in
 [`/permissions`](#permissions). It is not committed to transcript history.
-Scrollback keeps the goal marker, context use against its window, and one slot for the state
-in force — a notice, a required answer or permission, `esc interrupt`, or the background task
-count — on the same line. The model, with its effort when both fit, is right-aligned there;
-the line is clipped to the terminal width. Fullscreen instead keeps run status, the status
-slot, goal and context information in the composer border, not the permission preset.
+Both modes place the model label (with its effort when both fit) on the right side of the
+composer's top border, and keep the run status, the status slot (a notice, a required answer
+or permission, `esc interrupt`, or disconnect), background task count, goal and context
+information on the left side of the composer's bottom border, leaving only the permission
+preset and its shortcut hint on the footer line.
 
 ### Submit check warnings
 
@@ -3277,14 +3277,10 @@ The three rows above are alternatives: only the effective preset appears. The sh
 is translated into the selected interface language. Read only is cyan,
 Workspace write is purple and Full access is yellow; the shortcut hint is muted. Light themes
 use darker shades for contrast, and limited-color terminals use their cyan, magenta and yellow
-slots. The permission label takes priority over the hint and other status content on narrow
-terminals. Fullscreen retains run, goal, context and notice information in the composer border.
-In scrollback the hint ranks last: the permission label is drawn first and the hint only when
-the whole line still fits with it, so the hint's cells go to the rest when they are needed. A
-slot that asks the user something or reports a problem, which is a notice, the disconnected
-text, `answer required` and `permission required`, outranks the right-aligned model: the model
-gives up its effort first, then its place while that slot shows. `esc interrupt`, goal, context
-and background text still yield to the model, which keeps its space before they are clipped.
+slots. The permission label takes priority over the hint on narrow terminals, where the line
+is clipped to the terminal width. Both modes keep run status, the status slot, background
+task count, goal and context information on the composer's bottom border, and the model label
+on the composer's top border.
 
 With the composer owning the keys, Shift+Tab cycles Read only → Workspace write → Full access
 → Read only without submitting or changing the draft, including during a running turn. It
