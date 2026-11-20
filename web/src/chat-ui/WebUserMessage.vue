@@ -28,7 +28,7 @@ const actions = useChatUiHost().timeline?.actions
 const pending = computed(() => actions?.pending.value === true)
 const canFork = computed(() => !props.readOnly && actions?.canFork(props.message.id) === true)
 /** This message's turn is still running, so no cut before it is a rest point yet. */
-const inRunningTurn = computed(() => props.branchDisabled || context.activeUserMessageId.value === props.message.id)
+const inRunningTurn = computed(() => props.branchDisabled || context.runningUserMessageIds.value.has(props.message.id))
 /** Why branching is off for this message, or undefined when it is on. */
 const branchBlocked = computed(() => {
   const branch = context.actions.value.branch

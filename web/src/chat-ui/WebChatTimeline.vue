@@ -87,21 +87,20 @@ const { host, actions } = createWebChatUiHost({
   openBranch: (text, cut) => emit("branch", text, cut),
 })
 /**
- * The running turn's user message: the newest one after the last turn end. A
- * notice or error inside the turn splits it into several display rows, so the
- * renderer's latest-row check alone does not find it.
+ * The user messages of the running turn: every one after the last turn end,
+ * the message that started it and any queued or steered beside it. A notice or
+ * error inside the turn splits it into several display rows, so the renderer's
+ * latest-row check alone does not find them.
  */
-const activeUserMessageId = computed(() => {
-  if (!props.running) return undefined
-  for (let index = props.rows.length - 1; index >= 0; index--) {
-    const row = props.rows[index]!
-    if (row.kind === "user") return row.sequence > (props.lastTurnEnd ?? -1) ? row.key : undefined
-  }
-  return undefined
+const runningUserMessageIds = computed(() => {
+  const ids = new Set<string>()
+  if (!props.running) return ids
+  for (const row of props.rows) if (row.kind === "user" && row.sequence > (props.lastTurnEnd ?? -1)) ids.add(row.key)
+  return ids
 })
 provide(CHAT_UI_HOST, host)
 provide(WEB_TIMELINE, {
-  activeUserMessageId,
+  runningUserMessageIds,
   rowByKey,
   isDark,
   labels,

@@ -315,6 +315,26 @@ describe("WebChatTimeline actions", () => {
     expect(button(0, "timeline-user-fork").disabled, "an earlier message").toBe(false)
   })
 
+  it("keeps every message after the last turn end from branching or forking while the turn runs", async () => {
+    const projection = project([
+      ...recorded.slice(0, 7),
+      event(8, { kind: "input", text: "start the run", content: [{ type: "text", text: "start the run" }], blocks: [] }),
+      event(9, { kind: "input", text: "and also this", content: [{ type: "text", text: "and also this" }], blocks: [] }),
+    ])
+    expect(projection.rows.filter(row => row.kind === "user").map(row => row.kind === "user" && row.sequence)).toEqual([1, 8, 9])
+    const { root } = mountWith(projection.rows, { features: HELLO_FEATURES, props: { running: true, lastTurnEnd: projection.lastTurnEnd, branchable: true } })
+    await settle()
+    const button = (index: number, id: string) => userActions(root, index).querySelector<HTMLButtonElement>(`[data-testid='${id}']`)!
+    for (const index of [1, 2]) {
+      expect(button(index, "timeline-user-branch").disabled, `message ${index}`).toBe(true)
+      expect(button(index, "timeline-user-branch").getAttribute("aria-label")).toBe("You can branch from here once this turn finishes.")
+      expect(button(index, "timeline-user-fork").disabled, `message ${index}`).toBe(true)
+      expect(button(index, "timeline-user-fork").getAttribute("aria-label")).toBe("You can fork from here once this turn finishes.")
+    }
+    expect(button(0, "timeline-user-branch").disabled, "the completed turn's message").toBe(false)
+    expect(button(0, "timeline-user-fork").disabled, "the completed turn's message").toBe(false)
+  })
+
   it("forks the main line before a message after confirmation and opens the new session", async () => {
     const { root, pinia, router } = mountWith(project(recorded).rows, { features: HELLO_FEATURES, props: { branchable: true } })
     const fork = vi.spyOn(useChatStore(pinia), "fork").mockResolvedValue("s-2")
