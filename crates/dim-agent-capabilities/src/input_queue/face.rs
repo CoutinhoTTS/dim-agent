@@ -108,13 +108,23 @@ impl HostDispatch for SubmitChecks {
                     let _finish = stop.clone().drop_guard();
                     let run = owner.check(&request, &stop);
                     tokio::pin!(run);
+                    let cancellation =
+                        async { settle(cancelled.call_async(Value::List(vec![])).await?).await };
                     let result = tokio::select! {
                         result = &mut run => result,
-                        _ = async { settle(cancelled.call_async(Value::List(vec![])).await?).await } => {
+                        _ = cancellation => {
                             stop.cancel();
                             run.await
                         }
-                    }.map_err(|_| rutis_bridge::exports::failure("SubmitCheckError","cancelled","submit check interrupted".into(),None))?;
+                    }
+                    .map_err(|_| {
+                        rutis_bridge::exports::failure(
+                            "SubmitCheckError",
+                            "cancelled",
+                            "submit check interrupted".into(),
+                            None,
+                        )
+                    })?;
                     arg(&result)
                 }))
             }

@@ -679,6 +679,19 @@ async fn node_session_loader_creates_and_removes_only_its_own_instance() {
             .count()
     };
     let before = leaves();
+    let refused = client
+        .rpc(
+            "session.loaderfixture.create",
+            json!({"sessionId": first, "group":"session"}),
+        )
+        .await;
+    assert!(
+        refused["error"]
+            .to_string()
+            .contains("outside the loader scope"),
+        "{refused}"
+    );
+    assert_eq!(leaves(), before);
     let reply = client
         .rpc("session.loaderfixture.create", json!({"sessionId": first}))
         .await;

@@ -516,7 +516,7 @@ impl SessionLifecycle {
                 _ = stop.cancelled() => {}
                 _ = async {
                     loop {
-                        let current = faults.borrow_and_update().clone().map(crate::SessionFault::from);
+                        let current = faults.borrow_and_update().clone().map(Into::into);
                         if listener(current).await.is_err() || faults.changed().await.is_err() {
                             return;
                         }

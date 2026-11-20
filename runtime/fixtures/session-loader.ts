@@ -15,7 +15,8 @@ const part = definePlugin({
       async call => {
         if (call.method === namespace + '.create') {
           const { instanceId } = await loader.create({
-            group: 'FixtureInstances', definitionId: 'fixture-content', instanceData: { body: 'content' },
+            group: typeof call.params.group === 'string' ? call.params.group : 'FixtureInstances',
+            definitionId: 'fixture-content', instanceData: { body: 'content' },
           })
           return { kind: 'value', value: { instanceId: Number(instanceId) } }
         }

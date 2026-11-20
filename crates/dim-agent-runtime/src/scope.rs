@@ -73,14 +73,20 @@ pub enum SessionInstanceError {
 pub struct SessionLoader {
     loader: rutis_loader::Loader,
     anchor: Ctx,
+    parent_group: Option<&'static str>,
     instances: std::sync::Mutex<std::collections::HashMap<u64, rutis::host::FiberView>>,
 }
 #[rutis::service]
 impl SessionLoader {
-    pub fn new(loader: rutis_loader::Loader, anchor: Ctx) -> Self {
+    pub fn new(
+        loader: rutis_loader::Loader,
+        anchor: Ctx,
+        parent_group: Option<&'static str>,
+    ) -> Self {
         Self {
             loader,
             anchor,
+            parent_group,
             instances: Default::default(),
         }
     }
@@ -90,6 +96,15 @@ impl SessionLoader {
         definition: SessionInstanceDefinition,
     ) -> std::result::Result<SessionInstance, SessionInstanceError> {
         let group = definition.group.clone();
+        if self
+            .loader
+            .get(&group)
+            .is_some_and(|row| row.parent.as_deref() != self.parent_group)
+        {
+            return Err(SessionInstanceError::Create(format!(
+                "instance group {group} is outside the loader scope"
+            )));
+        }
         let created = self
             .loader
             .create_instance(&self.anchor, &group)

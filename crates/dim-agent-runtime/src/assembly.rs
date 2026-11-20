@@ -1108,7 +1108,11 @@ impl DynPlugin for SessionScopePlugin {
             let (owner, scope) = (&self.owner, self.scope);
             ctx.provide_at(
                 scope.key::<crate::SessionLoader>(),
-                Arc::new(crate::SessionLoader::new(owner.loader.clone(), ctx.clone())),
+                Arc::new(crate::SessionLoader::new(
+                    owner.loader.clone(),
+                    ctx.clone(),
+                    Some(SESSION_GROUP),
+                )),
             )?;
             ctx.provide_at(scope.key::<SessionConfig>(), Arc::new(owner.config.clone()))?;
             ctx.provide_at(
