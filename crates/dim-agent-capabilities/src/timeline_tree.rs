@@ -2878,6 +2878,22 @@ impl TimelineTreeControl for TimelineTree {
                 .and_then(|result| result.as_ref().ok().cloned())
         })
     }
+    fn published(&self, id: &str) -> Result<Branch> {
+        let state = self.state.lock().unwrap();
+        if state.ended.contains_key(id) {
+            return Err(AgentError::BranchEnded(id.into()));
+        }
+        state
+            .nodes
+            .get(id)
+            .and_then(|node| {
+                node.ready
+                    .borrow()
+                    .as_ref()
+                    .and_then(|result| result.as_ref().ok().cloned())
+            })
+            .ok_or_else(|| AgentError::UnknownBranch(id.into()))
+    }
     fn end(&self, id: String, source: BranchSource) -> BoxFuture<'_, Result<()>> {
         Box::pin(async move { TimelineTree::end(self, &id, source).await })
     }
