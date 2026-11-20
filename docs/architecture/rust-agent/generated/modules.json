@@ -18087,6 +18087,7 @@
         "path AgentError::refused",
         "path BranchRefusal::AlreadyDefault",
         "path BranchRefusal::CannotEnd",
+        "path BranchRefusal::NotOpener",
         "path BranchRefusal::NotSelectable",
         "path BranchRefusal::Protected",
         "path Result",
