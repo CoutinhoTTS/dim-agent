@@ -683,6 +683,11 @@ impl AgentBuilder {
                 session: required_session.clone(),
                 branch: required_branch.clone(),
             };
+            let extension_groups: Arc<[String]> = assembly
+                .extensions
+                .iter()
+                .map(|(group, _)| group.clone())
+                .collect();
             builtins.register(session_scope_module, move |build| {
                 let owner = build.value::<Arc<SessionAssembly>>().ok_or_else(|| {
                     rutis::Error::from(ErrorKind::PluginFailed(
@@ -692,12 +697,14 @@ impl AgentBuilder {
                 let scope = session_scope(build)?;
                 *owner.instance.lock().unwrap() = Some(scope.instance);
                 let required = required_session.clone();
+                let extension_groups = extension_groups.clone();
                 let build = build.clone();
                 Factory::new(move || {
                     Box::new(SessionScopePlugin {
                         owner: (*owner).clone(),
                         scope,
                         build: build.clone(),
+                        extension_groups: extension_groups.clone(),
                         required: required.clone(),
                     }) as Box<dyn DynPlugin>
                 })
@@ -1098,6 +1105,7 @@ struct SessionScopePlugin {
     /// The names of this copy's instances, for the mounters it builds.
     build: Build,
     required: Arc<[String]>,
+    extension_groups: Arc<[String]>,
 }
 impl DynPlugin for SessionScopePlugin {
     fn name(&self) -> &str {
@@ -1112,6 +1120,7 @@ impl DynPlugin for SessionScopePlugin {
                     owner.loader.clone(),
                     ctx.clone(),
                     Some(SESSION_GROUP),
+                    self.extension_groups.clone(),
                 )),
             )?;
             ctx.provide_at(scope.key::<SessionConfig>(), Arc::new(owner.config.clone()))?;

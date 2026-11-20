@@ -74,6 +74,7 @@ pub struct SessionLoader {
     loader: rutis_loader::Loader,
     anchor: Ctx,
     parent_group: Option<&'static str>,
+    extension_groups: std::sync::Arc<[String]>,
     instances: std::sync::Mutex<std::collections::HashMap<u64, rutis::host::FiberView>>,
 }
 #[rutis::service]
@@ -82,11 +83,13 @@ impl SessionLoader {
         loader: rutis_loader::Loader,
         anchor: Ctx,
         parent_group: Option<&'static str>,
+        extension_groups: std::sync::Arc<[String]>,
     ) -> Self {
         Self {
             loader,
             anchor,
             parent_group,
+            extension_groups,
             instances: Default::default(),
         }
     }
@@ -119,10 +122,11 @@ impl SessionLoader {
             .lock()
             .unwrap()
             .insert(instance.instance_id, created.view);
-        if let Some((row, state)) = created
-            .report
-            .iter()
-            .find(|(_, state)| !matches!(state, rutis_loader::edit::InstanceResult::Active))
+        if self.extension_groups.contains(&group)
+            && let Some((row, state)) = created
+                .report
+                .iter()
+                .find(|(_, state)| !matches!(state, rutis_loader::edit::InstanceResult::Active))
         {
             self.remove(instance).await?;
             return Err(SessionInstanceError::NotReady(format!("{row}: {state:?}")));

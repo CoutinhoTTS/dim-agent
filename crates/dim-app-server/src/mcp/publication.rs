@@ -44,7 +44,12 @@ pub struct McpOwner {
 }
 impl McpOwner {
     pub fn new(ctx: Ctx, loader: Loader) -> Self {
-        let loader = Arc::new(SessionLoader::new(loader, ctx.clone(), None));
+        let loader = Arc::new(SessionLoader::new(
+            loader,
+            ctx.clone(),
+            None,
+            [GROUP.to_owned()].into(),
+        ));
         Self {
             id: uuid::Uuid::new_v4().to_string(),
             closed: ctx.cancellation_token(),
