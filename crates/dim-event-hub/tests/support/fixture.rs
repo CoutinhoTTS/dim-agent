@@ -71,6 +71,9 @@ struct Inner {
     missing: Mutex<std::collections::HashSet<String>>,
     /// Session id to the error code its `defaultBranchId` read answers.
     default_failures: Mutex<HashMap<String, &'static str>>,
+    /// Session id to the error code its first `defaultBranchId` read answers;
+    /// that read removes it, so the next one answers the branch.
+    default_once: Mutex<HashMap<String, &'static str>>,
     /// The `defaultBranchId` reads answered (timeline branches §20.22).
     defaults: AtomicUsize,
     sequence: AtomicU64,
@@ -96,6 +99,7 @@ impl Default for FakeSessions {
                 accepted: Mutex::new(HashMap::new()),
                 missing: Mutex::new(std::collections::HashSet::new()),
                 default_failures: Mutex::new(HashMap::new()),
+                default_once: Mutex::new(HashMap::new()),
                 defaults: AtomicUsize::new(0),
                 sequence: AtomicU64::new(0),
                 gate: Mutex::new(None),
@@ -127,6 +131,16 @@ impl FakeSessions {
     pub fn fail_default(&self, session: &str, code: &'static str) {
         self.inner
             .default_failures
+            .lock()
+            .unwrap()
+            .insert(session.to_owned(), code);
+    }
+    /// Answers `session`'s first `defaultBranchId` read with `code` and the
+    /// next ones with its branch, so a test can tell a reused answer from a
+    /// second read (timeline branches §20.22).
+    pub fn fail_default_once(&self, session: &str, code: &'static str) {
+        self.inner
+            .default_once
             .lock()
             .unwrap()
             .insert(session.to_owned(), code);
@@ -241,11 +255,18 @@ impl HostDispatch for FakeSessions {
                 let session = write["sessionId"].as_str().unwrap_or_default().to_owned();
                 let failure = self
                     .inner
-                    .default_failures
+                    .default_once
                     .lock()
                     .unwrap()
-                    .get(&session)
-                    .copied()
+                    .remove(&session)
+                    .or_else(|| {
+                        self.inner
+                            .default_failures
+                            .lock()
+                            .unwrap()
+                            .get(&session)
+                            .copied()
+                    })
                     .or_else(|| {
                         self.inner
                             .missing

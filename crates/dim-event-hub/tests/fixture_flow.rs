@@ -832,6 +832,38 @@ async fn one_unresolvable_target_keeps_the_rest_of_the_publish() {
     );
 }
 
+/// A Session named by two omitted targets is read once even when the first
+/// read fails: the failure is that Session's receipt entry, and a second
+/// read cannot turn the duplicate into a delivery (timeline branches §20.22).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn duplicate_omitted_targets_read_the_default_once_after_a_failure() {
+    let (_directory, fixture) = mounted().await;
+    fixture.sessions.fail_default_once("flaky", "reloading");
+    let receipt = fixture
+        .producer
+        .publish(event_to("flaky-targets", &["flaky", "flaky"]))
+        .await
+        .unwrap();
+    assert_eq!(
+        fixture.sessions.default_reads(),
+        1,
+        "one read for a Session named twice: {receipt}"
+    );
+    let deliveries = receipt["deliveries"].as_array().unwrap();
+    assert_eq!(deliveries.len(), 1, "{receipt}");
+    let failed = &deliveries[0];
+    assert_eq!(failed["status"], json!("failed"), "{receipt}");
+    assert_eq!(failed["code"], json!("reloading"), "{receipt}");
+    assert!(
+        failed.get("branchId").is_none(),
+        "a target with no resolved branch names none: {receipt}"
+    );
+    assert!(
+        fixture.sessions.calls().is_empty(),
+        "the omitted targets deliver nothing: {receipt}"
+    );
+}
+
 /// The declared types answer before an omitted branch is resolved, so a
 /// refused subscribe never reads the target's default and never restores a
 /// cold Session for it (design §3.3; timeline branches §20.22).
