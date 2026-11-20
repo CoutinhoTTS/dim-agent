@@ -228,31 +228,31 @@ impl TimelineStore for TimelineStoreBinding {
 #[derive(Deserialize)]
 #[serde(tag = "method", content = "request", rename_all = "camelCase")]
 enum Request {
-    SessionConfig(Session),
-    CreateSession(Box<Create>),
-    ReleaseSession(Session),
-    RollbackSession(Session),
+    SessionConfig(TimelineSessionRequest),
+    CreateSession(Box<TimelineCreateRequest>),
+    ReleaseSession(TimelineSessionRequest),
+    RollbackSession(TimelineSessionRequest),
     SaveSnapshot(SaveSnapshot),
-    Branches(Session),
+    Branches(TimelineSessionRequest),
     Head(TimelineKey),
     ReadPage(Page),
     ReadSegments(Segments),
     Query(Box<Query>),
-    Trace(Position),
-    BatchEnd(Position),
-    BatchEndAt(Position),
+    Trace(TimelinePositionRequest),
+    BatchEnd(TimelinePositionRequest),
+    BatchEndAt(TimelinePositionRequest),
     LatestSnapshot(Snapshot),
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Session {
-    session_id: String,
+pub struct TimelineSessionRequest {
+    pub session_id: String,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Create {
-    session_id: String,
-    config: SessionConfig,
+pub struct TimelineCreateRequest {
+    pub session_id: String,
+    pub config: SessionConfig,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -305,10 +305,10 @@ struct Query {
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Position {
-    session_id: String,
-    branch_id: String,
-    sequence: u64,
+pub struct TimelinePositionRequest {
+    pub session_id: String,
+    pub branch_id: String,
+    pub sequence: u64,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -345,7 +345,7 @@ impl HostDispatch for TimelineStoreBinding {
                     "timelineStore request must be an object".into(),
                 ));
             }
-            let request: Session =
+            let request: TimelineSessionRequest =
                 serde_json::from_value(request).map_err(|error| Error::Value(error.to_string()))?;
             let listener = listener.reference()?;
             let owner = self.clone();
@@ -544,6 +544,6 @@ fn error_code(error: &AgentError) -> &'static str {
         _ => "storage",
     }
 }
-fn failure(error: AgentError) -> Error {
+pub fn failure(error: AgentError) -> Error {
     rutis_bridge::exports::failure("StoreError", error_code(&error), error.to_string(), None)
 }

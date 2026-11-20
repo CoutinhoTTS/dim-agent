@@ -1461,9 +1461,23 @@ async fn node_store_preserves_repository_results_and_worktree_removal_exclusion(
         assert_eq!(std::fs::read_to_string(&marker).unwrap(), "untouched");
     }
     let raw = server.service::<SessionStore>().unwrap().timeline_store();
-    for session in ["round-a", "round-b"] {
-        raw.create_session(session, &config).await.unwrap();
-    }
+    raw.create_session("round-a", &config).await.unwrap();
+    let created = client
+        .rpc(
+            "storefixture.timeline_directory",
+            json!({"sessionId":"round-b","config":config}),
+        )
+        .await;
+    assert_ok(&created);
+    assert_eq!(created["result"]["sequence"], 0);
+    assert_eq!(
+        created["result"]["config"],
+        serde_json::to_value(&config).unwrap()
+    );
+    assert_eq!(
+        created["result"]["branches"],
+        serde_json::to_value(raw.branches("round-b").await.unwrap()).unwrap()
+    );
     let batch_with_text = |session: &str, seq: u64, text: &str| {
         let id = format!("{session}-{seq}");
         let record = dim_agent_runtime::StoredEvent {
@@ -1547,6 +1561,18 @@ async fn node_store_preserves_repository_results_and_worktree_removal_exclusion(
             branch_id: "main".into(),
         };
         assert_eq!(raw.head(&key).await.unwrap(), expected);
+        let directory = client
+            .rpc(
+                "storefixture.timeline_directory",
+                json!({"sessionId":session}),
+            )
+            .await;
+        assert_ok(&directory);
+        assert_eq!(directory["result"]["sequence"], expected);
+        assert_eq!(
+            directory["result"]["branches"],
+            serde_json::to_value(raw.branches(session).await.unwrap()).unwrap()
+        );
         raw.rollback_session(session).await.unwrap();
     }
     raw.create_session(protected.to_str().unwrap(), &config)

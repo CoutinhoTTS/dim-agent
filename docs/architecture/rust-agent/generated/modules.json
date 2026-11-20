@@ -20945,7 +20945,11 @@
         "mod timeline_store_face",
         "use timeline_store_face::CommitFailure",
         "use timeline_store_face::TimelineAppend",
-        "use timeline_store_face::TimelineStoreBinding"
+        "use timeline_store_face::TimelineCreateRequest",
+        "use timeline_store_face::TimelinePositionRequest",
+        "use timeline_store_face::TimelineSessionRequest",
+        "use timeline_store_face::TimelineStoreBinding",
+        "use timeline_store_face::failure"
       ]
     },
     {
@@ -34612,9 +34616,7 @@
       "from": "dim_app_server::storage::export",
       "to": "dim_app_server::storage::timeline",
       "references": [
-        "path read_directory",
         "path read_range",
-        "use super::timeline::read_directory",
         "use super::timeline::read_range"
       ]
     },
@@ -35475,10 +35477,21 @@
     },
     {
       "from": "dim_app_server::storage::sqlite",
+      "to": "dim_agent_runtime::timeline_store",
+      "references": [
+        "path dim_agent_runtime::TimelineKey"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::sqlite",
       "to": "dim_agent_runtime::timeline_store_face",
       "references": [
         "path dim_agent_runtime::CommitFailure::from",
-        "path dim_agent_runtime::TimelineAppend"
+        "path dim_agent_runtime::TimelineAppend",
+        "path dim_agent_runtime::TimelineCreateRequest",
+        "path dim_agent_runtime::TimelinePositionRequest",
+        "path dim_agent_runtime::TimelineSessionRequest",
+        "path dim_agent_runtime::timeline_store_failure"
       ]
     },
     {
@@ -57167,6 +57180,18 @@
     },
     {
       "module": "dim_app_server::storage::sqlite",
+      "path": "Request::BatchEnd"
+    },
+    {
+      "module": "dim_app_server::storage::sqlite",
+      "path": "Request::BatchEndAt"
+    },
+    {
+      "module": "dim_app_server::storage::sqlite",
+      "path": "Request::Branches"
+    },
+    {
+      "module": "dim_app_server::storage::sqlite",
       "path": "Request::CommitFile"
     },
     {
@@ -57175,7 +57200,15 @@
     },
     {
       "module": "dim_app_server::storage::sqlite",
+      "path": "Request::CreateSession"
+    },
+    {
+      "module": "dim_app_server::storage::sqlite",
       "path": "Request::Delete"
+    },
+    {
+      "module": "dim_app_server::storage::sqlite",
+      "path": "Request::Head"
     },
     {
       "module": "dim_app_server::storage::sqlite",
@@ -57240,6 +57273,10 @@
     {
       "module": "dim_app_server::storage::sqlite",
       "path": "Request::Save"
+    },
+    {
+      "module": "dim_app_server::storage::sqlite",
+      "path": "Request::SessionConfig"
     },
     {
       "module": "dim_app_server::storage::sqlite",

@@ -13,10 +13,23 @@ export default definePlugin({
     let release: (() => void) | undefined
     await ctx.use<ManagementMethods>('managementMethods').register(
       'storefixture',
-      ['status', 'commit_round', 'reserve_file', 'file_ownership', 'selection', 'agent_records', 'read_user', 'import_user', 'replace_user', 'report', 'create', 'cycle', 'remove', 'refuse', 'release', 'invalid_id'].map(name => ({ name: `storefixture.${name}`, mutating: true, interruption: 'report', progress: false })),
+      ['status', 'commit_round', 'timeline_directory', 'reserve_file', 'file_ownership', 'selection', 'agent_records', 'read_user', 'import_user', 'replace_user', 'report', 'create', 'cycle', 'remove', 'refuse', 'release', 'invalid_id'].map(name => ({ name: `storefixture.${name}`, mutating: true, interruption: 'report', progress: false })),
       async (call: { method: string; params: any }): Promise<MethodReply> => {
         const params = call.params
         if (call.method === 'storefixture.status') return { kind: 'value', value: {} }
+        if (call.method === 'storefixture.timeline_directory') {
+          const { sessionId, config } = params
+          if (config) await sqlite.createSession({ sessionId, config })
+          const key = { sessionId, branchId: 'main' }
+          const { sequence } = await sqlite.head(key)
+          assert.deepEqual(await sqlite.batchEnd({ ...key, sequence }), {})
+          assert.deepEqual(await sqlite.batchEndAt({ ...key, sequence }), { sequence })
+          return { kind: 'value', value: {
+            ...await sqlite.sessionConfig({ sessionId }),
+            ...await sqlite.branches({ sessionId }),
+            sequence,
+          } }
+        }
         if (call.method === 'storefixture.commit_round') return { kind: 'value', value: await sqlite.commitTimelineRound(params) }
         if (call.method === 'storefixture.selection') {
           const scope = 'workspace:/fixture'

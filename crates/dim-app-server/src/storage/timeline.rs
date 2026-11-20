@@ -516,6 +516,93 @@ impl From<dim_agent_runtime::TimelineAppend> for TimelineBatch {
 }
 
 impl SqliteStorage {
+    pub(super) async fn batch_end(self: &Arc<Self>, key: TimelineKey, sequence: u64) -> Result<()> {
+        if self.batch_end_at(key, sequence).await? > sequence {
+            return Err(AgentError::InvalidInput(format!(
+                "sequence {sequence} is inside an atomic batch"
+            )));
+        }
+        Ok(())
+    }
+    pub(super) async fn batch_end_at(
+        self: &Arc<Self>,
+        key: TimelineKey,
+        sequence: u64,
+    ) -> Result<u64> {
+        if sequence == 0 {
+            return Ok(0);
+        }
+        let (session, branch) = (key.session_id, key.branch_id);
+        let row = self
+            .run_read(move |connection| {
+                connection
+                    .prepare_cached(
+                        "SELECT last_sequence, COALESCE(CASE json_extract(body, '$.encoding') \
+                               WHEN 'event' THEN json_extract(body, '$.record.batch_end') \
+                               ELSE (SELECT json_extract(value, '$.batch_end') \
+                                     FROM json_each(body, '$.records') \
+                                     WHERE json_extract(value, '$.event.sequence') = ?3) \
+                             END, last_sequence) \
+                             FROM timeline_events \
+                             WHERE session_id = ?1 AND branch_id = ?2 AND sequence <= ?3 \
+                             ORDER BY sequence DESC LIMIT 1",
+                    )
+                    .map_err(error)?
+                    .query_row(params![session, branch, sql_sequence(sequence)?], |row| {
+                        Ok((read_sequence(row, 0)?, row.get::<_, i64>(1)?))
+                    })
+                    .optional()
+                    .map_err(error)
+            })
+            .await?;
+        let Some((_, end)) = row.filter(|(last, _)| *last >= sequence) else {
+            return Err(error(format!("Timeline has no sequence {sequence}")));
+        };
+        sequence_value(end)
+    }
+
+    pub(super) async fn create_session(
+        self: &Arc<Self>,
+        session: String,
+        config: SessionConfig,
+    ) -> Result<()> {
+        self.run(move |connection| {
+            let tx = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(error)?;
+            create_session(&tx, &session, &config, None, SessionOrigin::Unknown)?;
+            tx.commit().map_err(error)
+        })
+        .await
+    }
+    pub(super) async fn session_config(
+        self: &Arc<Self>,
+        session: String,
+    ) -> Result<Option<SessionConfig>> {
+        self.run_read(move |connection| {
+            let config: Option<String> = connection
+                .query_row(
+                    "SELECT config FROM agent_sessions WHERE session_id = ?1",
+                    [&session],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(error)?;
+            config
+                .map(|config| serde_json::from_str(&config).map_err(error))
+                .transpose()
+        })
+        .await
+    }
+    pub(super) async fn branches(self: &Arc<Self>, id: String) -> Result<Vec<StoredBranch>> {
+        self.run_read(move |connection| directory_rows(connection, &id))
+            .await
+    }
+    pub(super) async fn head(self: &Arc<Self>, key: TimelineKey) -> Result<u64> {
+        self.run_read(move |connection| head(connection, &key))
+            .await
+    }
+
     pub(super) fn commit_timeline_round<'a>(
         &self,
         batches: impl Iterator<Item = &'a TimelineBatch>,
@@ -3050,19 +3137,10 @@ impl TimelineStore for SqliteTimelineStore {
         session_id: &'a str,
         config: &'a SessionConfig,
     ) -> BoxFuture<'a, Result<()>> {
-        Box::pin(async move {
-            let session = session_id.to_owned();
-            let config = config.clone();
+        Box::pin(
             self.db
-                .run(move |connection| {
-                    let tx = connection
-                        .transaction_with_behavior(TransactionBehavior::Immediate)
-                        .map_err(error)?;
-                    create_session(&tx, &session, &config, None, SessionOrigin::Unknown)?;
-                    tx.commit().map_err(error)
-                })
-                .await
-        })
+                .create_session(session_id.to_owned(), config.clone()),
+        )
     }
     fn rollback_session<'a>(&'a self, session_id: &'a str) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
@@ -3099,84 +3177,23 @@ impl TimelineStore for SqliteTimelineStore {
         &'a self,
         session_id: &'a str,
     ) -> BoxFuture<'a, Result<Option<SessionConfig>>> {
-        Box::pin(async move {
-            let session = session_id.to_owned();
-            self.db
-                .run_read(move |connection| {
-                    let config: Option<String> = connection
-                        .query_row(
-                            "SELECT config FROM agent_sessions WHERE session_id = ?1",
-                            [&session],
-                            |row| row.get(0),
-                        )
-                        .optional()
-                        .map_err(error)?;
-                    config
-                        .map(|config| serde_json::from_str(&config).map_err(error))
-                        .transpose()
-                })
-                .await
-        })
+        Box::pin(self.db.session_config(session_id.to_owned()))
     }
     fn branches<'a>(&'a self, session_id: &'a str) -> BoxFuture<'a, Result<Vec<StoredBranch>>> {
-        Box::pin(read_directory(&self.db, session_id))
+        Box::pin(self.db.branches(session_id.to_owned()))
     }
     fn head<'a>(&'a self, key: &'a TimelineKey) -> BoxFuture<'a, Result<u64>> {
-        Box::pin(async move {
-            let key = key.clone();
-            self.db
-                .run_read(move |connection| head(connection, &key))
-                .await
-        })
+        Box::pin(self.db.head(key.clone()))
     }
     fn batch_end<'a>(&'a self, key: &'a TimelineKey, sequence: u64) -> BoxFuture<'a, Result<()>> {
-        Box::pin(async move {
-            if self.batch_end_at(key, sequence).await? > sequence {
-                return Err(AgentError::InvalidInput(format!(
-                    "sequence {sequence} is inside an atomic batch"
-                )));
-            }
-            Ok(())
-        })
+        Box::pin(self.db.batch_end(key.clone(), sequence))
     }
     fn batch_end_at<'a>(
         &'a self,
         key: &'a TimelineKey,
         sequence: u64,
     ) -> BoxFuture<'a, Result<u64>> {
-        Box::pin(async move {
-            if sequence == 0 {
-                return Ok(0);
-            }
-            let (session, branch) = (key.session_id.clone(), key.branch_id.clone());
-            let row = self
-                .db
-                .run_read(move |connection| {
-                    connection
-                        .prepare_cached(
-                            "SELECT last_sequence, COALESCE(CASE json_extract(body, '$.encoding') \
-                               WHEN 'event' THEN json_extract(body, '$.record.batch_end') \
-                               ELSE (SELECT json_extract(value, '$.batch_end') \
-                                     FROM json_each(body, '$.records') \
-                                     WHERE json_extract(value, '$.event.sequence') = ?3) \
-                             END, last_sequence) \
-                             FROM timeline_events \
-                             WHERE session_id = ?1 AND branch_id = ?2 AND sequence <= ?3 \
-                             ORDER BY sequence DESC LIMIT 1",
-                        )
-                        .map_err(error)?
-                        .query_row(params![session, branch, sql_sequence(sequence)?], |row| {
-                            Ok((read_sequence(row, 0)?, row.get::<_, i64>(1)?))
-                        })
-                        .optional()
-                        .map_err(error)
-                })
-                .await?;
-            let Some((_, end)) = row.filter(|(last, _)| *last >= sequence) else {
-                return Err(error(format!("Timeline has no sequence {sequence}")));
-            };
-            sequence_value(end)
-        })
+        Box::pin(self.db.batch_end_at(key.clone(), sequence))
     }
     fn append(
         &self,
@@ -3403,15 +3420,6 @@ fn directory_rows(connection: &Connection, session: &str) -> Result<Vec<StoredBr
         }
     }
     Ok(branches.into_values().collect())
-}
-/// The directory read of a restore or export pass.
-pub(super) async fn read_directory(
-    db: &Arc<SqliteStorage>,
-    session: &str,
-) -> Result<Vec<StoredBranch>> {
-    let id = session.to_owned();
-    db.run_read(move |connection| directory_rows(connection, &id))
-        .await
 }
 
 #[cfg(test)]
