@@ -232,8 +232,9 @@ with `session.question.pending` and current execution/output offsets with `sessi
 window's cutoff. Lists use their own keyset continuation and retain that cutoff. Read current Goal
 state through `session.goal.get`; refresh it after Goal commands or relevant live input/deletion facts.
 The browser no longer parses Goal blocks or keeps historical Goal inputs. The attach reply supplies
-the root's model; a centre on a line keeps the model that line's own window adopted, because the
-reply's record belongs to the root ([timeline branches §14](timeline-branches.md#14-clients)).
+the root's model; a centre on a line reads the model that line adopted at or below the window's cutoff from
+the line's own event history, because the display transcript omits the fact and the reply's record belongs
+to the root ([timeline branches §14](timeline-branches.md#14-clients)).
 
 Questions on unopened branches are restored at their directory heads without reading transcripts.
 Live question terminals update those control states. Directory discovery and background branch notices

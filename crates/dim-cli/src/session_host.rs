@@ -819,7 +819,7 @@ impl Worker {
                         client::resume_failure("Cannot set the permission preset", error)
                     })?;
             }
-            adopt_startup(&mut self.client, &self.options, &id).await?;
+            adopt_startup(&mut self.client, &self.options, &id, &self.default_branch).await?;
             return Ok(());
         }
         if self.client.offers("session.model.preview")
@@ -1079,10 +1079,11 @@ impl Worker {
                 .through = Some(cursor);
         }
         // A conversation on the root takes the reply's configuration as its
-        // own; one on a line takes that line's facts, which the window replays
-        // from a watermark below every one of them. A reply that names no line
-        // comes from a server that cannot move the default branch, so its model
-        // is the Session's (design §14).
+        // own; one on a line reads that line's adopted configuration at its
+        // cursor (a display transcript omits the fact, and a bounded window can
+        // start after it). A reply that names no line comes from a server that
+        // cannot move the default branch, so its model is the Session's
+        // (design §14).
         let seeded = attached.default_branch.is_none() || conversation_line == ROOT_BRANCH_ID;
         self.model_through = if seeded {
             conversation_cursor.unwrap_or(0)
@@ -1093,6 +1094,8 @@ impl Worker {
         if seeded {
             self.model = Some(configuration.clone());
             self.send(Update::Ready(configuration));
+        } else {
+            self.model = None;
         }
         self.send(catalog_features(None));
         self.send(Update::Skills(Vec::new()));
@@ -4978,16 +4981,43 @@ impl Worker {
         self.last_usage = None;
         self.context_request = None;
         self.model_through = 0;
-        let adopted = self
+        self.model = None;
+        let line = self.default_branch.clone();
+        let mut adopted = self
             .line_configurations
-            .get(&self.default_branch)
+            .get(&line)
             .map(|adopted| (adopted.sequence, adopted.configuration.clone()));
+        if adopted.is_none()
+            && line != ROOT_BRANCH_ID
+            && let Some(through) = self
+                .task_history
+                .get(&line)
+                .and_then(|history| history.window.through)
+        {
+            match dim_client::configuration::adopted(
+                &mut self.client,
+                &self.session_id,
+                &line,
+                through,
+            )
+            .await
+            {
+                Ok(found) => adopted = found,
+                Err(error) => self.send(Update::Notice(format!("Configuration: {error}"))),
+            }
+        }
         if let Some((sequence, configuration)) = adopted {
             self.model_through = sequence;
             self.model = Some(configuration.clone());
+            self.line_configurations.insert(
+                line.clone(),
+                LineConfiguration {
+                    sequence,
+                    configuration: configuration.clone(),
+                },
+            );
             self.send(Update::Ready(configuration));
         }
-        let line = self.default_branch.clone();
         self.focus_line(line).await;
         if self.client.supports(&permission::PRESET_METHODS) {
             let params = json!({"sessionId":self.session_id,"branchId":self.default_branch});
@@ -5214,13 +5244,15 @@ pub(crate) async fn adopt_startup(
     client: &mut Client,
     options: &Options,
     session_id: &str,
+    branch: &str,
 ) -> crate::Result<()> {
     if options.startup.is_none() && options.effort.is_none() && options.model.is_none() {
         return Ok(());
     }
-    // The update names no line: a resume adopts the startup configuration on
-    // the Session's default branch, resolved once by the server (design §9).
-    let mut params = json!({"sessionId":session_id});
+    // The update names the line the attach reply named: a move between attach
+    // and this write must not apply the startup configuration to another line
+    // (design §9, §14).
+    let mut params = json!({"sessionId":session_id,"branchId":branch});
     if let Some(startup) = &options.startup {
         params["startup"] = startup.clone();
     }

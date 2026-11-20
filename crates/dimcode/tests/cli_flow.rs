@@ -480,9 +480,16 @@ impl Wire {
     fn resumed_on(&mut self, branch: &str, through: u64) {
         let history = self.read("session.history");
         assert_eq!(history["params"]["branchId"], branch);
+        // A line's window carries the configuration it adopted; the root takes
+        // the attach reply's model instead.
+        let events = if branch == "main" {
+            json!([])
+        } else {
+            json!([configured_event(through - 1, "line-model", json!({}))])
+        };
         self.reply(
             &history,
-            json!({"events":[],"through":through,"nextAfter":through,"done":true}),
+            json!({"events":events,"through":through,"nextAfter":through,"done":true}),
         );
         let question = self.read("session.question.pending");
         assert_eq!(question["params"]["branchId"], branch);
@@ -6039,6 +6046,48 @@ fn a_resumed_session_draws_the_adopted_model_and_effort() {
     daemon.join().unwrap();
 }
 
+/// The startup `--model` lands on the line the attach reply names: a move
+/// between attach and the update must not write it on another line.
+#[test]
+fn a_resumed_tui_adopts_the_startup_model_on_the_attached_line() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&[]);
+        let attach = wire.read("session.attach");
+        let mut record = attach_record(&attach);
+        record["defaultBranch"] = json!({"branchId":"line-1","sequence":5});
+        wire.reply(&attach, record);
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[configured_event(4, "line-model", json!({}))],
+                "through":5,"nextAfter":5,"done":true}),
+        );
+        let update = wire.read("session.model.update");
+        assert_eq!(
+            update["params"]["branchId"],
+            json!("line-1"),
+            "the startup model follows the attach reply's line"
+        );
+        assert_eq!(update["params"]["modelId"], json!("replacement"));
+        wire.reply(
+            &update,
+            json!({"outcome":"adopted","model":{"providerId":"test","modelId":"replacement"}}),
+        );
+        wire.no_context();
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
+        wire.hold();
+    });
+    let mut command = home.command();
+    command.args(["--model", "replacement"]);
+    let mut terminal = Terminal::resume_tui(command);
+    terminal.until("test / line-model");
+    home.kill(&terminal);
+    terminal.wait();
+    daemon.join().unwrap();
+}
+
 /// The capability declaration a configuration states for `model_id`.
 fn effort_snapshot(model_id: &str, efforts: &[&str]) -> Value {
     let mut capabilities = dim_agent_types::ModelCapabilities::with_limits(64_000, 2_048);
@@ -6063,7 +6112,13 @@ fn a_resumed_line_mode_session_folds_the_default_branchs_cursor() {
     ] {
         let home = Home::new();
         let daemon = home.daemon(move |wire| {
-            wire.hello(&["session.branches"]);
+            wire.hello(&[
+                "session.branches",
+                "session.history.display",
+                "session.history.detail",
+                "session.history.display.tail",
+                "session.history.display.transcript",
+            ]);
             let branches = wire.read("session.branches");
             let mut entries = vec![json!({"branchId":"main","state":"open","head":8})];
             if line != "main" {
@@ -6075,19 +6130,36 @@ fn a_resumed_line_mode_session_folds_the_default_branchs_cursor() {
             record["defaultBranch"] = json!({"branchId":line,"sequence":cursor});
             record["capabilitySnapshot"] = effort_snapshot("model", &["low", "high"]);
             wire.reply(&attach, record);
-            let history = wire.read("session.history");
-            assert_eq!(history["params"]["branchId"], json!(line));
-            assert!(
-                history["params"].get("through").is_none(),
-                "the line's window starts from its head"
+            let update = wire.read("session.model.update");
+            assert_eq!(
+                update["params"]["branchId"],
+                json!(line),
+                "the startup model follows the attach reply's line"
             );
-            let mut event = configured_event(cursor - 1, "line-model", json!({}));
-            event["data"]["capability_snapshot"] =
-                effort_snapshot("line-model", &["none", "minimal"]);
+            assert_eq!(update["params"]["modelId"], json!("replacement"));
             wire.reply(
-                &history,
-                json!({"events":[event],"through":cursor,"nextAfter":cursor,"done":true}),
+                &update,
+                json!({"outcome":"adopted","model":{"providerId":"test","modelId":"replacement"}}),
             );
+            let window = wire.read("session.history.display");
+            assert_eq!(window["params"]["branchId"], json!(line));
+            wire.reply(
+                &window,
+                json!({"items":[],"through":cursor,"nextBefore":1,"nextAfter":cursor,"done":true}),
+            );
+            if line != "main" {
+                let read = wire.read("session.history");
+                assert_eq!(read["params"]["branchId"], json!(line));
+                assert_eq!(read["params"]["through"], json!(cursor));
+                assert_eq!(read["params"]["before"], json!(cursor + 1));
+                let mut event = configured_event(cursor - 1, "line-model", json!({}));
+                event["data"]["capability_snapshot"] =
+                    effort_snapshot("line-model", &["none", "minimal"]);
+                wire.reply(
+                    &read,
+                    json!({"events":[event],"through":cursor,"nextBefore":1,"nextAfter":cursor,"done":true}),
+                );
+            }
             let idle = wire.read("session.idle");
             assert_eq!(idle["params"]["branchId"], json!(line));
             wire.reply(&idle, json!({"sequence":cursor}));
@@ -6101,12 +6173,19 @@ fn a_resumed_line_mode_session_folds_the_default_branchs_cursor() {
                             json!({"events":[],"through":through,"nextAfter":through,"done":true}),
                         );
                     }
+                    "session.history.display" => {
+                        let through = request["params"]["after"].as_u64().unwrap_or(cursor);
+                        wire.reply(
+                            &request,
+                            json!({"items":[],"through":through,"nextAfter":through,"done":true}),
+                        );
+                    }
                     other => panic!("unexpected {other}: {request}"),
                 }
             }
         });
         let mut command = home.command();
-        command.args(["--resume", "session"]);
+        command.args(["--resume", "session", "--model", "replacement"]);
         let mut terminal = Terminal::launch(command);
         terminal.editor();
         terminal.write(b"/effort\r");

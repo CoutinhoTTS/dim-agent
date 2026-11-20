@@ -1239,6 +1239,7 @@ impl Gateway {
                 session.configuring = true;
                 let config = session.config.clone();
                 let conversation = session.projection.branch.clone();
+                let through = session.projection.through;
                 let revision = session.config_revision;
                 self.spawn(async move {
                     let result = config
@@ -1276,12 +1277,26 @@ impl Gateway {
                                         params
                                     })
                                     .await?;
-                                let model = attached.model.map(|model| Configuration {
-                                    provider_id: model.provider_id,
-                                    model_id: model.model_id,
-                                    capability_snapshot: attached.capability_snapshot,
-                                    model_preferences: attached.model_preferences,
-                                });
+                                // The reply's model is the root's; the line being
+                                // configured takes its own configuration at the
+                                // reply's cursor (design §14).
+                                let model = if attached.default_branch.is_none() {
+                                    attached.model.map(|model| Configuration {
+                                        provider_id: model.provider_id,
+                                        model_id: model.model_id,
+                                        capability_snapshot: attached.capability_snapshot,
+                                        model_preferences: attached.model_preferences,
+                                    })
+                                } else {
+                                    let through = attached
+                                        .default_branch
+                                        .as_ref()
+                                        .filter(|cursor| cursor.branch_id == conversation)
+                                        .map_or(through, |cursor| cursor.sequence);
+                                    crate::config::adopted(&rpc, &id, &conversation, through)
+                                        .await?
+                                        .map(|(_, configuration)| configuration)
+                                };
                                 Config::read(&rpc, &id, &conversation, model).await
                             }
                             .await
@@ -3205,14 +3220,26 @@ async fn read_history(
         )
     };
     let mut config = Config::read(rpc, id, &conversation, model).await?;
-    // A line's configuration is the one its own window last adopted, at or
-    // below the cursor (design §14).
-    if !seeded {
-        for event in &history {
-            if let EventContent::Configuration(adopted) = &event.content {
-                config.model = Some(adopted.clone());
-            }
-        }
+    // A line's configuration is the one it last adopted at or below the
+    // cursor. A display transcript omits `context/configured` and a bounded
+    // window can start after the adoption, so the line's own event history is
+    // read at that cursor (design §14).
+    let mut model_through = if seeded {
+        dim_client::wire::resume_cursor(
+            attached.default_branch.as_ref(),
+            attached.sequence,
+            &conversation,
+        )
+        .unwrap_or(0)
+    } else {
+        0
+    };
+    if !seeded
+        && let Some((sequence, adopted)) =
+            crate::config::adopted(rpc, id, &conversation, through).await?
+    {
+        config.model = Some(adopted);
+        model_through = sequence;
     }
     let mut questions = HashMap::new();
     if config.methods.contains("session.question.pending") {
@@ -3309,17 +3336,7 @@ async fn read_history(
         .map(|turn| turn.turn_id);
     // The attach reply's `defaultBranch` is this conversation's own cursor;
     // its `sequence` stays the root's (design §14). A line's configuration was
-    // read from its window, so only a later fact may replace it.
-    let model_through = if seeded {
-        dim_client::wire::resume_cursor(
-            attached.default_branch.as_ref(),
-            attached.sequence,
-            &conversation,
-        )
-        .unwrap_or(0)
-    } else {
-        0
-    };
+    // read from its own history, so only a later fact may replace it.
     Ok(Prepared {
         branch: conversation.to_owned(),
         history,

@@ -338,16 +338,15 @@ pub async fn chat(
         None => {}
     }
     if options.resume.is_some() {
-        crate::session_host::adopt_startup(client, options, &session_id).await?;
+        crate::session_host::adopt_startup(client, options, &session_id, &conversation).await?;
     }
     let mut questions = Questions::default();
     let result = async {
         display.muted = !interactive;
         // The reply's configuration is the root's (design §14): a conversation
-        // on a line takes that line's own facts from the window below, and its
-        // watermark starts below every one of them. A reply that names no line
-        // comes from a server that cannot move the default branch, so its model
-        // is the Session's.
+        // on a line reads that line's own adopted configuration at its cursor.
+        // A reply that names no line comes from a server that cannot move the
+        // default branch, so its model is the Session's.
         let seeded = attached.default_branch.is_none() || conversation == ROOT_BRANCH_ID;
         display.model = if seeded {
             attached.model.map(|model| crate::wire::Configuration {
@@ -368,6 +367,23 @@ pub async fn chat(
             0
         };
         display.cursor = window::read(client, &session_id, &conversation, &mut display).await?;
+        // The display transcript omits `context/configured`, and a bounded
+        // window can start after the adoption: a line's model is read from its
+        // own event history at the cursor the reply named.
+        if !display.json
+            && !seeded
+            && display.model.is_none()
+            && let Some((sequence, configuration)) = dim_client::configuration::adopted(
+                client,
+                &session_id,
+                &conversation,
+                display.history_through,
+            )
+            .await?
+        {
+            display.model = Some(configuration);
+            display.model_through = sequence;
+        }
         questions.start(client, &session_id, &conversation).await?;
         display.failed = false;
         display.muted = false;

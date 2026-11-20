@@ -97,6 +97,43 @@ pub(crate) async fn models(rpc: &Rpc) -> Result<Vec<Model>, Error> {
     Ok(choices)
 }
 
+/// The newest configuration `branch` adopted at or below `through`, with the
+/// sequence it was adopted at. A display transcript omits `context/configured`
+/// and a bounded window can start after the adoption, so this walks the line's
+/// own facts back to the newest one.
+pub(crate) async fn adopted(
+    rpc: &Rpc,
+    session_id: &str,
+    branch: &str,
+    through: u64,
+) -> Result<Option<(u64, Configuration)>, Error> {
+    let mut before = through.saturating_add(1);
+    loop {
+        let page: dim_client::wire::HistoryWindow = rpc
+            .typed(
+                "session.history",
+                json!({"sessionId":session_id,"branchId":branch,
+                    "through":through,"before":before,"limit":256}),
+            )
+            .await?;
+        for event in page.events.iter().rev() {
+            let event: Event = serde_json::from_value(event.clone()).map_err(|_| {
+                Error::internal_error().data(json!({"code":"invalid_history_event"}))
+            })?;
+            if let EventContent::Configuration(configuration) = event.content {
+                return Ok(Some((event.sequence, configuration)));
+            }
+        }
+        let next = page
+            .next(Some(before), Some(through))
+            .map_err(|_| Error::internal_error().data(json!({"code":"invalid_history_cursor"})))?;
+        match next {
+            Some(next) => before = next,
+            None => return Ok(None),
+        }
+    }
+}
+
 impl Config {
     /// Reads the Session's configuration for `branch`, the line its
     /// conversation is on: its policy and its model are that line's (design §4).

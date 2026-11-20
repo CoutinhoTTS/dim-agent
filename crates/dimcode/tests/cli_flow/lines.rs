@@ -293,10 +293,11 @@ fn tui_a_refused_continue_is_shown_in_the_lines_panel() {
 
 /// The shown line resumes from the cursor its attach reply carries: a line's
 /// own sequence, and the root's `sequence` when the conversation is the root
-/// (design §14). Its model is that line's own, adopted at or below the cursor:
-/// the reply's model is the root's, and the root alone shows it. The reply's
-/// cursor is authoritative: the directory only answers for a server that does
-/// not carry the field.
+/// (design §14). Its model is that line's own, adopted at or below the cursor,
+/// read from the line's event history: the reply's model is the root's, and the
+/// production display transcript omits `context/configured`. The reply's cursor
+/// is authoritative: the directory only answers for a server that does not
+/// carry the field.
 #[test]
 fn tui_resumes_the_shown_line_from_the_attach_cursor() {
     for (line, cursor, listed, entries) in [
@@ -345,9 +346,12 @@ fn tui_resumes_the_shown_line_from_the_attach_cursor() {
             );
             wire.reply(
                 &window,
-                json!({"items":[configured_event(cursor - 1, "line-model", json!({}))],"through":cursor,"nextBefore":1,"nextAfter":cursor,"done":true}),
+                json!({"items":[],"through":cursor,"nextBefore":1,"nextAfter":cursor,"done":true}),
             );
-            let parent = entries.iter().find(|(id, _)| *id == line).and_then(|(_, parent)| *parent);
+            let parent = entries
+                .iter()
+                .find(|(id, _)| *id == line)
+                .and_then(|(_, parent)| *parent);
             loop {
                 let request = next(wire);
                 match request["method"].as_str().unwrap() {
@@ -359,7 +363,16 @@ fn tui_resumes_the_shown_line_from_the_attach_cursor() {
                         };
                         wire.reply(&request, detail);
                     }
-                    "session.history" => wire.reply(&request, history(cursor, vec![])),
+                    "session.history" => {
+                        assert_eq!(request["params"]["branchId"], json!(line));
+                        assert_eq!(request["params"]["through"], json!(cursor));
+                        assert_eq!(request["params"]["before"], json!(cursor + 1));
+                        wire.reply(
+                            &request,
+                            json!({"events":[configured_event(cursor - 1, "line-model", json!({}))],
+                                "through":cursor,"nextBefore":1,"nextAfter":cursor,"done":true}),
+                        );
+                    }
                     other => panic!("unexpected {other}: {request}"),
                 }
             }

@@ -638,6 +638,41 @@ impl Worker {
             }
         }
         self.changed();
+        // A display transcript omits `context/configured`, and a bounded window
+        // can start after it: the shown line's model is read from its own event
+        // history once its window is ready, unless a later fact already set it.
+        if window_ready
+            && self.model.is_none()
+            && request.branch_id == self.default_branch
+            && self.default_branch != ROOT_BRANCH_ID
+            && let Some(through) = self.task_history[&request.branch_id].window.through
+        {
+            match dim_client::configuration::adopted(
+                &mut self.client,
+                &self.session_id,
+                &request.branch_id,
+                through,
+            )
+            .await
+            {
+                Ok(Some((sequence, configuration))) => {
+                    if request.branch_id == self.default_branch && sequence > self.model_through {
+                        self.model_through = sequence;
+                        self.model = Some(configuration.clone());
+                        self.line_configurations.insert(
+                            request.branch_id.clone(),
+                            LineConfiguration {
+                                sequence,
+                                configuration: configuration.clone(),
+                            },
+                        );
+                        self.send(Update::Ready(configuration));
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => self.send(Update::Notice(format!("Configuration: {error}"))),
+            }
+        }
         if window_ready {
             self.publish();
         }
