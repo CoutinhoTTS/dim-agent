@@ -157,7 +157,7 @@ export function createWebChatUiHost(input: WebChatUiHostInput): { host: ChatUiHo
       if (!await input.confirmFork(t("chatTimeline.forkConfirm", { preview: preview(row.text) }))) return
       pending.value = true
       try {
-        const forked = await chat.fork(id, row.cut)
+        const forked = await chat.fork(id)
         void sessions.refresh()
         await router.push({ name: "chat-session", params: { sessionId: forked } })
       } finally {
