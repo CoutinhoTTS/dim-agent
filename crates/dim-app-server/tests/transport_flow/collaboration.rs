@@ -8749,12 +8749,18 @@ async fn a_request_completes_from_the_line_its_input_was_delivered_to() {
             )
             .await,
     );
+    assert_eq!(
+        member_session.default_branch().unwrap(),
+        side,
+        "the move stands while the request is in flight"
+    );
     gate.add_permits(1);
 
+    // The first request's result already exists: wait for the second one, the
+    // request this test is about.
     let outcome = poll("the request completes", async || {
-        result_of(&events(&lead_session).await, &member)
-            .into_iter()
-            .last()
+        let results = result_of(&events(&lead_session).await, &member);
+        (results.len() >= 2).then(|| results.last().unwrap().clone())
     })
     .await;
     assert_eq!(
@@ -8785,6 +8791,20 @@ async fn a_request_completes_from_the_line_its_input_was_delivered_to() {
     assert_eq!(
         result.text, answer,
         "the settle reads the line the input was written to, not the new default"
+    );
+    let delivered_turn = events(&member_session)
+        .await
+        .iter()
+        .rev()
+        .find_map(|event| match &event.kind {
+            EventKind::TurnEnd(data) => Some(data.turn_id.clone()),
+            _ => None,
+        })
+        .expect("the delivered turn ended");
+    assert_eq!(
+        result.last_turn_id.as_deref(),
+        Some(delivered_turn.as_str()),
+        "the result names the delivery line's turn"
     );
     server.shutdown();
     server.join().await.unwrap();
