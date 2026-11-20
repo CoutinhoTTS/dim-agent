@@ -7965,13 +7965,6 @@
     },
     {
       "from": "dim_acp::commands",
-      "to": "dim_agent_types::events",
-      "references": [
-        "use dim_agent_types::DEFAULT_BRANCH_ID"
-      ]
-    },
-    {
-      "from": "dim_acp::commands",
       "to": "dim_agent_types::goal",
       "references": [
         "path GoalRead",
@@ -7990,13 +7983,6 @@
       "references": [
         "path Rpc",
         "use crate::rpc::Rpc"
-      ]
-    },
-    {
-      "from": "dim_acp::config",
-      "to": "dim_agent_types::events",
-      "references": [
-        "use dim_agent_types::DEFAULT_BRANCH_ID"
       ]
     },
     {
@@ -8187,6 +8173,7 @@
         "path TurnOutcome::Completed",
         "path TurnOutcome::Failed",
         "use dim_agent_types::DEFAULT_BRANCH_ID",
+        "use dim_agent_types::ROOT_BRANCH_ID",
         "use dim_agent_types::TurnOutcome"
       ]
     },
@@ -38024,13 +38011,6 @@
     },
     {
       "from": "dim_cli::configure",
-      "to": "dim_agent_types::events",
-      "references": [
-        "use dim_agent_types::DEFAULT_BRANCH_ID"
-      ]
-    },
-    {
-      "from": "dim_cli::configure",
       "to": "dim_agent_types::model",
       "references": [
         "path ModelPreferences",
@@ -38289,14 +38269,6 @@
       "to": "dim_cli::goal",
       "references": [
         "path Request::Objective"
-      ]
-    },
-    {
-      "from": "dim_cli::goal_command",
-      "to": "dim_agent_types::events",
-      "references": [
-        "path DEFAULT_BRANCH_ID",
-        "use dim_agent_types::DEFAULT_BRANCH_ID"
       ]
     },
     {
@@ -40519,8 +40491,7 @@
       "to": "dim_agent_types::events",
       "references": [
         "path ApprovalCallData",
-        "use dim_agent_types::ApprovalCallData",
-        "use dim_agent_types::DEFAULT_BRANCH_ID"
+        "use dim_agent_types::ApprovalCallData"
       ]
     },
     {
@@ -41575,10 +41546,10 @@
       "to": "dim_agent_types::events",
       "references": [
         "path ApprovalCallData",
-        "path DEFAULT_BRANCH_ID",
+        "path ROOT_BRANCH_ID",
         "path UserInput",
         "use dim_agent_types::ApprovalCallData",
-        "use dim_agent_types::DEFAULT_BRANCH_ID",
+        "use dim_agent_types::ROOT_BRANCH_ID",
         "use dim_agent_types::UserInput"
       ]
     },
@@ -41835,19 +41806,12 @@
         "path Progress",
         "path crate::wire::Configuration",
         "path crate::wire::DisplayPage",
+        "path dim_client::wire::BranchDirectory",
         "use crate::wire::Attached",
         "use crate::wire::DisplayNotice",
         "use crate::wire::EventNotice",
         "use crate::wire::Progress",
         "use dim_client::wire::History"
-      ]
-    },
-    {
-      "from": "dim_cli::session::window",
-      "to": "dim_agent_types::events",
-      "references": [
-        "path DEFAULT_BRANCH_ID",
-        "use dim_agent_types::DEFAULT_BRANCH_ID"
       ]
     },
     {
@@ -42244,6 +42208,7 @@
         "path Command::SavePromptSetting",
         "path Command::SaveSuggestionSetting",
         "path Command::SelectModel",
+        "path Command::SetDefaultLine",
         "path Command::SetLocale",
         "path Command::SetModelPolicy",
         "path Command::SetPermission",
@@ -42344,6 +42309,7 @@
         "path Update::Failed",
         "path Update::Isolation",
         "path Update::IsolationBackend",
+        "path Update::LineRefusal",
         "path Update::Login",
         "path Update::Management",
         "path Update::ModelDefault",
@@ -43075,7 +43041,9 @@
         "path BranchCreateFailedData::Cancelled",
         "path BranchCreateFailedData::Failed",
         "path DEFAULT_BRANCH_ID",
-        "use dim_agent_types::BranchCreateFailedData"
+        "path ROOT_BRANCH_ID",
+        "use dim_agent_types::BranchCreateFailedData",
+        "use dim_agent_types::ROOT_BRANCH_ID"
       ]
     },
     {
@@ -45539,6 +45507,7 @@
         "path Effect::FocusLine",
         "path Effect::None",
         "path Effect::Notice",
+        "path Effect::SetDefaultLine",
         "use crate::ui::prompts::Effect"
       ]
     },
@@ -45586,8 +45555,16 @@
     },
     {
       "from": "dim_cli::ui::lines_panel::tests",
+      "to": "dim_cli::ui::i18n",
+      "references": [
+        "path t"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::lines_panel::tests",
       "to": "dim_cli::ui::lines_panel",
       "references": [
+        "path LinesPanel",
         "path LinesPanel::new"
       ]
     },
@@ -45596,7 +45573,8 @@
       "to": "dim_cli::ui::prompts",
       "references": [
         "path Effect::EndLine",
-        "path Effect::FocusLine"
+        "path Effect::FocusLine",
+        "path Effect::SetDefaultLine"
       ]
     },
     {
@@ -45622,6 +45600,7 @@
         "path KeyCode::Char",
         "path KeyCode::Down",
         "path KeyCode::Enter",
+        "path KeyCode::Up",
         "path KeyEvent",
         "path KeyEvent::new",
         "path Modifiers::NONE",
@@ -50357,6 +50336,7 @@
         "path Command::SavePromptSetting",
         "path Command::SaveSuggestionSetting",
         "path Command::SelectModel",
+        "path Command::SetDefaultLine",
         "path Command::SetLocale",
         "path Command::SetModelPolicy",
         "path Command::SetPermission",
@@ -50431,6 +50411,7 @@
         "path Update::FilesChanged",
         "path Update::Isolation",
         "path Update::IsolationBackend",
+        "path Update::LineRefusal",
         "path Update::Login",
         "path Update::Management",
         "path Update::MemberConversation",
@@ -50871,6 +50852,7 @@
         "path Effect::Runtime",
         "path Effect::SaveIsolation",
         "path Effect::SelectModel",
+        "path Effect::SetDefaultLine",
         "path Effect::SetEffort",
         "path Effect::SetModelPolicy",
         "path Effect::SetPermission",
