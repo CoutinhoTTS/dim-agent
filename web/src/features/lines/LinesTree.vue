@@ -22,7 +22,6 @@ const refusal = ref<{ branchId: string; message: string }>()
 
 function open(line: LineView): void {
   if (line.state.kind === "creation-failed") return
-  if (line.id === ROOT_BRANCH_ID) return
   if (line.id === defaultBranchId.value) {
     ui.openLines(props.sessionId)
     return
@@ -89,13 +88,15 @@ function parent(line: LineView): string {
         :key="line.id"
         class="lines-row"
         :data-depth="line.depth"
-        :data-active="line.id !== ROOT_BRANCH_ID && ui.activeLineTab[sessionId] === line.id"
+        :data-active="ui.activeLineTab[sessionId] === line.id"
       >
         <template v-if="line.id === ROOT_BRANCH_ID">
-          <span class="lines-state" :data-tone="tone(line)" aria-hidden="true" />
-          <span class="lines-name">{{ t("lines.main") }}</span>
-          <span v-for="mark in marks(line)" :key="mark" class="lines-mark">{{ t(mark === "main-line" ? "lines.mainLine" : "lines.start") }}</span>
-          <span class="lines-meta">{{ t("lines.mainHint") }}</span>
+          <button type="button" class="lines-open" :aria-label="t('lines.openLine', { name: t('lines.main') })" @click="open(line)">
+            <span class="lines-state" :data-tone="tone(line)" aria-hidden="true" />
+            <span class="lines-name">{{ t("lines.main") }}</span>
+            <span v-for="mark in marks(line)" :key="mark" class="lines-mark">{{ t(mark === "main-line" ? "lines.mainLine" : "lines.start") }}</span>
+            <span class="lines-meta">{{ t("lines.mainHint") }}</span>
+          </button>
           <UButton v-if="canContinue(line)" class="lines-continue" color="neutral" variant="ghost" size="xs" :aria-label="t('lines.continueFromLine', { name: t('lines.main') })" @click="continueFrom(line)">
             {{ t("lines.continueFrom") }}
           </UButton>

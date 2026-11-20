@@ -413,14 +413,16 @@ export const useChatStore = defineStore("chat", () => {
    * Hands the centre to `branchId`: the line that left the role falls back to
    * an ordinary branch, and the line that took it is the centre itself, not a
    * tab beside it (design §14). A local move and a resync that discovers one
-   * both hand the stream over once.
+   * both hand the stream over once; a local move hands over the window it read
+   * before the call, so the centre and its transcript change in one step.
    */
-  function centre(channel: Channel, branchId: string): void {
+  function centre(channel: Channel, branchId: string, branch: BranchStream = stream()): void {
     channel.view.defaultBranchId = branchId
     useUiStore().followDefault(channel.view.sessionId, branchId)
     channel.branches.delete(branchId)
-    channel.main = stream()
-    channel.main.opened = true
+    branch.opened = true
+    channel.main = branch
+    publish(channel)
   }
 
   function ensureBranch(channel: Channel, branchId: string): BranchStream {
@@ -577,7 +579,7 @@ export const useChatStore = defineStore("chat", () => {
     try {
       while (channel.historyQueue.length > 0) {
         const branchId = channel.historyQueue.shift()!
-        if (branchId === ROOT_BRANCH_ID || !channel.branches.has(branchId)) continue
+        if (!channel.branches.has(branchId)) continue
         await loadHistory(channel, branchId)
       }
     } finally {
@@ -588,7 +590,7 @@ export const useChatStore = defineStore("chat", () => {
 
   function retryLine(sessionId: string, branchId: string): void {
     const channel = channels.get(sessionId)
-    if (channel === undefined || branchId === ROOT_BRANCH_ID) return
+    if (channel === undefined) return
     const branch = channel.branches.get(branchId)
     if (branch === undefined) return
     branch.error = ""
@@ -872,8 +874,14 @@ export const useChatStore = defineStore("chat", () => {
     if (channel === undefined) return
     const view = channel.view
     if (moved !== view.defaultBranchId) {
-      centre(channel, moved)
+      // The new centre's window is read before the stream changes hands: the
+      // transcript on screen, its running state and every action that names
+      // the centre keep naming the outgoing line until its replacement is
+      // ready, then both change together.
+      const branch = ensureBranch(channel, moved)
+      branch.opened = true
       const loaded = await loadHistory(channel, moved)
+      centre(channel, moved, branch)
       if (loaded !== "ok") {
         // The move stands, but the centre has no transcript to show: report it
         // as `sync` reports the same failure rather than an empty conversation.
