@@ -6,7 +6,7 @@ use crate::{
     client::Client,
     wire::{Configuration, ProviderCatalogSnapshot},
 };
-use dim_agent_types::ModelPreferences;
+use dim_agent_types::{DEFAULT_BRANCH_ID, ModelPreferences};
 use serde::Deserialize;
 use serde_json::json;
 
@@ -192,7 +192,7 @@ pub async fn run(
             let result: Configured = client
                 .typed(
                     "session.agent.update",
-                    json!({"sessionId":session_id,"branchId":"main","agentId":agent_id}),
+                    json!({"sessionId":session_id,"branchId":DEFAULT_BRANCH_ID,"agentId":agent_id}),
                 )
                 .await?;
             lines.push(format!(
@@ -228,7 +228,7 @@ pub async fn run(
                 let result: Configured = client
                     .typed(
                         "session.model.update",
-                        json!({"sessionId":session_id,"branchId":"main","modelPreferences":preferences}),
+                        json!({"sessionId":session_id,"branchId":DEFAULT_BRANCH_ID,"modelPreferences":preferences}),
                     )
                     .await?;
                 lines.push(format!(

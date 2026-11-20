@@ -676,7 +676,9 @@
       "parent": "dim_agent_capabilities::file_storage",
       "file": "crates/dim-agent-capabilities/src/file_storage/face.rs",
       "unexpandedMacros": [
-        "serde_json::json"
+        "matches",
+        "serde_json::json",
+        "tokio::select"
       ]
     },
     {
@@ -1444,6 +1446,13 @@
         "unreachable",
         "vec"
       ]
+    },
+    {
+      "id": "dim_agent_capabilities::timeline_tree::testing",
+      "crate": "dim_agent_capabilities",
+      "parent": "dim_agent_capabilities::timeline_tree",
+      "file": "crates/dim-agent-capabilities/src/timeline_tree.rs",
+      "unexpandedMacros": []
     },
     {
       "id": "dim_agent_capabilities::timeline_tree::tests",
@@ -4342,7 +4351,8 @@
       "unexpandedMacros": [
         "assert",
         "assert_eq",
-        "format"
+        "format",
+        "panic"
       ]
     },
     {
@@ -5406,7 +5416,9 @@
       "crate": "dim_cli",
       "parent": "dim_cli::ui::composer",
       "file": "crates/dim-cli/src/ui/composer/history.rs",
-      "unexpandedMacros": []
+      "unexpandedMacros": [
+        "matches"
+      ]
     },
     {
       "id": "dim_cli::ui::composer::history::tests",
@@ -7954,6 +7966,13 @@
     },
     {
       "from": "dim_acp::commands",
+      "to": "dim_agent_types::events",
+      "references": [
+        "use dim_agent_types::DEFAULT_BRANCH_ID"
+      ]
+    },
+    {
+      "from": "dim_acp::commands",
       "to": "dim_agent_types::goal",
       "references": [
         "path GoalRead",
@@ -7972,6 +7991,13 @@
       "references": [
         "path Rpc",
         "use crate::rpc::Rpc"
+      ]
+    },
+    {
+      "from": "dim_acp::config",
+      "to": "dim_agent_types::events",
+      "references": [
+        "use dim_agent_types::DEFAULT_BRANCH_ID"
       ]
     },
     {
@@ -8156,10 +8182,12 @@
       "from": "dim_acp::gateway",
       "to": "dim_agent_types::events",
       "references": [
+        "path DEFAULT_BRANCH_ID",
         "path TurnOutcome",
         "path TurnOutcome::Cancelled",
         "path TurnOutcome::Completed",
         "path TurnOutcome::Failed",
+        "use dim_agent_types::DEFAULT_BRANCH_ID",
         "use dim_agent_types::TurnOutcome"
       ]
     },
@@ -8483,7 +8511,14 @@
       "from": "dim_acp::projection::tests",
       "to": "dim_acp::projection",
       "references": [
-        "path Projection::default"
+        "path Projection::new"
+      ]
+    },
+    {
+      "from": "dim_acp::projection::tests",
+      "to": "dim_client::question",
+      "references": [
+        "path dim_client::question::Call"
       ]
     },
     {
@@ -9657,6 +9692,13 @@
       "references": [
         "mod file_storage",
         "path file_storage::FileStorage"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities",
+      "to": "dim_agent_capabilities::file_storage::face",
+      "references": [
+        "path file_storage::FsHost"
       ]
     },
     {
@@ -12624,6 +12666,8 @@
         "path FsHost",
         "path FsHost::new",
         "use face::FsHost",
+        "use face::FsPermissions",
+        "use face::FsRemove",
         "use face::OpenRead"
       ]
     },
@@ -12752,6 +12796,7 @@
       "from": "dim_agent_capabilities::file_storage::face",
       "to": "dim_agent_capabilities::file_storage",
       "references": [
+        "path DirectoryEntry",
         "path FileReader",
         "path FileStorage",
         "path FileStorageError",
@@ -12762,10 +12807,44 @@
         "path FileStorageError::Locked",
         "path FileStorageError::Unsupported",
         "path Result",
+        "path super::FileLease",
+        "path super::FilePath",
+        "path super::FileStat",
+        "path super::FileStat::Missing",
+        "path super::ReadLimitExceeded",
+        "path super::ReplacementMode",
+        "path super::ReplacementMode::Native",
+        "path super::ReplacementMode::ReadOnly",
+        "path super::SharedLease::new",
+        "use super::DirectoryEntry",
         "use super::FileReader",
         "use super::FileStorage",
         "use super::FileStorageError",
         "use super::Result"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::file_storage::face",
+      "to": "dim_agent_capabilities::file_storage::native",
+      "references": [
+        "path super::native::file_stat",
+        "path super::native::parent"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::file_storage::face",
+      "to": "dim_agent_capabilities::file_storage::unsupported",
+      "references": [
+        "path super::native::file_stat",
+        "path super::native::parent"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::file_storage::face",
+      "to": "dim_agent_capabilities::file_storage::windows",
+      "references": [
+        "path super::native::file_stat",
+        "path super::native::parent"
       ]
     },
     {
@@ -12777,6 +12856,9 @@
         "path EntryKind::Directory",
         "path EntryKind::File",
         "path EntryKind::Other",
+        "path FileStat",
+        "path FileStat::Missing",
+        "path FileStat::from_entry",
         "path FileStorageError::InvalidPath",
         "path LOCK_DIRECTORY",
         "path Result",
@@ -12803,6 +12885,7 @@
       "references": [
         "path DirectoryEntry",
         "path EntryKind",
+        "path FileStat",
         "path FileStorageError::Unsupported",
         "path Result",
         "path Tree"
@@ -12817,6 +12900,9 @@
         "path EntryKind::Directory",
         "path EntryKind::File",
         "path EntryKind::Other",
+        "path FileStat",
+        "path FileStat::Missing",
+        "path FileStat::from_entry",
         "path FileStorageError::Cleanup",
         "path FileStorageError::InvalidPath",
         "path FileStorageError::Io",
@@ -13469,6 +13555,7 @@
         "path InputMode::Append",
         "path InputMode::Queue",
         "path InputMode::Steer",
+        "path ROOT_BRANCH_ID",
         "path ToolResultData",
         "path UserInput",
         "use dim_agent_types::AgentEvent",
@@ -13479,6 +13566,7 @@
         "use dim_agent_types::InputBlock",
         "use dim_agent_types::InputMessageData",
         "use dim_agent_types::InputMode",
+        "use dim_agent_types::ROOT_BRANCH_ID",
         "use dim_agent_types::ToolResultData",
         "use dim_agent_types::TurnOutcome",
         "use dim_agent_types::UserInput"
@@ -14445,6 +14533,7 @@
         "path AgentError",
         "path AgentError::AmbiguousSubmission",
         "path AgentError::BranchEnded",
+        "path AgentError::BranchRefused",
         "path AgentError::Build",
         "path AgentError::Closed",
         "path AgentError::Framework",
@@ -15694,6 +15783,13 @@
     },
     {
       "from": "dim_agent_capabilities::prompt_registry",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path ROOT_BRANCH_ID"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::prompt_registry",
       "to": "dim_agent_types::prompt",
       "references": [
         "path PromptEntry",
@@ -16107,6 +16203,7 @@
       "from": "dim_agent_capabilities::prompt_suggestion",
       "to": "dim_agent_types::events",
       "references": [
+        "path DEFAULT_BRANCH_ID",
         "path EventKind",
         "path EventKind::InputApplied",
         "path EventKind::InputMessage",
@@ -16118,6 +16215,7 @@
         "path EventKind::ToolUseStart",
         "path EventKind::TurnEnd",
         "path EventKind::TurnStart",
+        "use dim_agent_types::DEFAULT_BRANCH_ID",
         "use dim_agent_types::EventKind",
         "use dim_agent_types::TurnOutcome"
       ]
@@ -16782,9 +16880,11 @@
       "from": "dim_agent_capabilities::shell_input",
       "to": "dim_agent_types::events",
       "references": [
+        "path DEFAULT_BRANCH_ID",
         "path InputMessageData",
         "path InputMessageData::default",
         "path InputMode::Append",
+        "use dim_agent_types::DEFAULT_BRANCH_ID",
         "use dim_agent_types::InputMessageData",
         "use dim_agent_types::InputMode"
       ]
@@ -17814,6 +17914,13 @@
     },
     {
       "from": "dim_agent_capabilities::timeline_tree",
+      "to": "dim_agent_capabilities::branch_input",
+      "references": [
+        "path crate::branch_input::append_own"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::timeline_tree",
       "to": "dim_agent_capabilities::context_block",
       "references": [
         "path crate::context_block::element",
@@ -17868,6 +17975,14 @@
       "to": "dim_agent_capabilities::timeline_tree::read",
       "references": [
         "mod read"
+      ]
+    },
+    {
+      "from": "dim_agent_capabilities::timeline_tree",
+      "to": "dim_agent_capabilities::timeline_tree::testing",
+      "references": [
+        "mod testing",
+        "path testing::writers"
       ]
     },
     {
@@ -17961,6 +18076,7 @@
       "references": [
         "path AgentError",
         "path AgentError::BranchEnded",
+        "path AgentError::BranchRefused",
         "path AgentError::Build",
         "path AgentError::Cancelled",
         "path AgentError::Closed",
@@ -17969,9 +18085,15 @@
         "path AgentError::UnknownBranch",
         "path AgentError::aggregate",
         "path AgentError::fault",
+        "path AgentError::refused",
+        "path BranchRefusal::AlreadyDefault",
+        "path BranchRefusal::CannotEnd",
+        "path BranchRefusal::NotSelectable",
+        "path BranchRefusal::Protected",
         "path Result",
         "path crate::host::panic_message",
         "use dim_agent_runtime::AgentError",
+        "use dim_agent_runtime::BranchRefusal",
         "use dim_agent_runtime::Result"
       ]
     },
@@ -18026,6 +18148,7 @@
         "path QueryValue::Missing",
         "path QueryValue::Value",
         "path TimelineQuery",
+        "path TimelineQueryReply",
         "path dim_agent_runtime::TimelineQuery",
         "path dim_agent_runtime::TimelineQueryReply",
         "use dim_agent_runtime::QueryComparison",
@@ -18037,7 +18160,8 @@
         "use dim_agent_runtime::QuerySelect",
         "use dim_agent_runtime::QuerySpec",
         "use dim_agent_runtime::QueryValue",
-        "use dim_agent_runtime::TimelineQuery"
+        "use dim_agent_runtime::TimelineQuery",
+        "use dim_agent_runtime::TimelineQueryReply"
       ]
     },
     {
@@ -18079,15 +18203,18 @@
         "path BranchCreateFailedData",
         "path BranchCreateFailedData::Cancelled",
         "path BranchCreateFailedData::Failed",
+        "path BranchDefaultData",
         "path BranchEndData",
         "path BranchEndedData",
         "path BranchResumeData",
         "path BranchSource",
         "path BranchSource::Host",
         "path BranchSource::Tool",
+        "path BranchSource::User",
         "path BranchStartData",
         "path EventKind::BranchCreate",
         "path EventKind::BranchCreateFailed",
+        "path EventKind::BranchDefault",
         "path EventKind::BranchEnd",
         "path EventKind::BranchEnded",
         "path EventKind::BranchResume",
@@ -18109,6 +18236,7 @@
         "path InputMode::Append",
         "path InputMode::Queue",
         "path InputMode::Steer",
+        "path ROOT_BRANCH_ID",
         "path TextData",
         "path ToolUseStartData",
         "path TurnEndData",
@@ -21645,8 +21773,10 @@
         "path BranchCreateAt::Create",
         "path BranchCreateAt::Sequence",
         "path EventKind::BranchCreate",
+        "path ROOT_BRANCH_ID",
         "use dim_agent_types::BranchCreateAt",
-        "use dim_agent_types::EventKind"
+        "use dim_agent_types::EventKind",
+        "use dim_agent_types::ROOT_BRANCH_ID"
       ]
     },
     {
@@ -22524,8 +22654,10 @@
       "from": "dim_agent_scheduler::document",
       "to": "dim_agent_types::events",
       "references": [
+        "path DEFAULT_BRANCH_ID",
         "path InputMode",
         "path InputMode::Queue",
+        "use dim_agent_types::DEFAULT_BRANCH_ID",
         "use dim_agent_types::InputMode"
       ]
     },
@@ -22637,7 +22769,10 @@
       "to": "dim_agent_types::events",
       "references": [
         "path InputMode::Queue",
-        "use dim_agent_types::InputMode"
+        "path ROOT_BRANCH_ID",
+        "use dim_agent_types::DEFAULT_BRANCH_ID",
+        "use dim_agent_types::InputMode",
+        "use dim_agent_types::ROOT_BRANCH_ID"
       ]
     },
     {
@@ -23154,6 +23289,14 @@
     },
     {
       "from": "dim_agent_scheduler::session",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path DEFAULT_BRANCH_ID",
+        "use dim_agent_types::DEFAULT_BRANCH_ID"
+      ]
+    },
+    {
+      "from": "dim_agent_scheduler::session",
       "to": "dim_agent_types::tool",
       "references": [
         "path ToolCall",
@@ -23405,6 +23548,14 @@
       "to": "dim_agent_scheduler::wakeup_pass",
       "references": [
         "path crate::wakeup_pass::pause"
+      ]
+    },
+    {
+      "from": "dim_agent_scheduler::wakeups",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path DEFAULT_BRANCH_ID",
+        "use dim_agent_types::DEFAULT_BRANCH_ID"
       ]
     },
     {
@@ -24471,6 +24622,13 @@
     },
     {
       "from": "dim_app_server",
+      "to": "dim_app_server::settings::declared",
+      "references": [
+        "path settings::Settings"
+      ]
+    },
+    {
+      "from": "dim_app_server",
       "to": "dim_app_server::settings_methods",
       "references": [
         "mod settings_methods",
@@ -24510,6 +24668,7 @@
       "from": "dim_app_server",
       "to": "dim_app_server::storage::sqlite",
       "references": [
+        "path storage::AssemblyProgress::new",
         "path storage::SqliteStorage",
         "path storage::SqliteStoragePlugin::new"
       ]
@@ -24818,7 +24977,11 @@
       "from": "dim_app_server::agents",
       "to": "dim_agent_types::events",
       "references": [
-        "path dim_agent_types::AgentEvent"
+        "path DEFAULT_BRANCH_ID",
+        "path ROOT_BRANCH_ID",
+        "path dim_agent_types::AgentEvent",
+        "use dim_agent_types::DEFAULT_BRANCH_ID",
+        "use dim_agent_types::ROOT_BRANCH_ID"
       ]
     },
     {
@@ -25073,6 +25236,14 @@
     },
     {
       "from": "dim_app_server::agents::configuration",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path DEFAULT_BRANCH_ID",
+        "use dim_agent_types::DEFAULT_BRANCH_ID"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents::configuration",
       "to": "dim_agent_types::prompt",
       "references": [
         "path ModelSelection",
@@ -25175,8 +25346,10 @@
       "to": "dim_agent_types::events",
       "references": [
         "path AgentEvent",
+        "path ROOT_BRANCH_ID",
         "use dim_agent_types::AgentEvent",
-        "use dim_agent_types::EventKind"
+        "use dim_agent_types::EventKind",
+        "use dim_agent_types::ROOT_BRANCH_ID"
       ]
     },
     {
@@ -26417,6 +26590,7 @@
         "path CollaborationTarget::Agent",
         "path CollaborationTarget::Member",
         "path CollaborationTarget::Temporary",
+        "path DEFAULT_BRANCH_ID",
         "path EventKind",
         "path EventKind::CollaborationCancel",
         "path EventKind::CollaborationClose",
@@ -26444,6 +26618,7 @@
         "path InterruptScope",
         "path InterruptScope::Branch",
         "path InterruptScope::Turn",
+        "path ROOT_BRANCH_ID",
         "path TurnOutcome::Cancelled",
         "path TurnOutcome::Completed",
         "path TurnOutcome::Failed",
@@ -27132,7 +27307,11 @@
       "from": "dim_app_server::connection",
       "to": "dim_agent_types::events",
       "references": [
+        "path DEFAULT_BRANCH_ID",
+        "path ROOT_BRANCH_ID",
+        "use dim_agent_types::DEFAULT_BRANCH_ID",
         "use dim_agent_types::InputMessageData",
+        "use dim_agent_types::ROOT_BRANCH_ID",
         "use dim_agent_types::UserInput"
       ]
     },
@@ -27609,9 +27788,11 @@
         "path EventKind::ApprovalCancelled",
         "path EventKind::ApprovalRequest",
         "path EventKind::ApprovalRespond",
+        "path ROOT_BRANCH_ID",
         "path dim_agent_types::ApprovalRequestData",
         "use dim_agent_types::AgentEvent",
-        "use dim_agent_types::EventKind"
+        "use dim_agent_types::EventKind",
+        "use dim_agent_types::ROOT_BRANCH_ID"
       ]
     },
     {
@@ -27853,6 +28034,8 @@
       "to": "dim_agent_types::events",
       "references": [
         "path BranchSource::Host",
+        "path BranchSource::User",
+        "path DEFAULT_BRANCH_ID",
         "path InputBlock",
         "path InputBlock::Raw",
         "path InputMessageData",
@@ -27861,6 +28044,7 @@
         "path UserInput",
         "path dim_agent_types::AgentEvent",
         "use dim_agent_types::BranchSource",
+        "use dim_agent_types::DEFAULT_BRANCH_ID",
         "use dim_agent_types::InputBlock",
         "use dim_agent_types::InputMode"
       ]
@@ -28247,11 +28431,17 @@
       "from": "dim_app_server::hooks_settings",
       "to": "dim_agent_capabilities::file_storage",
       "references": [
-        "path FileStorage",
         "path FileStorageError::Cancelled",
         "path FileStorageError::Io",
-        "use dim_agent_capabilities::file_storage::FileStorage",
         "use dim_agent_capabilities::file_storage::FileStorageError"
+      ]
+    },
+    {
+      "from": "dim_app_server::hooks_settings",
+      "to": "dim_agent_capabilities::file_storage::face",
+      "references": [
+        "path FsHost",
+        "use dim_agent_capabilities::file_storage::FsHost"
       ]
     },
     {
@@ -28406,8 +28596,14 @@
       "from": "dim_app_server::hooks_settings::tests",
       "to": "dim_agent_capabilities::file_storage",
       "references": [
-        "path FileStorage",
         "use dim_agent_capabilities::file_storage::FileStoragePlugin"
+      ]
+    },
+    {
+      "from": "dim_app_server::hooks_settings::tests",
+      "to": "dim_agent_capabilities::file_storage::face",
+      "references": [
+        "path FsHost"
       ]
     },
     {
@@ -30743,16 +30939,16 @@
       "to": "dim_app_server::settings",
       "references": [
         "path SettingsError",
-        "path SettingsService",
-        "use crate::settings::SettingsError",
-        "use crate::settings::SettingsService"
+        "use crate::settings::SettingsError"
       ]
     },
     {
       "from": "dim_app_server::plugin_manager",
       "to": "dim_app_server::settings::declared",
       "references": [
+        "path Settings",
         "path SourceDeclaration",
+        "use crate::settings::Settings",
         "use crate::settings::SourceDeclaration"
       ]
     },
@@ -30915,10 +31111,8 @@
       "from": "dim_app_server::plugin_manager::tools",
       "to": "dim_app_server::settings::declared",
       "references": [
-        "path Writer::Owner",
         "path holds_write_only",
         "path without_write_only",
-        "use crate::settings::Writer",
         "use crate::settings::holds_write_only",
         "use crate::settings::without_write_only"
       ]
@@ -33058,6 +33252,14 @@
     },
     {
       "from": "dim_app_server::session_language",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path ROOT_BRANCH_ID",
+        "use dim_agent_types::ROOT_BRANCH_ID"
+      ]
+    },
+    {
+      "from": "dim_app_server::session_language",
       "to": "dim_app_server::storage::face",
       "references": [
         "path Store",
@@ -33982,6 +34184,7 @@
       "to": "dim_app_server::storage::sqlite",
       "references": [
         "mod sqlite",
+        "use sqlite::AssemblyProgress",
         "use sqlite::FORMAT",
         "use sqlite::ImportUser",
         "use sqlite::ReplaceUser",
@@ -34108,8 +34311,10 @@
         "path EventKind",
         "path EventKind::InputMessage",
         "path InputMessageData",
+        "path ROOT_BRANCH_ID",
         "use dim_agent_types::EventKind",
-        "use dim_agent_types::InputMessageData"
+        "use dim_agent_types::InputMessageData",
+        "use dim_agent_types::ROOT_BRANCH_ID"
       ]
     },
     {
@@ -35532,15 +35737,18 @@
         "path BranchCreateAt::Create",
         "path BranchCreateAt::Sequence",
         "path EventKind::BranchCreate",
+        "path EventKind::BranchDefault",
         "path EventKind::InputMessage",
         "path EventKind::SessionForked",
         "path EventKind::Text",
         "path EventKind::Thinking",
+        "path ROOT_BRANCH_ID",
         "path SessionForkedData",
         "path dim_agent_types::InputMessageData::text",
         "use dim_agent_types::AgentEvent",
         "use dim_agent_types::BranchCreateAt",
         "use dim_agent_types::EventKind",
+        "use dim_agent_types::ROOT_BRANCH_ID",
         "use dim_agent_types::SessionForkedData"
       ]
     },
@@ -35594,7 +35802,7 @@
         "path super::catalog::activity",
         "path super::catalog::create",
         "path super::catalog::initialize_session_catalog",
-        "path super::catalog::refresh"
+        "path super::catalog::refresh_preview"
       ]
     },
     {
@@ -36775,6 +36983,7 @@
         "path Action::Worktree",
         "path Options",
         "path Options::parse",
+        "path args",
         "use args::Action",
         "use args::Options"
       ]
@@ -36813,6 +37022,7 @@
         "path client::UpgradeStage::Index",
         "path client::UpgradeStage::Verify",
         "path client::connect_inner",
+        "path client::invocation",
         "path client::stop",
         "path client::web_assets"
       ]
@@ -37114,6 +37324,7 @@
       "to": "dim_cli::session",
       "references": [
         "mod session",
+        "path session",
         "path session::chat"
       ]
     },
@@ -37149,6 +37360,13 @@
     },
     {
       "from": "dim_cli",
+      "to": "dim_cli::ui::composer::history",
+      "references": [
+        "path ui::composer::history::flush_within"
+      ]
+    },
+    {
+      "from": "dim_cli",
       "to": "dim_cli::ui::config",
       "references": [
         "path ui::config::save_fullscreen",
@@ -37179,6 +37397,7 @@
       "from": "dim_cli",
       "to": "dim_cli::ui::tui",
       "references": [
+        "path ui::tui::UpdateRequest",
         "path ui::tui::is_interactive"
       ]
     },
@@ -37187,9 +37406,11 @@
       "to": "dim_cli::update",
       "references": [
         "mod update",
+        "path update",
         "path update::hold_installation",
         "path update::recover_startup",
         "path update::registry",
+        "path update::restart_launcher",
         "path update::run"
       ]
     },
@@ -37529,7 +37750,8 @@
       "from": "dim_cli::client",
       "to": "dim_cli::update",
       "references": [
-        "path crate::update::entry"
+        "path crate::update::entry",
+        "path crate::update::entry_command"
       ]
     },
     {
@@ -37558,9 +37780,17 @@
       "from": "dim_cli::client::progress_note_tests",
       "to": "dim_cli::client",
       "references": [
+        "path ProgressKind::Assembly",
+        "path ProgressKind::StoreUpgrade",
         "path ProgressNote",
+        "path ProgressReport::StoreUpgrade",
+        "path ProgressWatch::default",
+        "path UpgradeStage",
         "path read_progress_note",
+        "use super::ProgressKind",
         "use super::ProgressNote",
+        "use super::ProgressReport",
+        "use super::ProgressWatch",
         "use super::UpgradeStage",
         "use super::read_progress_note"
       ]
@@ -37830,6 +38060,13 @@
     },
     {
       "from": "dim_cli::configure",
+      "to": "dim_agent_types::events",
+      "references": [
+        "use dim_agent_types::DEFAULT_BRANCH_ID"
+      ]
+    },
+    {
+      "from": "dim_cli::configure",
       "to": "dim_agent_types::model",
       "references": [
         "path ModelPreferences",
@@ -38088,6 +38325,14 @@
       "to": "dim_cli::goal",
       "references": [
         "path Request::Objective"
+      ]
+    },
+    {
+      "from": "dim_cli::goal_command",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path DEFAULT_BRANCH_ID",
+        "use dim_agent_types::DEFAULT_BRANCH_ID"
       ]
     },
     {
@@ -38964,6 +39209,14 @@
       "references": [
         "path Client",
         "use crate::client::Client"
+      ]
+    },
+    {
+      "from": "dim_cli::management::scheduler",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path DEFAULT_BRANCH_ID",
+        "use dim_agent_types::DEFAULT_BRANCH_ID"
       ]
     },
     {
@@ -40302,7 +40555,8 @@
       "to": "dim_agent_types::events",
       "references": [
         "path ApprovalCallData",
-        "use dim_agent_types::ApprovalCallData"
+        "use dim_agent_types::ApprovalCallData",
+        "use dim_agent_types::DEFAULT_BRANCH_ID"
       ]
     },
     {
@@ -40586,6 +40840,7 @@
       "to": "dim_cli::ui::tui",
       "references": [
         "path WebOpened",
+        "path ui::tui::UpdateRequest",
         "path ui::tui::print_web_panel",
         "path ui::tui::run",
         "use crate::ui::tui::WebOpened"
@@ -40647,6 +40902,7 @@
         "path BranchCreateFailedData::Failed",
         "path BranchSource::Host",
         "path BranchSource::Tool",
+        "path BranchSource::User",
         "path CollaborationDelivery::Error",
         "path CollaborationDelivery::Ok",
         "path CollaborationOutcome::Cancelled",
@@ -40668,6 +40924,7 @@
         "path ModelFailure",
         "path ModelFailureKind",
         "path ModelOutputOutcome::Failed",
+        "path ROOT_BRANCH_ID",
         "path ReplacementParts",
         "path TurnOutcome",
         "path TurnOutcome::Cancelled",
@@ -40696,6 +40953,7 @@
         "use dim_agent_types::ModelFailure",
         "use dim_agent_types::ModelFailureKind",
         "use dim_agent_types::ModelOutputOutcome",
+        "use dim_agent_types::ROOT_BRANCH_ID",
         "use dim_agent_types::ReplacementParts",
         "use dim_agent_types::TurnOutcome",
         "use dim_agent_types::UserInput"
@@ -41098,6 +41356,14 @@
     },
     {
       "from": "dim_cli::question::line",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path ROOT_BRANCH_ID",
+        "use dim_agent_types::ROOT_BRANCH_ID"
+      ]
+    },
+    {
+      "from": "dim_cli::question::line",
       "to": "dim_agent_types::question",
       "references": [
         "path dim_agent_types::PendingQuestionBatch"
@@ -41345,8 +41611,10 @@
       "to": "dim_agent_types::events",
       "references": [
         "path ApprovalCallData",
+        "path DEFAULT_BRANCH_ID",
         "path UserInput",
         "use dim_agent_types::ApprovalCallData",
+        "use dim_agent_types::DEFAULT_BRANCH_ID",
         "use dim_agent_types::UserInput"
       ]
     },
@@ -41612,6 +41880,14 @@
     },
     {
       "from": "dim_cli::session::window",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path DEFAULT_BRANCH_ID",
+        "use dim_agent_types::DEFAULT_BRANCH_ID"
+      ]
+    },
+    {
+      "from": "dim_cli::session::window",
       "to": "dim_cli",
       "references": [
         "path Result",
@@ -41708,8 +41984,12 @@
         "path ApprovalCallData",
         "path ApprovalDecision::Allow",
         "path ApprovalDecision::Deny",
+        "path DEFAULT_BRANCH_ID",
+        "path ROOT_BRANCH_ID",
         "use dim_agent_types::ApprovalCallData",
-        "use dim_agent_types::ApprovalDecision"
+        "use dim_agent_types::ApprovalDecision",
+        "use dim_agent_types::DEFAULT_BRANCH_ID",
+        "use dim_agent_types::ROOT_BRANCH_ID"
       ]
     },
     {
@@ -41948,6 +42228,7 @@
         "path Command::Approval",
         "path Command::AskAnswers",
         "path Command::AskCancel",
+        "path Command::CheckUpdate",
         "path Command::ClearModelPreferences",
         "path Command::CloseSessions",
         "path Command::CloseSide",
@@ -42138,6 +42419,7 @@
         "path Update::Toast",
         "path Update::TurnCompleted",
         "path Update::Upgrade",
+        "path Update::UpgradeChecked",
         "path Update::Usage",
         "path Update::UsageReport",
         "path Update::Web",
@@ -42353,6 +42635,7 @@
       "references": [
         "path update",
         "path update::available",
+        "path update::check",
         "path update::enabled",
         "use crate::update"
       ]
@@ -42442,6 +42725,7 @@
       "to": "dim_agent_types::events",
       "references": [
         "path ContextCompactionData",
+        "path ROOT_BRANCH_ID",
         "use dim_agent_types::ContextCompactionData",
         "use dim_agent_types::ContextCompactionResult"
       ]
@@ -42542,6 +42826,13 @@
       "to": "dim_agent_types::activity",
       "references": [
         "path dim_agent_types::ToolRead"
+      ]
+    },
+    {
+      "from": "dim_cli::session_host::member",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path DEFAULT_BRANCH_ID"
       ]
     },
     {
@@ -42819,6 +43110,7 @@
       "references": [
         "path BranchCreateFailedData::Cancelled",
         "path BranchCreateFailedData::Failed",
+        "path DEFAULT_BRANCH_ID",
         "use dim_agent_types::BranchCreateFailedData"
       ]
     },
@@ -45206,6 +45498,14 @@
     },
     {
       "from": "dim_cli::ui::lines_panel",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path ROOT_BRANCH_ID",
+        "use dim_agent_types::ROOT_BRANCH_ID"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::lines_panel",
       "to": "dim_cli::model::view",
       "references": [
         "path LineState",
@@ -46582,6 +46882,14 @@
       "to": "dim_cli::ui::theme::detect",
       "references": [
         "path Env"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::prompts",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path ROOT_BRANCH_ID",
+        "use dim_agent_types::ROOT_BRANCH_ID"
       ]
     },
     {
@@ -48305,6 +48613,14 @@
     },
     {
       "from": "dim_cli::ui::tasks_panel",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path ROOT_BRANCH_ID",
+        "use dim_agent_types::ROOT_BRANCH_ID"
+      ]
+    },
+    {
+      "from": "dim_cli::ui::tasks_panel",
       "to": "dim_cli::model::view",
       "references": [
         "path MemberConversationState",
@@ -49885,7 +50201,9 @@
       "from": "dim_cli::ui::tui",
       "to": "dim_agent_types::events",
       "references": [
-        "path dim_agent_types::UserInput"
+        "path ROOT_BRANCH_ID",
+        "path dim_agent_types::UserInput",
+        "use dim_agent_types::ROOT_BRANCH_ID"
       ]
     },
     {
@@ -50024,6 +50342,7 @@
         "path Command::Approval",
         "path Command::AskAnswers",
         "path Command::AskCancel",
+        "path Command::CheckUpdate",
         "path Command::ClearModelPreferences",
         "path Command::CloseSessions",
         "path Command::CloseSide",
@@ -50191,6 +50510,7 @@
         "path Update::Toast",
         "path Update::TurnCompleted",
         "path Update::Upgrade",
+        "path Update::UpgradeChecked",
         "path Update::Usage",
         "path Update::UsageReport",
         "path Update::Web",
@@ -50599,6 +50919,7 @@
         "path Effect::ThemePreview",
         "path Effect::ThemeRestore",
         "path Effect::Timeline",
+        "path Effect::UpgradeNow",
         "path Effect::UpgradeSkip",
         "path EffortPrompt",
         "path EffortPrompt::new",
@@ -51092,7 +51413,6 @@
       "from": "dim_cli::ui::tui",
       "to": "dim_cli::update",
       "references": [
-        "path crate::update::command",
         "path crate::update::skip"
       ]
     },
@@ -51270,6 +51590,7 @@
         "path Update::SuggestionSetting",
         "path Update::Switched",
         "path Update::Upgrade",
+        "path Update::UpgradeChecked",
         "path Update::UsageReport",
         "path Update::Withdrawn",
         "path crate::model::session::Account",
@@ -51643,6 +51964,7 @@
       "to": "dim_cli::ui::i18n",
       "references": [
         "path t",
+        "path tf",
         "use crate::ui::i18n::t",
         "use crate::ui::i18n::tf"
       ]
@@ -51654,6 +51976,7 @@
         "path Effect",
         "path Effect::Close",
         "path Effect::None",
+        "path Effect::UpgradeNow",
         "path Effect::UpgradeSkip",
         "use crate::ui::prompts::Effect"
       ]
@@ -51757,6 +52080,7 @@
       "from": "dim_cli::update",
       "to": "dim_cli::plugins",
       "references": [
+        "path crate::plugins::Signals",
         "path crate::plugins::Signals::listen"
       ]
     },
@@ -51765,6 +52089,7 @@
       "to": "dim_cli::update::staged",
       "references": [
         "mod staged",
+        "path staged",
         "path staged::update"
       ]
     },
@@ -52934,6 +53259,14 @@
     },
     {
       "from": "dim_goal::session",
+      "to": "dim_agent_types::events",
+      "references": [
+        "path DEFAULT_BRANCH_ID",
+        "use dim_agent_types::DEFAULT_BRANCH_ID"
+      ]
+    },
+    {
+      "from": "dim_goal::session",
       "to": "dim_agent_types::tool",
       "references": [
         "path ToolCall",
@@ -53779,6 +54112,7 @@
         "path ModelContentData",
         "path ModelOutputEndData",
         "path ModelOutputOutcome::Completed",
+        "path ROOT_BRANCH_ID",
         "path TextData",
         "path ThinkingData",
         "path ToolCallResult",
@@ -55610,6 +55944,7 @@
         "path AgentEvent",
         "path BranchCreateFailedData::Cancelled",
         "path BranchCreateFailedData::Failed",
+        "path DEFAULT_BRANCH_ID",
         "path EventKind",
         "path EventKind::BranchCreateFailed",
         "path EventKind::BranchEnd",
@@ -55634,6 +55969,7 @@
         "path TurnOutcome::Failed",
         "use dim_agent_types::AgentEvent",
         "use dim_agent_types::BranchCreateFailedData",
+        "use dim_agent_types::DEFAULT_BRANCH_ID",
         "use dim_agent_types::EventKind",
         "use dim_agent_types::FinishReason",
         "use dim_agent_types::ModelOutputOutcome",
@@ -55854,9 +56190,11 @@
         "path EventKind::InputApplied",
         "path InputBlock",
         "path InputBlock::Raw",
+        "path ROOT_BRANCH_ID",
         "path UserInput",
         "use dim_agent_types::EventKind",
         "use dim_agent_types::InputBlock",
+        "use dim_agent_types::ROOT_BRANCH_ID",
         "use dim_agent_types::UserInput"
       ]
     },
@@ -55943,6 +56281,18 @@
     {
       "module": "dim_agent_capabilities::adapters",
       "path": "AsRef::as_ref"
+    },
+    {
+      "module": "dim_agent_capabilities::file_storage::face",
+      "path": "D::Error"
+    },
+    {
+      "module": "dim_agent_capabilities::file_storage::face",
+      "path": "S::Error"
+    },
+    {
+      "module": "dim_agent_capabilities::file_storage::face",
+      "path": "S::Ok"
     },
     {
       "module": "dim_agent_capabilities::file_storage::windows",
@@ -56066,11 +56416,11 @@
     },
     {
       "module": "dim_agent_capabilities::timeline_tree",
-      "path": "Wake::Lost"
+      "path": "Wake::Defaults"
     },
     {
       "module": "dim_agent_capabilities::timeline_tree",
-      "path": "Wake::Parent"
+      "path": "Wake::Parents"
     },
     {
       "module": "dim_agent_capabilities::timeline_tree",

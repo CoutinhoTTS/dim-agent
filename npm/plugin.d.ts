@@ -21,6 +21,9 @@ export interface FileLease {
 }
 
 export interface FileScope {
+  writeStream(name: string, next: () => Uint8Array | null | Promise<Uint8Array | null>): Promise<FileResult<null>>;
+  directory(name: string): Promise<FileResult<string>>;
+  openRead(name: string): Promise<FileResult<Awaited<ReturnType<FsHost["openRead"]>> | null>>;
   withLock<T>(path: string, work: (file: FileLease) => T | Promise<T>, cancelled?: Promise<void>): Promise<FileResult<T>>;
   /** One level of the directory `prefix`, sorted, never entering a directory
    * entry and never listing the root itself. */
@@ -58,6 +61,7 @@ export interface SourceDeclaration {
 
 /** Process service `settings`. */
 export interface Settings {
+  declaredBy(request: { instanceId: string }): SourceDeclaration[];
   /** Registers a source for as long as the calling row is loaded; its documents stay in the
    * home when the row unloads. Rejects (failing the caller's apply) when the declaration is
    * invalid or its name or a file is registered already. Call it from a row's own `apply`. */
@@ -709,8 +713,18 @@ export interface TimelineStore {
   latestSnapshot(request: { sessionId: string; branchId: string; through: number; interpreter: string }): Promise<{ snapshot: TimelineRecoverySnapshot | null }>;
 }
 
-/** Pinned reads on the filesystem owner; see resource-faces §4.1. */
+export type FsEntryName = string | { Unix: number[] } | { Windows: number[] };
+/** Directory operations and pinned reads on the filesystem owner; see resource-faces §4.1. */
 export interface FsHost {
+  stat(request: { path: string }): Promise<{ kind: 'file'; size: number } | { kind: 'directory' | 'other' | 'missing' }>;
+  replace(request: { path: string; bytes: string; permissions?: 'preserve' | 'private' | 'privateReadOnly'; leaseId?: string }): Promise<Record<string, never>>;
+  backup(request: { leaseId: string; suffix: string; permissions?: 'preserve' | 'private' }): Promise<Record<string, never>>;
+  lock(request: { path: string }): Promise<{ leaseId: string }>;
+  unlock(request: { leaseId: string }): Promise<Record<string, never>>;
+  readBytes(request: { path: string; limit: number; leaseId?: string }): Promise<{ size: number; bytes: string }>;
+  createDirectory(request: { path: string }): Promise<Record<string, never>>;
+  list(request: { path: string }): Promise<{ entries: { name: FsEntryName; kind: 'file' | 'directory' | 'other' }[] }>;
+  remove(request: { path: string } | { parent: string; name: FsEntryName }): Promise<Record<string, never>>;
   openRead(request: { path: string }): Promise<{ readId: string; size: number }>;
   readAt(request: { readId: string; offset: number; limit: number }): Promise<{ bytes: string }>;
   closeRead(request: { readId: string }): Promise<Record<string, never>>;

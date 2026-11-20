@@ -8,7 +8,10 @@ use crate::{
     runs::{Delivery, DeliveryState, SchedulerError, SessionOrigin, stamp},
 };
 use dim_agent_capabilities::settings::SettingsScope;
-use dim_agent_types::{InputMode, PermissionPolicy, PermissionPreset, markup::escaped};
+use dim_agent_types::{
+    DEFAULT_BRANCH_ID, InputMode, PermissionPolicy, PermissionPreset, ROOT_BRANCH_ID,
+    markup::escaped,
+};
 use dim_app_server::settings::SettingsError;
 use jiff::{SignedDuration, Timestamp};
 use rutis_bridge::session::{HostDispatch, settle};
@@ -454,7 +457,7 @@ async fn record_session(
 ) -> Result<(), SchedulerError> {
     update_run(shared, run_id, move |run| {
         run.session_id = Some(session_id);
-        run.branch_id = Some("main".into());
+        run.branch_id = Some(ROOT_BRANCH_ID.into());
         run.session_origin = Some(SessionOrigin::Launch);
         run.policy = Some(policy);
     })
@@ -742,7 +745,7 @@ async fn stop_at(shared: Arc<Shared>, run_id: String, session_id: String, deadli
         match sessions(
             shared.sessions.as_ref(),
             "stop",
-            json!({"sessionId": session_id, "branchId": "main",
+            json!({"sessionId": session_id, "branchId": DEFAULT_BRANCH_ID,
                 "reason": "scheduled run reached its stop time"}),
         )
         .await
@@ -1205,7 +1208,7 @@ async fn write_input(
             input_mode,
             ..
         }) => (branch_id, input_mode),
-        Some(Target::Launch { .. }) => ("main".to_owned(), InputMode::Queue),
+        Some(Target::Launch { .. }) => (ROOT_BRANCH_ID.to_owned(), InputMode::Queue),
         None => return Err(SchedulerError::invalid_data("job has no target")),
     };
     let input = json!({

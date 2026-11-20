@@ -612,6 +612,22 @@ impl Session {
         }
         self.0.tree.end(branch.to_owned(), source).await
     }
+    /// The line the Session's conversation is on: the root until the user
+    /// moves it (design §4, §5).
+    pub fn default_branch(&self) -> Result<String> {
+        self.0.tree.default_branch()
+    }
+    /// Moves the Session's conversation to `branch`; see
+    /// [`TimelineTreeControl::set_default_branch`] for the refusals.
+    pub async fn set_default_branch(&self, branch: &str, source: BranchSource) -> Result<String> {
+        if self.0.owner.closing.is_cancelled() {
+            return Err(AgentError::Closed(self.id().into()));
+        }
+        self.0
+            .tree
+            .set_default_branch(branch.to_owned(), source)
+            .await
+    }
     pub fn state(&self, branch: &str) -> Result<BranchStatus> {
         self.published(branch)?.state()
     }

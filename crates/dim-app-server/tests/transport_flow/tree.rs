@@ -297,7 +297,7 @@ async fn v2_tree_history_resume_and_protocol_isolation_work_on_both_transports()
         assert!(history.iter().any(|event| matches!(&event.kind,
             dim_agent_types::EventKind::BranchCreate(data) if data.branch == child_id
                 && matches!(&data.source,
-                    dim_agent_types::BranchSource::Host { operation_id } if !operation_id.is_empty()))));
+                    dim_agent_types::BranchSource::User { operation_id } if !operation_id.is_empty()))));
         server.shutdown();
         server.join().await.unwrap();
     }
@@ -345,7 +345,7 @@ async fn host_branch_creation_publishes_the_anchor_before_the_child_start() {
             }
         }
         let (anchor, start) = (anchor.unwrap(), start.unwrap());
-        assert_eq!(anchor["event"]["data"]["source"]["kind"], "host");
+        assert_eq!(anchor["event"]["data"]["source"]["kind"], "user");
         assert_eq!(start["event"]["sequence"], 1);
         assert_eq!(
             start["event"]["data"]["createEvent"],

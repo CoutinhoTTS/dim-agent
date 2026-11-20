@@ -1172,6 +1172,7 @@ fn branch_end(turn: &str, request: &str, call: &str) -> EventKind {
             call_id: call.into(),
         },
         ancestor: None,
+        final_message: None,
     })
 }
 

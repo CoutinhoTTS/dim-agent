@@ -86,6 +86,19 @@ test("branch facts are decoded with their line and cut", () => {
     prompt: "parser race",
     source: { kind: "host", operationId: "op-1" },
   })
+  const mine = page(event("branch", "create", {
+    at: { kind: "sequence", sequence: 2 },
+    source: { kind: "user", operation_id: "op-user" },
+    branch: "b-u1",
+    prompt: "continue here",
+  }))
+  assert.deepEqual(mine.events[0].content, {
+    kind: "branch-create",
+    branchId: "b-u1",
+    at: 2,
+    prompt: "continue here",
+    source: { kind: "user", operationId: "op-user" },
+  })
 
   const ended = page(event("branch", "ended", {
     branch: "b-7c",

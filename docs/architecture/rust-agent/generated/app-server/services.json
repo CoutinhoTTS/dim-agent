@@ -1935,7 +1935,7 @@
         "generation": 1,
         "injects": [
           {
-            "service": "dim_agent_capabilities::file_storage::FileStorage",
+            "service": "dim_agent_capabilities::file_storage::face::FsHost",
             "scope": null,
             "status": "Ready"
           },
@@ -1952,7 +1952,7 @@
         ],
         "resolved": [
           {
-            "service": "dim_agent_capabilities::file_storage::FileStorage",
+            "service": "dim_agent_capabilities::file_storage::face::FsHost",
             "scope": null,
             "provider": 4,
             "generation": 1
@@ -1972,7 +1972,7 @@
         ],
         "reads": [
           {
-            "service": "dim_agent_capabilities::file_storage::FileStorage",
+            "service": "dim_agent_capabilities::file_storage::face::FsHost",
             "provider": 4,
             "declared": true,
             "external": true

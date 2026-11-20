@@ -1,5 +1,5 @@
 import type { LineState, LineView } from "../../lines"
-import { MAIN_BRANCH, type ApprovalDecision } from "../../rpc/protocol"
+import { DEFAULT_BRANCH_ID, ROOT_BRANCH_ID, type ApprovalDecision } from "../../rpc/protocol"
 
 export type Translate = (key: string, params?: Record<string, unknown>) => string
 
@@ -25,7 +25,7 @@ export function shortId(id: string): string {
 
 export function lineStateLabel(t: Translate, state: LineState): string {
   switch (state.kind) {
-    case "main": return t("lines.state.main")
+    case ROOT_BRANCH_ID: return t("lines.state.main")
     case "working": return t("lines.state.working")
     case "waiting": return t("lines.state.waiting")
     case "ending": return t("lines.state.ending")
@@ -60,11 +60,11 @@ export function approvalKeyboardBranch(
 ): string | undefined {
   const mainVisible = !layout.detailOpen || (!layout.detailExpanded && layout.shellWidth >= DETAIL_COVER_WIDTH)
   const activeLine = layout.detailOpen ? layout.activeLine : undefined
-  const mainHas = mainVisible && approvals.some((request) => request.branchId === MAIN_BRANCH)
+  const mainHas = mainVisible && approvals.some((request) => request.branchId === DEFAULT_BRANCH_ID)
   const lineHas = activeLine !== undefined && approvals.some((request) => request.branchId === activeLine)
-  if (mainHas && lineHas) return layout.detailFocused ? activeLine : MAIN_BRANCH
+  if (mainHas && lineHas) return layout.detailFocused ? activeLine : DEFAULT_BRANCH_ID
   if (lineHas) return activeLine
-  if (mainHas) return MAIN_BRANCH
+  if (mainHas) return DEFAULT_BRANCH_ID
   return undefined
 }
 

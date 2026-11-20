@@ -26,6 +26,7 @@ flowchart LR
 | `dimcode web` | `crates/dim-cli` | Holder client: calls `web.open` over the local socket and keeps the connection; no HTTP stack in the CLI |
 | TUI `/web` | `crates/dim-cli` | Calls `web.toggle`; the daemon owns the on/off state, so the TUI stays open |
 | Frontend | `web/` at the repository root | Vue 3 + Vite app ported from the TypeScript `packages/cli-web`, with its transport rewritten for protocol v4 |
+| Shared chat UI | `web/packages/chat-ui` | Presentational `@dimcode/chat-ui` workspace package imported from `dim-electron` after its extraction completed; hosts supply session/commands/i18n/capabilities through `ChatUiHost` (see #1836/#1839) |
 
 ## 2. Local web entry
 

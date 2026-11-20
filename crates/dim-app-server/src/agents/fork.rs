@@ -3,7 +3,7 @@ use dim_agent_runtime::{
     AgentError, QueryComparison, QueryFilter, QueryOperand, QueryOutput, QueryPage, QueryPick,
     QuerySelect, QuerySpec, Result, Session, TimelineQuery, TimelineQueryScope,
 };
-use dim_agent_types::{AgentEvent, EventKind};
+use dim_agent_types::{AgentEvent, EventKind, ROOT_BRANCH_ID};
 use std::{num::NonZeroU64, sync::Arc};
 
 pub(super) async fn validate_rest_point(session: &Session, at: u64) -> Result<()> {
@@ -192,7 +192,7 @@ async fn read_one(
 ) -> Result<Option<Arc<AgentEvent>>> {
     let reply = session
         .query(
-            "main",
+            ROOT_BRANCH_ID,
             TimelineQuery {
                 scope: TimelineQueryScope::Branch,
                 from: None,

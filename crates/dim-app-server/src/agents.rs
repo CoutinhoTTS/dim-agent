@@ -14,7 +14,7 @@ use dim_agent_runtime::{
     TimelineReadScope, TimelineReadSegment,
 };
 pub use dim_agent_types::AgentProfile;
-use dim_agent_types::TimelinePosition;
+use dim_agent_types::{DEFAULT_BRANCH_ID, ROOT_BRANCH_ID, TimelinePosition};
 use rutis::host::{
     BoxFuture, CtxHost, DynPlugin, Effect, ErrorKind, FiberState, FiberView, Key, TypeKey,
 };
@@ -1060,8 +1060,8 @@ impl AgentIndex {
             summary.closed = closed.contains(&summary.session.session_id);
             if let Some((_, session)) = self.session(&summary.session.session_id) {
                 match session
-                    .state("main")
-                    .and_then(|state| Ok((state.running, session.sequence("main")?)))
+                    .state(DEFAULT_BRANCH_ID)
+                    .and_then(|state| Ok((state.running, session.sequence(DEFAULT_BRANCH_ID)?)))
                 {
                     Ok((running, sequence)) => {
                         summary.session.running = running;
@@ -1115,8 +1115,10 @@ impl AgentIndex {
                 model_id: session.config().model.model_id.clone(),
             },
             created_at: session.created_at(),
-            running: session.state("main").is_ok_and(|state| state.running),
-            sequence: session.sequence("main")?,
+            running: session
+                .state(DEFAULT_BRANCH_ID)
+                .is_ok_and(|state| state.running),
+            sequence: session.sequence(DEFAULT_BRANCH_ID)?,
             attached_clients: 0,
             agent_id: (version >= 3).then(|| host.agent_id.clone()),
             origin,
@@ -1159,7 +1161,7 @@ impl AgentIndex {
             }),
         };
         let loaded = match self.session(id) {
-            Some((_, session)) => match session.query("main", query.clone()).await {
+            Some((_, session)) => match session.query(DEFAULT_BRANCH_ID, query.clone()).await {
                 Ok(reply) => Some(reply.result),
                 Err(_) if session.is_unloading() => None,
                 Err(error) => return Err(error),
@@ -1176,11 +1178,11 @@ impl AgentIndex {
                 let scope = TimelineReadScope {
                     key: TimelineKey {
                         session_id: id.into(),
-                        branch_id: "main".into(),
+                        branch_id: DEFAULT_BRANCH_ID.into(),
                     },
                     through,
                     segments: vec![TimelineReadSegment {
-                        branch_id: "main".into(),
+                        branch_id: DEFAULT_BRANCH_ID.into(),
                         from: 1,
                         through,
                         stored_through: through,
@@ -1289,7 +1291,7 @@ impl AgentIndex {
             }),
         };
         let loaded = match self.session(id) {
-            Some((_, session)) => match session.query("main", query.clone()).await {
+            Some((_, session)) => match session.query(ROOT_BRANCH_ID, query.clone()).await {
                 Ok(reply) => Some(reply.result),
                 Err(_) if session.is_unloading() => None,
                 Err(error) => return Err(error),
@@ -1306,11 +1308,11 @@ impl AgentIndex {
                 let scope = TimelineReadScope {
                     key: TimelineKey {
                         session_id: id.into(),
-                        branch_id: "main".into(),
+                        branch_id: ROOT_BRANCH_ID.into(),
                     },
                     through,
                     segments: vec![TimelineReadSegment {
-                        branch_id: "main".into(),
+                        branch_id: ROOT_BRANCH_ID.into(),
                         from: 1,
                         through,
                         stored_through: through,
@@ -1827,9 +1829,13 @@ impl AgentIndex {
             ));
         }
         let checked = async {
-            dim_agent_capabilities::history::validate_context_boundary_in(session, "main", at)
-                .await?
-                .map_err(AgentError::InvalidInput)?;
+            dim_agent_capabilities::history::validate_context_boundary_in(
+                session,
+                ROOT_BRANCH_ID,
+                at,
+            )
+            .await?
+            .map_err(AgentError::InvalidInput)?;
             fork::validate_rest_point(session, at).await
         }
         .await;

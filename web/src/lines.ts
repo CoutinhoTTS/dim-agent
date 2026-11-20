@@ -1,8 +1,8 @@
-import type { SessionEvent } from "./rpc/protocol"
+import { ROOT_BRANCH_ID, type SessionEvent } from "./rpc/protocol"
 import type { BranchEntry } from "./rpc/read"
 
 export type LineState =
-  | { kind: "main" }
+  | { kind: typeof ROOT_BRANCH_ID }
   | { kind: "working" }
   | { kind: "waiting" }
   | { kind: "ending" }
@@ -47,7 +47,7 @@ export class Lines {
   }
 
   detail(entry: BranchEntry): void {
-    if (entry.branchId === "main") return
+    if (entry.branchId === ROOT_BRANCH_ID) return
     const previous = this.nodes.get(entry.branchId)
     this.nodes.set(entry.branchId, {
       id: entry.branchId, parentId: entry.parentBranchId!, at: entry.branchPoint!,
@@ -116,7 +116,7 @@ export class Lines {
   /** Every line in tree order: main first, then children by cut and opening order. */
   views(): LineView[] {
     const out: LineView[] = [
-      { id: "main", parentId: null, purpose: "", state: { kind: "main" }, cut: null, depth: 0 },
+      { id: ROOT_BRANCH_ID, parentId: null, purpose: "", state: { kind: ROOT_BRANCH_ID }, cut: null, depth: 0 },
     ]
     const children = new Map<string, LineNode[]>()
     for (const node of this.nodes.values()) {
@@ -143,7 +143,7 @@ export class Lines {
         walk(node.id, depth + 1)
       }
     }
-    walk("main", 1)
+    walk(ROOT_BRANCH_ID, 1)
     for (const node of this.nodes.values()) {
       if (seen.has(node.id)) continue
       seen.add(node.id)

@@ -550,9 +550,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         // keys.rs
         "show the key bindings" => "キーバインドを表示",
-        "show the command that updates this installation" => {
-            "このインストールを更新するコマンドを表示"
-        }
+        "check for a newer version" => "新しいバージョンを確認",
         "Application keys" => "アプリキー",
         "Enter submit when idle · Shift+Enter / Alt+Enter / Ctrl+J newline · ↑↓ history" => {
             "待機中は Enter で送信 · Shift+Enter / Alt+Enter / Ctrl+J で改行 · ↑↓ 履歴"

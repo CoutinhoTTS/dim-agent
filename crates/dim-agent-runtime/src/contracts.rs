@@ -193,6 +193,14 @@ pub trait TimelineTreeControl: Send + Sync + 'static {
     fn get(&self, id: &str) -> Option<Branch>;
     /// Ends the line `id` with `source`; only the target is checked.
     fn end(&self, id: String, source: dim_agent_types::BranchSource) -> BoxFuture<'_, Result<()>>;
+    /// The line the Session's conversation is on.
+    fn default_branch(&self) -> Result<String>;
+    /// Moves the default branch to `id`, writing the fact and the notes.
+    fn set_default_branch(
+        &self,
+        id: String,
+        source: dim_agent_types::BranchSource,
+    ) -> BoxFuture<'_, Result<String>>;
     /// The fixed head of an ended line, `None` for an open, ending or unknown
     /// one.
     fn ended_head(&self, id: &str) -> Option<u64>;
