@@ -9009,6 +9009,10 @@ async fn seed_recovery_facts(
         )
         .unwrap();
     receiver.await.unwrap().unwrap();
+    // The daemon launch that follows opens the same file: this reader gives its
+    // ownership up first, as the storage flows do.
+    store.close().await.unwrap();
+    db.close().await.unwrap();
 }
 
 /// Whether `branch` holds the recovery's own stop.
