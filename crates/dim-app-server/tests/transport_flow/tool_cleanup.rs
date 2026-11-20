@@ -109,9 +109,15 @@ async fn closed_notification_waits_for_session_resources_and_registry_removal() 
         assert_ok(&client.rpc("session.attach", json!({"sessionId":sid})).await);
         let session = agent.get_session(&sid).unwrap();
         if fault {
-            faults.lock().unwrap().as_ref().unwrap().report_fault(
-                dim_agent_runtime::AgentError::fault("test host", "private runtime detail"),
-            );
+            faults
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .report_native_fault(dim_agent_runtime::AgentError::fault(
+                    "test host",
+                    "private runtime detail",
+                ));
         } else {
             drop(session.close());
         }

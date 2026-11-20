@@ -853,6 +853,37 @@ export interface BranchLifecycle {
 }
 
 /**
+ * Why the tree refused an operation on a line, named the way the protocol's
+ * `appError` names it ([timeline branches §14](../../../docs/design/timeline-branches.md#14-clients)).
+ */
+export type BranchRefusal =
+  | /** The target is already the Session's default branch. */ "already_default"
+  | /** The target cannot be the default branch: a plugin line, or a line a client opened before `FORMAT` 53. */ "not_selectable"
+  | /** The target or an ancestor of it is ending or ended, so an end already on its way to it wins. */ "protected"
+  | /** The target cannot end: the current default branch, or an ancestor of the default branch. The root's own refusal is the operation's input error, which its callers already answer. */ "cannot_end"
+
+/** A failure reported to a Session. Framework failures carry their diagnostic text. */
+export type SessionFault =
+  | { invalidInput: string }
+  | { closed: string }
+  | { unknownBranch: string }
+  | { branchEnded: string }
+  | { branchRefused: { refusal: BranchRefusal; message: string } }
+  | { storage: string }
+  | { publicationUnknown: string }
+  | { build: string }
+  | { cancelled: string }
+  | { reloading: string }
+  | { ambiguousSubmission: string }
+  | { partialSubmission: string }
+  | { fault: { component: string; message: string } }
+  | { framework: string }
+  | { multiple: SessionFault[] }
+
+export interface FaultQuery {
+}
+
+/**
  * Lifecycle of one Session, provided by its scope. Session capabilities that
  * spawn background work in `apply`, such as replacing Session-owned instances
  * or contacting external services, wait for [`Self::activated`] and end that
@@ -870,6 +901,8 @@ export interface BranchLifecycle {
  * parts in other languages use [`Self::hold`].
  */
 export interface SessionLifecycle {
+  reportFault(error: SessionFault): Promise<void>
+  failure(request: FaultQuery): Promise<SessionFault | null>
   /**
    * Waits until the Session is published or starts closing: true only when
    * it was published and is not closing.
@@ -890,9 +923,12 @@ export interface SessionLifecycle {
    */
   hold(): Promise<number | bigint | null>
   /**
-   * Releases the hold `id` took and ends its cleanup in the row that
-   * took it: true when it was held, false when it was released already
-   * or by its row's unload.
+   * Observes the current failure and subsequent reports until release or caller unload.
+   * @throws {ErrorThrown}
+   */
+  observeFault(listener: (arg0: SessionFault | null) => void | Promise<void>): Promise<number | bigint>
+  /**
+   * Releases a hold or fault observation. The caller's unload also releases it.
    * @throws {AgentErrorThrown}
    */
   release(id: number | bigint): Promise<boolean>
@@ -1306,6 +1342,9 @@ export type AgentErrorThrown = RustError<"AgentError", "InvalidInput" | "Closed"
 
 /** What a method returning `Err(ApprovalRespondError)` throws. */
 export type ApprovalRespondErrorThrown = RustError<"ApprovalRespondError", "Unknown" | "Cancelled" | "Closed", undefined>
+
+/** What a method returning `Err(Error)` throws. */
+export type ErrorThrown = RustError<"Error", string, undefined>
 
 /** What a method returning `Err(HostError)` throws. */
 export type HostErrorThrown = RustError<"HostError", "Failed" | "Cancelled", undefined>

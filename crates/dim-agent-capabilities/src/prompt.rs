@@ -283,7 +283,7 @@ impl Prompt {
 
     fn report_panic(&self, panic: Box<dyn std::any::Any + Send>) -> AgentError {
         let error = AgentError::fault("Prompt", panic_message(panic));
-        self.session_lifecycle.report_fault(error.clone());
+        self.session_lifecycle.report_native_fault(error.clone());
         error
     }
 
@@ -1043,7 +1043,7 @@ impl DynPlugin for PromptPlugin {
                                 | AgentError::InvalidInput(_)
                         )
                     {
-                        owner.session_lifecycle.report_fault(error);
+                        owner.session_lifecycle.report_native_fault(error);
                         break;
                     }
                 }

@@ -409,16 +409,21 @@ pub struct SessionLifecycle {
     closing: tokio_util::sync::CancellationToken,
     /// Live holds, with [`RELEASING`] set once an idle release is decided.
     holds: Arc<AtomicUsize>,
-    /// The holds parts in other languages took, by id ([`Self::hold`]).
-    foreign: Arc<Mutex<ForeignHolds>>,
+    foreign: Arc<Mutex<ForeignResources>>,
 }
-/// Each hold is also a cleanup of the row that took it: the row's unload
-/// runs it, or [`SessionLifecycle::release`] runs it early.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FaultQuery {}
 #[derive(Default)]
-struct ForeignHolds {
+struct ForeignResources {
     next: u64,
-    held: std::collections::HashMap<u64, (SessionHold, rutis::Disposer)>,
+    entries: std::collections::HashMap<u64, rutis::Disposer>,
 }
+type FaultListener = Arc<
+    dyn Fn(Option<crate::SessionFault>) -> rutis::host::BoxFuture<'static, Result<(), rutis::Error>>
+        + Send
+        + Sync,
+>;
 /// Set in the hold count by the idle release decision; no hold follows it.
 const RELEASING: usize = 1 << (usize::BITS - 1);
 #[service]
@@ -432,9 +437,11 @@ impl SessionLifecycle {
             foreign: Arc::default(),
         }
     }
-    #[service(skip)]
-    pub fn report_fault(&self, error: crate::AgentError) {
-        self.faults.report(error);
+    pub fn report_fault(&self, error: crate::SessionFault) {
+        self.faults.report(error.into());
+    }
+    pub fn failure(&self, _request: FaultQuery) -> Option<crate::SessionFault> {
+        self.faults.failure().map(crate::SessionFault::from)
     }
     #[service(skip)]
     pub fn phase(&self) -> SessionPhase {
@@ -492,30 +499,39 @@ impl SessionLifecycle {
     /// TypeScript) once the Session is closing or its idle release is
     /// decided.
     pub fn hold(&self, ctx: &rutis::Ctx) -> Option<u64> {
-        let hold = self.take_hold()?;
-        let mut foreign = self.foreign.lock().unwrap();
-        foreign.next += 1;
-        let id = foreign.next;
-        let holds = Arc::downgrade(&self.foreign);
-        let disposer = ctx
-            .effect(move || async move {
-                if let Some(holds) = holds.upgrade() {
-                    holds.lock().unwrap().held.remove(&id);
-                }
-                Ok(())
-            })
-            .ok()?;
-        foreign.held.insert(id, (hold, disposer));
-        Some(id)
+        self.own(ctx, self.take_hold()?).ok()
     }
-    /// Releases the hold `id` took and ends its cleanup in the row that
-    /// took it: true when it was held, false when it was released already
-    /// or by its row's unload.
+
+    /// Observes the current failure and subsequent reports until release or caller unload.
+    pub fn observe_fault(
+        &self,
+        ctx: &rutis::Ctx,
+        listener: FaultListener,
+    ) -> Result<u64, rutis::Error> {
+        let stop = tokio_util::sync::CancellationToken::new();
+        let id = self.own(ctx, stop.clone().drop_guard())?;
+        let mut faults = self.faults.watch();
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = stop.cancelled() => {}
+                _ = async {
+                    loop {
+                        let current = faults.borrow_and_update().clone().map(crate::SessionFault::from);
+                        if listener(current).await.is_err() || faults.changed().await.is_err() {
+                            return;
+                        }
+                    }
+                } => {}
+            }
+        });
+        Ok(id)
+    }
+
+    /// Releases a hold or fault observation. The caller's unload also releases it.
     pub async fn release(&self, id: u64) -> std::result::Result<bool, crate::AgentError> {
-        let Some((hold, disposer)) = self.foreign.lock().unwrap().held.remove(&id) else {
+        let Some(disposer) = self.foreign.lock().unwrap().entries.remove(&id) else {
             return Ok(false);
         };
-        drop(hold);
         disposer
             .dispose()
             .await
@@ -539,6 +555,26 @@ impl SessionLifecycle {
     }
 }
 
+impl SessionLifecycle {
+    pub fn report_native_fault(&self, error: crate::AgentError) {
+        self.faults.report(error);
+    }
+    fn own<T: Send + 'static>(&self, ctx: &rutis::Ctx, resource: T) -> Result<u64, rutis::Error> {
+        let mut foreign = self.foreign.lock().unwrap();
+        foreign.next += 1;
+        let id = foreign.next;
+        let resources = Arc::downgrade(&self.foreign);
+        let disposer = ctx.effect(move || async move {
+            drop(resource);
+            if let Some(resources) = resources.upgrade() {
+                resources.lock().unwrap().entries.remove(&id);
+            }
+            Ok(())
+        })?;
+        foreign.entries.insert(id, disposer);
+        Ok(id)
+    }
+}
 /// An activity hold from [`SessionLifecycle::take_hold`]; dropping it releases it.
 /// It carries no identity, result or cancellation.
 pub struct SessionHold(Arc<AtomicUsize>);
