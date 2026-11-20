@@ -8383,8 +8383,13 @@ impl App {
             .into_iter()
             .flatten()
             .find(|text| width_of(text) <= budget)
-            .or_else(|| join(essential, &[]))
-            .or_else(|| join(None, &optional[..optional.len().min(1)]))
+            .or_else(|| {
+                if slot.is_some() {
+                    join(None, &[])
+                } else {
+                    join(essential, &[]).or_else(|| join(None, &optional[..optional.len().min(1)]))
+                }
+            })
     }
 
     /// The composer's bottom-right label, built to fit the cells the border
@@ -12301,6 +12306,45 @@ mod tests {
                 "the 32-column notice keeps its whole text (fullscreen: {fullscreen}):\n{}",
                 narrow.join("\n")
             );
+        }
+    }
+
+    #[test]
+    fn a_slot_wider_than_the_border_is_not_replaced_by_the_phase() {
+        for fullscreen in [false, true] {
+            let (mut app, _home) = status_app("local", "fixture-model", Some("high"));
+            app.fullscreen = fullscreen;
+            app.apply(Update::Snapshot(Box::new(ViewSnapshot {
+                session_id: "s1".into(),
+                running: true,
+                retry: Some(crate::model::view::RetryView {
+                    attempt: 2,
+                    max_attempts: 8,
+                    retry_at_ms: retry_at(60_000),
+                    kind: dim_agent_types::ModelFailureKind::ServerError,
+                    reason: Some("The provider reported a server error".into()),
+                }),
+                ..ViewSnapshot::default()
+            })));
+            app.set_notice("Interrupt requested; Ctrl+C again to exit");
+            let (_, bottom, _) = composer_chrome(&mut app, 40);
+            assert!(
+                bottom.starts_with(" ╰─ Interrupt requested; Ctrl+C aga"),
+                "fullscreen {fullscreen}: the notice leads the corner: {bottom}"
+            );
+            assert!(
+                !bottom.contains("Retrying"),
+                "fullscreen {fullscreen}: {bottom}"
+            );
+            assert!(
+                !bottom.contains("server error"),
+                "fullscreen {fullscreen}: {bottom}"
+            );
+            assert!(
+                !bottom.contains("esc interrupt"),
+                "fullscreen {fullscreen}: {bottom}"
+            );
+            app.notice = None;
         }
     }
 
