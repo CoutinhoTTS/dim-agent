@@ -23264,6 +23264,7 @@
         "path StartRequest",
         "path loops",
         "path loops::Loop",
+        "path loops::clamp_next",
         "use crate::loops",
         "use crate::loops::Loops",
         "use crate::loops::StartRequest",
