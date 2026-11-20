@@ -369,7 +369,7 @@ async function fork(): Promise<void> {
       </div>
     </div>
     <WebChatTimeline :session-id="sessionId"
-      :branch-id="ROOT_BRANCH_ID"
+      :branch-id="centred"
       :rows="view.rows"
       :earlier="view.earlier"
       :loading-earlier="view.loadingEarlier"

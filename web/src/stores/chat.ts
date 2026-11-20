@@ -210,8 +210,10 @@ export const useChatStore = defineStore("chat", () => {
         if (!view.methods.includes(required)) throw new ProtocolError(`This Session does not provide ${required}`)
       }
       const directory = await client().call("session.branches", { sessionId: view.sessionId }, readBranches)
-      view.defaultBranchId = directory.defaultBranchId
       channel.lines.directory(directory.branches)
+      // The centre is the default branch the directory reports: a resync that
+      // discovers a move hands the stream over once, as a local move does.
+      if (directory.defaultBranchId !== view.defaultBranchId) centre(channel, directory.defaultBranchId)
       for (const entry of directory.branches) {
         if (entry.branchId === ROOT_BRANCH_ID || entry.branchId === view.defaultBranchId) continue
         const branch = ensureBranch(channel, entry.branchId)
@@ -229,7 +231,9 @@ export const useChatStore = defineStore("chat", () => {
         }
         return
       }
-      channel.main.projection.model = model
+      // The reply's model is the root's (design §14): a centre on a line keeps
+      // the model its own window adopted.
+      if (view.defaultBranchId === ROOT_BRANCH_ID) channel.main.projection.model = model
       await refreshGoal(channel)
       if (view.status === "failed") return
       const queued = channel.queued
@@ -403,6 +407,20 @@ export const useChatStore = defineStore("chat", () => {
       throw error
     }).finally(() => changed(channel))
     return branch.liveTask
+  }
+
+  /**
+   * Hands the centre to `branchId`: the line that left the role falls back to
+   * an ordinary branch, and the line that took it is the centre itself, not a
+   * tab beside it (design §14). A local move and a resync that discovers one
+   * both hand the stream over once.
+   */
+  function centre(channel: Channel, branchId: string): void {
+    channel.view.defaultBranchId = branchId
+    useUiStore().followDefault(channel.view.sessionId, branchId)
+    channel.branches.delete(branchId)
+    channel.main = stream()
+    channel.main.opened = true
   }
 
   function ensureBranch(channel: Channel, branchId: string): BranchStream {
@@ -854,14 +872,7 @@ export const useChatStore = defineStore("chat", () => {
     if (channel === undefined) return
     const view = channel.view
     if (moved !== view.defaultBranchId) {
-      view.defaultBranchId = moved
-      // The centre's stream changes hands: the line that left the role falls
-      // back to an ordinary branch (its events resume on its own stream), and
-      // the line that took it is the centre itself, not a tab beside it.
-      useUiStore().followDefault(sessionId, moved)
-      channel.branches.delete(moved)
-      channel.main = stream()
-      channel.main.opened = true
+      centre(channel, moved)
       const loaded = await loadHistory(channel, moved)
       if (loaded !== "ok") {
         // The move stands, but the centre has no transcript to show: report it
@@ -917,28 +928,37 @@ export const useChatStore = defineStore("chat", () => {
       .then((state) => state.policy, () => undefined)
   }
 
-  /** Changes the preset, preserving tool exceptions; a conflict refreshes without retrying. */
+  /**
+   * Changes the preset, preserving tool exceptions; a conflict refreshes without
+   * retrying. The policy and the write are one line's: a move while the read is
+   * in flight must not send its version and exceptions to the new centre, and
+   * its late reply must not become another centre's policy.
+   */
   async function setPermission(sessionId: string, preset: PermissionPreset): Promise<PermissionOutcome> {
-    const state = await client().call("session.permission.get", { sessionId, branchId: defaultBranch(sessionId) }, readPermissionState)
+    const branchId = defaultBranch(sessionId)
+    const state = await client().call("session.permission.get", { sessionId, branchId }, readPermissionState)
     const view = views[sessionId]
-    if (view !== undefined) view.permission = state.policy
+    const publish = (policy: PermissionPolicy | undefined) => {
+      if (view !== undefined && defaultBranch(sessionId) === branchId) view.permission = policy
+    }
+    publish(state.policy)
     if (state.policy.preset === preset) return "unchanged"
     const policy = { ...state.policy, preset }
     try {
       await client().call("session.permission.update", {
         sessionId,
-        branchId: defaultBranch(sessionId),
+        branchId,
         expectedVersion: state.version,
         policy,
       }, readPermissionVersion)
     } catch (cause) {
       if (cause instanceof RpcError && cause.appError === "permission_conflict") {
-        if (view !== undefined) view.permission = await sessionPermission(sessionId)
+        publish(await sessionPermission(sessionId))
         return "conflict"
       }
       throw cause
     }
-    if (view !== undefined) view.permission = policy
+    publish(policy)
     return "updated"
   }
 

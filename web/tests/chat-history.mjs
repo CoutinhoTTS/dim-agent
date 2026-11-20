@@ -416,3 +416,81 @@ test("indexed transcript pages use one fixed head for initial and earlier reads"
   assert.equal(requests.length, 3)
   assert.deepEqual(chat.views.session.rows.map(row => row.text), ["oldest", "newest"])
 })
+
+test("a moved centre keeps the model its own timeline adopted", async t => {
+  const chat = session(t, params => params.branchId === "worker"
+    ? page([event(1, { kind: "context-configured", model: { providerId: "worker", modelId: "B" } })], 1)
+    : page([], 0), {
+    "session.branches": () => ({ branches: [{ branchId: "worker", parentBranchId: "main", branchPoint: 0, head: 1, state: "open" }], defaultBranchId: "worker" }),
+  })
+  await flush()
+  assert.equal(chat.views.session.defaultBranchId, "worker")
+  assert.deepEqual(
+    chat.views.session.model,
+    { providerId: "worker", modelId: "B" },
+    "the centre keeps the model its own window adopted instead of the attach reply's, which is the root's (design §14)",
+  )
+})
+
+test("a permission edit keeps the line whose policy it read", async t => {
+  const held = deferred()
+  const calls = []
+  let arm = false
+  const policy = (preset, tool) => ({ preset, allowedTools: [tool], disallowedTools: [] })
+  const chat = session(t, params => params.branchId === "worker"
+    ? page([input(1, "on the line")], 1)
+    : page([input(1, "on the root")], 1), {
+    "session.branches": () => ({ branches: [{ branchId: "worker", parentBranchId: "main", branchPoint: 0, head: 1, state: "open" }], defaultBranchId: "main" }),
+    "session.branch_set_default": () => "worker",
+    "session.permission.get": async params => {
+      calls.push(["get", params.branchId])
+      if (arm) { arm = false; await held.promise }
+      return { version: 0, policy: params.branchId === "worker" ? policy("read-only", "worker-tool") : policy("workspace-write", "main-tool") }
+    },
+    "session.permission.update": params => {
+      calls.push(["update", params.branchId, params.expectedVersion, params.policy.allowedTools])
+      return { version: 1 }
+    },
+  })
+  const supports = globalThis.historyStores.connection.supports
+  globalThis.historyStores.connection.supports = name => name === "session.permission.get" || name === "session.permission.update" || supports(name)
+  await flush()
+  arm = true
+  const editing = chat.setPermission("session", "full-access")
+  await flush()
+  assert.deepEqual(calls.at(-1), ["get", "main"], "the edit reads the centre it started on")
+  await chat.setDefaultBranch("session", "worker")
+  assert.equal(chat.views.session.defaultBranchId, "worker")
+  held.resolve()
+  await editing
+  assert.deepEqual(
+    calls.filter(call => call[0] === "update"),
+    [["update", "main", 0, ["main-tool"]]],
+    "the write follows the branch whose policy was read, not the centre the move produced",
+  )
+  assert.deepEqual(chat.views.session.permission, policy("read-only", "worker-tool"), "the late reply does not become another centre's policy")
+})
+
+test("a resync that discovers a moved default shows its pending question once", async t => {
+  let defaultId = "main"
+  const chat = session(t, params => params.branchId === "worker"
+    ? page([input(1, "on the line")], 1)
+    : page([input(1, "on the root")], 1), {
+    "session.branches": () => ({ branches: [{ branchId: "worker", parentBranchId: "main", branchPoint: 0, head: 1, state: "open" }], defaultBranchId: defaultId }),
+    "session.question.pending": params => ({
+      branchId: params.branchId,
+      through: params.through,
+      asks: params.branchId === "worker" ? [{ requestId: "req-1", callId: "call-1", questions: [{ id: "q-1", question: "Which?", options: [{ label: "Yes" }, { label: "No" }], multiSelect: false, allowCustom: false }] }] : [],
+      next: null,
+    }),
+  })
+  await flush()
+  chat.ensureLine("session", "worker")
+  await flush()
+  assert.equal(chat.views.session.questions.filter(ask => ask.branchId === "worker").length, 1, "the opened line holds its question once")
+  defaultId = "worker"
+  await chat.resync()
+  await flush()
+  assert.equal(chat.views.session.defaultBranchId, "worker")
+  assert.equal(chat.views.session.questions.filter(ask => ask.branchId === "worker").length, 1, "the newly centred line's question appears once")
+})
