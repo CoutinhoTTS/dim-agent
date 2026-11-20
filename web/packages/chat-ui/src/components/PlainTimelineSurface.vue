@@ -110,6 +110,8 @@ defineExpose({
             />
           </Teleport>
 
+          <slot name="before-rows" />
+
           <div ref="timelineContentRef" class="timeline-plain-scroller" data-testid="timeline-plain-scroller">
             <div
               v-if="props.window.topSpacerPx > 0"

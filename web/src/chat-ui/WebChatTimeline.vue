@@ -175,16 +175,26 @@ function measureRows(): void {
 
 const quoteTarget = ref<{ text: string; top: number; left: number }>()
 
+let jumpResumed = false
+
 function onScroll(): void {
   const element = viewport.value
   if (element === null) return
-  following.value = element.scrollHeight - element.scrollTop - element.clientHeight <= FOLLOW_THRESHOLD_PX
+  following.value = jumpResumed || element.scrollHeight - element.scrollTop - element.clientHeight <= FOLLOW_THRESHOLD_PX
   quoteTarget.value = undefined
 }
 
+function onReaderScroll(): void {
+  jumpResumed = false
+}
+
+const READER_SCROLL_EVENTS = ["wheel", "touchstart", "pointerdown", "keydown"] as const
+
 watch(viewport, (element, previous) => {
   previous?.removeEventListener("scroll", onScroll)
+  for (const name of READER_SCROLL_EVENTS) previous?.removeEventListener(name, onReaderScroll)
   element?.addEventListener("scroll", onScroll, { passive: true })
+  for (const name of READER_SCROLL_EVENTS) element?.addEventListener(name, onReaderScroll, { passive: true })
 })
 
 async function toEnd(): Promise<void> {
@@ -193,14 +203,69 @@ async function toEnd(): Promise<void> {
   if (following.value && element !== null) element.scrollTop = element.scrollHeight
 }
 
+const unseen = ref(false)
+watch(following, (value) => {
+  if (value) unseen.value = false
+  else jumpResumed = false
+})
+
 function jumpToLatest(): void {
+  const element = viewport.value
+  if (element === null) return
+  jumpResumed = true
   following.value = true
-  void toEnd()
+  element.scrollTo({ top: element.scrollHeight, behavior: "smooth" })
 }
 
 watch([() => rows.value.length, () => virtualizer.value.getTotalSize(), () => props.rows.at(-1), () => props.running], () => {
   if (following.value) void toEnd()
 })
+watch(() => props.rows.at(-1), (last, previous) => {
+  if (!following.value && last !== previous) unseen.value = true
+})
+
+let earlierPending = false
+function loadEarlier(): void {
+  if (props.loadingEarlier === true || earlierPending) return
+  earlierPending = true
+  following.value = false
+  emit("earlier")
+  void nextTick(() => { earlierPending = false })
+}
+
+const earlierRow = ref<HTMLElement>()
+let earlierObserver: IntersectionObserver | undefined
+watch([earlierRow, viewport], ([row, root]) => {
+  earlierObserver?.disconnect()
+  earlierObserver = undefined
+  if (row === undefined || root === null) return
+  earlierObserver = new IntersectionObserver((entries) => {
+    if (!following.value && entries.some(entry => entry.isIntersecting)) loadEarlier()
+  }, { root })
+  earlierObserver.observe(row)
+}, { flush: "post" })
+
+watch(() => rows.value[0]?.key, async (first, previous) => {
+  const element = viewport.value
+  const content = surface.value?.content
+  if (previous === undefined || first === previous || following.value || element === null || content == null) return
+  const keys = new Set(rows.value.map(row => row.key))
+  const top = element.getBoundingClientRect().top
+  let anchor: { key: string; top: number } | undefined
+  for (const row of content.querySelectorAll<HTMLElement>(":scope > [data-timeline-row-key]")) {
+    const rect = row.getBoundingClientRect()
+    if (rect.bottom > top && keys.has(row.dataset.timelineRowKey!)) {
+      anchor = { key: row.dataset.timelineRowKey!, top: rect.top - top }
+      break
+    }
+  }
+  if (anchor === undefined) return
+  await nextTick()
+  const index = rows.value.findIndex(row => row.key === anchor.key)
+  virtualizer.value.getTotalSize()
+  const start = virtualizer.value.measurementsCache[index]?.start
+  if (start !== undefined) element.scrollTop = start - anchor.top
+}, { flush: "pre" })
 
 const markers = computed(() => deriveTimelineUserMessageMarkers(rows.value))
 const showRail = computed(() => props.variant !== "panel" && shouldShowTimelineUserMessageRail(markers.value))
@@ -261,7 +326,7 @@ const surfaceProps = computed<Omit<ChatUiPlainTimelineSurfaceProps, "window">>((
       hasNewerGap: false,
       showUserMessageRail: showRail.value,
       userMessageRailHost: railHost.value,
-      showScrollToBottom: !following.value,
+      showScrollToBottom: false,
     },
     rowState: {
       latestTurnRowId: latestTurn,
@@ -362,15 +427,13 @@ onBeforeUnmount(() => {
   themeObserver?.disconnect()
   clearInterval(countdown)
   viewport.value?.removeEventListener("scroll", onScroll)
+  for (const name of READER_SCROLL_EVENTS) viewport.value?.removeEventListener(name, onReaderScroll)
+  earlierObserver?.disconnect()
 })
 </script>
 
 <template>
   <div ref="shell" class="timeline-shell web-chat-timeline dim-chat-ui" :data-variant="variant ?? 'main'" @pointerup="onPointerUp">
-    <div v-if="earlier || historyError" class="web-chat-history">
-      <UButton v-if="earlier" color="neutral" variant="soft" size="sm" :loading="loadingEarlier" :disabled="loadingEarlier" @click="following = false; emit('earlier')">{{ loadingEarlier ? t("timeline.loadingEarlier") : t("timeline.loadEarlier") }}</UButton>
-      <p v-if="historyError" role="alert">{{ historyError }}</p>
-    </div>
     <PlainTimelineSurface
       ref="surface"
       v-bind="surfaceProps"
@@ -378,12 +441,33 @@ onBeforeUnmount(() => {
       @toggle-details="toggleDetails"
       @toggle-block="toggle(blockExpanded, $event)"
       @toggle-block-group="toggle(groupExpanded, $event)"
-      @jump-to-bottom="jumpToLatest"
       @marker-click="jumpTo"
       @rail-wheel="onRailWheel"
       @fork-message="forkMessage"
       @branch-message="act(host.commands.branch($event.id))"
-    />
+    >
+      <template #before-rows>
+        <div v-if="earlier" ref="earlierRow" class="web-chat-earlier" data-testid="web-chat-earlier">
+          <span v-if="loadingEarlier" class="web-chat-earlier-status" role="status">
+            <UIcon name="i-lucide-loader-circle" class="web-chat-earlier-icon animate-spin" aria-hidden="true" />{{ t("timeline.loadingEarlier") }}
+          </span>
+          <span v-else-if="historyError" class="web-chat-earlier-status" role="alert">
+            <span class="web-chat-earlier-error">{{ historyError }}</span>
+            <button type="button" class="web-chat-earlier-action" @click="loadEarlier">{{ t("timeline.retryEarlier") }}</button>
+          </span>
+          <button v-else type="button" class="web-chat-earlier-action" @click="loadEarlier">
+            <UIcon name="i-lucide-arrow-up" class="web-chat-earlier-icon" aria-hidden="true" />{{ t("timeline.loadEarlier") }}
+          </button>
+        </div>
+      </template>
+    </PlainTimelineSurface>
+    <Transition name="web-chat-latest">
+      <button v-if="!following" type="button" class="web-chat-latest" data-testid="web-chat-jump-latest" @click="jumpToLatest">
+        <UIcon name="i-lucide-arrow-down" class="web-chat-latest-icon" aria-hidden="true" />
+        <span v-if="unseen" class="web-chat-latest-new">{{ t("timeline.newMessages") }}</span>
+        <span>{{ t("chatUi.timeline.returnToLatest") }}</span>
+      </button>
+    </Transition>
     <Teleport v-if="running && retry !== undefined && activitySlot" :to="activitySlot">
       <span class="tabular-nums" aria-hidden="true" data-testid="web-chat-retry">{{ retryText }}</span>
     </Teleport>
@@ -407,8 +491,22 @@ onBeforeUnmount(() => {
 <style scoped>
 .web-chat-timeline { flex: 1 1 auto; }
 .web-chat-timeline :deep(.chat-scroll-viewport) { overflow-anchor: none; }
-.web-chat-history { display: flex; flex-direction: column; align-items: center; gap: var(--space-2); padding: var(--space-2) var(--space-4) 0; }
-.web-chat-history p { margin: 0; color: var(--danger); font-size: var(--text-sm); }
+.web-chat-earlier { display: flex; align-items: center; gap: var(--space-3); padding: 0 var(--space-4) var(--space-4); color: var(--muted-foreground); font-size: var(--text-sm); }
+.web-chat-earlier::before, .web-chat-earlier::after { content: ""; flex: 1 1 0; min-width: var(--space-4); border-top: 1px solid var(--border); }
+.web-chat-earlier-status { display: inline-flex; min-width: 0; align-items: center; gap: var(--space-2); }
+.web-chat-earlier-error { min-width: 0; overflow: hidden; color: var(--danger); text-overflow: ellipsis; white-space: nowrap; }
+.web-chat-earlier-action { display: inline-flex; flex: none; align-items: center; gap: var(--space-1); padding: var(--space-1) var(--space-2); border: 0; border-radius: var(--control-xs-radius); background: none; color: inherit; font: inherit; cursor: pointer; transition: color var(--duration-hover) var(--ease-out), background-color var(--duration-hover) var(--ease-out); }
+.web-chat-earlier-action:hover { background: var(--accent); color: var(--foreground); }
+.web-chat-earlier-action:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
+.web-chat-earlier-icon { width: 14px; height: 14px; flex: none; }
+.web-chat-latest { position: absolute; bottom: var(--space-4); left: 50%; z-index: 30; display: inline-flex; align-items: center; gap: var(--space-2); height: var(--control-md); padding: 0 var(--space-3); transform: translateX(-50%); border: 1px solid var(--border); border-radius: var(--radius-pill); background: var(--background); box-shadow: var(--shadow-sm); color: var(--foreground); font: inherit; font-size: var(--text-sm); font-weight: var(--weight-medium); white-space: nowrap; cursor: pointer; transition: background-color var(--duration-hover) var(--ease-out); }
+.web-chat-latest:hover { background: var(--accent); }
+.web-chat-latest:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+.web-chat-latest-icon { width: 14px; height: 14px; flex: none; color: var(--muted-foreground); }
+.web-chat-latest-new { color: var(--primary); }
+.web-chat-timeline[data-variant="panel"] .web-chat-latest { bottom: var(--space-3); height: var(--control-sm); padding: 0 var(--space-2); font-size: var(--text-xs); }
+.web-chat-latest-enter-active, .web-chat-latest-leave-active { transition: opacity var(--duration-hover) var(--ease-out); }
+.web-chat-latest-enter-from, .web-chat-latest-leave-to { opacity: 0; }
 .web-chat-rail { position: absolute; top: var(--space-4); right: var(--space-2); z-index: 2; }
 .web-chat-quote { position: absolute; z-index: 40; transform: translate(-50%, calc(-100% - 6px)); }
 </style>

@@ -185,7 +185,21 @@ Features outside the settings scope with no v3 backend are left out rather than 
 
 ### 4.1 Lines and branch
 
-A line is a Timeline of the same Session ([Timeline branches](timeline-branches.md) §1). The Web workspace follows [Clients’ bounded-window contract](clients.md#opening-a-conversation-with-a-bounded-window). Main and selected lines load at most four initial wire pages; only an explicit “Load earlier” action reads older content. Reconnect replaces opened transcripts with fresh windows. Raw pages are released after projection.
+A line is a Timeline of the same Session ([Timeline branches](timeline-branches.md) §1). The Web workspace follows [Clients’ bounded-window contract](clients.md#opening-a-conversation-with-a-bounded-window). Main and selected lines load at most four initial wire pages; older content is read only when the reader asks for it. Reconnect replaces opened transcripts with fresh windows. Raw pages are released after projection.
+
+The main chat and every line share one timeline with two history controls:
+
+- While an earlier page exists, the first item of the scroll content, above the oldest row and in the message column, is a divider row: “Load earlier messages”, “Loading…” with a spinner, or the error with an inline Retry. It loads when it scrolls into view after the reader has scrolled up, or on click; a history that fits the viewport and is still following waits for the click. One read runs at a time. When the page lands, the first visible row keeps its offset from the viewport top. The row disappears when nothing earlier is left.
+- While the reader is more than the follow threshold (96 px) from the end, a “Return to latest” pill with a down arrow sits centered at the bottom of the timeline, above the composer; output that arrives meanwhile adds “New messages” to it. The pill scrolls smoothly to the end and resumes following until the reader scrolls again. The line panel draws a smaller pill. The shared surface's own icon button is not shown.
+
+```
+│ ──────── ↑ Load earlier messages ──────── │  first item of the scroll content
+│ you: …                                    │
+│ dim: …                                    │
+│ ( ↓ New messages · Return to latest )     │  while scrolled up, centered
+├───────────────────────────────────────────┤
+│ [composer]                                │
+```
 
 The Web workspace keeps the default branch's transcript in the center and follows other lines in a right-side detail panel, modeled on the Kimi Code Web `/btw` panel (tabs, a scroll region with a composer, an empty state, and a full-screen panel on narrow shells). Unlike Kimi's read-only side chat, a Dim line continues to run tools and accepts operator input; the panel therefore includes `session.submit`, `session.stop`, approvals and `session.branch_end` for the line.
 
