@@ -69,6 +69,10 @@ struct Inner {
     accepted: Mutex<HashMap<String, (String, u64)>>,
     /// Session ids `exists` answers `false` for (design §3.4).
     missing: Mutex<std::collections::HashSet<String>>,
+    /// Session id to the error code its `defaultBranchId` read answers.
+    default_failures: Mutex<HashMap<String, &'static str>>,
+    /// The `defaultBranchId` reads answered (timeline branches §20.22).
+    defaults: AtomicUsize,
     sequence: AtomicU64,
     gate: Mutex<Option<Arc<Gate>>>,
 }
@@ -91,6 +95,8 @@ impl Default for FakeSessions {
                 transports: Mutex::new(Vec::new()),
                 accepted: Mutex::new(HashMap::new()),
                 missing: Mutex::new(std::collections::HashSet::new()),
+                default_failures: Mutex::new(HashMap::new()),
+                defaults: AtomicUsize::new(0),
                 sequence: AtomicU64::new(0),
                 gate: Mutex::new(None),
             }),
@@ -116,6 +122,15 @@ impl FakeSessions {
     pub fn accept(&self, session: &str) {
         self.inner.failures.lock().unwrap().remove(session);
     }
+    /// Answers `session`'s `defaultBranchId` read with `code`, as a Session
+    /// whose Session service cannot answer does.
+    pub fn fail_default(&self, session: &str, code: &'static str) {
+        self.inner
+            .default_failures
+            .lock()
+            .unwrap()
+            .insert(session.to_owned(), code);
+    }
     /// Answers `exists` `false` for `session`, as a deleted Session does
     /// (design §3.4).
     pub fn deleted(&self, session: &str) {
@@ -127,6 +142,12 @@ impl FakeSessions {
     }
     pub fn restored(&self, session: &str) {
         self.inner.missing.lock().unwrap().remove(session);
+    }
+    /// How many `defaultBranchId` reads the fixture answered (timeline
+    /// branches §20.22): a publish that is refused before it resolves its
+    /// targets reads none.
+    pub fn default_reads(&self) -> usize {
+        self.inner.defaults.load(Ordering::SeqCst)
     }
     /// Answers any input whose submission id contains `needle` with `code`,
     /// so one guide write of a creation fails while its others succeed
@@ -178,10 +199,10 @@ impl HostDispatch for FakeSessions {
     }
     fn invoke(&self, method: &str, args: Value) -> Reply {
         let Json::Array(args) = args.json()? else {
-            return Err(BridgeError::Value("expected one request object".into()));
+            return Err(BridgeError::value("expected one request object"));
         };
         let Ok([write]) = <[Json; 1]>::try_from(args) else {
-            return Err(BridgeError::Value("expected one request object".into()));
+            return Err(BridgeError::value("expected one request object"));
         };
         match method {
             // The `sessions.lookup` reply (design §2.4).
@@ -213,15 +234,39 @@ impl HostDispatch for FakeSessions {
                 }));
             }
             // The `sessions.defaultBranchId` read (timeline branches §20.22):
-            // every fixture Session is on its root.
+            // every fixture Session is on its root, and one the fixture was
+            // told is gone answers as a closed Session does.
             "defaultBranchId" => {
+                self.inner.defaults.fetch_add(1, Ordering::SeqCst);
+                let session = write["sessionId"].as_str().unwrap_or_default().to_owned();
+                let failure = self
+                    .inner
+                    .default_failures
+                    .lock()
+                    .unwrap()
+                    .get(&session)
+                    .copied()
+                    .or_else(|| {
+                        self.inner
+                            .missing
+                            .lock()
+                            .unwrap()
+                            .contains(&session)
+                            .then_some("session_closed")
+                    });
                 return Ok(Value::future(async move {
-                    Ok(json!({ "ok": true, "value": { "defaultBranchId": "main" } }).into())
+                    if let Some(code) = failure {
+                        Ok(json!({ "ok": false, "error": { "code": code,
+                            "message": "the Session's default branch was not read" } })
+                        .into())
+                    } else {
+                        Ok(json!({ "ok": true, "value": { "defaultBranchId": "main" } }).into())
+                    }
                 }));
             }
             "input" => {}
             other => {
-                return Err(BridgeError::Value(format!(
+                return Err(BridgeError::value(format!(
                     "the fixture sessions service has no method {other}"
                 )));
             }

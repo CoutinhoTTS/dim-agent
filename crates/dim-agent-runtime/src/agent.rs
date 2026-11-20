@@ -650,6 +650,11 @@ impl Session {
     pub fn directory(&self) -> Vec<BranchDirectoryEntry> {
         self.0.tree.directory()
     }
+    /// The line the Session's conversation is on and the complete directory,
+    /// read under one tree lock (design §14).
+    pub fn default_and_directory(&self) -> (String, Vec<BranchDirectoryEntry>) {
+        self.0.tree.default_and_directory()
+    }
     pub async fn branch(&self, parent: String, at: u64, options: BranchOptions) -> Result<String> {
         self.branch_with_admission(parent, at, options, CancellationToken::new())
             .await

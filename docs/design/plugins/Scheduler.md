@@ -560,7 +560,7 @@ A management client has no Session, so the jobs-and-runs half is a connection-bo
 
 ## 12. Loop
 
-A loop is a Scheduler record whose rounds are ordinary inputs of one branch. `/loop` is its entry: the prompt it saves runs now and, for a self-paced loop, whenever the model arms the next round. It is not a job. A job is durable user configuration in the `schedule` Settings source, managed from `/scheduled` and never expiring; a loop is session-scoped and bounded. One record kind carries both cadences, so one `list`, one `stop` and one expiry serve both.
+A loop is a Scheduler record whose rounds are ordinary inputs of one branch. It has two entries, and they differ in when the first round is due: the user's `/loop` command runs the prompt it saves now, while the model's `loop` tool never delivers a round at the call — its `start` requires `delay_seconds` (clamped to 60..3600) and the first round is due that long after the call, because the model is already in a turn and work that is due now belongs to that turn. For a self-paced loop, later rounds arrive only when the model arms the next round. It is not a job. A job is durable user configuration in the `schedule` Settings source, managed from `/scheduled` and never expiring; a loop is session-scoped and bounded. One record kind carries both cadences, so one `list`, one `stop` and one expiry serve both.
 
 ### 12.1 Record
 
@@ -587,7 +587,7 @@ Each round is one `input/message` through the public `sessions.input`, `mode: qu
 
 The loop pass runs in the same one-second pass that serves the job windows and the wakeups (§3.1): it reads the file once, takes one clock reading, and writes at most once over the records it changed. `delivering_round` is persisted before any external effect, so a restart settles it by `sessions.lookup` with the same submission id instead of writing the round again (§A.6's rule for a job delivery).
 
-`session.loop.start` records `next_at = now`, so round 1 is a normal delivery with the loop's marker and never a plain user message.
+`session.loop.start` records `next_at = now`, so the user's first round is a normal delivery with the loop's marker and never a plain user message; the `loop` tool's `start` records `next_at = now + delay_seconds` instead, and its result states that due time, the seconds until it, and that nothing is delivered at the call.
 
 ### 12.3 Waiting, and no fallback round
 
@@ -597,7 +597,7 @@ A fixed cadence needs no such rule: its window is in the record, and a busy bran
 
 ### 12.4 Self-paced delay
 
-`loop` with `action=next` takes `delay_seconds` and clamps it to 60..3600. The range is a bound, not a schedule: which delay to choose belongs to the model, and the description asks it to wait longer when nothing is pending and to stop instead of waiting when the work is done. Scheduler states no prompt-cache window, because the cache lifetime is the provider's and no contract here declares it.
+`loop` takes `delay_seconds` on `start` and on `action=next`, clamped to 60..3600. On `start` it is required and fixes the first round's due time; nothing is delivered at the call. On `next` it arms the following round, and a `next` that arrives while a round is pending replaces that round's due time, which is how a changed rhythm is applied. The range is a bound, not a schedule: which delay to choose belongs to the model, and the description asks it to wait longer when nothing is pending and to stop instead of waiting when the work is done. Scheduler states no prompt-cache window, because the cache lifetime is the provider's and no contract here declares it.
 
 ### 12.5 Limits and outcomes
 
@@ -715,7 +715,7 @@ The process row's `schedule` namespace (§1.3) uses existing method admission: `
 | Kind | Form | Rule |
 | --- | --- | --- |
 | `cron` | `{cron: "m h dom mon dow", tz?: IANA}` | Five fields with lists, ranges, steps; `tz` defaults to the control node's zone; DST-gap times skipped, repeated times fire once |
-| `every` | `{every_minutes: n}` | `n` ≥ 1; windows at `anchor + k·n`, anchor = `Job.enabled_at` (A.1) |
+| `every` | `{every_minutes: n}` | `n` ≥ 1; windows at `anchor + k·n` for k ≥ 1, anchor = `Job.enabled_at` (A.1): the first window is one interval after the job is saved or enabled, so a saved job delivers nothing at its save time, and `schedule.run_now` is the immediate run |
 | `at` | `{at: RFC 3339 instant}` | One window; after it fires or is missed the job is disabled |
 
 A schedule is exactly one of these objects; mixed forms and unknown fields are rejected. For example:
@@ -726,7 +726,7 @@ A schedule is exactly one of these objects; mixed forms and unknown fields are r
 {"at": "2030-01-01T00:00:00Z"}
 ```
 
-`every_minutes` is a positive integer. Omitting `tz` from the cron form uses the host's local time zone, not UTC. An `at` value includes its UTC offset (`Z` or an explicit offset).
+`every_minutes` is a positive integer. Omitting `tz` from the cron form uses the host's local time zone, not UTC. An `at` value includes its UTC offset (`Z` or an explicit offset). An enabled `every` job always carries `enabled_at`, the save or enable time its windows count from: a new job and a re-enabled job both have their first window one interval later, and an enabled save or schedule edit preserves the anchor (A.1).
 
 Prefer `every_minutes` for fixed-minute intervals, `cron` for calendar times in the chosen time zone, and `at` for one delivery at a specific instant.
 
@@ -925,9 +925,9 @@ no `schedule.*` methods or `schedule` tool. The process part is added with
 | Tool `schedule` registered with `toolRegistry` | Session part keys `ToolRegistry` from `names.key()` and calls `tools.register(ctx, ToolContribution {definition, handler})` in `apply`, as `dim-agent-questions` does |
 | Namespace `schedule` registered with `managementMethods` | Process part keys `ManagementMethods` and calls `methods.register(ctx, "schedule", declarations, handler)`; Rpc looks it up per call and holds no dependency on Scheduler |
 | `scheduleJobs`, `wakeups`, `loops` | Process-group data faces registered shared and provided at their `host_key`. Native `ScheduleJobs`, `Wakeups` and `Loops` are bindings to the same owner operations, provided under their type keys. The native Session part declares them with `names.key()` and calls them directly. Wire projection happens only at the bridge boundary. `loops` serves `start`, `next`, `list` and `stop`; the delivery pass, recovery and `settle_delivering` stay internal (§12.6) |
-| `settings`, `pluginFiles` | Typed App Server services (`SettingsService`, `PluginFileTransactions`) keyed with `names.key()`; the crate depends on `dim-app-server`, which `xtask check` allows |
+| `settings`, `pluginFiles` | Typed App Server services (`SettingsService`, `PluginFiles`) keyed with `names.key()`; the crate depends on `dim-app-server`, which `xtask check` allows |
 | `sessions` | The shared host-dispatch name, called with its JSON envelope; its native request types are private to App Server |
-| Process storage | The typed `PluginFileTransactions` service of App Server ([trusted plugin storage](../../../crates/dim-app-server/README.md#trusted-plugin-storage)). The host writes the `{version: 1, text}` envelope; Scheduler supplies the inner v1 text, the same bytes the TypeScript version wrote. |
+| Process storage | The typed `PluginFiles` service of App Server ([trusted plugin storage](../../../crates/dim-app-server/README.md#trusted-plugin-storage)). The host writes the `{version: 1, text}` envelope; Scheduler supplies the inner v1 text, the same bytes the TypeScript version wrote. |
 | Timer, delivery writes and the stop timer | Owned by the process part: the timer, delivery tasks and retention run in its task tracker and start after its methods and services are registered and the process is published (§9 R1). On unload (`ctx.cancellation_token()`), new work stops, waits end, and cleanup joins the tracker before the storage scope closes; an admitted `sessions` call settles first. A record still `delivering` is left in the file for the next generation's recovery. The Session tools return the unloading results of §1.3 and their own `schedule: cancelled before handover` or `wakeup: cancelled before handover`. |
 | Policy text | `install_with(builder, SchedulerTexts {description})`; `install` uses the built-in text. The description is protocol only, so no evaluation member is carried and no validation is needed. |
 | Guide entry | The Session part keys `GuideEntries` and registers the §5.2 entry, session-scoped, order 110 |

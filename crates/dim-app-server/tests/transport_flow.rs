@@ -1731,16 +1731,33 @@ async fn attach_replies_the_record_the_listing_shows_for_that_session() {
             .find(|entry| entry["sessionId"] == sid.as_str())
             .expect("the Session is listed")
             .clone();
+        assert!(
+            entry.get("defaultBranch").is_none(),
+            "a listing item is a directory row and carries no default branch cursor (design §14)"
+        );
         for field in ["preview", "updatedAt", "closed"] {
             entry.as_object_mut().unwrap().remove(field);
         }
         let mut attached_info = attached["result"].clone();
+        // The listing has no per-row cursor: the attach reply is the listed
+        // record plus the line the conversation is on, which a Session that
+        // never moved reports as its root at the reply's own sequence.
+        let cursor = attached_info
+            .as_object_mut()
+            .unwrap()
+            .remove("defaultBranch")
+            .expect("the attach reply carries its default cursor");
+        assert_eq!(
+            cursor,
+            json!({"branchId": "main", "sequence": attached_info["sequence"].clone()}),
+            "the cursor names the root at the reply's sequence"
+        );
         assert!(entry["sequence"].as_u64().unwrap() >= attached_info["sequence"].as_u64().unwrap());
         entry.as_object_mut().unwrap().remove("sequence");
         attached_info.as_object_mut().unwrap().remove("sequence");
         assert_eq!(
             attached_info, entry,
-            "the attach reply is the listed record"
+            "the attach reply is the listed record plus its cursor"
         );
         assert_eq!(attached["result"]["attachedClients"], 1);
         server.shutdown();

@@ -323,6 +323,197 @@ async fn a_refused_switch_writes_nothing() {
     );
 }
 
+/// §14's compatibility rule: a v1 connection's event projection carries the
+/// root alone, so a call that omits `branchId` on it stays on the root after a
+/// newer connection moves the default branch (design §14, §15, §20.22). The
+/// v1 stream then shows the turn's output, and the line the default names
+/// holds none of it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_v1_submit_stays_on_the_root_after_a_switch() {
+    let (server, agent) = launch_with_agent(Arc::new(MockTools), ServerConfig::default()).await;
+    let mut legacy = Client::new_version(&server, false, 1).await;
+    let created = legacy.rpc("session.create", with_branch()).await;
+    assert_ok(&created);
+    let id = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    let session = agent.get_session(&id).unwrap();
+    let mut client = Client::new_version(&server, false, 3).await;
+    let b = open_line(&mut client, &id, "main", "b").await;
+    session.idle(&b).await.unwrap();
+    assert_ok(&switch(&mut client, &id, &b).await);
+    assert_eq!(session.default_branch().unwrap(), b);
+
+    let after = through(&mut client, &id, "main").await;
+    assert_ok(&legacy.rpc("session.attach", json!({"sessionId":id})).await);
+    assert_ok(
+        &legacy
+            .rpc("session.submit", json!({"sessionId":id,"text":"from v1"}))
+            .await,
+    );
+    session.idle("main").await.unwrap();
+    let through = through(&mut client, &id, "main").await;
+    let events = receive_events_through(&mut legacy, after, through).await;
+    assert!(
+        events
+            .iter()
+            .any(|event| event["type"] == json!("turn") && event["name"] == json!("end")),
+        "the v1 stream shows the turn that ran on the root: {events:?}"
+    );
+    let root = client
+        .rpc(
+            "session.history",
+            json!({"sessionId":id,"branchId":"main","after":0,"limit":256}),
+        )
+        .await;
+    assert_ok(&root);
+    assert!(
+        root["result"]["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|event| event["type"] == json!("input")
+                && event["data"]["user"]["content"][0]["text"] == json!("from v1")),
+        "the root holds the v1 input: {root}"
+    );
+    let line = client
+        .rpc(
+            "session.history",
+            json!({"sessionId":id,"branchId":b,"after":0,"limit":256}),
+        )
+        .await;
+    assert_ok(&line);
+    assert!(
+        !line["result"]["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|event| event["type"] == json!("input")
+                && event["data"]["user"]["content"][0]["text"] == json!("from v1")),
+        "the line the default names holds no v1 input: {line}"
+    );
+}
+
+/// §14: `session.attach` keeps `sequence` as the root's, the cutoff every
+/// client built before the branch-qualified cursor reads its root transcript
+/// from, and reports the line the conversation is on beside it. The two lines
+/// have unequal heads in both directions.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn attach_keeps_the_root_sequence_beside_the_default_cursor() {
+    let (server, agent) = launch_with_agent(Arc::new(MockTools), ServerConfig::default()).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let created = client.rpc("session.create", with_branch()).await;
+    assert_ok(&created);
+    let id = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    let session = agent.get_session(&id).unwrap();
+    let b = open_line(&mut client, &id, "main", "b").await;
+    session.idle(&b).await.unwrap();
+
+    // The root reaches further than the idle line.
+    assert_ok(
+        &client
+            .rpc(
+                "session.submit",
+                json!({"sessionId":id,"branchId":"main","text":"root turn"}),
+            )
+            .await,
+    );
+    session.idle("main").await.unwrap();
+    assert_ok(&switch(&mut client, &id, &b).await);
+    // The attach's own client-state input lands on the root after the reply's
+    // cutoff: the reply reports the branch heads as the attach found them.
+    let root_before = through(&mut client, &id, "main").await;
+    let line_before = through(&mut client, &id, &b).await;
+    let attached = client.rpc("session.attach", json!({"sessionId":id})).await;
+    assert_ok(&attached);
+    assert_eq!(
+        attached["result"]["sequence"],
+        json!(root_before),
+        "the record's own sequence is the root's"
+    );
+    assert_eq!(attached["result"]["defaultBranch"]["branchId"], json!(b));
+    assert_eq!(
+        attached["result"]["defaultBranch"]["sequence"],
+        json!(line_before),
+        "the cursor names the line the conversation is on"
+    );
+
+    // The line reaches further than the root.
+    for text in ["line turn one", "line turn two"] {
+        assert_ok(
+            &client
+                .rpc(
+                    "session.submit",
+                    json!({"sessionId":id,"branchId":b,"text":text}),
+                )
+                .await,
+        );
+        session.idle(&b).await.unwrap();
+    }
+    let line_head = through(&mut client, &id, &b).await;
+    let root_head = through(&mut client, &id, "main").await;
+    assert!(line_head > root_head, "the line is the longer one now");
+    let attached = client.rpc("session.attach", json!({"sessionId":id})).await;
+    assert_ok(&attached);
+    assert_eq!(
+        attached["result"]["sequence"],
+        json!(root_head),
+        "a longer line never becomes the root's cutoff"
+    );
+    assert_eq!(
+        attached["result"]["defaultBranch"],
+        json!({"branchId":b,"sequence":line_head})
+    );
+}
+
+/// §14: `session.branches` takes the default and the rows from one tree
+/// snapshot. The move away and the end of the former default complete while
+/// the read waits before its snapshot, so the advertised default is open in
+/// the directory the same answer carries.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_branches_read_advertises_an_open_default() {
+    let (server, agent) = launch_with_agent(Arc::new(MockTools), ServerConfig::default()).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let created = client.rpc("session.create", with_branch()).await;
+    assert_ok(&created);
+    let id = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    let session = agent.get_session(&id).unwrap();
+    let b = open_line(&mut client, &id, "main", "b").await;
+    session.idle(&b).await.unwrap();
+    assert_ok(&switch(&mut client, &id, &b).await);
+
+    let hold = server
+        .hold_next_branches()
+        .expect("the ConnectionHub exists");
+    let read = client
+        .send("session.branches", json!({"sessionId":id}))
+        .await;
+    hold.entered.notified().await;
+    // The competing calls land while the read waits before its snapshot.
+    assert_ok(&switch(&mut client, &id, "main").await);
+    assert_ok(
+        &client
+            .rpc("session.branch_end", json!({"sessionId":id,"branchId":b}))
+            .await,
+    );
+    hold.release.notify_one();
+    let reply = client.response(read).await;
+    assert_ok(&reply);
+    let default = reply["result"]["defaultBranchId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(default, "main", "the move is in the answer: {reply}");
+    let row = reply["result"]["branches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["branchId"] == json!(default))
+        .unwrap_or_else(|| panic!("the default is in the directory: {reply}"));
+    assert_eq!(
+        row["state"], "open",
+        "the advertised default accepts input: {reply}"
+    );
+}
+
 /// §20.22: a call that names no line reaches the line the fact names, and
 /// `session.submit`, `session.stop` and `session.idle` are among them.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -559,6 +750,92 @@ async fn newest_activity(client: &mut Client, session: &str, branch: &str) -> u6
         .map(|event| event["create_at"].as_u64().unwrap())
         .max()
         .unwrap_or(0)
+}
+
+/// One catalog row, as a client reads it.
+async fn catalog_row(client: &mut Client, session: &str) -> Value {
+    let listed = client.rpc("session.catalog", json!({})).await;
+    assert_ok(&listed);
+    listed["result"]["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["sessionId"] == json!(session))
+        .unwrap_or_else(|| panic!("{session} is listed: {listed}"))
+        .clone()
+}
+
+/// §14: the writer republishes the new default's own activity in the switch's
+/// transaction, and the switch itself is not activity, so two idle lines never
+/// leave the catalog recent by the line the Session left.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_switch_republishes_the_new_defaults_activity() {
+    let store = Store::new();
+    let (server, agent) = launch_with_agent(Arc::new(MockTools), store.config()).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let created = client.rpc("session.create", with_branch()).await;
+    assert_ok(&created);
+    let id = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    let session = agent.get_session(&id).unwrap();
+    let b = open_line(&mut client, &id, "main", "b").await;
+    session.idle(&b).await.unwrap();
+    // The line's turn runs while the root is the default, so the catalog
+    // still reports the root's activity.
+    assert_ok(
+        &client
+            .rpc(
+                "session.submit",
+                json!({"sessionId":id,"branchId":b,"text":"line turn"}),
+            )
+            .await,
+    );
+    session.idle(&b).await.unwrap();
+    let line_activity = newest_activity(&mut client, &id, &b).await;
+    let root_activity = newest_activity(&mut client, &id, "main").await;
+    assert!(
+        line_activity > root_activity,
+        "the line is the newer one: {line_activity} vs {root_activity}"
+    );
+    assert_eq!(
+        catalog_row(&mut client, &id).await["updatedAt"],
+        json!(root_activity),
+        "the root is the default while the line works"
+    );
+
+    assert_ok(&switch(&mut client, &id, &b).await);
+    assert_eq!(
+        catalog_row(&mut client, &id).await["updatedAt"],
+        json!(line_activity),
+        "the switch publishes the line's own activity, not the switch's time"
+    );
+
+    // A root turn makes the root the newer line while the line is default.
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    assert_ok(
+        &client
+            .rpc(
+                "session.submit",
+                json!({"sessionId":id,"branchId":"main","text":"root turn"}),
+            )
+            .await,
+    );
+    session.idle("main").await.unwrap();
+    let root_activity = newest_activity(&mut client, &id, "main").await;
+    assert!(
+        root_activity > line_activity,
+        "the root is the newer one now: {root_activity} vs {line_activity}"
+    );
+    assert_eq!(
+        catalog_row(&mut client, &id).await["updatedAt"],
+        json!(line_activity),
+        "a non-default line's turn does not move the catalog"
+    );
+    assert_ok(&switch(&mut client, &id, "main").await);
+    assert_eq!(
+        catalog_row(&mut client, &id).await["updatedAt"],
+        json!(root_activity),
+        "the move back publishes the root's activity"
+    );
 }
 
 /// §20.10: v3 clients are offered the method and read the new kind; v1 and v2

@@ -112,9 +112,10 @@ GuideRecord {
 | --- | --- | --- |
 | `delivered` | `{sessionId, branchId, subscriptionIds, inputId, sequence, truncated?, repeated?}` | 保留 |
 | `gone` | `{sessionId, branchId, subscriptionIds, code}`，`code` 为 `branch_missing` 或 `branch_ended` | 每条列出的订阅都被移除，因为该目标分支不会再接受输入；仅由 `to` 到达的分支，列表为空 |
-| `failed` | `{sessionId, branchId, subscriptionIds, code, message}`，`code` 为其他任何 `sessions` 错误或 `transport`：`session_closed`、`reloading`、`rejected`、`ambiguous`、`publication_unknown`、`transport`、`failed` | 每条列出的订阅都保留，并由 `lastFailure` 记录该码 |
+| `failed` | `{sessionId, branchId?, subscriptionIds, code, message}`，`code` 为其他任何 `sessions` 错误或 `transport`：`session_closed`、`reloading`、`rejected`、`ambiguous`、`publication_unknown`、`transport`、`failed` | 每条列出的订阅都保留，并由 `lastFailure` 记录该码 |
 
 - `subscriptionIds` 列出所有导致这条分支被投递的匹配订阅；仅由 `to` 到达的分支为空。表中的效果作用于每一条列出的订阅。
+- 省略的 `branchId` 无法解析的目标，其 `failed` 条目不携带 `branchId`：目标不命名任何线，`code` 就是该读取给出的答案（`session_closed`、`reloading`、`transport` 或其他 `sessions` 码）。
 - `repeated: true` 表示该分支已持有本进程内某次发布写入的同一事件输入；`inputId` 与 `sequence` 指向那个输入，且不含 `truncated`，见 2.4、3.2。
 - `failed` 不是拒绝：输入没有被写入，但有两种情况写入本身存疑：`publication_unknown`，此时它已提交而发布情况未知；以及 `transport`，此时 `sessions` 调用失败或其回复无法读取。生产方用同一个 `id` 重试会得到同一份回执，见 2.4。
 - 订阅的 `lastFailure` 只在发生变化时写入：设为一个新的码，或在一次已记录的失败之后清空。同一次发布的所有 `lastFailure` 变更在它的投递结束后合成一个事务。`eventhub.subscriptions` 会显示它，所以一条失效的订阅不必等生产方再发回执就能被看见。
@@ -169,7 +170,7 @@ sequenceDiagram
   H-->>P: {eventId, deliveries}
 ```
 
-一条分支无论被多少个目标命中，都只投递一次。一个 `to` 条目给出了 `mode` 时用它；否则取匹配的订阅中有效模式最强者，顺序为 `steer` 高于 `queue` 高于 `append`，其中订阅的有效模式是它自己的 `mode`，没有则为类型声明的 `mode`。要求被唤醒的订阅者不会被没有这样要求的订阅者盖过。凡请求可省略 `branchId` 时，它表示该 Session 当前的默认分支：`subscribe` 把该分支记入订阅，`publish` 在开始之前经 `sessions` 数据面解析每个 `to` 条目，因此默认分支无法读取(`session_closed`、`reloading`)的 Session 会拒绝整个 publish，且不写入任何东西。已存订阅的目标永不改变。零个目标不是错误：`deliveries: []`。
+一条分支无论被多少个目标命中，都只投递一次。一个 `to` 条目给出了 `mode` 时用它；否则取匹配的订阅中有效模式最强者，顺序为 `steer` 高于 `queue` 高于 `append`，其中订阅的有效模式是它自己的 `mode`，没有则为类型声明的 `mode`。要求被唤醒的订阅者不会被没有这样要求的订阅者盖过。凡请求可省略 `branchId` 时，它表示该 Session 当前的默认分支：`subscribe` 把该分支记入订阅，`publish` 每个请求一次地经 `sessions` 数据面解析每个 `to` 条目，冷读受 hub 的投递预算约束。`subscribe` 先检查声明的类型，再解析省略的目标分支，因此被拒绝的类型绝不会恢复冷 Session；随后它也在同一投递预算下读取该 Session。publish 先回答进程准入、来源归属和类型，再解析任何目标，所以被拒绝的 publish 绝不恢复冷的 Session，而是回答自己的错误；省略分支无法解析的目标，无论读取回答了什么（`session_closed`、`reloading` 或 `transport`），都在它自己的 `failed` 回执条目里带该码作答且不带 `branchId`；其余目标与所有匹配订阅照常规划并投递。已存订阅的目标永不改变。零个目标不是错误：`deliveries: []`。
 
 投递给一条被订阅的分支时，先按该分支与来源取出记录的指南，与当前声明对比(3.3)。二者不同时，它先在该 Session 的锁下把当前指南作为一条带键的 `append` 写出，然后写事件；仅由 `to` 到达的分支没有记录，也不写指南。
 
@@ -587,6 +588,6 @@ Session 部件为标记 `dim-event` 与 `dim-event-guide` 在 Session 作用域�
 - **可选读取。** Rust 生产方持有 `Key<EventHub>`，每次调用用 `ctx.get_at(&key)` 读取；EventHub 未安装、Pending 或重载时它回答 `None`，所以依赖不门控任何东西，见 [rutis 用法 A.3](../rutis-usage.md#a3-已定的问题)。`definePlugin` 行则 inject 该名字，见 2.1。同一形式用于读取 `sessionFiles`，即 `Key<SessionFiles>`，见 `crates/dim-agent-capabilities/src/host.rs:1002-1038`，以及 `sessions`，即在 `host_key("sessions")` 上的 `Key<dyn HostDispatch>`，见 `crates/dim-agent-scheduler/src/methods.rs:44,56`。
 - **声明通知。** Rust 或 Cordis 生产方先监听再读取：`ctx.listen::<dim_event_hub::Ready>()`，即名字为 `eventhub/ready` 的公开 `Event` 类型，然后 `ctx.get_at(&key)`；收到通知时再次读取该 key 并声明，见 2.1。`definePlugin` 行不需要这条通知：它 inject 该名字并在 `apply` 里声明，见 2.1。监听器持有一个类型，而不是一个运行中的 EventHub，所以在 EventHub 之前装载的生产方也能听到第一次提供它的那次 `apply`。通知本身由进程部件的一个依赖行发出，而不是在它的 `apply` 里：一行的服务只在部件活跃时才可被其他行读取，而部件在 `apply` 返回时才变为活跃。每次通知都声明不会增加 effect，因为重复声明是原地替换，见 A.1。
 - **投递。** `sessions.input` 就是在 `Key<dyn HostDispatch>` 上的一次 `invoke("input", json!([args]))`，见 `crates/dim-agent-scheduler/src/engine.rs:611-633`；回复是 `{inputId, sequence}`，错误码见 [session access A.6](../contracts/session-access.md#a6-错误)。
-- **存储。** 订阅文件使用 `PluginFileTransactions`，即 `dim_app_server::plugin_files::PluginFileTransactions`，见 `crates/dim-agent-scheduler/src/runs.rs:7,221-240`。
+- **存储。** 订阅更新通过调用方持有的 pluginFiles scope 调用 `scope.withLock`。已经受理的发布持有该 scope 直到结算完成，即使期间发生行重启。
 - **Session 部件** 注入 `guideEntries`、`toolRegistry`、`sessionIdentity` 与 `eventSubscriptions`，并在 `apply` 中登记条目与 `events` 工具，与 Scheduler 的部件相同，见 `crates/dim-agent-scheduler/src/session.rs:147-201`。
 - **TypeScript。** `npm/plugin.d.ts` 在 `sessions` 旁边声明这个服务：`EventHub`(`declare` 与 `publish`)、A.1 与 A.2 的请求和回复类型，以及列出附录 C 全部码的 `EventHubErrorThrown`。用 `definePlugin` 写成的行 inject `eventHub`，并用 `ctx.use<EventHub>('eventHub')` 读取它，在 `apply` 里声明；原始 Cordis 行则用 `ctx.get('eventHub')` 读取，见 [rutis 用法 §3.5](../rutis-usage.md#35-各运行时如何解析名字)。

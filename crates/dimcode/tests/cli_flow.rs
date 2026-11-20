@@ -8720,6 +8720,7 @@ fn approval_interrupt_stops_the_turn_instead_of_a_deferred_completed_shell() {
     assert!(!terminal.transcript.contains("deferred output"));
     terminal.signal(libc::SIGINT);
     terminal.until("[stopping] Waiting for resource settlement");
+    terminal.until("deferred output");
     terminal.signal(libc::SIGINT);
     terminal.until("[stopping] Still waiting for resource settlement");
     release.send(()).unwrap();

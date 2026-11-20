@@ -31,7 +31,7 @@ struct Completion {
     result: Result<(), CommitFailure>,
 }
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
-struct CommitFailure {
+pub struct CommitFailure {
     code: String,
     message: String,
 }
@@ -228,31 +228,31 @@ impl TimelineStore for TimelineStoreBinding {
 #[derive(Deserialize)]
 #[serde(tag = "method", content = "request", rename_all = "camelCase")]
 enum Request {
-    SessionConfig(Session),
-    CreateSession(Box<Create>),
-    ReleaseSession(Session),
-    RollbackSession(Session),
+    SessionConfig(TimelineSessionRequest),
+    CreateSession(Box<TimelineCreateRequest>),
+    ReleaseSession(TimelineSessionRequest),
+    RollbackSession(TimelineSessionRequest),
     SaveSnapshot(SaveSnapshot),
-    Branches(Session),
+    Branches(TimelineSessionRequest),
     Head(TimelineKey),
     ReadPage(Page),
     ReadSegments(Segments),
     Query(Box<Query>),
-    Trace(Position),
-    BatchEnd(Position),
-    BatchEndAt(Position),
+    Trace(TimelinePositionRequest),
+    BatchEnd(TimelinePositionRequest),
+    BatchEndAt(TimelinePositionRequest),
     LatestSnapshot(Snapshot),
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Session {
-    session_id: String,
+pub struct TimelineSessionRequest {
+    pub session_id: String,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Create {
-    session_id: String,
-    config: SessionConfig,
+pub struct TimelineCreateRequest {
+    pub session_id: String,
+    pub config: SessionConfig,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -263,11 +263,11 @@ struct SaveSnapshot {
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Append {
-    session_id: String,
-    branch_id: String,
-    batch_id: String,
-    events: Vec<StoredEvent>,
+pub struct TimelineAppend {
+    pub session_id: String,
+    pub branch_id: String,
+    pub batch_id: String,
+    pub events: Vec<StoredEvent>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -305,10 +305,10 @@ struct Query {
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Position {
-    session_id: String,
-    branch_id: String,
-    sequence: u64,
+pub struct TimelinePositionRequest {
+    pub session_id: String,
+    pub branch_id: String,
+    pub sequence: u64,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -334,19 +334,17 @@ impl HostDispatch for TimelineStoreBinding {
         if method == "commits" {
             let caller = rutis_bridge::session::caller_row()
                 .map(|row| row.ctx().clone())
-                .ok_or_else(|| Error::Value("commits needs the calling row's context".into()))?;
+                .ok_or_else(|| Error::value("commits needs the calling row's context"))?;
             let [request, listener]: [Value; 2] = args
                 .list()?
                 .try_into()
-                .map_err(|_| Error::Value("commits expects a request and listener".into()))?;
+                .map_err(|_| Error::value("commits expects a request and listener"))?;
             let request = request.json()?;
             if !request.is_object() {
-                return Err(Error::Value(
-                    "timelineStore request must be an object".into(),
-                ));
+                return Err(Error::value("timelineStore request must be an object"));
             }
-            let request: Session =
-                serde_json::from_value(request).map_err(|error| Error::Value(error.to_string()))?;
+            let request: TimelineSessionRequest =
+                serde_json::from_value(request).map_err(|error| Error::value(error.to_string()))?;
             let listener = listener.reference()?;
             let owner = self.clone();
             return Ok(Value::future(async move {
@@ -381,7 +379,7 @@ impl HostDispatch for TimelineStoreBinding {
                             Ok(None)
                         }
                     })
-                    .map_err(|error| Error::Value(error.to_string()))?;
+                    .map_err(|error| Error::value(error.to_string()))?;
                 owner
                     .0
                     .subscriptions
@@ -400,17 +398,15 @@ impl HostDispatch for TimelineStoreBinding {
                     if let Some(disposer) = disposer {
                         let _ = disposer.dispose().await;
                     }
-                    return Err(Error::Value(error.to_string()));
+                    return Err(Error::value(error.to_string()));
                 }
                 Ok(json!({"subscriptionId":id}).into())
             }));
         }
         let [request]: [serde_json::Value; 1] = serde_json::from_value(args.json()?)
-            .map_err(|error| Error::Value(error.to_string()))?;
+            .map_err(|error| Error::value(error.to_string()))?;
         if !request.is_object() {
-            return Err(Error::Value(
-                "timelineStore request must be an object".into(),
-            ));
+            return Err(Error::value("timelineStore request must be an object"));
         }
         if method == "append" {
             if rutis_bridge::session::caller().is_some() {
@@ -418,8 +414,8 @@ impl HostDispatch for TimelineStoreBinding {
                     "Timeline append must run beside its state owner".into(),
                 )));
             }
-            let p: Append =
-                serde_json::from_value(request).map_err(|error| Error::Value(error.to_string()))?;
+            let p: TimelineAppend =
+                serde_json::from_value(request).map_err(|error| Error::value(error.to_string()))?;
             if p.events.is_empty() {
                 return Err(failure(AgentError::InvalidInput(
                     "timeline batch must not be empty".into(),
@@ -439,7 +435,7 @@ impl HostDispatch for TimelineStoreBinding {
         }
         if method == "closeCommits" {
             let p: Close =
-                serde_json::from_value(request).map_err(|error| Error::Value(error.to_string()))?;
+                serde_json::from_value(request).map_err(|error| Error::value(error.to_string()))?;
             let disposer = self
                 .0
                 .subscriptions
@@ -451,13 +447,13 @@ impl HostDispatch for TimelineStoreBinding {
                     disposer
                         .dispose()
                         .await
-                        .map_err(|error| Error::Value(error.to_string()))?;
+                        .map_err(|error| Error::value(error.to_string()))?;
                 }
                 Ok(json!({}).into())
             }));
         }
         let request: Request = serde_json::from_value(json!({"method":method,"request":request}))
-            .map_err(|error| Error::Value(error.to_string()))?;
+            .map_err(|error| Error::value(error.to_string()))?;
         let store = self.clone();
         Ok(Value::future(async move {
             let result: crate::Result<serde_json::Value> = async {
@@ -544,6 +540,6 @@ fn error_code(error: &AgentError) -> &'static str {
         _ => "storage",
     }
 }
-fn failure(error: AgentError) -> Error {
+pub fn failure(error: AgentError) -> Error {
     rutis_bridge::exports::failure("StoreError", error_code(&error), error.to_string(), None)
 }

@@ -35,11 +35,12 @@ impl Connection {
         }
         let session = self.session(rpc, &params.session_id)?;
         // A request that names no line goes to the line the Session's
-        // conversation is on, read once for everything this call does (design
-        // §9, §20.22).
+        // conversation is on, read once for everything this call does, and to
+        // the root on a connection whose stream carries the root alone (design
+        // §9, §14, §15, §20.22).
         let branch = match params.branch_id {
             Some(branch) => branch,
-            None => session.default_branch().map_err(RpcError::from)?,
+            None => self.unnamed_branch(&session).map_err(RpcError::from)?,
         };
         let publication = session.publication(&branch).map_err(RpcError::from)?;
         let user = params.user.or_else(|| {
@@ -543,9 +544,19 @@ impl Connection {
         params: Branches,
     ) -> Result<Reply, RpcError> {
         let session = self.session(rpc, &params.session_id)?;
-        let default_branch_id = session.default_branch().map_err(RpcError::from)?;
+        // Feature `testing`: a test holds the read before its snapshot, moves
+        // the default away and ends the former default, then releases it.
+        #[cfg(feature = "testing")]
+        if let Some(hold) = self.hub.take_branches_hold() {
+            hold.entered.notify_one();
+            hold.release.notified().await;
+        }
+        // The default and the rows come from one tree snapshot: the advertised
+        // default is an open identity in the directory the same answer carries
+        // (design §14).
+        let (default_branch_id, rows) = session.default_and_directory();
         Ok(Reply::Branches(wire::BranchesResult {
-            branches: session.directory().into_iter().map(Into::into).collect(),
+            branches: rows.into_iter().map(Into::into).collect(),
             default_branch_id,
         }))
     }
