@@ -141,7 +141,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Member conversation" => "Conversa do membro",
         "x stop command · Esc back" => "x parar comando · Esc voltar",
         "x stop command · Esc close" => "x parar comando · Esc fechar",
-        "x interrupt member · Esc close" => "x interromper membro · Esc fechar",
         "x stop workflow · Esc close" => "x parar workflow · Esc fechar",
         "Esc back" => "Esc voltar",
         "Tail preview - last 2,000 lines / 50 KiB" => {

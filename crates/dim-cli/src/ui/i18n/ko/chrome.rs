@@ -131,7 +131,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Member conversation" => "멤버 대화",
         "x stop command · Esc back" => "x 명령 중지 · Esc 뒤로",
         "x stop command · Esc close" => "x 명령 중지 · Esc 닫기",
-        "x interrupt member · Esc close" => "x 멤버 중단 · Esc 닫기",
         "x stop workflow · Esc close" => "x 워크플로 중지 · Esc 닫기",
         "Esc back" => "Esc 뒤로",
         "Tail preview - last 2,000 lines / 50 KiB" => "미리보기 - 마지막 2,000줄 / 50 KiB",

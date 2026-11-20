@@ -490,7 +490,6 @@ mod tests {
             for key in [
                 "Esc close",
                 "x stop command · Esc close",
-                "x interrupt member · Esc close",
                 "x stop workflow · Esc close",
             ] {
                 let translated = table(locale, key);

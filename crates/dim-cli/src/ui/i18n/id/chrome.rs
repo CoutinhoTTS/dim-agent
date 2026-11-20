@@ -139,7 +139,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Member conversation" => "Percakapan anggota",
         "x stop command · Esc back" => "x stop perintah · Esc kembali",
         "x stop command · Esc close" => "x stop perintah · Esc tutup",
-        "x interrupt member · Esc close" => "x interupsi anggota · Esc tutup",
         "x stop workflow · Esc close" => "x stop workflow · Esc tutup",
         "Esc back" => "Esc kembali",
         "Tail preview - last 2,000 lines / 50 KiB" => "Pratinjau akhir - 2.000 baris / 50 KiB",

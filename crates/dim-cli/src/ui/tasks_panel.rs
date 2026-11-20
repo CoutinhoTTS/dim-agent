@@ -654,10 +654,7 @@ impl TasksPanel {
                 if detail.task.finished.is_none()
                     && !matches!(state, MemberConversationState::Closed)
                 {
-                    hint = back(
-                        "x interrupt member · Esc back",
-                        "x interrupt member · Esc close",
-                    );
+                    hint = "x interrupt member · Esc back";
                 }
             }
             DetailBody::Workflow => {

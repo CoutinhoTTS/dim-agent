@@ -257,9 +257,9 @@ shows, subject to the earlier shell/queue actions in
 [CLI run keys](cli-commands.md#run-keys-and-queue).
 
 In fullscreen mode, clicking a task row opens that task's existing detail
-directly; Esc returns to the composer with its draft preserved, and a command
-or workflow detail's hint reads `Esc close`. A detail opened from the `/tasks`
-list keeps `Esc back`, which returns to the list. Command rows
+directly; Esc returns to the composer with its draft preserved, and the
+detail box's hint reads `Esc close`. A detail opened from the `/tasks` list
+keeps `Esc back`, which returns to the list. Command rows
 open command output, and member rows use the existing
 [member conversation contract](member-conversation.md). A click requires press
 and release on the same cell with the same task identity still at that row.
