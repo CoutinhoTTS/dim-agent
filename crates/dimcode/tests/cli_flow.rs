@@ -30,6 +30,9 @@ mod hooks;
 #[path = "cli_flow/mcp.rs"]
 mod mcp;
 
+#[path = "cli_flow/lines.rs"]
+mod lines;
+
 #[path = "cli_flow/migration.rs"]
 mod migration;
 #[path = "cli_flow/modality.rs"]
@@ -10546,7 +10549,7 @@ fn tui_tasks_panel_stops_the_selected_command_or_member() {
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"req-other","sequence":20,"create_at":1,"type":"collaboration","name":"request","data":{"turn_id":"t","request_id":"r4","call_id":"call-4","target":{"kind":"agent","agent_id":"writer"},"prompt":"Check the docs"}}}));
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"del-other","sequence":21,"create_at":1,"type":"collaboration","name":"delivered","data":{"op_event_id":"req-other","status":"ok","agent_id":"writer","session_id":"other-member","input_event_id":"other-input"}}}));
         let stop = past_observations(wire, "session.stop");
-        assert_eq!(stop["params"], json!({"sessionId":"member","branchId":"main","reason":"stopped by the user"}));
+        assert_eq!(stop["params"], json!({"sessionId":"member","reason":"stopped by the user"}));
         wire.reply(&stop, json!({}));
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"res-1","sequence":22,"create_at":1,"type":"collaboration","name":"result","data":{"request_event_id":"req-1","agent_id":"reviewer","session_id":"member","text":"","status":"cancelled","reason":"stopped by the user"}}}));
         let submit = past_observations(wire, "session.submit");

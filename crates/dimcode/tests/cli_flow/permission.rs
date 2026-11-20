@@ -129,7 +129,7 @@ fn line_permission_controls_keep_tool_lists_report_conflicts_and_reject_unknown_
     terminal.until("Run the command again to switch.");
     terminal.until("\n> ");
     terminal.write(b"/permissions workspace-write\n");
-    terminal.until("Preset (main branch): workspace-write");
+    terminal.until("Preset: workspace-write");
     terminal.until("\n> ");
     terminal.write(b"/permissions\n");
     terminal.until("permission: workspace-write");
@@ -700,20 +700,20 @@ fn interactive_approvals_list_switch_and_edit_rules_with_version_checks() {
     terminal.until("Usage: /permissions");
     terminal.until("\n> ");
     terminal.write(b"/approvals full-access\n");
-    terminal.until("Switch the main branch to full-access? [y/N] ");
+    terminal.until("Switch to full-access? [y/N] ");
     terminal.write(b"\n");
     terminal.until("Preset unchanged: workspace-write");
     terminal.until("\n> ");
     terminal.write(b"/approvals full-access\n");
-    terminal.until("Switch the main branch to full-access? [y/N] ");
+    terminal.until("Switch to full-access? [y/N] ");
     terminal.write(b"y\n");
     terminal.until("The preset changed elsewhere and is now read-only; nothing was changed.");
     terminal.until("\n> ");
     terminal.write(b"/approvals read-only\n");
-    terminal.until("Preset (main branch) is already read-only");
+    terminal.until("Preset is already read-only");
     terminal.until("\n> ");
     terminal.write(b"/permissions workspace-write\n");
-    terminal.until("Preset (main branch): workspace-write. Child branches and members created later from main inherit it; existing branches and members keep their policies.");
+    terminal.until("Preset: workspace-write. Lines and members created later from this line inherit it; existing lines and members keep their policies.");
     terminal.until("\n> ");
     terminal.write(b"/approvals remove 1\n");
     terminal.until("Rule removed: allow exact `cargo test`");
@@ -766,7 +766,7 @@ fn interactive_approvals_list_switch_and_edit_rules_with_version_checks() {
     terminal.until("Error: Usage: /permissions");
     terminal.until("\n> ");
     terminal.write(b"after\n");
-    terminal.until("[permission] main branch preset: full-access");
+    terminal.until("[permission] preset: full-access");
     terminal.until("\n> ");
     terminal.write(b"/exit\n");
     assert!(terminal.wait().success());
@@ -774,7 +774,7 @@ fn interactive_approvals_list_switch_and_edit_rules_with_version_checks() {
     assert!(
         !terminal
             .transcript
-            .contains("[permission] main branch preset: workspace-write"),
+            .contains("[permission] preset: workspace-write"),
         "{}",
         terminal.transcript
     );
@@ -1050,7 +1050,7 @@ fn real_daemon_always_allow_saves_an_exact_rule_until_approvals_removes_it() {
     terminal.until("Rule removed: allow exact `printf always-ran`");
     terminal.editor();
     terminal.write(b"/approvals read-only\n");
-    terminal.until("Preset (main branch): read-only.");
+    terminal.until("Preset: read-only.");
     terminal.editor();
     let mark = terminal.transcript.len();
     terminal.write(b"exec: printf always-ran\n");
@@ -1065,7 +1065,7 @@ fn real_daemon_always_allow_saves_an_exact_rule_until_approvals_removes_it() {
     terminal.until("permission: read-only");
     terminal.editor();
     terminal.write(b"/permissions full-access\n");
-    terminal.until("Switch the main branch to full-access? [y/N] ");
+    terminal.until("Switch to full-access? [y/N] ");
     terminal.write(b"y\n");
     terminal.until("permission: full-access");
     terminal.editor();
@@ -1079,7 +1079,7 @@ fn real_daemon_always_allow_saves_an_exact_rule_until_approvals_removes_it() {
         terminal.transcript
     );
     terminal.write(b"/permissions workspace-write\n");
-    terminal.until("Preset (main branch): workspace-write");
+    terminal.until("Preset: workspace-write");
     terminal.editor();
     let mark = terminal.transcript.len();
     terminal.write(b"exec: printf ask-ran\n");

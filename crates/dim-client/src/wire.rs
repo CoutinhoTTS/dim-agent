@@ -480,8 +480,14 @@ pub struct TurnBoundary {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BranchDirectory {
     pub branches: Vec<BranchEntry>,
+    /// The line the Session's conversation is on (design §14). A server that
+    /// predates `session.branch_set_default` reports none, and such a Session
+    /// is on its root.
+    #[serde(default)]
+    pub default_branch_id: Option<String>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]

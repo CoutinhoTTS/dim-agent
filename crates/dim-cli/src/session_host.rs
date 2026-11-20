@@ -286,6 +286,9 @@ struct Worker {
     cursors: std::collections::HashMap<String, u64>,
     tool_origins: std::collections::VecDeque<(String, String, String)>,
     projection_id: u64,
+    /// The line the Session's conversation is on: the target a request that
+    /// names no line reaches, and the line the top bar folds (design §4, §14).
+    default_branch: String,
     focus: String,
     /// The line the side panel follows.
     side: Option<String>,
@@ -726,6 +729,7 @@ impl Worker {
             cursors: Default::default(),
             tool_origins: Default::default(),
             projection_id: 0,
+            default_branch: ROOT_BRANCH_ID.into(),
             focus: DEFAULT_BRANCH_ID.into(),
             side: None,
             lines: Default::default(),
@@ -781,6 +785,21 @@ impl Worker {
         scope_cwd(self.options.workspace().as_str(), scope)
     }
 
+    /// The line a Session's conversation is on: the default branch the daemon
+    /// reports, or the root of a Session that has not moved it (design §4).
+    async fn conversation_of(&mut self, session_id: &str) -> crate::Result<String> {
+        if !self.client.supports(&["session.branches"]) {
+            return Ok(ROOT_BRANCH_ID.into());
+        }
+        let directory: dim_client::wire::BranchDirectory = self
+            .client
+            .typed("session.branches", json!({"sessionId": session_id}))
+            .await?;
+        Ok(directory
+            .default_branch_id
+            .unwrap_or_else(|| ROOT_BRANCH_ID.into()))
+    }
+
     /// Resumes the requested Session; an ordinary startup stays at Home.
     async fn open(&mut self) -> crate::Result<()> {
         if let Some(id) = self.options.resume.clone() {
@@ -791,7 +810,8 @@ impl Worker {
                             .into(),
                     );
                 }
-                permission::select(&mut self.client, &id, preset)
+                let branch = self.conversation_of(&id).await?;
+                permission::select(&mut self.client, &id, &branch, preset)
                     .await
                     .map_err(|error| {
                         client::resume_failure("Cannot set the permission preset", error)
@@ -973,7 +993,6 @@ impl Worker {
         };
         // Without a record, find the model in the catalog: this is the only
         // caller of `list()` besides `/resume`, and only for an older server.
-        self.model_through = attached.sequence;
         let model_preferences = attached.model_preferences;
         let model = match attached.model.or(model) {
             Some(model) => model,
@@ -1002,19 +1021,21 @@ impl Worker {
         self.model = Some(configuration.clone());
         self.preview = None;
         self.pending = None;
-        self.discover_branch(DEFAULT_BRANCH_ID);
-        if self.client.offers("session.history.display.transcript") {
-            self.task_history
-                .get_mut(DEFAULT_BRANCH_ID)
-                .unwrap()
-                .window
-                .through = Some(attached.sequence);
-        }
+        // The Session's conversation starts where its default branch is
+        // (design §4): the directory names that line. `attached.sequence` is
+        // the root's sequence, so it is the conversation's own cursor only
+        // while the conversation is the root; a line's window and model fold
+        // start from its own history until the App Server reports a
+        // branch-qualified cursor (§14).
+        self.default_branch = ROOT_BRANCH_ID.into();
         if self.client.supports(&["session.branches"]) {
             let directory: dim_client::wire::BranchDirectory = self
                 .client
                 .typed("session.branches", json!({"sessionId":self.session_id}))
                 .await?;
+            self.default_branch = directory
+                .default_branch_id
+                .unwrap_or_else(|| ROOT_BRANCH_ID.into());
             for entry in directory.branches {
                 self.projection.directory(&entry);
                 if entry.state == "ended" {
@@ -1026,6 +1047,21 @@ impl Worker {
                 }
             }
         }
+        self.focus = self.default_branch.clone();
+        let conversation_line = self.focus.clone();
+        self.discover_branch(&conversation_line);
+        let conversation_cursor =
+            (self.default_branch == ROOT_BRANCH_ID).then_some(attached.sequence);
+        if self.client.offers("session.history.display.transcript")
+            && let Some(cursor) = conversation_cursor
+        {
+            self.task_history
+                .get_mut(&conversation_line)
+                .expect("the conversation is discovered")
+                .window
+                .through = Some(cursor);
+        }
+        self.model_through = conversation_cursor.unwrap_or(0);
         self.poll_task_history().await?;
         self.send(Update::Ready(configuration));
         self.send(catalog_features(None));
@@ -1046,7 +1082,7 @@ impl Worker {
         if self.client.supports(&permission::PRESET_METHODS) {
             reads.push((
                 "session.permission.get",
-                json!({"sessionId":session_id,"branchId":DEFAULT_BRANCH_ID}),
+                json!({"sessionId":session_id,"branchId":self.default_branch}),
                 OpeningRead::Permissions,
             ));
         }
@@ -1304,6 +1340,14 @@ impl Worker {
                 self.side = None;
                 self.publish();
             }
+            Command::SetDefaultLine {
+                session_id,
+                projection_id,
+                branch_id,
+            } => {
+                self.set_default_line(session_id, projection_id, branch_id)
+                    .await;
+            }
             Command::EndLine {
                 session_id,
                 projection_id,
@@ -1547,8 +1591,13 @@ impl Worker {
             Command::Resume(session_id) => {
                 if let Some(preset) = self.options.permission
                     && self.client.supports(&permission::PRESET_METHODS)
-                    && let Err(error) =
-                        permission::select(&mut self.client, &session_id, preset).await
+                    && let Err(error) = permission::select(
+                        &mut self.client,
+                        &session_id,
+                        &self.default_branch,
+                        preset,
+                    )
+                    .await
                 {
                     self.send(Update::Notice(format!(
                         "The permission preset was not applied: {error}"
@@ -1967,9 +2016,14 @@ impl Worker {
                     })
                 } else {
                     let session_id = self.session_id.clone();
-                    permission::select_preset(&mut self.client, &session_id, change)
-                        .await
-                        .map_err(|error| error.to_string())
+                    permission::select_preset(
+                        &mut self.client,
+                        &session_id,
+                        &self.default_branch,
+                        change,
+                    )
+                    .await
+                    .map_err(|error| error.to_string())
                 };
                 if let Ok(policy) = &result {
                     self.options.permission = Some(policy.preset);
@@ -2151,8 +2205,14 @@ impl Worker {
                     return Ok(());
                 }
                 let model = self.model.clone();
-                let result =
-                    configure::run(&mut self.client, &self.session_id, model.as_ref(), &text).await;
+                let result = configure::run(
+                    &mut self.client,
+                    &self.session_id,
+                    &self.focus,
+                    model.as_ref(),
+                    &text,
+                )
+                .await;
                 if matches!(text.as_str(), "/effort" | "/reasoning") {
                     self.send(Update::EffortChoices(
                         result
@@ -2194,9 +2254,10 @@ impl Worker {
                 branch_id,
                 stop_turn,
             } => {
-                let also_session_line = stop_turn && branch_id != DEFAULT_BRANCH_ID;
+                let session_line = self.default_branch.as_str();
+                let also_session_line = stop_turn && branch_id != session_line;
                 for branch in std::iter::once(branch_id.as_str())
-                    .chain(also_session_line.then_some(DEFAULT_BRANCH_ID))
+                    .chain(also_session_line.then_some(session_line))
                 {
                     let result = self.client.rpc("session.stop", json!({"sessionId":session_id,"branchId":branch,"reason":crate::model::view::INTERRUPT_REASON})).await;
                     self.report_failure(result);
@@ -2304,7 +2365,6 @@ impl Worker {
                 }
                 let params = json!({
                     "sessionId": member_id,
-                    "branchId": DEFAULT_BRANCH_ID,
                     "reason": "stopped by the user",
                 });
                 let result = self.client.rpc("session.stop", params).await;
@@ -2380,7 +2440,7 @@ impl Worker {
             .client
             .send(
                 "session.context.usage",
-                json!({"sessionId": self.session_id, "branchId": DEFAULT_BRANCH_ID}),
+                json!({"sessionId": self.session_id, "branchId": self.default_branch.clone()}),
             )
             .await
         {
@@ -2742,14 +2802,14 @@ impl Worker {
                 if notice.session_id == self.session_id {
                     // Live only: history pages arrive as `session.history`
                     // replies applied by `apply`, so they spend no read.
-                    if notice.branch_id == DEFAULT_BRANCH_ID
+                    if notice.branch_id == self.default_branch
                         && matches!(notice.event.content, EventContent::ModelEnd(_))
                     {
                         self.context_stale = true;
                     }
                     let completed = match &notice.event.content {
                         EventContent::TurnEnd(data)
-                            if notice.branch_id == DEFAULT_BRANCH_ID
+                            if notice.branch_id == self.default_branch
                                 && matches!(
                                     data.outcome,
                                     dim_agent_types::TurnOutcome::Completed { .. }
@@ -2799,7 +2859,8 @@ impl Worker {
                     {
                         transcript.set_running(notice.running);
                     }
-                    self.context_stale |= notice.branch_id == DEFAULT_BRANCH_ID && !notice.running;
+                    self.context_stale |=
+                        notice.branch_id == self.default_branch && !notice.running;
                     self.changed();
                 } else if notice.branch_id == DEFAULT_BRANCH_ID
                     && self.observes_member(&notice.session_id)
@@ -3855,7 +3916,7 @@ impl Worker {
         let command = text.split_whitespace().next().unwrap_or_default();
         let bare_effort = matches!(text, "/effort" | "/reasoning");
         if command == "/agent" {
-            match configure::run(&mut self.client, "", None, text).await {
+            match configure::run(&mut self.client, "", ROOT_BRANCH_ID, None, text).await {
                 Ok(report) => self.report(report.lines.join("\n"), false),
                 Err(error) => self.report(error.to_string(), true),
             }
@@ -4004,7 +4065,7 @@ impl Worker {
             model
         } else {
             let target = (provider_id.clone(), model_id.clone());
-            let params = json!({"sessionId":self.session_id,"branchId":DEFAULT_BRANCH_ID,"providerId":provider_id,"modelId":model_id});
+            let params = json!({"sessionId":self.session_id,"branchId":self.focus,"providerId":provider_id,"modelId":model_id});
             let updated: Updated = match self.client.typed("session.model.update", params).await {
                 Ok(updated) => updated,
                 Err(error) => {
@@ -4462,7 +4523,7 @@ impl Worker {
                         let mut line = usage.describe();
                         let loaded = self
                             .task_history
-                            .get(DEFAULT_BRANCH_ID)
+                            .get(&self.default_branch)
                             .is_some_and(|history| history.done);
                         if let Some(cached) = self
                             .last_usage
@@ -4683,7 +4744,7 @@ impl Worker {
     }
 
     fn fold(&mut self, branch_id: &str, event: Event, replayed: bool) {
-        if branch_id == DEFAULT_BRANCH_ID
+        if branch_id == self.default_branch
             && event.sequence > self.model_through
             && let EventContent::Configuration(configuration) = &event.content
         {
@@ -4720,14 +4781,14 @@ impl Worker {
         }
         *cursor = event.sequence;
         self.discover_workflow(branch_id, &event);
-        if branch_id == DEFAULT_BRANCH_ID
+        if branch_id == self.default_branch
             && let EventContent::PermissionChanged(data) = &event.content
         {
             self.opening_reads
                 .retain(|(_, kind)| !matches!(kind, OpeningRead::Permissions));
             self.send(Update::Permissions(Ok(data.policy.clone())));
         }
-        if branch_id == DEFAULT_BRANCH_ID
+        if branch_id == self.default_branch
             && matches!(
                 event.content,
                 EventContent::Compaction(_) | EventContent::CompactionSummary(_)
@@ -4735,7 +4796,7 @@ impl Worker {
         {
             self.context_stale = true;
         }
-        if branch_id == DEFAULT_BRANCH_ID
+        if branch_id == self.default_branch
             && let EventContent::ModelUsage(data) = &event.content
         {
             self.last_usage = Some(LastUsage {
@@ -4826,6 +4887,47 @@ impl Worker {
         lines
     }
 
+    /// `session.branch_set_default`, then shows the line the Session's
+    /// conversation is on now; a refusal goes back to the panel that asked
+    /// (design §14).
+    async fn set_default_line(
+        &mut self,
+        session_id: String,
+        projection_id: u64,
+        branch_id: String,
+    ) {
+        if !self.attached(&session_id, projection_id) {
+            self.send(Update::Notice(
+                "Session attachment changed; reopen the lines before choosing one".into(),
+            ));
+            return;
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Reply {
+            default_branch_id: String,
+        }
+        match self
+            .client
+            .typed::<Reply>(
+                "session.branch_set_default",
+                json!({"sessionId": self.session_id, "branchId": branch_id}),
+            )
+            .await
+        {
+            Ok(reply) => {
+                self.default_branch = reply.default_branch_id;
+                self.side = None;
+                let line = self.default_branch.clone();
+                self.focus_line(line).await;
+            }
+            Err(error) => self.send(Update::LineRefusal {
+                projection_id,
+                text: error.to_string(),
+            }),
+        }
+    }
+
     async fn focus_line(&mut self, line: String) {
         if line != ROOT_BRANCH_ID && !self.task_history.contains_key(&line) {
             self.send(Update::Notice(format!("No line {line} in this session")));
@@ -4914,6 +5016,7 @@ impl Worker {
                     .map_or_else(Vec::new, |line| line.projection.rows().to_vec()),
             })
         });
+        snapshot.default_branch_id = self.default_branch.clone();
         snapshot.focus = self.focus.clone();
         snapshot.main_running = self.projection.running();
         snapshot.main_topic = self.projection.first_message();
@@ -5044,7 +5147,9 @@ pub(crate) async fn adopt_startup(
     if options.startup.is_none() && options.effort.is_none() && options.model.is_none() {
         return Ok(());
     }
-    let mut params = json!({"sessionId":session_id,"branchId":DEFAULT_BRANCH_ID});
+    // The update names no line: a resume adopts the startup configuration on
+    // the Session's default branch, resolved once by the server (design §9).
+    let mut params = json!({"sessionId":session_id});
     if let Some(startup) = &options.startup {
         params["startup"] = startup.clone();
     }
