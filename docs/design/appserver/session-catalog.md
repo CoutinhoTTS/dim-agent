@@ -125,7 +125,9 @@ daemon without a store has no projection and answers from the loaded Sessions as
 `session.catalog` either (§3.1). A row reads its Session's default branch and that line's facts; when a concurrent
 move ends the line before the row completes, the row is read again from the Session's new default, so another client
 moving the conversation cannot fail the listing. That re-read happens once: a line that ends again while the second
-attempt completes answers its error instead of trying a third line. So the method is how a client that does not find
+attempt completes answers its error instead of trying a third line. Each attempt decides the line's lifecycle in one
+tree lookup, so a move and end that race the attempt classify the line as ended, and take the bounded re-read, rather
+than as a branch the Session does not have. So the method is how a client that does not find
 `session.catalog` lists, and how clients on a daemon older than this change list; both stay working because the
 method's shape does not change.
 

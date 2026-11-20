@@ -191,6 +191,11 @@ pub trait TimelineTreeControl: Send + Sync + 'static {
         admission: tokio_util::sync::CancellationToken,
     ) -> BoxFuture<'_, Result<Branch>>;
     fn get(&self, id: &str) -> Option<Branch>;
+    /// `id` if it is published and open, [`AgentError::BranchEnded`] for a
+    /// line that ended, and [`AgentError::UnknownBranch`] for an id this
+    /// Session never had, all decided under one tree state lock so a
+    /// concurrent end cannot read as unknown.
+    fn published(&self, id: &str) -> Result<Branch>;
     /// Ends the line `id` with `source`; only the target is checked.
     fn end(&self, id: String, source: dim_agent_types::BranchSource) -> BoxFuture<'_, Result<()>>;
     /// The line the Session's conversation is on.

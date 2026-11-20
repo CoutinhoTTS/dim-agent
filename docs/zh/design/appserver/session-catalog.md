@@ -57,7 +57,7 @@ Issue：[#556](https://github.com/arcships/dim/issues/556)，要求有界的 `/r
 
 ### 3.3 `session.summaries`
 
-`session.summaries` 保留回复类型与按连接判定的协议 v3 规则；参数新增下面可选的 `includeClosed`。原生存储打开时，它改为从同一份投影回答而不是读历史，内容不变：投影原样应用下面的预览规则，而且它的行从 Session 创建起就存在（§5）。没有存储的守护进程没有投影，与今天一样从已装载的 Session 回答；它也不列出 `session.catalog`（§3.1）。没有存储时，一行读它 Session 的默认分支和那条线的事实；若并发的移动在行读完之前结束了那条线，这一行改从 Session 的新默认分支重读，因此另一个客户端移动对话不会让列目录失败。重读只发生一次：第二次尝试读完之前那条线又被结束，读取返回它的错误，而不是再换一条线。所以找不到 `session.catalog` 的客户端靠它列目录，比本变更更旧的守护进程上的客户端也靠它；两者继续可用，因为该方法的形态不变。
+`session.summaries` 保留回复类型与按连接判定的协议 v3 规则；参数新增下面可选的 `includeClosed`。原生存储打开时，它改为从同一份投影回答而不是读历史，内容不变：投影原样应用下面的预览规则，而且它的行从 Session 创建起就存在（§5）。没有存储的守护进程没有投影，与今天一样从已装载的 Session 回答；它也不列出 `session.catalog`（§3.1）。没有存储时，一行读它 Session 的默认分支和那条线的事实；若并发的移动在行读完之前结束了那条线，这一行改从 Session 的新默认分支重读，因此另一个客户端移动对话不会让列目录失败。重读只发生一次：第二次尝试读完之前那条线又被结束，读取返回它的错误，而不是再换一条线。每次尝试都在一次 tree 读取里判定该线的生命周期，因此与它并发的移动与结束只会把这条线判为已结束并进入上面的有界重读，不会判成这个 Session 没有的分支。所以找不到 `session.catalog` 的客户端靠它列目录，比本变更更旧的守护进程上的客户端也靠它；两者继续可用，因为该方法的形态不变。
 
 **`includeClosed` 与已关闭的 Session。** 本守护进程关闭的 Session（经 `session.close` 或 ACP 的 `session/close`）保留存储的行，但不进入任何目录读取：准入槽的关闭标志（[空闲卸载 §6.4](idle-unload.md#64-准入槽)）过滤的是同一条目录查询，因此恢复选择面板不会提供本守护进程拒绝附着的 Session。清理读的是存储的数据，而这类 Session 仍有数据，所以 `session.summaries` 与 `session.catalog` 都接受 `includeClosed?: boolean`，缺省 `false`，含义相同。为 `true` 时同一条查询去掉关闭过滤，每条已关闭 Session 的行带 `closed: true`；每行都带 `closed`，本进程没有关闭它为 `false`。两种情况都只读一次：这个标志去掉查询的一个条件，而不是增加第二次读取。旧版 App Server 没有这个参数，会以 `invalid_params` 拒绝（`deny_unknown_fields`），需要这些行的客户端再去掉它重读一次。没有存储的守护进程与之前一样从已装载的 Session 回答 `session.summaries`，`closed` 来自同一个槽位事实；它不列出目录（§3.1）。`session.catalog` 一旦接受该成员就宣告 `session.catalog.includeClosed`。
 

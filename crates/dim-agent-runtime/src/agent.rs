@@ -490,13 +490,9 @@ impl Session {
         self.0.created_at
     }
     fn published(&self, id: &str) -> Result<Branch> {
-        if self.0.tree.ended_head(id).is_some() {
-            return Err(AgentError::BranchEnded(id.into()));
-        }
-        self.0
-            .tree
-            .get(id)
-            .ok_or_else(|| AgentError::UnknownBranch(id.into()))
+        #[cfg(feature = "testing")]
+        crate::testing::lifecycle(self.id(), id);
+        self.0.tree.published(id)
     }
     /// Text input shorthand for [`Self::input`].
     pub async fn submit(

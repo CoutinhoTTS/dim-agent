@@ -906,3 +906,142 @@ async fn a_storeless_summary_survives_its_default_line_ending_mid_read() {
     server.shutdown();
     server.join().await.unwrap();
 }
+
+/// A storeless listing decides the selected line's lifecycle in one tree
+/// lookup: a concurrent move and end makes it an ended line, so the row takes
+/// the bounded re-read from the Session's new default instead of failing the
+/// listing as an unknown branch (session catalog §3.3).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_storeless_summary_reclassifies_a_line_ended_mid_lookup() {
+    let (server, agent) = launch_holding_tool_line(ServerConfig::default()).await;
+    let mut mover = Client::new_version(&server, false, 3).await;
+    let mut reader = Client::new_version(&server, false, 3).await;
+    let created = reader
+        .rpc(
+            "session.create",
+            json!({
+                "cwd": std::env::temp_dir(),
+                "tools": ["branch", "wait"],
+                "permissionPolicy": {"preset": "full-access"}
+            }),
+        )
+        .await;
+    assert_ok(&created);
+    let id = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    let session = agent.get_session(&id).unwrap();
+    while dim_agent_runtime::core::unix_millis() <= session.created_at() {
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    let open = format!(
+        "tool:branch {}",
+        json!({"action": "create", "prompt": "hold this line"})
+    );
+    assert_ok(
+        &reader
+            .rpc(
+                "session.submit",
+                json!({"sessionId": id, "branchId": "main", "text": open}),
+            )
+            .await,
+    );
+    let child = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(branch) = session
+                .branches()
+                .into_iter()
+                .find(|branch| branch.parent.as_deref() == Some("main"))
+            {
+                return branch.id;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("main opens the tool line");
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !session.state(&child).is_ok_and(|state| state.running) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the tool line starts its first turn");
+    assert_ok(
+        &reader
+            .rpc(
+                "session.branch_set_default",
+                json!({"sessionId": id, "branchId": child}),
+            )
+            .await,
+    );
+    let mut held = dim_agent_runtime::testing::hold_lifecycle(&id, &child);
+    let reading = tokio::spawn(async move { reader.rpc("session.summaries", json!({})).await });
+    let stopped = tokio::time::timeout(Duration::from_secs(10), held.arrived())
+        .await
+        .expect("the listing reads the line's lifecycle");
+    assert_eq!(stopped, child, "the held lookup names the selected line");
+    assert_ok(
+        &mover
+            .rpc(
+                "session.branch_set_default",
+                json!({"sessionId": id, "branchId": "main"}),
+            )
+            .await,
+    );
+    let ended = tokio::time::timeout(
+        Duration::from_secs(20),
+        mover.rpc(
+            "session.branch_end",
+            json!({"sessionId": id, "branchId": child}),
+        ),
+    )
+    .await
+    .expect("the line ends while the listing holds its lookup");
+    assert_ok(&ended);
+    // The ended line's notice starts a turn on the root once `branch/ended` is
+    // recorded; waiting for it leaves the retried row a settled root.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let events = read_branch_events(&session, "main", ..).await.unwrap();
+            let recorded = events
+                .iter()
+                .rfind(|event| matches!(event.kind, EventKind::BranchEnded(_)))
+                .map(|event| event.sequence);
+            if recorded.is_some_and(|recorded| {
+                events.iter().any(|event| {
+                    event.sequence > recorded && matches!(event.kind, EventKind::TurnEnd(_))
+                })
+            }) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the ended line's notice turn ends on the root");
+    held.release();
+    let summaries = reading.await.unwrap();
+    assert_ok(&summaries);
+    let row = summaries["result"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["sessionId"] == json!(id))
+        .unwrap_or_else(|| panic!("the Session is listed: {summaries}"));
+    let activity = activity_time(
+        &read_branch_events(&session, "main", ..=session.sequence("main").unwrap())
+            .await
+            .unwrap(),
+    )
+    .expect("the root line is active");
+    assert_eq!(
+        row["updatedAt"],
+        json!(activity),
+        "the row follows the Session's new default after the line ended"
+    );
+    drop(held);
+    drop(mover);
+    drop(session);
+    drop(agent);
+    server.shutdown();
+    server.join().await.unwrap();
+}
