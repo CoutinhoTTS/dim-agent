@@ -304,7 +304,7 @@ fn upgrade_tag(version: &str, release: bool) -> Option<&str> {
 /// A newer version on the channel of `current` the user has not skipped, or
 /// `None` when there is none or the registry did not answer in time.
 pub async fn available(home: &Path, current: &str) -> Option<Offer> {
-    let tag = upgrade_tag(current, dim_agent_capabilities::build::RELEASE)?;
+    let tag = upgrade_tag(current, dim_agent_capabilities::build::release())?;
     let package = package().ok()?;
     let version = channel_version(&package, tag).await.ok()?;
     if !newer(current, &version) || skipped(home).as_deref() == Some(version.as_str()) {
@@ -333,7 +333,7 @@ fn offer(exe: &Path, package: &str, current: &str, version: String) -> Offer {
 /// be offered: a source build, or a registry that did not answer.
 pub async fn check(current: &str) -> Result<Option<Offer>, String> {
     let package = package()?;
-    let Some(tag) = upgrade_tag(current, dim_agent_capabilities::build::RELEASE) else {
+    let Some(tag) = upgrade_tag(current, dim_agent_capabilities::build::release()) else {
         return Err(not_installable(&package, current));
     };
     let version = channel_version(&package, tag)
@@ -375,7 +375,7 @@ pub(crate) async fn recover_startup(
 ) -> crate::Result<i32> {
     use std::os::unix::process::CommandExt;
 
-    if !dim_agent_capabilities::build::RELEASE
+    if !dim_agent_capabilities::build::release()
         || !enabled()
         || !std::io::stderr().is_terminal()
         || std::env::var_os(crate::client::STARTUP_RETRY).is_some()
