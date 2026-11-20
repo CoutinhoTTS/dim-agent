@@ -1147,6 +1147,11 @@ impl SessionStore {
         self.binding.clone()
     }
 
+    #[cfg(feature = "testing")]
+    pub fn file_writer_generation(&self) -> &str {
+        self.files.generation()
+    }
+
     /// Native query counters for product-flow verification.
     #[cfg(feature = "testing")]
     pub fn timeline_diagnostics(&self) -> &SqliteTimelineStore {

@@ -57128,11 +57128,19 @@
     },
     {
       "module": "dim_app_server::storage::sqlite",
+      "path": "Request::AbandonFile"
+    },
+    {
+      "module": "dim_app_server::storage::sqlite",
       "path": "Request::AgentOwner"
     },
     {
       "module": "dim_app_server::storage::sqlite",
       "path": "Request::Agents"
+    },
+    {
+      "module": "dim_app_server::storage::sqlite",
+      "path": "Request::CommitFile"
     },
     {
       "module": "dim_app_server::storage::sqlite",
@@ -57160,7 +57168,19 @@
     },
     {
       "module": "dim_app_server::storage::sqlite",
+      "path": "Request::OwnedPaths"
+    },
+    {
+      "module": "dim_app_server::storage::sqlite",
       "path": "Request::Owners"
+    },
+    {
+      "module": "dim_app_server::storage::sqlite",
+      "path": "Request::OwnsFile"
+    },
+    {
+      "module": "dim_app_server::storage::sqlite",
+      "path": "Request::OwnsOutput"
     },
     {
       "module": "dim_app_server::storage::sqlite",
@@ -57176,7 +57196,15 @@
     },
     {
       "module": "dim_app_server::storage::sqlite",
+      "path": "Request::RegisterOutput"
+    },
+    {
+      "module": "dim_app_server::storage::sqlite",
       "path": "Request::ReplaceUser"
+    },
+    {
+      "module": "dim_app_server::storage::sqlite",
+      "path": "Request::ReserveFile"
     },
     {
       "module": "dim_app_server::storage::sqlite",

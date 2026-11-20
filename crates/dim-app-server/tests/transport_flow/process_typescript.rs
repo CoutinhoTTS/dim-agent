@@ -1491,6 +1491,55 @@ async fn node_store_preserves_repository_results_and_worktree_removal_exclusion(
     }})).await;
     assert_ok(&created);
     assert!(store.has_records("wire-source").await.unwrap());
+    let output = server
+        .service::<dim_agent_capabilities::host_platform::HostPlatform>()
+        .unwrap()
+        .exec_root()
+        .join("fixture-owned-output")
+        .join("stdout");
+    std::fs::create_dir_all(output.parent().unwrap()).unwrap();
+    let file_id = uuid::Uuid::new_v4().to_string();
+    let owner = server.service::<SessionStore>().unwrap();
+    let file = json!({"sessionId":"wire-source","fileId":file_id,"generation":owner.file_writer_generation()});
+    let reserved = client
+        .rpc("storefixture.reserve_file", json!({"file":file}))
+        .await;
+    assert_ok(&reserved);
+    assert_eq!(reserved["result"], true);
+    let files_directory = home.join("rust/dimcode.sqlite.session-files");
+    let pending = files_directory.join(&file_id).join("sample");
+    std::fs::create_dir_all(pending.parent().unwrap()).unwrap();
+    std::fs::write(&pending, b"pending bytes").unwrap();
+    let orphan = files_directory.join(uuid::Uuid::new_v4().to_string());
+    std::fs::create_dir(&orphan).unwrap();
+    raw.create_session("trigger-sweep", &config).await.unwrap();
+    store.delete_session("trigger-sweep").await.unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while orphan.exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("SessionFiles sweeps the unregistered directory");
+    assert_ok(
+        &client
+            .rpc(
+                "storefixture.file_ownership",
+                json!({"file":file,"path":output}),
+            )
+            .await,
+    );
+    assert_eq!(std::fs::read(&pending).unwrap(), b"pending bytes");
+    assert!(
+        server
+            .service::<dim_agent_capabilities::host::SessionFiles>()
+            .unwrap()
+            .0
+            .owned_paths("wire-source".to_owned())
+            .await
+            .unwrap()
+            .contains(&output)
+    );
     let agents = client
         .rpc(
             "storefixture.agent_records",

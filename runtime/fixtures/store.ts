@@ -13,7 +13,7 @@ export default definePlugin({
     let release: (() => void) | undefined
     await ctx.use<ManagementMethods>('managementMethods').register(
       'storefixture',
-      ['status', 'selection', 'agent_records', 'read_user', 'import_user', 'replace_user', 'report', 'create', 'cycle', 'remove', 'refuse', 'release', 'invalid_id'].map(name => ({ name: `storefixture.${name}`, mutating: true, interruption: 'report', progress: false })),
+      ['status', 'reserve_file', 'file_ownership', 'selection', 'agent_records', 'read_user', 'import_user', 'replace_user', 'report', 'create', 'cycle', 'remove', 'refuse', 'release', 'invalid_id'].map(name => ({ name: `storefixture.${name}`, mutating: true, interruption: 'report', progress: false })),
       async (call: { method: string; params: any }): Promise<MethodReply> => {
         const params = call.params
         if (call.method === 'storefixture.status') return { kind: 'value', value: {} }
@@ -27,6 +27,26 @@ export default definePlugin({
           await assert.rejects(() => sqlite.writeSelection({scope, selection, expectedVersion:null}),
             (error: unknown) => error instanceof Error && 'code' in error && error.code === 'conflict')
           return {kind:'value', value: await sqlite.readSelection({scope})}
+        }
+        if (call.method === 'storefixture.reserve_file') {
+          return { kind: 'value', value: await sqlite.reserveFile(params.file) }
+        }
+        if (call.method === 'storefixture.file_ownership') {
+          const { file, path } = params
+          const { sessionId } = file
+          assert.equal(await sqlite.commitFile({ ...file, generation: 'other' }), 'superseded')
+          assert.equal(await sqlite.commitFile(file), 'owned')
+          assert.equal(await sqlite.ownsFile({ sessionId, fileId: file.fileId }), true)
+          const abandoned = { ...file, fileId: 'fixture-abandoned' }
+          assert.equal(await sqlite.reserveFile(abandoned), true)
+          assert.equal(await sqlite.abandonFile({ fileId: abandoned.fileId, generation: file.generation }), 1)
+          assert.equal(await sqlite.registerOutput({ sessionId: 'missing', path }), false)
+          assert.equal(await sqlite.ownsFile({ sessionId, fileId: 'absent' }), false)
+          assert.equal(await sqlite.ownsOutput({ sessionId, path }), false)
+          assert.equal(await sqlite.registerOutput({ sessionId, path }), true)
+          assert.equal(await sqlite.ownsOutput({ sessionId, path }), true)
+          assert.ok((await sqlite.ownedPaths({ sessionId }))[1].includes(path))
+          return { kind: 'value', value: {} }
         }
         if (call.method === 'storefixture.agent_records') {
           const { agent, leader } = params
