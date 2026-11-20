@@ -98,7 +98,6 @@ pub fn catalog() -> ServiceCatalog {
     catalog.register_shared_instance(name_of::<AgentConfig>(), SESSION_GROUP);
     register::<SessionIdentity>(&mut catalog, session);
     register::<SessionLifecycle>(&mut catalog, session);
-    register::<FaultReporter>(&mut catalog, session);
     register::<TimelineFactory>(&mut catalog, session);
     catalog.register_shared_instance("timelineStore", SESSION_GROUP);
     register::<dyn TimelineTreeControl>(&mut catalog, session);

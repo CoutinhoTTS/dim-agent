@@ -74,7 +74,6 @@ Each catalog name a part of the assembly provides or injects. `data` means share
 | `commandRules` | session | CommandRules | data | `read` async |
 | `compactionStrategyHost` | session | ProductSummaryStrategy | internal(hot-path) | — |
 | `contextModelHost` | session | SessionScope | internal(hot-path) | — |
-| `faultReporter` | session | SessionScope | internal(hot-path) | — |
 | `guideEntries` | session | PromptGuide | data | `register` async |
 | `historyRenderer` | session | SessionScope | internal(hot-path) | — |
 | `initialPromptConfiguration` | session | PromptRegistry | data | `get` async |

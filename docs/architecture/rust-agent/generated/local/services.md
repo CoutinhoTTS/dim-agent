@@ -97,10 +97,10 @@ flowchart LR
   p43 -->|"dim_agent_capabilities::prompt::InitialPromptConfiguration@session"| p74
   p42 -->|"dim_agent_capabilities::prompt_guide::GuideEntries@session"| p74
   p60 -->|"dim_agent_runtime::config::BranchLifecycle@main"| p74
+  p33 -->|"dim_agent_runtime::config::SessionLifecycle@session"| p74
   p60 -->|"dim_agent_runtime::config::TimelineIdentity@main"| p74
   p60 -->|"dim_agent_runtime::core::dispatcher::Dispatcher@main"| p74
   p60 -->|"dim_agent_runtime::core::timeline::Timeline@main"| p74
-  p33 -->|"dim_agent_runtime::lifecycle::FaultReporter@session"| p74
   p33 -->|"dim_agent_capabilities::permission::CommandRules@session"| p73
   p33 -->|"dim_agent_runtime::config::SessionConfig@session"| p73
   p33 -->|"dim_agent_runtime::config::SessionIdentity@session"| p73

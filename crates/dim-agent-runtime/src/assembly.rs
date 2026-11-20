@@ -1072,7 +1072,6 @@ pub(crate) struct SessionAssembly {
     pub id: String,
     pub restored: bool,
     pub unloading: CancellationToken,
-    pub faults: FaultReporter,
     pub closing: CancellationToken,
     pub lifecycle: SessionLifecycle,
     pub loaded: Mutex<Option<Arc<Loaded<SessionScope>>>>,
@@ -1140,7 +1139,6 @@ impl DynPlugin for SessionScopePlugin {
                 rutis_bridge::session::host_key("timelineStore").instance(scope.instance),
                 owner.assembly.store.clone(),
             )?;
-            ctx.provide_at(scope.key::<FaultReporter>(), Arc::new(owner.faults.clone()))?;
             for provide in &owner.assembly.values {
                 provide(ctx, &scope)?;
             }
@@ -1297,7 +1295,7 @@ impl DynPlugin for BranchScopePlugin {
                 ancestors,
                 session.assembly.store.clone(),
                 owner.sequence,
-                session.faults.clone(),
+                session.lifecycle.faults.clone(),
             );
             let dispatcher = Dispatcher::new(scope.instance, owner.sequence, timeline.clone());
             ctx.provide_at(scope.key::<Timeline>(), Arc::new(timeline.clone()))?;
@@ -1454,7 +1452,7 @@ impl TimelineFactory {
                     branch.timeline.clone(),
                     branch.dispatcher.clone(),
                     branch.lifecycle.clone(),
-                    parent.faults.clone(),
+                    parent.lifecycle.faults.clone(),
                     parent.assembly.catalog.clone(),
                 ))
             })
@@ -1815,7 +1813,6 @@ pub(crate) async fn build_session(
         config,
         id,
         restored: matches!(initialization, SessionInitialization::Restore(_)),
-        faults: FaultReporter::default(),
         unloading: CancellationToken::new(),
         lifecycle: SessionLifecycle::new(closing.clone()),
         closing,

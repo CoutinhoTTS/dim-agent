@@ -399,6 +399,11 @@
             "status": "Ready"
           },
           {
+            "service": "dim_agent_runtime::config::SessionLifecycle@session",
+            "scope": null,
+            "status": "Ready"
+          },
+          {
             "service": "dim_agent_runtime::config::TimelineIdentity@main",
             "scope": null,
             "status": "Ready"
@@ -410,11 +415,6 @@
           },
           {
             "service": "dim_agent_runtime::core::timeline::Timeline@main",
-            "scope": null,
-            "status": "Ready"
-          },
-          {
-            "service": "dim_agent_runtime::lifecycle::FaultReporter@session",
             "scope": null,
             "status": "Ready"
           }
@@ -451,6 +451,12 @@
             "generation": 1
           },
           {
+            "service": "dim_agent_runtime::config::SessionLifecycle@session",
+            "scope": null,
+            "provider": 21,
+            "generation": 1
+          },
+          {
             "service": "dim_agent_runtime::config::TimelineIdentity@main",
             "scope": null,
             "provider": 35,
@@ -466,12 +472,6 @@
             "service": "dim_agent_runtime::core::timeline::Timeline@main",
             "scope": null,
             "provider": 35,
-            "generation": 1
-          },
-          {
-            "service": "dim_agent_runtime::lifecycle::FaultReporter@session",
-            "scope": null,
-            "provider": 21,
             "generation": 1
           }
         ],
@@ -507,6 +507,12 @@
             "external": false
           },
           {
+            "service": "dim_agent_runtime::config::SessionLifecycle@session",
+            "provider": 21,
+            "declared": true,
+            "external": true
+          },
+          {
             "service": "dim_agent_runtime::config::TimelineIdentity@main",
             "provider": 35,
             "declared": true,
@@ -523,12 +529,6 @@
             "provider": 35,
             "declared": true,
             "external": false
-          },
-          {
-            "service": "dim_agent_runtime::lifecycle::FaultReporter@session",
-            "provider": 21,
-            "declared": true,
-            "external": true
           }
         ]
       },
@@ -2273,12 +2273,6 @@
       },
       {
         "service": "dim_agent_runtime::config::SessionLifecycle@session",
-        "provider": 21,
-        "generation": 1,
-        "removing": false
-      },
-      {
-        "service": "dim_agent_runtime::lifecycle::FaultReporter@session",
         "provider": 21,
         "generation": 1,
         "removing": false

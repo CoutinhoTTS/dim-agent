@@ -185,7 +185,6 @@ Proposed target operations: [Session and branch operations](contracts/runtime-ow
 | `prepareModelHost` | session | PrepareModelHost | hot-path | 待迁移；按 #1292 定义操作面 |
 | `prepareContextHost` | session | SessionScope | hot-path | 待迁移；按 #1292 定义操作面 |
 | `compactionStrategyHost` | session | ProductSummaryStrategy | hot-path | 待迁移；按 #1292 定义操作面 |
-| `faultReporter` | session | SessionScope | hot-path | 待迁移；按 #1292 定义操作面 |
 
 ### 3.6 入口、凭据与宿主资源
 

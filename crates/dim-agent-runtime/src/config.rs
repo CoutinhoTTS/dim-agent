@@ -404,6 +404,7 @@ impl BranchLifecycle {
 /// parts in other languages use [`Self::hold`].
 #[derive(Clone)]
 pub struct SessionLifecycle {
+    pub(crate) faults: crate::FaultReporter,
     phases: Phases<SessionPhase>,
     closing: tokio_util::sync::CancellationToken,
     /// Live holds, with [`RELEASING`] set once an idle release is decided.
@@ -425,10 +426,15 @@ impl SessionLifecycle {
     pub(crate) fn new(closing: tokio_util::sync::CancellationToken) -> Self {
         Self {
             phases: Phases::new(),
+            faults: crate::FaultReporter::default(),
             closing,
             holds: Arc::default(),
             foreign: Arc::default(),
         }
+    }
+    #[service(skip)]
+    pub fn report_fault(&self, error: crate::AgentError) {
+        self.faults.report(error);
     }
     #[service(skip)]
     pub fn phase(&self) -> SessionPhase {
