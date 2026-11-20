@@ -139,7 +139,7 @@ and runtime validation before fat LTO is enabled there. Other targets still need
 release-profile build and runtime validation; Linux or macOS measurements do not establish their
 peak memory requirements.
 
-The Ubuntu preflight generates the Rust distribution notices once with cargo-about 0.9.3 using the versioned checkout. All six targets download that artifact. Linux builds on each native host with GNU tools in a digest-pinned manylinux_2_28 container. The executable also runs in that glibc 2.28 environment. Windows uses native MSVC, clang-cl on ARM64, NASM on x64, and the Windows system tar to create ZIP archives. Actions installs Node from `.node-version` and Rust uses `rust-toolchain.toml`. Web and Release assembly run on hosted Ubuntu.
+The Ubuntu preflight generates the Rust distribution notices once with the pinned prebuilt cargo-about 0.9.3 binary (verified by SHA-256) using the versioned checkout. All six targets download that artifact. Linux builds on each native host with GNU tools in a digest-pinned manylinux_2_28 container. The executable also runs in that glibc 2.28 environment. Windows uses native MSVC, clang-cl on ARM64, NASM on x64, and the Windows system tar to create ZIP archives. Actions installs Node from `.node-version` and Rust uses `rust-toolchain.toml`. Web and Release assembly run on hosted Ubuntu.
 
 The separate PR workflow uses self-hosted macOS ARM64, Windows x64, and Linux x64 runners. Register self-hosted runners with the [OS and architecture labels](https://docs.github.com/en/actions/how-tos/manage-runners/self-hosted-runners/use-in-a-workflow). A Linux x64 runner that carries workspace verification also has the `dim-verify` label and bubblewrap installed. Keep PR runner credentials and private networks isolated as required by the [CI trust model](#ci-trust-model).
 
@@ -188,7 +188,7 @@ The `Verify downloaded Node runtime` step runs on full `main` push checks and ma
 
 ### Action pins and updates
 
-External Actions in every workflow use full commit SHAs, including `code-layout.yml`. This policy covers both persistent self-hosted runners and GitHub-hosted runners. Pinning does not change the [CI trust boundary](#ci-trust-model).
+External Actions in every workflow and local composite action (`.github/actions/*/action.yml`) use full commit SHAs, including `code-layout.yml`. This policy covers both persistent self-hosted runners and GitHub-hosted runners. Pinning does not change the [CI trust boundary](#ci-trust-model).
 
 Update an Action in a normal pull request:
 

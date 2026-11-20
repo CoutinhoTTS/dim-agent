@@ -60,7 +60,11 @@ test('long workspace targets start first, overlap and drain the queue after a fa
       }, 10);
     }
   `;
-  const result = spawnSync(process.execPath, [path.join(import.meta.dirname, 'run-rust-test.mjs'), artifacts, '--workspace', '--eval', fixture], { encoding: 'utf8', timeout: 10_000 });
+  const result = spawnSync(process.execPath, [path.join(import.meta.dirname, 'run-rust-test.mjs'), artifacts, '--workspace', '--eval', fixture], {
+    encoding: 'utf8',
+    env: { ...process.env, DIM_TEST_JOBS: '3' },
+    timeout: 10_000,
+  });
   assert.equal(result.status, 7, result.stderr);
   assert.deepEqual(Array.from(result.stderr.matchAll(/^\[test\] START (\S+)/gm), match => match[1]), [...initial, 'queued']);
   assert.match(result.stderr, /\[test\] END .*\n\[test\] START queued /);
@@ -69,6 +73,19 @@ test('long workspace targets start first, overlap and drain the queue after a fa
     assert.match(result.stderr, new RegExp(`START ${record.target.name}`));
     assert.match(result.stderr, new RegExp(`END ${record.target.name}`));
   }
+  const parallel = spawnSync(process.execPath, [path.join(import.meta.dirname, 'run-rust-test.mjs'), artifacts, '--workspace', '--eval', ''], {
+    encoding: 'utf8',
+    env: { ...process.env, DIM_TEST_JOBS: '4' },
+    timeout: 10_000,
+  });
+  assert.equal(parallel.status, 0, parallel.stderr);
+  assert.deepEqual(Array.from(parallel.stderr.matchAll(/^\[test\] START (\S+)/gm), match => match[1]), [...initial, 'queued']);
+  const invalidJobs = spawnSync(process.execPath, [path.join(import.meta.dirname, 'run-rust-test.mjs'), artifacts, '--workspace'], {
+    encoding: 'utf8',
+    env: { ...process.env, DIM_TEST_JOBS: '0' },
+  });
+  assert.notEqual(invalidJobs.status, 0);
+  assert.match(invalidJobs.stderr, /DIM_TEST_JOBS must be a positive integer/);
   writeFileSync(artifacts, '');
   const empty = spawnSync(process.execPath, [path.join(import.meta.dirname, 'run-rust-test.mjs'), artifacts, '--workspace'], { encoding: 'utf8' });
   assert.notEqual(empty.status, 0);
