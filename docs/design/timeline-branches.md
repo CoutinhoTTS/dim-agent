@@ -653,8 +653,10 @@ still sees the turn its input runs after a newer connection has moved the defaul
 branch, must name a line where v1 could not, and a v3 connection's unnamed calls follow the default branch. Nothing
 else an older client reads changes meaning: `SessionInfo.sequence` on the `session.attach` reply stays the root's
 sequence — the cutoff the CLI keeps as the `main` window's `through` and as the root model-update watermark — and the
-line the conversation is on arrives beside it as `defaultBranch {branchId, sequence}`. A client that predates the
-field ignores it; one that follows the move resumes that line from it. The same rule holds the catalog row's
+line the conversation is on arrives beside it as `defaultBranch {branchId, sequence}`. The cursor belongs to that reply
+alone: a `session.summaries` item is a directory row, so it carries no `defaultBranch`, and a client reads the line
+after it attaches rather than from a list. A client that predates the field ignores it; one that follows the move
+resumes that line from it. The same rule holds the catalog row's
 `sequence`: it is the root's in both projections, the loaded overlay and the stored query, so loading or unloading a
 Session never changes it, while `running` and `updatedAt` follow the default branch. A persisted move refreshes
 `updatedAt` in its own transaction from the new default's latest activity, and the switch itself counts as none, so an
@@ -712,7 +714,7 @@ New public content:
 - one RPC method, `session.branch_set_default`;
 - one TreeCommands read and one write, `default_branch()` and `set_default_branch(id, source)`;
 - `defaultBranchId` on the directory reply;
-- `defaultBranch {branchId, sequence}` on the `session.attach` reply, beside the root's `sequence`;
+- `defaultBranch {branchId, sequence}` on the `session.attach` reply, beside the root's `sequence`, and on no `session.summaries` item;
 - the `branchId` a collaboration read page reports and accepts for its continuation;
 - the `branch_changed` reason a PromptSuggestion clearing notice and refusal carry;
 - a `BranchSource` kind for a line the user opened;
