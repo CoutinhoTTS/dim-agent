@@ -99,6 +99,7 @@ pub fn share_names(catalog: &mut ServiceCatalog) {
         catalog.register_shared_instance(name, group);
     }
     catalog
+        .register_shared_instance("submitChecks", SESSION_GROUP)
         .register_shared_instance(name_of::<ToolRegistry>(), SESSION_GROUP)
         .register_shared_instance(name_of::<SessionMethods>(), SESSION_GROUP)
         .register_shared_instance(name_of::<GuideEntries>(), SESSION_GROUP)

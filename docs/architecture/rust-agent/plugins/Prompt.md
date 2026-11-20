@@ -25,7 +25,6 @@ The publisher receives explicit adopted state instead of rebuilding history.
 | `B:Dispatcher` | Order configuration adoption and state projection. |
 | `B:Timeline` | Write controls and query adopted prompt/configuration properties. |
 | `S:FaultReporter` | Report owned work failures. |
-| `B:BranchOpening` | Register initial prompt completion receipt. |
 | `S:GuideEntries` | The entries whose load or unload moves this branch's composition. |
 
 ## Events and lifetime
@@ -68,7 +67,7 @@ owners, rule check and complete-candidate concurrency limit.
 | 项 | 值 |
 | --- | --- |
 | 作用域 | 分支 |
-| 注入 | `B:BranchLifecycle`、`B:BranchOpening`、`B:ConfigurationPublisher`、`B:Dispatcher`、`B:Timeline`、`B:TimelineIdentity`、`S:FaultReporter`、`S:GuideEntries`、`S:InitialPromptConfiguration`、`S:PromptHost` |
+| 注入 | `B:BranchLifecycle`、`B:ConfigurationPublisher`、`B:Dispatcher`、`B:Timeline`、`B:TimelineIdentity`、`S:FaultReporter`、`S:GuideEntries`、`S:InitialPromptConfiguration`、`S:PromptHost` |
 | 提供 | `B:Prompt`、`B:StateCell<PromptSnapshot>`、`B:dyn ConfigureControl` |
 | 被注入于 | `PromptSourcesBranch`、`SkillsBranch`、`ToolBinding` |
 <!-- /generated -->

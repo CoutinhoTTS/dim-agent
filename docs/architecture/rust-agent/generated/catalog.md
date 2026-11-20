@@ -90,7 +90,7 @@ Each catalog name a part of the assembly provides or injects. `data` means share
 | `sessionLoader` | session | SessionScope | internal(control) | — |
 | `sessionMethods` | session | SessionMethods | data | `register` async |
 | `skillsConfig` | session | SessionScope | data | `get` async |
-| `submitChecks` | session | InputMethods | internal(hot-path) | — |
+| `submitChecks` | session | InputMethods | data | `check` async, `register` async |
 | `timelineFactory` | session | SessionScope | internal(control) | — |
 | `timelineStore` | session | SessionScope | data | `append` sync, `batchEnd` async, `batchEndAt` async, `branches` async, `closeCommits` async, `commits` async, `createSession` async, `head` async, `latestSnapshot` async, `query` async, `readPage` async, `readSegments` async, `releaseSession` async, `rollbackSession` async, `saveSnapshot` async, `sessionConfig` async, `trace` async |
 | `timelineTree` | session | TimelineTree | internal(owner-api) | — |
@@ -103,9 +103,8 @@ Each catalog name a part of the assembly provides or injects. `data` means share
 | `agentLoop` | branch | Loop | internal(hot-path) | — |
 | `approval` | branch | Approval | data | `decide` async, `pending` async |
 | `backgroundExec` | branch | BackgroundExec | data | `output` async, `outputPage` async, `stop` async, `wait` async |
-| `branchLifecycle` | branch | BranchScope | data | `activated` async, `closing` async |
+| `branchLifecycle` | branch | BranchScope | data | `activated` async, `closing` async, `registerOpening` async |
 | `branchLine` | branch | BranchLine | data | `cursor` async, `ending` async, `resolved` async |
-| `branchOpening` | branch | BranchScope | internal(hot-path) | — |
 | `configurationPublisher` | branch | ContextPreparation | internal(hot-path) | — |
 | `configureControl` | branch | Prompt | internal(hot-path) | — |
 | `contextPreparation` | branch | ContextPreparation | internal(hot-path) | — |

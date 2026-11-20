@@ -307,32 +307,83 @@ impl<P: Copy + Ord + Default + Send + Sync + 'static> Phases<P> {
 /// branch's [`crate::TimelineContext`]. Capabilities that spawn background
 /// work in `apply` wait for [`Self::activated`] before doing it.
 #[derive(Clone)]
-pub struct BranchLifecycle(Phases<BranchPhase>);
+pub struct BranchLifecycle {
+    phases: Phases<BranchPhase>,
+    opening: Arc<Mutex<Option<Vec<OpeningReceipt>>>>,
+}
+type OpeningReceipt = rutis::host::BoxFuture<'static, crate::Result<()>>;
+
 #[service]
 impl BranchLifecycle {
     pub(crate) fn new() -> Self {
-        Self(Phases::new())
+        Self {
+            phases: Phases::new(),
+            opening: Arc::new(Mutex::new(Some(Vec::new()))),
+        }
     }
+    /// Registers a completion for the current branch opening. Once opening seals,
+    /// registration fails. A failed completion fails the opening.
+    pub fn register_opening(
+        &self,
+        completion: Arc<
+            dyn Fn() -> rutis::host::BoxFuture<'static, std::result::Result<(), rutis::Error>>
+                + Send
+                + Sync,
+        >,
+    ) -> std::result::Result<(), crate::AgentError> {
+        self.admit_opening(Box::pin(async move { Ok(completion().await?) }))
+    }
+
     #[service(skip)]
     pub fn phase(&self) -> BranchPhase {
-        self.0.get()
+        self.phases.get()
     }
     #[service(skip)]
     pub fn watch(&self) -> tokio::sync::watch::Receiver<BranchPhase> {
-        self.0.watch()
+        self.phases.watch()
     }
     /// Waits until the branch leaves `Loading`: true when it became Active,
     /// false when it closes without ever starting.
     pub async fn activated(&self) -> bool {
-        self.0.reach(|phase| *phase != BranchPhase::Loading).await == Some(BranchPhase::Active)
+        self.phases
+            .reach(|phase| *phase != BranchPhase::Loading)
+            .await
+            == Some(BranchPhase::Active)
     }
     /// Waits until the branch starts closing; background work ends then,
     /// without waiting for its capability to unload.
     pub async fn closing(&self) {
-        self.0.reach(|phase| *phase >= BranchPhase::Closing).await;
+        self.phases
+            .reach(|phase| *phase >= BranchPhase::Closing)
+            .await;
     }
     pub(crate) fn advance(&self, next: BranchPhase) {
-        self.0.advance(next);
+        self.phases.advance(next);
+    }
+}
+
+impl BranchLifecycle {
+    pub fn admit_opening(&self, receipt: OpeningReceipt) -> crate::Result<()> {
+        let mut receipts = self.opening.lock().unwrap();
+        receipts
+            .as_mut()
+            .ok_or_else(|| crate::AgentError::Closed("branch opening".into()))?
+            .push(receipt);
+        Ok(())
+    }
+    pub(crate) async fn finish_opening(
+        &self,
+        ctx: &rutis::Ctx,
+        scope: rutis::host::PluginId,
+    ) -> crate::Result<()> {
+        use futures_util::{StreamExt, stream::FuturesUnordered};
+        let receipts = self.opening.lock().unwrap().take().unwrap_or_default();
+        let mut pending: FuturesUnordered<_> = receipts.into_iter().collect();
+        while let Some(result) = pending.next().await {
+            result?;
+            ctx.emit(crate::assembly::OpeningAdvanced(scope))?;
+        }
+        Ok(())
     }
 }
 

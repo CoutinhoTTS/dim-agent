@@ -108,7 +108,6 @@ pub fn catalog() -> ServiceCatalog {
     register::<Dispatcher>(&mut catalog, branch);
     register::<TimelineIdentity>(&mut catalog, branch);
     register::<BranchLifecycle>(&mut catalog, branch);
-    register::<BranchOpening>(&mut catalog, branch);
     register::<dyn LoopState>(&mut catalog, branch);
     register::<dyn ConfigureControl>(&mut catalog, branch);
     catalog

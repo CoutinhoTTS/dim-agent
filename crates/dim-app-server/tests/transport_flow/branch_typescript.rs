@@ -554,3 +554,36 @@ async fn node_branch_typescript_writes_and_follows_extension_events() {
     server.join().await.unwrap();
     let _ = std::fs::remove_dir_all(&home);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+async fn node_branch_opening_completion_can_refuse_session_creation() {
+    let mut parts = branch_part();
+    parts.rows = vec![json!({
+        "id": "opening-receipt",
+        "name": parts.anchor.parent().unwrap().join("fixtures/branch-opening.ts"),
+        "provides": {},
+    })];
+    let (server, agent) = launch_with(
+        Arc::new(MockTools),
+        ServerConfig {
+            session_typescript: Some(parts),
+            ..Default::default()
+        },
+        |builder| {
+            builder.require_part("OpeningReceiptFixture");
+        },
+    )
+    .await;
+    let error = agent
+        .create_session(Default::default())
+        .await
+        .err()
+        .expect("opening must fail");
+    assert!(
+        error.to_string().contains("opening completion refused"),
+        "{error}"
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+}

@@ -1268,7 +1268,6 @@ struct LoadedBranch {
     timeline: Timeline,
     dispatcher: Dispatcher,
     lifecycle: BranchLifecycle,
-    opening: Arc<BranchOpening>,
 }
 struct BranchScopePlugin {
     owner: Arc<BranchAssembly>,
@@ -1305,8 +1304,6 @@ impl DynPlugin for BranchScopePlugin {
             ctx.provide_at(scope.key::<Dispatcher>(), Arc::new(dispatcher.clone()))?;
             let lifecycle = BranchLifecycle::new();
             ctx.provide_at(scope.key::<BranchLifecycle>(), Arc::new(lifecycle.clone()))?;
-            let opening = Arc::new(BranchOpening::new());
-            ctx.provide_at(scope.key::<BranchOpening>(), opening.clone())?;
             ctx.provide_at(
                 scope.key::<TimelineIdentity>(),
                 Arc::new(TimelineIdentity {
@@ -1325,7 +1322,6 @@ impl DynPlugin for BranchScopePlugin {
                 timeline,
                 dispatcher,
                 lifecycle,
-                opening,
             }));
             let site = Arc::new(crate::parts::MountSite {
                 scope: crate::PartScope::Branch,
@@ -1458,7 +1454,6 @@ impl TimelineFactory {
                     branch.timeline.clone(),
                     branch.dispatcher.clone(),
                     branch.lifecycle.clone(),
-                    branch.opening.clone(),
                     parent.faults.clone(),
                     parent.assembly.catalog.clone(),
                 ))

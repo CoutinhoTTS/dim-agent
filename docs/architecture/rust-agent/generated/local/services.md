@@ -82,7 +82,6 @@ flowchart LR
   p60 -->|"dim_agent_runtime::config::BranchLifecycle@main"| p78
   p60 -->|"dim_agent_runtime::core::dispatcher::Dispatcher@main"| p78
   p60 -->|"dim_agent_runtime::core::timeline::Timeline@main"| p78
-  p60 -->|"dim_agent_runtime::timeline_context::BranchOpening@main"| p78
   p51 -->|"dim_agent_capabilities::skills::session::SessionSkills@session"| p77
   p60 -->|"dim_agent_runtime::config::BranchLifecycle@main"| p77
   p74 -->|"dyn dim_agent_runtime::contracts::ConfigureControl@main"| p77
@@ -102,7 +101,6 @@ flowchart LR
   p60 -->|"dim_agent_runtime::core::dispatcher::Dispatcher@main"| p74
   p60 -->|"dim_agent_runtime::core::timeline::Timeline@main"| p74
   p33 -->|"dim_agent_runtime::lifecycle::FaultReporter@session"| p74
-  p60 -->|"dim_agent_runtime::timeline_context::BranchOpening@main"| p74
   p33 -->|"dim_agent_capabilities::permission::CommandRules@session"| p73
   p33 -->|"dim_agent_runtime::config::SessionConfig@session"| p73
   p33 -->|"dim_agent_runtime::config::SessionIdentity@session"| p73

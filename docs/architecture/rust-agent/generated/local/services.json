@@ -299,11 +299,6 @@
             "service": "dim_agent_runtime::core::timeline::Timeline@main",
             "scope": null,
             "status": "Ready"
-          },
-          {
-            "service": "dim_agent_runtime::timeline_context::BranchOpening@main",
-            "scope": null,
-            "status": "Ready"
           }
         ],
         "resolved": [
@@ -336,12 +331,6 @@
             "scope": null,
             "provider": 60,
             "generation": 1
-          },
-          {
-            "service": "dim_agent_runtime::timeline_context::BranchOpening@main",
-            "scope": null,
-            "provider": 60,
-            "generation": 1
           }
         ],
         "reads": [
@@ -371,12 +360,6 @@
           },
           {
             "service": "dim_agent_runtime::core::timeline::Timeline@main",
-            "provider": 60,
-            "declared": true,
-            "external": false
-          },
-          {
-            "service": "dim_agent_runtime::timeline_context::BranchOpening@main",
             "provider": 60,
             "declared": true,
             "external": false
@@ -643,11 +626,6 @@
             "service": "dim_agent_runtime::lifecycle::FaultReporter@session",
             "scope": null,
             "status": "Ready"
-          },
-          {
-            "service": "dim_agent_runtime::timeline_context::BranchOpening@main",
-            "scope": null,
-            "status": "Ready"
           }
         ],
         "resolved": [
@@ -703,12 +681,6 @@
             "service": "dim_agent_runtime::lifecycle::FaultReporter@session",
             "scope": null,
             "provider": 33,
-            "generation": 1
-          },
-          {
-            "service": "dim_agent_runtime::timeline_context::BranchOpening@main",
-            "scope": null,
-            "provider": 60,
             "generation": 1
           }
         ],
@@ -766,12 +738,6 @@
             "provider": 33,
             "declared": true,
             "external": true
-          },
-          {
-            "service": "dim_agent_runtime::timeline_context::BranchOpening@main",
-            "provider": 60,
-            "declared": true,
-            "external": false
           }
         ]
       },
@@ -2161,12 +2127,6 @@
       {
         "service": "dim_agent_runtime::state::StateCell<dim_agent_runtime::contracts::ModelProgress>@main",
         "provider": 72,
-        "generation": 1,
-        "removing": false
-      },
-      {
-        "service": "dim_agent_runtime::timeline_context::BranchOpening@main",
-        "provider": 60,
         "generation": 1,
         "removing": false
       },
@@ -4211,6 +4171,12 @@
       {
         "service": "dyn rutis_bridge::session::services::HostDispatch#skillsConfig@session",
         "provider": 33,
+        "generation": 1,
+        "removing": false
+      },
+      {
+        "service": "dyn rutis_bridge::session::services::HostDispatch#submitChecks@session",
+        "provider": 39,
         "generation": 1,
         "removing": false
       },

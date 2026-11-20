@@ -132,7 +132,6 @@ pub struct Prompt {
     identity: Arc<TimelineIdentity>,
     lifecycle: CancellationToken,
     branch_phase: Arc<BranchLifecycle>,
-    opening: Arc<BranchOpening>,
     opened: tokio::sync::watch::Sender<Option<Result<()>>>,
     /// The Session's guide entries: the composition the listener adopts.
     guide: Arc<GuideEntries>,
@@ -723,7 +722,6 @@ pub struct PromptPlugin {
     identity: rutis::host::Key<TimelineIdentity>,
     faults: rutis::host::Key<FaultReporter>,
     branch_phase: rutis::host::Key<BranchLifecycle>,
-    opening: rutis::host::Key<BranchOpening>,
     guide: rutis::host::Key<GuideEntries>,
     state: rutis::host::Key<StateCell<PromptSnapshot>>,
     prompt: rutis::host::Key<Prompt>,
@@ -740,7 +738,6 @@ impl PromptPlugin {
             identity: names.key()?,
             faults: names.key()?,
             branch_phase: names.key()?,
-            opening: names.key()?,
             guide: names.key()?,
             state: names.state_cell()?,
             prompt: names.key()?,
@@ -762,7 +759,6 @@ impl DynPlugin for PromptPlugin {
             self.identity.erase(),
             self.faults.erase(),
             self.branch_phase.erase(),
-            self.opening.erase(),
             self.guide.erase(),
         ]
     }
@@ -776,7 +772,6 @@ impl DynPlugin for PromptPlugin {
             let identity = ctx.require_at(&self.identity)?;
             let faults = ctx.require_at(&self.faults)?;
             let branch_phase = ctx.require_at(&self.branch_phase)?;
-            let opening = ctx.require_at(&self.opening)?;
             let guide = ctx.require_at(&self.guide)?;
             if ctx.cancellation_token().is_cancelled() {
                 return Ok(Effect::Done);
@@ -793,7 +788,6 @@ impl DynPlugin for PromptPlugin {
                 identity,
                 lifecycle: ctx.cancellation_token(),
                 branch_phase,
-                opening,
                 opened: tokio::sync::watch::channel(None).0,
                 guide,
                 tasks: TaskTracker::new(),
@@ -947,7 +941,7 @@ impl DynPlugin for PromptPlugin {
                         };
                         if let Some(snapshot) = opening {
                             let (reply, opened) = oneshot::channel();
-                            prompt.opening.register(Box::pin(async move {
+                            prompt.branch_phase.admit_opening(Box::pin(async move {
                                 opened
                                     .await
                                     .map_err(|_| AgentError::Closed("Prompt".into()))?
