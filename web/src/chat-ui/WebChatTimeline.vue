@@ -12,7 +12,7 @@ import {
   type ChatUiTimelineUserMessageMarker,
 } from "@dimcode/chat-ui"
 import BrandMark from "../components/BrandMark.vue"
-import { retrySeconds, retryStatus } from "../failures"
+import { retryAnnouncement, retrySeconds, retryStatus } from "../failures"
 import type { TimelineRow } from "../projection"
 import type { ModelRetryProgress } from "../rpc/protocol"
 import { WebErrorBoundary, WebTimelineRow, WebUserMessageRail, createLabels } from "./components"
@@ -253,9 +253,10 @@ const surfaceProps = computed<Omit<ChatUiPlainTimelineSurfaceProps, "window">>((
       loadedMarkers: markers.value,
       rowDomSignature: `${surfaceWindow.value.start}:${surfaceWindow.value.end}`,
     },
+    // The retry countdown is not a live region (docs/design/model-failures.md §3).
     activity: {
-      visible: props.running,
-      text: props.retry === undefined ? t("work.processing") : retryStatus(props.retry, retrySeconds(props.retry.retryAtMs, now.value)),
+      visible: props.running && props.retry === undefined,
+      text: t("work.processing"),
     },
     labels: {
       emptySession: props.empty ?? t("chat.emptyTimeline"),
@@ -300,9 +301,22 @@ onMounted(() => {
   themeObserver = new MutationObserver(readTheme)
   themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ["class", "data-theme"] })
   measureRows()
+  findActivitySlot()
   void toEnd()
 })
-onUpdated(measureRows)
+/** The surface's activity line, which the visible retry countdown fills. */
+const activitySlot = shallowRef<HTMLElement | null>(null)
+function findActivitySlot(): void {
+  const element = surface.value?.flow?.querySelector<HTMLElement>("[data-timeline-activity-slot]") ?? null
+  if (element !== activitySlot.value) activitySlot.value = element
+}
+const retryText = computed(() => props.retry === undefined ? "" : retryStatus(props.retry, retrySeconds(props.retry.retryAtMs, now.value)))
+const retryLive = computed(() => retryAnnouncement(props.retry))
+
+onUpdated(() => {
+  measureRows()
+  findActivitySlot()
+})
 onBeforeUnmount(() => {
   themeObserver?.disconnect()
   clearInterval(countdown)
@@ -327,6 +341,10 @@ onBeforeUnmount(() => {
       @marker-click="jumpTo"
       @rail-wheel="onRailWheel"
     />
+    <Teleport v-if="running && retry !== undefined && activitySlot" :to="activitySlot">
+      <span class="tabular-nums" aria-hidden="true" data-testid="web-chat-retry">{{ retryText }}</span>
+    </Teleport>
+    <span class="sr-only" role="status" aria-live="polite">{{ running ? retryLive : "" }}</span>
     <div ref="railHost" class="web-chat-rail" />
     <UButton
       v-if="quoteTarget"

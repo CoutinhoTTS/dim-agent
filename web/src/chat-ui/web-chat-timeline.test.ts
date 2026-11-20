@@ -39,6 +39,7 @@ afterEach(() => {
   while (mounted.length > 0) mounted.pop()!.unmount()
   document.body.replaceChildren()
   vi.restoreAllMocks()
+  vi.useRealTimers()
 })
 
 async function settle(): Promise<void> {
@@ -48,11 +49,11 @@ async function settle(): Promise<void> {
   }
 }
 
-function mount(rows: Projection["rows"], onOpenLine: (branchId: string) => void): HTMLElement {
+function mount(rows: Projection["rows"], onOpenLine: (branchId: string) => void, extra: Record<string, unknown> = {}): HTMLElement {
   const container = document.createElement("div")
   document.body.append(container)
   const app = createApp({
-    render: () => h(WebChatTimeline, { sessionId: "s-1", rows, running: false, quotable: true, onOpenLine }),
+    render: () => h(WebChatTimeline, { sessionId: "s-1", rows, running: false, quotable: true, onOpenLine, ...extra }),
   })
   app.use(createPinia()).use(i18n).component("UIcon", UIcon).component("UButton", UButton)
   app.mount(container)
@@ -89,6 +90,11 @@ describe("WebChatTimeline", () => {
 
     const failure = root.querySelector("[data-testid='timeline-terminal-line']")
     expect(failure?.textContent).toContain("The provider reported a server error")
+
+    for (const id of ["timeline-user-copy", "timeline-assistant-copy"]) {
+      const button = root.querySelector(`[data-testid='${id}']`)
+      expect(button?.getAttribute("aria-label"), id).toBeTruthy()
+    }
 
     const line = root.querySelector<HTMLButtonElement>(".timeline-line-marker")
     expect(line?.textContent).toContain("parser race")
@@ -130,6 +136,29 @@ describe("WebChatTimeline", () => {
     const lines = root.querySelectorAll("[data-testid='timeline-terminal-line']")
     expect(lines).toHaveLength(1)
     expect(lines[0]!.textContent).toContain("The provider reported a server error")
+  })
+
+  it("announces a retry once per attempt while its visible countdown ticks", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "Date"], now: 1_700_000_000_000 })
+    const projection = new Projection()
+    projection.apply(recorded[0]!)
+    const retry = { attempt: 2, maxAttempts: 8, retryAtMs: Date.now() + 5_000, kind: "server_error", reason: "overloaded" }
+    const root = mount(projection.rows, () => {}, { running: true, retry })
+    await settle()
+    const live = (): string[] => [...root.querySelectorAll("[aria-live]")]
+      .filter(region => region.closest("[aria-hidden='true']") === null)
+      .map(region => region.textContent?.trim() ?? "")
+    const countdown = (): string | undefined => root.querySelector("[data-testid='web-chat-retry']")?.textContent ?? undefined
+
+    const before = live()
+    const shown = countdown()
+    expect(before).toContain("Retrying, attempt 2 of 8: The provider reported a server error")
+    expect(shown).toContain("in 5 s")
+    vi.advanceTimersByTime(2_000)
+    await settle()
+    expect(countdown()).toContain("in 3 s")
+    expect(live()).toEqual(before)
+    expect(root.querySelector("[data-testid='web-chat-retry']")?.closest("[aria-hidden='true']")).not.toBeNull()
   })
 
   it("rebuilds only the turn whose rows changed", () => {

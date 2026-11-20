@@ -30,7 +30,7 @@ import ChatMarkdown from "../features/chat/ChatMarkdown.vue"
 import { failureDetails } from "../failures"
 import { i18n } from "../i18n"
 import { toolTranslate } from "./i18n"
-import { Button, Empty, Passthrough, icon, icons, useWebTimeline, type WebTimelineContext } from "./primitives"
+import { Button, Empty, Passthrough, icon, icons, tooltip, useWebTimeline, type WebTimelineContext } from "./primitives"
 import { ICON } from "./WebIcon.vue"
 import WebUserMessage from "./WebUserMessage.vue"
 
@@ -202,8 +202,6 @@ const AnimatedNumber = defineComponent({
   props: { value: { type: Number, required: true }, prefix: { type: String, default: "" }, durationMs: Number },
   setup: props => () => h("span", `${props.prefix}${props.value}`),
 })
-
-const tooltip = { tooltipComponent: Passthrough, tooltipTriggerComponent: Passthrough, tooltipContentComponent: Empty }
 
 const codeTheme = { dark: "vitesse-dark", light: "vitesse-light" }
 const CODE_FONT_SIZE = 13
@@ -469,4 +467,3 @@ export const WebUserMessageRail = defineComponent({
     return () => h(TimelineUserMessageRail as Component, { ...attrs, labels: context.labels.value.rail })
   },
 })
-

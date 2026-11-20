@@ -12,7 +12,7 @@ import { copyText } from "../clipboard"
 import { skillSegments } from "../skill-token"
 import { formatTimelineTimestamp } from "../features/chat/timeline-time"
 import { useToastStore } from "../stores/toast"
-import { Button, Empty, Passthrough, fileIconUrl, icon, icons, useWebTimeline } from "./primitives"
+import { Button, Passthrough, fileIconUrl, icon, icons, tooltip, useWebTimeline } from "./primitives"
 
 const props = defineProps<{ message: ChatUiTimelineRowMessage }>()
 const { t, locale } = useI18n()
@@ -86,9 +86,9 @@ async function copy(): Promise<void> {
       :icons="actionIcons"
       :button-component="Button"
       :tooltip-provider-component="Passthrough"
-      :tooltip-component="Passthrough"
-      :tooltip-trigger-component="Passthrough"
-      :tooltip-content-component="Empty"
+      :tooltip-component="tooltip.tooltipComponent"
+      :tooltip-trigger-component="tooltip.tooltipTriggerComponent"
+      :tooltip-content-component="tooltip.tooltipContentComponent"
       @copy="copy"
     />
   </article>

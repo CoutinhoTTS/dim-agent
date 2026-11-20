@@ -1,4 +1,4 @@
-import { defineComponent, h, inject, type Component, type ComputedRef, type InjectionKey, type Ref } from "vue"
+import { Text, cloneVNode, defineComponent, h, inject, isVNode, type Component, type ComputedRef, type InjectionKey, type Ref, type Slots, type VNode } from "vue"
 import type { TimelineRow as ProjectionRow } from "../projection"
 import type { WebTimelineLabels } from "./components"
 import WebIcon, { ICON } from "./WebIcon.vue"
@@ -51,6 +51,33 @@ export const Passthrough = defineComponent({
   inheritAttrs: false,
   setup: (_, { slots }) => () => slots.default?.(),
 })
+
+function slotNodes(node: VNode): VNode[] {
+  return (node.children as Slots | null)?.default?.() ?? []
+}
+
+function nodeText(nodes: readonly VNode[]): string {
+  return nodes.map(node => node.type === Text ? String(node.children) : Array.isArray(node.children) ? nodeText(node.children.filter(isVNode)) : "").join("").trim()
+}
+
+const TooltipTrigger = defineComponent({ name: "WebChatTooltipTrigger", setup: (_, { slots }) => () => slots.default?.() })
+const TooltipContent = defineComponent({ name: "WebChatTooltipContent", setup: () => () => null })
+
+/**
+ * The package's tooltip: its text names the trigger as `aria-label` and `title`,
+ * so an icon-only button has an accessible name and a native hover hint.
+ */
+const Tooltip = defineComponent({
+  name: "WebChatTooltip",
+  setup: (_, { slots }) => () => {
+    const nodes = slots.default?.() ?? []
+    const label = nodeText(nodes.filter(node => node.type === TooltipContent).flatMap(slotNodes))
+    const triggers = nodes.filter(node => node.type === TooltipTrigger).flatMap(slotNodes)
+    return label === "" ? triggers : triggers.map(node => cloneVNode(node, { "aria-label": label, title: label }))
+  },
+})
+
+export const tooltip = { tooltipComponent: Tooltip, tooltipTriggerComponent: TooltipTrigger, tooltipContentComponent: TooltipContent }
 
 /** Surfaces the read-only Web timeline does not offer: tooltip and menu content, MCP Apps, provider icons. */
 export const Empty = defineComponent({ name: "WebChatEmpty", inheritAttrs: false, setup: () => () => null })

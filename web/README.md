@@ -47,4 +47,3 @@ npm test           # Node test runner over unit and component tests, then Vitest
 | `packages/chat-ui/` | Shared presentational chat timeline package (`@dimcode/chat-ui`); host contracts and component tests |
 | `src/chat-ui/` | The Web host of `@dimcode/chat-ui` and the only Web code that imports it: row mapping, read-only `ChatUiHost`, labels, and `WebChatTimeline`, the chat and line timeline |
 | `src/features/settings/` | Account, appearance, agent defaults, providers, modality, MCP, plugins, skills, permissions, scheduled tasks, archived sessions and diagnostics |
-
