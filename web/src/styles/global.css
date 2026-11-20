@@ -2,8 +2,6 @@
 @import "@nuxt/ui";
 /* The shared timeline's components use Tailwind utilities; generate them here. */
 @source "../../packages/chat-ui/src";
-/* The theme follows the .dark class on <html>, not the media query. */
-@custom-variant dark (&:where(.dark, .dark *));
 
 @theme inline {
   --color-background: var(--background);
