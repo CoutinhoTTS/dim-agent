@@ -5014,6 +5014,12 @@ impl BranchTool {
         let Some(target) = target else {
             return Ok(self.not_kin());
         };
+        // A plugin line's protocol is its creator's: it sends the line it was
+        // cut from no message, and the refusal names the caller as the line
+        // that is not a tool line (design §6).
+        if own.role == LineRole::Host && own.parent.as_deref() == Some(target.id.as_str()) {
+            return Ok(self.not_tool_line(&own.id));
+        }
         if !kin(own, &target) {
             return Ok(self.not_kin());
         }

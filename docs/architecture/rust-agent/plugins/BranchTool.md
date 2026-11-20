@@ -39,7 +39,10 @@ after?, limit?}`, with `action` required and no other properties; risk stays
 ([event-driven flows](../event-driven-flows.md)). A refusal is an error result
 whose `structuredContent` carries a code (`branch_not_opener`, `branch_limit_reached`,
 `branch_not_kin`, `branch_not_tool_line`, `branch_ended`, `branch_cannot_end`) and writes
-nothing. The tools registry and the calling line's BranchLine are found per
+nothing. `branch_not_tool_line` names the line that is not a tool line: the
+target when a caller messages or reads a plugin line it opened, and the caller
+when a plugin line messages the line it was cut from. The tools registry and
+the calling line's BranchLine are found per
 call; the registration is withdrawn when this part unloads, and a reloaded
 TimelineTree reloads it with the services it injects.
 

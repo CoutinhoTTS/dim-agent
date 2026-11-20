@@ -3919,6 +3919,9 @@ async fn a_line_messages_and_reads_its_parent_and_the_lines_it_opened() {
         "a line reads the line it was cut from: {page}"
     );
 
+    // The user opens a line of its own at the root's head, which must end a
+    // committed batch rather than sit inside the root's answer to the line.
+    soon(session.idle("main")).await.unwrap();
     let cut = session.sequence("main").unwrap();
     let user = soon(session.branch(
         "main".into(),
@@ -3984,10 +3987,14 @@ async fn a_line_messages_and_reads_its_parent_and_the_lines_it_opened() {
         ended_notices,
         "and no ended notice either"
     );
+    // A line the user opened messages the line it was cut from in both modes:
+    // an append rides its next request and starts no turn, a steer wakes it
+    // (design §6, §20.2).
+    let before = session.sequence("main").unwrap();
     let sent = tool_call(
         &session,
         &user,
-        r#"{"action":"message","to":"main","content":"FROM-THE-USERS-LINE"}"#,
+        r#"{"action":"message","to":"main","content":"APPEND-FROM-THE-USERS-LINE"}"#,
     )
     .await;
     assert_eq!(
@@ -3995,6 +4002,52 @@ async fn a_line_messages_and_reads_its_parent_and_the_lines_it_opened() {
         "a line the user opened messages the line it was cut from: {:?}",
         sent.content
     );
+    let events = until_events(&session, "main", |events| {
+        message_at(events, "APPEND-FROM-THE-USERS-LINE").is_some()
+    })
+    .await;
+    let (appended, mode) =
+        message_at(&events, "APPEND-FROM-THE-USERS-LINE").expect("the append landed on main");
+    assert_eq!(mode, InputMode::Append);
+    assert!(appended > before);
+    let block = marked_message(&events, "APPEND-FROM-THE-USERS-LINE");
+    assert!(
+        block.starts_with(&format!("<dim-branch-message from=\"{user}\" to=\"main\">")),
+        "the receiver tells the message from the user's words by its marker: {block}"
+    );
+    let started = events
+        .iter()
+        .any(|event| matches!(event.kind, EventKind::TurnStart(_)) && event.sequence > appended);
+    assert!(
+        !started,
+        "an append from a line the user opened starts no turn on the line it was cut from"
+    );
+    let sent = tool_call(
+        &session,
+        &user,
+        r#"{"action":"message","to":"main","content":"STEER-FROM-THE-USERS-LINE","mode":"steer"}"#,
+    )
+    .await;
+    assert_eq!(sent.is_error, None, "{:?}", sent.content);
+    let events = until_events(&session, "main", |events| {
+        message_at(events, "STEER-FROM-THE-USERS-LINE").is_some()
+    })
+    .await;
+    let (steered, mode) =
+        message_at(&events, "STEER-FROM-THE-USERS-LINE").expect("the steer landed on main");
+    assert_eq!(mode, InputMode::Steer);
+    let block = marked_message(&events, "STEER-FROM-THE-USERS-LINE");
+    assert!(
+        block.starts_with(&format!("<dim-branch-message from=\"{user}\" to=\"main\">")),
+        "the steer carries the marker too: {block}"
+    );
+    until_events(&session, "main", |events| {
+        events
+            .iter()
+            .any(|event| matches!(event.kind, EventKind::TurnStart(_)) && event.sequence > steered)
+    })
+    .await;
+    soon(session.idle("main")).await.unwrap();
     let page = page_of(&tool_call(&session, &user, r#"{"action":"read","branch":"main"}"#).await);
     let sequences = page_sequences(&page);
     assert!(!sequences.is_empty(), "{page}");
@@ -4003,9 +4056,8 @@ async fn a_line_messages_and_reads_its_parent_and_the_lines_it_opened() {
         "a read of the line it was cut from starts at its cut {cut}: {sequences:?}"
     );
 
-    // A plugin line's protocol is its creator's: it is on no roster, the line
-    // that opened it reaches it only to be told so, and it sends that line no
-    // message (design §6).
+    // A plugin line's protocol is its creator's: it is never on a roster, and
+    // the line that opened it reaches it only to be told so (design §6).
     let plugin = soon(session.branch(tool_line.clone(), 0, options("a plugin line")))
         .await
         .unwrap();
@@ -4038,17 +4090,82 @@ async fn a_line_messages_and_reads_its_parent_and_the_lines_it_opened() {
         not_tool_line,
         "nor message it"
     );
+    soon(agent.close()).await.unwrap();
+}
+
+/// A plugin line coordinates nothing through the tool, in either direction: it
+/// sends the line it was cut from no message, and the refusal names the caller
+/// as the line that was not opened with this tool, while a line's read of its
+/// opener still works (design §6, §20.3).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_host_line_sends_the_line_it_was_cut_from_no_message() {
+    let probe = Arc::new(Probe::default());
+    let agent = setup(&probe).await;
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let host = soon(session.branch("main".into(), 0, options("a plugin line")))
+        .await
+        .unwrap();
+    quiet(&session, &host).await;
+    let not_tool_line = (
+        "branch_not_tool_line".to_string(),
+        format!("Line {host} was not opened with this tool; it follows its own protocol."),
+    );
+    let written = blocks_with(&local_events(&session, "main").await, "<dim-branch-message").len();
     assert_eq!(
         call(
             &session,
-            &plugin,
-            &format!(r#"{{"action":"message","to":"{tool_line}","content":"hello"}}"#)
+            &host,
+            r#"{"action":"message","to":"main","content":"hello"}"#
         )
         .await,
-        not_kin,
-        "and it messages the line it was cut from nothing"
+        not_tool_line.clone(),
+        "a plugin line sends its opener no message, and the refusal names the caller"
+    );
+    assert_eq!(
+        blocks_with(&local_events(&session, "main").await, "<dim-branch-message").len(),
+        written,
+        "the refused message writes nothing to the line it was cut from"
+    );
+    assert_eq!(
+        call(
+            &session,
+            "main",
+            &format!(r#"{{"action":"message","to":"{host}","content":"hello"}}"#)
+        )
+        .await,
+        not_tool_line,
+        "and the opener sends it none either"
+    );
+    let page = page_of(&tool_call(&session, &host, r#"{"action":"read","branch":"main"}"#).await);
+    assert!(
+        !page_sequences(&page).is_empty(),
+        "a plugin line still reads the line it was cut from: {page}"
     );
     soon(agent.close()).await.unwrap();
+}
+
+/// The message block carrying `content`, as its receiver stored it.
+fn marked_message(events: &[Arc<AgentEvent>], content: &str) -> String {
+    blocks_with(events, "<dim-branch-message")
+        .into_iter()
+        .find(|text| text.contains(content))
+        .expect("the message block")
+}
+
+/// The sequence of the input carrying the message `content`, and its mode.
+fn message_at(events: &[Arc<AgentEvent>], content: &str) -> Option<(u64, InputMode)> {
+    events.iter().find_map(|event| match &event.kind {
+        EventKind::InputMessage(data)
+            if blocks_with(std::slice::from_ref(event), "<dim-branch-message")
+                .iter()
+                .any(|text| text.contains(content)) =>
+        {
+            Some((event.sequence, data.effective_mode()))
+        }
+        _ => None,
+    })
 }
 
 /// How many message blocks each of `lines` holds in its own history.
