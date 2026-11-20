@@ -1448,6 +1448,7 @@ pub(crate) fn register_names(catalog: &mut dim_agent_runtime::names::ServiceCata
     register::<ServerControl>(catalog, None);
     register::<ProcessActivity>(catalog, None);
     register::<storage::SqliteStorage>(catalog, None);
+    catalog.register_shared("sqliteStorage");
     register::<storage::SessionStore>(catalog, None);
     register::<storage::Store>(catalog, None);
     catalog.register_shared("store");
@@ -1457,7 +1458,6 @@ pub(crate) fn register_names(catalog: &mut dim_agent_runtime::names::ServiceCata
     catalog.register_shared(dim_agent_runtime::names::name_of::<
         collaboration::CollaborationDirectory,
     >());
-    register::<plugin_files::PluginFileTransactions>(catalog, None);
     register::<ConnectionHub>(catalog, None);
     catalog.register_shared(dim_agent_runtime::names::name_of::<ListenAddresses>());
     register::<ui_host::UiHost>(catalog, None);
@@ -1526,7 +1526,6 @@ pub fn register_faces(builder: &mut dim_agent_runtime::AgentBuilder) {
         ("mentionIndex", "host-resource"),
         ("modelHost", "owner-api"),
         ("openAICodexOAuthService", "secret"),
-        ("pluginFileTransactions", "host-resource"),
         ("prepareContextHost", "hot-path"),
         ("prepareModelHost", "hot-path"),
         ("prompt", "hot-path"),
@@ -1536,7 +1535,6 @@ pub fn register_faces(builder: &mut dim_agent_runtime::AgentBuilder) {
         ("sessionLoader", "control"),
         ("sessionStore", "owner-api"),
         ("settingsService", "owner-api"),
-        ("sqliteStorage", "object"),
         ("submitChecks", "hot-path"),
         ("timelineFactory", "control"),
         ("timelineTree", "owner-api"),

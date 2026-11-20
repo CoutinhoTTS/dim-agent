@@ -39,7 +39,6 @@ Each catalog name a part of the assembly provides or injects. `data` means share
 | `modelSelectionHost` | process | Provider | data | `resolve` async |
 | `openAICodexOAuthService` | process | OpenAICodexOAuth | internal(secret) | — |
 | `partRegistry` | process | PartRegistry | data | `registerDefinition` async |
-| `pluginFileTransactions` | process | PluginFiles | internal(host-resource) | — |
 | `pluginFiles` | process | PluginFiles | data | `open` async |
 | `processActivity` | process | ServerControl | data | `activated` async, `hold` async, `release` async |
 | `promptSuggestionSettingsHost` | process | PromptSuggestionSettings | data | `read` async |
@@ -60,7 +59,7 @@ Each catalog name a part of the assembly provides or injects. `data` means share
 | `settingsService` | process | Settings | internal(owner-api) | — |
 | `skillsCatalog` | process | SkillsCatalog | data | `issues` async, `plugins` async, `register` async, `withdraw` async |
 | `skillsInstructionsSettingsHost` | process | PromptSettings | data | `instructions` async |
-| `sqliteStorage` | process | SqliteStorage | internal(object) | — |
+| `sqliteStorage` | process | SqliteStorage | data | `abandonFile` async, `agentOwner` async, `agents` async, `batchEnd` async, `batchEndAt` async, `branches` async, `commitFile` async, `commitTimelineRound` async, `createSession` async, `delete` async, `head` async, `importUserIfAbsent` async, `ledMembers` async, `memberSessions` async, `members` async, `ownedAgents` async, `ownedPaths` async, `owners` async, `ownsFile` async, `ownsOutput` async, `readPreferences` async, `readSelection` async, `readUser` async, `registerOutput` async, `replaceUser` async, `reserveFile` async, `save` async, `sessionConfig` async, `storageReport` async, `unfinishedOwned` async, `writeSelection` async |
 | `store` | process | SessionStore | data | `addGrant` async, `catalog` async, `createOwnedSession` async, `creationRecord` async, `delete` async, `fork` async, `grants` async, `hasRecords` async, `owner` async, `query` async, `removeGrant` async, `removeWorktree` async, `removeWorktreeDirectory` async, `sessionConfig` async, `sessionConfigText` async, `sessionsUnderWorkspace` async, `setSessionLanguage` async, `worktreeDirectories` async, `worktreeUsages` async |
 | `summaryPromptSettingsHost` | process | PromptSettings | data | `systemPrompt` async |
 | `toolchainSourceHost` | process | ToolchainSource | data | `list` sync |
