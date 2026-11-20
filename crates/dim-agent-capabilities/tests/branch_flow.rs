@@ -11072,6 +11072,202 @@ async fn a_clean_restart_writes_no_status_note() {
     soon(again.close()).await.unwrap();
 }
 
+/// The `<dim-branch-line>` note origin/main (fc46080) wrote when a tool line
+/// became the default branch, rendered by its own `status_note` and
+/// `tool_line_body`: the birth bullet forbids opening lines, and the change
+/// names no right to open one. `{line}`, `{parent}` and `{prompt}` stand where
+/// that code substituted them.
+const OLD_TOOL_NOTE: &str = r#"<dim-branch-line branch="{line}" parent="{parent}" source="tool" default="true">
+You are line {line} of this session. Line {parent} opened you at this point of its history to work in parallel with it. You are the same agent as {parent}: everything above is your own history, and you continue from here on your own line. {parent} keeps working on its line; you can read its work after this point, and it can read yours. Messages above that were addressed to {parent}, such as its list of open lines, are {parent}'s, not yours.
+
+Your purpose, as {parent} wrote it:
+{prompt}
+
+How you work with {parent}:
+- Work on this purpose only. You cannot open lines; if more parallel work is needed, tell {parent}.
+- Read {parent} with the branch tool (action read, branch "{parent}") when what {parent} did or decided since your cut changes your work; the parent block reports when {parent} has moved. Message {parent} only for what it must act on: a decision that changes its work, a blocker only the user can settle, a conflict with another line, or a change to your purpose. Use mode "steer" for what {parent} must act on now, "append" for what {parent} should see at its next step. Do not send {parent} a progress report it can read, and do not page through {parent}'s whole stream: read the page that answers your question, then act.
+- You share the workspace with {parent} and its other lines. Change only the files {parent} gave you; before changing any other file, tell {parent} which. If edit or write fails because the file was modified after it was last read, another line may have changed the file: read it again and tell {parent} before you continue.
+- The user can talk to you directly. Answer the user, and ask with ask_user when only the user can decide.
+- When your purpose is done, or cannot be done, call the branch tool with action "end" and content saying what you found, did, changed and left undone. If you already told {parent} that in a message, your end content carries only what is new. Read {parent} once more before you end if the parent block says {parent} has moved, so your last word still holds. That is your last action; {parent} receives it.
+
+This line is now the session's default branch, switched from line {parent}. While this block is your latest one: answer the user here; you send no automatic idle notice to {parent}; you cannot call end on yourself. Line {parent} stays open and keeps the lines it opened.
+</dim-branch-line>"#;
+
+/// The same for a line the user opened.
+const OLD_USER_NOTE: &str = r#"<dim-branch-line branch="{line}" parent="{parent}" source="user" default="true">
+You are line {line} of this session, opened by the user from line {parent} at this point of its history. You are the same agent as {parent}: everything above is your own history, and you continue from here on your own line, in parallel with {parent}. You can read {parent}'s work after this point. Unless the user makes this line the default branch, you cannot call end on yourself. Messages above that were addressed to {parent} are {parent}'s, not yours. The message after this one is from the user for this line.
+
+The user has now made this line the session's default branch, switched from line {parent}. While this block is your latest one: answer the user here; you cannot call end on yourself; the user ends this line. Line {parent} stays open and keeps the lines it opened.
+</dim-branch-line>"#;
+
+/// §5: a Session that moved its default branch under the older rule keeps that
+/// note on the line, and the tool admits its `create` while the note still
+/// forbids it. The load replaces it once, before the line's first request, and a
+/// second load writes nothing.
+async fn a_stale_note_is_replaced_once(old: &str, user: bool) {
+    let purpose = "the purpose of B";
+    let first = Arc::new(MemoryTimelineStore::default());
+    let agent = MinimalHost::start(&builder_with_store(
+        &Arc::new(Probe::default()),
+        first.clone(),
+    ))
+    .await
+    .unwrap();
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let b = if user {
+        let cut = session.sequence("main").unwrap();
+        soon(session.branch(
+            "main".into(),
+            cut,
+            BranchOptions {
+                prompt: purpose.into(),
+                source: BranchSource::User {
+                    operation_id: "client".into(),
+                },
+            },
+        ))
+        .await
+        .unwrap()
+    } else {
+        open_line(&session, purpose).await
+    };
+    quiet(&session, &b).await;
+    switch(&session, &b).await;
+    owed_notes(&session, &b, 1).await;
+    let id = session.id().to_owned();
+    soon(session.close()).await.unwrap();
+    soon(agent.close()).await.unwrap();
+
+    // The store now holds the Session as the older code left it: B's latest
+    // note is the one that code wrote, byte for byte.
+    let old = old
+        .replace("{line}", &b)
+        .replace("{parent}", "main")
+        .replace("{prompt}", purpose);
+    let second = Arc::new(MemoryTimelineStore::default());
+    copy_session(&first, &second, &id, |branch, mut records| {
+        if branch == b {
+            for record in &mut records {
+                let event = Arc::make_mut(&mut record.event);
+                let EventKind::InputMessage(data) = &mut event.kind else {
+                    continue;
+                };
+                for block in &mut data.blocks {
+                    if let InputBlock::Raw { text, key, retire } = block
+                        && key.as_deref() == Some("branch:line")
+                        && !*retire
+                        && text.contains(" default=\"")
+                    {
+                        *text = old.clone();
+                    }
+                }
+            }
+        }
+        records
+    })
+    .await;
+
+    // The writer is held, so only the load can write the note it owes, and the
+    // line's first request still carries it.
+    let mut held = dim_agent_capabilities::timeline_tree::testing::hold_writers(&id);
+    let agent = MinimalHost::start(&builder_with_store(
+        &Arc::new(Probe::default()),
+        second.clone(),
+    ))
+    .await
+    .unwrap();
+    let session = soon(agent.restore_session(id.clone())).await.unwrap();
+    assert_eq!(session.default_branch().unwrap(), b, "the fact stands");
+    let stopped = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if held.arrived().await == b {
+                break;
+            }
+        }
+    })
+    .await;
+    assert!(
+        stopped.is_ok(),
+        "line {b}'s writer never stopped at the test seam"
+    );
+    soon(session.submit("next request".into(), InputMode::Queue, &b))
+        .await
+        .unwrap();
+    let events = until_events(&session, &b, |events| {
+        request_after_resume(events).is_some()
+    })
+    .await;
+    let (at, request) = request_after_resume(&events).expect("B's first request exists");
+    let before: Vec<_> = events
+        .iter()
+        .filter(|event| event.sequence < at)
+        .cloned()
+        .collect();
+    let notes = status_notes(&before);
+    assert_eq!(
+        notes.len(),
+        2,
+        "the load replaced the stale note exactly once: {notes:?}"
+    );
+    assert_eq!(
+        notes[0], old,
+        "the stored note is the one older rules wrote"
+    );
+    let note = &notes[1];
+    assert!(note.contains(r#"default="true""#), "{note}");
+    assert!(
+        note.contains("you can open lines with create"),
+        "the replacement states the rule the tool applies: {note}"
+    );
+    assert!(
+        note.contains(match user {
+            true => "opened by the user from line main",
+            false => "this block does not make it one: a status note would",
+        }),
+        "the replacement restates the current birth identity: {note}"
+    );
+    assert!(
+        request
+            .request
+            .messages
+            .iter()
+            .any(|message| said(message).contains(note)),
+        "the first request carries the note the load wrote"
+    );
+    held.release();
+    drop(held);
+    soon(session.close()).await.unwrap();
+    soon(agent.close()).await.unwrap();
+
+    let third = MinimalHost::start(&builder_with_store(&Arc::new(Probe::default()), second))
+        .await
+        .unwrap();
+    let session = soon(third.restore_session(id)).await.unwrap();
+    soon(session.idle(&b)).await.unwrap();
+    assert_eq!(
+        status_notes(&local_events(&session, &b).await).len(),
+        2,
+        "a second load finds the note it writes and adds none"
+    );
+    soon(third.close()).await.unwrap();
+}
+
+/// §5: the reviewer's case. A tool line was made the default branch under the
+/// older rule, so its stored note forbids the `create` the tool now admits.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_tool_lines_note_from_older_rules_is_replaced_once_at_load() {
+    a_stale_note_is_replaced_once(OLD_TOOL_NOTE, false).await;
+}
+
+/// §5: the same for a line the user opened and made the default branch under
+/// the older rule.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_user_lines_note_from_older_rules_is_replaced_once_at_load() {
+    a_stale_note_is_replaced_once(OLD_USER_NOTE, true).await;
+}
+
 /// A Session whose model compacts, over `store`, for a test that restarts it:
 /// the summary strategy [`Compact`] and the hosts the branch tool needs.
 fn compacting_builder(store: Arc<dyn TimelineStore>) -> AgentBuilder {

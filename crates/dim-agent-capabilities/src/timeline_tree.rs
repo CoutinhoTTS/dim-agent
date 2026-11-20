@@ -4599,12 +4599,14 @@ impl BranchLine {
         };
         Ok(prompt.clone())
     }
-    /// Writes the note a load owes, comparing one thing only: whether this
-    /// line is the default branch now, against the role its latest
-    /// `branch:line` block states, where a missing `default` attribute means
-    /// not default. A line that took no part in the latest move keeps the
+    /// Writes the note a load owes, comparing two things: whether this line is
+    /// the default branch now, against the role its latest `branch:line` block
+    /// states, where a missing `default` attribute means not default; and, for
+    /// the tree's current default branch alone, the text of that block against
+    /// the note this code writes for the line, so a note an older rule set left
+    /// is replaced once. A line that took no part in the latest move keeps the
     /// counterpart its own note named, so a move between other lines does not
-    /// rewrite it, and a load that finds the roles in agreement writes nothing
+    /// rewrite it, and a load that finds both in agreement writes nothing
     /// (design §5).
     async fn write_load_note(&self, role: LineRole, parent: Option<&str>) -> Result<()> {
         if !receives_note(role) {
@@ -4628,12 +4630,27 @@ impl BranchLine {
         } else {
             None
         };
-        if self.record_status(block).unwrap_or(false) == is_default {
+        let agrees = self.record_status(block).unwrap_or(false) == is_default;
+        if agrees && !is_default {
             return Ok(());
         }
         let Some(text) = self.note_text(parent, is_default, &other).await? else {
             return Ok(());
         };
+        // The line is the tree's default branch, so its latest note was written
+        // by the move that made it the default and carries this code's text: a
+        // note an older rule set left differs and is replaced once (design §5).
+        let in_force = agrees
+            && self
+                .view
+                .lock()
+                .unwrap()
+                .identity
+                .as_ref()
+                .is_some_and(|(latest, retired)| !retired && latest == &text);
+        if in_force {
+            return Ok(());
+        }
         let data = InputMessageData {
             blocks: vec![crate::context_block::raw(text.clone(), Some(line_key()))],
             mode: Some(InputMode::Append),
