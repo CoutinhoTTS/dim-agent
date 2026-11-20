@@ -21,7 +21,7 @@ const recorded: SessionEvent[] = [
   event(6, { kind: "model-end", requestId: "r1" }),
   event(7, { kind: "turn-end", outcome: "completed" }),
   event(8, { kind: "branch-create", branchId: "b-7c0ffee1", at: 0, prompt: "parser race", source: { kind: "host", operationId: "op" } }),
-  event(9, { kind: "input", text: "now run it", content: [{ type: "text", text: "now run it" }], blocks: [] }),
+  event(9, { kind: "input", text: "now run /skill:commit it", content: [{ type: "text", text: "now run /skill:commit it" }], blocks: [] }),
   event(10, { kind: "model-end", requestId: "r2", error: "boom", failure: { kind: "server_error", status: 503, cause: [], attempts: 1, waitedMs: 0 } }),
   event(11, { kind: "turn-end", outcome: "failed", error: "boom" }),
 ]
@@ -74,7 +74,8 @@ describe("WebChatTimeline", () => {
     await settle()
 
     const bubbles = [...root.querySelectorAll(".timeline-user-bubble")].map(bubble => bubble.textContent?.trim())
-    expect(bubbles).toEqual(["read the entry point", "now run it"])
+    expect(bubbles).toEqual(["read the entry point", "now run /skill:commit it"])
+    expect([...root.querySelectorAll(".timeline-user-bubble .skill-chip")].map(chip => chip.textContent)).toEqual(["/skill:commit"])
     expect(root.querySelector("[data-testid='timeline-text-block']")?.textContent).toContain("The entry point only defines main.")
 
     root.querySelector<HTMLButtonElement>("[data-testid='timeline-work-summary'] button")!.click()

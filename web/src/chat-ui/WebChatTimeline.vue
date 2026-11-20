@@ -20,7 +20,6 @@ import { WEB_TIMELINE, icons } from "./primitives"
 import { createRowMapper } from "./rows"
 import { createWebChatUiHost } from "./web-host"
 
-/** The same contract as `features/chat/TimelineView.vue`, so a call site switches with one line. */
 const props = defineProps<{
   sessionId?: string
   earlier?: boolean

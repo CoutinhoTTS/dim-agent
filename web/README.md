@@ -42,10 +42,9 @@ npm test           # Node test runner over unit and component tests, then Vitest
 | `src/projection.ts` | Folds history pages, `session.event` and `session.model.progress` into timeline rows (as `crates/dim-cli/src/projection.rs`) |
 | `src/lines.ts` | Folds branch facts into the Session's line tree, line states and cut message counts |
 | `src/stores/` | Connection, session directory, attached sessions and their per-line streams, models, layout, toasts and line tabs |
-| `src/features/chat/` | Chat page, new-session page, timeline, composer, model menu, approval prompt |
+| `src/features/chat/` | Chat page, new-session page, composer, model menu, approval prompt |
 | `src/features/lines/` | Right-side Lines panel, tree, line conversation, new-line and end-line dialogs |
 | `packages/chat-ui/` | Shared presentational chat timeline package (`@dimcode/chat-ui`); host contracts and component tests |
-| `src/chat-ui/` | The Web host of `@dimcode/chat-ui` and the only Web code that imports it: row mapping, read-only `ChatUiHost`, labels, and `WebChatTimeline`, which replaces `features/chat/TimelineView.vue` when the page opens with `?chatUi=1` or `localStorage["dim.chatUi"] === "1"` |
+| `src/chat-ui/` | The Web host of `@dimcode/chat-ui` and the only Web code that imports it: row mapping, read-only `ChatUiHost`, labels, and `WebChatTimeline`, the chat and line timeline |
 | `src/features/settings/` | Account, appearance, agent defaults, providers, modality, MCP, plugins, skills, permissions, scheduled tasks, archived sessions and diagnostics |
 
-The conversation work-status presentation is visually inspired by [Rare UI AI Status](https://www.rareui.com/components/aistatus), implemented with Vue transitions and local icons. Active groups show the current action; completed groups retain their expandable activity summary. Reduced-motion preferences disable the animations.

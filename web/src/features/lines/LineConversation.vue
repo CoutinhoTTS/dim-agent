@@ -9,8 +9,7 @@ import { useUiStore } from "../../stores/ui"
 import ApprovalPrompt from "../chat/ApprovalPrompt.vue"
 import ComposerPanel from "../chat/ComposerPanel.vue"
 import QuestionPrompt from "../chat/QuestionPrompt.vue"
-import TimelineView from "../chat/TimelineView.vue"
-import { WebChatTimeline, chatUiEnabled } from "../../chat-ui/flag"
+import { WebChatTimeline } from "../../chat-ui/timeline"
 import { lineName, lineStateLabel, lineStateTone, shortId } from "./line-state"
 
 const props = defineProps<{ sessionId: string; branchId: string }>()
@@ -132,7 +131,7 @@ function noModel(): void {
       </UButton>
     </div>
     <template v-else>
-      <component :is="chatUiEnabled ? WebChatTimeline : TimelineView" :session-id="sessionId"
+      <WebChatTimeline :session-id="sessionId"
         :rows="rows"
         :earlier="branch.earlier"
         :loading-earlier="branch.loadingEarlier"
