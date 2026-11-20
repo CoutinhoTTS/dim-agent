@@ -10473,6 +10473,10 @@ async fn a_former_default_branch_keeps_no_stale_instruction_and_ends_after_a_mov
         line_block(events).is_some_and(|(text, _)| text.contains(r#"default="false""#))
     })
     .await;
+    until_events(&session, &nested, |events| {
+        line_block(events).is_some_and(|(text, _)| text.contains(r#"default="true""#))
+    })
+    .await;
     assert_eq!(
         default_notes(&session, &["main", &a, &nested]).await,
         [("main".to_owned(), 0), (a.clone(), 2), (nested.clone(), 1)],
