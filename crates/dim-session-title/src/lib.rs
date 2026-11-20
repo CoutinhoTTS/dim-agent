@@ -10,7 +10,8 @@ use dim_agent_runtime::{
     SessionIdentity, SessionLifecycle, TimelineQuery, TimelineQueryScope,
 };
 use dim_agent_types::{
-    ContentBlock, EventKind, InputBlock, Message, ModelId, Role, UserInput, markup::runtime_context,
+    ContentBlock, EventKind, InputBlock, Message, ModelId, ROOT_BRANCH_ID, Role, UserInput,
+    markup::runtime_context,
 };
 use dim_app_server::{
     settings::{Settings, SettingsScope, SourceDeclaration},
@@ -224,7 +225,7 @@ impl DynPlugin for SessionTitle {
                     .name(session_channel(&owner.id))
                     .on(move |record, _| {
                         if let SessionBroadcastEvent::Event { branch_id, event } = &record.record
-                            && branch_id == "main"
+                            && branch_id == ROOT_BRANCH_ID
                             && let EventKind::InputApplied(applied) = &event.kind
                         {
                             let state = observed.state.lock().unwrap();
@@ -392,7 +393,7 @@ impl Owner {
             );
             let operator = self
                 .tree
-                .query("main".into(), operator_query)
+                .query(ROOT_BRANCH_ID.into(), operator_query)
                 .await
                 .map_err(|_| ())?;
             let through = operator.through;
@@ -434,7 +435,7 @@ impl Owner {
             );
             let first = self
                 .tree
-                .query("main".into(), first_query)
+                .query(ROOT_BRANCH_ID.into(), first_query)
                 .await
                 .map_err(|_| ())?;
             let QueryOutput::Rows { rows } = first.result else {
@@ -463,7 +464,7 @@ impl Owner {
             );
             let input = self
                 .tree
-                .query("main".into(), input_query)
+                .query(ROOT_BRANCH_ID.into(), input_query)
                 .await
                 .map_err(|_| ())?;
             let QueryOutput::Rows { rows } = input.result else {
@@ -507,7 +508,7 @@ impl Owner {
             );
             let configured = self
                 .tree
-                .query("main".into(), configured_query)
+                .query(ROOT_BRANCH_ID.into(), configured_query)
                 .await
                 .map_err(|_| ())?;
             let QueryOutput::Rows { rows } = configured.result else {

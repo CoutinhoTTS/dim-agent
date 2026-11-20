@@ -448,29 +448,35 @@ mod tests {
         set(previous);
     }
 
-    /// The two strings `/update` prints, translated in every locale with the
-    /// command's placeholder kept.
+    /// The update dialog's and `/update`'s strings, translated in every locale
+    /// with their placeholders kept.
     #[test]
-    fn every_locale_translates_the_update_entry_strings() {
+    fn every_locale_translates_the_update_strings() {
         let previous = active();
         for (locale, code, _) in LOCALES {
             if locale == Locale::En {
                 continue;
             }
             for key in [
-                "show the command that updates this installation",
-                "To update, exit every client and stop the server, then run {command}",
+                "check for a newer version",
+                "Update now",
+                "To update, exit DimCode and run: {command}",
+                "Finish or stop the current work first (a running turn, shell command, or pending prompt).",
+                "Checking for updates…",
+                "DimCode {version} is up to date.",
             ] {
                 let translated = table(locale, key);
                 assert!(translated.is_some(), "{code} lacks {key:?}");
                 assert_ne!(translated.unwrap(), key, "{code} copies {key:?}");
             }
             set(locale);
-            let text = tf(
-                "To update, exit every client and stop the server, then run {command}",
-                &[("command", "fixture-command")],
-            );
-            assert!(text.contains("fixture-command"), "{code} drops the command");
+            for (key, name) in [
+                ("To update, exit DimCode and run: {command}", "command"),
+                ("DimCode {version} is up to date.", "version"),
+            ] {
+                let text = tf(key, &[(name, "fixture-value")]);
+                assert!(text.contains("fixture-value"), "{code} drops {name}");
+            }
         }
         set(previous);
     }

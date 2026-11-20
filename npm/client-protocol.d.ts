@@ -85,6 +85,7 @@ export type ApprovalDecision = "allow" | "deny"
 export type BranchSource =
   | { kind: "tool"; turnId: string; requestId: string; callId: string }
   | { kind: "host"; operationId: string }
+  | { kind: "user"; operationId: string }
 
 export type ToolResult = {
   /** Text and durable images from the tool result. */

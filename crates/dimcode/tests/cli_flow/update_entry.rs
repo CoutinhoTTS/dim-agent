@@ -1,11 +1,10 @@
-//! `/update`: the terminal UI names the command that installs this copy, and
-//! sends nothing to the model. It installs nothing either: the interface is a
-//! client of the installation the updater would replace, so the installer
-//! cannot run while it serves (cli-commands.md, Update dialog).
+//! `/update`: the terminal UI checks this build's channel and sends nothing to
+//! the model. A build from source has no channel, so it says how to update by
+//! hand and installs nothing (cli-commands.md, Update dialog).
 use super::*;
 
 #[test]
-fn update_names_the_command_and_sends_no_input() {
+fn update_reports_a_source_build_and_sends_no_input() {
     for fullscreen in [false, true] {
         for package in [None, Some("dimcode"), Some("dimcode-alpha")] {
             update_entry(fullscreen, package);
@@ -71,24 +70,11 @@ fn update_entry(fullscreen: bool, package: Option<&str>) {
     terminal.write(b"/upd");
     terminal.until_plain("/update");
     terminal.write(b"ate\r");
-    if let Some(package) = package {
-        let entry = if package == "dimcode-alpha" {
-            "dima"
-        } else {
-            "dimcode"
-        };
-        terminal.until_plain(&format!(
-            "To update, exit every client and stop the server, then run {entry} update"
-        ));
-    } else {
-        terminal.until_plain("Cannot update this installation");
-    }
+    terminal.until_plain("Cannot update this installation");
     terminal.write(b"/exit\r");
     terminal.until("Bye!");
     assert!(terminal.wait().success(), "{}", terminal.transcript);
-    if package.is_none() {
-        assert!(strip_ansi(&terminal.transcript).contains("pull and rebuild"));
-    }
+    assert!(strip_ansi(&terminal.transcript).contains("pull and rebuild"));
     let methods = wait_asked.recv_timeout(PATIENCE).unwrap();
     daemon.join().unwrap();
     assert!(

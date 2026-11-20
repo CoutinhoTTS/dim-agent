@@ -29,7 +29,8 @@ use dim_agent_runtime::{
     SessionLifecycle,
 };
 use dim_agent_types::{
-    EventKind, Message, MessageContent, MessagePart, ModelRequest, Role, TurnOutcome,
+    DEFAULT_BRANCH_ID, EventKind, Message, MessageContent, MessagePart, ModelRequest, Role,
+    TurnOutcome,
 };
 use futures_util::StreamExt;
 use rutis::Ctx;
@@ -418,7 +419,7 @@ struct InFlight {
     /// every exit after registration. A request that shares an unstarted
     /// flight subscribes here, so it answers what the owner answers; a
     /// dropped sender settles it with the state as it is then.
-    outcome: watch::Sender<Option<Settled>>,
+    outcome: watch::Receiver<Option<Settled>>,
 }
 
 #[derive(Default)]
@@ -446,20 +447,6 @@ impl State {
         let flight = self.in_flight.take()?;
         flight.cancel.cancel();
         Some((flight.turn_id, flight.started))
-    }
-    /// Settles the invocation's flight with `outcome` and takes it out of the
-    /// slot, so a request that shared its preflight answers what it settled
-    /// to. A slot another invocation holds is left alone.
-    fn settle_in_flight(&mut self, invocation: u64, outcome: Settled) {
-        if !self
-            .in_flight
-            .as_ref()
-            .is_some_and(|flight| flight.invocation == invocation)
-        {
-            return;
-        }
-        let flight = self.in_flight.take().expect("just checked");
-        let _ = flight.outcome.send(Some(outcome));
     }
     /// The next invocation identity; never reused within the part.
     fn next_invocation(&mut self) -> u64 {
@@ -786,7 +773,7 @@ impl Part {
         let SessionBroadcastEvent::Event { branch_id, event } = record else {
             return;
         };
-        if branch_id != "main" {
+        if branch_id != DEFAULT_BRANCH_ID {
             return;
         }
         // The notice is emitted under the state lock, so the order of
@@ -892,7 +879,7 @@ impl Part {
                         return Ok(json!({"accepted": true}));
                     }
                     let invocation = flight.invocation;
-                    let outcome = flight.outcome.subscribe();
+                    let outcome = flight.outcome.clone();
                     let settled = outcome.borrow().clone();
                     Some((invocation, outcome, settled))
                 }
@@ -900,7 +887,7 @@ impl Part {
                     let invocation = state.next_invocation();
                     let _ = state.cancel_in_flight();
                     state.take_offer();
-                    let (outcome, _) = watch::channel(None);
+                    let (sender, outcome) = watch::channel(None);
                     state.in_flight = Some(InFlight {
                         turn_id: params.turn_id.clone(),
                         invocation,
@@ -908,12 +895,12 @@ impl Part {
                         started: false,
                         outcome,
                     });
-                    registered = Some(invocation);
+                    registered = Some((invocation, sender));
                     None
                 }
             }
         };
-        let invocation = match shared {
+        let (invocation, sender) = match shared {
             Some((invocation, outcome, settled)) => {
                 #[cfg(feature = "testing")]
                 testing::sharing(&self.session_id);
@@ -923,11 +910,24 @@ impl Part {
             }
             None => registered.expect("a ready request registers its flight"),
         };
+        let settle = |state: &mut State, result| {
+            if state
+                .in_flight
+                .as_ref()
+                .is_some_and(|flight| flight.invocation == invocation)
+            {
+                state.in_flight.take();
+            }
+            sender.send_replace(Some(result));
+        };
         // The pending registration holds the slot across the preflight, so a
         // settings change, a new input, a dismissal or the Session's close
         // cancels this request like one already in flight.
         if self.compaction_due(max_chars, token.clone()).await {
-            self.settle(invocation, Settled::Refused("compaction_due"));
+            settle(
+                &mut self.state.lock().unwrap(),
+                Settled::Refused("compaction_due"),
+            );
             return Ok(refused("compaction_due"));
         }
         // The preflight awaited: the start is decided again against the
@@ -937,7 +937,10 @@ impl Part {
         let settings = match self.read_settings(self.stopping.child_token()).await {
             Ok(settings) => settings,
             Err(error) => {
-                self.settle(invocation, Settled::Failed(error.clone()));
+                settle(
+                    &mut self.state.lock().unwrap(),
+                    Settled::Failed(error.clone()),
+                );
                 return Err(error);
             }
         };
@@ -950,14 +953,12 @@ impl Part {
                 .is_some_and(|flight| flight.invocation == invocation);
             if !ours || token.is_cancelled() {
                 let reason = self.cancelled_reason(&state, &params.turn_id, &settings, invocation);
-                if ours {
-                    state.settle_in_flight(invocation, Settled::Refused(reason));
-                }
+                settle(&mut state, Settled::Refused(reason));
                 return Ok(refused(reason));
             }
             let ready = match self.decision(&state, &params.turn_id, &settings, Some(invocation)) {
                 Decision::Refused(reason) => {
-                    state.settle_in_flight(invocation, Settled::Refused(reason));
+                    settle(&mut state, Settled::Refused(reason));
                     return Ok(refused(reason));
                 }
                 // `ours` was just checked: the slot holds this invocation,
@@ -968,7 +969,7 @@ impl Part {
             state.enabled = Some(settings.enabled);
             if let Some(flight) = state.in_flight.as_mut() {
                 flight.started = true;
-                let _ = flight.outcome.send(Some(Settled::Started));
+                sender.send_replace(Some(Settled::Started));
             }
             ready
         };
@@ -979,16 +980,6 @@ impl Part {
                 .await;
         });
         Ok(json!({"accepted": true}))
-    }
-
-    /// Settles an invocation's flight with its outcome, so a request that
-    /// shared its preflight answers what it settled to. Every exit path after
-    /// registration ends here; a slot another invocation holds is left alone.
-    fn settle(&self, invocation: u64, outcome: Settled) {
-        self.state
-            .lock()
-            .unwrap()
-            .settle_in_flight(invocation, outcome);
     }
 
     /// Answers a request that found another request for its turn still in
@@ -1109,7 +1100,7 @@ impl Part {
     }
 
     async fn compaction_due(&self, max_chars: u32, cancel: CancellationToken) -> bool {
-        let Ok(branch) = self.hosts.tree.get("main") else {
+        let Ok(branch) = self.hosts.tree.get(DEFAULT_BRANCH_ID) else {
             return false;
         };
         let Ok(preparation) = branch.service::<ContextPreparation>() else {

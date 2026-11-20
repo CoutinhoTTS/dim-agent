@@ -10,7 +10,7 @@ import QueuedInputs from "./QueuedInputs.vue"
 import QuestionPrompt from "./QuestionPrompt.vue"
 import TimelineView from "./TimelineView.vue"
 import ExtensionMenu from "../extensions/ExtensionMenu.vue"
-import { MAIN_BRANCH, type ContextUsage, type DraftAttachments, type ModelId, type PermissionPreset, type QueuedInput, type SubmitMode, type WithdrawResult } from "../../rpc/protocol"
+import { DEFAULT_BRANCH_ID, ROOT_BRANCH_ID, type ContextUsage, type DraftAttachments, type ModelId, type PermissionPreset, type QueuedInput, type SubmitMode, type WithdrawResult } from "../../rpc/protocol"
 import { goalCall, goalObjective, parseGoalRequest, type Goal, type GoalStatus } from "../../goal"
 import { intervalSeconds, loopReport, parseLoopRequest } from "../../loop"
 import { useChatStore } from "../../stores/chat"
@@ -39,8 +39,8 @@ const title = computed(() => summary.value?.title ?? summary.value?.preview ?? t
 const parentId = computed(() => summary.value?.parentSessionId)
 const parent = computed(() => parentId.value === undefined ? undefined : sessions.byId.get(parentId.value))
 const children = computed(() => sessions.summaries.filter((session) => session.parentSessionId === props.sessionId))
-const approval = computed(() => view.value?.approvals.find((request) => request.branchId === MAIN_BRANCH))
-const questions = computed(() => view.value?.questions.filter((ask) => ask.branchId === MAIN_BRANCH) ?? [])
+const approval = computed(() => view.value?.approvals.find((request) => request.branchId === DEFAULT_BRANCH_ID))
+const questions = computed(() => view.value?.questions.filter((ask) => ask.branchId === DEFAULT_BRANCH_ID) ?? [])
 const prompting = computed(() => approval.value !== undefined || questions.value.length > 0)
 const rulesAvailable = computed(() => connection.supports("permission.rules") && connection.supports("permission.set_rules"))
 const storesPastes = computed(() => view.value?.methods.includes("attachment.put") === true)
@@ -57,16 +57,16 @@ const permissionControl = computed(() => {
   if (session?.status !== "ready" || !connection.supports("session.permission.get") || !connection.supports("session.permission.update")) return undefined
   return { policy: session.permission, select: setPermission }
 })
-const approvalKeyboard = computed(() => ui.approvalKeyboard(props.sessionId, MAIN_BRANCH, view.value?.approvals ?? []))
+const approvalKeyboard = computed(() => ui.approvalKeyboard(props.sessionId, DEFAULT_BRANCH_ID, view.value?.approvals ?? []))
 const composer = ref<InstanceType<typeof ComposerPanel>>()
-const lineCount = computed(() => view.value?.lines.filter((line) => line.id !== MAIN_BRANCH).length ?? 0)
+const lineCount = computed(() => view.value?.lines.filter((line) => line.id !== ROOT_BRANCH_ID).length ?? 0)
 const linesBusy = computed(() => {
   const approvals = view.value?.approvals ?? []
-  return view.value?.lines.some((line) => line.id !== MAIN_BRANCH && (line.state.kind === "working" || approvals.some((request) => request.branchId === line.id))) ?? false
+  return view.value?.lines.some((line) => line.id !== ROOT_BRANCH_ID && (line.state.kind === "working" || approvals.some((request) => request.branchId === line.id))) ?? false
 })
 const branchable = computed(() => connection.supports("session.branch_end") && view.value?.status === "ready")
 const canNewLine = computed(() => connection.supports("session.branch_create") && view.value?.status === "ready")
-/** The reasoning effort values the main line's model accepts; undefined until the models are read or when it has none. */
+/** The reasoning effort values the default branch's model accepts; undefined until the models are read or when it has none. */
 const effortChoices = computed(() => {
   const model = view.value?.model
   if (model === undefined) return undefined
@@ -88,16 +88,16 @@ const sessionCommands = computed(() => {
 })
 
 function send(text: string, attachments: DraftAttachments, mode: SubmitMode): Promise<void> {
-  return chat.submit(props.sessionId, MAIN_BRANCH, text, attachments, mode)
+  return chat.submit(props.sessionId, DEFAULT_BRANCH_ID, text, attachments, mode)
 }
 
 function stop(): Promise<void> {
-  return chat.stop(props.sessionId, MAIN_BRANCH)
+  return chat.stop(props.sessionId, DEFAULT_BRANCH_ID)
 }
 
 /** Withdraws one held message of main, so the composer can recall it into the draft; reports a message the run already adopted. */
 async function withdrawHeld(input: QueuedInput): Promise<WithdrawResult["status"]> {
-  const result = await chat.withdrawInput(props.sessionId, MAIN_BRANCH, input.id, undefined)
+  const result = await chat.withdrawInput(props.sessionId, DEFAULT_BRANCH_ID, input.id, undefined)
   if (result.status === "notHeld") toast.push({ tone: "info", title: t("queue.notHeld") })
   return result.status
 }
@@ -112,13 +112,13 @@ function openLine(branchId: string): void {
 }
 
 function branch(text: string, cut: number): void {
-  ui.requestNewLine({ sessionId: props.sessionId, parentBranchId: MAIN_BRANCH, at: cut, text })
+  ui.requestNewLine({ sessionId: props.sessionId, parentBranchId: ROOT_BRANCH_ID, at: cut, text })
 }
 
 async function createBranch(prompt: string): Promise<void> {
   const at = view.value?.lastTurnEnd
   if (at === undefined) throw new Error(t("lines.noFinishedTurn"))
-  const branchId = await chat.createLine(props.sessionId, MAIN_BRANCH, at, prompt)
+  const branchId = await chat.createLine(props.sessionId, ROOT_BRANCH_ID, at, prompt)
   ui.openLine(props.sessionId, branchId)
 }
 
@@ -235,7 +235,7 @@ async function loop(words: string): Promise<void> {
   }
 }
 
-/** `/effort` with no words lists the choices; `/effort VALUE` sets the main line's reasoning effort. */
+/** `/effort` with no words lists the choices; `/effort VALUE` sets the default branch's reasoning effort. */
 async function effort(words: string): Promise<void> {
   const choices = effortChoices.value
   const value = words.trim()
@@ -371,7 +371,7 @@ async function fork(): Promise<void> {
       :earlier="view.earlier"
       :loading-earlier="view.loadingEarlier"
       :history-error="view.historyError"
-      @earlier="chat.loadEarlier(sessionId, 'main')"
+      @earlier="chat.loadEarlier(sessionId, ROOT_BRANCH_ID)"
       :running="view.running"
       :retry="view.retry"
       :quotable="!approval && questions.length === 0"

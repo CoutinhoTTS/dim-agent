@@ -53,6 +53,15 @@ pub fn opening_advanced(ctx: &Ctx) {
     }
 }
 
+type ProgressReport = Arc<dyn Fn() + Send + Sync>;
+
+fn notify_progress(report: &Mutex<Option<ProgressReport>>) {
+    let report = report.lock().unwrap().clone();
+    if let Some(report) = report {
+        report();
+    }
+}
+
 /// Bounds an opening by inactivity in its own fiber subtrees, including rows
 /// created while the opening is in flight. Other scopes cannot extend it.
 pub struct StartupProgress {
@@ -60,6 +69,7 @@ pub struct StartupProgress {
     started: tokio::time::Instant,
     timeout: Duration,
     active: Arc<Mutex<HashMap<PluginId, tokio::time::Instant>>>,
+    report: Arc<Mutex<Option<ProgressReport>>>,
     listeners: Vec<rutis::Disposer>,
 }
 
@@ -67,14 +77,24 @@ impl StartupProgress {
     pub fn new(ctx: &Ctx, timeout: Duration) -> Result<Self> {
         let active = Arc::new(Mutex::new(HashMap::new()));
         let changes = active.clone();
+        let report = Arc::new(Mutex::new(None));
+        let reports = report.clone();
         let started = tokio::time::Instant::now();
         let listener = ctx.on_sync::<FiberStatusChanged>(move |event, _| {
             if event.to == FiberState::Active {
-                changes
-                    .lock()
-                    .unwrap()
-                    .entry(event.plugin_id)
-                    .or_insert_with(tokio::time::Instant::now);
+                let inserted = {
+                    let mut changes = changes.lock().unwrap();
+                    match changes.entry(event.plugin_id) {
+                        std::collections::hash_map::Entry::Vacant(entry) => {
+                            entry.insert(tokio::time::Instant::now());
+                            true
+                        }
+                        std::collections::hash_map::Entry::Occupied(_) => false,
+                    }
+                };
+                if inserted {
+                    notify_progress(&reports);
+                }
             }
             Ok(None)
         })?;
@@ -83,9 +103,11 @@ impl StartupProgress {
             started,
             timeout,
             active,
+            report,
             listeners: vec![listener],
         };
         let changes = progress.active.clone();
+        let reports = progress.report.clone();
         progress
             .listeners
             .push(ctx.on_sync::<OpeningAdvanced>(move |event, _| {
@@ -93,9 +115,18 @@ impl StartupProgress {
                     .lock()
                     .unwrap()
                     .insert(event.0, tokio::time::Instant::now());
+                notify_progress(&reports);
                 Ok(None)
             })?);
         Ok(progress)
+    }
+
+    /// Calls `report` after every progress this opening records: a row's first
+    /// activation or an [`OpeningAdvanced`] report. A report runs in the event
+    /// handler that recorded the progress; keep it short. Replaces an earlier
+    /// report.
+    pub fn on_progress(&mut self, report: impl Fn() + Send + Sync + 'static) {
+        *self.report.lock().unwrap() = Some(Arc::new(report));
     }
 
     /// Returns `None` after no first activation, opening dispatch or receipt

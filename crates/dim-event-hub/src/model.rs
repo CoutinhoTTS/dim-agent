@@ -1,7 +1,7 @@
 //! The wire shapes of the `eventHub` service and the `eventhub` namespace,
 //! and the field bounds Appendix A.1–A.3 states.
 use crate::{error::EventHubError, text::one_line};
-use dim_agent_types::InputMode;
+use dim_agent_types::{DEFAULT_BRANCH_ID, InputMode};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -123,7 +123,7 @@ impl Target {
     pub fn new(session_id: impl Into<String>, branch_id: Option<&str>) -> Self {
         Self {
             session_id: session_id.into(),
-            branch_id: branch_id.map_or_else(|| "main".into(), str::to_owned),
+            branch_id: branch_id.map_or_else(|| DEFAULT_BRANCH_ID.into(), str::to_owned),
         }
     }
 }

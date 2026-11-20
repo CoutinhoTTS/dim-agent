@@ -1,4 +1,5 @@
 use crate::{Result, client::Client, display::Display, wire::HistoryWindow};
+use dim_agent_types::DEFAULT_BRANCH_ID;
 use dim_client::window::Window;
 use dim_client::wire::DisplayPage;
 
@@ -16,7 +17,7 @@ pub(super) async fn read(
     loop {
         let params = window.params_with_display(
             session_id,
-            "main",
+            DEFAULT_BRANCH_ID,
             !display.json && client.offers("session.history.display.tail"),
             !display.json && client.offers("session.history.display.transcript"),
         );
@@ -65,7 +66,7 @@ pub(super) async fn earlier(
     loop {
         let params = window.params_with_display(
             session_id,
-            "main",
+            DEFAULT_BRANCH_ID,
             !display.json && client.offers("session.history.display.tail"),
             !display.json && client.offers("session.history.display.transcript"),
         );

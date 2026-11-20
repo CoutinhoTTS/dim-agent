@@ -1981,22 +1981,33 @@ the store. A failed startup exits 1 unless it enters the recovery below.
 While a store format upgrade runs, the daemon writes the same note as a progress
 kind, `dimcode-startup-progress v1 pid=<pid>` with
 `store-upgrade from=<from> to=<to> progress=<n>`, at most once a second and
-after each upgrade step; a fresh store or one at the current format writes none.
-All three startup waits read it: the wait before spawning and the start-lock
-wait count any pid, the spawn wait only its child's pid, and each new counter
-moves the wait's bound forward by the bound itself (10 s for the wait before
-spawning and the spawn wait, one verified shutdown plus one startup plus a
-margin for the lock). A store format upgrade is the long phase that reports
-progress and moves the bound; every other phase of startup is bounded by the
-client's fixed value. Before it spawns, a client waits while the note names a
-live pid other than its own: the store is owned, and it has no socket until the
-upgrade finishes. Progress moves that bound, the client retries the socket, and
-it connects once the daemon serves; a note whose pid is gone, or that names the
-client itself, is stale, and the client starts its own daemon. The first such
-note a client reads prints, once on stderr in every mode,
+after each upgrade step. From the moment the store opens until the listeners
+open, the daemon owns the note as an assembly kind, `assembly progress=<n>`:
+`<n>` rises whenever the opening records progress (a row's first activation or
+an `OpeningAdvanced` report), the first progress after the store removes its own
+note writes at once and later ones at most once per 500 ms, with the last
+progress of an interval written when that interval ends so the note is never
+more than one interval behind the daemon's own progress, and opening removes
+the note. The store writes no note for a fresh store or one at the current
+format; the assembly note is what a normal start reports. All four startup
+waits read either kind: the wait before spawning and the start-lock wait count
+any pid, the spawn wait only its child's pid, and the reply wait takes the
+server that accepted its connection; each new counter moves the wait's bound
+forward by the bound itself (10 s for the wait before spawning, the spawn wait
+and the reply wait, one verified shutdown plus one startup plus a margin for the
+lock). A start that reports progress is waited for however long it takes; one
+that reports nothing for the bound fails. Before it spawns, a client waits while
+the note names a live pid other than its own: the store is owned, and it has no
+socket until the upgrade or assembly finishes. Progress moves that bound, the
+client retries the socket, and it connects once the daemon serves; a note whose
+pid is gone, or that names the client itself, is stale, and the client starts
+its own daemon. Only the store-upgrade kind prints: the first such note a
+client reads prints, once on stderr in every mode,
 `Upgrading the local store from format v<from> to v<to>; this can take a while on a large store.`;
-stdout and JSON output stay unchanged. A client that only knows the failure kind
-ignores the progress kind and falls back to the generic messages above.
+an assembly note prints nothing and stdout and JSON output stay unchanged. A
+client that only knows the failure kind ignores a progress kind and falls back
+to the generic messages above; a client that knows only the store-upgrade kind
+treats the assembly kind the same way.
 
 A note that names a `stage` keeps the upgrade visible instead of leaving the
 first line alone for as long as the upgrade runs: each later report prints
@@ -2016,10 +2027,10 @@ accepts and answers nothing. That wait is a startup phase, not a request
 handshake with a bound of its own: `hello` carries none, and the client takes
 the reply under the inactivity bound of the phase it is in, which a progress
 counter moves forward by the bound itself (10 s for a connect and the spawn
-wait, the shutdown plus startup plus margin for the start-lock wait). An
-upgrade therefore extends the handshake the same way it extends the spawn, and
-every action that connects, `daemon stop` included, is bounded like the phase
-it is in. `Client::greet` sends `hello` and `Client::complete_hello` checks the
+wait, the shutdown plus startup plus margin for the start-lock wait). A store
+upgrade or an assembly therefore extends the handshake the same way it extends
+the spawn, and every action that connects, `daemon stop` included, is bounded
+like the phase it is in. `Client::greet` sends `hello` and `Client::complete_hello` checks the
 reply, so a caller with a wait takes the reply itself, and `Client::hello` is
 for a caller with none, such as the ACP gateway's reconnect, which bounds a
 whole attempt inside its own deadline. When the bound does expire, the client
@@ -2062,8 +2073,7 @@ The CLI stages the newer version its current channel tag resolves to, as the
 [update command](#update-dialog) does, so npm resolves the version against the
 same registry configuration it installs from; `DIMCODE_NPM_REGISTRY` stays the
 selector for the availability check alone and need not name that registry. The
-existing update command owns the installation lock, legacy-consumer
-confirmation, progress, and cancellation. Before switching, the updater checks
+existing update command owns the installation lock, progress, and cancellation. Before switching, the updater checks
 the staged host platform's release manifest for the version it actually staged
 and the store's format. A missing declaration or unsupported format stops
 recovery before replacing the live installation.
@@ -2653,11 +2663,22 @@ opened also fails the starting process, so a recognised consumer never runs unre
 The lock file is created readable by every user and remains in place after release;
 deleting it while an update runs would allow another inode to be locked independently.
 
-Older builds hold no lock, so `update` also refuses until `.dimcode-consumers` exists at
-the manager root. After exiting every client and stopping every old server, the operator
-runs `update --confirm-legacy-exited`, which creates the marker and installs. The flag
-vouches for older processes only and never overrides a live lock. Source builds and
-unrecognised layouts hold no lock and are not updated.
+`update` never stops a server, not even an idle one: while this home's daemon holds its
+lease, the operator stops it with `daemon stop` first, and a lease from another home is
+settled in that home. A process that has just exited can keep its lease for a moment, so
+`update` waits up to two seconds for the lock before it refuses; Ctrl+C ends that wait,
+and no package manager starts after it. The refusal names the entry point that runs it,
+with `--home` when the invocation selected one:
+
+```text
+$ dima update
+Error: DimCode is currently running (another window, server, or update is active).
+Close all DimCode windows, run `dima daemon stop`, and try again.
+```
+
+Builds older than the lease hold no lock, so `update` cannot see them; the operator exits
+them before the first update. Source builds and unrecognised layouts hold no lock and are
+not updated.
 
 ```text
 $ dima update
@@ -2674,10 +2695,68 @@ $ dima update
 Updated dimcode-alpha on the alpha channel.
 ```
 
-The update dialog installs nothing. It names the new version and the command to run
-(`dima update` for a recognised installation, else the package manager's own command)
-once every client has exited and the server has stopped, and offers `Skip this version`
-and `Close`. It uses the same layout in fullscreen and scrollback. It fits the available
+The update dialog names the new version. For a recognised installation whose server the
+client manages (no `--server`) and can stop when idle (`daemon.shutdown.ifIdle`), it offers `Update now`, `Skip this version` and `Close`,
+with `Update now` focused:
+
+```text
+╭──────────────────────────────────────────────────────────────╮
+│ Update available                                             │
+│                                                              │
+│ Version 0.1.0-alpha.26 is available (you have 0.1.0-alpha.25).│
+│                                                              │
+│ › Update now   Skip this version   Close                     │
+│                                                              │
+│ ←→ move · Enter confirm · Esc close                          │
+╰──────────────────────────────────────────────────────────────╯
+```
+
+Any other installation, a client of an external `--server`, or a daemon without
+`daemon.shutdown.ifIdle` gets `Skip this version`
+and `Close` with the command to run once DimCode has exited (`dima update`, or the package
+manager's own command):
+
+```text
+│ Version 0.1.0-alpha.26 is available (you have 0.1.0-alpha.25).│
+│ To update, exit DimCode and run: dima update                 │
+│                                                              │
+│ › Skip this version   Close                                  │
+```
+
+`Update now` updates without the interface staying connected:
+
+1. While this Session has a running turn, a foreground shell command, or a pending
+   approval or question, the dialog stays and says to finish or stop that work first. The
+   daemon is not asked.
+2. Otherwise the interface leaves as it does on exit, restoring the terminal and closing
+   its connection, so its own attachment no longer counts.
+3. The same process asks this home's daemon to stop with `daemon.shutdown {ifIdle: true}`
+   ([Tui](plugins/Tui.md) owns the idle decision). A refusal from a connection that has
+   only just closed is asked again for up to two seconds.
+4. With the daemon stopped, or none running, it installs exactly as `update` does, with
+   the same progress row and errors.
+5. A staged npm installation then starts the updated entry point in place of this
+   process, in the mode it left (`--fullscreen` or `--scrollback`) and with
+   `--resume <session>` when a Session was open; the new client starts its own daemon.
+   Any other layout says to start DimCode again.
+
+A busy daemon, a daemon without `daemon.shutdown.ifIdle`, a lease held elsewhere, a
+failed install, or Ctrl+C stops nothing more: the CLI prints what blocked it and the next
+step, then the resume command, and exits nonzero. Ctrl+C is heard from the moment the
+interface leaves, also while the daemon is asked; a shutdown the daemon already accepted
+settles on its own. Every printed command keeps `--home` when the invocation selected one,
+so it addresses the same daemon and Session:
+
+```text
+Could not update: Other DimCode windows or tasks are using the server (clients: 1, attached sessions: 1, running turns: 0).
+Close them or let them finish, then run: dima --home /tmp/work update
+Resume this session with: dima --home /tmp/work --resume s-42
+```
+
+A failed install adds `To try again, run: dima --home /tmp/work update`, and Ctrl+C prints
+`Update cancelled. To update later, run: dima --home /tmp/work update`.
+
+The dialog uses the same layout in fullscreen and scrollback. It fits the available
 columns and rows: long version and command text wraps, with Up/Down scrolling when
 needed. The title and action row remain visible. If the actions do not fit on one row,
 show the focused action and its index; Left/Right and Tab/BackTab still cycle all
@@ -2693,17 +2772,15 @@ when it fits.
 +----------- Up/Down 1-2/7-+
 ```
 
-`/update` is that command as a client-side report in both terminal UI modes. It
-runs nothing: the update command holds the installation's exclusive lease, and
-the interface itself is a client whose share of that lease it cannot release
-while it serves the operator. So `/update` names the command the dialog would
-name, for a recognised installation, or the [manual and rebuild
-instructions](#update-dialog) for any other layout, and it never consults the
-channel: the automatic startup check keeps owning the dialog and its skip list.
+`/update` checks this build's channel on demand in both terminal UI modes, including a
+version the user skipped. A newer version opens the update dialog; otherwise the
+transcript says the build is up to date, or, for a source build or unrecognised layout,
+gives the [manual and rebuild instructions](#update-dialog). The startup check keeps
+honouring the skip list.
 
 ```text
 > /update
-To update, exit every client and stop the server, then run dima update
+DimCode 0.1.0-alpha.26 is up to date.
 ```
 
 ### Coordinated client/server upgrade
@@ -2763,13 +2840,10 @@ below; the remaining items need alignment with the lifecycle and launch owners (
   update holds the lock. The OS releases a lease when its process dies, so a crash never
   leaves a stale occupant. A source build or unrecognised layout holds no lease and is never
   updated.
-- **First migration:** older builds hold no lease, so a lease-aware install cannot prove
-  they have exited. Until `.dimcode-consumers` exists at the manager root, `update` refuses.
-  After exiting every client and stopping every old server, the operator runs
-  `update --confirm-legacy-exited`, which creates the marker and installs. The flag trusts
-  that statement for older processes only: a live lease still refuses.
-- **Remaining:** quiescing process admission before shutdown, safe replacement on Windows,
-  and successor activation by the new client are not part of the command yet.
+- **Remaining:** safe replacement on Windows is not part of the command yet, and
+  `update` itself stops no server. `Update now` stops this home's daemon only through
+  `daemon.shutdown {ifIdle: true}` and leaves successor activation to the new client it
+  starts.
 - **Effects and ownership:** quiescence changes admission, not Timeline order, batching,
   recovery formats or already accepted work. The App Server/lifecycle owners implement
   and verify the generic operation; native launch and installation owners implement the

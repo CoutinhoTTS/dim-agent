@@ -8,14 +8,14 @@ import { ConnectionLost, RpcError } from "../rpc/client"
 import type { Goal, GoalCall } from "../goal"
 import { readLoops as readLoopsReply, readStartedLoop, type Loop } from "../loop"
 import { readUploadedImage } from "../rpc/read"
-import { MAIN_BRANCH, type ApprovalDecision, type ApprovalRequest, type DraftAttachments, type FileCandidate, type ModelId, type ModelProgress, type Notification, type PendingQuestion, type PermissionPreset, type ModelRetryProgress, type PermissionPolicy, type QueuedInput, type QuestionAnswer, type SessionEvent, type SubmitMode, type UserInput, type WithdrawResult } from "../rpc/protocol"
+import { DEFAULT_BRANCH_ID, ROOT_BRANCH_ID, type ApprovalDecision, type ApprovalRequest, type DraftAttachments, type FileCandidate, type ModelId, type ModelProgress, type Notification, type PendingQuestion, type PermissionPreset, type ModelRetryProgress, type PermissionPolicy, type QueuedInput, type QuestionAnswer, type SessionEvent, type SubmitMode, type UserInput, type WithdrawResult } from "../rpc/protocol"
 import { readRevision, readRules } from "../rpc/general-settings"
 import { ProtocolError, readAttached, readBranches, readBranchDetail, readPendingInputs, readPendingQuestions, readTurn, readGoal, readTool, readAck, readAttachmentPath, readBranchCreate, readCompactResult, readConfigurationOutcome, readContextUsage, readFileCandidates, readForkedSessionId, readHistory, readDisplayHistory, readModelUpdate, readMemberApproval, readPermissionState, readPermissionVersion, readSessionMethods, readSessionSkills, readWithdrawResult } from "../rpc/read"
 import { useConnectionStore } from "./connection"
 import { useSessionsStore } from "./sessions"
 import { useUiStore } from "./ui"
 
-/** What a permission change did: written, already in place, or refused because `main` changed first. */
+/** What a permission change did: written, already in place, or refused because the line changed first. */
 export type PermissionOutcome = "updated" | "unchanged" | "conflict"
 
 /** One line's transcript and history state. */
@@ -39,7 +39,7 @@ export type SessionView = {
   /** `loading` until the first main-history load finishes; `closed` once the session is gone. */
   status: "loading" | "ready" | "closed" | "failed"
   error: string
-  /** The main line's transcript. */
+  /** The default branch's transcript. */
   rows: readonly TimelineRow[]
   /** Whether main runs, and whether it is stopping. */
   running: boolean
@@ -54,11 +54,11 @@ export type SessionView = {
   questions: PendingQuestion[]
   /** The method names this Session serves (`session.methods`); empty when the daemon offers no table. */
   methods: readonly string[]
-  /** The policy of `main`: read after history loads, then kept current by `permission/changed`. */
+  /** The default branch's policy: read after history loads, then kept current by `permission/changed`. */
   permission: PermissionPolicy | undefined
-  /** The main line's current goal from its owner. */
+  /** The default branch's current goal from its owner. */
   goal: Goal | undefined
-  /** Messages queued on the main line while it runs, oldest first. */
+  /** Messages queued on the default branch while it runs, oldest first. */
   queued: readonly QueuedInput[]
   model: ModelId | undefined
   /** Every line of the session, main first, in tree order. */
@@ -209,7 +209,7 @@ export const useChatStore = defineStore("chat", () => {
       const directory = await client().call("session.branches", { sessionId: view.sessionId }, readBranches)
       channel.lines.directory(directory)
       for (const entry of directory) {
-        if (entry.branchId === MAIN_BRANCH) continue
+        if (entry.branchId === ROOT_BRANCH_ID) continue
         const branch = ensureBranch(channel, entry.branchId)
         if (!branch.opened) {
           const asks = await pendingQuestions(channel, entry.branchId, entry.head)
@@ -217,7 +217,7 @@ export const useChatStore = defineStore("chat", () => {
           branch.projection.restoreControls([], asks, entry.head)
         }
       }
-      const main = await loadHistory(channel, MAIN_BRANCH)
+      const main = await loadHistory(channel, ROOT_BRANCH_ID)
       if (main !== "ok") {
         if (main === "failed" && view.status !== "closed") {
           view.status = "failed"
@@ -304,15 +304,15 @@ export const useChatStore = defineStore("chat", () => {
         break
       }
       case "session.state": {
-        if (notification.branchId === MAIN_BRANCH) {
+        if (notification.branchId === ROOT_BRANCH_ID) {
           if (view.running && !notification.running) refreshDirectorySoon()
         }
         channel.states.set(notification.branchId, { running: notification.running, stopping: notification.stopping })
         channel.lines.setRunning(notification.branchId, notification.running)
-        if (notification.branchId !== MAIN_BRANCH) ensureBranch(channel, notification.branchId)
+        if (notification.branchId !== ROOT_BRANCH_ID) ensureBranch(channel, notification.branchId)
         const running = anyRunning(channel)
-        view.running = stateOf(channel, MAIN_BRANCH).running
-        view.stopping = stateOf(channel, MAIN_BRANCH).stopping
+        view.running = stateOf(channel, ROOT_BRANCH_ID).running
+        view.stopping = stateOf(channel, ROOT_BRANCH_ID).stopping
         view.sessionRunning = running
         useSessionsStore().setRunning(view.sessionId, running)
         changed(channel)
@@ -360,8 +360,8 @@ export const useChatStore = defineStore("chat", () => {
     const applied = event.content
     if (applied.kind === "turn-end" || ((applied.kind === "model-end" || applied.kind === "tool-use-start" || applied.kind === "tool-use") && applied.requestId === stream.progress?.requestId)) stream.progress = undefined
     if (event.content.kind === "branch-create") ensureBranch(channel, event.content.branchId)
-    if (branchId === MAIN_BRANCH && event.content.kind === "permission-changed") channel.view.permission = event.content.policy
-    if (branchId === MAIN_BRANCH && (applied.kind === "input-deleted" || ((applied.kind === "input" || applied.kind === "source-input") && applied.blocks.some(block => block.key?.startsWith("goal:"))))) void refreshGoal(channel)
+    if (branchId === ROOT_BRANCH_ID && event.content.kind === "permission-changed") channel.view.permission = event.content.policy
+    if (branchId === ROOT_BRANCH_ID && (applied.kind === "input-deleted" || ((applied.kind === "input" || applied.kind === "source-input") && applied.blocks.some(block => block.key?.startsWith("goal:"))))) void refreshGoal(channel)
     changed(channel)
   }
 
@@ -402,7 +402,7 @@ export const useChatStore = defineStore("chat", () => {
   }
 
   function ensureBranch(channel: Channel, branchId: string): BranchStream {
-    if (branchId === MAIN_BRANCH) return channel.main
+    if (branchId === ROOT_BRANCH_ID) return channel.main
     let branch = channel.branches.get(branchId)
     if (branch === undefined) {
       branch = stream()
@@ -450,7 +450,7 @@ export const useChatStore = defineStore("chat", () => {
     try {
       while (channel.goalDirty) {
         channel.goalDirty = false
-        channel.main.projection.goal = await client().call("session.goal.get", { sessionId: channel.view.sessionId, branchId: MAIN_BRANCH }, readGoal)
+        channel.main.projection.goal = await client().call("session.goal.get", { sessionId: channel.view.sessionId, branchId: DEFAULT_BRANCH_ID }, readGoal)
         changed(channel)
       }
     } catch (error) {
@@ -488,7 +488,7 @@ export const useChatStore = defineStore("chat", () => {
         const loaded = await window(channel, branchId)
         const through = loaded.window.through!
         await restoreControls(channel, branchId, loaded.projection, through)
-        if (branchId !== MAIN_BRANCH) channel.lines.detail(await client().call("session.branch.get", { sessionId: channel.view.sessionId, branchId }, readBranchDetail))
+        if (branchId !== ROOT_BRANCH_ID) channel.lines.detail(await client().call("session.branch.get", { sessionId: channel.view.sessionId, branchId }, readBranchDetail))
         await branch.liveTask?.catch(() => {})
         loaded.projection.cursor = through
         branch.projection = loaded.projection
@@ -505,7 +505,7 @@ export const useChatStore = defineStore("chat", () => {
         changed(channel)
         return "ok"
       } catch (error) {
-        if (branchId !== MAIN_BRANCH && attempt < 10 && transientBranch(error)) {
+        if (branchId !== ROOT_BRANCH_ID && attempt < 10 && transientBranch(error)) {
           await new Promise(resolve => setTimeout(resolve, 100))
           continue
         }
@@ -555,7 +555,7 @@ export const useChatStore = defineStore("chat", () => {
     try {
       while (channel.historyQueue.length > 0) {
         const branchId = channel.historyQueue.shift()!
-        if (branchId === MAIN_BRANCH || !channel.branches.has(branchId)) continue
+        if (branchId === ROOT_BRANCH_ID || !channel.branches.has(branchId)) continue
         await loadHistory(channel, branchId)
       }
     } finally {
@@ -566,7 +566,7 @@ export const useChatStore = defineStore("chat", () => {
 
   function retryLine(sessionId: string, branchId: string): void {
     const channel = channels.get(sessionId)
-    if (channel === undefined || branchId === MAIN_BRANCH) return
+    if (channel === undefined || branchId === ROOT_BRANCH_ID) return
     const branch = channel.branches.get(branchId)
     if (branch === undefined) return
     branch.error = ""
@@ -594,7 +594,7 @@ export const useChatStore = defineStore("chat", () => {
     clearTimeout(channel.publishTimer)
     channel.publishTimer = undefined
     const view = channel.view
-    const main = stateOf(channel, MAIN_BRANCH)
+    const main = stateOf(channel, ROOT_BRANCH_ID)
     view.rows = channel.main.projection.rows.slice()
     view.lastTurnEnd = channel.main.projection.lastTurnEnd
     view.earlier = channel.main.before !== undefined
@@ -609,7 +609,7 @@ export const useChatStore = defineStore("chat", () => {
     view.goal = channel.main.projection.goal
     view.queued = channel.main.projection.queued()
     view.questions = [
-      ...channel.main.projection.waiting().map((ask) => ({ branchId: MAIN_BRANCH, ...ask })),
+      ...channel.main.projection.waiting().map((ask) => ({ branchId: ROOT_BRANCH_ID, ...ask })),
       ...[...channel.branches].flatMap(([id, branch]) => branch.projection.waiting().map((ask) => ({ branchId: id, ...ask }))),
     ]
     const branches: Record<string, BranchView> = {}
@@ -642,7 +642,7 @@ export const useChatStore = defineStore("chat", () => {
   function ensureLine(sessionId: string, branchId: string): void {
     const channel = channels.get(sessionId)
     if (channel === undefined) return
-    if (branchId !== MAIN_BRANCH && !channel.lines.has(branchId)) return
+    if (branchId !== ROOT_BRANCH_ID && !channel.lines.has(branchId)) return
     const branch = ensureBranch(channel, branchId)
     if (!branch.opened) {
       branch.opened = true
@@ -794,14 +794,14 @@ export const useChatStore = defineStore("chat", () => {
     return client().call("session.methods", { sessionId }, readSessionMethods).catch(() => [])
   }
 
-  /** Compacts the main line's context. */
+  /** Compacts the default branch's context. */
   async function compact(sessionId: string) {
-    return client().call("session.context.compact", { sessionId, branchId: MAIN_BRANCH }, readCompactResult)
+    return client().call("session.context.compact", { sessionId, branchId: DEFAULT_BRANCH_ID }, readCompactResult)
   }
 
-  /** Writes the main line's goal through `session.goal.<call>`; the goal changes when its events arrive. */
+  /** Writes the default branch's goal through `session.goal.<call>`; the goal changes when its events arrive. */
   async function writeGoal(sessionId: string, call: GoalCall, objective: string | undefined): Promise<void> {
-    await client().call(`session.goal.${call}`, { sessionId, branchId: MAIN_BRANCH, ...(objective === undefined ? {} : { objective }) }, readAck)
+    await client().call(`session.goal.${call}`, { sessionId, branchId: DEFAULT_BRANCH_ID, ...(objective === undefined ? {} : { objective }) }, readAck)
     const channel = channels.get(sessionId)
     if (channel !== undefined) {
       await refreshGoal(channel)
@@ -809,29 +809,29 @@ export const useChatStore = defineStore("chat", () => {
     }
   }
 
-  /** Starts a loop on the main line and returns its id. */
+  /** Starts a loop on the default branch and returns its id. */
   async function startLoop(sessionId: string, prompt: string, everySeconds: number | undefined): Promise<string> {
     return await client().call("session.loop.start", {
       sessionId,
-      branchId: MAIN_BRANCH,
+      branchId: DEFAULT_BRANCH_ID,
       prompt,
       ...(everySeconds === undefined ? {} : { everySeconds }),
     }, readStartedLoop)
   }
 
-  /** The main line's loops, newest first. */
+  /** The default branch's loops, newest first. */
   async function readLoops(sessionId: string): Promise<Loop[]> {
-    return [...await client().call("session.loop.list", { sessionId, branchId: MAIN_BRANCH }, readLoopsReply)]
+    return [...await client().call("session.loop.list", { sessionId, branchId: DEFAULT_BRANCH_ID }, readLoopsReply)]
   }
 
-  /** Stops one loop of the main line. */
+  /** Stops one loop of the default branch. */
   async function stopLoop(sessionId: string, loopId: string): Promise<void> {
     await client().call("session.loop.stop", { sessionId, loopId }, readAck)
   }
 
-  /** Reads the main line's context window usage. */
+  /** Reads the default branch's context window usage. */
   async function usage(sessionId: string) {
-    return client().call("session.context.usage", { sessionId, branchId: MAIN_BRANCH }, readContextUsage)
+    return client().call("session.context.usage", { sessionId, branchId: DEFAULT_BRANCH_ID }, readContextUsage)
   }
 
   /** Forks the Session at `at` (a main-line cut) and returns the new Session's id. */
@@ -846,25 +846,25 @@ export const useChatStore = defineStore("chat", () => {
 
   /** The Skills the composer offers by `/skill:<name>`: enabled, unshadowed and user-invocable, from `session.skills`. */
   async function sessionSkills(sessionId: string) {
-    return client().call("session.skills", { sessionId, branchId: MAIN_BRANCH }, readSessionSkills)
+    return client().call("session.skills", { sessionId, branchId: DEFAULT_BRANCH_ID }, readSessionSkills)
   }
 
-  /** Writes the main line's reasoning effort through `session.model.update`'s preferences; returns the server's outcome. */
+  /** Writes the default branch's reasoning effort through `session.model.update`'s preferences; returns the server's outcome. */
   /** Withdraws a queued message of `branchId`; with `steer`, the same content joins the running turn at its next boundary. */
   async function withdrawInput(sessionId: string, branchId: string, inputId: string, steer: UserInput | undefined): Promise<WithdrawResult> {
     return client().call("session.input.withdraw", { sessionId, branchId, inputId, ...(steer === undefined ? {} : { steer }) }, readWithdrawResult)
   }
 
-  /** The policy of `main`, or undefined when the Session serves no permission method or the read fails. */
+  /** The default branch's policy, or undefined when the Session serves no permission method or the read fails. */
   async function sessionPermission(sessionId: string): Promise<PermissionPolicy | undefined> {
     if (!useConnectionStore().supports("session.permission.get")) return undefined
-    return client().call("session.permission.get", { sessionId, branchId: MAIN_BRANCH }, readPermissionState)
+    return client().call("session.permission.get", { sessionId, branchId: DEFAULT_BRANCH_ID }, readPermissionState)
       .then((state) => state.policy, () => undefined)
   }
 
   /** Changes the preset, preserving tool exceptions; a conflict refreshes without retrying. */
   async function setPermission(sessionId: string, preset: PermissionPreset): Promise<PermissionOutcome> {
-    const state = await client().call("session.permission.get", { sessionId, branchId: MAIN_BRANCH }, readPermissionState)
+    const state = await client().call("session.permission.get", { sessionId, branchId: DEFAULT_BRANCH_ID }, readPermissionState)
     const view = views[sessionId]
     if (view !== undefined) view.permission = state.policy
     if (state.policy.preset === preset) return "unchanged"
@@ -872,7 +872,7 @@ export const useChatStore = defineStore("chat", () => {
     try {
       await client().call("session.permission.update", {
         sessionId,
-        branchId: MAIN_BRANCH,
+        branchId: DEFAULT_BRANCH_ID,
         expectedVersion: state.version,
         policy,
       }, readPermissionVersion)
@@ -888,13 +888,13 @@ export const useChatStore = defineStore("chat", () => {
   }
 
   async function setEffort(sessionId: string, effort: string): Promise<string> {
-    return client().call("session.model.update", { sessionId, branchId: MAIN_BRANCH, modelPreferences: { reasoningEffort: effort } }, readConfigurationOutcome)
+    return client().call("session.model.update", { sessionId, branchId: DEFAULT_BRANCH_ID, modelPreferences: { reasoningEffort: effort } }, readConfigurationOutcome)
   }
 
   async function setModel(sessionId: string, model: ModelId): Promise<void> {
     const result = await client().call("session.model.update", {
       sessionId,
-      branchId: MAIN_BRANCH,
+      branchId: DEFAULT_BRANCH_ID,
       providerId: model.providerId,
       modelId: model.modelId,
     }, readModelUpdate)

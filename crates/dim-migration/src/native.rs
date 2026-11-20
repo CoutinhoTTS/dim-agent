@@ -532,7 +532,7 @@ impl Native {
         )
         .map_err(failure)?;
         let branch = BranchRecord {
-            id: "main".into(),
+            id: ROOT_BRANCH_ID.into(),
             parent: None,
             branch_point: None,
             create_anchor: None,

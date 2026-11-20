@@ -323,9 +323,12 @@ entry's name relative to the authorized root and its kind; a name is the stored
 components joined by `/`, ready to pass to another operation, and on Unix a
 backslash is part of a name while on Windows it is a separator. `remove(name)`
 removes a file or a directory tree and returns `locked` while a lease holds it
-or a file beneath it. Plugins that must
-handle larger files keep them out of JavaScript: there is no streaming on this
-side. A buffer large enough that its call message would exceed the runtime's
+or a file beneath it. Use `scope.openRead(name)` for larger files. A missing file returns null;
+a present file returns its size and a pinned reader ID for `fsHost.readAt` and
+`fsHost.closeRead`. The opening row's unload closes outstanding readers.
+`scope.writeStream(name, next)` pulls chunks until null and preserves the old file
+on failure or cancellation. `scope.directory(name)` creates the work directory
+and returns its node-local path. A buffer large enough that its call message would exceed the runtime's
 16 MiB frame fails that call before it is sent, as a `RangeError` coded
 `bad-value`; the row and the file store are unaffected, and the same holds for
 any call argument, a large text `replace` included.

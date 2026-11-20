@@ -174,6 +174,12 @@ impl From<AgentError> for RpcError {
             },
             _ => error,
         };
+        // A tree refusal is the caller's own to correct, and its code is the
+        // one the tree named (design §20.21): the wire keeps both instead of
+        // reporting a Session operation failure.
+        if let AgentError::BranchRefused { refusal, message } = &error {
+            return Self::service(refusal.code(), message.clone());
+        }
         let variant = match &error {
             AgentError::InvalidInput(_) => "InvalidInput",
             AgentError::UnknownBranch(_) => "UnknownBranch",

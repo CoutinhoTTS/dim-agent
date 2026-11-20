@@ -2207,6 +2207,7 @@ async fn branch_end_events_restore_unchanged_and_the_line_stays_ended() {
             call_id: "call".into(),
         },
         ancestor: None,
+        final_message: None,
     });
     append(
         &store,
@@ -9361,4 +9362,455 @@ async fn v51_provider_history_migrates_atomically_without_guessing_the_bundle() 
             .unwrap(),
         None
     );
+}
+
+/// The store's default branch for `session`, read the way restore reads it:
+/// the newest `branch/default` or `session/forked` on the root through the
+/// kind index.
+fn stored_default(connection: &Connection, session: &str) -> String {
+    let row: Option<(String, Option<String>)> = connection
+        .query_row(
+            "SELECT kind, json_extract(body, '$.record.event.data.branch') \
+             FROM timeline_events INDEXED BY timeline_events_by_kind \
+             WHERE session_id = ?1 AND branch_id = 'main' \
+             AND kind IN ('branch/default', 'session/forked') \
+             ORDER BY sequence DESC LIMIT 1",
+            [session],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .unwrap();
+    match row {
+        Some((kind, Some(branch))) if kind == "branch/default" => branch,
+        _ => "main".into(),
+    }
+}
+
+/// A fork copies the root only and writes its `session/forked` after every
+/// copied fact, so its default branch is its root (design §5, §13, §20.24).
+#[tokio::test]
+async fn a_fork_copies_the_root_and_its_default_branch_is_the_root() {
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let sessions =
+        dim_app_server::storage::SessionStore::new(db.clone(), rutis::Ctx::root().unwrap(), 0);
+    let store = SqliteTimelineStore::new(db.clone());
+    let config = SessionConfig {
+        interactive: false,
+        ..SessionConfig::default()
+    };
+    store.create_session("source", &config).await.unwrap();
+    for (sequence, kind) in [
+        (
+            1,
+            EventKind::BranchCreate(BranchCreateData {
+                at: BranchCreateAt::Create {},
+                source: BranchSource::Tool {
+                    turn_id: "turn".into(),
+                    request_id: "request".into(),
+                    call_id: "call".into(),
+                },
+                branch: "line".into(),
+                prompt: "a line".into(),
+            }),
+        ),
+        (
+            2,
+            EventKind::BranchDefault(BranchDefaultData {
+                branch: "line".into(),
+                from: None,
+                source: BranchSource::User {
+                    operation_id: "switch".into(),
+                },
+            }),
+        ),
+    ] {
+        append(&store, key("source", "main"), vec![record(sequence, kind)])
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        stored_default(&Connection::open(&database.0).unwrap(), "source"),
+        "line"
+    );
+    store.close().await.unwrap();
+    let config = sessions
+        .session_config_text("source")
+        .await
+        .unwrap()
+        .unwrap();
+    sessions
+        .fork_session("source", "fork", 2, &config)
+        .await
+        .unwrap();
+    let connection = Connection::open(&database.0).unwrap();
+    assert_eq!(
+        stored_default(&connection, "fork"),
+        "main",
+        "the fork's own fact voids the move it copied"
+    );
+    assert_eq!(
+        store.default_of("fork"),
+        "main",
+        "the writer's cache starts the fork at its root"
+    );
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+}
+
+/// The catalog's recent activity follows the default branch: a batch that
+/// carries activity on the line the Session is now on moves the catalog's
+/// time, and one on the root after a move does not (design §5, §15).
+#[tokio::test]
+async fn the_writer_thread_keeps_recent_activity_on_the_default_branch() {
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    let config = SessionConfig {
+        interactive: false,
+        ..SessionConfig::default()
+    };
+    store.create_session("s", &config).await.unwrap();
+    let activity_at = |connection: &Connection| -> i64 {
+        connection
+            .query_row(
+                "SELECT updated_at_ms FROM session_catalog WHERE session_id='s'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    append(
+        &store,
+        key("s", "main"),
+        vec![record(
+            1,
+            EventKind::StopInterrupt(StopInterruptData {
+                reason: "setup".into(),
+                scope: InterruptScope::Turn,
+            }),
+        )],
+    )
+    .await
+    .unwrap();
+    let connection = Connection::open(&database.0).unwrap();
+    drop(connection);
+    let write = |sequence: u64, at: u64| {
+        let mut entry = record(
+            sequence,
+            EventKind::InputMessage(InputMessageData::text("hello", Some(InputMode::Queue))),
+        );
+        Arc::make_mut(&mut entry.event).create_at = at;
+        entry
+    };
+    append(&store, key("s", "main"), vec![write(2, 5_000)])
+        .await
+        .unwrap();
+    let connection = Connection::open(&database.0).unwrap();
+    assert_eq!(
+        activity_at(&connection),
+        5_000,
+        "before the move the root's activity is the Session's"
+    );
+    drop(connection);
+    append(
+        &store,
+        key("s", "main"),
+        vec![record(
+            3,
+            EventKind::BranchDefault(BranchDefaultData {
+                branch: "line".into(),
+                from: None,
+                source: BranchSource::User {
+                    operation_id: "switch".into(),
+                },
+            }),
+        )],
+    )
+    .await
+    .unwrap();
+    assert_eq!(store.default_of("s"), "line", "the cache follows the fact");
+    append(
+        &store,
+        key("s", "main"),
+        vec![record(
+            4,
+            EventKind::BranchCreate(BranchCreateData {
+                at: BranchCreateAt::Create {},
+                source: BranchSource::Tool {
+                    turn_id: "turn".into(),
+                    request_id: "request".into(),
+                    call_id: "call".into(),
+                },
+                branch: "line".into(),
+                prompt: "a line".into(),
+            }),
+        )],
+    )
+    .await
+    .unwrap();
+    append(&store, key("s", "main"), vec![write(5, 9_000)])
+        .await
+        .unwrap();
+    let connection = Connection::open(&database.0).unwrap();
+    assert_eq!(
+        activity_at(&connection),
+        5_000,
+        "the root's later activity is no longer the Session's"
+    );
+    drop(connection);
+    append(&store, key("s", "line"), vec![write(1, 7_000)])
+        .await
+        .unwrap();
+    let connection = Connection::open(&database.0).unwrap();
+    assert_eq!(
+        activity_at(&connection),
+        7_000,
+        "the default branch's activity is the Session's"
+    );
+    drop(connection);
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+}
+
+/// The catalog preview follows the root, the line that holds the Session's
+/// first words, even after the conversation moved to another line: a root
+/// batch inside the preview window fills a missing preview and leaves the
+/// activity time, which follows the default branch, where it was (session
+/// catalog §3.2, design §5, §15).
+#[tokio::test]
+async fn the_catalog_preview_follows_the_root_after_the_default_branch_moves() {
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    let config = SessionConfig {
+        interactive: false,
+        ..SessionConfig::default()
+    };
+    store.create_session("s", &config).await.unwrap();
+    append(
+        &store,
+        key("s", "main"),
+        vec![record(
+            1,
+            EventKind::BranchCreate(BranchCreateData {
+                at: BranchCreateAt::Create {},
+                source: BranchSource::User {
+                    operation_id: "open".into(),
+                },
+                branch: "line".into(),
+                prompt: "a line".into(),
+            }),
+        )],
+    )
+    .await
+    .unwrap();
+    append(
+        &store,
+        key("s", "main"),
+        vec![record(
+            2,
+            EventKind::BranchDefault(BranchDefaultData {
+                branch: "line".into(),
+                from: None,
+                source: BranchSource::User {
+                    operation_id: "switch".into(),
+                },
+            }),
+        )],
+    )
+    .await
+    .unwrap();
+    assert_eq!(store.default_of("s"), "line", "the cache follows the fact");
+    let projection = || {
+        let connection = Connection::open(&database.0).unwrap();
+        connection
+            .query_row(
+                "SELECT updated_at_ms, preview FROM session_catalog WHERE session_id='s'",
+                [],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?)),
+            )
+            .unwrap()
+    };
+    let activity = projection().0;
+    assert!(
+        projection().1.is_none(),
+        "the Session has no root user message yet"
+    );
+    append(
+        &store,
+        key("s", "main"),
+        vec![record(
+            3,
+            EventKind::InputMessage(InputMessageData::text(
+                "the root's first words",
+                Some(InputMode::Queue),
+            )),
+        )],
+    )
+    .await
+    .unwrap();
+    let (after, preview) = projection();
+    assert_eq!(
+        preview.as_deref(),
+        Some("the root's first words"),
+        "the root's user text fills the preview whatever the default is"
+    );
+    assert_eq!(
+        after, activity,
+        "a root batch does not move the activity time of a Session whose conversation is on another line"
+    );
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+}
+
+/// A `FORMAT` 52 store is migrated in place by the marker-only step, so this
+/// daemon opens it and rewrites only the marker; an older daemon refuses the
+/// store a newer one wrote, which is what the bump is for (design §15, §20.28).
+#[tokio::test]
+async fn a_format_52_store_is_refused_by_this_daemon_and_migrated_in_place() {
+    let database = Database::new();
+    let connection = Connection::open(&database.0).unwrap();
+    let mut statements = schema_of(52);
+    statements.sort_by_key(|sql| {
+        !sql.starts_with("CREATE TABLE ") && !sql.starts_with("CREATE VIRTUAL TABLE ")
+    });
+    for sql in statements {
+        connection.execute_batch(&sql).unwrap();
+    }
+    connection
+        .execute("INSERT INTO agent_store_format VALUES (52)", [])
+        .unwrap();
+    assert_eq!(marker(&connection), [52]);
+    let catalog = rows(&connection, "session_catalog");
+    let branches = rows(&connection, "timeline_branches");
+    drop(connection);
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    assert_eq!(db.upgraded_from(), Some(52), "the marker step ran");
+    db.close().await.unwrap();
+    let connection = Connection::open(&database.0).unwrap();
+    assert_eq!(marker(&connection), [i64::from(STORE_FORMAT)]);
+    assert_eq!(schema(&connection), schema_of(STORE_FORMAT));
+    assert_eq!(
+        (
+            rows(&connection, "session_catalog"),
+            rows(&connection, "timeline_branches")
+        ),
+        (catalog, branches),
+        "a marker-only step rewrites no business row"
+    );
+    drop(connection);
+    let future = STORE_FORMAT + 1;
+    let newer = Database::new();
+    Connection::open(&newer.0)
+        .unwrap()
+        .execute_batch(&format!(
+            "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = {future}));
+             INSERT INTO agent_store_format VALUES ({future});"
+        ))
+        .unwrap();
+    assert!(
+        SqliteStorage::open(newer.0.clone()).is_err(),
+        "a store a newer daemon wrote is refused"
+    );
+}
+
+/// E1: the write path and the catalog activity before and after the default
+/// branch moves (design §5, §15). Run with `--release --ignored --nocapture`.
+#[tokio::test]
+#[ignore]
+async fn measure_e1_write_path_and_catalog_activity_across_a_move() {
+    let database = Database::new();
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    let config = SessionConfig {
+        interactive: false,
+        ..SessionConfig::default()
+    };
+    store.create_session("s", &config).await.unwrap();
+    let median = |mut values: Vec<Duration>| -> f64 {
+        values.sort();
+        values[values.len() / 2].as_secs_f64() * 1e6
+    };
+    const ROUNDS: usize = 20;
+    let activity_at = |connection: &Connection| -> i64 {
+        connection
+            .query_row(
+                "SELECT updated_at_ms FROM session_catalog WHERE session_id='s'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    let mut sequence = 1;
+    append(
+        &store,
+        key("s", "main"),
+        vec![
+            record(
+                sequence,
+                EventKind::BranchCreate(BranchCreateData {
+                    at: BranchCreateAt::Create {},
+                    source: BranchSource::Tool {
+                        turn_id: "turn".into(),
+                        request_id: "request".into(),
+                        call_id: "call".into(),
+                    },
+                    branch: "line".into(),
+                    prompt: "a line".into(),
+                }),
+            ),
+            record(
+                sequence + 1,
+                EventKind::BranchDefault(BranchDefaultData {
+                    branch: "line".into(),
+                    from: None,
+                    source: BranchSource::User {
+                        operation_id: "switch".into(),
+                    },
+                }),
+            ),
+        ],
+    )
+    .await
+    .unwrap();
+    sequence += 2;
+    let write = |sequence: u64| {
+        let mut entry = record(
+            sequence,
+            EventKind::InputMessage(InputMessageData::text("hello", Some(InputMode::Queue))),
+        );
+        Arc::make_mut(&mut entry.event).create_at = 10_000 + sequence * 1_000;
+        entry
+    };
+    let mut before = Vec::new();
+    for round in 0..ROUNDS {
+        let started = Instant::now();
+        append(&store, key("s", "line"), vec![write(round as u64 + 1)])
+            .await
+            .unwrap();
+        before.push(started.elapsed());
+    }
+    let connection = Connection::open(&database.0).unwrap();
+    let moved = activity_at(&connection);
+    drop(connection);
+    let mut after = Vec::new();
+    for _ in 0..ROUNDS {
+        let started = Instant::now();
+        append(&store, key("s", "main"), vec![write(sequence)])
+            .await
+            .unwrap();
+        after.push(started.elapsed());
+        sequence += 1;
+    }
+    let connection = Connection::open(&database.0).unwrap();
+    let stale = activity_at(&connection);
+    drop(connection);
+    println!(
+        "E1 write on the default branch: {:.1} us; on the root it left: {:.1} us; catalog activity on the default branch: {moved}; the root's later writes left it at: {stale}",
+        median(before),
+        median(after)
+    );
+    store.close().await.unwrap();
+    db.close().await.unwrap();
 }

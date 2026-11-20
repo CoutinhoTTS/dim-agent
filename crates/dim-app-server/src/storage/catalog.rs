@@ -7,7 +7,7 @@ use crate::protocol::{Catalog, CatalogResult, SessionInfo, SessionSummary};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use dim_agent_runtime::{AgentError, Result};
 use dim_agent_types::{
-    ContentBlock, EventKind, InputMessageData, ModelId, markup::runtime_context,
+    ContentBlock, EventKind, InputMessageData, ModelId, ROOT_BRANCH_ID, markup::runtime_context,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use sha2::{Digest, Sha256};
@@ -24,7 +24,7 @@ pub(super) fn create(connection: &Connection, session: &str) -> Result<()> {
 /// Call inside the transaction that inserts those rows, before committing.
 pub fn initialize_session_catalog(connection: &Connection, session: &str) -> Result<()> {
     create(connection, session)?;
-    refresh(connection, session)
+    refresh(connection, session, ROOT_BRANCH_ID)
 }
 
 pub(crate) fn truncate_preview(value: &str, limit: usize) -> String {
@@ -76,14 +76,25 @@ fn activity_selection() -> String {
     )
 }
 
-pub(super) fn refresh(connection: &Connection, session: &str) -> Result<()> {
+/// Rebuilds both catalog columns for `session`: the activity time from
+/// `default` and a missing preview from the root. Imports, forks and the
+/// backfills need both, whichever line the Session's conversation is on.
+pub(super) fn refresh(connection: &Connection, session: &str, default: &str) -> Result<()> {
+    refresh_activity(connection, session, default)?;
+    refresh_preview(connection, session)
+}
+
+/// Rebuilds `session`'s activity time from its most recent activity on
+/// `default`, the line its conversation is on (design §5, §15). Writes only
+/// `updated_at_ms`.
+fn refresh_activity(connection: &Connection, session: &str, default: &str) -> Result<()> {
     let last: Option<String> = connection
         .query_row(
             &format!(
-                "SELECT body FROM timeline_events WHERE session_id=?1 AND branch_id='main' AND {} ORDER BY sequence DESC LIMIT 1",
+                "SELECT body FROM timeline_events WHERE session_id=?1 AND branch_id=?2 AND {} ORDER BY sequence DESC LIMIT 1",
                 activity_selection()
             ),
-            [session],
+            params![session, default],
             |row| row.get(0),
         )
         .optional()
@@ -112,6 +123,14 @@ pub(super) fn refresh(connection: &Connection, session: &str) -> Result<()> {
             params![session, i64::try_from(updated_at).map_err(error)?],
         )
         .map_err(error)?;
+    Ok(())
+}
+
+/// Fills `session`'s missing preview from its first user input within the
+/// root's first 256 events: the root holds a Session's first words, whatever
+/// line its conversation moved to (session catalog §3.3). Writes only
+/// `preview`, and only while it is undecided.
+pub(super) fn refresh_preview(connection: &Connection, session: &str) -> Result<()> {
     let preview: Option<String> = connection
         .query_row(
             "SELECT preview FROM session_catalog WHERE session_id=?1",
@@ -199,7 +218,7 @@ pub(super) fn backfill(connection: &Connection) -> Result<()> {
         if !present {
             create(connection, &session)?;
         }
-        refresh(connection, &session)?;
+        refresh(connection, &session, ROOT_BRANCH_ID)?;
     }
     Ok(())
 }

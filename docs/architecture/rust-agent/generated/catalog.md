@@ -21,7 +21,7 @@ Each catalog name a part of the assembly provides or injects. `data` means share
 | `eventSubscriptions` | process | eventhub | data | `list` sync, `sources` sync, `subscribe` async, `unsubscribe` async |
 | `executionSettingsHost` | process | ExecutionSettings | data | `read` async |
 | `fileStorage` | process | FileStorage | internal(object) | — |
-| `fsHost` | process | FileStorage | data | `closeRead` async, `openRead` async, `readAt` async |
+| `fsHost` | process | FileStorage | data | `backup` async, `closeRead` async, `createDirectory` async, `list` async, `lock` async, `openRead` async, `readAt` async, `readBytes` async, `remove` async, `replace` async, `stat` async, `unlock` async |
 | `grokOAuthService` | process | GrokOAuth | internal(secret) | — |
 | `hooksService` | process | HooksSettings | data | `plugins` async, `refusal` sync, `register` async, `withdraw` async |
 | `hostPlatform` | process | HostPlatform | internal(object) | — |
@@ -56,7 +56,7 @@ Each catalog name a part of the assembly provides or injects. `data` means share
 | `sessionPermissions` | process | AgentDirectory | data | `permission` async, `permissionDefaults` async |
 | `sessionStore` | process | SessionStore | internal(owner-api) | — |
 | `sessions` | process | AgentDirectory | data | `delete` async, `exists` async, `history` async, `idle` async, `input` async, `launch` async, `lookup` async, `pending` async, `stop` async, `withdraw` async |
-| `settings` | process | Settings | data | `projects` sync, `read` async, `register` async, `update` async |
+| `settings` | process | Settings | data | `declaredBy` sync, `projects` sync, `read` async, `register` async, `update` async |
 | `settingsService` | process | Settings | internal(owner-api) | — |
 | `skillsCatalog` | process | SkillsCatalog | data | `issues` async, `plugins` async, `register` async, `withdraw` async |
 | `skillsInstructionsSettingsHost` | process | PromptSettings | data | `instructions` async |
@@ -99,7 +99,7 @@ Each catalog name a part of the assembly provides or injects. `data` means share
 | `toolHost` | session | WorkspaceTools | data | `execute` async |
 | `toolRegistry` | session | ToolRegistry | data | `register` async |
 | `toolSourcesView` | session | ToolRegistry | data | `get` sync, `observe` async |
-| `treeCommands` | session | TimelineTree | data | `create` async, `end` async, `info` async, `input` async, `list` async, `page` async, `query` async |
+| `treeCommands` | session | TimelineTree | data | `create` async, `defaultBranch` async, `end` async, `info` async, `input` async, `list` async, `page` async, `query` async, `setDefaultBranch` async |
 | `uiResources` | session | UiResources | data | `publishFile` async, `withdraw` async |
 | `agentLoop` | branch | Loop | internal(hot-path) | — |
 | `approval` | branch | Approval | data | `decide` async, `pending` async |

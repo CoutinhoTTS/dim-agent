@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from "vue"
 import { useI18n } from "vue-i18n"
+import { ROOT_BRANCH_ID } from "../../rpc/protocol"
 import type { LineView } from "../../lines"
 import { useChatStore } from "../../stores/chat"
 import { useUiStore } from "../../stores/ui"
@@ -13,16 +14,16 @@ const ui = useUiStore()
 
 const view = computed(() => chat.views[props.sessionId])
 const lines = computed(() => view.value?.lines ?? [])
-const hasLines = computed(() => lines.value.some((line) => line.id !== "main"))
+const hasLines = computed(() => lines.value.some((line) => line.id !== ROOT_BRANCH_ID))
 
 function open(line: LineView): void {
-  if (line.id === "main" || line.state.kind === "creation-failed") return
+  if (line.id === ROOT_BRANCH_ID || line.state.kind === "creation-failed") return
   chat.ensureLine(props.sessionId, line.id)
   ui.openLine(props.sessionId, line.id)
 }
 
 function canEnd(line: LineView): boolean {
-  return line.id !== "main" && (line.state.kind === "working" || line.state.kind === "waiting")
+  return line.id !== ROOT_BRANCH_ID && (line.state.kind === "working" || line.state.kind === "waiting")
 }
 
 function awaitingApproval(line: LineView): boolean {
@@ -62,9 +63,9 @@ function parent(line: LineView): string {
         :key="line.id"
         class="lines-row"
         :data-depth="line.depth"
-        :data-active="line.id !== 'main' && ui.activeLineTab[sessionId] === line.id"
+        :data-active="line.id !== ROOT_BRANCH_ID && ui.activeLineTab[sessionId] === line.id"
       >
-        <template v-if="line.id === 'main'">
+        <template v-if="line.id === ROOT_BRANCH_ID">
           <span class="lines-state" :data-tone="tone(line)" aria-hidden="true" />
           <span class="lines-name">{{ t("lines.main") }}</span>
           <span class="lines-meta">{{ t("lines.mainHint") }}</span>
@@ -76,7 +77,7 @@ function parent(line: LineView): string {
             <span class="lines-meta">
               <span v-if="line.cut !== null">{{ cut(line) }} · </span>
               <span class="lines-id">{{ shortId(line.id) }}</span>
-              <span v-if="line.parentId !== 'main'"> · {{ t("lines.from", { name: parent(line) }) }}</span>
+              <span v-if="line.parentId !== ROOT_BRANCH_ID"> · {{ t("lines.from", { name: parent(line) }) }}</span>
               <span> · {{ lineStateLabel(t, line.state) }}</span>
             </span>
           </button>

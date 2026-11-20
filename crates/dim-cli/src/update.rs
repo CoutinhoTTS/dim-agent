@@ -31,6 +31,9 @@ pub struct Offer {
     /// The command to run: `update` for a recognised installation, else the
     /// package manager's own command.
     pub manual: String,
+    /// Whether the terminal UI may run the update itself: a recognised
+    /// installation whose server the client manages.
+    pub direct: bool,
 }
 
 /// What only a newer-store startup recovery asks of the staged tree.
@@ -308,16 +311,39 @@ pub async fn available(home: &Path, current: &str) -> Option<Offer> {
         return None;
     }
     let exe = std::env::current_exe().ok()?;
-    let manual = if installer(&exe, &package, &version).is_some() {
-        update_command(&package)
-    } else {
-        manual(&package, current)
-    };
-    Some(Offer {
+    Some(offer(&exe, &package, current, version))
+}
+
+fn offer(exe: &Path, package: &str, current: &str, version: String) -> Offer {
+    let direct = installer(exe, package, &version).is_some();
+    Offer {
         current: current.to_owned(),
+        manual: if direct {
+            update_command(package)
+        } else {
+            manual(package, current)
+        },
         version,
-        manual,
-    })
+        direct,
+    }
+}
+
+/// `/update`: a newer version on this build's channel, skipped or not;
+/// `Ok(None)` when this build is the newest. `Err` explains why nothing can
+/// be offered: a source build, or a registry that did not answer.
+pub async fn check(current: &str) -> Result<Option<Offer>, String> {
+    let package = package()?;
+    let Some(tag) = upgrade_tag(current, dim_agent_capabilities::build::RELEASE) else {
+        return Err(not_installable(&package, current));
+    };
+    let version = channel_version(&package, tag)
+        .await
+        .map_err(|error| format!("Cannot check for updates: {error}"))?;
+    if !newer(current, &version) {
+        return Ok(None);
+    }
+    let exe = std::env::current_exe().map_err(|error| error.to_string())?;
+    Ok(Some(offer(&exe, &package, current, version)))
 }
 
 async fn channel_version(package: &str, tag: &str) -> crate::Result<String> {
@@ -344,6 +370,7 @@ async fn channel_version(package: &str, tag: &str) -> crate::Result<String> {
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub(crate) async fn recover_startup(
     home: &Path,
+    invocation: &str,
     store: &crate::client::NewerStore,
 ) -> crate::Result<i32> {
     use std::os::unix::process::CommandExt;
@@ -395,7 +422,8 @@ pub(crate) async fn recover_startup(
             store_format: store.format,
             skipped,
         });
-        run_install(installation, tag, false).await?;
+        let mut signals = crate::plugins::Signals::listen()?;
+        run_install(installation, tag, invocation, &mut signals).await?;
         eprintln!("Restarting {}...", entry_point(&package));
         let error = std::process::Command::new(&launcher)
             .args(std::env::args_os().skip(1))
@@ -442,44 +470,60 @@ fn not_installable(package: &str, current: &str) -> String {
     )
 }
 
-/// The command that updates this copy, for a client that cannot run the
-/// installer itself (the terminal UI holds a share of the installation lease):
-/// the owner's entry point for a recognised installation, else
-/// [`not_installable`]. Installs nothing.
-pub fn command() -> Result<String, String> {
-    let package = package()?;
-    let current = dim_agent_capabilities::build::VERSION;
-    let executable = std::env::current_exe().map_err(|error| error.to_string())?;
-    match installer(&executable, &package, channel(current)) {
-        Some(_) => Ok(update_command(&package)),
-        None => Err(not_installable(&package, current)),
-    }
-}
-
 /// Updates this installation's package on its current channel, independently
 /// of automatic-check preferences and skipped versions. Unknown installation
-/// layouts return a manual command without installing anything.
-pub async fn run(legacy_exited: bool) -> crate::Result<i32> {
+/// layouts return a manual command without installing anything. `invocation`
+/// starts this CLI on the selected home in the commands an error names, and
+/// `signals` cancel the update.
+pub async fn run(invocation: &str, signals: &mut crate::plugins::Signals) -> crate::Result<i32> {
     let package = package()?;
     let current = dim_agent_capabilities::build::VERSION;
     let tag = channel(current);
     let executable = std::env::current_exe()?;
     let installation =
         installer(&executable, &package, tag).ok_or_else(|| not_installable(&package, current))?;
-    run_install(installation, tag, legacy_exited).await?;
+    run_install(installation, tag, invocation, signals).await?;
     Ok(0)
 }
 
-async fn run_install(installation: Install, tag: &str, legacy_exited: bool) -> crate::Result<()> {
+/// What starts the updated build in place of this process: the
+/// installation's own entry point, when the update exchanged the package
+/// folder under it. `None` for any other layout, whose user starts it again.
+pub fn restart_launcher() -> Option<PathBuf> {
+    let package = package().ok()?;
+    let executable = std::env::current_exe().ok()?;
+    let installation = installer(&executable, &package, "x")?;
+    #[cfg(unix)]
+    let staged = installation.manager == Manager::Staged;
+    #[cfg(not(unix))]
+    let staged = false;
+    staged.then(|| {
+        installation
+            .directory
+            .join("bin")
+            .join(entry_point(&package))
+    })
+}
+
+/// The command word that starts this installation for a shell.
+pub fn entry_command() -> String {
+    std::env::current_exe().map_or_else(|_| PACKAGE.to_owned(), |exe| entry(&exe))
+}
+
+async fn run_install(
+    installation: Install,
+    tag: &str,
+    invocation: &str,
+    signals: &mut crate::plugins::Signals,
+) -> crate::Result<()> {
     let package = installation.package.clone();
-    let mut signals = crate::plugins::Signals::listen()?;
     let mut stderr = std::io::stderr();
     let interactive = stderr.is_terminal();
     if !interactive {
         writeln!(stderr, "Updating {package} on the {tag} channel...")?;
     }
     let cancel = CancellationToken::new();
-    let installation = install(installation, cancel.clone(), legacy_exited);
+    let installation = install(installation, invocation, cancel.clone());
     tokio::pin!(installation);
     let started = tokio::time::Instant::now();
     let mut progress = tokio::time::interval(Duration::from_millis(120));
@@ -534,7 +578,11 @@ async fn run_install(installation: Install, tag: &str, legacy_exited: bool) -> c
 }
 
 const LOCK_FILE: &str = ".dimcode-update.lock";
-const BASELINE_FILE: &str = ".dimcode-consumers";
+/// What a cancelled update reports.
+const INTERRUPTED: &str = "Update interrupted";
+/// How long an update waits for the lock before it refuses: a server that just
+/// stopped can close its connection before the OS releases its lease.
+const LOCK_GRACE: Duration = Duration::from_secs(2);
 
 /// The shared lock this process holds on its installation for its lifetime.
 static LEASE: std::sync::Mutex<Option<std::fs::File>> = std::sync::Mutex::new(None);
@@ -608,27 +656,24 @@ pub fn hold_installation() -> Result<(), String> {
 /// The installation lock is taken exclusively, so it fails while any other
 /// process (client, server or installer, in any home) uses the installation.
 /// This process's own lease is released for the duration and restored after.
-/// Without the baseline marker an older consumer, which holds no lease, cannot
-/// be ruled out: the install is refused unless `legacy_exited` states that
-/// every older client and server has exited, which then creates the marker.
 pub async fn install(
     install: Install,
+    invocation: &str,
     cancel: CancellationToken,
-    legacy_exited: bool,
 ) -> Result<Vec<String>, String> {
     let own = LEASE.lock().unwrap().take();
     drop(own);
-    let result = install_exclusive(&install, cancel, legacy_exited).await;
+    let result = install_exclusive(&install, invocation, cancel).await;
     *LEASE.lock().unwrap() = shared(&install.directory).ok().flatten();
     result
 }
 
 async fn install_exclusive(
     install: &Install,
+    invocation: &str,
     cancel: CancellationToken,
-    legacy_exited: bool,
 ) -> Result<Vec<String>, String> {
-    let lock = lease(install, legacy_exited)?;
+    let lock = lease(install, invocation, &cancel).await?;
     let result = match install.manager {
         #[cfg(unix)]
         Manager::Staged => staged::update(install, &cancel).await,
@@ -640,33 +685,37 @@ async fn install_exclusive(
     result
 }
 
-/// Takes the installation's exclusive lease and records the baseline marker,
-/// returning the lock so it is held for as long as the caller needs it.
-fn lease(install: &Install, legacy_exited: bool) -> Result<std::fs::File, String> {
+/// Takes the installation's exclusive lease, returning the lock so it is held
+/// for as long as the caller needs it. Cancellation ends the wait for it.
+async fn lease(
+    install: &Install,
+    invocation: &str,
+    cancel: &CancellationToken,
+) -> Result<std::fs::File, String> {
     let path = install.directory.join(LOCK_FILE);
     let lock = open_lock(&install.directory, true)
         .map_err(|error| format!("Cannot lock installation {}: {error}", path.display()))?;
-    match lock.try_lock() {
-        Ok(()) => {}
-        Err(std::fs::TryLockError::WouldBlock) => {
-            return Err(
-                "This installation is in use by a client, server or update (in any home). Exit them, stop the server with `dimcode daemon stop`, and retry".to_owned(),
-            );
+    let deadline = tokio::time::Instant::now() + LOCK_GRACE;
+    loop {
+        if cancel.is_cancelled() {
+            return Err(INTERRUPTED.to_owned());
         }
-        Err(std::fs::TryLockError::Error(error)) => return Err(error.to_string()),
-    }
-    let baseline = install.directory.join(BASELINE_FILE);
-    if !baseline.exists() {
-        if !legacy_exited {
-            let command = entry_point(&install.package);
-            return Err(format!(
-                "Older versions do not register as users of this installation, so an idle installation cannot be confirmed. Exit every client and stop every server, then run `{command} update --confirm-legacy-exited`"
-            ));
+        match lock.try_lock() {
+            Ok(()) => return Ok(lock),
+            Err(std::fs::TryLockError::WouldBlock) if tokio::time::Instant::now() < deadline => {
+                tokio::select! {
+                    () = cancel.cancelled() => {}
+                    () = tokio::time::sleep(Duration::from_millis(50)) => {}
+                }
+            }
+            Err(std::fs::TryLockError::WouldBlock) => {
+                return Err(format!(
+                    "DimCode is currently running (another window, server, or update is active).\nClose all DimCode windows, run `{invocation} daemon stop`, and try again."
+                ));
+            }
+            Err(std::fs::TryLockError::Error(error)) => return Err(error.to_string()),
         }
-        std::fs::write(&baseline, b"")
-            .map_err(|error| format!("Cannot record {}: {error}", baseline.display()))?;
     }
-    Ok(lock)
 }
 
 /// Runs the manager and waits for it, ending its process tree on cancellation.
@@ -675,6 +724,9 @@ async fn run_manager(
     args: Vec<String>,
     cancel: CancellationToken,
 ) -> Result<(), String> {
+    if cancel.is_cancelled() {
+        return Err(INTERRUPTED.to_owned());
+    }
     let mut command = tokio::process::Command::new(&install.program);
     command.args(&args).stdin(std::process::Stdio::null());
     let mut tree = dim_agent_capabilities::host_platform::ProcessTree::spawn(command)
@@ -685,7 +737,7 @@ async fn run_manager(
     let mut sink = tokio::io::sink();
     let result = tokio::select! {
         biased;
-        _ = cancel.cancelled() => Err("Update interrupted".to_owned()),
+        _ = cancel.cancelled() => Err(INTERRUPTED.to_owned()),
         result = async {
             let (status, _, _) = tokio::try_join!(
                 tree.wait(),

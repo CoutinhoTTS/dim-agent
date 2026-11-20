@@ -20,7 +20,8 @@ use dim_agent_runtime::{
     panic_message,
 };
 use dim_agent_types::{
-    AgentEvent, BranchCreateAt, EventKind, ModelRequest, RecoverySnapshot, SessionForkedData,
+    AgentEvent, BranchCreateAt, EventKind, ModelRequest, ROOT_BRANCH_ID, RecoverySnapshot,
+    SessionForkedData,
     grant::{GrantKind, GrantMode, SessionGrant},
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
@@ -476,7 +477,22 @@ impl SqliteTimelineStore {
         }
         self.db.checkpoint();
     }
+    #[cfg(feature = "testing")]
+    pub fn default_of(&self, session: &str) -> String {
+        self.db
+            .defaults
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(session)
+            .cloned()
+            .unwrap_or_else(|| ROOT_BRANCH_ID.into())
+    }
     fn forget(&self, session: &str) {
+        self.db
+            .defaults
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(session);
         self.db
             .timeline_memo
             .lock()
@@ -530,7 +546,8 @@ impl SqliteStorage {
         for (session, batches) in sessions {
             match writer_operation(|| writer.prepare(&session, &batches)) {
                 Ok(encoding) => {
-                    prepared.insert(session, (batches, encoding));
+                    let default = self.default_for(&session, &batches);
+                    prepared.insert(session, (batches, encoding, default));
                 }
                 Err(failure) => {
                     tracing::error!(db_path = %self.path.display(), adapter = "rust", phase = "prepare", pid = std::process::id(), %failure, "storage.transaction");
@@ -539,17 +556,26 @@ impl SqliteStorage {
             }
         }
         if !prepared.is_empty() {
-            let grouped = self.write_round_sessions(
-                prepared
-                    .values()
-                    .map(|(batches, encoding)| (batches.as_slice(), encoding)),
-            );
-            for (session, (batches, encoding)) in prepared {
+            let grouped =
+                self.write_round_sessions(prepared.values().map(|(batches, encoding, default)| {
+                    (batches.as_slice(), encoding, default.as_str())
+                }));
+            for (session, (batches, encoding, default)) in prepared {
                 let result = if grouped.is_ok() {
                     Ok(())
                 } else {
-                    self.write_round_sessions(std::iter::once((batches.as_slice(), &encoding)))
+                    self.write_round_sessions(std::iter::once((
+                        batches.as_slice(),
+                        &encoding,
+                        default.as_str(),
+                    )))
                 };
+                if result.is_ok() {
+                    self.defaults
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .insert(session.clone(), default);
+                }
                 if result.is_ok() && memo_enabled {
                     let branches = memo.entry(session.clone()).or_default();
                     for (branch, (sequence, request, refs)) in encoding.last {
@@ -566,15 +592,81 @@ impl SqliteStorage {
                 outcomes.insert(session, result);
             }
         }
+        self.defaults
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|session, _| !outcomes.get(session).is_some_and(Result::is_err));
         memo.retain(|session, branches| {
             branches.retain(|_, entry| entry.request.strong_count() > 0);
             !branches.is_empty() && !outcomes.get(session).is_some_and(Result::is_err)
         });
         outcomes
     }
+    /// The default branch `session`'s batches write on, for the catalog's recent
+    /// activity: the cache's answer, then the moves and forks among the batches
+    /// themselves, newest last, because those rows are not readable before the
+    /// transaction commits. A Session the cache does not hold reads the fact the
+    /// way restore does, once (design §5, §15).
+    fn default_for(&self, session: &str, batches: &[&TimelineBatch]) -> String {
+        let mut current = self
+            .cached_default(session)
+            .unwrap_or_else(|| ROOT_BRANCH_ID.into());
+        for batch in batches {
+            for record in &batch.events {
+                match &record.event.kind {
+                    EventKind::BranchDefault(data) => current = data.branch.clone(),
+                    EventKind::SessionForked(_) => current = ROOT_BRANCH_ID.into(),
+                    _ => {}
+                }
+            }
+        }
+        current
+    }
+    /// The default branch the cache holds for `session`; a Session it does not
+    /// hold reads its newest `branch/default` or `session/forked` through the
+    /// kind index and keeps the answer.
+    fn cached_default(&self, session: &str) -> Option<String> {
+        if let Some(default) = self
+            .defaults
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(session)
+        {
+            return Some(default.clone());
+        }
+        let guard = self
+            .connection
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let connection = guard.as_ref()?;
+        let row: Option<(String, Option<String>)> = connection
+            .query_row(
+                "SELECT kind, json_extract(body, '$.record.event.data.branch') \
+                 FROM timeline_events INDEXED BY timeline_events_by_kind \
+                 WHERE session_id = ?1 AND branch_id = ?2 \
+                 AND kind IN ('branch/default', 'session/forked') \
+                 ORDER BY sequence DESC LIMIT 1",
+                params![session, ROOT_BRANCH_ID],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .ok()
+            .flatten();
+        drop(guard);
+        let default = match row {
+            Some((kind, Some(branch))) if kind == "branch/default" => branch,
+            Some(_) => ROOT_BRANCH_ID.into(),
+            None => ROOT_BRANCH_ID.into(),
+        };
+        self.defaults
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(session.to_owned(), default.clone());
+        Some(default)
+    }
     fn write_round_sessions<'a>(
         &self,
-        sessions: impl Iterator<Item = (&'a [&'a TimelineBatch], &'a Prepared)>,
+        sessions: impl Iterator<Item = (&'a [&'a TimelineBatch], &'a Prepared, &'a str)>,
     ) -> Result<()> {
         let mut guard = self
             .connection
@@ -1758,7 +1850,7 @@ fn create_session(
         )
         .map_err(error)?;
     let info = BranchRecord {
-        id: "main".into(),
+        id: ROOT_BRANCH_ID.into(),
         parent: None,
         branch_point: None,
         create_anchor: None,
@@ -1801,7 +1893,7 @@ fn writer_operation<T>(operation: impl FnOnce() -> Result<T>) -> Result<T> {
 fn transaction<'a>(
     connection: &mut Connection,
     path: &std::path::Path,
-    mut sessions: impl Iterator<Item = (&'a [&'a TimelineBatch], &'a Prepared)>,
+    mut sessions: impl Iterator<Item = (&'a [&'a TimelineBatch], &'a Prepared, &'a str)>,
 ) -> Result<()> {
     writer_operation(|| {
         let tx = connection
@@ -1810,7 +1902,7 @@ fn transaction<'a>(
                 tracing::error!(db_path = %path.display(), adapter = "rust", phase = "BEGIN", pid = std::process::id(), sqlite_code = ?failure.sqlite_error_code(), %failure, "storage.transaction");
                 error(failure)
             })?;
-        let written = sessions.try_for_each(|(batches, prepared)| {
+        let written = sessions.try_for_each(|(batches, prepared, default)| {
             let mut insert = tx
                 .prepare_cached("INSERT OR IGNORE INTO timeline_content VALUES (?1, ?2, ?3, ?4)")
                 .map_err(error)?;
@@ -1824,7 +1916,9 @@ fn transaction<'a>(
             batches
                 .iter()
                 .zip(&prepared.lists)
-                .try_for_each(|(batch, lists)| write_batch(&tx, batch, lists, &mut outputs))
+                .try_for_each(|(batch, lists)| {
+                    write_batch(&tx, batch, lists, default, &mut outputs)
+                })
         });
         match written {
         Ok(()) => tx.commit().map_err(|failure| {
@@ -1909,6 +2003,7 @@ fn write_batch(
     connection: &Connection,
     batch: &TimelineBatch,
     lists: &[Vec<Option<ListReferences>>],
+    default: &str,
     outputs: &mut BTreeMap<String, OutputRow>,
 ) -> Result<()> {
     #[cfg(test)]
@@ -2074,7 +2169,7 @@ fn write_batch(
             sql_sequence(sequence)?
         ])
         .map_err(error)?;
-    if batch.key.branch_id == "main" {
+    if batch.key.branch_id == default {
         // The batch's own activity, newest first: a housekeeping batch does
         // not touch the stored activity time (issue #1099).
         if let Some(last) = batch
@@ -2090,11 +2185,14 @@ fn write_batch(
                 )
                 .map_err(error)?;
         }
-        if batch.events.first().is_some_and(|record| record.event.sequence <= 256)
-            && batch.events.iter().any(|record| matches!(&record.event.kind, EventKind::InputMessage(input) if input.user.is_some()))
-        {
-            super::catalog::refresh(connection, &batch.key.session_id)?;
-        }
+    }
+    // The preview comes from the root, the line that holds the Session's first
+    // words, whatever line the conversation moved to (session catalog §3.3).
+    if batch.key.branch_id == ROOT_BRANCH_ID
+        && batch.events.first().is_some_and(|record| record.event.sequence <= 256)
+        && batch.events.iter().any(|record| matches!(&record.event.kind, EventKind::InputMessage(input) if input.user.is_some()))
+    {
+        super::catalog::refresh_preview(connection, &batch.key.session_id)?;
     }
     Ok(())
 }
@@ -2396,11 +2494,24 @@ impl SqliteTimelineStore {
             .into_iter()
             .collect();
         let (source, fork, config) = (source.to_owned(), fork.to_owned(), config.to_owned());
-        self.db
+        let reset = fork.clone();
+        let copied = self
+            .db
             .run_copy(move |connection| {
                 copy_fork(connection, &source, &fork, at, &content, &arrays, &config)
             })
-            .await
+            .await;
+        if copied.is_ok() {
+            // A fork's default branch is its root: the cache starts the fork
+            // there, and forgets the source's entry nothing reads again (design
+            // §5, §13).
+            self.db
+                .defaults
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(reset, ROOT_BRANCH_ID.into());
+        }
+        copied
     }
 
     /// The source record's configuration text, so a caller can copy it into
@@ -2513,9 +2624,9 @@ fn copy_fork_rows(
             .map_err(error)?;
         for (id, info) in &branches {
             let parsed: BranchRecord = serde_json::from_str(info).map_err(error)?;
-            let head = if id == "main" {
+            let head = if id == ROOT_BRANCH_ID {
                 cut
-            } else if parsed.parent.as_deref() == Some("main")
+            } else if parsed.parent.as_deref() == Some(ROOT_BRANCH_ID)
                 && parsed.create_anchor.is_some_and(|anchor| anchor <= at)
             {
                 0
@@ -2577,7 +2688,7 @@ fn copy_fork_rows(
                 super::text::row_through(
                     tx,
                     fork,
-                    "main",
+                    ROOT_BRANCH_ID,
                     read_sequence(row, 0).map_err(error)?,
                     &row.get::<_, String>(2).map_err(error)?,
                     at,
@@ -2587,7 +2698,7 @@ fn copy_fork_rows(
                     super::identities::row(
                         tx,
                         fork,
-                        "main",
+                        ROOT_BRANCH_ID,
                         read_sequence(row, 0).map_err(error)?,
                         &row.get::<_, String>(2).map_err(error)?,
                         at,
@@ -2596,7 +2707,7 @@ fn copy_fork_rows(
                 super::members::row(
                     tx,
                     fork,
-                    "main",
+                    ROOT_BRANCH_ID,
                     &row.get::<_, String>(1).map_err(error)?,
                     &row.get::<_, String>(2).map_err(error)?,
                 )?;
@@ -2680,10 +2791,10 @@ fn copy_fork_rows(
             };
             let key = TimelineKey {
                 session_id: fork.to_owned(),
-                branch_id: "main".into(),
+                branch_id: ROOT_BRANCH_ID.into(),
             };
             let wire = codec::encode(&forked, std::iter::empty())?;
-            super::text::event(tx, fork, "main", at + 1, &wire.event)?;
+            super::text::event(tx, fork, ROOT_BRANCH_ID, at + 1, &wire.event)?;
             insert_event(
                 tx,
                 &key,
@@ -3246,7 +3357,7 @@ fn directory_rows(connection: &Connection, session: &str) -> Result<Vec<StoredBr
         );
     }
     let main = branches
-        .get("main")
+        .get(ROOT_BRANCH_ID)
         .ok_or_else(|| error("Session main directory is missing"))?;
     if main.info.parent.is_some()
         || main.info.branch_point.is_some()
@@ -3255,7 +3366,7 @@ fn directory_rows(connection: &Connection, session: &str) -> Result<Vec<StoredBr
         return Err(error("invalid main branch directory"));
     }
     for (id, branch) in &branches {
-        if id == "main" {
+        if id == ROOT_BRANCH_ID {
             continue;
         }
         let parent = branch
