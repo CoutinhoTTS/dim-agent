@@ -458,14 +458,41 @@ impl Wire {
     fn attached(&mut self) {
         let attach = self.read("session.attach");
         self.reply(&attach, attach_record(&attach));
+        self.resumed_on("main", 8);
+    }
+    /// The attach reply, then the policy read of the line it names and the
+    /// window, pending-question and idle reads that follow: a Session's first
+    /// frame names one line, and the reply is where it comes from
+    /// (design §14).
+    fn attached_with_policy(&mut self, policy: Value) {
+        let attach = self.read("session.attach");
+        self.reply(&attach, attach_record(&attach));
+        let get = self.read("session.permission.get");
+        assert_eq!(
+            get["params"],
+            json!({"sessionId":"session","branchId":"main"})
+        );
+        self.reply(&get, policy);
+        self.resumed_on("main", 8);
+    }
+    /// The window, pending-question and idle reads a resumed Session makes on
+    /// `branch`, after its attach reply.
+    fn resumed_on(&mut self, branch: &str, through: u64) {
         let history = self.read("session.history");
+        assert_eq!(history["params"]["branchId"], branch);
         self.reply(
             &history,
-            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+            json!({"events":[],"through":through,"nextAfter":through,"done":true}),
         );
-        self.no_pending_questions(8);
+        let question = self.read("session.question.pending");
+        assert_eq!(question["params"]["branchId"], branch);
+        self.reply(
+            &question,
+            json!({"branchId":branch,"through":through,"batches":[],"next":null}),
+        );
         let idle = self.read("session.idle");
-        self.reply(&idle, json!({"sequence":8}));
+        assert_eq!(idle["params"]["branchId"], branch);
+        self.reply(&idle, json!({"sequence":through}));
     }
     fn no_pending_questions(&mut self, through: u64) {
         let request = self.read("session.question.pending");
@@ -6012,20 +6039,21 @@ fn a_resumed_session_draws_the_adopted_model_and_effort() {
     daemon.join().unwrap();
 }
 
-/// The capability declaration a configuration states for the test model.
-fn effort_snapshot(efforts: &[&str]) -> Value {
+/// The capability declaration a configuration states for `model_id`.
+fn effort_snapshot(model_id: &str, efforts: &[&str]) -> Value {
     let mut capabilities = dim_agent_types::ModelCapabilities::with_limits(64_000, 2_048);
     capabilities.reasoning = true;
-    json!({"target":{"providerId":"test","modelId":"model"},
+    json!({"target":{"providerId":"test","modelId":model_id},
         "capabilities":capabilities,
         "reasoning":{"supported":true,"effortOptions":efforts}})
 }
 
-/// A resumed line-mode Session folds the shown line from the cursor its attach
-/// reply carries: a configuration fact at that sequence is already the reply's
-/// model, and a later one reaches `/effort`. The reply is authoritative: the
-/// directory only answers for a server that does not carry the field (design
-/// §14).
+/// A resumed Session folds the configuration of the line its cursor names: the
+/// attach reply's model is the root's (design §14), so a Session whose
+/// conversation is on a line shows the model that line adopted at or below its
+/// cursor, and only the root takes the reply's. The reply's cursor stays the
+/// shown line's, and the directory answers only for a server that does not
+/// carry the field.
 #[test]
 fn a_resumed_line_mode_session_folds_the_default_branchs_cursor() {
     for (line, cursor, listed) in [
@@ -6045,7 +6073,7 @@ fn a_resumed_line_mode_session_folds_the_default_branchs_cursor() {
             let attach = wire.read("session.attach");
             let mut record = attach_record(&attach);
             record["defaultBranch"] = json!({"branchId":line,"sequence":cursor});
-            record["capabilitySnapshot"] = effort_snapshot(&["low", "high"]);
+            record["capabilitySnapshot"] = effort_snapshot("model", &["low", "high"]);
             wire.reply(&attach, record);
             let history = wire.read("session.history");
             assert_eq!(history["params"]["branchId"], json!(line));
@@ -6053,8 +6081,9 @@ fn a_resumed_line_mode_session_folds_the_default_branchs_cursor() {
                 history["params"].get("through").is_none(),
                 "the line's window starts from its head"
             );
-            let mut event = configured_event(cursor, "model", json!({}));
-            event["data"]["capability_snapshot"] = effort_snapshot(&["minimal"]);
+            let mut event = configured_event(cursor - 1, "line-model", json!({}));
+            event["data"]["capability_snapshot"] =
+                effort_snapshot("line-model", &["none", "minimal"]);
             wire.reply(
                 &history,
                 json!({"events":[event],"through":cursor,"nextAfter":cursor,"done":true}),
@@ -6081,7 +6110,10 @@ fn a_resumed_line_mode_session_folds_the_default_branchs_cursor() {
         let mut terminal = Terminal::launch(command);
         terminal.editor();
         terminal.write(b"/effort\r");
-        terminal.until("Reasoning effort choices: low, high");
+        terminal.until(match line {
+            "main" => "Reasoning effort choices: low, high",
+            _ => "Reasoning effort choices: none, minimal",
+        });
         home.kill(&terminal);
         terminal.wait();
         daemon.join().unwrap();

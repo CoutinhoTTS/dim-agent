@@ -270,22 +270,14 @@ pub async fn chat(
         created.session_id
     };
     let listed = conversation(client, &session_id).await?;
-    let selected = if let (Some(preset), Some(_)) = (options.permission, &options.resume) {
-        if !client.supports(&permission::PRESET_METHODS) {
-            return Err(
-                "This daemon cannot change a Session's permission preset; omit --permission".into(),
-            );
-        }
-        Some(
-            permission::select(client, &session_id, &listed, preset)
-                .await
-                .map_err(|error| {
-                    crate::client::resume_failure("Cannot set the permission preset", error)
-                })?,
-        )
-    } else {
-        None
-    };
+    if options.permission.is_some()
+        && options.resume.is_some()
+        && !client.supports(&permission::PRESET_METHODS)
+    {
+        return Err(
+            "This daemon cannot change a Session's permission preset; omit --permission".into(),
+        );
+    }
     display.record(&format!(
         "{}: {}\nsession: {}",
         if interactive {
@@ -296,26 +288,6 @@ pub async fn chat(
         options.launch_dir().display(),
         session_id
     ))?;
-    let policy = match (selected, options.permission) {
-        (Some(policy), _) => Some(Ok(policy)),
-        (None, Some(preset)) => Some(Ok(PermissionPolicy {
-            preset,
-            ..Default::default()
-        })),
-        (None, None) if interactive && client.supports(&["session.permission.get"]) => Some(
-            permission::read(client, &session_id, &listed)
-                .await
-                .map(|state| state.policy),
-        ),
-        (None, None) => None,
-    };
-    match policy {
-        Some(Ok(policy)) => {
-            display.record(&format!("permission: {}", permission::name(policy.preset)))?;
-        }
-        Some(Err(error)) => display.record(&format!("permission: unavailable ({error})"))?,
-        None => {}
-    }
     let mut params = json!({"sessionId":session_id});
     if !display.json
         && client.offers("session.history.display")
@@ -332,23 +304,68 @@ pub async fn chat(
         .default_branch
         .as_ref()
         .map_or(listed, |cursor| cursor.branch_id.clone());
+    // The preset belongs to the line the reply names: the directory's answer is
+    // one round trip older, and the line may have moved between them
+    // (design §14).
+    let selected = match (options.permission, &options.resume) {
+        (Some(preset), Some(_)) => Some(
+            permission::select(client, &session_id, &conversation, preset)
+                .await
+                .map_err(|error| {
+                    crate::client::resume_failure("Cannot set the permission preset", error)
+                })?,
+        ),
+        _ => None,
+    };
+    let policy = match (selected, options.permission) {
+        (Some(policy), _) => Some(Ok(policy)),
+        (None, Some(preset)) => Some(Ok(PermissionPolicy {
+            preset,
+            ..Default::default()
+        })),
+        (None, None) if interactive && client.supports(&["session.permission.get"]) => Some(
+            permission::read(client, &session_id, &conversation)
+                .await
+                .map(|state| state.policy),
+        ),
+        (None, None) => None,
+    };
+    match policy {
+        Some(Ok(policy)) => {
+            display.record(&format!("permission: {}", permission::name(policy.preset)))?;
+        }
+        Some(Err(error)) => display.record(&format!("permission: unavailable ({error})"))?,
+        None => {}
+    }
     if options.resume.is_some() {
         crate::session_host::adopt_startup(client, options, &session_id).await?;
     }
     let mut questions = Questions::default();
     let result = async {
         display.muted = !interactive;
-        display.model = attached.model.map(|model| crate::wire::Configuration {
-            provider_id: model.provider_id,
-            model_id: model.model_id,
-            capability_snapshot: attached.capability_snapshot,
-            model_preferences: attached.model_preferences,
-        });
+        // The reply's configuration is the root's (design §14): a conversation
+        // on a line takes that line's own facts from the window below, and its
+        // watermark starts below every one of them. A reply that names no line
+        // predates per-line configuration, so its model is the Session's.
+        let seeded = attached.default_branch.is_none() || conversation == ROOT_BRANCH_ID;
+        display.model = if seeded {
+            attached.model.map(|model| crate::wire::Configuration {
+                provider_id: model.provider_id,
+                model_id: model.model_id,
+                capability_snapshot: attached.capability_snapshot,
+                model_preferences: attached.model_preferences,
+            })
+        } else {
+            None
+        };
         // The attach reply's `defaultBranch` is the conversation's own cursor;
         // its `sequence` stays the root's (design §14).
-        display.model_through =
+        display.model_through = if seeded {
             resume_cursor(attached.default_branch.as_ref(), attached.sequence, &conversation)
-                .unwrap_or(0);
+                .unwrap_or(0)
+        } else {
+            0
+        };
         display.cursor = window::read(client, &session_id, &conversation, &mut display).await?;
         questions.start(client, &session_id, &conversation).await?;
         display.failed = false;

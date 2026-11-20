@@ -797,40 +797,30 @@ impl Worker {
         scope_cwd(self.options.workspace().as_str(), scope)
     }
 
-    /// The line a Session's conversation is on: the default branch the daemon
-    /// reports, or the root of a Session that has not moved it (design §4).
-    async fn conversation_of(&mut self, session_id: &str) -> crate::Result<String> {
-        if !self.client.supports(&["session.branches"]) {
-            return Ok(ROOT_BRANCH_ID.into());
-        }
-        let directory: dim_client::wire::BranchDirectory = self
-            .client
-            .typed("session.branches", json!({"sessionId": session_id}))
-            .await?;
-        Ok(directory
-            .default_branch_id
-            .unwrap_or_else(|| ROOT_BRANCH_ID.into()))
-    }
-
     /// Resumes the requested Session; an ordinary startup stays at Home.
     async fn open(&mut self) -> crate::Result<()> {
         if let Some(id) = self.options.resume.clone() {
+            if self.options.permission.is_some()
+                && !self.client.supports(&permission::PRESET_METHODS)
+            {
+                return Err(
+                    "This daemon cannot change a Session's permission preset; omit --permission"
+                        .into(),
+                );
+            }
+            adopt_startup(&mut self.client, &self.options, &id).await?;
+            self.attach(id.clone(), SwitchKind::Resumed).await?;
+            // The preset belongs to the line the attach reply named
+            // (design §14); a directory read would be one round trip older.
             if let Some(preset) = self.options.permission {
-                if !self.client.supports(&permission::PRESET_METHODS) {
-                    return Err(
-                        "This daemon cannot change a Session's permission preset; omit --permission"
-                            .into(),
-                    );
-                }
-                let branch = self.conversation_of(&id).await?;
+                let branch = self.default_branch.clone();
                 permission::select(&mut self.client, &id, &branch, preset)
                     .await
                     .map_err(|error| {
                         client::resume_failure("Cannot set the permission preset", error)
                     })?;
             }
-            adopt_startup(&mut self.client, &self.options, &id).await?;
-            return self.attach(id, SwitchKind::Resumed).await;
+            return Ok(());
         }
         if self.client.offers("session.model.preview")
             && let Err(error) = self.preview_model().await
@@ -1030,7 +1020,6 @@ impl Worker {
         self.session_cwd = attached.cwd;
         self.register_ui().await?;
         self.mcp_required.clear();
-        self.model = Some(configuration.clone());
         // The reply's record is the root's adopted configuration, the model the
         // conversation keeps when it moves back to the root (design §14).
         self.line_configurations.insert(
@@ -1089,9 +1078,22 @@ impl Worker {
                 .window
                 .through = Some(cursor);
         }
-        self.model_through = conversation_cursor.unwrap_or(0);
+        // A conversation on the root takes the reply's configuration as its
+        // own; one on a line takes that line's facts, which the window replays
+        // from a watermark below every one of them. A reply that names no line
+        // predates per-line configuration, so its model is the Session's
+        // (design §14).
+        let seeded = attached.default_branch.is_none() || conversation_line == ROOT_BRANCH_ID;
+        self.model_through = if seeded {
+            conversation_cursor.unwrap_or(0)
+        } else {
+            0
+        };
         self.poll_task_history().await?;
-        self.send(Update::Ready(configuration));
+        if seeded {
+            self.model = Some(configuration.clone());
+            self.send(Update::Ready(configuration));
+        }
         self.send(catalog_features(None));
         self.send(Update::Skills(Vec::new()));
         self.send(Update::Switched {
@@ -1617,26 +1619,21 @@ impl Worker {
                 }));
             }
             Command::Resume(session_id) => {
+                self.attach(session_id.clone(), SwitchKind::Resumed).await?;
                 if let Some(preset) = self.options.permission
                     && self.client.supports(&permission::PRESET_METHODS)
                 {
-                    // The preset lands on the line the resumed Session's
-                    // conversation is on, which this Home is not (design §14).
-                    let applied = match self.conversation_of(&session_id).await {
-                        Ok(branch) => {
-                            permission::select(&mut self.client, &session_id, &branch, preset)
-                                .await
-                                .map(|_| ())
-                        }
-                        Err(error) => Err(error),
-                    };
-                    if let Err(error) = applied {
+                    // The preset lands on the line the attach reply named,
+                    // which this Home was not (design §14).
+                    let branch = self.default_branch.clone();
+                    if let Err(error) =
+                        permission::select(&mut self.client, &session_id, &branch, preset).await
+                    {
                         self.send(Update::Notice(format!(
                             "The permission preset was not applied: {error}"
                         )));
                     }
                 }
-                self.attach(session_id, SwitchKind::Resumed).await?;
             }
             Command::ListSessions {
                 id,

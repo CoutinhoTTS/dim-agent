@@ -293,8 +293,10 @@ fn tui_a_refused_continue_is_shown_in_the_lines_panel() {
 
 /// The shown line resumes from the cursor its attach reply carries: a line's
 /// own sequence, and the root's `sequence` when the conversation is the root
-/// (design §14). The attach reply is authoritative: the directory only
-/// answers for a server that does not carry the field.
+/// (design §14). Its model is that line's own, adopted at or below the cursor:
+/// the reply's model is the root's, and the root alone shows it. The reply's
+/// cursor is authoritative: the directory only answers for a server that does
+/// not carry the field.
 #[test]
 fn tui_resumes_the_shown_line_from_the_attach_cursor() {
     for (line, cursor, listed, entries) in [
@@ -343,7 +345,7 @@ fn tui_resumes_the_shown_line_from_the_attach_cursor() {
             );
             wire.reply(
                 &window,
-                json!({"items":[],"through":cursor,"nextBefore":null,"nextAfter":cursor,"done":true}),
+                json!({"items":[configured_event(cursor - 1, "line-model", json!({}))],"through":cursor,"nextBefore":1,"nextAfter":cursor,"done":true}),
             );
             let parent = entries.iter().find(|(id, _)| *id == line).and_then(|(_, parent)| *parent);
             loop {
@@ -365,7 +367,10 @@ fn tui_resumes_the_shown_line_from_the_attach_cursor() {
         let mut command = home.command();
         sized(&mut command, 100, 32);
         let mut terminal = Terminal::resume_tui(command);
-        terminal.until("test / model");
+        terminal.until(match line {
+            "main" => "test / model",
+            _ => "test / line-model",
+        });
         home.kill(&terminal);
         terminal.wait();
         daemon.join().unwrap();
@@ -392,15 +397,14 @@ fn policy(preset: &str) -> Value {
     json!({"preset":preset,"allowedTools":[],"disallowedTools":[]})
 }
 
-/// `/resume` applies the launch preset to the resumed Session's default
-/// branch, the line its conversation is on, not to the root the interface is
-/// leaving (design §14).
+/// `/resume` applies the launch preset to the line the attach reply names, the
+/// line the conversation is on, not to the root the interface is leaving and
+/// not to a line the directory reported before the attach (design §14).
 #[test]
 fn tui_resume_applies_the_preset_to_the_resumed_default_branch() {
     let home = Home::new();
     let workspace = std::fs::canonicalize(&home.0).unwrap();
     let workspace = workspace.to_str().unwrap().to_owned();
-    let (chosen, preset) = std::sync::mpsc::channel();
     let daemon = home.daemon(move |wire| {
         wire.hello(&[
             "session.methods",
@@ -418,25 +422,45 @@ fn tui_resume_applies_the_preset_to_the_resumed_default_branch() {
                 "preview":"on the line","model":{"providerId":"test","modelId":"model"},
                 "updatedAt":5}]}),
         );
-        let directory = || directory("line-1", &[("main", None), ("line-1", Some("main"))]);
+        // The directory's line and the attach reply's disagree: the reply is
+        // the one the write follows.
+        let directory = || directory("main", &[("main", None), ("line-1", Some("main"))]);
+        let mut opening_read = true;
         loop {
             let request = next(wire);
             match request["method"].as_str().unwrap_or_default() {
                 "session.branches" => wire.reply(&request, directory()),
+                "session.attach" => {
+                    let mut record = attach_record(&request);
+                    record["defaultBranch"] = json!({"branchId":"line-1","sequence":5});
+                    wire.reply(&request, record);
+                }
                 "session.permission.get" => {
-                    chosen.send(request["params"]["branchId"].clone()).unwrap();
+                    assert_eq!(
+                        request["params"]["branchId"],
+                        json!("line-1"),
+                        "the preset follows the attach reply's line"
+                    );
                     wire.reply(
                         &request,
                         json!({"version":1,"policy":policy("workspace-write")}),
                     );
-                    break;
+                    if !opening_read {
+                        break;
+                    }
+                    opening_read = false;
                 }
+                "session.history" => wire.reply(&request, history(5, vec![])),
                 other => panic!("unexpected {other}: {request}"),
             }
         }
         let update = next(wire);
         assert_eq!(update["method"], "session.permission.update");
-        chosen.send(update["params"]["branchId"].clone()).unwrap();
+        assert_eq!(
+            update["params"]["branchId"],
+            json!("line-1"),
+            "the write follows the attach reply's line"
+        );
         wire.reply(&update, json!({"version":2,"policy":policy("read-only")}));
         loop {
             let request = next(wire);
@@ -450,7 +474,10 @@ fn tui_resume_applies_the_preset_to_the_resumed_default_branch() {
                     record["defaultBranch"] = json!({"branchId":"line-1","sequence":5});
                     wire.reply(&request, record);
                 }
-                "session.history" => wire.reply(&request, history(5, vec![])),
+                "session.history" => wire.reply(
+                    &request,
+                    history(5, vec![configured_event(4, "line-model", json!({}))]),
+                ),
                 other => panic!("unexpected {other}: {request}"),
             }
         }
@@ -463,15 +490,7 @@ fn tui_resume_applies_the_preset_to_the_resumed_default_branch() {
     terminal.write(b"/resume\r");
     terminal.until("on the line");
     terminal.write(b"\r");
-    terminal.until("test / model");
-    for step in 0..2 {
-        let branch = preset.recv_timeout(PATIENCE).unwrap();
-        assert_eq!(
-            branch,
-            json!("line-1"),
-            "step {step} of the launch preset must reach the resumed Session's default branch"
-        );
-    }
+    terminal.until("test / line-model");
     home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
