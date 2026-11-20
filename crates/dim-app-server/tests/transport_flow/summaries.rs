@@ -1,6 +1,6 @@
 use super::*;
 use dim_agent_runtime::testing::branch_events as read_branch_events;
-use dim_agent_types::{EventKind, InputBlock, InputMessageData};
+use dim_agent_types::{EventKind, InputBlock, InputMessageData, ROOT_BRANCH_ID};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn summaries_are_v3_filtered_and_bounded() {
@@ -430,10 +430,19 @@ impl dim_agent_capabilities::host::ModelDriver for HeldToolLine {
 async fn launch_holding_tool_line(
     config: ServerConfig,
 ) -> (RunningServer, dim_agent_runtime::Agent) {
+    launch_holding_tool_line_with(
+        config,
+        Arc::new(dim_agent_runtime::MemoryTimelineStore::default()),
+    )
+    .await
+}
+
+async fn launch_holding_tool_line_with(
+    config: ServerConfig,
+    timeline: Arc<dyn dim_agent_runtime::TimelineStore>,
+) -> (RunningServer, dim_agent_runtime::Agent) {
     let mut builder = AgentBuilder::new(AgentConfig::default());
-    builder.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(Arc::new(
-        dim_agent_runtime::MemoryTimelineStore::default(),
-    )));
+    builder.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(timeline));
     defaults::install(&mut builder);
     defaults::mock_model_hosts_with_model(
         &mut builder,
@@ -564,4 +573,336 @@ async fn an_empty_tool_line_is_dated_by_its_opening_in_both_listings() {
         server.shutdown();
         server.join().await.unwrap();
     }
+}
+
+/// Delegates to the in-memory store and holds the first summary activity read
+/// on a line that is not the root, so a test can move the default branch away
+/// and end that line while the read is in flight.
+struct SummaryHoldStore {
+    memory: dim_agent_runtime::MemoryTimelineStore,
+    entered: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    release: tokio::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    armed: AtomicBool,
+}
+
+impl SummaryHoldStore {
+    fn new() -> (
+        Arc<Self>,
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (entered, entered_rx) = tokio::sync::oneshot::channel();
+        let (release, release_rx) = tokio::sync::oneshot::channel();
+        (
+            Arc::new(Self {
+                memory: dim_agent_runtime::MemoryTimelineStore::default(),
+                entered: std::sync::Mutex::new(Some(entered)),
+                release: tokio::sync::Mutex::new(Some(release_rx)),
+                armed: AtomicBool::new(true),
+            }),
+            entered_rx,
+            release,
+        )
+    }
+
+    /// The summary's activity read: the newest activity timestamp on a line
+    /// other than the root (session catalog §3.2).
+    fn holds(
+        &self,
+        scope: &dim_agent_runtime::TimelineReadScope,
+        query: &dim_agent_runtime::QuerySpec,
+    ) -> bool {
+        scope.key.branch_id != ROOT_BRANCH_ID
+            && query.pick == Some(dim_agent_runtime::QueryPick::Last)
+            && matches!(
+                &query.select,
+                dim_agent_runtime::QuerySelect::Fields { fields }
+                    if fields.len() == 1 && fields[0] == "create_at"
+            )
+            && query
+                .filter
+                .as_ref()
+                .is_some_and(|filter| mentions_kind(filter, "turn/end"))
+            && self.armed.swap(false, Ordering::SeqCst)
+    }
+}
+
+fn mentions_kind(filter: &dim_agent_runtime::QueryFilter, kind: &str) -> bool {
+    use dim_agent_runtime::QueryFilter;
+    match filter {
+        QueryFilter::In { values, .. } => values.iter().any(|value| value.as_str() == Some(kind)),
+        QueryFilter::And { conditions } | QueryFilter::Or { conditions } => conditions
+            .iter()
+            .any(|condition| mentions_kind(condition, kind)),
+        QueryFilter::Not { condition } | QueryFilter::Exists { condition } => {
+            mentions_kind(condition, kind)
+        }
+        _ => false,
+    }
+}
+
+impl dim_agent_runtime::TimelineStore for SummaryHoldStore {
+    fn query<'a>(
+        &'a self,
+        scope: &'a dim_agent_runtime::TimelineReadScope,
+        query: &'a dim_agent_runtime::QuerySpec,
+        page: Option<&'a dim_agent_runtime::QueryPage>,
+    ) -> dim_agent_runtime::BoxFuture<'a, dim_agent_runtime::Result<dim_agent_runtime::QueryResult>>
+    {
+        Box::pin(async move {
+            if self.holds(scope, query) {
+                if let Some(entered) = self.entered.lock().unwrap().take() {
+                    let _ = entered.send(());
+                }
+                if let Some(release) = self.release.lock().await.take() {
+                    let _ = release.await;
+                }
+            }
+            self.memory.query(scope, query, page).await
+        })
+    }
+    fn create_session<'a>(
+        &'a self,
+        id: &'a str,
+        config: &'a dim_agent_runtime::SessionConfig,
+    ) -> dim_agent_runtime::BoxFuture<'a, dim_agent_runtime::Result<()>> {
+        self.memory.create_session(id, config)
+    }
+    fn rollback_session<'a>(
+        &'a self,
+        id: &'a str,
+    ) -> dim_agent_runtime::BoxFuture<'a, dim_agent_runtime::Result<()>> {
+        self.memory.rollback_session(id)
+    }
+    fn release_session<'a>(
+        &'a self,
+        id: &'a str,
+    ) -> dim_agent_runtime::BoxFuture<'a, dim_agent_runtime::Result<()>> {
+        self.memory.release_session(id)
+    }
+    fn session_config<'a>(
+        &'a self,
+        id: &'a str,
+    ) -> dim_agent_runtime::BoxFuture<
+        'a,
+        dim_agent_runtime::Result<Option<dim_agent_runtime::SessionConfig>>,
+    > {
+        self.memory.session_config(id)
+    }
+    fn branches<'a>(
+        &'a self,
+        id: &'a str,
+    ) -> dim_agent_runtime::BoxFuture<
+        'a,
+        dim_agent_runtime::Result<Vec<dim_agent_runtime::StoredBranch>>,
+    > {
+        self.memory.branches(id)
+    }
+    fn head<'a>(
+        &'a self,
+        key: &'a dim_agent_runtime::TimelineKey,
+    ) -> dim_agent_runtime::BoxFuture<'a, dim_agent_runtime::Result<u64>> {
+        self.memory.head(key)
+    }
+    fn append(
+        &self,
+        key: dim_agent_runtime::TimelineKey,
+        events: Vec<dim_agent_runtime::StoredEvent>,
+        publish: dim_agent_runtime::PublishCallback,
+    ) -> dim_agent_runtime::Result<()> {
+        self.memory.append(key, events, publish)
+    }
+    fn batch_end<'a>(
+        &'a self,
+        key: &'a dim_agent_runtime::TimelineKey,
+        sequence: u64,
+    ) -> dim_agent_runtime::BoxFuture<'a, dim_agent_runtime::Result<()>> {
+        self.memory.batch_end(key, sequence)
+    }
+    fn read_segments<'a>(
+        &'a self,
+        session_id: &'a str,
+        segments: Vec<(String, std::ops::RangeInclusive<u64>)>,
+    ) -> dim_agent_runtime::BoxFuture<
+        'a,
+        dim_agent_runtime::Result<Vec<Vec<dim_agent_runtime::StoredEvent>>>,
+    > {
+        self.memory.read_segments(session_id, segments)
+    }
+    fn trace<'a>(
+        &'a self,
+        key: &'a dim_agent_runtime::TimelineKey,
+        sequence: u64,
+    ) -> dim_agent_runtime::BoxFuture<
+        'a,
+        dim_agent_runtime::Result<Option<dim_agent_runtime::TimelineTrace>>,
+    > {
+        self.memory.trace(key, sequence)
+    }
+    fn save_snapshot<'a>(
+        &'a self,
+        key: &'a dim_agent_runtime::TimelineKey,
+        snapshot: dim_agent_types::RecoverySnapshot,
+    ) -> dim_agent_runtime::BoxFuture<'a, dim_agent_runtime::Result<()>> {
+        self.memory.save_snapshot(key, snapshot)
+    }
+    fn latest_snapshot<'a>(
+        &'a self,
+        key: &'a dim_agent_runtime::TimelineKey,
+        through: u64,
+        interpreter: &'a str,
+    ) -> dim_agent_runtime::BoxFuture<
+        'a,
+        dim_agent_runtime::Result<Option<dim_agent_types::RecoverySnapshot>>,
+    > {
+        self.memory.latest_snapshot(key, through, interpreter)
+    }
+}
+
+/// A storeless listing reads a row's default branch and its activity in more
+/// than one read. Another client moving the default back to the root ends the
+/// line between them; the listing still answers the row, from the Session's
+/// new default (session catalog §3.3).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_storeless_summary_survives_its_default_line_ending_mid_read() {
+    let (store, entered, release) = SummaryHoldStore::new();
+    let (server, agent) = launch_holding_tool_line_with(ServerConfig::default(), store).await;
+    let mut mover = Client::new_version(&server, false, 3).await;
+    let mut reader = Client::new_version(&server, false, 3).await;
+    let created = reader
+        .rpc(
+            "session.create",
+            json!({
+                "cwd": std::env::temp_dir(),
+                "tools": ["branch", "wait"],
+                "permissionPolicy": {"preset": "full-access"}
+            }),
+        )
+        .await;
+    assert_ok(&created);
+    let id = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    let session = agent.get_session(&id).unwrap();
+    while dim_agent_runtime::core::unix_millis() <= session.created_at() {
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    let open = format!(
+        "tool:branch {}",
+        json!({"action": "create", "prompt": "hold this line"})
+    );
+    assert_ok(
+        &reader
+            .rpc(
+                "session.submit",
+                json!({"sessionId": id, "branchId": "main", "text": open}),
+            )
+            .await,
+    );
+    let child = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(branch) = session
+                .branches()
+                .into_iter()
+                .find(|branch| branch.parent.as_deref() == Some("main"))
+            {
+                return branch.id;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("main opens the tool line");
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !session.state(&child).is_ok_and(|state| state.running) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the tool line starts its first turn");
+    let opening = read_branch_events(&session, &child, ..=session.sequence(&child).unwrap())
+        .await
+        .unwrap()
+        .first()
+        .expect("the line has its opening event")
+        .create_at;
+    assert_ok(
+        &reader
+            .rpc(
+                "session.branch_set_default",
+                json!({"sessionId": id, "branchId": child}),
+            )
+            .await,
+    );
+    let reading = tokio::spawn(async move { reader.rpc("session.summaries", json!({})).await });
+    tokio::time::timeout(Duration::from_secs(10), entered)
+        .await
+        .expect("the listing reads the line's activity")
+        .unwrap();
+    assert_ok(
+        &mover
+            .rpc(
+                "session.branch_set_default",
+                json!({"sessionId": id, "branchId": "main"}),
+            )
+            .await,
+    );
+    let ended = tokio::time::timeout(
+        Duration::from_secs(20),
+        mover.rpc(
+            "session.branch_end",
+            json!({"sessionId": id, "branchId": child}),
+        ),
+    )
+    .await
+    .expect("the line ends while the listing holds its activity read");
+    assert_ok(&ended);
+    // The ended line's notice starts a turn on the root once `branch/ended` is
+    // recorded; waiting for it leaves the retried row a settled root.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let events = read_branch_events(&session, "main", ..).await.unwrap();
+            let recorded = events
+                .iter()
+                .rfind(|event| matches!(event.kind, EventKind::BranchEnded(_)))
+                .map(|event| event.sequence);
+            if recorded.is_some_and(|recorded| {
+                events.iter().any(|event| {
+                    event.sequence > recorded && matches!(event.kind, EventKind::TurnEnd(_))
+                })
+            }) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the ended line's notice turn ends on the root");
+    release.send(()).unwrap();
+    let summaries = reading.await.unwrap();
+    assert_ok(&summaries);
+    let row = summaries["result"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["sessionId"] == json!(id))
+        .unwrap_or_else(|| panic!("the Session is listed: {summaries}"));
+    let activity = activity_time(
+        &read_branch_events(&session, "main", ..=session.sequence("main").unwrap())
+            .await
+            .unwrap(),
+    )
+    .expect("the root line is active");
+    assert!(
+        activity > opening,
+        "the root's activity follows the line's opening: {activity} vs {opening}"
+    );
+    assert_eq!(
+        row["updatedAt"],
+        json!(activity),
+        "the row follows the Session's new default, not the line it left"
+    );
+    drop(mover);
+    drop(session);
+    drop(agent);
+    server.shutdown();
+    server.join().await.unwrap();
 }

@@ -43,6 +43,50 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 const MAX_REQUESTS: usize = 64;
 const CONTROL_RESERVE: usize = 8;
 
+/// How many times one storeless listing row re-reads its Session's default
+/// branch when a concurrent move ends the line it started on.
+const SUMMARY_READ_ATTEMPTS: usize = 2;
+
+/// One storeless listing row's snapshot: the Session's default branch, its
+/// running state and the cutoffs both reads of the row use (session catalog
+/// §3.3). The line can end under the read, which only a move off it allows
+/// (timeline branches §10); the caller then reads the row from the Session's
+/// new default.
+fn summary_record(
+    host: &crate::agents::AgentHost,
+    session: &Session,
+) -> dim_agent_runtime::Result<(SessionInfo, crate::agents::SummaryCutoff)> {
+    let default = session.default_branch()?;
+    let status = session.state(&default)?;
+    let cutoff = crate::agents::SummaryCutoff {
+        preview_through: session.sequence(ROOT_BRANCH_ID)?,
+        activity_through: session.sequence(&default)?,
+        default,
+    };
+    Ok((
+        SessionInfo {
+            session_id: session.id().to_owned(),
+            cwd: session.config().cwd.clone(),
+            model: dim_agent_types::ModelId {
+                provider_id: session.config().model.provider_id.clone(),
+                model_id: session.config().model.model_id.clone(),
+            },
+            created_at: session.created_at(),
+            running: status.running,
+            // The row's sequence stays the root's, as the stored catalog row
+            // reads it; the running state and the activity follow the line the
+            // conversation is on (design §14, §15).
+            sequence: cutoff.preview_through,
+            attached_clients: 0,
+            agent_id: Some(host.agent_id.clone()),
+            origin: None,
+            parent_session_id: None,
+            title: Some(crate::storage::TitleFields::default()),
+        },
+        cutoff,
+    ))
+}
+
 /// The channel a connection declared at `hello`, for presence only.
 #[derive(Clone, Debug)]
 pub(crate) struct ClientIdentity {
@@ -1182,7 +1226,7 @@ impl Connection {
                         },
                     );
                 }
-                let records = rpc
+                let sessions = rpc
                     .index
                     .hosts()
                     .into_iter()
@@ -1200,60 +1244,31 @@ impl Connection {
                             .version_of(session.id())
                             .is_some_and(|recorded| recorded <= self.protocol_version())
                     })
-                    .map(|(host, s)| {
-                        let default = s.default_branch().map_err(RpcError::from)?;
-                        let status = s.state(&default).map_err(RpcError::from)?;
-                        let cutoff = crate::agents::SummaryCutoff {
-                            preview_through: s.sequence(ROOT_BRANCH_ID).map_err(RpcError::from)?,
-                            activity_through: s.sequence(&default).map_err(RpcError::from)?,
-                            default,
+                    .collect::<Vec<_>>();
+                let mut summaries = Vec::with_capacity(sessions.len());
+                'sessions: for (host, session) in sessions {
+                    let mut attempt = 0;
+                    let (mut record, preview, updated_at) = loop {
+                        attempt += 1;
+                        let read = match summary_record(&host, &session) {
+                            Ok((record, cutoff)) => rpc
+                                .index
+                                .session_summary(session.id(), cutoff, session.created_at())
+                                .await
+                                .map(|(preview, updated_at)| (record, preview, updated_at)),
+                            Err(error) => Err(error),
                         };
-                        Ok((
-                            SessionInfo {
-                                session_id: s.id().to_owned(),
-                                cwd: s.config().cwd.clone(),
-                                model: dim_agent_types::ModelId {
-                                    provider_id: s.config().model.provider_id.clone(),
-                                    model_id: s.config().model.model_id.clone(),
-                                },
-                                created_at: s.created_at(),
-                                running: status.running,
-                                // The row's sequence stays the root's, as the
-                                // stored catalog row reads it; the running
-                                // state and the activity follow the line the
-                                // conversation is on (design §14, §15).
-                                sequence: cutoff.preview_through,
-                                attached_clients: 0,
-                                agent_id: Some(host.agent_id.clone()),
-                                origin: None,
-                                parent_session_id: None,
-                                title: Some(crate::storage::TitleFields::default()),
-                            },
-                            cutoff,
-                        ))
-                    })
-                    .collect::<Result<Vec<_>, RpcError>>();
-                let mut records = match records {
-                    Ok(records) => records,
-                    Err(error) => return Some(Err(error)),
-                };
-                for (record, _) in &mut records {
-                    record.attached_clients = self.hub.attached_clients(&record.session_id);
-                }
-                let mut summaries = Vec::with_capacity(records.len());
-                for (session, cutoff) in records {
-                    let summary = rpc
-                        .index
-                        .session_summary(&session.session_id, cutoff, session.created_at)
-                        .await;
-                    let (preview, updated_at) = match summary {
-                        Ok(summary) => summary,
-                        Err(AgentError::Closed(_)) => continue,
-                        Err(error) => return Some(Err(RpcError::from(error))),
+                        match read {
+                            Ok(row) => break row,
+                            Err(AgentError::Closed(_)) => continue 'sessions,
+                            Err(AgentError::BranchEnded(_)) if attempt < SUMMARY_READ_ATTEMPTS => {}
+                            Err(error) => return Some(Err(RpcError::from(error))),
+                        }
                     };
+                    record.attached_clients = self.hub.attached_clients(&record.session_id);
                     summaries.push(SessionSummary {
-                        closed: rpc.index.closed(&session.session_id),
-                        session,
+                        closed: rpc.index.closed(&record.session_id),
+                        session: record,
                         preview,
                         updated_at,
                     });

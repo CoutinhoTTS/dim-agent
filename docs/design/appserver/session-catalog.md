@@ -122,8 +122,11 @@ it answers from the same projection instead of reading history, and its contents
 applies the preview rule below unchanged, its row exists from the Session's creation (§5), and the read applies
 neither classification filter, so a Session of any origin is listed, with the two fields every v3 item now carries. A
 daemon without a store has no projection and answers from the loaded Sessions as today; it does not list
-`session.catalog` either (§3.1). So the method is how a client that does not find `session.catalog` lists, and how
-clients on a daemon older than this change list; both stay working because the method's shape does not change.
+`session.catalog` either (§3.1). A row reads its Session's default branch and that line's facts; when a concurrent
+move ends the line before the row completes, the row is read again from the Session's new default, so another client
+moving the conversation cannot fail the listing. So the method is how a client that does not find `session.catalog`
+lists, and how clients on a daemon older than this change list; both stay working because the method's shape does not
+change.
 
 **Open Sessions and `includeClosed`.** A Session this daemon closed, through `session.close` or ACP's
 `session/close`, keeps its stored rows but stays out of a default catalog read: the admission slot's closed flag
