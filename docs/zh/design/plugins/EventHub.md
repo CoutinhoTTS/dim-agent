@@ -199,7 +199,7 @@ sequenceDiagram
 2. 为订阅命名的每个来源向目标分支各写一条 `append` 输入，提交 id 为 `eventhub-guide:<subscriptionId>:<source>`，它的唯一原始块是 `<dim-event-guide source="im">guide</dim-event-guide>`，键为 `eventhub:guide:<source>`，`use: live`。这次写入同时校验目标：分支不存在或已结束、Session 已关闭或任何其他 `sessions` 错误都会拒绝创建、什么也不存；`publication_unknown` 是例外，因为它说明输入已经提交，所以订阅会被存储，见 A.3。
 3. 存储订阅并带上它的 `origin`，同时为它写出的每个来源把该指南的 digest 存入该分支的 `GuideRecord`：由 `events` 工具发起时为 `tool`，由管理方法发起时为 `client`(2.2)。
 
-每次 `subscribe` 与 `unsubscribe` 从上限检查到最后一次写指南或撤回为止，持有目标 Session 的一把锁；省略分支的 `subscribe` 在拿这把锁之前，先在一次投递许可下解析该分支(2.5，timeline branches §20.22)。`agent/session-deleted` 处理与 3.4 的对账拿同一把锁。没有它，同一条分支上同一来源的两次变更可以交错：一条订阅写出它的指南，旧记录的取消订阅在新记录尚未存储时移除旧记录、撤回该键，然后订阅才存储新记录——已生效的指南被撤回。按 Session 加锁保留这个顺序，又不至于让宿主机上的每次订阅变更都被卡住：持锁时间由该 Session 自己的 `sessions.input` 调用决定，所以一次冷恢复只会堵住对该 Session 的变更。`gone` 移除不拿这把锁：该分支上的订阅会以同一个码在写指南时失败。每 Session 与总数上限仍在存储的变更里、文件锁之下执行。
+每次 `subscribe` 与 `unsubscribe` 都取目标 Session 的一把锁，并从那把锁下的第一次检查一直持有到最后一次写指南或撤回；省略分支的 `subscribe` 在拿这把锁之前，先在一次投递许可下解析该分支(2.5，timeline branches §20.22)。`agent/session-deleted` 处理与 3.4 的对账拿同一把锁。没有它，同一条分支上同一来源的两次变更可以交错：一条订阅写出它的指南，旧记录的取消订阅在新记录尚未存储时移除旧记录、撤回该键，然后订阅才存储新记录——已生效的指南被撤回。按 Session 加锁保留这个顺序，又不至于让宿主机上的每次订阅变更都被卡住：持锁时间由该 Session 自己的 `sessions.input` 调用决定，所以一次冷恢复只会堵住对该 Session 的变更。`gone` 移除不拿这把锁：该分支上的订阅会以同一个码在写指南时失败。每 Session 与总数上限仍在存储的变更里、文件锁之下执行。
 
 带键块在压缩之后会被重放，所以只要分支还订阅着，来源的手册就一直留在上下文里，跨重启、生产方关闭时也一样。对分支上已经生效的来源再建一条订阅，会以同样的文字写一次同一个键，覆盖该块而不改变模型读到的内容。`append` 从不启动一轮，见 `crates/dim-agent-capabilities/src/agent_loop.rs:149-157` 与 `crates/dim-agent-capabilities/src/input_queue.rs:167-180`。
 
