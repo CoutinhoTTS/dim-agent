@@ -142,7 +142,8 @@ Consumes `branch/create`, `branch/create-failed`, `branch/ended`, `branch/end`,
   filled when the move committed, woken by its move signal. It
   restates the line's birth identity byte for byte and then the sentences the move changes; the
   root never receives one, and a load whose latest block disagrees with the tree writes the
-  missing note once (design [§5](../../../design/timeline-branches.md#5-parts), [§12.1](../../../design/timeline-branches.md#121-context-mapping)).
+  missing note once; on the tree's current default branch the load also compares that block's text
+  with the note this code writes, and replaces a note an older rule set left once (design [§5](../../../design/timeline-branches.md#5-parts), [§12.1](../../../design/timeline-branches.md#121-context-mapping)).
 - **Roster.** On a line that has opened tool lines, a keyed Append under `branch:roster` of `<dim-branch-lines>` lists the lines it opened with the tool that are still open, in the order it opened them, with the
   first line of each purpose; when none is open the key is retired. A plugin line is never on a roster, and neither is a line the user opened: it stays in the Session's directory and coordinates its own tool lines. A child whose inherited prefix holds a live roster gets one block in its opening input that retires that key, so a line that opened no tool line of its own keeps no list; TimelineTree writes it with the identity block (design [§7.1](../../../design/timeline-branches.md#71-keyed-state-branchline-branchroster-and-branchparent)).
 - **Parent block.** On a line that is not the root, one keyed Append of

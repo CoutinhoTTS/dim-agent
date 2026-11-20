@@ -228,10 +228,10 @@ pub struct TimelineTree {
     /// waiters cannot both deliver and record it (design §10, §20.26b).
     retry: tokio::sync::Mutex<()>,
     /// Serialises the operations that read the tree and then write on it, an
-    /// end and a move: each admits under the state lock and keeps the lock
-    /// until its fact commits, so of two conflicting operations exactly one is
-    /// admitted and each reads what the other would have written (design §10,
-    /// §20.26).
+    /// open, an end and a move: each admits under the state lock and keeps the
+    /// lock until its fact commits, so of two conflicting operations exactly one
+    /// is admitted and each reads what the other would have written (design
+    /// §6.1, §10, §14, §20.26).
     operations: Arc<tokio::sync::Mutex<()>>,
     /// The tasks that settle an admitted operation: each holds the operations
     /// guard, awaits its fact's publication and applies the live update, so a
@@ -2312,6 +2312,11 @@ impl TimelineTree {
         let event = context.branch().input(data).await?;
         Self::published(timeline, event.sequence).await
     }
+    /// Reserves one line and answers once its build publishes it. The opener
+    /// check, the cap and the `branch/create` append decide under the
+    /// operations guard, so a move or an end that already holds it has applied
+    /// its state first (design §6.1, §10, §14). The guard is released as soon
+    /// as the reservation exists, before the build it started.
     fn create_child(
         &self,
         parent: String,
@@ -2346,6 +2351,12 @@ impl TimelineTree {
             if parent_context.is_closing() {
                 return Err(AgentError::Closed(parent.clone()));
             }
+            let operations = tokio::select! {
+                operations = self.operations.clone().lock_owned() => operations,
+                _ = admission.cancelled() => {
+                    return Err(AgentError::Cancelled("branch admission".into()));
+                }
+            };
             let mut ready = None;
             let _ =
                 timeline.append_registered(EventKind::BranchCreate(original).into(), |event| {
@@ -2403,6 +2414,7 @@ impl TimelineTree {
                     )?);
                     Ok(())
                 })?;
+            drop(operations);
             tokio::select! {
                 result = Self::await_branch(ready.expect("committed branch reservation")) => result,
                 _ = admission.cancelled() => Err(AgentError::Cancelled(
@@ -4587,12 +4599,14 @@ impl BranchLine {
         };
         Ok(prompt.clone())
     }
-    /// Writes the note a load owes, comparing one thing only: whether this
-    /// line is the default branch now, against the role its latest
-    /// `branch:line` block states, where a missing `default` attribute means
-    /// not default. A line that took no part in the latest move keeps the
+    /// Writes the note a load owes, comparing two things: whether this line is
+    /// the default branch now, against the role its latest `branch:line` block
+    /// states, where a missing `default` attribute means not default; and, for
+    /// the tree's current default branch alone, the text of that block against
+    /// the note this code writes for the line, so a note an older rule set left
+    /// is replaced once. A line that took no part in the latest move keeps the
     /// counterpart its own note named, so a move between other lines does not
-    /// rewrite it, and a load that finds the roles in agreement writes nothing
+    /// rewrite it, and a load that finds both in agreement writes nothing
     /// (design §5).
     async fn write_load_note(&self, role: LineRole, parent: Option<&str>) -> Result<()> {
         if !receives_note(role) {
@@ -4616,12 +4630,27 @@ impl BranchLine {
         } else {
             None
         };
-        if self.record_status(block).unwrap_or(false) == is_default {
+        let agrees = self.record_status(block).unwrap_or(false) == is_default;
+        if agrees && !is_default {
             return Ok(());
         }
         let Some(text) = self.note_text(parent, is_default, &other).await? else {
             return Ok(());
         };
+        // The line is the tree's default branch, so its latest note was written
+        // by the move that made it the default and carries this code's text: a
+        // note an older rule set left differs and is replaced once (design §5).
+        let in_force = agrees
+            && self
+                .view
+                .lock()
+                .unwrap()
+                .identity
+                .as_ref()
+                .is_some_and(|(latest, retired)| !retired && latest == &text);
+        if in_force {
+            return Ok(());
+        }
         let data = InputMessageData {
             blocks: vec![crate::context_block::raw(text.clone(), Some(line_key()))],
             mode: Some(InputMode::Append),
