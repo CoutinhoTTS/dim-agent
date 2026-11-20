@@ -8327,9 +8327,10 @@ impl App {
 
     /// The composer's bottom-left status corner: the run status, the slot (a
     /// notice in the highlight colour), background task count, goal and
-    /// context use, fitted to `budget` cells. The slot always stays whole.
-    /// The optional parts go first, then the run status's reason; the corner
-    /// falls back to the phase beside the slot, and to the slot alone.
+    /// context use, fitted to `budget` cells. The slot outranks every other
+    /// part and is kept whole when it fits the border; the caller clips it
+    /// from its end only when the slot alone is wider than the border. The
+    /// optional parts go first, then the run status's reason.
     fn dock_status(&self, run: Option<(&str, &str)>, budget: usize) -> Option<String> {
         let p = &self.palette;
         let slot = self.slot().map(|slot| {
@@ -12336,6 +12337,20 @@ mod tests {
             assert!(bottom.contains("1 in background · /tasks"), "{bottom}");
             assert!(!bottom.contains("goal active"), "{bottom}");
             assert!(!bottom.contains("98.3K"), "{bottom}");
+
+            // A slot wider than the border is clipped from its end. It starts at
+            // the corner's left edge, and no optional part or place is drawn beside it.
+            app.set_notice("Interrupt requested; Ctrl+C again to exit");
+            let (_, bottom, _) = composer_chrome(&mut app, 40);
+            assert!(
+                bottom.starts_with(" ╰─ Interrupt requested; Ctrl+C aga"),
+                "the slot is clipped from its end at the left edge: {bottom}"
+            );
+            assert!(!bottom.contains("exit"), "{bottom}");
+            assert!(!bottom.contains("background"), "{bottom}");
+            assert!(!bottom.contains("goal"), "{bottom}");
+            assert!(!bottom.contains("dima-probe"), "{bottom}");
+            app.notice = None;
         }
     }
 

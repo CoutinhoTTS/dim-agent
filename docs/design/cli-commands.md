@@ -3106,9 +3106,10 @@ composer's top border, and keep the run status, the status slot (a notice, a req
 or permission, `esc interrupt`, or disconnect), background task count, goal and context
 information on the left side of the composer's bottom border, leaving only the permission
 preset and its shortcut hint on the footer line. When the corner is too narrow, its parts
-go in this order: first the context usage, then the goal, then the background task count,
-while the run status head and the slot stay whole when the width allows it; the retry
-reason goes before the optional parts. While a prompt replaces the composer
+go in this order: first the context usage, then the goal, then the background task count.
+The retry reason and the run status head go before the optional parts. The slot outranks
+every other part: it is kept whole when it fits the border, and clipped from its end only
+when the slot alone is wider than the border. While a prompt replaces the composer
 (permission, question, effort, exit, upgrade, fork, timeline, queue, export or report),
 the composer is not drawn, so a notice or the disconnect state is drawn once, on the rows
 just above the footer, and the footer stays permission-only.
