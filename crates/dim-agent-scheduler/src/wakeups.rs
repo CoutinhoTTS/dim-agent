@@ -592,7 +592,7 @@ impl HostDispatch for WakeupsFace {
                 })
             }
             _ => {
-                return Err(BridgeError::Value(format!(
+                return Err(BridgeError::value(format!(
                     "unknown wakeups method {method}"
                 )));
             }

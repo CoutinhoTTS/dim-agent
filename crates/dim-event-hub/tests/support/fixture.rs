@@ -199,10 +199,10 @@ impl HostDispatch for FakeSessions {
     }
     fn invoke(&self, method: &str, args: Value) -> Reply {
         let Json::Array(args) = args.json()? else {
-            return Err(BridgeError::Value("expected one request object".into()));
+            return Err(BridgeError::value("expected one request object"));
         };
         let Ok([write]) = <[Json; 1]>::try_from(args) else {
-            return Err(BridgeError::Value("expected one request object".into()));
+            return Err(BridgeError::value("expected one request object"));
         };
         match method {
             // The `sessions.lookup` reply (design §2.4).
@@ -266,7 +266,7 @@ impl HostDispatch for FakeSessions {
             }
             "input" => {}
             other => {
-                return Err(BridgeError::Value(format!(
+                return Err(BridgeError::value(format!(
                     "the fixture sessions service has no method {other}"
                 )));
             }
