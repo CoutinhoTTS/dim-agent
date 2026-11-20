@@ -15,7 +15,7 @@ use std::{
 };
 
 /// The native store format this daemon creates and opens.
-pub const FORMAT: u32 = 52;
+pub const FORMAT: u32 = 53;
 /// The oldest schema the startup transaction upgrades: the first step of
 /// `UPGRADES`, which is ordered oldest first.
 const MIN_FORMAT: u32 = UPGRADES[0].0;
@@ -91,7 +91,7 @@ const PROVIDER_V51: &[(&str, &str)] = &[
 pub(super) const SCHEMA: &[(&str, &str)] = &[
     (
         "agent_store_format",
-        "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 52))",
+        "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 53))",
     ),
     (
         "settings_documents",
@@ -350,7 +350,7 @@ const V45_COLUMNS: &str = "ALTER TABLE worktree_directories ADD COLUMN last_used
 /// The one-way upgrade steps, oldest first: the format a step starts from
 /// and the `SCHEMA` entries it adds, which are created in `SCHEMA` order,
 /// tables before their indexes. An upgrade also replaces the marker table.
-const UPGRADES: [(u32, &[&str]); 38] = [
+const UPGRADES: [(u32, &[&str]); 39] = [
     (
         13,
         &[
@@ -504,6 +504,11 @@ const UPGRADES: [(u32, &[&str]); 38] = [
             "provider_models_by_position",
         ],
     ),
+    // #427: the `branch/default` event kind and the `BranchSource` variant a
+    // line the user opened records, which a v52 daemon cannot decode; the
+    // marker only. Startup decodes no stored event, so without this a v52
+    // daemon would accept the store and fail on the first row of either.
+    (52, &[]),
 ];
 
 fn format_table(version: u32) -> String {

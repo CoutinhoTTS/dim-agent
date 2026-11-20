@@ -653,7 +653,7 @@ impl Connection {
                 params.at,
                 BranchOptions {
                     prompt: params.prompt,
-                    source: BranchSource::Host {
+                    source: BranchSource::User {
                         operation_id: uuid::Uuid::new_v4().to_string(),
                     },
                 },

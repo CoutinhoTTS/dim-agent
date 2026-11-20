@@ -7,10 +7,11 @@ use crate::{
 };
 use dim_agent_runtime::{
     AgentError, Branch, BranchDirectoryEntry, BranchDirectoryState, BranchLifecycle, BranchOptions,
-    Dispatcher, Names, QueryComparison, QueryFilter, QueryOperand, QueryOutput, QueryPage,
-    QueryPick, QuerySelect, QuerySpec, QueryValue, Result, SessionIdentity, StoredBranch,
-    StoredEvent, Timeline, TimelineContext, TimelineFactory, TimelineIdentity, TimelineInfo,
-    TimelineKey, TimelineQuery, TimelineQueryScope, TimelineStore, TimelineTreeControl,
+    BranchRefusal, Dispatcher, Names, QueryComparison, QueryFilter, QueryOperand, QueryOutput,
+    QueryPage, QueryPick, QuerySelect, QuerySpec, QueryValue, Result, SessionIdentity,
+    StoredBranch, StoredEvent, Timeline, TimelineContext, TimelineFactory, TimelineIdentity,
+    TimelineInfo, TimelineKey, TimelineQuery, TimelineQueryReply, TimelineQueryScope,
+    TimelineStore, TimelineTreeControl,
 };
 use dim_agent_types::*;
 use futures_util::{FutureExt, future::join_all};
@@ -33,6 +34,84 @@ use tokio::{
 };
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
+/// A hook that stops a line's writer before it reads the moves it owes, so a
+/// test can commit moves in the window between a line becoming selectable and
+/// its writer starting. Feature `testing` only: a production build has no hook.
+#[cfg(feature = "testing")]
+pub mod testing {
+    use std::sync::Mutex;
+    use tokio::sync::{mpsc, watch};
+
+    type Hold = (String, mpsc::UnboundedSender<String>, watch::Receiver<bool>);
+    static HOLDS: Mutex<Vec<Hold>> = Mutex::new(Vec::new());
+
+    /// The writers of one Session, stopped before they run until released.
+    pub struct HeldWriters {
+        session: String,
+        arrived: mpsc::UnboundedReceiver<String>,
+        release: watch::Sender<bool>,
+    }
+    impl HeldWriters {
+        /// Resolves with the line whose writer the hook stopped; every later
+        /// writer of the Session stops here too.
+        pub async fn arrived(&mut self) -> String {
+            self.arrived.recv().await.unwrap_or_default()
+        }
+        /// Lets every stopped writer continue.
+        pub fn release(&self) {
+            self.release.send_replace(true);
+        }
+    }
+    impl Drop for HeldWriters {
+        fn drop(&mut self) {
+            self.release.send_replace(true);
+            let session = std::mem::take(&mut self.session);
+            HOLDS
+                .lock()
+                .unwrap()
+                .retain(|(held, _, _)| *held != session);
+        }
+    }
+
+    /// Holds every writer of `session_id` before it runs. The tests of one
+    /// process run in parallel, so the key is the Session.
+    pub fn hold_writers(session_id: &str) -> HeldWriters {
+        let (arrived, wait) = mpsc::unbounded_channel();
+        let (release, released) = watch::channel(false);
+        HOLDS
+            .lock()
+            .unwrap()
+            .push((session_id.to_owned(), arrived, released));
+        HeldWriters {
+            session: session_id.to_owned(),
+            arrived: wait,
+            release,
+        }
+    }
+
+    pub(crate) async fn writers(session_id: &str, branch: &str) {
+        let found = {
+            let holds = HOLDS.lock().unwrap();
+            holds
+                .iter()
+                .find(|(held, _, _)| held == session_id)
+                .map(|(_, arrived, released)| (arrived.clone(), released.clone()))
+        };
+        let Some((arrived, mut released)) = found else {
+            return;
+        };
+        let _ = arrived.send(branch.to_owned());
+        loop {
+            if *released.borrow_and_update() {
+                return;
+            }
+            if released.changed().await.is_err() {
+                return;
+            }
+        }
+    }
+}
+
 /// How a loaded branch begins on its Timeline.
 enum Opening {
     /// A new branch: the root of a new Session, or a child with its first
@@ -53,6 +132,11 @@ struct Node {
     /// The sequence of the line's latest `turn/end`, 0 before the first.
     turn_end: watch::Sender<u64>,
     started: bool,
+    /// The committed moves this line took part in and has not turned into
+    /// status notes yet, oldest first (design §5, §20.21). It is created with
+    /// the line, so a move that lands before the line's writer runs still owes
+    /// its note.
+    owed: VecDeque<DefaultMove>,
 }
 enum ChildTerminal {
     Ended(u64),
@@ -70,13 +154,59 @@ struct PendingEnd {
     sequence: u64,
     data: BranchEndData,
 }
+/// An end whose final message the store refused. The line stays ending, every
+/// waiter answers the error, and a later end retries the delivery under the id
+/// `branch/end` derives, so a retry cannot deliver the message twice (design
+/// §10, §20.26b).
+#[derive(Clone)]
+struct Undelivered {
+    end_event: u64,
+    data: BranchEndData,
+    error: AgentError,
+}
+/// One operation between taking the operations guard and handing its
+/// settlement to the tree. Close waits for it, so a settle task is never
+/// spawned after the tree stopped tracking them (design §5, §10, §20.26).
+struct Admission<'a> {
+    tree: &'a TimelineTree,
+}
+impl Drop for Admission<'_> {
+    fn drop(&mut self) {
+        let mut state = self.tree.state.lock().unwrap();
+        state.admitting -= 1;
+        drop(state);
+        self.tree.admitted.notify_waiters();
+    }
+}
+/// One committed move of the default branch: the line that held the role, `None`
+/// for the root, and the line it passed to. Each participant turns its own
+/// transition into its one status note (design §5, §12.1, §20.21).
+#[derive(Clone)]
+struct DefaultMove {
+    from: Option<String>,
+    to: String,
+}
 struct TreeState {
     nodes: BTreeMap<String, Node>,
     ended: BTreeMap<String, EndedLine>,
     /// Lines waiting for the turn end that a tool-sourced end belongs to.
     pending: BTreeMap<String, PendingEnd>,
+    /// Ends whose final message is still owed to the parent (design §10,
+    /// §20.26b).
+    undelivered: BTreeMap<String, Undelivered>,
+    /// The line the Session's conversation is on (design §4, §5). The root
+    /// until a `branch/default` says otherwise, and it never names an ended,
+    /// plugin or pre-upgrade `host` line.
+    default: String,
+    /// The line the latest `branch/default` moved from: what a load that
+    /// completes a stopped move names (§5).
+    default_from: Option<String>,
     closing: bool,
     cleanup_errors: Vec<AgentError>,
+    /// Operations holding the operations guard that have not handed their
+    /// settlement to the tree yet; close waits for it before it stops tracking
+    /// them.
+    admitting: usize,
 }
 pub struct TimelineTree {
     weak: Weak<Self>,
@@ -91,6 +221,26 @@ pub struct TimelineTree {
     close_started: AtomicBool,
     /// Wakes the callers waiting for an end to complete or to wait for a turn.
     end_notify: tokio::sync::Notify,
+    /// Wakes the writers after a move lands in a line's own queue; its value is
+    /// an epoch, not the move, so a writer never reads only the latest one.
+    default_moved: watch::Sender<u64>,
+    /// Serialises the retries of one line's refused final message, so two
+    /// waiters cannot both deliver and record it (design §10, §20.26b).
+    retry: tokio::sync::Mutex<()>,
+    /// Serialises the operations that read the tree and then write on it, an
+    /// end and a move: each admits under the state lock and keeps the lock
+    /// until its fact commits, so of two conflicting operations exactly one is
+    /// admitted and each reads what the other would have written (design §10,
+    /// §20.26).
+    operations: Arc<tokio::sync::Mutex<()>>,
+    /// The tasks that settle an admitted operation: each holds the operations
+    /// guard, awaits its fact's publication and applies the live update, so a
+    /// caller that goes away leaves the settlement with the tree (design §5,
+    /// §10, §20.26).
+    settling: TaskTracker,
+    /// Wakes `start_close` once no admitted operation is between its append and
+    /// its settling task.
+    admitted: tokio::sync::Notify,
 }
 /// Shared with Timeline roots; never owns the tree or its child roots.
 pub struct TreeCommands {
@@ -187,6 +337,43 @@ impl TreeCommands {
             .end(&id, source)
             .await
     }
+    /// Ends the line `id` with a tool end's `final_message` riding on its
+    /// `branch/end`, which the parent receives once the end is admitted
+    /// (design §10). Rust only: the `branch` tool is its one caller.
+    #[service(skip)]
+    pub async fn end_with_final(
+        &self,
+        id: String,
+        source: BranchSource,
+        final_message: Option<String>,
+    ) -> std::result::Result<(), AgentError> {
+        self.tree
+            .upgrade()
+            .ok_or_else(|| AgentError::Closed("TimelineTree".into()))?
+            .end_with_final(&id, source, final_message)
+            .await
+    }
+    /// The line the Session's conversation is on: the root until a
+    /// `branch/default` moves it, then that fact's line while it is open and
+    /// selectable (design §4, §5, §20.20).
+    pub fn default_branch(&self) -> Result<String> {
+        self.tree
+            .upgrade()
+            .ok_or_else(|| AgentError::Closed("TimelineTree".into()))
+            .map(|tree| tree.state.lock().unwrap().default.clone())
+    }
+    /// Moves the default branch to `id` and answers it. The target must be an
+    /// open conversation line that is not already the default branch, and
+    /// neither it nor any ancestor of it may be ending or ended. The move
+    /// writes `branch/default` on the root and one status note to each
+    /// participant that is not the root (design §4, §10, §14).
+    pub async fn set_default_branch(&self, id: String, source: BranchSource) -> Result<String> {
+        self.tree
+            .upgrade()
+            .ok_or_else(|| AgentError::Closed("TimelineTree".into()))?
+            .set_default_branch(&id, source)
+            .await
+    }
     /// One page of `id`'s committed batches up to `through`; an ended line
     /// reads at its fixed head and `through` must end an atomic batch.
     pub async fn page(
@@ -272,6 +459,31 @@ impl TreeCommands {
             .ok_or_else(|| AgentError::Closed("TimelineTree".into()))?
             .batch_end(&id, sequence)
             .await
+    }
+    /// The line the latest `branch/default` moved from, `None` when the root
+    /// held the role or no move was recorded. Rust only: the status note's
+    /// reconciling load is its one reader (design §5).
+    #[service(skip)]
+    pub fn default_from(&self) -> Option<String> {
+        self.tree
+            .upgrade()
+            .and_then(|tree| tree.state.lock().unwrap().default_from.clone())
+    }
+    /// A signal that changes after each move; it wakes a line's writer, which
+    /// reads the transitions the tree owes it from its own queue, not from this
+    /// value (design §5).
+    #[service(skip)]
+    fn default_moves(&self) -> watch::Receiver<u64> {
+        self.tree
+            .upgrade()
+            .map(|tree| tree.default_moved.subscribe())
+            .unwrap_or_else(|| watch::channel(0).1)
+    }
+    /// The oldest move `id` owes a status note for, in commit order; this call
+    /// takes it off the line's queue (design §5, §20.21).
+    #[service(skip)]
+    fn next_move(&self, id: &str) -> Option<DefaultMove> {
+        self.tree.upgrade()?.next_move(id)
     }
     /// A signal that changes when line `id` ends a turn; it carries that
     /// `turn/end`'s sequence.
@@ -727,8 +939,12 @@ impl TimelineTree {
                 nodes: BTreeMap::new(),
                 ended: BTreeMap::new(),
                 pending: BTreeMap::new(),
+                undelivered: BTreeMap::new(),
+                default: ROOT_BRANCH_ID.into(),
+                default_from: None,
                 closing: false,
                 cleanup_errors: Vec::new(),
+                admitting: 0,
             }),
             factory,
             store,
@@ -739,6 +955,11 @@ impl TimelineTree {
             close_task: Mutex::new(None),
             close_started: AtomicBool::new(false),
             end_notify: tokio::sync::Notify::new(),
+            default_moved: watch::channel(0).0,
+            retry: tokio::sync::Mutex::new(()),
+            operations: Arc::new(tokio::sync::Mutex::new(())),
+            settling: TaskTracker::new(),
+            admitted: tokio::sync::Notify::new(),
         })
     }
     fn owned_context(&self, id: &str) -> Option<Arc<TimelineContext>> {
@@ -774,6 +995,7 @@ impl TimelineTree {
                 ready,
                 turn_end,
                 started: false,
+                owed: VecDeque::new(),
             },
         );
         Ok(receiver)
@@ -1381,35 +1603,27 @@ impl TimelineTree {
             .or_else(|| state.ended.get(id).map(|ended| ended.info.clone()))
     }
     async fn end(&self, id: &str, source: BranchSource) -> Result<()> {
-        let context = {
-            let state = self.state.lock().unwrap();
-            if state.closing {
-                return Err(AgentError::Closed("TimelineTree".into()));
-            }
-            if id == ROOT_BRANCH_ID {
-                return Err(AgentError::InvalidInput(
-                    "`main` cannot end; closing the Session is not an end".into(),
-                ));
-            }
-            if state.ended.contains_key(id) {
-                return Err(AgentError::BranchEnded(id.into()));
-            }
-            let node = state
-                .nodes
-                .get(id)
-                .ok_or_else(|| AgentError::UnknownBranch(id.into()))?;
-            if !matches!(&*node.ready.borrow(), Some(Ok(_))) {
-                return Err(AgentError::UnknownBranch(id.into()));
-            }
-            node.context
-                .clone()
-                .ok_or_else(|| AgentError::UnknownBranch(id.into()))?
-        };
+        self.end_with_final(id, source, None).await
+    }
+    /// Ends `id` with `final_message` riding on `branch/end` when it is a tool
+    /// end, and waits for the close. The guard, the command and the message are
+    /// one operation: a refused end writes neither, so a line the user has just
+    /// made the default branch never tells its parent it ended (design §10,
+    /// §20.26a).
+    async fn end_with_final(
+        &self,
+        id: &str,
+        source: BranchSource,
+        final_message: Option<String>,
+    ) -> Result<()> {
+        let _operations = self.operations.lock().await;
+        let context = self.end_admission(id)?;
         let data = BranchEndData {
             source,
             ancestor: None,
+            final_message,
         };
-        context.timeline().append_registered(
+        let appended = context.timeline().append_registered(
             EventKind::BranchEnd(data.clone()).into(),
             |event| {
                 if context.ended() {
@@ -1418,13 +1632,40 @@ impl TimelineTree {
                 context.mark_ended(event.sequence);
                 Ok(())
             },
-        )?;
+        );
+        // A line that already committed its end keeps the first call's message
+        // as its last word; a later end only retries a delivery still owed. Its
+        // branch is already closed by then, so the append answers `Closed`.
+        if let Err(AgentError::BranchEnded(_) | AgentError::Closed(_)) = &appended
+            && self.undelivered(id)
+        {
+            drop(_operations);
+            let owner = self
+                .weak
+                .upgrade()
+                .ok_or_else(|| AgentError::Closed("TimelineTree".into()))?;
+            let admitted = self.admit()?;
+            let line = id.to_owned();
+            let (answer, wait) = oneshot::channel();
+            self.settling.spawn(async move {
+                let _ = answer.send(owner.retry_undelivered(&line).await);
+            });
+            drop(admitted);
+            return wait
+                .await
+                .map_err(|_| AgentError::Closed("TimelineTree settling".into()))?;
+        }
+        appended?;
+        drop(_operations);
         loop {
             let notified = self.end_notify.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
             {
                 let state = self.state.lock().unwrap();
+                if let Some(undelivered) = state.undelivered.get(id) {
+                    return Err(undelivered.error.clone());
+                }
                 // After the commit above, `on_end` parks a tool-sourced end of
                 // a running line in `pending`; the tool call belongs to the
                 // turn the close waits for, so `end()` returns there.
@@ -1442,6 +1683,260 @@ impl TimelineTree {
                 }
             }
         }
+    }
+    /// Admits an end of `id` and returns the line's Timeline context. The
+    /// guards are the target's alone: the root, a line that already ended, a
+    /// line still opening, the current default branch, and every ancestor of
+    /// it, because ending a line ends every line below it (design §10).
+    fn end_admission(&self, id: &str) -> Result<Arc<TimelineContext>> {
+        let state = self.state.lock().unwrap();
+        if state.closing {
+            return Err(AgentError::Closed("TimelineTree".into()));
+        }
+        if id == ROOT_BRANCH_ID {
+            return Err(AgentError::InvalidInput(
+                "`main` cannot end; closing the Session is not an end".into(),
+            ));
+        }
+        if state.ended.contains_key(id) {
+            return Err(AgentError::BranchEnded(id.into()));
+        }
+        let node = state
+            .nodes
+            .get(id)
+            .ok_or_else(|| AgentError::UnknownBranch(id.into()))?;
+        if !matches!(&*node.ready.borrow(), Some(Ok(_))) {
+            return Err(AgentError::UnknownBranch(id.into()));
+        }
+        if state.default == id || Self::protects(&state, id) {
+            return Err(AgentError::refused(
+                BranchRefusal::CannotEnd,
+                format!("line {id} is the default branch or an ancestor of it"),
+            ));
+        }
+        node.context
+            .clone()
+            .ok_or_else(|| AgentError::UnknownBranch(id.into()))
+    }
+    /// Whether `id` is above the current default branch: the default's parent
+    /// chain goes through it.
+    fn protects(state: &TreeState, id: &str) -> bool {
+        let mut above = state
+            .nodes
+            .get(&state.default)
+            .and_then(|node| node.info.parent.clone());
+        while let Some(line) = above {
+            if line == id {
+                return true;
+            }
+            above = state
+                .nodes
+                .get(&line)
+                .and_then(|node| node.info.parent.clone());
+        }
+        false
+    }
+    /// The line a move may select, or the refusal its record earns: the root
+    /// whenever it is not already the default branch, a tool line and a line
+    /// the user opened, never a plugin line or a line a client created before
+    /// `FORMAT` 53 (design §4, §14, §20.21).
+    fn selectable(&self, state: &TreeState, id: &str) -> Result<()> {
+        let Some(node) = state.nodes.get(id) else {
+            return match state.ended.get(id) {
+                Some(_) => Err(AgentError::BranchEnded(id.into())),
+                None => Err(AgentError::UnknownBranch(id.into())),
+            };
+        };
+        if !matches!(&*node.ready.borrow(), Some(Ok(_))) {
+            return Err(AgentError::UnknownBranch(id.into()));
+        }
+        match &node.info.source {
+            None => Ok(()),
+            Some(BranchSource::Tool { .. } | BranchSource::User { .. }) => Ok(()),
+            Some(BranchSource::Host { .. }) => Err(AgentError::refused(
+                BranchRefusal::NotSelectable,
+                format!("line {id} is not a conversation line"),
+            )),
+        }
+        .inspect(|_| ())
+    }
+    /// Moves the default branch to `id` (design §4, §10, §14, §20.21). The
+    /// target and every ancestor of it must be open, the target must be
+    /// selectable and not already the role, and the move then writes one
+    /// `branch/default` on the root and answers once that fact is published:
+    /// a move the caller saw succeed is a move a restart keeps, and a write
+    /// that fails answers its error and changes nothing. Once the write is
+    /// admitted the tree settles it, so a caller that goes away after that
+    /// point does not leave the fact unapplied.
+    async fn set_default_branch(&self, id: &str, source: BranchSource) -> Result<String> {
+        let operations = self.operations.clone().lock_owned().await;
+        let owner = self
+            .weak
+            .upgrade()
+            .ok_or_else(|| AgentError::Closed("TimelineTree".into()))?;
+        let admitted = self.admit()?;
+        let (root, from) = {
+            let state = self.state.lock().unwrap();
+            if state.default == id {
+                return Err(AgentError::refused(
+                    BranchRefusal::AlreadyDefault,
+                    format!("line {id} is already the default branch"),
+                ));
+            }
+            self.selectable(&state, id)?;
+            self.protected_chain(&state, id)?;
+            let root = state
+                .nodes
+                .get(ROOT_BRANCH_ID)
+                .and_then(|node| node.context.clone())
+                .ok_or_else(|| AgentError::UnknownBranch(ROOT_BRANCH_ID.into()))?;
+            let from = (state.default != ROOT_BRANCH_ID).then(|| state.default.clone());
+            (root, from)
+        };
+        let data = BranchDefaultData {
+            branch: id.into(),
+            from: from.clone(),
+            source,
+        };
+        let timeline = root.timeline().clone();
+        let event = timeline.append(EventKind::BranchDefault(data).into())?;
+        let branch = id.to_owned();
+        let wait = self.settle(operations, async move {
+            Self::published(&timeline, event.sequence).await?;
+            owner.set_default(&branch, from);
+            Ok(branch)
+        });
+        drop(admitted);
+        wait.await
+            .map_err(|_| AgentError::Closed("TimelineTree settling".into()))?
+    }
+    /// Hands an operation that has admitted its durable write to the tree: the
+    /// task holds the operations guard, awaits the fact's publication, applies
+    /// the live update and answers the oneshot. A caller that goes away drops
+    /// only its receiver (design §5, §10, §20.26).
+    fn settle<T: Send + 'static>(
+        &self,
+        operations: tokio::sync::OwnedMutexGuard<()>,
+        work: impl std::future::Future<Output = Result<T>> + Send + 'static,
+    ) -> oneshot::Receiver<Result<T>> {
+        let (answer, wait) = oneshot::channel();
+        self.settling.spawn(async move {
+            let _operations = operations;
+            let _ = answer.send(work.await);
+        });
+        wait
+    }
+    /// Counts the operation until it has handed its settlement to the tree;
+    /// close waits for it so no settle task is spawned after it stopped
+    /// tracking them.
+    fn admit(&self) -> Result<Admission<'_>> {
+        let mut state = self.state.lock().unwrap();
+        if state.closing {
+            return Err(AgentError::Closed("TimelineTree".into()));
+        }
+        state.admitting += 1;
+        drop(state);
+        Ok(Admission { tree: self })
+    }
+    /// Waits until no admitted operation is between its append and its settling
+    /// task. That span has no await, so the wait is bounded.
+    async fn settled_admissions(&self) {
+        loop {
+            let admitted = self.admitted.notified();
+            tokio::pin!(admitted);
+            admitted.as_mut().enable();
+            if self.state.lock().unwrap().admitting == 0 {
+                return;
+            }
+            admitted.await;
+        }
+    }
+    /// Waits until `timeline` publishes `sequence`: the store committed the
+    /// batch, not only queued it. A failed transaction leaves it unpublished
+    /// and its fault answers here. A close waits for every accepted batch to
+    /// publish or fail before it sets `closed`, so `closed` is not a path a
+    /// close takes here: it ends a publication channel that stops (design §5,
+    /// §20.21).
+    async fn published(timeline: &Timeline, sequence: u64) -> Result<()> {
+        let mut published = timeline.watch();
+        loop {
+            let (tail, closed) = *published.borrow_and_update();
+            if tail >= sequence {
+                return Ok(());
+            }
+            if let Some(error) = timeline.failure() {
+                return Err(error);
+            }
+            if closed {
+                return Err(AgentError::Closed("branch/default publication".into()));
+            }
+            published
+                .changed()
+                .await
+                .map_err(|_| AgentError::Closed("branch/default publication".into()))?;
+        }
+    }
+    /// The move in force after its fact committed: the tree's answer, and the
+    /// transition both participants owe a note, queued under the same lock that
+    /// moves `default`, so a reader never sees the new default without the note
+    /// the tree owes for it (design §5, §12.1, §20.21).
+    fn set_default(&self, id: &str, from: Option<String>) {
+        let transition = DefaultMove {
+            from,
+            to: id.to_owned(),
+        };
+        {
+            let mut state = self.state.lock().unwrap();
+            state.default = id.into();
+            state.default_from = transition.from.clone();
+            for line in [transition.from.clone(), Some(transition.to.clone())]
+                .into_iter()
+                .flatten()
+            {
+                if line == ROOT_BRANCH_ID {
+                    continue;
+                }
+                if let Some(node) = state.nodes.get_mut(&line) {
+                    node.owed.push_back(transition.clone());
+                }
+            }
+        }
+        self.default_moved.send_modify(|epoch| *epoch += 1);
+    }
+    /// The oldest move `id` owes a status note for, in commit order (design §5,
+    /// §20.21).
+    fn next_move(&self, id: &str) -> Option<DefaultMove> {
+        self.state
+            .lock()
+            .unwrap()
+            .nodes
+            .get_mut(id)?
+            .owed
+            .pop_front()
+    }
+    /// Whether `id` or any ancestor of it is ending or ended: such a line
+    /// cannot become the default branch, because an end already on its way to
+    /// it wins (design §10, §20.26).
+    fn protected_chain(&self, state: &TreeState, id: &str) -> Result<()> {
+        let mut line = Some(id.to_owned());
+        while let Some(current) = line {
+            let ending = state
+                .nodes
+                .get(&current)
+                .and_then(|node| node.context.as_ref())
+                .is_some_and(|context| context.ended());
+            if state.ended.contains_key(&current) || ending {
+                return Err(AgentError::refused(
+                    BranchRefusal::Protected,
+                    format!("line {current} is ending or ended"),
+                ));
+            }
+            line = state
+                .nodes
+                .get(&current)
+                .and_then(|node| node.info.parent.clone());
+        }
+        Ok(())
     }
     fn on_end(self: &Arc<Self>, id: &str, sequence: u64, data: BranchEndData) {
         if data.ancestor.is_some() {
@@ -1566,6 +2061,7 @@ impl TimelineTree {
         let data = BranchEndData {
             source: source.clone(),
             ancestor: Some(ancestor.into()),
+            final_message: None,
         };
         let sequence = context.timeline().append_registered(
             EventKind::BranchEnd(data.clone()).into(),
@@ -1580,26 +2076,54 @@ impl TimelineTree {
         let sequence = match sequence {
             Ok(event) => event.sequence,
             Err(AgentError::BranchEnded(_)) => return self.wait_ended(id).await,
+            Err(AgentError::Closed(_)) if context.ended() => {
+                return self.wait_ended(id).await;
+            }
             Err(error) => return Err(error),
         };
         self.close_and_record(id, sequence, data).await
     }
-    /// Waits until the line is recorded as ended.
+    /// Whether the line is ending with a final message the parent did not
+    /// receive.
+    fn undelivered(&self, id: &str) -> bool {
+        self.state.lock().unwrap().undelivered.contains_key(id)
+    }
+    /// Runs a refused end's delivery and completion again. One retry at a
+    /// time, so a waiter that loses the race finds the state cleared instead
+    /// of writing a second copy (design §10, §20.26b).
+    async fn retry_undelivered(&self, id: &str) -> Result<()> {
+        let _retry = self.retry.lock().await;
+        let pending = self.state.lock().unwrap().undelivered.get(id).cloned();
+        let Some(undelivered) = pending else {
+            // The retry that held the lock recorded the end and cleared the
+            // state; the line is no longer owed anything.
+            return Ok(());
+        };
+        self.close_and_record(id, undelivered.end_event, undelivered.data)
+            .await
+    }
+    /// Waits until the line is recorded as ended, retrying the final message
+    /// the store refused (design §10, §20.26b).
     async fn wait_ended(&self, id: &str) -> Result<()> {
         loop {
             let notified = self.end_notify.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
-            let pending = {
+            let (retry, pending) = {
                 let mut state = self.state.lock().unwrap();
-                if state.ended.contains_key(id) {
+                if state.undelivered.contains_key(id) {
+                    (true, None)
+                } else if state.ended.contains_key(id) {
                     return Ok(());
-                }
-                if state.closing {
+                } else if state.closing {
                     return Err(AgentError::Closed("TimelineTree".into()));
+                } else {
+                    (false, state.pending.remove(id))
                 }
-                state.pending.remove(id)
             };
+            if retry {
+                return self.retry_undelivered(id).await;
+            }
             if let Some(pending) = pending {
                 return self
                     .close_and_record(id, pending.sequence, pending.data)
@@ -1629,8 +2153,42 @@ impl TimelineTree {
         };
         let parent = info.parent.clone();
         let mut errors = Vec::new();
+        let mut undelivered = false;
+        if let Some(final_message) = &data.final_message
+            && let Some(parent) = &parent
+        {
+            // A parent that is closing cannot hear anything more, and the line
+            // still ends: its own end is not owed to a line that is gone.
+            match self
+                .deliver_final(parent, id, final_message, end_event)
+                .await
+            {
+                Ok(()) | Err(AgentError::BranchEnded(_) | AgentError::Closed(_)) => {}
+                Err(error) => {
+                    errors.push(error);
+                    undelivered = true;
+                }
+            }
+        }
         if let Err(error) = context.branch().close().await {
             errors.push(error);
+        }
+        if undelivered {
+            // The message is still owed: recording the end now would make
+            // restore skip the line and lose it. Leave the line ending, with
+            // its `branch/end` as the message's source, and keep the failure
+            // for every waiter and for the end that retries it (design §10,
+            // §20.26b).
+            let error = AgentError::aggregate(errors).expect_err("the delivery failed");
+            self.state.lock().unwrap().undelivered.insert(
+                id.into(),
+                Undelivered {
+                    end_event,
+                    data,
+                    error: error.clone(),
+                },
+            );
+            return Err(error);
         }
         let head = context.timeline().sequence();
         let recorded = parent.as_deref().map_or(Ok(()), |parent| {
@@ -1654,6 +2212,7 @@ impl TimelineTree {
         {
             let mut state = self.state.lock().unwrap();
             state.pending.remove(id);
+            state.undelivered.remove(id);
             state.nodes.remove(id);
             state.ended.insert(
                 id.into(),
@@ -1670,6 +2229,33 @@ impl TimelineTree {
             )));
         }
         AgentError::aggregate(errors)
+    }
+    /// Delivers a tool end's final message to `parent` as a steer under the id
+    /// derived from the end, so a restart cannot deliver it twice: the id is
+    /// the same one a reconciling load computes, and `Branch::input` answers
+    /// the committed input for an id it already holds (design §10, §20.26b).
+    /// Answers once the input is published: a batch the store accepts and then
+    /// fails is still owed, and an end that recorded itself over it would lose
+    /// the message on restore.
+    async fn deliver_final(
+        &self,
+        parent: &str,
+        line: &str,
+        message: &str,
+        end_event: u64,
+    ) -> Result<()> {
+        let Some(context) = self.owned_context(parent) else {
+            return Err(AgentError::UnknownBranch(parent.into()));
+        };
+        let data = InputMessageData {
+            submission_id: Some(final_submission_id(line, end_event)),
+            blocks: vec![message_block(line, parent, message, true)],
+            mode: Some(InputMode::Steer),
+            ..InputMessageData::default()
+        };
+        let timeline = context.timeline();
+        let event = context.branch().input(data).await?;
+        Self::published(timeline, event.sequence).await
     }
     fn create_child(
         &self,
@@ -1851,6 +2437,13 @@ impl TimelineTree {
         let task = tokio::spawn(async move {
             owner.builds.close();
             owner.builds.wait().await;
+            // Every admitted operation has handed its settlement over by now,
+            // so closing the tracker loses none of them. Each context's close
+            // waits for the store's answer to every batch its timeline
+            // accepted, and the settling tasks act on those answers; joining
+            // them last means close answers only after their live updates ran.
+            owner.settled_admissions().await;
+            owner.settling.close();
             let (contexts, failures): (Vec<_>, Vec<_>) = {
                 let mut state = owner.state.lock().unwrap();
                 (
@@ -1869,13 +2462,114 @@ impl TimelineTree {
                     .into_iter()
                     .filter_map(|result| result.err()),
             );
+            owner.settling.wait().await;
             owner
                 .close_result
                 .send_replace(Some(AgentError::aggregate(errors)));
         });
         *self.close_task.lock().unwrap() = Some(task);
     }
+    /// The default branch the root's stored facts name, or the root: the
+    /// newest `branch/default` or `session/forked` on the root, by the same
+    /// kind index the writer's cache uses (design §5, §20.20). A
+    /// `session/forked` newer than every `branch/default` voids them all,
+    /// because a fork's default branch is its root.
+    async fn recorded_default(&self, branches: &[StoredBranch]) -> Result<Option<String>> {
+        let root = branches
+            .iter()
+            .find(|branch| branch.info.id == ROOT_BRANCH_ID)
+            .ok_or_else(|| AgentError::Storage("branch directory has no root".into()))?;
+        let reply = self
+            .store
+            .query(
+                &self.stored_scope(ROOT_BRANCH_ID, 1, root.sequence),
+                &QuerySpec {
+                    filter: Some(QueryFilter::In {
+                        value: QueryOperand::Field {
+                            path: "kind".into(),
+                        },
+                        values: vec!["branch/default".into(), "session/forked".into()],
+                    }),
+                    select: QuerySelect::Fields {
+                        fields: vec!["kind".into(), "data.branch".into(), "data.from".into()],
+                    },
+                    group_by: vec![],
+                    pick: Some(QueryPick::Last),
+                    order_by: vec![],
+                },
+                Some(&QueryPage {
+                    limit: NonZeroU64::MIN,
+                    after: None,
+                }),
+            )
+            .await?;
+        let QueryOutput::Rows { rows } = reply.result else {
+            unreachable!("field selection returns rows")
+        };
+        let Some(row) = rows.into_iter().next() else {
+            return Ok(None);
+        };
+        let [kind, branch, from] = <[_; 3]>::try_from(row.values).expect("default fields");
+        let QueryValue::Value { value: kind } = kind else {
+            return Err(AgentError::Storage("default fact names no kind".into()));
+        };
+        // A fork's default branch is its root, and `session/forked` has no
+        // branch at all: the kind must answer before the branch is read
+        // (design §5, §20.20).
+        if kind.as_str() != Some("branch/default") {
+            return Ok(None);
+        }
+        let QueryValue::Value { value: branch } = branch else {
+            return Err(AgentError::Storage("branch/default names no line".into()));
+        };
+        let branch = branch
+            .as_str()
+            .ok_or_else(|| AgentError::Storage("branch/default names no line".into()))?;
+        if branch != ROOT_BRANCH_ID {
+            self.state.lock().unwrap().default_from = match from {
+                QueryValue::Value { value } => value.as_str().map(str::to_owned),
+                _ => None,
+            };
+        }
+        Ok(Some(branch.to_owned()))
+    }
+    /// The line the latest `branch/default` moved from, as the restore read
+    /// recorded it.
+    fn recorded_default_from(&self) -> Option<String> {
+        self.state.lock().unwrap().default_from.clone()
+    }
+    /// Whether `id`, the line the newest fact names, is one this restore can
+    /// select: it is in the directory, and a child's recorded source is a
+    /// conversation line (design §4, §5).
+    async fn restorable_default(&self, branches: &[StoredBranch], id: &str) -> Result<bool> {
+        let Some(branch) = branches.iter().find(|branch| branch.info.id == id) else {
+            return Ok(false);
+        };
+        let Some(parent) = &branch.info.parent else {
+            return Ok(true);
+        };
+        let anchor = branch
+            .info
+            .create_anchor
+            .ok_or_else(|| AgentError::Storage(format!("line {id} has no creation position")))?;
+        Ok(matches!(
+            self.creation_source(parent, id, anchor).await?,
+            Some(BranchSource::Tool { .. } | BranchSource::User { .. })
+        ))
+    }
+    /// Whether `id` may still hold the role once every line is restored: it is
+    /// open and it is a conversation line (design §4, §5).
+    fn selectable_now(&self, id: &str) -> bool {
+        let state = self.state.lock().unwrap();
+        state.nodes.get(id).is_some_and(|node| {
+            matches!(
+                node.info.source,
+                None | Some(BranchSource::Tool { .. } | BranchSource::User { .. })
+            )
+        }) && !state.ended.contains_key(id)
+    }
 }
+
 impl TimelineTreeControl for TimelineTree {
     fn begin_close(&self) {
         let mut state = self.state.lock().unwrap();
@@ -1923,6 +2617,18 @@ impl TimelineTreeControl for TimelineTree {
             if branches.is_empty() {
                 self.create_main().await?;
                 return Ok(());
+            }
+            let restored = match branches.len() {
+                1 => None,
+                _ => self.recorded_default(&branches).await?,
+            };
+            // The fact as of load is the tree's default before any line loads:
+            // BranchLine reconciles its note in `apply`, which runs before the
+            // line is ready and the Session publishes (design §5, §20.24a).
+            if let Some(default) = &restored
+                && self.restorable_default(&branches, default).await?
+            {
+                self.state.lock().unwrap().default = default.clone();
             }
             let mut remaining: BTreeMap<_, _> = branches
                 .into_iter()
@@ -2016,6 +2722,13 @@ impl TimelineTreeControl for TimelineTree {
                 };
                 if let Some((end_event, data)) = own_end {
                     self.complete_stored_ends(&next, &mut remaining).await?;
+                    if let (Some(message), Some(parent)) =
+                        (&data.final_message, next.parent.as_deref())
+                        && self.owned_context(parent).is_some()
+                    {
+                        self.deliver_final(parent, &next.id, message, end_event)
+                            .await?;
+                    }
                     let head = remaining[&next.id].sequence;
                     self.complete_end(&next, end_event, data)?;
                     self.state.lock().unwrap().ended.insert(
@@ -2078,6 +2791,12 @@ impl TimelineTreeControl for TimelineTree {
                 Self::await_branch(ready).await?;
                 remaining.remove(&next.id);
             }
+            if let Some(default) = restored.filter(|default| self.selectable_now(default)) {
+                let from = self.recorded_default_from();
+                self.set_default(&default, from);
+            } else {
+                self.state.lock().unwrap().default = ROOT_BRANCH_ID.into();
+            }
             Ok(())
         })
     }
@@ -2100,6 +2819,16 @@ impl TimelineTreeControl for TimelineTree {
     }
     fn end(&self, id: String, source: BranchSource) -> BoxFuture<'_, Result<()>> {
         Box::pin(async move { TimelineTree::end(self, &id, source).await })
+    }
+    fn default_branch(&self) -> Result<String> {
+        Ok(self.state.lock().unwrap().default.clone())
+    }
+    fn set_default_branch(
+        &self,
+        id: String,
+        source: BranchSource,
+    ) -> BoxFuture<'_, Result<String>> {
+        Box::pin(async move { TimelineTree::set_default_branch(self, &id, source).await })
     }
     fn ended_head(&self, id: &str) -> Option<u64> {
         TimelineTree::ended_head(self, id)
@@ -2387,6 +3116,9 @@ pub enum LineRole {
     Main,
     Tool,
     Host,
+    /// A line a client opened through `session.branch_create`: the user is its
+    /// opener, so it is a conversation line the user ends (design §4).
+    User,
 }
 #[derive(Clone, Copy, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -2407,8 +3139,18 @@ struct Child {
 enum Decision {
     Roster,
     Ended(String),
-    Idle { turn: String, status: &'static str },
+    Idle {
+        turn: String,
+        status: &'static str,
+    },
     Parent,
+    /// A committed move this line took part in: the role it assigns this line
+    /// and the other participant, so every transition earns its own note
+    /// (design §5, §20.21).
+    Moved {
+        became_default: bool,
+        other: String,
+    },
 }
 /// BranchLine's fold of its own line's facts.
 #[derive(Default)]
@@ -2441,8 +3183,9 @@ struct LineView {
 impl LineView {
     fn input_block(&mut self, id: &str, text: &str, key: &str, retire: bool) {
         if key == line_key() {
+            let birth = self.roster.is_none();
             if self.role == Some(LineRole::Tool)
-                && self.roster.is_none()
+                && birth
                 && !retire
                 && text.lines().next().is_some_and(|line| {
                     line.starts_with("<dim-branch-line ")
@@ -2597,6 +3340,7 @@ impl DynPlugin for BranchLinePlugin {
             let line = Arc::new(BranchLine {
                 own: identity.branch_id.clone(),
                 tree,
+                timeline: timeline.clone(),
                 roster_closing: self.config.roster_closing.clone(),
                 view: Mutex::new(LineView::default()),
                 wanted: Mutex::new(std::collections::VecDeque::new()),
@@ -2639,6 +3383,7 @@ impl DynPlugin for BranchLinePlugin {
                     }),
                 )
                 .await?;
+            line.reconcile().await?;
             line.want(Decision::Roster);
             line.want(Decision::Parent);
             let writer = line.clone();
@@ -2652,6 +3397,8 @@ impl DynPlugin for BranchLinePlugin {
                 if !session.activated().await {
                     return;
                 }
+                #[cfg(feature = "testing")]
+                testing::writers(&identity.session_id, &identity.branch_id).await;
                 writer.run().await;
             });
             let stop = line.stop.clone();
@@ -2669,6 +3416,9 @@ impl DynPlugin for BranchLinePlugin {
 pub struct BranchLine {
     own: String,
     tree: Arc<TreeCommands>,
+    /// The line's own Timeline, which a load writes through before the tree
+    /// has registered the line.
+    timeline: Arc<Timeline>,
     /// The roster's closing sentence in place of [`ROSTER_CLOSING`].
     roster_closing: Option<Arc<str>>,
     view: Mutex<LineView>,
@@ -2678,101 +3428,72 @@ pub struct BranchLine {
 }
 #[service]
 impl BranchLine {
+    /// The latest live block under `key`, read through the tree at the line's
+    /// published head.
     async fn block(&self, key: &str) -> Result<Option<(String, String, bool)>> {
         let reply = self
             .tree
             .query(
                 self.own.clone(),
-                TimelineQuery {
-                    scope: TimelineQueryScope::Branch,
-                    from: None,
-                    through: self.tree.head(&self.own),
-                    include_publishing: true,
-                    query: QuerySpec {
-                        filter: Some(QueryFilter::And {
-                            conditions: vec![
-                                QueryFilter::In {
-                                    value: QueryOperand::Field {
-                                        path: "kind".into(),
-                                    },
-                                    values: vec!["input/message".into()],
-                                },
-                                QueryFilter::TextCandidate {
-                                    field: "data".into(),
-                                    partition_by: vec![],
-                                    terms: vec!["branch".into()],
-                                },
-                                QueryFilter::Any {
-                                    field: "data.blocks".into(),
-                                    condition: Box::new(QueryFilter::In {
-                                        value: QueryOperand::Element { path: "key".into() },
-                                        values: vec![key.into()],
-                                    }),
-                                },
-                            ],
-                        }),
-                        select: QuerySelect::Fields {
-                            fields: [
-                                "id",
-                                "data.blocks[].key",
-                                "data.blocks[].text",
-                                "data.blocks[].retire",
-                            ]
-                            .map(String::from)
-                            .to_vec(),
-                        },
-                        group_by: vec![],
-                        pick: Some(QueryPick::Last),
-                        order_by: vec![],
-                    },
-                    page: Some(QueryPage {
-                        limit: NonZeroU64::MIN,
-                        after: None,
-                    }),
-                },
+                self.block_query(key, self.tree.head(&self.own)),
             )
             .await?;
-        let QueryOutput::Rows { rows } = reply.result else {
-            unreachable!("branch block fields")
-        };
-        let Some(row) = rows.first() else {
-            return Ok(None);
-        };
-        let [
-            QueryValue::Value {
-                value: serde_json::Value::String(id),
+        Ok(block_row(key, reply))
+    }
+    /// [`Self::block`] read on the line's own Timeline, for a load that runs
+    /// before the tree registers the line.
+    async fn load_block(&self, key: &str) -> Result<Option<(String, String, bool)>> {
+        let reply = self.timeline.query(self.block_query(key, None)).await?;
+        Ok(block_row(key, reply))
+    }
+    fn block_query(&self, key: &str, through: Option<u64>) -> TimelineQuery {
+        TimelineQuery {
+            scope: TimelineQueryScope::Branch,
+            from: None,
+            through,
+            include_publishing: true,
+            query: QuerySpec {
+                filter: Some(QueryFilter::And {
+                    conditions: vec![
+                        QueryFilter::In {
+                            value: QueryOperand::Field {
+                                path: "kind".into(),
+                            },
+                            values: vec!["input/message".into()],
+                        },
+                        QueryFilter::TextCandidate {
+                            field: "data".into(),
+                            partition_by: vec![],
+                            terms: vec!["branch".into()],
+                        },
+                        QueryFilter::Any {
+                            field: "data.blocks".into(),
+                            condition: Box::new(QueryFilter::In {
+                                value: QueryOperand::Element { path: "key".into() },
+                                values: vec![key.into()],
+                            }),
+                        },
+                    ],
+                }),
+                select: QuerySelect::Fields {
+                    fields: [
+                        "id",
+                        "data.blocks[].key",
+                        "data.blocks[].text",
+                        "data.blocks[].retire",
+                    ]
+                    .map(String::from)
+                    .to_vec(),
+                },
+                group_by: vec![],
+                pick: Some(QueryPick::Last),
+                order_by: vec![],
             },
-            QueryValue::Elements { values: keys },
-            QueryValue::Elements { values: texts },
-            QueryValue::Elements { values: retires },
-        ] = row.values.as_slice()
-        else {
-            unreachable!("branch block projections")
-        };
-        for ((found, text), retire) in keys.iter().zip(texts).zip(retires).rev() {
-            if matches!(
-                found,
-                QueryValue::Value { value: serde_json::Value::String(found) } if found == key
-            ) {
-                let QueryValue::Value {
-                    value: serde_json::Value::String(text),
-                } = text
-                else {
-                    unreachable!("raw block text")
-                };
-                return Ok(Some((
-                    id.clone(),
-                    text.clone(),
-                    matches!(
-                        retire,
-                        QueryValue::Value {
-                            value: serde_json::Value::Bool(true)
-                        }
-                    ),
-                )));
-            }
+            page: Some(QueryPage {
+                limit: NonZeroU64::MIN,
+                after: None,
+            }),
         }
-        unreachable!("selected branch block")
     }
     async fn parent_held(&self, id: &str) -> Result<bool> {
         let mut query = TimelineQuery {
@@ -3313,6 +4034,7 @@ impl BranchLine {
             None => LineRole::Main,
             Some(BranchSource::Tool { .. }) => LineRole::Tool,
             Some(BranchSource::Host { .. }) => LineRole::Host,
+            Some(BranchSource::User { .. }) => LineRole::User,
         };
         let mut view = self.view.lock().unwrap();
         view.role = Some(role);
@@ -3327,13 +4049,16 @@ impl BranchLine {
         /// What woke the writer when its queue was empty.
         enum Wake {
             Queued,
-            Parent,
-            Lost,
+            /// Whether the parent's turn-end signal is still live.
+            Parents(bool),
+            /// Whether the tree's default-branch signal is still live.
+            Defaults(bool),
         }
         let mut parent = self
             .resolved()
             .and_then(|(_, parent)| parent)
             .and_then(|parent| self.tree.turn_ends(&parent));
+        let mut defaults = Some(self.tree.default_moves());
         loop {
             let next = self.wanted.lock().unwrap().pop_front();
             if let Some(decision) = next {
@@ -3343,27 +4068,44 @@ impl BranchLine {
                 let _ = self.write(decision).await;
                 continue;
             }
-            let wake = match parent.as_mut() {
-                Some(signal) => {
-                    tokio::select! {
-                        _ = self.stop.cancelled() => return,
-                        _ = self.changed.notified() => Wake::Queued,
-                        changed = signal.changed() => {
-                            if changed.is_ok() { Wake::Parent } else { Wake::Lost }
-                        }
-                    }
+            if let Some(change) = self.tree.next_move(&self.own) {
+                let became_default = change.to == self.own;
+                let other = match became_default {
+                    true => change.from.unwrap_or_else(|| ROOT_BRANCH_ID.into()),
+                    false => change.to,
+                };
+                let _ = self
+                    .write(Decision::Moved {
+                        became_default,
+                        other,
+                    })
+                    .await;
+                continue;
+            }
+            let parent_change = async {
+                match parent.as_mut() {
+                    Some(signal) => signal.changed().await.is_ok(),
+                    None => std::future::pending().await,
                 }
-                None => {
-                    tokio::select! {
-                        _ = self.stop.cancelled() => return,
-                        _ = self.changed.notified() => Wake::Queued,
-                    }
+            };
+            let default_change = async {
+                match defaults.as_mut() {
+                    Some(signal) => signal.changed().await.is_ok(),
+                    None => std::future::pending().await,
                 }
+            };
+            let wake = tokio::select! {
+                _ = self.stop.cancelled() => return,
+                _ = self.changed.notified() => Wake::Queued,
+                changed = default_change => Wake::Defaults(changed),
+                changed = parent_change => Wake::Parents(changed),
             };
             match wake {
                 Wake::Queued => {}
-                Wake::Parent => self.want(Decision::Parent),
-                Wake::Lost => parent = None,
+                Wake::Parents(true) => self.want(Decision::Parent),
+                Wake::Parents(false) => parent = None,
+                Wake::Defaults(true) => {}
+                Wake::Defaults(false) => defaults = None,
             }
         }
     }
@@ -3398,6 +4140,13 @@ impl BranchLine {
                 let Some(parent) = parent.filter(|_| role == LineRole::Tool) else {
                     return Ok(());
                 };
+                if self
+                    .tree
+                    .default_branch()
+                    .is_ok_and(|default| default == self.own)
+                {
+                    return Ok(());
+                }
                 let needs_identity = self.view.lock().unwrap().roster.is_none();
                 if needs_identity && let Some((id, text, retire)) = self.block(&line_key()).await? {
                     self.view
@@ -3527,6 +4276,13 @@ impl BranchLine {
                     ..InputMessageData::default()
                 };
                 self.tree.input(parent, data).await.map(|_| ())
+            }
+            Decision::Moved {
+                became_default,
+                other,
+            } => {
+                self.write_move_note(role, parent.as_deref(), became_default, other)
+                    .await
             }
             Decision::Parent => {
                 let Some(parent) = parent.filter(|_| role != LineRole::Main) else {
@@ -3669,6 +4425,245 @@ impl BranchLine {
         self.view.lock().unwrap().roster = Some((text, retired));
         Ok(())
     }
+}
+impl BranchLine {
+    /// The purpose this line's opening `branch/create` recorded on `parent` at
+    /// `at`, unchanged: the note restates the structured value rather than a
+    /// rendered block (design §12.1).
+    async fn recorded_purpose(&self, parent: &str, at: u64) -> Result<String> {
+        let reply = self
+            .tree
+            .query(
+                parent.to_owned(),
+                TimelineQuery {
+                    scope: TimelineQueryScope::Branch,
+                    from: Some(TimelinePosition {
+                        branch_id: parent.to_owned(),
+                        sequence: at,
+                    }),
+                    through: Some(at),
+                    include_publishing: true,
+                    query: QuerySpec {
+                        filter: None,
+                        select: QuerySelect::Fields {
+                            fields: vec!["data.prompt".into()],
+                        },
+                        group_by: vec![],
+                        pick: None,
+                        order_by: vec![],
+                    },
+                    page: Some(QueryPage {
+                        limit: NonZeroU64::MIN,
+                        after: None,
+                    }),
+                },
+            )
+            .await?;
+        let QueryOutput::Rows { rows } = reply.result else {
+            unreachable!("creation prompt")
+        };
+        let Some(row) = rows.into_iter().next() else {
+            return Err(AgentError::Storage(format!(
+                "line {} has no branch/create at {at}",
+                self.own
+            )));
+        };
+        let [
+            QueryValue::Value {
+                value: serde_json::Value::String(prompt),
+            },
+        ] = row.values.as_slice()
+        else {
+            return Err(AgentError::Storage(format!(
+                "the branch/create of line {} at {at} carries no prompt",
+                self.own
+            )));
+        };
+        Ok(prompt.clone())
+    }
+    /// Writes the note a load owes, comparing one thing only: whether this
+    /// line is the default branch now, against the role its latest
+    /// `branch:line` block states, where a missing `default` attribute means
+    /// not default. A line that took no part in the latest move keeps the
+    /// counterpart its own note named, so a move between other lines does not
+    /// rewrite it, and a load that finds the roles in agreement writes nothing
+    /// (design §5).
+    async fn write_load_note(&self, role: LineRole, parent: Option<&str>) -> Result<()> {
+        if !receives_note(role) {
+            return Ok(());
+        }
+        let default = self.tree.default_branch()?;
+        let (is_default, other) = match default == self.own {
+            true => (
+                true,
+                self.tree
+                    .default_from()
+                    .unwrap_or_else(|| ROOT_BRANCH_ID.into()),
+            ),
+            false => (false, default),
+        };
+        // The fold has seen no block on a load, so the comparison starts from
+        // the latest one stored, read on the line's own Timeline before the
+        // tree registers the line.
+        let block = if self.view.lock().unwrap().roster.is_none() {
+            self.load_block(&line_key()).await?
+        } else {
+            None
+        };
+        if self.record_status(block).unwrap_or(false) == is_default {
+            return Ok(());
+        }
+        let Some(text) = self.note_text(parent, is_default, &other).await? else {
+            return Ok(());
+        };
+        let data = InputMessageData {
+            blocks: vec![crate::context_block::raw(text.clone(), Some(line_key()))],
+            mode: Some(InputMode::Append),
+            ..InputMessageData::default()
+        };
+        crate::branch_input::append_own(&self.timeline, data, Vec::new()).map(|_| ())?;
+        self.view.lock().unwrap().roster = Some((text, false));
+        Ok(())
+    }
+    /// Writes the note a committed move owes this line: the role the move
+    /// gives it and the other participant it names, unless the latest block
+    /// already states both. A move to another line is a later note even though
+    /// this line's own role did not change (design §5, §20.21).
+    async fn write_move_note(
+        &self,
+        role: LineRole,
+        parent: Option<&str>,
+        became_default: bool,
+        other: String,
+    ) -> Result<()> {
+        if !receives_note(role) {
+            return Ok(());
+        }
+        let block = if self.view.lock().unwrap().roster.is_none() {
+            self.block(&line_key()).await?
+        } else {
+            None
+        };
+        let stated = self.record_status(block);
+        let Some(text) = self.note_text(parent, became_default, &other).await? else {
+            return Ok(());
+        };
+        let latest = self.view.lock().unwrap().roster.clone();
+        if stated == Some(became_default) && latest.is_some_and(|(latest, _)| latest == text) {
+            return Ok(());
+        }
+        let data = InputMessageData {
+            blocks: vec![crate::context_block::raw(text.clone(), Some(line_key()))],
+            mode: Some(InputMode::Append),
+            ..InputMessageData::default()
+        };
+        // Once the line runs, input goes through the tree, which refuses it on
+        // an ended line.
+        self.tree.input(self.own.clone(), data).await?;
+        self.view.lock().unwrap().roster = Some((text, false));
+        Ok(())
+    }
+    /// The text of the status note either decision writes, `None` when this
+    /// line has nothing to state it on: no parent or no source (design §12.1).
+    async fn note_text(
+        &self,
+        parent: Option<&str>,
+        is_default: bool,
+        other: &str,
+    ) -> Result<Option<String>> {
+        let Some(parent) = parent else {
+            return Ok(None);
+        };
+        let Some(info) = self.tree.info(self.own.clone()).ok() else {
+            return Ok(None);
+        };
+        let Some(source) = info.source else {
+            return Ok(None);
+        };
+        let purpose = match source {
+            BranchSource::Tool { .. } => {
+                let at = info.create_anchor.ok_or_else(|| {
+                    AgentError::Storage(format!("line {} has no creation position", self.own))
+                })?;
+                self.recorded_purpose(parent, at).await?
+            }
+            _ => String::new(),
+        };
+        let idle_notice = self.view.lock().unwrap().idle_notice;
+        Ok(Some(status_note(
+            &self.own,
+            parent,
+            &source,
+            &purpose,
+            idle_notice,
+            is_default,
+            other,
+        )))
+    }
+    /// Records `block` as this line's latest `branch:line` block and answers
+    /// the role it states, where a missing `default` attribute means not
+    /// default (design §5).
+    fn record_status(&self, block: Option<(String, String, bool)>) -> Option<bool> {
+        let mut view = self.view.lock().unwrap();
+        if let Some((id, text, retire)) = block {
+            view.input_block(&id, &text, &line_key(), retire);
+        }
+        view.roster
+            .as_ref()
+            .and_then(|(text, _)| default_attribute(text))
+    }
+    /// Writes the note the tree's default fact earns this line as it loads,
+    /// before the line is ready and the Session publishes, so the note is in
+    /// the line's Timeline before the first request it can answer (design §5,
+    /// §20.24a).
+    async fn reconcile(&self) -> Result<()> {
+        let Some((role, parent)) = self.resolved() else {
+            return Ok(());
+        };
+        self.write_load_note(role, parent.as_deref()).await
+    }
+}
+/// The block under `key` in a block query's last row.
+fn block_row(key: &str, reply: TimelineQueryReply) -> Option<(String, String, bool)> {
+    let QueryOutput::Rows { rows } = reply.result else {
+        unreachable!("branch block fields")
+    };
+    let row = rows.first()?;
+    let [
+        QueryValue::Value {
+            value: serde_json::Value::String(id),
+        },
+        QueryValue::Elements { values: keys },
+        QueryValue::Elements { values: texts },
+        QueryValue::Elements { values: retires },
+    ] = row.values.as_slice()
+    else {
+        unreachable!("branch block projections")
+    };
+    for ((found, text), retire) in keys.iter().zip(texts).zip(retires).rev() {
+        if matches!(
+            found,
+            QueryValue::Value { value: serde_json::Value::String(found) } if found == key
+        ) {
+            let QueryValue::Value {
+                value: serde_json::Value::String(text),
+            } = text
+            else {
+                unreachable!("raw block text")
+            };
+            return Some((
+                id.clone(),
+                text.clone(),
+                matches!(
+                    retire,
+                    QueryValue::Value {
+                        value: serde_json::Value::Bool(true)
+                    }
+                ),
+            ));
+        }
+    }
+    unreachable!("selected branch block")
 }
 fn steered_parent(call: &ToolCall, parent: &str) -> bool {
     call.name == "branch"
@@ -4009,7 +5004,9 @@ impl BranchTool {
         };
         let permitted = match own.role {
             LineRole::Main => kin(own, &target),
-            LineRole::Tool | LineRole::Host => own.parent.as_deref() == Some(target.id.as_str()),
+            LineRole::Tool | LineRole::Host | LineRole::User => {
+                own.parent.as_deref() == Some(target.id.as_str())
+            }
         };
         if !permitted {
             return Ok(self.not_kin());
@@ -4102,25 +5099,25 @@ impl BranchTool {
             .parent
             .clone()
             .ok_or_else(|| invalid("a tool line has a parent"))?;
-        let data = InputMessageData {
-            blocks: vec![message_block(&own.id, &parent, &content, true)],
-            mode: Some(InputMode::Steer),
-            ..InputMessageData::default()
-        };
-        if let Err(error) = self.tree.input(parent.clone(), data).await {
-            return Err(HostError::failed(error.to_string()));
-        }
         let source = BranchSource::Tool {
             turn_id: context.turn_id.clone(),
             request_id: context.request_id.clone(),
             call_id: call_id.into(),
         };
-        match self.tree.end(own.id.clone(), source).await {
+        match self
+            .tree
+            .end_with_final(own.id.clone(), source, Some(content))
+            .await
+        {
             Ok(()) => Ok(ToolResult::text(format!(
                 "Line {} is ending; your final message was sent to {}.",
                 own.id, parent
             ))),
             Err(AgentError::BranchEnded(line)) => Ok(self.ended(&line)),
+            Err(AgentError::BranchRefused {
+                refusal: kind,
+                message,
+            }) => Ok(refusal(kind.code(), message)),
             Err(error) => Err(HostError::failed(error.to_string())),
         }
     }
@@ -4159,8 +5156,15 @@ fn kin(own: &OwnLine, target: &TimelineInfo) -> bool {
     match own.role {
         LineRole::Tool => target.id == own.parent.clone().unwrap_or_default(),
         LineRole::Main => target.parent.as_deref() == Some(own.id.as_str()),
-        LineRole::Host => false,
+        LineRole::Host | LineRole::User => false,
     }
+}
+/// The submission id a tool end's final message carries, derived from the end
+/// it belongs to: `branch-final:<line>:<sequence>`. Both the delivery after the
+/// commit and a load that completes one write it, so the id decides whether the
+/// message is already there (design §10, §20.26b).
+fn final_submission_id(line: &str, end_event: u64) -> String {
+    format!("branch-final:{line}:{end_event}")
 }
 fn message_block(from: &str, to: &str, content: &str, final_message: bool) -> InputBlock {
     let content = crate::context_block::text(content);
@@ -4462,8 +5466,25 @@ impl ToolHandler for BranchTool {
 fn line_key() -> String {
     "branch:line".into()
 }
+/// The `default` attribute of a `<dim-branch-line>` block, `None` when it
+/// carries none: a birth identity has no attribute, and a note is `true` or
+/// `false` (design §12.1).
+fn default_attribute(text: &str) -> Option<bool> {
+    let first = text.lines().next()?;
+    let rest = first.strip_prefix("<dim-branch-line ")?;
+    match rest.contains(r#" default="true""#) {
+        true => Some(true),
+        false => rest.contains(r#" default="false""#).then_some(false),
+    }
+}
 fn parent_key() -> String {
     "branch:parent".into()
+}
+/// Whether this line receives a status note at all: never the root, which
+/// opens lines and never ends, and never a plugin line, which follows its
+/// creator's protocol (design §5, §12.1).
+fn receives_note(role: LineRole) -> bool {
+    !matches!(role, LineRole::Main | LineRole::Host)
 }
 
 fn first_input(parent: &str, data: &BranchCreateData, idle_notice: IdleNotice) -> InputMessageData {
@@ -4479,6 +5500,14 @@ fn first_input(parent: &str, data: &BranchCreateData, idle_notice: IdleNotice) -
         ),
         BranchSource::Host { .. } => (
             vec![host_line_identity(&data.branch, parent)],
+            Some(UserInput {
+                content: vec![ContentBlock::Text {
+                    text: data.prompt.clone(),
+                }],
+            }),
+        ),
+        BranchSource::User { .. } => (
+            vec![user_line_identity(&data.branch, parent)],
             Some(UserInput {
                 content: vec![ContentBlock::Text {
                     text: data.prompt.clone(),
@@ -4520,8 +5549,22 @@ fn tool_line_identity(
     prompt: &str,
     idle_notice: IdleNotice,
 ) -> InputBlock {
+    let body = tool_line_body(line, parent, prompt);
+    let mut attrs = vec![("branch", line), ("parent", parent), ("source", "tool")];
+    if idle_notice == IdleNotice::None {
+        attrs.push((QUIET_IDLE_ATTRIBUTE, "none"));
+    }
+    crate::context_block::raw(
+        crate::context_block::element("dim-branch-line", &attrs, &body),
+        Some(line_key()),
+    )
+}
+
+/// The birth sentences of a tool line: what a status note restates byte for
+/// byte when it replaces this block (design §12.1).
+fn tool_line_body(line: &str, parent: &str, prompt: &str) -> String {
     let prompt = crate::context_block::text(prompt);
-    let body = [
+    [
         format!("You are line {line} of this session. Line {parent} opened you at this point of its history to work in parallel with it. You are the same agent as {parent}: everything above is your own history, and you continue from here on your own line. {parent} keeps working on its line; you can read its work after this point, and it can read yours. Messages above that were addressed to {parent}, such as its list of open lines, are {parent}'s, not yours."),
         String::new(),
         format!("Your purpose, as {parent} wrote it:"),
@@ -4534,15 +5577,7 @@ fn tool_line_identity(
         "- The user can talk to you directly. Answer the user, and ask with ask_user when only the user can decide.".to_string(),
         format!("- When your purpose is done, or cannot be done, call the branch tool with action \"end\" and content saying what you found, did, changed and left undone. If you already told {parent} that in a message, your end content carries only what is new. Read {parent} once more before you end if the parent block says {parent} has moved, so your last word still holds. That is your last action; {parent} receives it."),
     ]
-    .join("\n");
-    let mut attrs = vec![("branch", line), ("parent", parent), ("source", "tool")];
-    if idle_notice == IdleNotice::None {
-        attrs.push((QUIET_IDLE_ATTRIBUTE, "none"));
-    }
-    crate::context_block::raw(
-        crate::context_block::element("dim-branch-line", &attrs, &body),
-        Some(line_key()),
-    )
+    .join("\n")
 }
 
 fn host_line_identity(line: &str, parent: &str) -> InputBlock {
@@ -4556,6 +5591,71 @@ fn host_line_identity(line: &str, parent: &str) -> InputBlock {
         ),
         Some(line_key()),
     )
+}
+
+/// The block a line the user opened gets: the user is its opener, so it ends
+/// the line and the line does not end itself (design §4, §12.1).
+fn user_line_identity(line: &str, parent: &str) -> InputBlock {
+    let body = user_line_body(line, parent);
+    crate::context_block::raw(
+        crate::context_block::element(
+            "dim-branch-line",
+            &[("branch", line), ("parent", parent), ("source", "user")],
+            &body,
+        ),
+        Some(line_key()),
+    )
+}
+
+/// The birth sentences of a line the user opened (design §12.1).
+fn user_line_body(line: &str, parent: &str) -> String {
+    format!(
+        "You are line {line} of this session, opened by the user from line {parent} at this point of its history. You are the same agent as {parent}: everything above is your own history, and you continue from here on your own line, in parallel with {parent}. You can read {parent}'s work after this point. Unless the user makes this line the default branch, you cannot call end on yourself. Messages above that were addressed to {parent} are {parent}'s, not yours. The message after this one is from the user for this line."
+    )
+}
+
+/// The status note a move writes on a conversation line: the line's birth
+/// identity under the same key, restated byte for byte, then the sentences the
+/// move changes (design §5, §12.1). A line the user opened and a tool line get
+/// their own rule. The policy sentences come later; these are the protocol's.
+fn status_note(
+    line: &str,
+    parent: &str,
+    source: &BranchSource,
+    purpose: &str,
+    idle_notice: IdleNotice,
+    default: bool,
+    other: &str,
+) -> String {
+    let (kind, birth) = match source {
+        BranchSource::Tool { .. } => ("tool", tool_line_body(line, parent, purpose)),
+        _ => ("user", user_line_body(line, parent)),
+    };
+    let change = if default {
+        match kind {
+            "tool" => format!(
+                "This line is now the session's default branch, switched from line {other}. While this block is your latest one: answer the user here; you send no automatic idle notice to {parent}; you cannot call end on yourself. Line {other} stays open and keeps the lines it opened."
+            ),
+            _ => format!(
+                "The user has now made this line the session's default branch, switched from line {other}. While this block is your latest one: answer the user here; you cannot call end on yourself; the user ends this line. Line {other} stays open and keeps the lines it opened."
+            ),
+        }
+    } else {
+        format!(
+            "Line {other} is now the session's default branch. This line stays open, reports to {parent} as before and keeps coordinating the lines it opened; the rest of the rules above hold again."
+        )
+    };
+    let body = format!("{birth}\n\n{change}");
+    let mut attrs = vec![
+        ("branch", line),
+        ("parent", parent),
+        ("source", kind),
+        ("default", if default { "true" } else { "false" }),
+    ];
+    if idle_notice == IdleNotice::None {
+        attrs.push((QUIET_IDLE_ATTRIBUTE, "none"));
+    }
+    crate::context_block::element("dim-branch-line", &attrs, &body)
 }
 
 /// The `branch` tool's description: its policy sentences are the coordination

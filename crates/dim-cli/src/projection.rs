@@ -179,7 +179,9 @@ impl Projection {
                 let state = match (&data.source, &data.ancestor) {
                     (_, Some(ancestor)) => LineState::EndedWith(ancestor.clone()),
                     (BranchSource::Tool { .. }, None) => LineState::EndedItself,
-                    (BranchSource::Host { .. }, None) => LineState::EndedByOperation,
+                    (BranchSource::Host { .. } | BranchSource::User { .. }, None) => {
+                        LineState::EndedByOperation
+                    }
                 };
                 if let Some(line) = self.lines.iter_mut().find(|line| line.id == data.branch) {
                     line.state = state;
@@ -352,7 +354,9 @@ impl Projection {
                 let issuer = match (&data.source, &data.ancestor) {
                     (_, Some(ancestor)) => format!("with {ancestor}"),
                     (BranchSource::Tool { .. }, None) => "itself".into(),
-                    (BranchSource::Host { .. }, None) => "an operation".into(),
+                    (BranchSource::Host { .. } | BranchSource::User { .. }, None) => {
+                        "an operation".into()
+                    }
                 };
                 self.push(
                     format!("end-{sequence}"),
@@ -1348,7 +1352,9 @@ impl Projection {
                     Some(end) => match (&end.source, &end.ancestor) {
                         (_, Some(ancestor)) => LineState::EndedWith(ancestor.clone()),
                         (BranchSource::Tool { .. }, None) => LineState::EndedItself,
-                        (BranchSource::Host { .. }, None) => LineState::EndedByOperation,
+                        (BranchSource::Host { .. } | BranchSource::User { .. }, None) => {
+                            LineState::EndedByOperation
+                        }
                     },
                     None => LineState::Ended,
                 }

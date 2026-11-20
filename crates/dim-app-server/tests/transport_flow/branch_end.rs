@@ -218,6 +218,37 @@ async fn read_both_sides(config: ServerConfig) {
     server.join().await.unwrap();
 }
 
+/// #1862: an end the tree refuses keeps the code the caller corrects against.
+/// The root answers the input error its callers already handle, and a protected
+/// line — the default branch or an ancestor of it — answers the tree's own
+/// `branch_cannot_end` instead of falling through to a framework fault.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ending_the_default_branch_answers_the_tree_refusal() {
+    let (server, agent) = launch_with_agent(Arc::new(MockTools), ServerConfig::default()).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let created = client.rpc("session.create", create_with_branch()).await;
+    assert_ok(&created);
+    let id = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    let session = agent.get_session(&id).unwrap();
+    let child = open_tool_line(&mut client, &session, &id).await;
+    session
+        .set_default_branch(
+            &child,
+            BranchSource::User {
+                operation_id: "continue".into(),
+            },
+        )
+        .await
+        .unwrap();
+    let refused = client.rpc("session.branch_end", end(&id, &child)).await;
+    assert_eq!(error_name(&refused), "branch_cannot_end");
+    assert_eq!(refused["error"]["code"], json!(-32000));
+    let root = client.rpc("session.branch_end", end(&id, "main")).await;
+    assert_eq!(error_name(&root), "session_invalid_input");
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_v2_client_never_sees_the_new_kinds() {
     let (server, agent) = launch_with_agent(Arc::new(MockTools), ServerConfig::default()).await;
