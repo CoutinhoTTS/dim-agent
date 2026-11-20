@@ -5045,16 +5045,13 @@ impl BranchTool {
         let Some(target) = self.line(&id) else {
             return Ok(self.not_kin());
         };
-        let permitted = match own.role {
-            LineRole::Main => kin(own, &target),
-            LineRole::Tool | LineRole::Host | LineRole::User => {
-                own.parent.as_deref() == Some(target.id.as_str())
-            }
-        };
-        if !permitted {
+        // A plugin line reads the line it was cut from; every other line reads
+        // the line it was cut from and the lines it opened (design §6).
+        let cut_from = own.parent.as_deref() == Some(target.id.as_str());
+        if !cut_from && !kin(own, &target) {
             return Ok(self.not_kin());
         }
-        if own.role == LineRole::Main && matches!(target.source, Some(BranchSource::Host { .. })) {
+        if !cut_from && matches!(target.source, Some(BranchSource::Host { .. })) {
             return Ok(self.not_tool_line(&target.id));
         }
         let limit = match input.limit.unwrap_or(READ_PAGE_LIMIT as u64) {
@@ -5065,20 +5062,21 @@ impl BranchTool {
                 )));
             }
         };
-        // main reads from a line's start; a line reads from its cut. Without
-        // `after`, a read continues after the reader's last read of the
-        // target, and a parent read never goes below the cut (design §6).
-        let cut = if own.role == LineRole::Main {
-            0
-        } else {
-            self.tree
+        // A read of the line the caller was cut from starts at its cut; a read
+        // of a line it opened starts at that line's first event. Without
+        // `after`, a read continues after the caller's last read of the target,
+        // and a read of the line it was cut from never goes below the cut
+        // (design §6).
+        let cut = match cut_from {
+            true => self
+                .tree
                 .info(own.id.clone())
                 .ok()
                 .and_then(|info| info.branch_point)
-                .unwrap_or(0)
+                .unwrap_or(0),
+            false => 0,
         };
         let after = match input.after {
-            Some(after) if own.role == LineRole::Main => after,
             Some(after) => after.max(cut),
             None => line
                 .cursor(&target.id)
@@ -5195,12 +5193,19 @@ struct OwnLine {
     /// The line committed its own `branch/end`: it is ending.
     ending: bool,
 }
+/// The line a caller may message: the line it was cut from, and each line it
+/// opened, whatever opened that line (design §6). A line the user opened is
+/// on no roster, so the line it was cut from neither messages nor reads it,
+/// and a plugin line sends its creator's protocol no message.
 fn kin(own: &OwnLine, target: &TimelineInfo) -> bool {
-    match own.role {
-        LineRole::Tool => target.id == own.parent.clone().unwrap_or_default(),
-        LineRole::Main => target.parent.as_deref() == Some(own.id.as_str()),
-        LineRole::Host | LineRole::User => false,
+    if own.role == LineRole::Host {
+        return false;
     }
+    if own.parent.as_deref() == Some(target.id.as_str()) {
+        return true;
+    }
+    target.parent.as_deref() == Some(own.id.as_str())
+        && !matches!(target.source, Some(BranchSource::User { .. }))
 }
 /// The submission id a tool end's final message carries, derived from the end
 /// it belongs to: `branch-final:<line>:<sequence>`. Both the delivery after the

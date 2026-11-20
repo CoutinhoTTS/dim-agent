@@ -173,6 +173,8 @@ BranchLine mounts at the committed Dispatcher cutoff without reading historical 
 `a_roster_and_an_identity_replay_separately_after_a_compaction`,
 `a_child_cut_after_a_roster_retires_it_and_one_cut_before_gets_nothing`,
 `the_roots_roster_from_before_the_key_split_is_retired_at_load`,
+`a_line_messages_and_reads_its_parent_and_the_lines_it_opened`,
+`a_sibling_or_grandparent_is_refused_with_nothing_written`,
 `an_idle_line_is_told_its_parent_moved_without_being_woken`,
 `a_running_line_gets_the_block_with_its_next_request_once`,
 `two_parent_turns_while_the_line_is_idle_write_one_block`,

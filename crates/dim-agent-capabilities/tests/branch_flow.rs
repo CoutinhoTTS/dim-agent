@@ -3867,6 +3867,310 @@ async fn a_refused_branch_call_writes_nothing() {
     soon(agent.close()).await.unwrap();
 }
 
+/// The reach of the tool: a line messages and reads the line it was cut from
+/// and each tool line it opened, while a line the user opened is on no roster
+/// and under no coordination of the line it was cut from, which neither
+/// messages nor reads it (design §6, §20.1, §20.3a).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_line_messages_and_reads_its_parent_and_the_lines_it_opened() {
+    let probe = Arc::new(Probe::default());
+    let agent = setup(&probe).await;
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let tool_line = open_line(&session, "opened with the tool").await;
+    let page = tool_call(
+        &session,
+        "main",
+        &format!(r#"{{"action":"read","branch":"{tool_line}"}}"#),
+    )
+    .await;
+    assert_eq!(
+        page.is_error, None,
+        "the opener reads the line it opened: {:?}",
+        page.content
+    );
+    let sent = tool_call(
+        &session,
+        "main",
+        &format!(r#"{{"action":"message","to":"{tool_line}","content":"FROM-THE-OPENER"}}"#),
+    )
+    .await;
+    assert_eq!(
+        sent.is_error, None,
+        "the opener messages it: {:?}",
+        sent.content
+    );
+    let sent = tool_call(
+        &session,
+        &tool_line,
+        r#"{"action":"message","to":"main","content":"FROM-THE-LINE"}"#,
+    )
+    .await;
+    assert_eq!(
+        sent.is_error, None,
+        "a line messages the line it was cut from: {:?}",
+        sent.content
+    );
+    let page =
+        page_of(&tool_call(&session, &tool_line, r#"{"action":"read","branch":"main"}"#).await);
+    assert!(
+        !page_sequences(&page).is_empty(),
+        "a line reads the line it was cut from: {page}"
+    );
+
+    let cut = session.sequence("main").unwrap();
+    let user = soon(session.branch(
+        "main".into(),
+        cut,
+        BranchOptions {
+            prompt: "the user opened this".into(),
+            source: BranchSource::User {
+                operation_id: "client-op".into(),
+            },
+        },
+    ))
+    .await
+    .unwrap();
+    quiet(&session, &user).await;
+    let roster = blocks_with(&local_events(&session, "main").await, "<dim-branch-lines")
+        .last()
+        .cloned()
+        .expect("the root's roster");
+    assert!(roster.contains(&tool_line), "{roster}");
+    assert!(
+        !roster.contains(&user),
+        "a line the user opened is on no roster: {roster}"
+    );
+    let not_kin = (
+        "branch_not_kin".to_string(),
+        "You can message or read only the lines you opened and the line you were cut from."
+            .to_string(),
+    );
+    assert_eq!(
+        call(
+            &session,
+            "main",
+            &format!(r#"{{"action":"message","to":"{user}","content":"hello"}}"#)
+        )
+        .await,
+        not_kin,
+        "the line it was cut from sends it no message"
+    );
+    assert_eq!(
+        call(
+            &session,
+            "main",
+            &format!(r#"{{"action":"read","branch":"{user}"}}"#)
+        )
+        .await,
+        not_kin,
+        "the line it was cut from reads it no more"
+    );
+    let idle_notices = blocks_with(&local_events(&session, "main").await, "<dim-branch-idle").len();
+    let ended_notices =
+        blocks_with(&local_events(&session, "main").await, "<dim-branch-ended").len();
+    soon(session.submit("WORK-ON".into(), InputMode::Queue, &user))
+        .await
+        .unwrap();
+    quiet(&session, &user).await;
+    assert_eq!(
+        blocks_with(&local_events(&session, "main").await, "<dim-branch-idle").len(),
+        idle_notices,
+        "the user's line tells the line it was cut from nothing"
+    );
+    assert_eq!(
+        blocks_with(&local_events(&session, "main").await, "<dim-branch-ended").len(),
+        ended_notices,
+        "and no ended notice either"
+    );
+    let sent = tool_call(
+        &session,
+        &user,
+        r#"{"action":"message","to":"main","content":"FROM-THE-USERS-LINE"}"#,
+    )
+    .await;
+    assert_eq!(
+        sent.is_error, None,
+        "a line the user opened messages the line it was cut from: {:?}",
+        sent.content
+    );
+    let page = page_of(&tool_call(&session, &user, r#"{"action":"read","branch":"main"}"#).await);
+    let sequences = page_sequences(&page);
+    assert!(!sequences.is_empty(), "{page}");
+    assert!(
+        sequences.iter().all(|sequence| *sequence > cut),
+        "a read of the line it was cut from starts at its cut {cut}: {sequences:?}"
+    );
+
+    // A plugin line's protocol is its creator's: it is on no roster, the line
+    // that opened it reaches it only to be told so, and it sends that line no
+    // message (design §6).
+    let plugin = soon(session.branch(tool_line.clone(), 0, options("a plugin line")))
+        .await
+        .unwrap();
+    quiet(&session, &plugin).await;
+    assert!(
+        roster_block(&local_events(&session, &tool_line).await).is_none(),
+        "a line that opened no tool line keeps no roster"
+    );
+    let not_tool_line = (
+        "branch_not_tool_line".to_string(),
+        format!("Line {plugin} was not opened with this tool; it follows its own protocol."),
+    );
+    assert_eq!(
+        call(
+            &session,
+            &tool_line,
+            &format!(r#"{{"action":"read","branch":"{plugin}"}}"#)
+        )
+        .await,
+        not_tool_line.clone(),
+        "a line does not read a plugin line it opened"
+    );
+    assert_eq!(
+        call(
+            &session,
+            &tool_line,
+            &format!(r#"{{"action":"message","to":"{plugin}","content":"hello"}}"#)
+        )
+        .await,
+        not_tool_line,
+        "nor message it"
+    );
+    assert_eq!(
+        call(
+            &session,
+            &plugin,
+            &format!(r#"{{"action":"message","to":"{tool_line}","content":"hello"}}"#)
+        )
+        .await,
+        not_kin,
+        "and it messages the line it was cut from nothing"
+    );
+    soon(agent.close()).await.unwrap();
+}
+
+/// How many message blocks each of `lines` holds in its own history.
+async fn messages_written(session: &Session, lines: &[&String]) -> Vec<usize> {
+    let mut counts = Vec::new();
+    for line in lines {
+        counts.push(blocks_with(&local_events(session, line).await, "<dim-branch-message").len());
+    }
+    counts
+}
+
+/// Siblings and a line's grandparent are refused `branch_not_kin` and write
+/// nothing: the pair the tool serves is one edge of the tree (design §6,
+/// §20.3).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_sibling_or_grandparent_is_refused_with_nothing_written() {
+    let probe = Arc::new(Probe::default());
+    let agent = setup(&probe).await;
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let sibling = |prompt: &'static str| {
+        let session = session.clone();
+        async move {
+            soon(session.branch(
+                "main".into(),
+                0,
+                BranchOptions {
+                    prompt: prompt.into(),
+                    source: BranchSource::User {
+                        operation_id: format!("user:{prompt}"),
+                    },
+                },
+            ))
+            .await
+            .unwrap()
+        }
+    };
+    let first = sibling("first").await;
+    let second = sibling("second").await;
+    quiet(&session, &first).await;
+    quiet(&session, &second).await;
+    let grandchild = soon(session.branch(
+        first.clone(),
+        0,
+        BranchOptions {
+            prompt: "the child of the first line".into(),
+            source: BranchSource::User {
+                operation_id: "user:grandchild".into(),
+            },
+        },
+    ))
+    .await
+    .unwrap();
+    quiet(&session, &grandchild).await;
+    let lines = [&first, &second, &grandchild];
+    let before = messages_written(&session, &lines).await;
+    let not_kin = (
+        "branch_not_kin".to_string(),
+        "You can message or read only the lines you opened and the line you were cut from."
+            .to_string(),
+    );
+    assert_eq!(
+        call(
+            &session,
+            &first,
+            &format!(r#"{{"action":"message","to":"{second}","content":"hello"}}"#)
+        )
+        .await,
+        not_kin.clone(),
+        "a sibling gets no message"
+    );
+    assert_eq!(
+        call(
+            &session,
+            &first,
+            &format!(r#"{{"action":"read","branch":"{second}"}}"#)
+        )
+        .await,
+        not_kin.clone(),
+        "and no read"
+    );
+    assert_eq!(
+        call(
+            &session,
+            &grandchild,
+            r#"{"action":"read","branch":"main"}"#
+        )
+        .await,
+        not_kin.clone(),
+        "a line does not read its grandparent"
+    );
+    assert_eq!(
+        call(
+            &session,
+            "main",
+            &format!(r#"{{"action":"read","branch":"{grandchild}"}}"#)
+        )
+        .await,
+        not_kin.clone(),
+        "and the grandparent does not read it"
+    );
+    assert_eq!(
+        messages_written(&session, &lines).await,
+        before,
+        "a refused call writes no message to any of the three lines"
+    );
+    let page = page_of(
+        &tool_call(
+            &session,
+            &grandchild,
+            &format!(r#"{{"action":"read","branch":"{first}"}}"#),
+        )
+        .await,
+    );
+    assert!(
+        !page_sequences(&page).is_empty(),
+        "a line still reads the line it was cut from: {page}"
+    );
+    soon(agent.close()).await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn session_close_cancels_an_active_build_and_waits_for_rollback() {
     let probe = Arc::new(Probe::default());
