@@ -47,7 +47,7 @@ function session(t, history, reads = {}, display = true, transcript = false) {
       return undefined
     } } },
     sessions: { byId: new Map(), setRunning() {}, refresh: async () => {}, forget() {} },
-    ui: { resetSessionTabs() {} },
+    ui: { resetSessionTabs() {}, followDefault() {} },
   }
   const chat = useChatStore()
   t.after(() => chat.$dispose())
@@ -84,6 +84,25 @@ test("the centre follows the Session's default branch and its commands name it",
   assert.equal(seen.usage, "worker", "/usage acts on the centred line")
   await chat.submit("session", chat.views.session.defaultBranchId, "hello")
   assert.equal(seen.submit, "worker", "a message from the centre reaches the default branch")
+})
+
+test("a move whose new centre cannot be read reports the failure instead of an empty conversation", async t => {
+  let moved = false
+  const chat = session(t, params => {
+    if (moved && params.branchId === "worker") throw new Error("the line could not be read")
+    return page([input(1, "on the root")], 1)
+  }, {
+    "session.branch_set_default": () => {
+      moved = true
+      return "worker"
+    },
+  })
+  await flush()
+  assert.equal(chat.views.session.status, "ready")
+  await chat.setDefaultBranch("session", "worker")
+  assert.equal(chat.views.session.defaultBranchId, "worker", "the move stands")
+  assert.equal(chat.views.session.status, "failed", "the unreadable centre is reported, not shown empty")
+  assert.equal(chat.views.session.error, "the line could not be read")
 })
 
 for (const display of [true, false]) test(`conversation windows negotiate ${display ? "display summaries" : "bounded legacy history"}`, async t => {

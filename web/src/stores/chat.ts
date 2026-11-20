@@ -862,7 +862,17 @@ export const useChatStore = defineStore("chat", () => {
       channel.branches.delete(moved)
       channel.main = stream()
       channel.main.opened = true
-      await loadHistory(channel, moved)
+      const loaded = await loadHistory(channel, moved)
+      if (loaded !== "ok") {
+        // The move stands, but the centre has no transcript to show: report it
+        // as `sync` reports the same failure rather than an empty conversation.
+        if (loaded === "failed" && view.status !== "closed") {
+          view.status = "failed"
+          view.error = channel.main.error
+        }
+        publish(channel)
+        return
+      }
       await refreshGoal(channel)
       if (view.status !== "closed") view.permission = await sessionPermission(sessionId)
       publish(channel)
