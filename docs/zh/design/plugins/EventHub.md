@@ -112,9 +112,10 @@ GuideRecord {
 | --- | --- | --- |
 | `delivered` | `{sessionId, branchId, subscriptionIds, inputId, sequence, truncated?, repeated?}` | 保留 |
 | `gone` | `{sessionId, branchId, subscriptionIds, code}`，`code` 为 `branch_missing` 或 `branch_ended` | 每条列出的订阅都被移除，因为该目标分支不会再接受输入；仅由 `to` 到达的分支，列表为空 |
-| `failed` | `{sessionId, branchId, subscriptionIds, code, message}`，`code` 为其他任何 `sessions` 错误或 `transport`：`session_closed`、`reloading`、`rejected`、`ambiguous`、`publication_unknown`、`transport`、`failed` | 每条列出的订阅都保留，并由 `lastFailure` 记录该码 |
+| `failed` | `{sessionId, branchId?, subscriptionIds, code, message}`，`code` 为其他任何 `sessions` 错误或 `transport`：`session_closed`、`reloading`、`rejected`、`ambiguous`、`publication_unknown`、`transport`、`failed` | 每条列出的订阅都保留，并由 `lastFailure` 记录该码 |
 
 - `subscriptionIds` 列出所有导致这条分支被投递的匹配订阅；仅由 `to` 到达的分支为空。表中的效果作用于每一条列出的订阅。
+- 省略的 `branchId` 无法解析的目标，其 `failed` 条目不携带 `branchId`：目标不命名任何线，`code` 就是该读取给出的答案（`session_closed`、`reloading`、`transport` 或其他 `sessions` 码）。
 - `repeated: true` 表示该分支已持有本进程内某次发布写入的同一事件输入；`inputId` 与 `sequence` 指向那个输入，且不含 `truncated`，见 2.4、3.2。
 - `failed` 不是拒绝：输入没有被写入，但有两种情况写入本身存疑：`publication_unknown`，此时它已提交而发布情况未知；以及 `transport`，此时 `sessions` 调用失败或其回复无法读取。生产方用同一个 `id` 重试会得到同一份回执，见 2.4。
 - 订阅的 `lastFailure` 只在发生变化时写入：设为一个新的码，或在一次已记录的失败之后清空。同一次发布的所有 `lastFailure` 变更在它的投递结束后合成一个事务。`eventhub.subscriptions` 会显示它，所以一条失效的订阅不必等生产方再发回执就能被看见。
@@ -169,7 +170,7 @@ sequenceDiagram
   H-->>P: {eventId, deliveries}
 ```
 
-一条分支无论被多少个目标命中，都只投递一次。一个 `to` 条目给出了 `mode` 时用它；否则取匹配的订阅中有效模式最强者，顺序为 `steer` 高于 `queue` 高于 `append`，其中订阅的有效模式是它自己的 `mode`，没有则为类型声明的 `mode`。要求被唤醒的订阅者不会被没有这样要求的订阅者盖过。凡请求可省略 `branchId` 时，它表示该 Session 当前的默认分支：`subscribe` 把该分支记入订阅，`publish` 每个请求一次地经 `sessions` 数据面解析每个 `to` 条目，冷读受 hub 的投递预算约束。`subscribe` 先检查声明的类型，再解析省略的目标分支，因此被拒绝的类型绝不会恢复冷 Session；随后它也在同一投递预算下读取该 Session。publish 先回答进程准入、来源归属和类型，再解析任何目标，所以被拒绝的 publish 绝不恢复冷的 Session，而是回答自己的错误；已准入的 publish 在其 Session 的默认分支无法读取(`session_closed`、`reloading`)时拒绝，且不写入任何东西。省略分支无法解析的目标在其自己的回执条目里作答：一条 `failed` 投递，带该 Session 的投递本来会给出的码，例如已删除 Session 的 `session_closed`，其余目标与所有匹配订阅照常规划并投递。整条链路的失败，例如 sessions 服务重载或传输失败，仍拒绝整次 publish。已存订阅的目标永不改变。零个目标不是错误：`deliveries: []`。
+一条分支无论被多少个目标命中，都只投递一次。一个 `to` 条目给出了 `mode` 时用它；否则取匹配的订阅中有效模式最强者，顺序为 `steer` 高于 `queue` 高于 `append`，其中订阅的有效模式是它自己的 `mode`，没有则为类型声明的 `mode`。要求被唤醒的订阅者不会被没有这样要求的订阅者盖过。凡请求可省略 `branchId` 时，它表示该 Session 当前的默认分支：`subscribe` 把该分支记入订阅，`publish` 每个请求一次地经 `sessions` 数据面解析每个 `to` 条目，冷读受 hub 的投递预算约束。`subscribe` 先检查声明的类型，再解析省略的目标分支，因此被拒绝的类型绝不会恢复冷 Session；随后它也在同一投递预算下读取该 Session。publish 先回答进程准入、来源归属和类型，再解析任何目标，所以被拒绝的 publish 绝不恢复冷的 Session，而是回答自己的错误；省略分支无法解析的目标，无论读取回答了什么（`session_closed`、`reloading` 或 `transport`），都在它自己的 `failed` 回执条目里带该码作答且不带 `branchId`；其余目标与所有匹配订阅照常规划并投递。已存订阅的目标永不改变。零个目标不是错误：`deliveries: []`。
 
 投递给一条被订阅的分支时，先按该分支与来源取出记录的指南，与当前声明对比(3.3)。二者不同时，它先在该 Session 的锁下把当前指南作为一条带键的 `append` 写出，然后写事件；仅由 `to` 到达的分支没有记录，也不写指南。
 

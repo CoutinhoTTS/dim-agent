@@ -69,6 +69,8 @@ struct Inner {
     accepted: Mutex<HashMap<String, (String, u64)>>,
     /// Session ids `exists` answers `false` for (design §3.4).
     missing: Mutex<std::collections::HashSet<String>>,
+    /// Session id to the error code its `defaultBranchId` read answers.
+    default_failures: Mutex<HashMap<String, &'static str>>,
     /// The `defaultBranchId` reads answered (timeline branches §20.22).
     defaults: AtomicUsize,
     sequence: AtomicU64,
@@ -93,6 +95,7 @@ impl Default for FakeSessions {
                 transports: Mutex::new(Vec::new()),
                 accepted: Mutex::new(HashMap::new()),
                 missing: Mutex::new(std::collections::HashSet::new()),
+                default_failures: Mutex::new(HashMap::new()),
                 defaults: AtomicUsize::new(0),
                 sequence: AtomicU64::new(0),
                 gate: Mutex::new(None),
@@ -118,6 +121,15 @@ impl FakeSessions {
     }
     pub fn accept(&self, session: &str) {
         self.inner.failures.lock().unwrap().remove(session);
+    }
+    /// Answers `session`'s `defaultBranchId` read with `code`, as a Session
+    /// whose Session service cannot answer does.
+    pub fn fail_default(&self, session: &str, code: &'static str) {
+        self.inner
+            .default_failures
+            .lock()
+            .unwrap()
+            .insert(session.to_owned(), code);
     }
     /// Answers `exists` `false` for `session`, as a deleted Session does
     /// (design §3.4).
@@ -227,11 +239,25 @@ impl HostDispatch for FakeSessions {
             "defaultBranchId" => {
                 self.inner.defaults.fetch_add(1, Ordering::SeqCst);
                 let session = write["sessionId"].as_str().unwrap_or_default().to_owned();
-                let gone = self.inner.missing.lock().unwrap().contains(&session);
+                let failure = self
+                    .inner
+                    .default_failures
+                    .lock()
+                    .unwrap()
+                    .get(&session)
+                    .copied()
+                    .or_else(|| {
+                        self.inner
+                            .missing
+                            .lock()
+                            .unwrap()
+                            .contains(&session)
+                            .then_some("session_closed")
+                    });
                 return Ok(Value::future(async move {
-                    if gone {
-                        Ok(json!({ "ok": false, "error": { "code": "session_closed",
-                            "message": "the Session is closed" } })
+                    if let Some(code) = failure {
+                        Ok(json!({ "ok": false, "error": { "code": code,
+                            "message": "the Session's default branch was not read" } })
                         .into())
                     } else {
                         Ok(json!({ "ok": true, "value": { "defaultBranchId": "main" } }).into())

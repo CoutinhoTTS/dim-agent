@@ -334,7 +334,9 @@ export type EventHubDelivery =
       inputId: string; sequence: number; truncated?: boolean; repeated?: boolean }
   | { status: 'gone'; sessionId: string; branchId: string; subscriptionIds: string[];
       code: 'branch_missing' | 'branch_ended' }
-  | { status: 'failed'; sessionId: string; branchId: string; subscriptionIds: string[];
+  | { status: 'failed'; sessionId: string;
+      /** Absent when an omitted branch could not be resolved: the target names no line. */
+      branchId?: string; subscriptionIds: string[];
       code: 'session_closed' | 'reloading' | 'rejected' | 'ambiguous' |
         'publication_unknown' | 'transport' | 'failed'; message: string };
 /** `publish`'s reply, after every target has an outcome (design A.2). */

@@ -63,7 +63,10 @@ pub(crate) enum Delivery {
     #[serde(rename_all = "camelCase")]
     Failed {
         session_id: String,
-        branch_id: String,
+        /// Absent when an omitted branch could not be resolved: the target
+        /// names no line.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        branch_id: Option<String>,
         subscription_ids: Vec<String>,
         code: String,
         message: String,
@@ -172,8 +175,7 @@ struct UnresolvedTarget {
 /// task starts, reading a Session named by two entries once and holding the
 /// hub's delivery budget across each cold read. A target that cannot be
 /// resolved is answered in its own receipt entry instead of failing the
-/// publish; a link that fails as a whole, such as the Sessions service
-/// reloading, still refuses the publish.
+/// publish, whatever the read answered.
 async fn resolved_to(
     shared: &Shared,
     to: Vec<crate::model::ToTarget>,
@@ -194,7 +196,6 @@ async fn resolved_to(
                             defaults.insert(target.session_id.clone(), branch_id.clone());
                             Some(branch_id)
                         }
-                        Err(error) if whole_publish(&error) => return Err(error),
                         Err(error) => {
                             unresolved.push(UnresolvedTarget {
                                 session_id: target.session_id.clone(),
@@ -214,13 +215,6 @@ async fn resolved_to(
         resolved.push(target);
     }
     Ok((resolved, unresolved))
-}
-
-/// Whether a resolution failure refuses the whole publish instead of one
-/// target: the Sessions link is unavailable (reloading) or broke (transport),
-/// so no target's state could be read.
-fn whole_publish(error: &EventHubError) -> bool {
-    matches!(error.code, "reloading" | TRANSPORT)
 }
 
 /// One publish from taking its event lock to its receipt, in the task
@@ -332,7 +326,7 @@ async fn publish_to_completion(
     // delivery to a gone Session would give (design §2.3, §3.2).
     deliveries.extend(unresolved.into_iter().map(|target| Delivery::Failed {
         session_id: target.session_id,
-        branch_id: String::new(),
+        branch_id: None,
         subscription_ids: Vec::new(),
         code: target.code,
         message: target.message,
@@ -645,7 +639,7 @@ async fn deliver(
             },
             _ => Delivery::Failed {
                 session_id: session_id.clone(),
-                branch_id: branch_id.clone(),
+                branch_id: Some(branch_id.clone()),
                 subscription_ids: subscription_ids.clone(),
                 code: TRANSPORT.into(),
                 message: "sessions.input answered without an input".into(),
@@ -663,7 +657,7 @@ async fn deliver(
             } else {
                 Delivery::Failed {
                     session_id: session_id.clone(),
-                    branch_id: branch_id.clone(),
+                    branch_id: Some(branch_id.clone()),
                     subscription_ids: subscription_ids.clone(),
                     code: failure.code,
                     message: failure.message,
@@ -674,7 +668,7 @@ async fn deliver(
         // was written is unknown (design Appendix C's `transport`).
         Err(message) => Delivery::Failed {
             session_id: session_id.clone(),
-            branch_id: branch_id.clone(),
+            branch_id: Some(branch_id.clone()),
             subscription_ids: subscription_ids.clone(),
             code: TRANSPORT.into(),
             message,

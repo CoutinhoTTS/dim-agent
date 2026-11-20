@@ -782,6 +782,7 @@ async fn one_unresolvable_target_keeps_the_rest_of_the_publish() {
         .await
         .unwrap();
     fixture.sessions.deleted("gone");
+    fixture.sessions.fail_default("reloading", "reloading");
     let mut request = event("partial");
     request.to = vec![
         ToTarget {
@@ -791,6 +792,11 @@ async fn one_unresolvable_target_keeps_the_rest_of_the_publish() {
         },
         ToTarget {
             session_id: "gone".into(),
+            branch_id: None,
+            mode: None,
+        },
+        ToTarget {
+            session_id: "reloading".into(),
             branch_id: None,
             mode: None,
         },
@@ -804,6 +810,21 @@ async fn one_unresolvable_target_keeps_the_rest_of_the_publish() {
     let gone = delivery_for(&receipt, "gone");
     assert_eq!(gone["status"], json!("failed"), "{receipt}");
     assert_eq!(gone["code"], json!("session_closed"), "{receipt}");
+    assert!(
+        gone.get("branchId").is_none(),
+        "a target with no resolved branch names none: {receipt}"
+    );
+    let reloading = delivery_for(&receipt, "reloading");
+    assert_eq!(reloading["status"], json!("failed"), "{receipt}");
+    assert_eq!(
+        reloading["code"],
+        json!("reloading"),
+        "the link's own code is the target's receipt entry: {receipt}"
+    );
+    assert!(
+        reloading.get("branchId").is_none(),
+        "a target with no resolved branch names none: {receipt}"
+    );
     assert_eq!(
         delivery_for(&receipt, "subscriber")["status"],
         json!("delivered"),
