@@ -880,7 +880,7 @@ export type SessionFault =
   | { framework: string }
   | { multiple: SessionFault[] }
 
-export interface FaultQuery {
+export type FaultQuery = {
 }
 
 /**
@@ -1019,13 +1019,13 @@ export interface PartRegistry {
   registerDefinition(scope: PartScope, name: string, definition: import('@arcships/rutis').Plugin | ((ctx: any, config: any) => unknown) | { apply(ctx: any, config: any): unknown }): Promise<void>
 }
 
-export interface SessionInstanceDefinition {
+export type SessionInstanceDefinition = {
   group: string
   definitionId: string
   instanceData: import('./plugin.js').BridgeJsonValue
 }
 
-export interface SessionInstance {
+export type SessionInstance = {
   instanceId: number | bigint
 }
 
