@@ -39,7 +39,7 @@ function session(t, history, reads = {}, display = true, transcript = false) {
       if (method === "session.history" || method === "session.history.display") return history(params)
       if (method === "session.attach") return { providerId: "test", modelId: "test" }
       if (method === "session.methods") return ["session.input.pending", "session.question.pending", "session.turn.get", "session.goal.get"]
-      if (method === "session.branches") return [{ branchId: "worker", parentBranchId: "main", branchPoint: 0, head: 0, state: "open" }]
+      if (method === "session.branches") return { branches: [{ branchId: "worker", parentBranchId: "main", branchPoint: 0, head: 0, state: "open" }], defaultBranchId: "main" }
       if (method === "session.branch.get") return { ...params, parentBranchId: "main", branchPoint: 0, head: 0, state: "open" }
       if (method === "session.input.pending") return { ...params, inputs: [], next: null }
       if (method === "session.question.pending") return { ...params, asks: [], next: null }
@@ -55,6 +55,36 @@ function session(t, history, reads = {}, display = true, transcript = false) {
   return chat
 }
 const receive = (chat, branchId, event) => chat.receive({ method: "session.event", sessionId: "session", branchId, event })
+
+test("the centre follows the Session's default branch and its commands name it", async t => {
+  const seen = {}
+  const policy = { preset: "workspace-write", allowedTools: [], disallowedTools: [] }
+  const chat = session(t, params => {
+    seen.history = params.branchId
+    return page([input(1, "on the line")], 1)
+  }, {
+    "session.branches": () => ({ branches: [{ branchId: "worker", parentBranchId: "main", branchPoint: 0, head: 1, state: "open" }], defaultBranchId: "worker" }),
+    "session.goal.get": params => { seen.goal = params.branchId; return { branchId: params.branchId, through: 1, goal: null } },
+    "session.permission.get": params => { seen.permission = params.branchId; return { version: 1, policy } },
+    "session.context.compact": params => { seen.compact = params.branchId; return { status: "skipped", reason: "short" } },
+    "session.context.usage": params => { seen.usage = params.branchId; return { contextWindow: 1000, outputTokens: 10, thresholdTokens: 800, estimatedInputTokens: 100, baselineSource: "estimated" } },
+    "session.submit": params => { seen.submit = params.branchId; return { event: event(9, { kind: "other" }) } },
+  })
+  const supports = globalThis.historyStores.connection.supports
+  globalThis.historyStores.connection.supports = name => name === "session.permission.get" || supports(name)
+  await flush()
+  assert.equal(chat.views.session.defaultBranchId, "worker")
+  assert.equal(seen.history, "worker", "the centre reads the default branch's history")
+  assert.deepEqual(chat.views.session.rows.map(row => row.text), ["on the line"], "the shown transcript is the default branch's")
+  assert.equal(seen.goal, "worker", "the goal in force is the default branch's")
+  assert.equal(seen.permission, "worker", "the permission read is the default branch's")
+  await chat.compact("session")
+  assert.equal(seen.compact, "worker", "/compact acts on the centred line")
+  await chat.usage("session")
+  assert.equal(seen.usage, "worker", "/usage acts on the centred line")
+  await chat.submit("session", chat.views.session.defaultBranchId, "hello")
+  assert.equal(seen.submit, "worker", "a message from the centre reaches the default branch")
+})
 
 for (const display of [true, false]) test(`conversation windows negotiate ${display ? "display summaries" : "bounded legacy history"}`, async t => {
   let attached = 0
