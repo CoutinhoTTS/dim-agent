@@ -110,39 +110,27 @@ pub(super) fn refresh_activity(
         )
         .optional()
         .map_err(error)?;
-    let updated_at = match last {
-        Some(body) => {
-            let row: Row = serde_json::from_str(&body).map_err(error)?;
-            row.wires()
-                .last()
-                .and_then(|wire| wire.event["create_at"].as_u64())
-                .ok_or_else(|| error("catalog activity event has no timestamp"))?
-        }
-        None if default != ROOT_BRANCH_ID => {
-            let first: Option<String> = connection
-                .query_row(
-                    "SELECT body FROM timeline_events WHERE session_id=?1 AND branch_id=?2 ORDER BY sequence ASC LIMIT 1",
-                    params![session, default],
-                    |row| row.get(0),
-                )
-                .optional()
-                .map_err(error)?;
-            match first {
-                // The same failures the activity read answers: a row that
-                // exists but cannot be dated is damaged storage, not a line
-                // without an opening.
-                Some(body) => {
-                    let row: Row = serde_json::from_str(&body).map_err(error)?;
-                    row.wires()
-                        .first()
-                        .and_then(|wire| wire.event["create_at"].as_u64())
-                        .ok_or_else(|| error("catalog activity event has no timestamp"))?
-                }
-                None => created_at(connection, session)?,
-            }
-        }
-        None => created_at(connection, session)?,
+    let latest = last
+        .map(|body| stored_timestamp(&body, false))
+        .transpose()?;
+    let opening = if latest.is_none() && default != ROOT_BRANCH_ID {
+        let first: Option<String> = connection
+            .query_row(
+                "SELECT body FROM timeline_events WHERE session_id=?1 AND branch_id=?2 ORDER BY sequence ASC LIMIT 1",
+                params![session, default],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(error)?;
+        // The same failures the activity read answers: a row that exists but
+        // cannot be dated is damaged storage, not a line without an opening.
+        first
+            .map(|body| stored_timestamp(&body, true))
+            .transpose()?
+    } else {
+        None
     };
+    let updated_at = activity_time(latest, opening, default, || created_at(connection, session))?;
     connection
         .execute(
             "UPDATE session_catalog SET updated_at_ms=?2 WHERE session_id=?1",
@@ -150,6 +138,37 @@ pub(super) fn refresh_activity(
         )
         .map_err(error)?;
     Ok(())
+}
+
+/// The time a catalog row reports for a Session line (session catalog §3.2):
+/// its newest activity event, or, while a line other than the root has none,
+/// its own opening event. The Session's creation time answers only for the
+/// root and for a line with no event at all. The stored rows and a daemon
+/// without a store decide here.
+pub(crate) fn activity_time(
+    latest: Option<u64>,
+    opening: Option<u64>,
+    default: &str,
+    created_at: impl FnOnce() -> Result<u64>,
+) -> Result<u64> {
+    match (latest, opening, default != ROOT_BRANCH_ID) {
+        (Some(at), _, _) => Ok(at),
+        (None, Some(at), true) => Ok(at),
+        (None, _, _) => created_at(),
+    }
+}
+
+/// The `create_at` of a stored event row: the newest wire of an activity row's
+/// batch, the first wire of an opening row's.
+fn stored_timestamp(body: &str, opening: bool) -> Result<u64> {
+    let row: Row = serde_json::from_str(body).map_err(error)?;
+    let wire = if opening {
+        row.wires().first()
+    } else {
+        row.wires().last()
+    };
+    wire.and_then(|wire| wire.event["create_at"].as_u64())
+        .ok_or_else(|| error("catalog activity event has no timestamp"))
 }
 
 /// The Session's creation time: the catalog's date for a line that has no

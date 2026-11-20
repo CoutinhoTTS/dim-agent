@@ -8,8 +8,8 @@ use crate::{
 use dim_agent_capabilities::{host::ModelSelectionHost, methods::RpcError};
 use dim_agent_runtime::{
     AGENT_GROUP, Agent, AgentBuilder, AgentError, CollaborationRole, InUse, Modules, Names,
-    NoConfig, QueryFilter, QueryOperand, QueryOutput, QueryPage, QueryPick, QuerySelect, QuerySpec,
-    QueryValue, Session, SessionConfig, TimelineKey, TimelineQuery, TimelineQueryScope,
+    NoConfig, QueryFilter, QueryOperand, QueryOutput, QueryPage, QueryPick, QueryRow, QuerySelect,
+    QuerySpec, QueryValue, Session, SessionConfig, TimelineKey, TimelineQuery, TimelineQueryScope,
     TimelineReadScope, TimelineReadSegment,
 };
 pub use dim_agent_types::AgentProfile;
@@ -1186,41 +1186,9 @@ impl AgentIndex {
                 after: None,
             }),
         };
-        let loaded = match self.session(id) {
-            Some((_, session)) => match session.query(ROOT_BRANCH_ID, query.clone()).await {
-                Ok(reply) => Some(reply.result),
-                Err(_) if session.is_unloading() => None,
-                Err(error) => return Err(error),
-            },
-            None => None,
-        };
-        let result = match loaded {
-            Some(result) => result,
-            None => {
-                let store = self
-                    .session_store
-                    .as_ref()
-                    .ok_or_else(|| AgentError::Closed(id.into()))?;
-                let scope = TimelineReadScope {
-                    key: TimelineKey {
-                        session_id: id.into(),
-                        branch_id: ROOT_BRANCH_ID.into(),
-                    },
-                    through: cutoff.preview_through,
-                    segments: vec![TimelineReadSegment {
-                        branch_id: ROOT_BRANCH_ID.into(),
-                        from: 1,
-                        through: cutoff.preview_through,
-                        stored_through: cutoff.preview_through,
-                        tail: vec![],
-                    }],
-                };
-                store
-                    .query(&scope, &query.query, query.page.as_ref())
-                    .await?
-                    .result
-            }
-        };
+        let result = self
+            .branch_query(id, ROOT_BRANCH_ID, cutoff.preview_through, query)
+            .await?;
         let QueryOutput::Rows { rows } = result else {
             unreachable!("field selection returns rows")
         };
@@ -1254,10 +1222,17 @@ impl AgentIndex {
                 (!text.is_empty())
                     .then(|| crate::storage::truncate_preview(&text, Self::SUMMARY_PREVIEW_CHARS))
             });
-        let updated_at = self
+        let latest = self
             .latest_activity(id, &cutoff.default, cutoff.activity_through)
-            .await?
-            .unwrap_or(created_at);
+            .await?;
+        let opening = if latest.is_none() && cutoff.default != ROOT_BRANCH_ID {
+            self.opening_time(id, &cutoff.default, cutoff.activity_through)
+                .await?
+        } else {
+            None
+        };
+        let updated_at =
+            crate::storage::activity_time(latest, opening, &cutoff.default, || Ok(created_at))?;
         Ok((preview, updated_at))
     }
 
@@ -1318,52 +1293,99 @@ impl AgentIndex {
                 after: None,
             }),
         };
+        let result = self.branch_query(id, default, through, query).await?;
+        let QueryOutput::Rows { rows } = result else {
+            unreachable!("field selection returns rows")
+        };
+        Ok(rows.first().map(Self::event_timestamp))
+    }
+
+    /// The first event's timestamp on `branch` through the fixed cutoff: the
+    /// opening that dates a line other than the root while it has no activity
+    /// of its own (session catalog §3.2).
+    async fn opening_time(
+        &self,
+        id: &str,
+        branch: &str,
+        through: u64,
+    ) -> dim_agent_runtime::Result<Option<u64>> {
+        let query = TimelineQuery {
+            scope: TimelineQueryScope::Branch,
+            from: None,
+            through: Some(through),
+            include_publishing: false,
+            query: QuerySpec {
+                filter: None,
+                select: QuerySelect::Fields {
+                    fields: vec!["create_at".into()],
+                },
+                group_by: vec![],
+                pick: Some(QueryPick::First),
+                order_by: vec![],
+            },
+            page: Some(QueryPage {
+                limit: NonZeroU64::MIN,
+                after: None,
+            }),
+        };
+        let result = self.branch_query(id, branch, through, query).await?;
+        let QueryOutput::Rows { rows } = result else {
+            unreachable!("field selection returns rows")
+        };
+        Ok(rows.first().map(Self::event_timestamp))
+    }
+
+    /// Reads `query` on `branch` through `through` from the loaded Session, or
+    /// from its stored rows once it is unloading.
+    async fn branch_query(
+        &self,
+        id: &str,
+        branch: &str,
+        through: u64,
+        query: TimelineQuery,
+    ) -> dim_agent_runtime::Result<QueryOutput> {
         let loaded = match self.session(id) {
-            Some((_, session)) => match session.query(default, query.clone()).await {
+            Some((_, session)) => match session.query(branch, query.clone()).await {
                 Ok(reply) => Some(reply.result),
                 Err(_) if session.is_unloading() => None,
                 Err(error) => return Err(error),
             },
             None => None,
         };
-        let result = match loaded {
-            Some(result) => result,
-            None => {
-                let store = self
-                    .session_store
-                    .as_ref()
-                    .ok_or_else(|| AgentError::Closed(id.into()))?;
-                let scope = TimelineReadScope {
-                    key: TimelineKey {
-                        session_id: id.into(),
-                        branch_id: default.into(),
-                    },
-                    through,
-                    segments: vec![TimelineReadSegment {
-                        branch_id: default.into(),
-                        from: 1,
-                        through,
-                        stored_through: through,
-                        tail: vec![],
-                    }],
-                };
-                store
-                    .query(&scope, &query.query, query.page.as_ref())
-                    .await?
-                    .result
-            }
+        if let Some(result) = loaded {
+            return Ok(result);
+        }
+        let store = self
+            .session_store
+            .as_ref()
+            .ok_or_else(|| AgentError::Closed(id.into()))?;
+        let scope = TimelineReadScope {
+            key: TimelineKey {
+                session_id: id.into(),
+                branch_id: branch.into(),
+            },
+            through,
+            segments: vec![TimelineReadSegment {
+                branch_id: branch.into(),
+                from: 1,
+                through,
+                stored_through: through,
+                tail: vec![],
+            }],
         };
-        let QueryOutput::Rows { rows } = result else {
-            unreachable!("field selection returns rows")
+        Ok(store
+            .query(&scope, &query.query, query.page.as_ref())
+            .await?
+            .result)
+    }
+
+    fn event_timestamp(row: &QueryRow) -> u64 {
+        let [QueryValue::Value { value: timestamp }] = row.values.as_slice() else {
+            unreachable!("event has a creation timestamp")
         };
-        Ok(rows.first().map(|row| {
-            let [QueryValue::Value { value: timestamp }] = row.values.as_slice() else {
-                unreachable!("event has a creation timestamp")
-            };
-            timestamp
-                .as_u64()
-                .expect("event creation timestamp is unsigned")
-        }))
+        timestamp
+            .as_u64()
+            .expect("event creation timestamp is unsigned")
     }
 
     pub(crate) async fn prepare_session(

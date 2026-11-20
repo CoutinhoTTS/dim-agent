@@ -368,3 +368,200 @@ async fn summaries_list_a_closed_session_only_when_asked() {
     server.shutdown();
     server.join().await.unwrap();
 }
+
+/// Holds a tool line's opening turn on `wait`, so the line has its opening
+/// event and no activity of its own while the listings read it.
+struct HeldToolLine;
+impl HeldToolLine {
+    fn hold(id: &str) -> Vec<dim_agent_capabilities::host::ModelChunk> {
+        use dim_agent_capabilities::host::{ModelChunk, ModelStopReason};
+        vec![
+            ModelChunk::MessageStart {
+                message_id: id.into(),
+            },
+            ModelChunk::ToolStart {
+                id: id.into(),
+                name: "wait".into(),
+            },
+            ModelChunk::ToolUse(ToolCall {
+                id: id.into(),
+                name: "wait".into(),
+                input: serde_json::from_value(json!({"millis": 20000})).expect("tool input"),
+            }),
+            ModelChunk::MessageStop {
+                message_id: id.into(),
+                reason: ModelStopReason::ToolUse,
+            },
+        ]
+    }
+}
+impl dim_agent_capabilities::host::ModelDriver for HeldToolLine {
+    fn invoke(
+        &self,
+        request: Arc<dim_agent_types::ModelRequest>,
+        connection: dim_agent_capabilities::host::ModelConnection,
+        cancel: CancellationToken,
+    ) -> HostFuture<'_, dim_agent_capabilities::host::ModelStream> {
+        let tool_line = request
+            .messages
+            .iter()
+            .any(|message| match &message.content {
+                dim_agent_types::MessageContent::Text(text) => text.contains("source=\"tool\""),
+                dim_agent_types::MessageContent::Parts(parts) => parts.iter().any(|part| {
+                    matches!(
+                        part,
+                        dim_agent_types::MessagePart::Text { text, .. }
+                            if text.contains("source=\"tool\"")
+                    )
+                }),
+            });
+        if tool_line {
+            return Box::pin(async {
+                Ok(Box::pin(futures_util::stream::iter(
+                    Self::hold("held-tool-line").into_iter().map(Ok),
+                ))
+                    as dim_agent_capabilities::host::ModelStream)
+            });
+        }
+        dim_agent_capabilities::adapters::EchoModel.invoke(request, connection, cancel)
+    }
+}
+
+async fn launch_holding_tool_line(
+    config: ServerConfig,
+) -> (RunningServer, dim_agent_runtime::Agent) {
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    builder.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(Arc::new(
+        dim_agent_runtime::MemoryTimelineStore::default(),
+    )));
+    defaults::install(&mut builder);
+    defaults::mock_model_hosts_with_model(
+        &mut builder,
+        dim_agent_capabilities::history::HistoryRenderer::default(),
+        Arc::new(HeldToolLine),
+    );
+    defaults::tool_host(&mut builder, Arc::new(MockTools));
+    dim_app_server::collaboration::install(&mut builder);
+    let server = serve(
+        builder,
+        ServerConfig {
+            unix_path: Some(std::path::PathBuf::from("/tmp").join(format!(
+                "dim-server-test-{}/server.sock",
+                uuid::Uuid::new_v4()
+            ))),
+            ..config
+        },
+    )
+    .await
+    .unwrap();
+    let agent = server.agent().unwrap();
+    (server, agent)
+}
+
+/// A tool line switched to while its first turn runs has an opening event but
+/// no activity of its own: both listings date it by that opening, not by the
+/// Session's creation (session-catalog §3.2).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_empty_tool_line_is_dated_by_its_opening_in_both_listings() {
+    let store = deletion::Store::new();
+    for config in [ServerConfig::default(), store.config()] {
+        let (server, agent) = launch_holding_tool_line(config).await;
+        let mut client = Client::new_version(&server, false, 3).await;
+        let created = client
+            .rpc(
+                "session.create",
+                json!({
+                    "cwd": std::env::temp_dir(),
+                    "tools": ["branch", "wait"],
+                    "permissionPolicy": {"preset": "full-access"}
+                }),
+            )
+            .await;
+        assert_ok(&created);
+        let id = created["result"]["sessionId"].as_str().unwrap().to_owned();
+        let session = agent.get_session(&id).unwrap();
+        while dim_agent_runtime::core::unix_millis() <= session.created_at() {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        let open = format!(
+            "tool:branch {}",
+            json!({"action": "create", "prompt": "hold this line"})
+        );
+        assert_ok(
+            &client
+                .rpc(
+                    "session.submit",
+                    json!({"sessionId": id, "branchId": "main", "text": open}),
+                )
+                .await,
+        );
+        let child = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if let Some(branch) = session
+                    .branches()
+                    .into_iter()
+                    .find(|branch| branch.parent.as_deref() == Some("main"))
+                {
+                    return branch.id;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("main opens the tool line");
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !session.state(&child).is_ok_and(|state| state.running) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the tool line starts its first turn");
+        assert_ok(
+            &client
+                .rpc(
+                    "session.branch_set_default",
+                    json!({"sessionId": id, "branchId": child}),
+                )
+                .await,
+        );
+        let cutoff = session.sequence(&child).unwrap();
+        let events = read_branch_events(&session, &child, ..=cutoff)
+            .await
+            .unwrap();
+        let opening = events
+            .first()
+            .expect("the line has its opening event")
+            .create_at;
+        assert!(
+            opening > session.created_at(),
+            "the opening event is later than the Session's creation: {opening} vs {}",
+            session.created_at()
+        );
+        assert!(
+            activity_time(&events).is_none(),
+            "the line has no activity of its own yet"
+        );
+        let summaries = client.rpc("session.summaries", json!({})).await;
+        assert_ok(&summaries);
+        let row = summaries["result"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["sessionId"] == json!(id))
+            .unwrap_or_else(|| panic!("the Session is listed: {summaries}"));
+        assert_eq!(
+            row["updatedAt"],
+            json!(opening),
+            "the line is dated by its own opening event, not the Session's creation"
+        );
+        session
+            .stop(&child, "the listing read the line".into())
+            .await
+            .unwrap();
+        drop(client);
+        drop(session);
+        drop(agent);
+        server.shutdown();
+        server.join().await.unwrap();
+    }
+}
