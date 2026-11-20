@@ -29,7 +29,7 @@ During migration, an existing entry may carry `internal(reason)`:
 - `object`, `hot-path`, `lock-callback`, `secret`, `control`, `host-resource`, `legacy-no-consumer`
   and `owner-api` describe the remaining migration work.
 - New public services start as data faces. A batch can expose a face before it has a consumer.
-- Secret values stay with the owner. Public methods expose operations that use those values.
+- Secret values stay with the owner. Business methods expose operations that use those values. The storage exception for trusted plugins is limited to the [Provider and Settings persistence operations](contracts/resource-owner-operations.md#credential-values-in-replies).
 
 ### 2.3 Checks
 
@@ -98,7 +98,7 @@ Rust 产品装配的现状以 [生成的 catalog](../architecture/rust-agent/gen
 | `sessionLanguage` | `sessionLanguage.get()` | 形状见 §4.8。 |
 | `skillsConfig` | `skillsConfig.get()` | 形状见 §4.8。 |
 | `collaborationConfig` | `collaborationConfig.get()` | 形状见 §4.8。 |
-| `worktreeAssociations` | `worktreeAssociations.associate` | 形状见 §4.8。 |
+| `worktreeAssociations` | `store.associateWorktree` | 形状见 §4.8。 |
 | `toolSourcesView` | `toolSourcesView.get/observe` | 同一 ToolRegistry owner 的独立只读观察面；贡献注册仍由 `toolRegistry` 负责，见 [工具贡献 §7.5](../architecture/rust-agent/tool-contributions.md#75-服务接口)。 |
 
 宿主读取端口的数据面（§4.10）包括 `executionSettingsHost`、`toolchainSourceHost`、`promptSuggestionSettingsHost`。模型选择与列表统一由 `providerService` 提供；调用方和配置见[进程操作](contracts/process-owner-operations.md)；其余读取端口沿用现名。
@@ -113,16 +113,19 @@ Rust 产品装配的现状以 [生成的 catalog](../architecture/rust-agent/gen
 | `settingsService` | `settings` | GoalBranch 的取消契约见 §4.1。 |
 | `modelHost` | `modelHost` | 完整模型请求直接调用所选配置的执行入口；辅助请求使用 `providerService.complete`。 |
 | `loader` | `rutis/loader` | 插件管理走数据面 |
-| `sessionStore` | `sessionMetadata`、`sessionFiles` | 行与文件分开 |
+| `sessionStore` | `store`、`sessionFiles`、`timelineStore` | 标题与 worktree 关联直接调 store |
 | `treeCommands`、`timelineTreeControl` | `timelineTree` | 分支操作直接调用 Session 的树；不保留别名 |
 
 ### 3.4 对象/句柄：拆成操作加 id
+
+Proposed target operations: [Resource and repository operations](contracts/resource-owner-operations.md).
+
 
 | 名字 | 现在的对象 | 目标操作 |
 | --- | --- | --- |
 | `hostPlatform` | `ProcessTree`、`PtyProcessTree`、临时目录 | 数据面 `execHost`：`start`/`wait`/`kill`/`settle`/`output`/`tail`/`removeOutputDirectory`/`shell`/`write`/`resize`/`info`/`confined`/`configured`（[resource and store data faces](resource-faces.md) §3，#1295）；`hostPlatform` 是提供方和它的 Rust binding |
 | `fileStorage` | `FilePath`、根与代次 | 数据面 `fsHost`：工具部分 `resolve`/`read`/`write`/`edit`/`glob`/`grep`/`mentions`，存储部分 `stat`/`readBytes`/`openRead`/`readAt`/`closeRead`/`lock`/`unlock`/`backup`/`createDirectory`/`replace`/`list`/`remove`（§4，#1297）；`fileStorage` 是提供方和 binding |
-| `sqliteStorage` | 连接与事务 | `sqliteStorage.storageReport({})` 返回 SQLite 文件和 WAL 的容量指标（[存储契约](appserver/native-storage-format.md)）；Session 行操作见 `store`（§5） |
+| `sqliteStorage` | 连接与事务 | Session 行走 `store`；原生 Agent、Provider 和 Settings 的记录操作直接调用 `sqliteStorage`，连接与事务由 SQLite 插件持有。`sqliteStorage.storageReport({})` 返回 SQLite 文件和 WAL 的容量指标（[存储契约](appserver/native-storage-format.md)） |
 | `timelineStore` | 连接与批次 | Session 作用域的 `timelineStore` 数据面（resource-faces §9 允许与仓储族分名）：`createSession`/`sessionConfig`/`releaseSession`/`rollbackSession`/`append`（同步受理）/`commits`、`closeCommits`（按分支序的完成通知）/`head`/`branches`/`readPage`/`readSegments`/`query`/`trace`/`batchEnd`/`batchEndAt`/`saveSnapshot`/`latestSnapshot`；`TimelineStore` trait 是 binding（#1298） |
 | `promptSourcesBranch` | 分支 prompt 装配 | 按 #1292 确认公共操作与装配内部职责。 |
 
@@ -157,7 +160,7 @@ Rust 产品装配的现状以 [生成的 catalog](../architecture/rust-agent/gen
 `backgroundExec.start` 需要活的进程对象，仍是 `exec` 工具的操作，不在数据面上；`backgroundExec.stop` 是 kill。
 这些名字在 catalog 里是 `data`，Rust 类型仍由部件在同一实例按类型键读取。
 
-`hostPlatform`、`fileStorage`、`timelineStore` 不按对象分类保留：数据面就是公开契约，`execHost`、`fsHost`、`timelineStore` 的操作就是它们的接口，旧名字是提供方和它的 Rust binding，调用方在进程内直接调这组操作，不再有第二套公开 API。凭据是操作内部用的能力，不是保留 `internal` 的理由。`hostPlatform`、`fileStorage` 的提供方在持有资源的那个 daemon（控制节点自己的插件，或 #1296 挂载的资源 leaf）；`store` 在持有 Session 状态的那个 daemon，SQLite 还是 PostgreSQL 只是实现（#1298，[resource and store data faces](resource-faces.md) §6）。
+`hostPlatform`、`fileStorage`、`timelineStore` 不按对象分类保留：数据面就是公开契约，`execHost`、`fsHost`、`store`、`timelineStore` 的操作就是它们的接口，旧名字是提供方和它的 Rust binding，调用方在进程内直接调这组操作，不再有第二套公开 API。凭据是操作内部用的能力，不是保留 `internal` 的理由。`hostPlatform`、`fileStorage` 的提供方在持有资源的那个 daemon（控制节点自己的插件，或 #1296 挂载的资源 leaf）；`store` 在持有 Session 状态的那个 daemon，SQLite 还是 PostgreSQL 只是实现（#1298，[resource and store data faces](resource-faces.md) §6）。
 
 ### 3.5 热路径与顺序：待操作化
 
@@ -312,7 +315,7 @@ skillsConfig.get() -> {instructions?}
   -- Skills 的 factory 文本；null 表示内置
 collaborationConfig.get() -> {leaderDescription?, memberDescription?}
   -- Collaboration 的 factory 文本；null 表示内置
-worktreeAssociations.associate {sessionId, repository, root, subtree} -> {}
+store.associateWorktree {sessionId, repository, root, subtree} -> {}
   -> error {code: failed, message}
   -- 路径按 §1 是 UTF-8 字符串；一次写入仍由 SessionStore 的原子事务保证
 ```
@@ -320,7 +323,7 @@ worktreeAssociations.associate {sessionId, repository, root, subtree} -> {}
 - `agentConfig` 在 runtime 的 catalog 注册 shared instance；`SessionScope` 已经提供值，`get` 返回同一个快照。 配置快照直接使用所有者的数据定义，接收端允许未知字段；公开类型名称的迁移见[插件配置类型兼容性说明](../release/README.md#plugin-configuration-type-compatibility)。
 - `skillsConfig`、`collaborationConfig` 的注册从 typed 改成 shared instance；值仍由 `install_with_config` 的 `session_value` 提供。
 - `sessionLanguage` 只把读做成面；值由 PromptSources 的 Session part 提供，branch 通过 `PromptSourcesBranch::language()` 读同一个 cell。写入不暴露，避免绕过 Session 记录和 Prompt 的采用。
-- `worktreeAssociations` 去掉 `AssociateWorktree` trait：端口持有所有者的写闭包，Rust 调用方和 wire 调用同一个 `associate`。SessionStore 绑定 `associate_worktree`；字符串转回 `PathBuf`，绝对性和子树包含仍由所有者校验。
+- FileAccess 通过 `store.associateWorktree` 调用 SessionStore；Rust 与跨语言调用共享同一写入操作。迁移调用方时移除 `worktreeAssociations`。路径校验和原子关联由 SessionStore 负责。
 - 测试：`crates/dim-agent-capabilities/tests/legacy_session_faces.rs` 与 `crates/dim-app-server/tests/legacy_session_faces.rs` 比较 typed binding 与 wire 的同一操作。
 
 ### 4.9 旧主机端口：`credentialVariablesHost` 等六个
