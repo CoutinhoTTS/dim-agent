@@ -1,6 +1,8 @@
 import type { Messages } from "./en"
+import chatUi from "./chat-ui.zh-CN"
 
 const zhCN: Messages = {
+  ...chatUi,
   "a11y.mainContent": "主要内容",
   "a11y.primaryNavigation": "主导航",
   "a11y.workspaceSessionIndex": "工作区和会话索引",

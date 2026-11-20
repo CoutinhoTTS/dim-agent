@@ -1,5 +1,9 @@
 @import "tailwindcss";
 @import "@nuxt/ui";
+/* The shared timeline's components use Tailwind utilities; generate them here. */
+@source "../../packages/chat-ui/src";
+/* The theme follows the .dark class on <html>, not the media query. */
+@custom-variant dark (&:where(.dark, .dark *));
 
 @theme inline {
   --color-background: var(--background);
@@ -16,6 +20,12 @@
   --color-ring: var(--ring);
   --color-sidebar: var(--sidebar);
   --color-sidebar-foreground: var(--sidebar-foreground);
+  /* Semantic colors the shared timeline (@dimcode/chat-ui) names, on the Web palette. */
+  --color-destructive: var(--danger);
+  --color-input: var(--border);
+  --color-activity-success: var(--success);
+  --color-activity-warning: var(--warning);
+  --color-activity-violet: var(--accent-ultra);
 }
 
 /* Type scale — the single font-size standard (compact terminal density).
@@ -769,4 +779,11 @@ button.event-row { width: 100%; border: 0; background: transparent; font: inheri
 .work-icon-leave-to { opacity: 0; transform: scale(.6) rotate(25deg); }
 @media (prefers-reduced-motion: reduce) {
   .work-icon-enter-active, .work-icon-leave-active, .timeline-status-chevron { transition: none; }
+}
+
+/* Tokens the shared timeline reads under its root class. */
+.dim-chat-ui {
+  --dim-chat-ui-code-font-family: var(--font-mono);
+  --activity-shimmer-highlight: var(--foreground);
+  --markdown-link: var(--primary);
 }

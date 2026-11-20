@@ -9,6 +9,7 @@ import ComposerPanel from "./ComposerPanel.vue"
 import QueuedInputs from "./QueuedInputs.vue"
 import QuestionPrompt from "./QuestionPrompt.vue"
 import TimelineView from "./TimelineView.vue"
+import { WebChatTimeline, chatUiEnabled } from "../../chat-ui/flag"
 import ExtensionMenu from "../extensions/ExtensionMenu.vue"
 import { DEFAULT_BRANCH_ID, ROOT_BRANCH_ID, type ContextUsage, type DraftAttachments, type ModelId, type PermissionPreset, type QueuedInput, type SubmitMode, type WithdrawResult } from "../../rpc/protocol"
 import { goalCall, goalObjective, parseGoalRequest, type Goal, type GoalStatus } from "../../goal"
@@ -366,7 +367,7 @@ async function fork(): Promise<void> {
         </UCollapsible>
       </div>
     </div>
-    <TimelineView :session-id="sessionId"
+    <component :is="chatUiEnabled ? WebChatTimeline : TimelineView" :session-id="sessionId"
       :rows="view.rows"
       :earlier="view.earlier"
       :loading-earlier="view.loadingEarlier"

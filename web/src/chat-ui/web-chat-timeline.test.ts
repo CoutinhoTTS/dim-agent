@@ -1,0 +1,111 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import { createApp, defineComponent, h, nextTick, type App } from "vue"
+import { createPinia } from "pinia"
+import { i18n } from "../i18n"
+import { Projection } from "../projection"
+import type { SessionEvent } from "../rpc/protocol"
+import { createRowMapper } from "./rows"
+import WebChatTimeline from "./WebChatTimeline.vue"
+
+function event(sequence: number, content: SessionEvent["content"]): SessionEvent {
+  return { id: `e${sequence}`, sequence, createAt: 1_700_000_000_000 + sequence * 1000, content } as SessionEvent
+}
+
+/** A completed turn with reasoning, a tool call and an answer; a child line; then a turn that fails. */
+const recorded: SessionEvent[] = [
+  event(1, { kind: "input", text: "read the entry point", content: [{ type: "text", text: "read the entry point" }], blocks: [] }),
+  event(2, { kind: "thinking", requestId: "r1", delta: "open main first" }),
+  event(3, { kind: "tool-use", requestId: "r1", callId: "call-1", name: "read", input: { path: "src/main.rs" } }),
+  event(4, { kind: "tool-completed", requestId: "r1", callId: "call-1", result: { text: "fn main() {}", isError: false } }),
+  event(5, { kind: "text", requestId: "r1", delta: "The entry point only defines main." }),
+  event(6, { kind: "model-end", requestId: "r1" }),
+  event(7, { kind: "turn-end", outcome: "completed" }),
+  event(8, { kind: "branch-create", branchId: "b-7c0ffee1", at: 0, prompt: "parser race", source: { kind: "host", operationId: "op" } }),
+  event(9, { kind: "input", text: "now run it", content: [{ type: "text", text: "now run it" }], blocks: [] }),
+  event(10, { kind: "model-end", requestId: "r2", error: "boom", failure: { kind: "server_error", status: 503, cause: [], attempts: 1, waitedMs: 0 } }),
+  event(11, { kind: "turn-end", outcome: "failed", error: "boom" }),
+]
+
+const UIcon = defineComponent({ name: "UIcon", props: { name: String }, setup: props => () => h("i", { "data-icon": props.name }) })
+const UButton = defineComponent({ name: "UButton", setup: (_, { slots }) => () => h("button", { type: "button" }, slots.default?.()) })
+
+const mounted: App[] = []
+// jsdom lays nothing out; the virtualizer needs a viewport size to render a window.
+beforeEach(() => {
+  vi.spyOn(HTMLElement.prototype, "offsetWidth", "get").mockReturnValue(800)
+  vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockReturnValue(600)
+})
+afterEach(() => {
+  while (mounted.length > 0) mounted.pop()!.unmount()
+  document.body.replaceChildren()
+  vi.restoreAllMocks()
+})
+
+async function settle(): Promise<void> {
+  for (let i = 0; i < 5; i++) {
+    await nextTick()
+    await new Promise(resolve => setTimeout(resolve, 0))
+  }
+}
+
+function mount(rows: Projection["rows"], onOpenLine: (branchId: string) => void): HTMLElement {
+  const container = document.createElement("div")
+  document.body.append(container)
+  const app = createApp({
+    render: () => h(WebChatTimeline, { sessionId: "s-1", rows, running: false, quotable: true, onOpenLine }),
+  })
+  app.use(createPinia()).use(i18n).component("UIcon", UIcon).component("UButton", UButton)
+  app.mount(container)
+  mounted.push(app)
+  return container
+}
+
+describe("WebChatTimeline", () => {
+  it("renders recorded session events through the Projection and the shared timeline", async () => {
+    const projection = new Projection()
+    for (const item of recorded) projection.apply(item)
+    expect(projection.rows.map(row => row.kind)).toEqual(["user", "thinking", "tool", "assistant", "line", "user", "error"])
+
+    const rows = createRowMapper()(projection.rows, "s-1")
+    expect(rows.map(row => row.kind)).toEqual(["turn", "message", "turn"])
+
+    const openLine = vi.fn()
+    const root = mount(projection.rows, openLine)
+    await settle()
+
+    const bubbles = [...root.querySelectorAll(".timeline-user-bubble")].map(bubble => bubble.textContent?.trim())
+    expect(bubbles).toEqual(["read the entry point", "now run it"])
+    expect(root.querySelector("[data-testid='timeline-text-block']")?.textContent).toContain("The entry point only defines main.")
+
+    root.querySelector<HTMLButtonElement>("[data-testid='timeline-work-summary'] button")!.click()
+    await settle()
+    root.querySelector<HTMLButtonElement>("[data-testid='timeline-block-group-toggle']")!.click()
+    await settle()
+    expect(root.querySelector("[data-testid='timeline-thinking-block']")?.textContent).toContain("open main first")
+    const tool = root.querySelector("[data-testid='timeline-tool-block']")
+    expect(tool?.textContent).toContain("Read")
+    expect(tool?.textContent).toContain("main.rs")
+
+    const failure = root.querySelector("[data-testid='timeline-terminal-line']")
+    expect(failure?.textContent).toContain("The provider reported a server error")
+
+    const line = root.querySelector<HTMLButtonElement>(".timeline-line-marker")
+    expect(line?.textContent).toContain("parser race")
+    line!.click()
+    expect(openLine).toHaveBeenCalledWith("b-7c0ffee1")
+  })
+
+  it("rebuilds only the turn whose rows changed", () => {
+    const projection = new Projection()
+    for (const item of recorded.slice(0, 7)) projection.apply(item)
+    projection.apply(event(9, { kind: "input", text: "again", content: [{ type: "text", text: "again" }], blocks: [] }))
+    projection.apply(event(10, { kind: "text", requestId: "r2", delta: "part" }))
+    const map = createRowMapper()
+    const before = map(projection.rows.slice(), "s-1")
+    projection.apply(event(11, { kind: "text", requestId: "r2", delta: "ial" }))
+    const after = map(projection.rows.slice(), "s-1")
+    expect(after[0]).toBe(before[0])
+    expect(after[1]).not.toBe(before[1])
+    expect(after[1]?.kind === "turn" && after[1].turn.blocks[0]?.content).toBe("partial")
+  })
+})

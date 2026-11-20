@@ -27,6 +27,7 @@ flowchart LR
 | TUI `/web` | `crates/dim-cli` | Calls `web.toggle`; the daemon owns the on/off state, so the TUI stays open |
 | Frontend | `web/` at the repository root | Vue 3 + Vite app ported from the TypeScript `packages/cli-web`, with its transport rewritten for protocol v4 |
 | Shared chat UI | `web/packages/chat-ui` | Presentational `@dimcode/chat-ui` workspace package imported from `dim-electron` after its extraction completed; hosts supply session/commands/i18n/capabilities through `ChatUiHost` (see #1836/#1839) |
+| Shared timeline host | `web/src/chat-ui` | The Web's read-only `ChatUiHost`: maps Projection rows to the package's rows and renders them with `PlainTimelineSurface` in a lazily loaded chunk, in place of the Web timeline when the page opens with `?chatUi=1` or `localStorage["dim.chatUi"] === "1"` (off by default; #1837, plan #1888) |
 
 ## 2. Local web entry
 
