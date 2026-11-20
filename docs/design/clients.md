@@ -170,7 +170,7 @@ absence from a missing start event in the window:
 
 | State | Required read and merge |
 | --- | --- |
-| Adopted model and preferences | The attach reply; a `context/configured` in the window is historical display, not a substitute for the current adopted value. |
+| Adopted model and preferences | The attach reply when its `defaultBranch` is the root, or when it carries no `defaultBranch` and so predates per-line configuration; on a line, the last `context/configured` at or below that line's cursor in the window. The reply's record is the root's, so it never stands in for another line's model ([timeline branches §14](timeline-branches.md#14-clients)). |
 | Permission | `session.permission.get`; later policy notices update it. |
 | Active turn and output | Current running/turn/request state and output block identities; a window without `turn/start` cannot prove the branch idle. |
 | Pending questions | `session.question.pending` ([Questions §3.5](plugins/Questions.md#35-pending-question-read)); join later tool results by call identity. |
@@ -232,7 +232,7 @@ Include a turn longer than the page budget, an empty visible page,
 a question/task/delegation/input started before the window, a terminal event while
 state is loading, member switching, reconnect and a transport-oversized batch.
 Also verify that `/lines` lists a branch created before the window, line-mode
-`/effort` uses the attach model, and an old ACP `forkAtTurn` anchor still resolves.
+`/effort` uses the shown line's model, and an old ACP `forkAtTurn` anchor still resolves.
 `/goal` reads `session.goal.get` before choosing a command and after its write; a successful Goal read must not
 be discarded because the transcript failed, nor may a partial transcript decide
 whether a goal exists. Retrying a transcript never changes other branches into
