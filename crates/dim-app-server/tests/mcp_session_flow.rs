@@ -6,7 +6,10 @@ use axum::{
     response::{IntoResponse, Response, Sse, sse::Event},
     routing::post,
 };
-use dim_agent_capabilities::host_platform::{HostPlatform, ShellStatus};
+use dim_agent_capabilities::host_platform::HostPlatform;
+#[cfg(unix)]
+use dim_agent_capabilities::host_platform::ShellStatus;
+#[cfg(unix)]
 use dim_agent_capabilities::toolchain::{InstalledToolchain, ToolchainSourceHost};
 use dim_agent_capabilities::{
     adapters::{DefaultPrepareModelPlugin, MockTools},
@@ -568,6 +571,7 @@ impl Env {
     /// A Session whose stdio entry names a program only the installed
     /// runtime provides: the child `PATH` gets `bin` appended, so the bare
     /// command resolves there.
+    #[cfg(unix)]
     async fn with_stdio_toolchain(bin: PathBuf, root: PathBuf) -> Self {
         let fixture =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mcp-minimal.cjs");
