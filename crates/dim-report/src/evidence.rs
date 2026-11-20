@@ -6,8 +6,9 @@ use dim_agent_runtime::{
     QuerySpec, TimelineQuery, TimelineQueryScope,
 };
 use dim_agent_types::{
-    AgentEvent, BranchCreateFailedData, ContentBlock, EventKind, FinishReason, MessagePart,
-    ModelId, ModelOutputOutcome, TimelinePosition, TurnOutcome, markup::runtime_context,
+    AgentEvent, BranchCreateFailedData, ContentBlock, DEFAULT_BRANCH_ID, EventKind, FinishReason,
+    MessagePart, ModelId, ModelOutputOutcome, TimelinePosition, TurnOutcome,
+    markup::runtime_context,
 };
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
@@ -52,7 +53,11 @@ impl ErrorReference {
         tree: Option<&TreeCommands>,
     ) -> Result<(Snapshot, Option<ModelId>), RpcError> {
         let (observed, branch, timeline) = match self {
-            Self::Observed { observed } => (observed, "main".to_owned(), Err(Missing::NoReference)),
+            Self::Observed { observed } => (
+                observed,
+                DEFAULT_BRANCH_ID.to_owned(),
+                Err(Missing::NoReference),
+            ),
             Self::Timeline {
                 branch_id,
                 sequence,
@@ -186,10 +191,10 @@ pub(super) struct Snapshot {
 
 impl Snapshot {
     pub(super) async fn capture_session(tree: &TreeCommands) -> (Self, Option<ModelId>) {
-        let branch = tree.get("main").ok();
+        let branch = tree.get(DEFAULT_BRANCH_ID).ok();
         let conversation_through = branch.as_ref().map(Branch::sequence);
         let timeline = match conversation_through {
-            Some(through) => read_window(tree, "main", through, ACTIVITY_KINDS)
+            Some(through) => read_window(tree, DEFAULT_BRANCH_ID, through, ACTIVITY_KINDS)
                 .await
                 .map(|(events, truncated)| {
                     let (recent, truncated) = excerpt(&events, truncated, true);
@@ -225,7 +230,7 @@ pub(super) async fn capture_conversation(
 ) -> Vec<ConversationExcerpt> {
     let Ok((events, _)) = read_window(
         tree,
-        "main",
+        DEFAULT_BRANCH_ID,
         through,
         &[
             "input/message",

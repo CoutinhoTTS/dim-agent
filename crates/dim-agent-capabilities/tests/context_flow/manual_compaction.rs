@@ -1180,7 +1180,9 @@ async fn a_replaced_strategy_is_replayed_by_the_same_rule_and_checked_by_the_pol
     store.ranges.lock().unwrap().clear();
     store.pages.lock().unwrap().clear();
     store.queries.lock().unwrap().clear();
-    *store.hold_range.lock().unwrap() = Some(("main".into(), 1..=main_head, 1));
+    // The tree reads the root's `branch/default` fact first (design §20.20), so
+    // the part's own read of this range is the second one.
+    *store.hold_range.lock().unwrap() = Some(("main".into(), 1..=main_head, 2));
     armed.store(true, Ordering::SeqCst);
     let session = tokio::time::timeout(Duration::from_secs(5), agent.restore_session(id))
         .await

@@ -9,7 +9,7 @@ use dim_agent_runtime::{
     QueryOrderKey, QueryOutput, QueryPage, QueryPick, QuerySelect, QuerySpec, QueryValue,
     TimelineQuery,
 };
-use dim_agent_types::{BranchSource, InputBlock, InputMode, TimelinePosition};
+use dim_agent_types::{BranchSource, DEFAULT_BRANCH_ID, InputBlock, InputMode, TimelinePosition};
 
 impl Connection {
     /// Runs the Session's submit checks before writing operator input (Hooks
@@ -34,7 +34,7 @@ impl Connection {
             return Err(RpcError::invalid("text and user are mutually exclusive"));
         }
         let session = self.session(rpc, &params.session_id)?;
-        let branch = params.branch_id.as_deref().unwrap_or("main");
+        let branch = params.branch_id.as_deref().unwrap_or(DEFAULT_BRANCH_ID);
         let publication = session.publication(branch).map_err(RpcError::from)?;
         let user = params.user.or_else(|| {
             params.text.map(|text| UserInput {
@@ -653,7 +653,7 @@ impl Connection {
                 params.at,
                 BranchOptions {
                     prompt: params.prompt,
-                    source: BranchSource::Host {
+                    source: BranchSource::User {
                         operation_id: uuid::Uuid::new_v4().to_string(),
                     },
                 },

@@ -1,6 +1,6 @@
 use crate::{config::Config, rpc::Rpc};
 use agent_client_protocol::{Error, schema::v1 as acp};
-use dim_agent_types::{GoalRead, GoalViewStatus};
+use dim_agent_types::{DEFAULT_BRANCH_ID, GoalRead, GoalViewStatus};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
@@ -98,7 +98,7 @@ pub(crate) async fn run(
             let result = rpc
                 .call(
                     "session.context.compact",
-                    json!({"sessionId":id,"branchId":"main"}),
+                    json!({"sessionId":id,"branchId":DEFAULT_BRANCH_ID}),
                 )
                 .await;
             match result {
@@ -132,7 +132,7 @@ async fn goal(
     if matches!(verb, "set" | "edit") && rest.is_empty() {
         return Ok(GOAL_USAGE.into());
     }
-    let query = json!({"sessionId":id,"branchId":"main"});
+    let query = json!({"sessionId":id,"branchId":DEFAULT_BRANCH_ID});
     let mut read: GoalRead = rpc.typed("session.goal.get", query.clone()).await?;
     if !words.is_empty() {
         let (method, objective) = match verb {
@@ -239,7 +239,7 @@ async fn loops(
         let listed: LoopList = rpc
             .typed(
                 "session.loop.list",
-                json!({"sessionId":id,"branchId":"main"}),
+                json!({"sessionId":id,"branchId":DEFAULT_BRANCH_ID}),
             )
             .await?;
         if words.is_empty() {
@@ -302,8 +302,7 @@ async fn loops(
                 .checked_mul(scale)
         })
         .filter(|seconds| *seconds > 0 && !rest.is_empty());
-    let mut params =
-        json!({"sessionId":id,"branchId":"main","prompt":if seconds.is_some() {rest} else {words}});
+    let mut params = json!({"sessionId":id,"branchId":DEFAULT_BRANCH_ID,"prompt":if seconds.is_some() {rest} else {words}});
     if let Some(seconds) = seconds {
         params["everySeconds"] = json!(seconds);
     }

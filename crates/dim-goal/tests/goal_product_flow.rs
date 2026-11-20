@@ -978,7 +978,7 @@ async fn goal_on_a_line_behaves_as_on_main() {
             _ => None,
         })
         .expect("the line's opening input");
-    let marker = format!(r#"<dim-branch-line branch="{child}" parent="main" source="host">"#);
+    let marker = format!(r#"<dim-branch-line branch="{child}" parent="main" source="user">"#);
     assert!(opening.0.starts_with(&marker), "{}", opening.0);
     assert_eq!(
         first_user_text(&session, &child).await,

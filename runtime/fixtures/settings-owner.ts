@@ -22,11 +22,15 @@ export const part = definePlugin({
     }
     await ctx.use<SessionMethods>('sessionMethods').register(
       'session.example',
-      ['read', 'update', 'events'].map(name => ({
+      ['read', 'update', 'events', 'declared'].map(name => ({
         name: `session.example.${name}`, mutating: false, interruption: 'report', progress: false,
       })),
       async (call: MethodCall) => {
         const { sessionId: _, ...request } = call.params
+        if (call.method.endsWith('.declared')) {
+          if (typeof request.instanceId !== 'string') throw new Error('expected instanceId')
+          return { kind: 'value', value: ctx.use<SettingsService>('settings').declaredBy({ instanceId: request.instanceId }) }
+        }
         if (call.method.endsWith('.events')) return { kind: 'value', value: events }
         const reply = call.method.endsWith('.read') ? await settings.read(request) : await settings.update(request)
         return { kind: 'value', value: reply }

@@ -14,7 +14,9 @@ use dim_agent_capabilities::{
     workspace_tools::background::{BackgroundExec, TaskError},
 };
 use dim_agent_runtime::{AgentError, Names, Session, TimelineQueryDirection, TimelineQueryScope};
-use dim_agent_types::{ContentBlock, InputMessageData, UserInput};
+use dim_agent_types::{
+    ContentBlock, DEFAULT_BRANCH_ID, InputMessageData, ROOT_BRANCH_ID, UserInput,
+};
 mod mcp;
 mod subscription;
 mod tree;
@@ -1169,7 +1171,7 @@ impl Connection {
                             .is_some_and(|recorded| recorded <= self.protocol_version())
                     })
                     .map(|(host, s)| {
-                        let status = s.state("main").map_err(RpcError::from)?;
+                        let status = s.state(DEFAULT_BRANCH_ID).map_err(RpcError::from)?;
                         Ok(SessionInfo {
                             session_id: s.id().to_owned(),
                             cwd: s.config().cwd.clone(),
@@ -1179,7 +1181,7 @@ impl Connection {
                             },
                             created_at: s.created_at(),
                             running: status.running,
-                            sequence: s.sequence("main").map_err(RpcError::from)?,
+                            sequence: s.sequence(DEFAULT_BRANCH_ID).map_err(RpcError::from)?,
                             attached_clients: 0,
                             agent_id: Some(host.agent_id.clone()),
                             origin: None,
@@ -1261,7 +1263,7 @@ impl Connection {
             Call::Keys(params) => self.keys(rpc, params).await,
             Call::Stop(params) => match self.session(rpc, &params.session_id) {
                 Ok(session) => {
-                    let branch = params.branch_id.as_deref().unwrap_or("main");
+                    let branch = params.branch_id.as_deref().unwrap_or(DEFAULT_BRANCH_ID);
                     let result = session
                         .stop(
                             branch,
@@ -1283,7 +1285,7 @@ impl Connection {
             },
             Call::Idle(params) => match self.session(rpc, &params.session_id) {
                 Ok(session) => {
-                    let branch = params.branch_id.as_deref().unwrap_or("main");
+                    let branch = params.branch_id.as_deref().unwrap_or(DEFAULT_BRANCH_ID);
                     let result = tokio::select! {
                         biased;
                         _ = self.closed.cancelled() => return None,
@@ -1352,7 +1354,7 @@ impl Connection {
                 }),
             Call::Fork(params) => match rpc.index.fork(&params.session_id, params.at).await {
                 Ok(fork) => fork
-                    .sequence("main")
+                    .sequence(ROOT_BRANCH_ID)
                     .map(|sequence| {
                         Reply::Fork(ForkResult {
                             session_id: fork.id().to_owned(),
@@ -1363,7 +1365,10 @@ impl Connection {
                 Err(error) => Err(RpcError::from(error)),
             },
             Call::ApprovalRespond(params) => {
-                let branch = params.branch_id.clone().unwrap_or_else(|| "main".into());
+                let branch = params
+                    .branch_id
+                    .clone()
+                    .unwrap_or_else(|| DEFAULT_BRANCH_ID.into());
                 let result = match rpc.index.session(&params.session_id) {
                     Some((_, session)) => crate::approval::respond(
                         &session,
@@ -1546,7 +1551,7 @@ impl Connection {
                 Reply::SessionSkills(SessionSkillsResult { skills })
             }
             Call::ModelUpdate(p) => {
-                if p.branch_id != "main" {
+                if p.branch_id != ROOT_BRANCH_ID {
                     return Err(RpcError::invalid("Model updates only support main"));
                 }
                 let mut startup_admission = None;
@@ -1682,7 +1687,7 @@ impl Connection {
                 Reply::ModelUpdate(ModelUpdateResult { model: id, outcome })
             }
             Call::PromptRefresh(p) => {
-                if p.branch_id != "main" {
+                if p.branch_id != ROOT_BRANCH_ID {
                     return Err(RpcError::invalid("Prompt refresh only supports main"));
                 }
                 let outcome = session
@@ -1752,7 +1757,7 @@ impl Connection {
         if let Some(source) = &source {
             let adopted = source
                 .session
-                .get::<dim_agent_capabilities::prompt_state::PromptSnapshot>("main")?
+                .get::<dim_agent_capabilities::prompt_state::PromptSnapshot>(ROOT_BRANCH_ID)?
                 .and_then(|state| state.configuration.clone())
                 .ok_or_else(|| RpcError::invalid("Source Session has no adopted model"))?;
             config.model = dim_agent_types::ModelSelection {
@@ -1875,7 +1880,7 @@ impl Connection {
                 session.config().model.config.as_ref(),
                 session.config().model.metadata.as_ref(),
             ),
-            sequence: session.sequence("main").map_err(RpcError::from)?,
+            sequence: session.sequence(ROOT_BRANCH_ID).map_err(RpcError::from)?,
             worktree: worktree.as_ref().map(|created| created.reply()),
         }))
     }

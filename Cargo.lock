@@ -6050,6 +6050,7 @@ dependencies = [
  "dim-session-title",
  "futures-util",
  "libc",
+ "proc-macro2",
  "rusqlite",
  "rutis",
  "rutis-bridge",

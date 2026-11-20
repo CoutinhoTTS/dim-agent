@@ -13,7 +13,7 @@ use crate::{
     text::{digest, preview, stamp},
 };
 use dim_agent_capabilities::host::{SessionFiles, StoredSessionFile};
-use dim_agent_types::{InputMode, markup::escaped};
+use dim_agent_types::{DEFAULT_BRANCH_ID, InputMode, markup::escaped};
 use futures_util::{StreamExt, stream};
 use jiff::Timestamp;
 use rutis::Ctx;
@@ -300,7 +300,7 @@ fn plan_targets(
         let index = find(
             &mut plans,
             &target.session_id,
-            target.branch_id.as_deref().unwrap_or("main"),
+            target.branch_id.as_deref().unwrap_or(DEFAULT_BRANCH_ID),
         );
         if plans[index].explicit_mode.is_none() {
             plans[index].explicit_mode = target.mode;

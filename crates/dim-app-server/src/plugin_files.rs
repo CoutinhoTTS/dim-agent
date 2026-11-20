@@ -78,6 +78,7 @@ struct Files {
     tasks: TaskTracker,
 }
 struct Scope {
+    caller: Option<Ctx>,
     files: Arc<Files>,
     stopping: CancellationToken,
     tasks: TaskTracker,
@@ -90,6 +91,9 @@ impl Scope {
     }
     fn value(self: Arc<Self>) -> Value {
         let transaction = self.clone();
+        let directory = self.clone();
+        let reader = self.clone();
+        let writer = self.clone();
         let listing = self.clone();
         let removal = self.clone();
         let quiesce = self.clone();
@@ -98,6 +102,18 @@ impl Scope {
                 (
                     "withLock".into(),
                     Value::callback(move |args| transaction.with_lock(args)),
+                ),
+                (
+                    "directory".into(),
+                    Value::callback(move |args| directory.directory(args)),
+                ),
+                (
+                    "openRead".into(),
+                    Value::callback(move |args| reader.open_read(args)),
+                ),
+                (
+                    "writeStream".into(),
+                    Value::callback(move |args| writer.write_stream(args)),
                 ),
                 (
                     "list".into(),
@@ -129,6 +145,70 @@ impl Scope {
             .into(),
         )
     }
+    fn directory(self: &Arc<Self>, args: Value) -> Reply {
+        self.operation(args, |files, _, path, cancel| {
+            Box::pin(async move {
+                let result = files
+                    .storage
+                    .create_directories(&path, &cancel)
+                    .await
+                    .and_then(|dir| {
+                        dir.into_os_string()
+                            .into_string()
+                            .map_err(|_| FileStorageError::InvalidPath("non-UTF-8 directory path"))
+                    });
+                Ok(match result {
+                    Ok(path) => success(json!(path).into()),
+                    Err(error) => failure(error),
+                })
+            })
+        })
+    }
+
+    fn open_read(self: &Arc<Self>, args: Value) -> Reply {
+        let caller = self
+            .caller
+            .clone()
+            .ok_or_else(|| Error::Value("openRead requires a calling row".into()))?;
+        self.operation(args, move |files, _, path, cancel| {
+            Box::pin(async move {
+                Ok(
+                    match files.storage.open_reader(&caller, &path, &cancel).await {
+                        Ok(reader) => success(json!(reader).into()),
+                        Err(FileStorageError::Io(error))
+                            if error.kind() == io::ErrorKind::NotFound =>
+                        {
+                            success(json!(null).into())
+                        }
+                        Err(error) => failure(error),
+                    },
+                )
+            })
+        })
+    }
+
+    fn write_stream(self: &Arc<Self>, args: Value) -> Reply {
+        let [name, next]: [Value; 2] = args.list()?.try_into().map_err(|_| invalid())?;
+        let next = next.reference()?;
+        self.operation(Value::List(vec![name]), move |files, _, path, cancel| {
+            Box::pin(async move {
+                let reader = callback_reader(next, cancel.clone());
+                Ok(
+                    match write_stream_file(&files.storage, &path, reader, &cancel).await {
+                        Ok(()) => success(json!(null).into()),
+                        Err(FileStorageError::Io(error))
+                            if error.kind() == io::ErrorKind::ConnectionAborted
+                                && cancel.is_cancelled() =>
+                        {
+                            failure(FileStorageError::Closed)
+                        }
+                        Err(error) => failure(error),
+                    },
+                )
+            })
+        })
+    }
+
     /// The value of the named directory's entries, one level, relative to the
     /// authorized root.
     fn list(self: &Arc<Self>, args: Value) -> Reply {
@@ -551,9 +631,7 @@ impl PluginFileTransactions {
     ) -> Result<(), PluginFileError> {
         self.run(name, move |storage, path, stopping| {
             Box::pin(async move {
-                let mut lease = acquire(&storage, &path, &stopping).await?;
-                lease
-                    .replace_from(source, private_permissions(), &stopping)
+                write_stream_file(&storage, &path, source, &stopping)
                     .await
                     .map_err(file_error)
             })
@@ -658,7 +736,9 @@ async fn transact_file<R>(
     stopping: CancellationToken,
     change: impl FnOnce(Option<&str>) -> (Option<String>, R),
 ) -> Result<R, PluginFileError> {
-    let mut lease = acquire(&storage, &path, &stopping).await?;
+    let mut lease = acquire(&storage, &path, &stopping)
+        .await
+        .map_err(file_error)?;
     let current = match lease.read(&stopping).await {
         Ok(bytes) => match serde_json::from_slice::<StoredFile>(&bytes) {
             Ok(StoredFile {
@@ -685,20 +765,58 @@ async fn transact_file<R>(
     Ok(result)
 }
 
+fn callback_reader(
+    next: rutis_bridge::session::Reference,
+    cancel: CancellationToken,
+) -> impl io::Read + Send {
+    let chunks = futures_util::stream::try_unfold(next, move |next| {
+        let cancel = cancel.clone();
+        async move {
+            let pull = async { resolve(next.call_async(Value::List(vec![])).await?).await };
+            let value = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return Err(io::Error::new(io::ErrorKind::ConnectionAborted, "stream closed")),
+                result = pull => result.map_err(|_| io::Error::other("file source failed"))?,
+            };
+            match value {
+                Value::Data(serde_json::Value::Null) => Ok(None),
+                Value::Bytes(bytes) => Ok(Some((bytes::Bytes::from(bytes), next))),
+                _ => Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "expected bytes or null",
+                )),
+            }
+        }
+    });
+    tokio_util::io::SyncIoBridge::new(tokio_util::io::StreamReader::new(Box::pin(chunks)))
+}
+
+async fn write_stream_file(
+    storage: &Arc<FileStorage>,
+    path: &FilePath,
+    source: impl io::Read + Send + 'static,
+    stopping: &CancellationToken,
+) -> Result<(), FileStorageError> {
+    acquire(storage, path, stopping)
+        .await?
+        .replace_from(source, private_permissions(), stopping)
+        .await
+}
+
 /// Takes the file's lease, waiting while another holder has it.
 async fn acquire(
     storage: &Arc<FileStorage>,
     path: &FilePath,
     stopping: &CancellationToken,
-) -> Result<FileLease, PluginFileError> {
+) -> Result<FileLease, FileStorageError> {
     loop {
         match storage.lock(path, stopping).await {
             Ok(lease) => return Ok(lease),
             Err(FileStorageError::Locked) => tokio::select! {
-                _ = stopping.cancelled() => return Err(PluginFileError::Closed),
+                _ = stopping.cancelled() => return Err(FileStorageError::Closed),
                 _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {},
             },
-            Err(error) => return Err(file_error(error)),
+            Err(error) => return Err(error),
         }
     }
 }
@@ -713,6 +831,7 @@ impl HostDispatch for Dispatch {
             return Err(invalid());
         }
         let scope = Arc::new(Scope {
+            caller: rutis_bridge::session::caller_row().map(|row| row.ctx().clone()),
             files: self.0.clone(),
             stopping: self.0.stopping.child_token(),
             tasks: TaskTracker::new(),

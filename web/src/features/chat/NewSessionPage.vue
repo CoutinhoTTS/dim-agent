@@ -6,7 +6,7 @@ import BrandMark from "../../components/BrandMark.vue"
 import ComposerPanel from "./ComposerPanel.vue"
 import ExtensionMenu from "../extensions/ExtensionMenu.vue"
 import { useNewSessionModel } from "./new-session-model"
-import { MAIN_BRANCH } from "../../rpc/protocol"
+import { ROOT_BRANCH_ID } from "../../rpc/protocol"
 import { useChatStore } from "../../stores/chat"
 import { useConnectionStore } from "../../stores/connection"
 import { useModels } from "../../stores/models"
@@ -54,7 +54,7 @@ async function send(text: string): Promise<void> {
   if (cwd.value === "") throw new Error(t("newThread.workspaceRequired"))
   const sessionId = await sessions.create(cwd.value, preview.override)
   chat.open(sessionId)
-  await chat.submit(sessionId, MAIN_BRANCH, text)
+  await chat.submit(sessionId, ROOT_BRANCH_ID, text)
   await router.push({ name: "chat-session", params: { sessionId } })
 }
 </script>

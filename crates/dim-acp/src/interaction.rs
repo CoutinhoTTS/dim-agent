@@ -22,6 +22,10 @@ pub(crate) fn key(kind: &str, session: &str, branch: &str, request: &str, call: 
     json!([kind, session, branch, request, call]).to_string()
 }
 
+pub(crate) fn tool_call_id(call: &Call) -> acp::ToolCallId {
+    acp::ToolCallId::new(tool_id(&call.branch_id, &call.request_id, &call.call_id))
+}
+
 pub(crate) async fn approval(
     cx: ConnectionTo<Client>,
     outbox: crate::outbox::Outbox,
@@ -186,9 +190,8 @@ pub(crate) async fn question(
     schema.required.get_or_insert_default();
     let mut params = serde_json::to_value(acp::CreateElicitationRequest::new(
         acp::ElicitationFormMode::new(
-            acp::ElicitationSessionScope::new(acp::SessionId::new(session)).tool_call_id(
-                acp::ToolCallId::new(tool_id(&call.branch_id, &call.request_id, &call.call_id)),
-            ),
+            acp::ElicitationSessionScope::new(acp::SessionId::new(session))
+                .tool_call_id(tool_call_id(call)),
             schema,
         ),
         "Answer the agent's questions",

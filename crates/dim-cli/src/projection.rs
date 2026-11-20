@@ -4,17 +4,16 @@
 //! [`ViewSnapshot`]s built here. Only the rows the screen needs are kept; the
 //! durable history stays with the App Server.
 
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
-
 use dim_agent_types::{
     BranchCreateAt, BranchCreateFailedData, BranchSource, CollaborationDelivery,
     CollaborationOutcome, CollaborationTarget, ContentBlock, ContextCompactionResult, ExecStatus,
     InputMode, InsufficientSpacePartName, JsonObject, Message, MessageContent, MessagePart,
-    ModelFailure, ModelFailureKind, ModelOutputOutcome, ReplacementParts, ToolContent, ToolResult,
-    TurnOutcome, UserInput, markup,
+    ModelFailure, ModelFailureKind, ModelOutputOutcome, ROOT_BRANCH_ID, ReplacementParts,
+    ToolContent, ToolResult, TurnOutcome, UserInput, markup,
 };
 use serde_json::Value;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use crate::model::shell::ShellRun;
 use crate::model::view::{
@@ -108,7 +107,7 @@ impl Projection {
     fn owns(&self, branch_id: &str) -> bool {
         branch_id
             == if self.owner.is_empty() {
-                "main"
+                ROOT_BRANCH_ID
             } else {
                 &self.owner
             }
@@ -180,7 +179,9 @@ impl Projection {
                 let state = match (&data.source, &data.ancestor) {
                     (_, Some(ancestor)) => LineState::EndedWith(ancestor.clone()),
                     (BranchSource::Tool { .. }, None) => LineState::EndedItself,
-                    (BranchSource::Host { .. }, None) => LineState::EndedByOperation,
+                    (BranchSource::Host { .. } | BranchSource::User { .. }, None) => {
+                        LineState::EndedByOperation
+                    }
                 };
                 if let Some(line) = self.lines.iter_mut().find(|line| line.id == data.branch) {
                     line.state = state;
@@ -353,7 +354,9 @@ impl Projection {
                 let issuer = match (&data.source, &data.ancestor) {
                     (_, Some(ancestor)) => format!("with {ancestor}"),
                     (BranchSource::Tool { .. }, None) => "itself".into(),
-                    (BranchSource::Host { .. }, None) => "an operation".into(),
+                    (BranchSource::Host { .. } | BranchSource::User { .. }, None) => {
+                        "an operation".into()
+                    }
                 };
                 self.push(
                     format!("end-{sequence}"),
@@ -1326,7 +1329,7 @@ impl Projection {
 
     /// The lines `main` recorded, without `main` itself (design §14).
     pub fn directory(&mut self, entry: &dim_client::wire::BranchEntry) {
-        if entry.branch_id == "main" {
+        if entry.branch_id == ROOT_BRANCH_ID {
             return;
         }
         let previous = self
@@ -1349,7 +1352,9 @@ impl Projection {
                     Some(end) => match (&end.source, &end.ancestor) {
                         (_, Some(ancestor)) => LineState::EndedWith(ancestor.clone()),
                         (BranchSource::Tool { .. }, None) => LineState::EndedItself,
-                        (BranchSource::Host { .. }, None) => LineState::EndedByOperation,
+                        (BranchSource::Host { .. } | BranchSource::User { .. }, None) => {
+                            LineState::EndedByOperation
+                        }
                     },
                     None => LineState::Ended,
                 }
@@ -1553,7 +1558,7 @@ impl Projection {
 
     /// A main-branch delegation's card.
     fn card(&mut self, branch_id: &str, request_event_id: &str) -> Option<&mut MemberCard> {
-        if branch_id != "main" {
+        if branch_id != ROOT_BRANCH_ID {
             return None;
         }
         let index = *self.cards.get(request_event_id)?;
@@ -1633,7 +1638,7 @@ impl Projection {
 
     fn refresh_result_labels(&mut self) {
         let owner = if self.owner.is_empty() {
-            "main"
+            ROOT_BRANCH_ID
         } else {
             &self.owner
         };

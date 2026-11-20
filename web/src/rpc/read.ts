@@ -38,6 +38,7 @@ import type {
   UserInput,
   WithdrawResult,
 } from "./protocol"
+import { ROOT_BRANCH_ID } from "./protocol"
 
 export class ProtocolError extends Error {
   override name = "ProtocolError"
@@ -323,7 +324,7 @@ export function readPermissionPolicy(value: unknown, at: string): PermissionPoli
   }
 }
 
-/** `session.permission.get`: the policy of `main` and the version a change must expect. */
+/** `session.permission.get`: the default branch's policy and the version a change must expect. */
 export function readPermissionState(value: unknown): PermissionState {
   const at = "session.permission.get"
   const source = obj(value, at)
@@ -585,7 +586,7 @@ function branchSource(value: unknown, at: string): BranchSource {
       callId: str(source, "call_id", at),
     }
   }
-  if (kind === "host") return { kind, operationId: str(source, "operation_id", at) }
+  if (kind === "host" || kind === "user") return { kind, operationId: str(source, "operation_id", at) }
   return fail(at, "a branch source")
 }
 
@@ -968,8 +969,8 @@ export function readBranchEntry(value: unknown): BranchEntry {
   const end = source.end === undefined || source.end === null ? undefined : obj(source.end, `${at}.end`)
   return {
     branchId,
-    parentBranchId: branchId === "main" ? undefined : str(source, "parentBranchId", at),
-    branchPoint: branchId === "main" ? undefined : num(source, "branchPoint", at),
+    parentBranchId: branchId === ROOT_BRANCH_ID ? undefined : str(source, "parentBranchId", at),
+    branchPoint: branchId === ROOT_BRANCH_ID ? undefined : num(source, "branchPoint", at),
     state: str(source, "state", at), head: num(source, "head", at),
     purpose: optStr(source, "purpose", at),
     cutMessages: source.cutMessages === undefined || source.cutMessages === null ? undefined : num(source, "cutMessages", at),
