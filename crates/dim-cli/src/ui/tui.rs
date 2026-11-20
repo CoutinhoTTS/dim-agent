@@ -6158,10 +6158,14 @@ impl App {
             )
             .max(1);
         live.push(String::new());
+        // The run status as (full, essential): the full text carries the
+        // retry reason, and the essential one keeps only the phase, so the
+        // border can drop the reason before it cuts the slot.
         let status = (self.prompt.is_none() && self.running()).then(|| {
             let started = self.run_started.unwrap_or_else(Instant::now);
             let elapsed = started.elapsed();
             let beat = (elapsed.as_millis() / PULSE.as_millis()) as usize;
+            let pulse = PULSE_FRAMES[beat % PULSE_FRAMES.len()];
             let retry = self
                 .snapshot
                 .as_ref()
@@ -6170,18 +6174,17 @@ impl App {
                 let seconds = crate::projection::retry_seconds(retry.retry_at_ms);
                 let reason = crate::projection::failure_phrase(retry.kind, retry.reason.as_deref());
                 if seconds == 0 {
-                    return format!(
-                        "{} {}",
-                        PULSE_FRAMES[beat % PULSE_FRAMES.len()],
+                    let full = format!(
+                        "{pulse} {}",
                         tf(
                             "Waiting for the provider · {reason} · Esc stops",
                             &[("reason", &reason)]
                         )
                     );
+                    return (full, format!("{pulse} {}", t("Waiting for the provider")));
                 }
-                return format!(
-                    "{} {}",
-                    PULSE_FRAMES[beat % PULSE_FRAMES.len()],
+                let full = format!(
+                    "{pulse} {}",
                     tf(
                         "Retrying {attempt}/{max} in {seconds} s · {reason} · Esc stops",
                         &[
@@ -6192,6 +6195,18 @@ impl App {
                         ]
                     )
                 );
+                let essential = format!(
+                    "{pulse} {}",
+                    tf(
+                        "Retrying {attempt}/{max} in {seconds} s",
+                        &[
+                            ("attempt", &retry.attempt.to_string()),
+                            ("max", &retry.max_attempts.to_string()),
+                            ("seconds", &seconds.to_string()),
+                        ]
+                    )
+                );
+                return (full, essential);
             }
             let thinking = self.snapshot.as_ref().is_some_and(|snapshot| {
                 snapshot.rows.iter().any(|row| {
@@ -6203,11 +6218,11 @@ impl App {
             } else {
                 "working…  {elapsed}"
             };
-            format!(
-                "{} {}",
-                PULSE_FRAMES[beat % PULSE_FRAMES.len()],
+            let text = format!(
+                "{pulse} {}",
                 tf(label, &[("elapsed", &format_elapsed(elapsed))])
-            )
+            );
+            (text.clone(), text)
         });
         let inner = cols.saturating_sub(MARGIN + 6).max(1);
         let shell = self.composer.shell();
@@ -6309,7 +6324,10 @@ impl App {
             let end = MARGIN + outer - 3;
             frame.model_label = Some((box_top, end - width_of(model)..end));
         }
-        let docked = self.dock_status(status.as_deref()).and_then(|text| {
+        let run = status
+            .as_ref()
+            .map(|(full, essential)| (full.as_str(), essential.as_str()));
+        let docked = self.dock_status(run, max_border).and_then(|text| {
             if width_of(&text) <= max_border {
                 return Some(text);
             }
@@ -6365,9 +6383,13 @@ impl App {
             cols.saturating_sub(2 + MARGIN).max(4)
         };
         let margin = " ".repeat(panel_margin);
-        let notice_row = replaced.then(|| self.replaced_notice(cols)).flatten();
+        let notice_rows = if replaced {
+            self.replaced_notice(cols)
+        } else {
+            Vec::new()
+        };
         let composer_rows = if replaced {
-            usize::from(notice_row.is_some())
+            notice_rows.len()
         } else {
             rows.len() + 2
         };
@@ -6514,9 +6536,7 @@ impl App {
         if let Some(panel) = panel {
             live.extend(panel.into_iter().map(|row| format!("{margin}{row}")));
         }
-        if let Some(row) = notice_row {
-            live.push(row);
-        }
+        live.extend(notice_rows);
         live.push(self.status_line(cols));
         let composer_cursor = (
             (box_top + 1 + cursor_row) as u16,
@@ -8305,28 +8325,27 @@ impl App {
         }
     }
 
-    /// The composer's bottom-left border label, the status corner: the run
-    /// status, the slot (a notice in the highlight colour), background task
-    /// count, goal and context use.
-    fn dock_status(&self, run: Option<&str>) -> Option<String> {
+    /// The composer's bottom-left status corner: the run status, the slot (a
+    /// notice in the highlight colour), background task count, goal and
+    /// context use, fitted to `budget` cells. The slot always stays whole.
+    /// The optional parts go first, then the run status's reason; the corner
+    /// falls back to the phase beside the slot, and to the slot alone.
+    fn dock_status(&self, run: Option<(&str, &str)>, budget: usize) -> Option<String> {
         let p = &self.palette;
-        let mut parts: Vec<String> = Vec::new();
-        if let Some(run) = run {
-            parts.push(fg(run, &p.activity));
-        }
-        if let Some(slot) = self.slot() {
+        let slot = self.slot().map(|slot| {
             let color = if self.notice.is_some() {
                 &p.highlight
             } else {
                 &p.muted
             };
-            parts.push(fg(&slot, color));
-        }
+            fg(&slot, color)
+        });
+        let mut optional: Vec<String> = Vec::new();
         if let Some(background) = self.background_label() {
-            parts.push(fg(&background, &p.muted));
+            optional.push(fg(&background, &p.muted));
         }
         if let Some(goal) = self.goal_label() {
-            parts.push(fg(goal, &p.muted));
+            optional.push(fg(goal, &p.muted));
         }
         if let Some(context) = self.context_label() {
             let color = if self.context_near() {
@@ -8334,9 +8353,30 @@ impl App {
             } else {
                 &p.muted
             };
-            parts.push(fg(&context, color));
+            optional.push(fg(&context, color));
         }
-        (!parts.is_empty()).then(|| parts.join("  "))
+        let join = |run: Option<&str>, optional: &[String]| {
+            let mut parts: Vec<String> = Vec::new();
+            if let Some(run) = run {
+                parts.push(fg(run, &p.activity));
+            }
+            parts.extend(slot.clone());
+            parts.extend(optional.iter().cloned());
+            (!parts.is_empty()).then(|| parts.join("  "))
+        };
+        let (full, essential) = run.map_or((None, None), |(full, essential)| {
+            (Some(full), Some(essential))
+        });
+        [
+            join(full, &optional),
+            join(essential, &optional),
+            join(essential, &[]),
+            join(None, &[]),
+        ]
+        .into_iter()
+        .flatten()
+        .find(|text| width_of(text) <= budget)
+        .or_else(|| join(essential, &[]))
     }
 
     /// The composer's bottom-right label, built to fit the cells the border
@@ -8390,22 +8430,28 @@ impl App {
         clip(&format!("{prefix} {hint}"), total).0
     }
 
-    /// The notice or disconnect line drawn above the footer while a prompt
-    /// replaces the composer, because the composer's bottom border (which
-    /// otherwise carries the slot) is not drawn then. Only a notice or a
-    /// failure is drawn: the prompt itself already names an approval or answer.
-    fn replaced_notice(&self, cols: usize) -> Option<String> {
+    /// The notice or disconnect drawn above the footer while a prompt replaces
+    /// the composer, because the composer's bottom border (which otherwise
+    /// carries the slot) is not drawn then. Only a notice or a failure is
+    /// drawn: the prompt itself already names an approval or answer. The text
+    /// wraps onto as many rows as it needs, so the slot is never cut.
+    fn replaced_notice(&self, cols: usize) -> Vec<String> {
         if self.notice.is_none() && self.failure.is_none() {
-            return None;
+            return Vec::new();
         }
-        let text = self.slot()?;
+        let Some(text) = self.slot() else {
+            return Vec::new();
+        };
         let color = if self.notice.is_some() {
             &self.palette.highlight
         } else {
             &self.palette.muted
         };
-        let line = format!("{}{}", " ".repeat(MARGIN), fg(&text, color));
-        Some(clip(&line, cols.saturating_sub(2)).0)
+        let width = cols.saturating_sub(MARGIN + 1).max(1);
+        wrap_words(&text, width)
+            .into_iter()
+            .map(|row| format!("{}{}", " ".repeat(MARGIN), fg(&row, color)))
+            .collect()
     }
 }
 
@@ -12204,6 +12250,94 @@ mod tests {
     }
 
     #[test]
+    fn a_replaced_composer_keeps_a_narrow_notice_whole() {
+        use crate::ui::render::panel::strip_escapes;
+        const DISCONNECT: &str = "Disconnected · draft kept";
+        const RESUME: &str = "Disconnected; draft kept. Exit and resume this Session.";
+        fn rows(app: &mut App, fullscreen: bool, cols: u16) -> Vec<String> {
+            app.fullscreen = fullscreen;
+            app.frame((cols, 24))
+                .live
+                .iter()
+                .map(|row| strip_escapes(row).trim().to_owned())
+                .collect()
+        }
+        for fullscreen in [false, true] {
+            let (mut app, _home) = status_app("local", "fixture-model", Some("high"));
+            app.apply(Update::Snapshot(Box::new(ViewSnapshot {
+                session_id: "s1".into(),
+                approvals: vec![crate::model::view::ApprovalView {
+                    member: None,
+                    request_id: "r1".into(),
+                    branch_id: "main".into(),
+                    reason: "shell command".into(),
+                    tool_name: "exec".into(),
+                    tool_input: serde_json::Value::Null,
+                    always: None,
+                }],
+                ..ViewSnapshot::default()
+            })));
+            app.apply(Update::Failed("daemon disconnected".into()));
+            let shown = rows(&mut app, fullscreen, 100);
+            assert_eq!(
+                shown.iter().filter(|row| row.contains(DISCONNECT)).count(),
+                1,
+                "fullscreen: {fullscreen}"
+            );
+
+            press(&mut app, KeyCode::Enter);
+            let narrow = rows(&mut app, fullscreen, 32);
+            let flat = narrow.join(" ");
+            assert!(
+                flat.contains(RESUME),
+                "the 32-column notice keeps its whole text (fullscreen: {fullscreen}):\n{}",
+                narrow.join("\n")
+            );
+        }
+    }
+
+    #[test]
+    fn a_retry_keeps_the_stop_shortcut_on_the_border_before_its_reason() {
+        for fullscreen in [false, true] {
+            let (mut app, _home) = status_app("local", "fixture-model", Some("high"));
+            app.fullscreen = fullscreen;
+            app.apply(Update::Snapshot(Box::new(ViewSnapshot {
+                session_id: "s1".into(),
+                running: true,
+                retry: Some(crate::model::view::RetryView {
+                    attempt: 2,
+                    max_attempts: 8,
+                    retry_at_ms: retry_at(60_000),
+                    kind: dim_agent_types::ModelFailureKind::ServerError,
+                    reason: Some(
+                        "The provider reported a server error: The server is overloaded and cannot take more requests right now"
+                            .into(),
+                    ),
+                }),
+                ..ViewSnapshot::default()
+            })));
+            for cols in [100u16, 60, 48, 40] {
+                let (_, bottom, footer) = composer_chrome(&mut app, cols);
+                assert!(
+                    bottom.contains("esc interrupt"),
+                    "{cols} columns, fullscreen {fullscreen}: the stop shortcut is on the border: {bottom}"
+                );
+                assert!(!footer.contains("esc interrupt"), "{cols}: {footer}");
+                assert!(
+                    !bottom.contains("server error"),
+                    "{cols} columns: the long reason is dropped before the slot: {bottom}"
+                );
+                if cols >= 48 {
+                    assert!(
+                        bottom.contains("Retrying 2/8 in"),
+                        "{cols} columns keeps the phase beside the slot: {bottom}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn both_modes_unify_composer_borders_and_keep_permission_only_on_the_footer() {
         let (mut app, _home) = status_app("local", "fixture-model", Some("high"));
         app.context = Some(crate::model::session::ContextReading {
@@ -12280,10 +12414,12 @@ mod tests {
             assert!(!footer.contains("esc interrupt"), "{footer}");
             assert!(!footer.contains("local / fixture-model"), "{footer}");
 
-            // Very narrow (24 cols): status keeps its phase ahead of elapsed/slot; model drops.
+            // Very narrow (24 cols): the slot stays whole and the phase drops
+            // when both cannot fit; the model label drops too.
             let (top, bottom, _) = composer_chrome(&mut app, 24);
             assert!(!top.contains("local / fixture-model"), "{top}");
-            assert!(bottom.contains("thinking…"), "{bottom}");
+            assert!(bottom.contains("esc interrupt"), "{bottom}");
+            assert!(!bottom.contains("thinking…"), "{bottom}");
         }
     }
 
@@ -12354,6 +12490,7 @@ mod tests {
             let (top, bottom, footer) = composer_chrome(&mut app, cols);
             assert!(!top.contains("Retrying"), "{cols}: {top}");
             assert!(bottom.contains("Retrying 2/8 in"), "{cols}: {bottom}");
+            assert!(bottom.contains("esc interrupt"), "{cols}: {bottom}");
             assert!(!footer.contains("Retrying"), "{cols}: {footer}");
         }
 
