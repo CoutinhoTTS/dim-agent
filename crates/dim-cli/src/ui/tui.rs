@@ -6509,7 +6509,7 @@ impl App {
         if let Some(panel) = panel {
             live.extend(panel.into_iter().map(|row| format!("{margin}{row}")));
         }
-        live.push(self.status_line(cols));
+        live.push(self.status_line(cols, replaced));
         let composer_cursor = (
             (box_top + 1 + cursor_row) as u16,
             (MARGIN + 2 + cursor_col).min(cols.saturating_sub(1)) as u16,
@@ -8365,7 +8365,10 @@ impl App {
         }
     }
 
-    fn status_line(&self, cols: usize) -> String {
+    /// The footer line: the permission mode, plus the status slot while a
+    /// prompt replaces the composer, because the composer's bottom border
+    /// (which otherwise carries the slot) is not drawn then.
+    fn status_line(&self, cols: usize, replaced: bool) -> String {
         use dim_agent_types::PermissionPreset;
         let p = &self.palette;
         let preset = self.permission_policy.preset;
@@ -8378,7 +8381,23 @@ impl App {
         let hint = fg(t("(shift+tab to cycle)"), &p.muted);
         let total = cols.saturating_sub(2);
         let prefix = format!("{}{permission}", " ".repeat(MARGIN));
-        clip(&format!("{prefix} {hint}"), total).0
+        let slot = replaced.then(|| self.slot()).flatten().map(|slot| {
+            let color = if self.notice.is_some() {
+                &p.highlight
+            } else {
+                &p.muted
+            };
+            fg(&slot, color)
+        });
+        let Some(slot) = slot else {
+            return clip(&format!("{prefix} {hint}"), total).0;
+        };
+        let with_hint = format!("{prefix} {hint}  {slot}");
+        if width_of(&with_hint) <= total {
+            with_hint
+        } else {
+            clip(&format!("{prefix}  {slot}"), total).0
+        }
     }
 }
 
@@ -12100,6 +12119,67 @@ mod tests {
             .expect("composer bottom border");
         let footer = rows.last().cloned().expect("footer line");
         (top, bottom, footer)
+    }
+
+    #[test]
+    fn a_disconnect_stays_visible_once_while_a_prompt_replaces_the_composer() {
+        use crate::ui::render::panel::strip_escapes;
+        const SLOT: &str = "Disconnected · draft kept";
+        fn count(app: &mut App, fullscreen: bool) -> usize {
+            app.fullscreen = fullscreen;
+            app.frame((100, 24))
+                .live
+                .iter()
+                .map(|row| strip_escapes(row))
+                .filter(|row| row.contains(SLOT))
+                .count()
+        }
+
+        for fullscreen in [false, true] {
+            let (mut app, _home) = status_app("local", "fixture-model", Some("high"));
+            let open = ViewSnapshot {
+                approvals: vec![crate::model::view::ApprovalView {
+                    member: None,
+                    request_id: "r1".into(),
+                    branch_id: "main".into(),
+                    reason: "shell command".into(),
+                    tool_name: "exec".into(),
+                    tool_input: serde_json::Value::Null,
+                    always: None,
+                }],
+                ..ViewSnapshot::default()
+            };
+            app.apply(Update::Snapshot(Box::new(open)));
+            app.apply(Update::Failed("daemon disconnected".into()));
+            assert!(matches!(app.prompt, Some(Prompt::Permission(_))));
+            assert_eq!(
+                count(&mut app, fullscreen),
+                1,
+                "a disconnect shows once beside an open approval (fullscreen: {fullscreen})"
+            );
+
+            let (mut app, _home) = status_app("local", "fixture-model", Some("high"));
+            app.apply(Update::Snapshot(Box::default()));
+            app.apply(Update::Failed("daemon disconnected".into()));
+            let snapshot = app.snapshot.as_ref().unwrap();
+            app.open_prompt(Prompt::Queue(QueuePanel::new(snapshot)));
+            assert!(matches!(app.prompt, Some(Prompt::Queue(_))));
+            assert_eq!(
+                count(&mut app, fullscreen),
+                1,
+                "a disconnect shows once beside an open queue (fullscreen: {fullscreen})"
+            );
+        }
+
+        for fullscreen in [false, true] {
+            let (mut app, _home) = status_app("local", "fixture-model", Some("high"));
+            app.apply(Update::Failed("daemon disconnected".into()));
+            app.fullscreen = fullscreen;
+            let (_, bottom, footer) = composer_chrome(&mut app, 100);
+            assert!(bottom.contains(SLOT), "{bottom}");
+            assert!(!footer.contains(SLOT), "{footer}");
+            assert_eq!(count(&mut app, fullscreen), 1, "fullscreen: {fullscreen}");
+        }
     }
 
     #[test]

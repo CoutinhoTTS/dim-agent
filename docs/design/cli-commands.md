@@ -3113,7 +3113,10 @@ Both modes place the model label (with its effort when both fit) on the right si
 composer's top border, and keep the run status, the status slot (a notice, a required answer
 or permission, `esc interrupt`, or disconnect), background task count, goal and context
 information on the left side of the composer's bottom border, leaving only the permission
-preset and its shortcut hint on the footer line.
+preset and its shortcut hint on the footer line. While a prompt replaces the composer
+(permission, question, effort, exit, upgrade, fork, timeline, queue, export or report),
+the composer is not drawn, so the footer line also carries the status slot. The slot
+is drawn once, on the bottom border or on the footer, never both.
 
 ### Submit check warnings
 
