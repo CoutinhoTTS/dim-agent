@@ -5,7 +5,7 @@ use crate::{
     rpc::{self, Native, Rpc},
 };
 use agent_client_protocol::{Client, ConnectionTo, Error, UntypedMessage, schema::v1 as acp};
-use dim_agent_types::{DEFAULT_BRANCH_ID, TurnOutcome};
+use dim_agent_types::{DEFAULT_BRANCH_ID, ROOT_BRANCH_ID, TurnOutcome};
 use dim_client::window::Window;
 use dim_client::wire::{
     Attached, Configuration, DisplayNotice, DisplayPage, Event, EventContent, EventNotice,
@@ -917,10 +917,11 @@ impl Gateway {
                 {
                     return reply.respond_with_error(busy());
                 }
+                let conversation = session.projection.branch.clone();
                 let rpc = self.rpc.clone();
                 self.spawn(async move {
                     let mut query =
-                        json!({"sessionId":args.session_id,"branchId":DEFAULT_BRANCH_ID,"limit":limit});
+                        json!({"sessionId":args.session_id,"branchId":conversation,"limit":limit});
                     if rpc.supports("session.history.display.transcript") {
                         query["tail"] = json!(true);
                         query["transcript"] = json!(true);
@@ -1001,7 +1002,9 @@ impl Gateway {
                         {
                             return Err(Error::invalid_params());
                         }
-                        let mut params = json!({"sessionId":source,"branchId":DEFAULT_BRANCH_ID});
+                        // The fork copies the source's root, so its cut is a
+                        // root position whatever line that Session shows.
+                        let mut params = json!({"sessionId":source,"branchId":ROOT_BRANCH_ID});
                         if let Some(turn) = &controls.fork_turn {
                             params["turnId"] = json!(turn);
                         }
@@ -1053,6 +1056,7 @@ impl Gateway {
                     let name = name.to_owned();
                     let words = words.to_owned();
                     let config = session.config.clone();
+                    let conversation = session.projection.branch.clone();
                     let command_id = uuid::Uuid::new_v4();
                     let cancelled = CancellationToken::new();
                     session.command = Some(Command {
@@ -1064,9 +1068,16 @@ impl Gateway {
                         cancelled: cancelled.clone(),
                     });
                     self.spawn(async move {
-                        let result =
-                            crate::commands::run(&rpc, &id, &config, &name, &words, &cancelled)
-                                .await;
+                        let result = crate::commands::run(
+                            &rpc,
+                            &id,
+                            &conversation,
+                            &config,
+                            &name,
+                            &words,
+                            &cancelled,
+                        )
+                        .await;
                         Work::Command {
                             id,
                             command_id,
@@ -1108,6 +1119,7 @@ impl Gateway {
                     ended: HashMap::new(),
                     deleted: HashSet::new(),
                 });
+                let conversation = session.projection.branch.clone();
                 let mcp = self.mcp.clone();
                 self.spawn(async move {
                     let mut sent = false;
@@ -1122,7 +1134,7 @@ impl Gateway {
                         };
                         if uploading.is_cancelled() { return Err(Error::new(-32800, "Request cancelled before submission")); }
                         sent = true;
-                        rpc.typed("session.submit", json!({"sessionId":id,"branchId":DEFAULT_BRANCH_ID,"submissionId":submission,"user":user,"mode":"queue"})).await
+                        rpc.typed("session.submit", json!({"sessionId":id,"branchId":conversation,"submissionId":submission,"user":user,"mode":"queue"})).await
                     }.await;
                     Work::Submitted { id, submission, result,sent }
                 });
@@ -1216,9 +1228,13 @@ impl Gateway {
                 }
                 session.configuring = true;
                 let config = session.config.clone();
+                let conversation = session.projection.branch.clone();
                 let revision = session.config_revision;
                 self.spawn(async move {
-                    let result = config.clone().set(&rpc, &id, &key, &value).await;
+                    let result = config
+                        .clone()
+                        .set(&rpc, &id, &conversation, &key, &value)
+                        .await;
                     let refreshed = if let Err(error) = &result {
                         match error
                             .data
@@ -1229,7 +1245,7 @@ impl Gateway {
                                 let current = rpc
                                     .typed(
                                         "session.permission.get",
-                                        json!({"sessionId":id,"branchId":DEFAULT_BRANCH_ID}),
+                                        json!({"sessionId":id,"branchId":conversation}),
                                     )
                                     .await;
                                 current.ok().map(|policy| {
@@ -1256,7 +1272,7 @@ impl Gateway {
                                     capability_snapshot: attached.capability_snapshot,
                                     model_preferences: attached.model_preferences,
                                 });
-                                Config::read(&rpc, &id, model).await
+                                Config::read(&rpc, &id, &conversation, model).await
                             }
                             .await
                             .ok(),
@@ -1353,6 +1369,7 @@ impl Gateway {
             return;
         };
         session.stopping = true;
+        let conversation = session.projection.branch.clone();
         let (submission, input) = match &mut session.prompt {
             Some(prompt) => {
                 prompt.cancelling = true;
@@ -1368,7 +1385,7 @@ impl Gateway {
                     let value = rpc
                         .call(
                             "session.input.withdraw",
-                            json!({"sessionId":id,"branchId":DEFAULT_BRANCH_ID,"inputId":input}),
+                            json!({"sessionId":id,"branchId":conversation,"inputId":input}),
                         )
                         .await?;
                     if value["status"] == "deleted" {
@@ -1377,7 +1394,7 @@ impl Gateway {
                 }
                 rpc.call(
                     "session.stop",
-                    json!({"sessionId":id,"branchId":DEFAULT_BRANCH_ID}),
+                    json!({"sessionId":id,"branchId":conversation}),
                 )
                 .await
             }
@@ -2352,11 +2369,11 @@ impl Gateway {
             }
             "session.model.progress" => {
                 let progress: Progress = decode_native(params)?;
-                if progress.branch_id != DEFAULT_BRANCH_ID {
-                    return Ok(());
-                }
                 let id = progress.session_id.clone();
                 if let Some(Slot::Ready(session)) = self.sessions.get_mut(&id) {
+                    if progress.branch_id != session.projection.branch {
+                        return Ok(());
+                    }
                     let updates = session.projection.progress(progress);
                     for update in updates {
                         self.update(&id, update).await?;
@@ -2619,6 +2636,7 @@ impl Gateway {
                 Slot::Ready(session) => Some((
                     id.clone(),
                     session.cwd.clone(),
+                    session.projection.branch.clone(),
                     session
                         .prompt
                         .as_ref()
@@ -2640,7 +2658,7 @@ impl Gateway {
         if sessions.is_empty() {
             self.recovering = false;
         }
-        for (id, cwd, submission, accepted_input, turn_id) in sessions {
+        for (id, cwd, conversation, submission, accepted_input, turn_id) in sessions {
             let rpc = self.rpc.clone();
             let mcp = self.mcp.clone();
             self.spawn_generation(generation, async move {
@@ -2656,7 +2674,7 @@ impl Gateway {
                         loop {
                             let query = json!({
                                 "sessionId":id,
-                                "branchId":DEFAULT_BRANCH_ID,
+                                "branchId":conversation,
                                 "submissionId":submission,
                             });
                             match rpc.typed("session.input_lookup", query).await? {
@@ -2949,6 +2967,7 @@ impl Gateway {
             return;
         }
         session.usage_pending = true;
+        let conversation = session.projection.branch.clone();
         let id = id.to_owned();
         let rpc = self.rpc.clone();
         self.spawn(async move {
@@ -2956,7 +2975,7 @@ impl Gateway {
                 result: rpc
                     .call(
                         "session.context.usage",
-                        json!({"sessionId":id,"branchId":DEFAULT_BRANCH_ID}),
+                        json!({"sessionId":id,"branchId":conversation}),
                     )
                     .await,
                 id,
@@ -3057,9 +3076,20 @@ async fn read_history(
     }
     // The whole recovery reads one branch's conversation: the history window
     // that yields the cutoff, the pending requests read from that cutoff, and
-    // the reply check. It reads the branch the Session shows by default without
-    // reading the Session's default branch, so `DEFAULT_BRANCH_ID` names it.
-    let conversation = DEFAULT_BRANCH_ID;
+    // the reply check. The directory names that line once per ACP session
+    // (design §4); a server without the fact has a Session still on its root.
+    let directory: Option<dim_client::wire::BranchDirectory> = if rpc.supports("session.branches") {
+        Some(
+            rpc.typed("session.branches", json!({"sessionId":id}))
+                .await?,
+        )
+    } else {
+        None
+    };
+    let conversation = directory
+        .as_ref()
+        .and_then(|directory| directory.default_branch_id.clone())
+        .unwrap_or_else(|| DEFAULT_BRANCH_ID.to_owned());
     let attached: Attached = rpc
         .typed("session.attach", {
             let mut params = json!({"sessionId":id});
@@ -3098,7 +3128,7 @@ async fn read_history(
         loop {
             let args = window.params_with_display(
                 id,
-                conversation,
+                &conversation,
                 rpc.supports("session.history.display.tail"),
                 rpc.supports("session.history.display.transcript"),
             );
@@ -3124,21 +3154,18 @@ async fn read_history(
             window.before,
         )
     };
-    let config = Config::read(rpc, id, model).await?;
+    let config = Config::read(rpc, id, &conversation, model).await?;
     let mut questions = HashMap::new();
     if config.methods.contains("session.question.pending") {
-        let mut branches = vec![conversation.to_owned()];
-        if rpc.supports("session.branches") {
-            let directory: dim_client::wire::BranchDirectory = rpc
-                .typed("session.branches", json!({"sessionId":id}))
-                .await?;
-            branches = directory
+        let branches: Vec<String> = match &directory {
+            Some(directory) => directory
                 .branches
-                .into_iter()
+                .iter()
                 .filter(|branch| branch.state != "ended")
-                .map(|branch| branch.branch_id)
-                .collect();
-        }
+                .map(|branch| branch.branch_id.clone())
+                .collect(),
+            None => vec![conversation.clone()],
+        };
         for branch in branches {
             let mut params = json!({"sessionId":id,"branchId":branch});
             if branch == conversation {
@@ -3178,7 +3205,7 @@ async fn read_history(
         if !config.methods.contains(method) {
             continue;
         }
-        let mut params = json!({"sessionId":id,"branchId":conversation,"through":through});
+        let mut params = json!({"sessionId":id,"branchId":&conversation,"through":through});
         loop {
             let value = rpc.call(method, params.clone()).await?;
             let (branch, cut, next) = match method {
@@ -3235,6 +3262,14 @@ async fn read_history(
         inputs,
         turn,
         output,
-        model_through: attached.sequence,
+        // `attached.sequence` is the root's sequence, which is this
+        // conversation's own cursor only while the conversation is the root; a
+        // line's configuration arrives with its history until the App Server
+        // reports a branch-qualified cursor (design §14).
+        model_through: if conversation == DEFAULT_BRANCH_ID {
+            attached.sequence
+        } else {
+            0
+        },
     })
 }
