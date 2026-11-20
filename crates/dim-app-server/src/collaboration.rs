@@ -860,6 +860,12 @@ struct Request {
     turn_id: String,
     agent_id: String,
     session: Session,
+    /// The member's line this request's input was written to, chosen once at
+    /// delivery. The idle wait, settlement and every withdrawal and stop of
+    /// this request read it, so moving the member's default branch never makes
+    /// an in-flight request wait on, settle from, or stop another line
+    /// (design §9, §15).
+    member_branch: String,
     input_event_id: Option<String>,
     /// A client cancel on this request: the settle names it when the member
     /// never started the turn (`cancel_named`), and the queued input is
@@ -1104,17 +1110,32 @@ impl CollaborationSession {
                 session_id,
                 after,
                 limit,
+                branch_id,
             } => {
                 let limit = limit.unwrap_or(READ_PAGE_LIMIT);
                 if !(1..=READ_PAGE_LIMIT).contains(&limit) {
                     return Ok(refusal(
                         Refusal::InvalidInput,
                         &format!(
-                            "limit must be between 1 and {READ_PAGE_LIMIT}; read more pages by passing nextCursor as after"
+                            "limit must be between 1 and {READ_PAGE_LIMIT}; read more pages by passing nextCursor as after together with the branchId the page reported"
                         ),
                     ));
                 }
-                return Ok(self.read(&agent_id, &session_id, after, limit).await);
+                if after > 0 && branch_id.as_deref().is_none_or(str::is_empty) {
+                    return Ok(refusal(
+                        Refusal::InvalidInput,
+                        "a continuation must pass the branchId the page reported with nextCursor",
+                    ));
+                }
+                if branch_id.as_deref() == Some("") {
+                    return Ok(refusal(
+                        Refusal::InvalidInput,
+                        "branchId must not be empty",
+                    ));
+                }
+                return Ok(self
+                    .read(&agent_id, &session_id, branch_id, after, limit)
+                    .await);
             }
             Input::Request {
                 prompt,
@@ -1339,6 +1360,7 @@ impl CollaborationSession {
             };
             request.cancelled_by_client = true;
             let session = request.session.clone();
+            let branch = request.member_branch.clone();
             let start = if request.carrying_out || request.input_event_id.is_none() {
                 None
             } else {
@@ -1350,12 +1372,12 @@ impl CollaborationSession {
             let stopping = start
                 .as_ref()
                 .map(|_| Stopping::mark(self, &mut state, &p.member_session_id));
-            start.map(|input| (session, input, stopping))
+            start.map(|input| (session, branch, input, stopping))
         };
-        let Some((session, input, Some(stopping))) = work else {
+        let Some((session, branch, input, Some(stopping))) = work else {
             return Ok(json!({"status": "cancelled"}));
         };
-        self.carry_out_stop(&session, &input, CANCELLED_BY_CLIENT, stopping)
+        self.carry_out_stop(&session, &branch, &input, CANCELLED_BY_CLIENT, stopping)
             .await
             .map_err(cancel_rpc)?;
         Ok(json!({"status": "cancelled"}))
@@ -1470,7 +1492,14 @@ impl CollaborationSession {
         }
     }
 
-    async fn read(&self, agent_id: &str, session_id: &str, after: u64, limit: usize) -> ToolResult {
+    async fn read(
+        &self,
+        agent_id: &str,
+        session_id: &str,
+        branch_id: Option<String>,
+        after: u64,
+        limit: usize,
+    ) -> ToolResult {
         let peer = match self
             .collaboration
             .resolve(&self.session_id, agent_id, session_id)
@@ -1480,11 +1509,20 @@ impl CollaborationSession {
             Err(error) => return refusal(error, explain(error)),
         };
         let session = &peer.session;
-        // The member's conversation is on its own default branch, read once
-        // for this read (design §9, §15).
-        let line = match session.default_branch() {
-            Ok(line) => line,
-            Err(error) => return ToolResult::error(error.to_string()),
+        // A continuation is read from the line its earlier page named, and a
+        // fresh read from the line the member's conversation is on: the line
+        // is chosen once for this read (design §9, §15).
+        let line = match branch_id {
+            Some(line) => {
+                if let Err(error) = session.state(&line) {
+                    return ToolResult::error(error.to_string());
+                }
+                line
+            }
+            None => match session.default_branch() {
+                Ok(line) => line,
+                Err(error) => return ToolResult::error(error.to_string()),
+            },
         };
         self.collaboration.note_read();
         let (next, events) = match read_page(
@@ -1642,8 +1680,8 @@ impl CollaborationSession {
         }
         flush_text(&mut items, &mut text);
         success(
-            json!({"agentId": agent_id, "sessionId": session_id, "events": items,
-            "nextCursor": next}),
+            json!({"agentId": agent_id, "sessionId": session_id, "branchId": line,
+            "events": items, "nextCursor": next}),
         )
     }
 
@@ -1748,7 +1786,12 @@ impl CollaborationSession {
                     && let Some(input) = request.input_event_id.clone()
                 {
                     request.carrying_out = true;
-                    raw_starts.push((member.clone(), request.session.clone(), input));
+                    raw_starts.push((
+                        member.clone(),
+                        request.session.clone(),
+                        request.member_branch.clone(),
+                        input,
+                    ));
                 }
             }
             let retired = {
@@ -1772,17 +1815,17 @@ impl CollaborationSession {
         // it.
         let starts: Vec<_> = raw_starts
             .into_iter()
-            .map(|(member, session, input)| {
+            .map(|(member, session, branch, input)| {
                 let stopping = Stopping::mark(self, &mut state, &member);
-                (session, input, stopping)
+                (session, branch, input, stopping)
             })
             .collect();
         drop(state);
-        for (session, input, stopping) in starts {
+        for (session, branch, input, stopping) in starts {
             let stops = self.clone();
             self.collaboration.tasks.spawn(async move {
                 let _ = stops
-                    .carry_out_stop(&session, &input, INTERRUPTED, stopping)
+                    .carry_out_stop(&session, &branch, &input, INTERRUPTED, stopping)
                     .await;
             });
         }
@@ -2058,7 +2101,10 @@ impl CollaborationSession {
                     .collaboration
                     .member(&self.session_id, &data.agent_id, &data.session_id)
                     .await?;
-                if let Ok(line) = peer.session.default_branch() {
+                if let Some(line) = self
+                    .delivered_branch(&data.session_id)
+                    .or_else(|| peer.session.default_branch().ok())
+                {
                     let _ = peer.session.stop(&line, CANCELLED.into()).await;
                 }
                 Ok(delivered(&peer, None, Some(cancel)))
@@ -2069,7 +2115,10 @@ impl CollaborationSession {
                     .member(&self.session_id, &data.agent_id, &data.session_id)
                     .await?;
                 let working = self.in_flight(&data.session_id);
-                if let Ok(line) = peer.session.default_branch() {
+                if let Some(line) = self
+                    .delivered_branch(&data.session_id)
+                    .or_else(|| peer.session.default_branch().ok())
+                {
                     let _ = peer.session.stop(&line, CANCELLED.into()).await;
                 }
                 if let Some(mut done) = working {
@@ -2084,6 +2133,18 @@ impl CollaborationSession {
             }
             _ => unreachable!("operation event"),
         }
+    }
+
+    /// The line an open request's input was written to: a cancel or close
+    /// stops that line instead of a default the member may have moved since
+    /// (design §9, §15).
+    fn delivered_branch(&self, member: &str) -> Option<String> {
+        self.state
+            .lock()
+            .unwrap()
+            .requests
+            .get(member)
+            .map(|request| request.member_branch.clone())
     }
 
     fn in_flight(&self, member: &str) -> Option<watch::Receiver<bool>> {
@@ -2205,6 +2266,7 @@ impl CollaborationSession {
                     turn_id: data.turn_id.clone(),
                     agent_id: peer.agent_id.clone(),
                     session: peer.session.clone(),
+                    member_branch: line.clone(),
                     input_event_id: None,
                     cancelled_by_client: false,
                     carrying_out: false,
@@ -2270,11 +2332,12 @@ impl CollaborationSession {
                 CANCELLED_BY_CLIENT
             };
             let session = peer.session.clone();
+            let branch = line.clone();
             let input = input.id.clone();
             let stops = self.clone();
             self.collaboration.tasks.spawn(async move {
                 let _ = stops
-                    .carry_out_stop(&session, &input, reason, stopping)
+                    .carry_out_stop(&session, &branch, &input, reason, stopping)
                     .await;
             });
         }
@@ -2327,14 +2390,15 @@ impl CollaborationSession {
             return;
         };
         let session = request.session.clone();
+        let line = request.member_branch.clone();
         let member = member.clone();
         let abort = branch.abort.clone();
         let this = self.clone();
         let branch_id = branch_id.to_owned();
         branch.tasks.spawn(async move {
-            let Ok(line) = session.default_branch() else {
-                return;
-            };
+            // The idle wait follows the line the delivery wrote, held on the
+            // request rather than re-read: a member move does not redirect it
+            // (design §9, §15).
             let idle = tokio::select! {
                 result = session.idle(&line) => result,
                 _ = abort.cancelled() => return,
@@ -2367,6 +2431,7 @@ impl CollaborationSession {
                             request.op.clone(),
                             request.agent_id.clone(),
                             request.session.clone(),
+                            request.member_branch.clone(),
                             request.input_event_id.clone(),
                             request.cancelled_by_client,
                             request.leader_reason.clone(),
@@ -2378,21 +2443,15 @@ impl CollaborationSession {
             return;
         };
         self.retire_member_approvals(branch_id, member).await;
-        let (op, agent_id, session, input, cancelled, leader_reason) = request;
+        let (op, agent_id, session, member_branch, input, cancelled, leader_reason) = request;
         let through = match &idle {
             Some(Ok(cutoff)) => Some(*cutoff),
             _ => None,
         };
-        let (last_turn_id, text, derived) = match session.default_branch() {
-            Ok(line) => outcome(&session, &line, input.as_deref(), through).await,
-            Err(error) => (
-                None,
-                String::new(),
-                CollaborationOutcome::Failed {
-                    reason: error.to_string(),
-                },
-            ),
-        };
+        // The result is read from the line the delivery wrote, not from the
+        // member's current default (design §9, §15).
+        let (last_turn_id, text, derived) =
+            outcome(&session, &member_branch, input.as_deref(), through).await;
         let settle = self
             .state
             .lock()
@@ -2447,13 +2506,14 @@ impl CollaborationSession {
     async fn carry_out_stop(
         self: &Arc<Self>,
         session: &Session,
+        branch: &str,
         input: &str,
         reason: &str,
         stopping: Stopping,
     ) -> dim_agent_runtime::Result<()> {
         let stopping = Arc::new(stopping);
         let result = self
-            .stop_request_input(session, input, reason, Arc::clone(&stopping))
+            .stop_request_input(session, branch, input, reason, Arc::clone(&stopping))
             .await;
         if result.is_err() {
             stopping.failed(input);
@@ -2466,15 +2526,17 @@ impl CollaborationSession {
     async fn stop_request_input(
         self: &Arc<Self>,
         session: &Session,
+        branch: &str,
         input: &str,
         reason: &str,
         stopping: Arc<Stopping>,
     ) -> dim_agent_runtime::Result<()> {
         let mut after = 0;
         let mut open = None;
-        // The member's conversation is on its own default branch, read once
-        // for this carry-out (design §9, §15).
-        let line = session.default_branch()?;
+        // The delivery's line, held on the request: moving the member's
+        // default branch does not redirect the withdrawal or the stop to a
+        // line that never held the input (design §9, §15).
+        let line = branch.to_owned();
         // Subscribed before the first check, so a consumption or a deletion
         // published while it reads, or between it and the withdrawal, still
         // wakes the wait below: whatever the check cannot see happened after
@@ -2696,7 +2758,7 @@ impl CollaborationSession {
             );
         }
         for member in members {
-            let (session, start) = {
+            let (session, branch, start) = {
                 let mut state = self.state.lock().unwrap();
                 let Some(request) = state.requests.get_mut(&member) else {
                     continue;
@@ -2725,10 +2787,11 @@ impl CollaborationSession {
                     None
                 };
                 let session = request.session.clone();
+                let branch = request.member_branch.clone();
                 let stopping = input
                     .as_ref()
                     .map(|_| Stopping::mark(self, &mut state, &member));
-                (session, input.map(|input| (input, stopping)))
+                (session, branch, input.map(|input| (input, stopping)))
             };
             if closing {
                 if let Some((input, Some(stopping))) = start {
@@ -2737,12 +2800,12 @@ impl CollaborationSession {
                     let stops = self.clone();
                     self.collaboration.tasks.spawn(async move {
                         let _ = stops
-                            .carry_out_stop(&session, &input, INTERRUPTED, stopping)
+                            .carry_out_stop(&session, &branch, &input, INTERRUPTED, stopping)
                             .await;
                     });
                 }
-            } else if let Ok(line) = session.default_branch() {
-                let _ = session.interrupt(&line, INTERRUPTED.into());
+            } else {
+                let _ = session.interrupt(&branch, INTERRUPTED.into());
             }
             self.settle(branch_id, &member, None).await;
         }
@@ -3257,6 +3320,12 @@ enum Input {
         #[serde(default)]
         after: u64,
         limit: Option<usize>,
+        /// The line the previous page was read from, as that page reported
+        /// it. A continuation (`after` above 0) must carry it, so a move of
+        /// the member's default branch between pages never applies one
+        /// line's cursor to another (design §9, §15).
+        #[serde(default)]
+        branch_id: Option<String>,
     },
     List {},
     Models {},
@@ -3276,7 +3345,8 @@ const LEADER_DESCRIPTION_HEAD: &str = "Work with other agents as a team you lead
 - message: send information to a team member. Default mode \"append\" adds context the
   receiver sees in its next step without interrupting it. Use mode \"steer\" only when the
   receiver must change course now.
-- read: view a team member's recent activity. list: show your team and the agents you
+- read: view a team member's recent activity, more pages by passing nextCursor as after
+  together with the branchId the page reported. list: show your team and the agents you
   can use. inspect: show one agent's full profile (instructions, tools, model).";
 /// The `models` bullet, between [`LEADER_DESCRIPTION_HEAD`] and
 /// [`LEADER_DESCRIPTION_TAIL`]: only a deployment that provides the selectable
@@ -3292,7 +3362,8 @@ const MEMBER_DESCRIPTION: &str = "You are a member of a team. You cannot delegat
   adds context the receiver sees in its next step without interrupting it. Use mode
   \"steer\" only when the receiver must act on it now, such as a blocking question or a
   finding that invalidates its current work.
-- read: view a team member's recent activity. list: show your team.
+- read: view a team member's recent activity, more pages by passing nextCursor as after
+  together with the branchId the page reported. list: show your team.
 Your final answer to the task is returned to the leader automatically; do not send it
 as a message.";
 
@@ -3308,9 +3379,11 @@ fn agent_definition(
         "content": {"type": "string"},
         "mode": {"type": "string", "enum": ["append", "steer"]},
         "after": {"type": "integer", "minimum": 0},
+        "branchId": {"type": "string",
+            "description": "The line an earlier read page reported as its branchId. Required with after above 0, so a continuation reads the same line; omit it on a fresh read."},
         "limit": {"type": "integer", "minimum": 1, "maximum": READ_PAGE_LIMIT,
             "default": READ_PAGE_LIMIT,
-            "description": "Target events per page. The final atomic batch is returned whole and may exceed the target. Pass nextCursor as after to continue."},
+            "description": "Target events per page. The final atomic batch is returned whole and may exceed the target. Pass nextCursor as after, with the page's branchId, to continue."},
     });
     let (actions, description) = match role {
         CollaborationRole::Leader => {
@@ -3379,7 +3452,7 @@ fn agent_definition(
             let optional: &[&str] = match *action {
                 "request" if required.contains(&"agentId") => &["sessionId"],
                 "message" => &["mode"],
-                "read" => &["after", "limit"],
+                "read" => &["after", "limit", "branchId"],
                 _ => &[],
             };
             for field in optional {
