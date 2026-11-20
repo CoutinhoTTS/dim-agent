@@ -968,8 +968,14 @@ impl FullScreen {
         let hovered = self.hover(doc);
         if self.overlay_open {
             match event.kind {
-                MouseKind::WheelUp => return MouseOutcome::Overlay(-1),
-                MouseKind::WheelDown => return MouseOutcome::Overlay(1),
+                MouseKind::WheelUp => {
+                    self.press = None;
+                    return MouseOutcome::Overlay(-1);
+                }
+                MouseKind::WheelDown => {
+                    self.press = None;
+                    return MouseOutcome::Overlay(1);
+                }
                 MouseKind::Press
                     if column < content_width(self.size.0 as usize)
                         && self.task_rows.contains_key(&row) => {}
@@ -981,7 +987,11 @@ impl FullScreen {
                             ..
                         })
                     ) => {}
-                _ => return MouseOutcome::Ignored,
+                MouseKind::Move => return MouseOutcome::Ignored,
+                _ => {
+                    self.press = None;
+                    return MouseOutcome::Ignored;
+                }
             }
         }
         match event.kind {

@@ -11697,6 +11697,30 @@ mod tests {
                 column: 4,
                 row,
             };
+            let watched_t2 = || {
+                sent.borrow().iter().any(|command| matches!(command, Command::WatchTaskOutput { target: Some(target), .. } if target.task_id == "t2"))
+            };
+            screen.mouse(event(MouseKind::Press), &app);
+            screen.mouse(
+                MouseEvent {
+                    kind: MouseKind::Drag,
+                    column: 4,
+                    row: row - 3,
+                },
+                &app,
+            );
+            screen.render(&app.frame(size), size, &app.palette, &app);
+            screen.mouse(event(MouseKind::Drag), &app);
+            assert_ne!(
+                screen.mouse(event(MouseKind::Release), &app),
+                MouseOutcome::Task("t2".into()),
+                "a drag under the tasks prompt cancels the row click"
+            );
+            app.sync_task_details();
+            assert!(!watched_t2(), "the watch stays on t1");
+            let overlay = strip_escapes(&app.frame(size).overlay.unwrap().rows.join("\n"));
+            assert!(overlay.contains("╭─ cargo build"), "{overlay}");
+
             screen.mouse(event(MouseKind::Press), &app);
             screen.render(&app.frame(size), size, &app.palette, &app);
             assert_eq!(
