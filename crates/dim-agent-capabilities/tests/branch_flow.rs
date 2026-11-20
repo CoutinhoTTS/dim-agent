@@ -5988,7 +5988,7 @@ async fn a_nested_line_is_told_its_own_parent_at_open() {
             .submit(text, InputMode::Queue, &inner)
             .await
             .unwrap();
-        soon(session.idle(&inner)).await.unwrap();
+        patient(session.idle(&inner)).await.unwrap();
     }
     let message = baseline_message(&local_events(&session, &inner).await, "branch:parent")
         .expect("the line compacted and its parent block replayed");
@@ -6458,7 +6458,7 @@ async fn the_parent_block_replays_after_a_compaction() {
             .submit(text, InputMode::Queue, &child)
             .await
             .unwrap();
-        soon(session.idle(&child)).await.unwrap();
+        patient(session.idle(&child)).await.unwrap();
     }
     let message = baseline_message(&local_events(&session, &child).await, "branch:parent")
         .expect("the line compacted and its parent block replayed");
@@ -7634,7 +7634,7 @@ async fn wait_for_roster(session: &Session, line: &str) {
 async fn compact_line(session: &Session, line: &str) {
     for text in ["x".repeat(1500), "y".repeat(1500)] {
         session.submit(text, InputMode::Queue, line).await.unwrap();
-        soon(session.idle(line)).await.unwrap();
+        patient(session.idle(line)).await.unwrap();
     }
 }
 
@@ -9564,7 +9564,7 @@ async fn a_switched_line_keeps_its_identity_after_a_compaction() {
     .unwrap();
     for text in ["x".repeat(1500), "y".repeat(1500)] {
         session.submit(text, InputMode::Queue, &line).await.unwrap();
-        soon(session.idle(&line)).await.unwrap();
+        patient(session.idle(&line)).await.unwrap();
     }
     let note = line_block(&chain_events(&session, &line, ..).await.unwrap())
         .expect("the note is the latest block of the key");
@@ -9645,7 +9645,7 @@ async fn a_multi_paragraph_purpose_survives_a_move_and_a_compaction() {
     );
     for text in ["x".repeat(1500), "y".repeat(1500)] {
         session.submit(text, InputMode::Queue, &line).await.unwrap();
-        soon(session.idle(&line)).await.unwrap();
+        patient(session.idle(&line)).await.unwrap();
     }
     let note = line_block(&chain_events(&session, &line, ..).await.unwrap())
         .expect("the note is still the latest block of the key");
