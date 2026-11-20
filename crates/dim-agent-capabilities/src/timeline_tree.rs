@@ -228,10 +228,10 @@ pub struct TimelineTree {
     /// waiters cannot both deliver and record it (design §10, §20.26b).
     retry: tokio::sync::Mutex<()>,
     /// Serialises the operations that read the tree and then write on it, an
-    /// end and a move: each admits under the state lock and keeps the lock
-    /// until its fact commits, so of two conflicting operations exactly one is
-    /// admitted and each reads what the other would have written (design §10,
-    /// §20.26).
+    /// open, an end and a move: each admits under the state lock and keeps the
+    /// lock until its fact commits, so of two conflicting operations exactly one
+    /// is admitted and each reads what the other would have written (design
+    /// §6.1, §10, §14, §20.26).
     operations: Arc<tokio::sync::Mutex<()>>,
     /// The tasks that settle an admitted operation: each holds the operations
     /// guard, awaits its fact's publication and applies the live update, so a
@@ -2312,6 +2312,11 @@ impl TimelineTree {
         let event = context.branch().input(data).await?;
         Self::published(timeline, event.sequence).await
     }
+    /// Reserves one line and answers once its build publishes it. The opener
+    /// check, the cap and the `branch/create` append decide under the
+    /// operations guard, so a move or an end that already holds it has applied
+    /// its state first (design §6.1, §10, §14). The guard is released as soon
+    /// as the reservation exists, before the build it started.
     fn create_child(
         &self,
         parent: String,
@@ -2346,6 +2351,12 @@ impl TimelineTree {
             if parent_context.is_closing() {
                 return Err(AgentError::Closed(parent.clone()));
             }
+            let operations = tokio::select! {
+                operations = self.operations.clone().lock_owned() => operations,
+                _ = admission.cancelled() => {
+                    return Err(AgentError::Cancelled("branch admission".into()));
+                }
+            };
             let mut ready = None;
             let _ =
                 timeline.append_registered(EventKind::BranchCreate(original).into(), |event| {
@@ -2403,6 +2414,7 @@ impl TimelineTree {
                     )?);
                     Ok(())
                 })?;
+            drop(operations);
             tokio::select! {
                 result = Self::await_branch(ready.expect("committed branch reservation")) => result,
                 _ = admission.cancelled() => Err(AgentError::Cancelled(

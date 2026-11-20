@@ -10,6 +10,7 @@ use dim_agent_capabilities::{
         ToolExecutionContext, ToolHost,
     },
     timeline_tree::{BranchToolConfig, TreeCommands},
+    tool_registry::ToolRegistry,
     workspace_tools::{file_reads::FileReads, files::FileTools},
 };
 use dim_agent_runtime::testing::MinimalHost;
@@ -156,6 +157,8 @@ struct Probe {
     child_builds: AtomicUsize,
     child_cleanups: Arc<AtomicUsize>,
     commands: Mutex<Option<Arc<TreeCommands>>>,
+    /// The Session's tool registry, so a test can call the `branch` tool itself.
+    tool_registry: Mutex<Option<Arc<ToolRegistry>>>,
     /// main's Timeline as its capabilities receive it, for direct writes.
     main_timeline: Mutex<Option<Arc<Timeline>>>,
     /// A line's own Timeline: the binding its file tools keep reads in.
@@ -194,6 +197,7 @@ struct ProbePlugin {
     dispatcher: Key<Dispatcher>,
     identity: Key<TimelineIdentity>,
     commands: Key<TreeCommands>,
+    registry: Key<ToolRegistry>,
 }
 impl ProbePlugin {
     fn new(names: &Names<'_>, probe: Arc<Probe>) -> rutis::Result<Self> {
@@ -203,6 +207,7 @@ impl ProbePlugin {
             dispatcher: names.key()?,
             identity: names.key()?,
             commands: names.key()?,
+            registry: names.key()?,
         })
     }
 }
@@ -216,6 +221,7 @@ impl DynPlugin for ProbePlugin {
             self.dispatcher.erase(),
             self.identity.erase(),
             self.commands.erase(),
+            self.registry.erase(),
         ]
     }
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
@@ -224,8 +230,10 @@ impl DynPlugin for ProbePlugin {
             let dispatcher = ctx.require_at(&self.dispatcher)?;
             let identity = ctx.require_at(&self.identity)?;
             let commands = ctx.require_at(&self.commands)?;
+            let registry = ctx.require_at(&self.registry)?;
             let probe = self.probe.clone();
             *probe.commands.lock().unwrap() = Some(commands);
+            *probe.tool_registry.lock().unwrap() = Some(registry);
             if identity.branch_id == "main" {
                 *probe.main_timeline.lock().unwrap() = Some(timeline.clone());
                 if probe.read_while_opening.load(Ordering::SeqCst) {
@@ -579,6 +587,20 @@ fn builder_with_store(probe: &Arc<Probe>, store: Arc<dyn TimelineStore>) -> Agen
     builder.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(store));
     mock_hosts(&mut builder);
     defaults::install(&mut builder);
+    probe_features(&mut builder, probe);
+    builder
+}
+/// [`builder_with_store`](builder_with_store) with the branch texts at a
+/// candidate's factory configuration.
+fn builder_with_store_config(
+    probe: &Arc<Probe>,
+    store: Arc<dyn TimelineStore>,
+    config: BranchToolConfig,
+) -> AgentBuilder {
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    builder.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(store));
+    mock_hosts(&mut builder);
+    defaults::install_with_branch_config(&mut builder, config);
     probe_features(&mut builder, probe);
     builder
 }
@@ -11919,6 +11941,64 @@ async fn switch(session: &Session, line: &str) {
 const NOT_OPENER: &str = "Only the root and the default branch open lines. Tell one of them if more parallel work is needed.";
 const LIMIT_REACHED: &str = "This Session holds its limit of open lines. Continue on this line, or end one of its open lines first.";
 
+/// The branch tool's own `create`, called as a tool call so a test can hold the
+/// tree and stop the call at its admission, or let it answer there.
+async fn open_with_tool(
+    probe: &Probe,
+    opener: &str,
+    at: u64,
+    prompt: &str,
+) -> std::result::Result<ToolResult, HostError> {
+    let registry = probe
+        .tool_registry
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the Session registers its tools");
+    // A read takes in what is registered now, so the tool is in the snapshot.
+    registry.definitions();
+    let tool = registry.contributed("branch").expect("the branch tool");
+    tool.handler
+        .execute(
+            ToolCall {
+                id: "call".into(),
+                name: "branch".into(),
+                input: serde_json::json!({"action": "create", "prompt": prompt, "at": at})
+                    .as_object()
+                    .cloned()
+                    .unwrap_or_default(),
+            },
+            ToolExecutionContext {
+                turn_id: "turn".into(),
+                request_id: "request".into(),
+                branch_id: opener.into(),
+            },
+            CancellationToken::new(),
+        )
+        .await
+}
+
+/// The refusal a tool call answers, as the tool's structured error.
+fn tool_refusal(result: &ToolResult) -> (String, String) {
+    let structured = result.structured_content.clone().unwrap_or_default();
+    let field = |name: &str| {
+        structured
+            .get(name)
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_string()
+    };
+    (field("error"), field("message"))
+}
+
+/// The `branch/create` facts a line holds.
+fn creates(events: &[Arc<AgentEvent>]) -> usize {
+    events
+        .iter()
+        .filter(|event| matches!(event.kind, EventKind::BranchCreate(_)))
+        .count()
+}
+
 /// §20.29: the root opens a line while another line is the default branch, so
 /// the new line starts from the root's history at the cut the root names,
 /// reports to the root, and the default branch hears nothing about it.
@@ -12392,6 +12472,206 @@ async fn the_cap_is_refused_under_the_tree_lock() {
         Some(b.as_str())
     );
     let _ = a;
+    soon(agent.close()).await.unwrap();
+}
+
+/// §6.1, §14: an open decides in one order with every move and end. The root's
+/// `create` is called while `A → main` holds the tree lock, before its fact is
+/// published: the open waits, and then counts A as off the protected path, so
+/// the cap refuses it. The refusal writes nothing and adds no line.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_open_after_a_move_waits_and_counts_the_moves_result() {
+    let store = Arc::new(TestStore::default());
+    let probe = Arc::new(Probe::default());
+    let agent = MinimalHost::start(&builder_with_store_config(&probe, store.clone(), capped(1)))
+        .await
+        .unwrap();
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let a = open_line(&session, "a").await;
+    switch(&session, &a).await;
+    let tree = session.session_service::<TreeCommands>().unwrap();
+
+    store.hold_next_default("main");
+    let mut moved = Box::pin(tree.set_default_branch(
+        "main".into(),
+        BranchSource::User {
+            operation_id: "move".into(),
+        },
+    ));
+    tokio::select! {
+        result = &mut moved => panic!("the move answered before its fact committed: {result:?}"),
+        _ = store.wait_holding() => {}
+    }
+    let cut = session.sequence("main").unwrap();
+    let before = line_ids(&session);
+    let written = creates(&local_events(&session, "main").await);
+    let mut created = Box::pin(open_with_tool(&probe, "main", cut, "b"));
+    assert!(
+        futures_util::poll!(created.as_mut()).is_pending(),
+        "the open waits for the move's admission"
+    );
+    assert_eq!(
+        line_ids(&session),
+        before,
+        "no line is reserved while the move settles"
+    );
+    store.release();
+    assert_eq!(soon(&mut moved).await.unwrap(), "main");
+    let created = soon(&mut created)
+        .await
+        .expect("the open answers a refusal");
+    assert_eq!(
+        tool_refusal(&created),
+        ("branch_limit_reached".into(), LIMIT_REACHED.into()),
+        "A counts once the move is in force, which is the cap: {:?}",
+        created.content
+    );
+    assert_eq!(line_ids(&session), before, "the refusal opened no line");
+    assert_eq!(
+        creates(&local_events(&session, "main").await),
+        written,
+        "the refusal wrote nothing on the root"
+    );
+    soon(agent.close()).await.unwrap();
+}
+
+/// §6.1, §14: the same order for the opener. `B` holds the role and opens a line
+/// while `B → main` holds the tree lock: once the move settles, `B` is no longer
+/// an opener, and the refusal writes nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_open_from_the_moving_line_is_refused_once_the_move_settles() {
+    let store = Arc::new(TestStore::default());
+    let probe = Arc::new(Probe::default());
+    let agent = MinimalHost::start(&builder_with_store(&probe, store.clone()))
+        .await
+        .unwrap();
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let b = open_line(&session, "b").await;
+    switch(&session, &b).await;
+    let tree = session.session_service::<TreeCommands>().unwrap();
+
+    store.hold_next_default("main");
+    let mut moved = Box::pin(tree.set_default_branch(
+        "main".into(),
+        BranchSource::User {
+            operation_id: "move".into(),
+        },
+    ));
+    tokio::select! {
+        result = &mut moved => panic!("the move answered before its fact committed: {result:?}"),
+        _ = store.wait_holding() => {}
+    }
+    let cut = session.sequence(&b).unwrap();
+    let before = line_ids(&session);
+    let mut created = Box::pin(open_with_tool(&probe, &b, cut, "c"));
+    assert!(
+        futures_util::poll!(created.as_mut()).is_pending(),
+        "the open waits for the move's admission"
+    );
+    assert_eq!(
+        line_ids(&session),
+        before,
+        "no line is reserved while the move settles"
+    );
+    store.release();
+    assert_eq!(soon(&mut moved).await.unwrap(), "main");
+    let created = soon(&mut created)
+        .await
+        .expect("the open answers a refusal");
+    assert_eq!(
+        tool_refusal(&created),
+        ("branch_not_opener".into(), NOT_OPENER.into()),
+        "B opens lines only while it holds the role: {:?}",
+        created.content
+    );
+    assert_eq!(line_ids(&session), before, "the refusal opened no line");
+    assert!(
+        !local_events(&session, &b)
+            .await
+            .iter()
+            .any(|event| matches!(event.kind, EventKind::BranchCreate(_))),
+        "the refusal wrote nothing on B"
+    );
+    soon(agent.close()).await.unwrap();
+}
+
+/// §6.1, §14: the guard covers the admission only. A child whose build is paused
+/// after its reservation does not keep a later move from settling.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_paused_build_does_not_hold_the_tree_lock() {
+    let probe = Arc::new(Probe::default());
+    let agent = MinimalHost::start(&builder_with_branch_config(&probe, capped(2)))
+        .await
+        .unwrap();
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let a = open_line(&session, "a").await;
+    probe.delay_child.store(true, Ordering::SeqCst);
+    let builds = probe.child_builds.load(Ordering::SeqCst);
+    let cut = session.sequence("main").unwrap();
+    let mut created = Box::pin(open_with_tool(&probe, "main", cut, "held"));
+    tokio::select! {
+        result = &mut created => panic!("the paused build answered: {result:?}"),
+        _ = async {
+            while probe.child_builds.load(Ordering::SeqCst) == builds {
+                probe.child_entered.notified().await;
+            }
+        } => {}
+    }
+    switch(&session, &a).await;
+    assert_eq!(
+        session.default_branch().unwrap(),
+        a,
+        "the move settled while the child's build was paused"
+    );
+    probe.delay_child.store(false, Ordering::SeqCst);
+    probe.child_release.notify_one();
+    let failed = patient(&mut created).await;
+    assert!(
+        failed.is_err(),
+        "the held child's build fails, as its apply does: {failed:?}"
+    );
+    until_events(&session, "main", |events| {
+        events
+            .iter()
+            .any(|event| matches!(event.kind, EventKind::BranchCreateFailed(_)))
+    })
+    .await;
+    soon(agent.close()).await.unwrap();
+}
+
+/// §6.1, §20.31: an open admitted before a move stands. It counts after the
+/// move, which can leave the Session over the cap, and the next open is what
+/// refuses.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_open_admitted_before_a_move_still_stands() {
+    let probe = Arc::new(Probe::default());
+    let agent = MinimalHost::start(&builder_with_branch_config(&probe, capped(1)))
+        .await
+        .unwrap();
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let a = open_line(&session, "a").await;
+    switch(&session, &a).await;
+    let b = open_line(&session, "b").await;
+    switch(&session, "main").await;
+    let open = line_ids(&session);
+    assert!(
+        open.contains(&a) && open.contains(&b),
+        "the move closed neither line: {open:?}"
+    );
+    assert_eq!(
+        tool_refusal(&tool_call(&session, "main", r#"{"action":"create","prompt":"c"}"#).await),
+        ("branch_limit_reached".into(), LIMIT_REACHED.into()),
+        "A counts again with B, which is over the cap of one"
+    );
+    assert_eq!(line_ids(&session), open, "the refusal closed nothing");
     soon(agent.close()).await.unwrap();
 }
 
