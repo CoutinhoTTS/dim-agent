@@ -140,10 +140,12 @@ const virtualizer = useVirtualizer(computed(() => ({
 // start: TanStack rebuilds measurementsCache lazily, and the item it passes can
 // carry a stale estimated start. While a prepend's reading position is held,
 // every row above the held row moves the view, measured or partly visible.
+// During Return to latest none does: its smooth scroll aims at the end, and an
+// adjustment would be an instant scroll that ends it.
 let heldIndex: number | undefined
 virtualizer.value.shouldAdjustScrollPositionOnItemSizeChange = (item, _delta, instance) => {
   const element = viewport.value
-  if (element === null) return false
+  if (element === null || jumpResumed) return false
   if (heldIndex !== undefined && item.index < heldIndex) return true
   instance.getTotalSize()
   const start = instance.measurementsCache[item.index]?.start ?? item.start

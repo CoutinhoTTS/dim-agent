@@ -266,6 +266,13 @@ describe("WebChatTimeline history and following", () => {
   /** Instant `scrollTop` assignments, collected while set; a smooth scroll's own steps are not among them. */
   let instant: number[] | undefined
   let animating = false
+  /** Rows measured at other than 600 px. */
+  const grown = new Map<Element, number>()
+  const resizeObservers: { observe: (target: Element) => void; targets: Element[] }[] = []
+  /** Delivers a resize observation of `target` in the next frame, as a changed size would. */
+  function remeasure(target: Element): void {
+    for (const observer of resizeObservers) if (observer.targets.includes(target)) observer.observe(target)
+  }
   function nextFrame(): void {
     frame ??= setTimeout(async () => {
       frame = undefined
@@ -289,12 +296,13 @@ describe("WebChatTimeline history and following", () => {
     const isViewport = (element: Element): boolean => element.classList.contains("chat-scroll-viewport")
     const height = (element: Element): number => element instanceof HTMLElement && element.dataset.timelineRowSpacer !== undefined
       ? Number.parseFloat(element.style.height)
-      : element.hasAttribute("data-timeline-row-index") ? ROW_PX : 0
+      : element.hasAttribute("data-timeline-row-index") ? grown.get(element) ?? ROW_PX : 0
     const contentHeight = (viewport: Element): number => {
       const content = viewport.querySelector("[data-testid='timeline-plain-scroller']")
       return content === null ? 0 : [...content.children].reduce((sum, child) => sum + height(child), HEAD_PX)
     }
     vi.spyOn(Element.prototype, "scrollHeight", "get").mockImplementation(function (this: Element) { return isViewport(this) ? contentHeight(this) : 0 })
+    vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockImplementation(function (this: HTMLElement) { return grown.get(this) ?? 600 })
     vi.spyOn(Element.prototype, "clientHeight", "get").mockImplementation(function (this: Element) { return isViewport(this) ? VIEWPORT_PX : 0 })
     vi.spyOn(Element.prototype, "scrollTop", "get").mockImplementation(function (this: Element) { return scrollTops.get(this) ?? 0 })
     vi.spyOn(Element.prototype, "scrollTop", "set").mockImplementation(function (this: Element, value: number) {
@@ -332,6 +340,8 @@ describe("WebChatTimeline history and following", () => {
     observers = []
     clearTimeout(frame)
     instant = undefined
+    grown.clear()
+    resizeObservers.length = 0
     frame = undefined
     scrolled.clear()
     resized.length = 0
@@ -348,10 +358,20 @@ describe("WebChatTimeline history and following", () => {
       disconnect(): void { this.entry.targets = [] }
     })
     vi.stubGlobal("ResizeObserver", class {
-      constructor(private readonly callback: ResizeObserverCallback) {}
+      readonly entry: { observe: (target: Element) => void; targets: Element[] }
+      constructor(private readonly callback: ResizeObserverCallback) {
+        this.entry = {
+          targets: [],
+          observe: (target) => {
+            resized.push(() => this.callback([{ target } as ResizeObserverEntry], this as unknown as ResizeObserver))
+            nextFrame()
+          },
+        }
+        resizeObservers.push(this.entry)
+      }
       observe(target: Element): void {
-        resized.push(() => this.callback([{ target } as ResizeObserverEntry], this))
-        nextFrame()
+        this.entry.targets.push(target)
+        this.entry.observe(target)
       }
       unobserve(): void {}
       disconnect(): void {}
@@ -637,6 +657,49 @@ describe("WebChatTimeline history and following", () => {
     expect(instant, "no instant scroll replaced the animation").toEqual([])
     expect(viewport.scrollTop).toBe(viewport.scrollHeight - VIEWPORT_PX)
     await vi.waitFor(() => expect(root.querySelector("[data-testid='web-chat-jump-latest']")).toBeNull())
+  })
+
+  it("keeps the jump smooth when a row above the viewport is measured again", async () => {
+    const projection = project(turns(6, 1))
+    const state = shallowReactive<Record<string, unknown>>({ rows: [...projection.rows] })
+    const { root } = mountWith([], { props: state })
+    await idle()
+    await scrollTo(root, 0)
+    const viewport = viewportOf(root)
+    const first = root.querySelector("[data-timeline-row-index='0']")!
+    let target = 0
+    let step: ReturnType<typeof setTimeout> | undefined
+    const animate = (): void => {
+      step = undefined
+      const goal = Math.min(target, viewport.scrollHeight - VIEWPORT_PX)
+      const now = viewport.scrollTop
+      if (now === goal) return
+      animating = true
+      viewport.scrollTop = now + Math.sign(goal - now) * Math.min(300, Math.abs(goal - now))
+      animating = false
+      if (viewport.scrollTop > 750 && !grown.has(first)) {
+        grown.set(first, 700)
+        remeasure(first)
+      }
+      step = setTimeout(animate, 5)
+    }
+    viewport.scrollTo = ((options: ScrollToOptions) => {
+      if (options.behavior !== "smooth") {
+        viewport.scrollTop = options.top!
+        return
+      }
+      target = options.top!
+      step ??= setTimeout(animate, 5)
+    }) as Element["scrollTo"]
+
+    instant = []
+    root.querySelector<HTMLButtonElement>("[data-testid='web-chat-jump-latest']")!.click()
+    await vi.waitFor(() => expect(step).toBeUndefined(), { timeout: 5_000 })
+    await idle()
+
+    expect(grown.get(first), "row 0 was measured again above the viewport").toBe(700)
+    expect(instant, "no instant scroll replaced the animation").toEqual([])
+    expect(viewport.scrollTop).toBe(viewport.scrollHeight - VIEWPORT_PX)
   })
 
   it("stops following when the reader wheels up on the rail during a jump", async () => {
