@@ -60,7 +60,7 @@ Each catalog name a part of the assembly provides or injects. `data` means share
 | `settingsService` | process | Settings | internal(owner-api) | — |
 | `skillsCatalog` | process | SkillsCatalog | data | `issues` async, `plugins` async, `register` async, `withdraw` async |
 | `skillsInstructionsSettingsHost` | process | PromptSettings | data | `instructions` async |
-| `sqliteStorage` | process | SqliteStorage | internal(object) | — |
+| `sqliteStorage` | process | SqliteStorage | data | `storageReport` async |
 | `store` | process | SessionStore | data | `addGrant` async, `catalog` async, `createOwnedSession` async, `creationRecord` async, `delete` async, `fork` async, `grants` async, `hasRecords` async, `owner` async, `query` async, `removeGrant` async, `removeWorktree` async, `removeWorktreeDirectory` async, `sessionConfig` async, `sessionConfigText` async, `sessionsUnderWorkspace` async, `setSessionLanguage` async, `worktreeDirectories` async, `worktreeUsages` async |
 | `summaryPromptSettingsHost` | process | PromptSettings | data | `systemPrompt` async |
 | `toolchainSourceHost` | process | ToolchainSource | data | `list` sync |

@@ -1375,6 +1375,11 @@ async fn node_store_preserves_repository_results_and_worktree_removal_exclusion(
     let (server, _, _) = session_typescript::start(config(&home, parts)).await;
     let mut client = Client::new_version(&server, false, 3).await;
     files_available(&mut client, "storefixture.status", json!({})).await;
+    let wire = client.rpc("storefixture.report", json!({})).await;
+    let native = client.rpc("storage.report", json!({})).await;
+    assert_ok(&wire);
+    assert_ok(&native);
+    assert_eq!(wire["result"], native["result"]);
     let store = server.service::<Store>().unwrap();
     let listed = client.rpc("agent.list", json!({})).await;
     assert_ok(&listed);

@@ -833,7 +833,7 @@ original path argument and ownership exclusion.
 | --- | --- | --- |
 | `hostPlatform` | `execHost` | The provider and its Rust binding: `ProcessTree`, `PtyProcessTree`, temporary directories and shell preparation are its internals, reached through the operations |
 | `fileStorage` | `fsHost` | The provider and its binding: roots, leases, generations and one validated path component per open are its internals |
-| `sqliteStorage` | `store` | The SQL engine inside the provider |
+| `sqliteStorage` | `sqliteStorage.storageReport({})` | SQLite file, WAL and reclaimable bytes ([native storage](appserver/native-storage-format.md)). Session repository operations belong to `store`. |
 | `timelineStore` | `timelineStore` | Session-scoped Timeline operations; the `TimelineStore` trait is its native binding |
 
 For the owners below, Rust callers use a thin binding over the operations — a direct
@@ -945,8 +945,7 @@ registered output path reuses `output` after the provider releases its task reco
 leases the node's storage already offers, needed because a path's facts and its bytes cannot be
 read on a machine that does not hold the file; `resolve` is where resolution and the worktree
 probe belong. `store` publishes the repository operations the state owner already has;
-`timelineStore` publishes its Timeline operations and completion notifications. The SQL engine
-remains private implementation, and `TimelineStore` is the native binding of `timelineStore`.
+`timelineStore` publishes its Timeline operations and completion notifications. StorageMethods reads database and WAL sizes through the native binding of `sqliteStorage.storageReport({})`; plugins can dispatch the same operation. SQLite owns the connections and SQL. `TimelineStore` is the native binding of `timelineStore`.
 Admission stays synchronous and completion keeps the callback's ordering as a notification.
 
 The `worktree` candidate carries the identity needed to recheck the mapping after the association

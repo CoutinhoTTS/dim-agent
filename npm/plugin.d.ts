@@ -624,6 +624,10 @@ export interface TimelineReadScope {
   through: number;
   segments: { branchId: string; from: number; through: number; storedThrough: number; tail: AgentEvent[] }[];
 }
+export interface SqliteStorage {
+  storageReport(request: Record<string, never>): Promise<{ databaseBytes: number; walBytes: number; reclaimableBytes: number }>;
+}
+
 /** Process repository operations for trusted plugins; ids are not scoped to the caller. Create/fork/delete reject ids that are not one normal path component. */
 export interface Store {
   query(request: { scope: TimelineReadScope; query: import('./branch-services.js').QuerySpec; page?: import('./branch-services.js').QueryPage | null }): Promise<{ result: import('./branch-services.js').QueryOutput; next: import('./branch-services.js').QueryCursor | null }>;

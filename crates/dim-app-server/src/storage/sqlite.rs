@@ -1,8 +1,11 @@
 use super::reclaim::Reclaimed;
 use dim_agent_runtime::{AgentError, Result, panic_message};
 use rusqlite::{Connection, OpenFlags};
-use rutis::host::ErrorKind;
+use rutis::host::{CtxHost, ErrorKind};
 use rutis::{Ctx, Plugin};
+use rutis_bridge::session::{
+    Error as BridgeError, HostDispatch, Reply, Value as BridgeValue, host_key,
+};
 use serde::Serialize;
 use std::{
     collections::BTreeMap,
@@ -2044,7 +2047,7 @@ impl SqliteStorage {
 
     /// The bytes of the store's own files, and the space an offline `VACUUM`
     /// returns: the free pages of the database as it was last committed.
-    pub(crate) async fn storage_report(self: &Arc<Self>) -> Result<StorageReport> {
+    pub async fn storage_report(self: &Arc<Self>) -> Result<StorageReport> {
         let (page_size, free_pages) = self
             .run_read(|connection| {
                 let page_size: i64 = connection
@@ -2391,6 +2394,41 @@ fn store_bytes(path: &Path) -> u64 {
     file_bytes(path) + file_bytes(&wal_path(path))
 }
 
+struct SqliteDispatch(Arc<SqliteStorage>);
+
+impl HostDispatch for SqliteDispatch {
+    fn methods(&self) -> Option<serde_json::Value> {
+        Some(serde_json::json!({"storageReport":"async"}))
+    }
+
+    fn invoke(&self, method: &str, args: BridgeValue) -> Reply {
+        if method != "storageReport" {
+            return Err(BridgeError::Value(format!(
+                "unknown sqliteStorage method {method}"
+            )));
+        }
+        let [request]: [serde_json::Value; 1] = serde_json::from_value(args.json()?)
+            .map_err(|error| BridgeError::Value(error.to_string()))?;
+        if !request.as_object().is_some_and(|fields| fields.is_empty()) {
+            return Err(BridgeError::Value(
+                "storageReport expects an empty request object".into(),
+            ));
+        }
+        let db = self.0.clone();
+        Ok(BridgeValue::cancellable_future(async move {
+            let report = db.storage_report().await.map_err(|error| {
+                rutis_bridge::exports::failure(
+                    "StorageError",
+                    "storage_unavailable",
+                    error.to_string(),
+                    None,
+                )
+            })?;
+            Ok(serde_json::json!(report).into())
+        }))
+    }
+}
+
 pub struct SqliteStoragePlugin {
     path: PathBuf,
     assembly: Option<Arc<AssemblyProgress>>,
@@ -2440,6 +2478,10 @@ impl Plugin for SqliteStoragePlugin {
             storage.close().await?;
             return Err(error);
         }
+        ctx.provide_at(
+            host_key("sqliteStorage"),
+            Arc::new(SqliteDispatch(storage.clone())) as Arc<dyn HostDispatch>,
+        )?;
         ctx.provide_as::<SqliteStorage>(storage)?;
         Ok(())
     }
