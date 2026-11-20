@@ -3904,6 +3904,7 @@ async fn a_tool_call_deadline_is_shared_by_its_404_retry() {
 /// directory starts there and lists its tools: the child `PATH` appends the
 /// toolchain directories after the daemon's own, and on Unix the program
 /// lookup reads the child `PATH`.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_stdio_entry_starts_a_command_the_toolchain_source_provides() {
     use std::os::unix::fs::PermissionsExt;
