@@ -1,5 +1,7 @@
 # 服务面：跨语言形状的策略、盘点与第一批改造
 
+进程服务的目标调用方、替代名称与提供方见[进程操作](contracts/process-owner-operations.md)。
+
 状态：Draft。对应 [#1289](https://github.com/arcships/dim/issues/1289)（标记与检查）、[#1300](https://github.com/arcships/dim/issues/1300)（盘点）、[#1292](https://github.com/arcships/dim/issues/1292)（迁移）。父 issue [#1288](https://github.com/arcships/dim/issues/1288)。研究背景见 `docs/design/research/remote-plugins.md`（由 [#1299](https://github.com/arcships/dim/pull/1299) 引入）。
 
 本文是改动设计，不是实现记录。所有 API 都是目标形状；现有代码位置用于说明改哪里。
@@ -99,7 +101,7 @@ Rust 产品装配的现状以 [生成的 catalog](../architecture/rust-agent/gen
 | `worktreeAssociations` | `worktreeAssociations.associate` | 形状见 §4.8。 |
 | `toolSourcesView` | `toolSourcesView.get/observe` | 同一 ToolRegistry owner 的独立只读观察面；贡献注册仍由 `toolRegistry` 负责，见 [工具贡献 §7.5](../architecture/rust-agent/tool-contributions.md#75-服务接口)。 |
 
-宿主读取端口的数据面（§4.10）包括 `executionSettingsHost`、`toolchainSourceHost`、`promptSuggestionSettingsHost`、`selectableModelsHost` 和 `modelSelectionHost`。名字不变，不新增 catalog 行。
+宿主读取端口的数据面（§4.10）包括 `executionSettingsHost`、`toolchainSourceHost`、`promptSuggestionSettingsHost`。模型选择与列表统一由 `providerService` 提供；调用方和配置见[进程操作](contracts/process-owner-operations.md)；其余读取端口沿用现名。
 
 ### 3.3 所有者 API，已有数据兄弟
 
@@ -109,7 +111,7 @@ Rust 产品装配的现状以 [生成的 catalog](../architecture/rust-agent/gen
 | --- | --- | --- |
 | `agentIndex` | `sessions` | 目录查询走 `sessions` |
 | `settingsService` | `settings` | GoalBranch 的取消契约见 §4.1。 |
-| `modelHost` | `auxiliaryModel` | PromptSuggestion 的请求与流式语义见 §4.2。 |
+| `modelHost` | `modelHost` | 完整模型请求直接调用所选配置的执行入口；辅助请求使用 `providerService.complete`。 |
 | `loader` | `rutis/loader` | 插件管理走数据面 |
 | `sessionStore` | `sessionMetadata`、`sessionFiles` | 行与文件分开 |
 | `treeCommands`、`timelineTreeControl` | `timelineTree` | 分支操作直接调用 Session 的树；不保留别名 |
@@ -200,7 +202,7 @@ Proposed target operations: [Session and branch operations](contracts/runtime-ow
 | `mentionIndex` | process | WorkspaceToolsOwner | host-resource |
 | `mcpService` | process | Mcp | host-resource |
 | `hooksService` | process | HooksSettings | host-resource |
-| `providerService` | process | Provider | secret |
+| `providerService` | process | Provider | 当前为 secret，迁移后通过数据操作使用凭据 |
 | `providerConnectionResolver` | process | Provider | host-resource |
 | `sessionLoader` | session | SessionScope | control |
 | `timelineFactory` | session | SessionScope | control |
@@ -220,7 +222,7 @@ PromptSettings 的三个只读端口按 [prompt overrides §3.1](appserver/promp
 
 ### 4.2 `modelHost`：保留完整模型请求
 
-迁移前 `PromptSuggestion` 继续用类型化调用。模型 owner 在 #1292 的批次内定义能承载完整 `ModelRequest` 的公开操作，保留当轮 provider、model、system、tools、config、cached prefix、流式回复与取消。现有 `auxiliaryModel.complete` 用于精简请求。PromptSuggestion 切到同一数据契约的 Rust 绑定时，覆盖 tools、config 和缓存前缀。
+迁移前 `PromptSuggestion` 继续用类型化调用。模型 owner 在 #1292 的批次内定义能承载完整 `ModelRequest` 的公开操作，保留当轮 provider、model、system、tools、config、cached prefix、流式回复与取消。精简请求迁往 `providerService.complete`，随后移除 `auxiliaryModel`。PromptSuggestion 切到同一数据契约的 Rust 绑定时，覆盖 tools、config 和缓存前缀。
 
 ### 4.3 `scheduleJobs`
 
@@ -350,9 +352,9 @@ eventSubscriptions.list {sessionId} -> reply
 
 `reservedMethods` 的 owner 是 App Server 的根值：它从 `process_value`（每个 Agent 一份）改为进程根上的一份，因为 shared 名字的 isolate 只覆盖 dispatcher key，而 `process_value` 的按 Agent 隔离覆盖的是类型 key；一份进程值对所有 Session 表等价，且只有一个 dispatcher。
 
-### 4.10 宿主端口：`executionSettingsHost` 等五个
+### 4.10 宿主读取端口与 Provider 选择
 
-这五个读取端口持有 owner 的闭包，Rust 绑定直接调用类型化操作；dispatcher 只在跨语言边界解码请求、调用同一个操作并编码回复，不写第二份业务逻辑。Rust 调用不经过 JSON，也不为读取另起桥接任务。每次异步调用持有独立的子取消 token：取消或丢弃调用会取消该次 owner 读取，不取消调用方的父 token。跨语言回复使用 `cancellable_future`，放弃等待会丢弃同一个读取；owner 的生命周期仍约束其工作。
+这些读取操作持有 owner 的闭包，Rust 绑定直接调用类型化操作；dispatcher 只在跨语言边界解码请求、调用同一个操作并编码回复，不写第二份业务逻辑。Rust 调用不经过 JSON，也不为读取另起桥接任务。每次异步调用持有独立的子取消 token：取消或丢弃调用会取消该次 owner 读取，不取消调用方的父 token。跨语言回复使用 `cancellable_future`，放弃等待会丢弃同一个读取；owner 的生命周期仍约束其工作。
 
 ```text
 executionSettingsHost.read({}) -> {sandbox, network}
@@ -361,9 +363,9 @@ toolchainSourceHost.list({}) -> {toolchains: [{bin, root}]}          # sync
   -> error {code: failed, message}
 promptSuggestionSettingsHost.read({}) -> {enabled, maxChars}
   -> error {code: failed, message}
-selectableModelsHost.selectableModels({}) -> {models: [ModelCapabilitySnapshot]}
-selectableModelsHost.selectableForModality({}) -> {models: [ModalityModelSnapshot]}
-modelSelectionHost.resolve({explicit?: ModelId, cwd?}) -> ModelSelection
+providerService.selectableModels({}) -> {models: [ModelCapabilitySnapshot]}
+providerService.selectableForModality({}) -> {models: [ModalityModelSnapshot]}
+providerService.resolve({explicit?: ModelId, cwd?}) -> ModelSelection
   -> error {code: cancelled | owner_closed | invalid_request | model_unavailable | failed, message}
 ```
 
