@@ -300,20 +300,23 @@ describe("WebChatTimeline actions", () => {
   const say = (sequence: number, text: string) => event(sequence, { kind: "input", text, content: [{ type: "text", text }], blocks: [] })
   /** The queue's release of the input written at `input`. */
   const applied = (sequence: number, input: number) => event(sequence, { kind: "input-applied", inputId: `e${input}` })
-  /** A finished first turn: its message adopted, an answer, the turn end at 7. */
+  /** Loop's take of the input written at `input` into the request it starts. */
+  const consumed = (sequence: number, input: number) => event(sequence, { kind: "input-consumed", inputId: `e${input}` })
+  /** A finished first turn: its message applied and consumed, an answer, the turn end at 7. */
   const finishedTurn = [
     say(1, "read the entry point"),
     applied(2, 1),
-    event(3, { kind: "text", requestId: "r1", delta: "done" }),
-    event(4, { kind: "model-end", requestId: "r1" }),
+    consumed(3, 1),
+    event(4, { kind: "text", requestId: "r1", delta: "done" }),
+    event(5, { kind: "model-end", requestId: "r1" }),
     event(7, { kind: "turn-end", outcome: "completed" }),
   ]
   const notice = (sequence: number) => event(sequence, { kind: "branch-create", branchId: "b-1", at: 7, prompt: "side quest", source: { kind: "tool", turnId: "t", requestId: "r", callId: "c" } })
 
   /** The user messages' branch and fork state, by message text. */
-  async function actionsOf(events: readonly SessionEvent[]): Promise<Record<string, { branch: string | null; fork: string | null }>> {
+  async function actionsOf(events: readonly SessionEvent[], running = true): Promise<Record<string, { branch: string | null; fork: string | null }>> {
     const projection = project(events)
-    const { root } = mountWith(projection.rows, { features: HELLO_FEATURES, props: { running: true, branchable: true } })
+    const { root } = mountWith(projection.rows, { features: HELLO_FEATURES, props: { running, branchable: true } })
     await settle()
     const state = (button: HTMLButtonElement | null): string | null => button === null ? null : button.disabled ? `disabled: ${button.getAttribute("aria-label")}` : "enabled"
     return Object.fromEntries([...root.querySelectorAll<HTMLElement>(".web-user-message")].map(message => [
@@ -325,7 +328,7 @@ describe("WebChatTimeline actions", () => {
   const open = { branch: "enabled", fork: "enabled" }
 
   it("keeps the running turn's message from branching or forking when a notice splits the turn", async () => {
-    const events = [...finishedTurn, say(9, "keep going"), applied(10, 9), notice(11), event(12, { kind: "text", requestId: "r2", delta: "still working" })]
+    const events = [...finishedTurn, say(9, "keep going"), applied(10, 9), consumed(11, 9), notice(12), event(13, { kind: "text", requestId: "r2", delta: "still working" })]
     expect(createRowMapper()(project(events).rows, "s-1").map(row => row.kind)).toEqual(["turn", "turn", "message", "turn"])
     expect(await actionsOf(events)).toEqual({ "read the entry point": open, "keep going": running })
   })
@@ -343,23 +346,43 @@ describe("WebChatTimeline actions", () => {
       ...finishedTurn,
       say(8, "first"),
       applied(9, 8),
-      say(10, "queued next"),
-      event(11, { kind: "text", requestId: "r2", delta: "answering first" }),
+      consumed(10, 8),
+      say(11, "queued next"),
+      event(12, { kind: "text", requestId: "r2", delta: "answering first" }),
     ]
     expect(await actionsOf(whileHeld), "the queued message is held during the first one's turn").toEqual({ "read the entry point": open, first: running, "queued next": running })
     const ownTurn = [
       ...whileHeld,
-      event(12, { kind: "model-end", requestId: "r2" }),
-      event(13, { kind: "turn-end", outcome: "completed" }),
-      applied(14, 10),
-      notice(15),
-      event(16, { kind: "text", requestId: "r3", delta: "answering the queued one" }),
+      event(13, { kind: "model-end", requestId: "r2" }),
+      event(14, { kind: "turn-end", outcome: "completed" }),
+      applied(15, 11),
+      consumed(16, 11),
+      notice(17),
+      event(18, { kind: "text", requestId: "r3", delta: "answering the queued one" }),
     ]
     expect(await actionsOf(ownTurn)).toEqual({ "read the entry point": open, first: open, "queued next": running })
   })
 
+  it("keeps a steer a stop left unconsumed in the turn that consumes it", async () => {
+    const stopped = [
+      ...finishedTurn,
+      say(8, "run a tool"),
+      applied(9, 8),
+      consumed(10, 8),
+      event(11, { kind: "tool-use", requestId: "r2", callId: "call-2", name: "exec", input: { command: "sleep 30" } }),
+      say(12, "steer this"),
+      applied(13, 12),
+      event(14, { kind: "tool-completed", requestId: "r2", callId: "call-2", result: { text: "interrupted", isError: true } }),
+      event(15, { kind: "turn-end", outcome: "cancelled" }),
+    ]
+    const nextTurn = [...stopped, say(16, "next"), applied(17, 16), consumed(18, 12), consumed(19, 16), event(20, { kind: "text", requestId: "r3", delta: "taking both" })]
+    expect(await actionsOf(nextTurn)).toEqual({ "read the entry point": open, "run a tool": open, "steer this": running, next: running })
+    const ended = [...nextTurn, event(21, { kind: "model-end", requestId: "r3" }), event(22, { kind: "turn-end", outcome: "completed" })]
+    expect(await actionsOf(ended, false)).toEqual({ "read the entry point": open, "run a tool": open, "steer this": open, next: open })
+  })
+
   it("settles a withdrawn message", async () => {
-    const events = [...finishedTurn, say(8, "first"), applied(9, 8), say(10, "withdrawn"), event(11, { kind: "input-deleted", inputId: "e10" }), event(12, { kind: "turn-end", outcome: "completed" }), say(13, "next"), applied(14, 13)]
+    const events = [...finishedTurn, say(8, "first"), applied(9, 8), consumed(10, 8), say(11, "withdrawn"), event(12, { kind: "input-deleted", inputId: "e11" }), event(13, { kind: "turn-end", outcome: "completed" }), say(14, "next"), applied(15, 14)]
     expect(await actionsOf(events)).toEqual({ "read the entry point": open, first: open, withdrawn: open, next: running })
   })
 
