@@ -11890,6 +11890,15 @@ async fn restore_default(store: &Arc<TestStore>, id: &str) -> String {
     default
 }
 
+/// The branch tool's configuration with a Session cap, as the design's cap
+/// cases state it.
+fn capped(max_open_lines: usize) -> BranchToolConfig {
+    BranchToolConfig {
+        max_open_lines: Some(max_open_lines),
+        ..BranchToolConfig::default()
+    }
+}
+
 /// Moves the Session's conversation to `line` and answers once the move is
 /// durable; a participant's note may still be on its way.
 async fn switch(session: &Session, line: &str) {
@@ -11904,6 +11913,7 @@ async fn switch(session: &Session, line: &str) {
 }
 
 const NOT_OPENER: &str = "Only the root and the default branch open lines. Tell one of them if more parallel work is needed.";
+const LIMIT_REACHED: &str = "This Session holds its limit of open lines. Continue on this line, or end one of its open lines first.";
 
 /// §20.29: the root opens a line while another line is the default branch, so
 /// the new line starts from the root's history at the cut the root names,
@@ -12186,12 +12196,209 @@ async fn a_tool_line_still_cannot_open_a_line() {
     soon(agent.close()).await.unwrap();
 }
 
+/// §20.30: continuing on tool children does not fill the cap, because the
+/// default branch and its ancestors do not count.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_cap_does_not_count_the_default_branch_or_its_ancestors() {
+    let probe = Arc::new(Probe::default());
+    let agent = MinimalHost::start(&builder_with_branch_config(&probe, capped(2)))
+        .await
+        .unwrap();
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let b = open_line(&session, "b").await;
+    switch(&session, &b).await;
+    let c = open_line_from(&session, &b, "c").await;
+    switch(&session, &c).await;
+    let d = open_line_from(&session, &c, "d").await;
+    switch(&session, &d).await;
+    let info = session
+        .branches()
+        .into_iter()
+        .find(|info| info.id == d)
+        .expect("the chain reached D");
+    assert_eq!(info.parent.as_deref(), Some(c.as_str()));
+    let e = open_line(&session, "e").await;
+    let f = open_line(&session, "f").await;
+    let open = line_ids(&session);
+    assert!(open.contains(&b) && open.contains(&e) && open.contains(&f));
+    assert_eq!(
+        call(&session, "main", r#"{"action":"create","prompt":"g"}"#).await,
+        ("branch_limit_reached".into(), LIMIT_REACHED.into()),
+        "B, C and D spent no slot: E and F filled the two"
+    );
+    assert_eq!(session.branches().len(), 6, "the refusal closed nothing");
+    soon(agent.close()).await.unwrap();
+}
+
+/// §20.31: a switch that leaves the Session over the cap refuses new opens and
+/// closes nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_switch_over_the_cap_closes_nothing() {
+    let probe = Arc::new(Probe::default());
+    let agent = MinimalHost::start(&builder_with_branch_config(&probe, capped(2)))
+        .await
+        .unwrap();
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let a = open_line(&session, "a").await;
+    switch(&session, &a).await;
+    let b = open_line_from(&session, &a, "b").await;
+    switch(&session, "main").await;
+    let before = line_ids(&session);
+    assert!(before.contains(&a) && before.contains(&b));
+    assert_eq!(
+        call(&session, "main", r#"{"action":"create","prompt":"c"}"#).await,
+        ("branch_limit_reached".into(), LIMIT_REACHED.into()),
+        "A and B count again, which is the cap"
+    );
+    assert_eq!(line_ids(&session), before, "the switch closed no line");
+    assert_eq!(
+        session.branches().len(),
+        3,
+        "every line open before the switch is open after it"
+    );
+    soon(agent.close()).await.unwrap();
+}
+
+/// §20.34: a switch that frees a slot admits the next open, and nothing is
+/// closed to free it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_switch_that_frees_a_slot_admits_the_next_open() {
+    let probe = Arc::new(Probe::default());
+    let agent = MinimalHost::start(&builder_with_branch_config(&probe, capped(2)))
+        .await
+        .unwrap();
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let a = open_line(&session, "a").await;
+    let x = open_line(&session, "x").await;
+    assert_eq!(
+        call(&session, "main", r#"{"action":"create","prompt":"y"}"#).await,
+        ("branch_limit_reached".into(), LIMIT_REACHED.into()),
+        "A and X fill the cap while the root holds the role"
+    );
+    switch(&session, &a).await;
+    let y = open_line(&session, "y").await;
+    let open = line_ids(&session);
+    assert!(
+        open.contains(&a) && open.contains(&x) && open.contains(&y),
+        "A stopped counting, so Y fitted; no line was closed"
+    );
+    soon(agent.close()).await.unwrap();
+}
+
+/// §20.33 and §20.35: the cap is charged where the line is reserved, so the
+/// last slot admits one open only, and a reservation holds a slot before its
+/// line publishes and frees it when the creation fails.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_cap_is_refused_under_the_tree_lock() {
+    let probe = Arc::new(Probe::default());
+    let agent = MinimalHost::start(&builder_with_branch_config(&probe, capped(2)))
+        .await
+        .unwrap();
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let a = open_line(&session, "a").await;
+    let b = open_line(&session, "b").await;
+    assert_eq!(
+        call(&session, "main", r#"{"action":"create","prompt":"c"}"#).await,
+        ("branch_limit_reached".into(), LIMIT_REACHED.into()),
+        "the last slot was spent by B"
+    );
+    assert!(
+        !session
+            .branches()
+            .iter()
+            .any(|info| info.parent.as_deref() == Some(b.as_str())),
+        "the refusal opened nothing"
+    );
+    let _ = (a, b);
+    soon(agent.close()).await.unwrap();
+
+    let probe = Arc::new(Probe::default());
+    let agent = MinimalHost::start(&builder_with_branch_config(&probe, capped(2)))
+        .await
+        .unwrap();
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let a = open_line(&session, "a").await;
+    let b = open_line(&session, "b").await;
+    switch(&session, &b).await;
+    probe.delay_child.store(true, Ordering::SeqCst);
+    let builds = probe.child_builds.load(Ordering::SeqCst);
+    session
+        .submit(
+            r#"tool:branch {"action":"create","prompt":"held"}"#.into(),
+            InputMode::Queue,
+            "main",
+        )
+        .await
+        .unwrap();
+    soon(async {
+        while probe.child_builds.load(Ordering::SeqCst) == builds {
+            probe.child_entered.notified().await;
+        }
+    })
+    .await;
+    soon(session.stop("main", "user stop".into()))
+        .await
+        .unwrap();
+    assert_eq!(
+        call(&session, &b, r#"{"action":"create","prompt":"later"}"#).await,
+        ("branch_limit_reached".into(), LIMIT_REACHED.into()),
+        "the held reservation is charged with A, so B finds no room"
+    );
+    assert!(
+        !local_events(&session, &b)
+            .await
+            .iter()
+            .any(|event| matches!(event.kind, EventKind::BranchCreate(_))),
+        "the refusal wrote nothing on B"
+    );
+    probe.delay_child.store(false, Ordering::SeqCst);
+    probe.child_release.notify_one();
+    soon(async {
+        loop {
+            let failed = local_events(&session, "main")
+                .await
+                .iter()
+                .any(|event| matches!(event.kind, EventKind::BranchCreateFailed(_)));
+            if failed {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    let later = open_line_from(&session, &b, "later").await;
+    assert_eq!(
+        session
+            .branches()
+            .into_iter()
+            .find(|info| info.id == later)
+            .expect("the freed slot admitted the open")
+            .parent
+            .as_deref(),
+        Some(b.as_str())
+    );
+    let _ = a;
+    soon(agent.close()).await.unwrap();
+}
+
 /// The opener's two keys stay apart: a line that is not the root keeps the
 /// identity its move wrote and the roster of the lines it opened.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_opener_that_is_not_the_root_keeps_its_identity_and_its_roster() {
     let probe = Arc::new(Probe::default());
-    let agent = setup(&probe).await;
+    let agent = MinimalHost::start(&builder_with_branch_config(&probe, capped(2)))
+        .await
+        .unwrap();
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
@@ -12305,7 +12512,9 @@ async fn a_user_opened_default_branch_coordinates_the_line_it_opens() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_status_note_and_a_live_roster_do_not_retire_each_other() {
     let probe = Arc::new(Probe::default());
-    let agent = setup(&probe).await;
+    let agent = MinimalHost::start(&builder_with_branch_config(&probe, capped(2)))
+        .await
+        .unwrap();
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();

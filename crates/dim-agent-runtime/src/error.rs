@@ -71,6 +71,9 @@ pub enum BranchRefusal {
     /// The caller may not open a line: only the root, and the current default
     /// branch, open one.
     NotOpener,
+    /// The Session holds its limit of open tool lines, counting the admitted
+    /// reservations.
+    LimitReached,
 }
 
 impl BranchRefusal {
@@ -82,6 +85,7 @@ impl BranchRefusal {
             Self::Protected => "branch_target_protected",
             Self::CannotEnd => "branch_cannot_end",
             Self::NotOpener => "branch_not_opener",
+            Self::LimitReached => "branch_limit_reached",
         }
     }
 }

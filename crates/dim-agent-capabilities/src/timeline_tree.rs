@@ -1737,11 +1737,17 @@ impl TimelineTree {
     /// reserved: under the same lock, so the caller's eligibility and the
     /// Session's counted total are the state the reservation is taken in (§4,
     /// §6.1). A refusal writes nothing.
-    fn admit_open(state: &TreeState, opener: &str) -> Result<()> {
+    fn admit_open(state: &TreeState, opener: &str, max_open_lines: usize) -> Result<()> {
         if !Self::can_open(state, opener) {
             return Err(AgentError::refused(
                 BranchRefusal::NotOpener,
                 format!("line {opener} is not the root or the default branch"),
+            ));
+        }
+        if Self::counted_tool_lines(state) >= max_open_lines {
+            return Err(AgentError::refused(
+                BranchRefusal::LimitReached,
+                format!("the Session holds {max_open_lines} open tool lines"),
             ));
         }
         Ok(())
@@ -1751,6 +1757,21 @@ impl TimelineTree {
     /// never either.
     fn can_open(state: &TreeState, line: &str) -> bool {
         line == ROOT_BRANCH_ID || line == state.default.as_str()
+    }
+    /// The tool lines a new open is charged with, one slot each: the lines the
+    /// tool opened that are open or ending, except the current default branch
+    /// and its ancestors, which an end cannot close (§6.1). A reservation is in
+    /// `nodes` before its build, so it is counted here too.
+    fn counted_tool_lines(state: &TreeState) -> usize {
+        state
+            .nodes
+            .iter()
+            .filter(|(id, node)| {
+                matches!(node.info.source, Some(BranchSource::Tool { .. }))
+                    && id.as_str() != state.default.as_str()
+                    && !Self::protects(state, id)
+            })
+            .count()
     }
     /// Whether `id` is above the current default branch: the default's parent
     /// chain goes through it.
@@ -2353,7 +2374,7 @@ impl TimelineTree {
                     }
                     let mut state = self.state.lock().unwrap();
                     if let Some(open) = open {
-                        Self::admit_open(&state, &parent)?;
+                        Self::admit_open(&state, &parent, open.max_open_lines)?;
                     }
                     let mut above = Some(parent.clone());
                     while let Some(id) = above {
@@ -3138,7 +3159,13 @@ impl DynPlugin for BranchToolPlugin {
                             .as_deref()
                             .unwrap_or(BRANCH_TOOL_DESCRIPTION),
                     ),
-                    handler: Arc::new(BranchTool { tree }),
+                    handler: Arc::new(BranchTool {
+                        tree,
+                        max_open_lines: self
+                            .config
+                            .max_open_lines
+                            .unwrap_or(DEFAULT_MAX_OPEN_LINES),
+                    }),
                 },
             )?;
             Ok(Effect::Done)
@@ -3165,11 +3192,12 @@ enum IdleNotice {
     None,
 }
 /// An open by the `branch` tool: the notice the new line gives its opener when
-/// a turn ends quietly. The tree reads the caller's eligibility in the lock
-/// that reserves the line (§4).
+/// a turn ends quietly, and the Session's cap on open tool lines. The tree
+/// charges both in the lock that reserves the line (§4, §6.1).
 #[derive(Clone, Copy)]
 struct ToolOpen {
     idle_notice: IdleNotice,
+    max_open_lines: usize,
 }
 const QUIET_IDLE_ATTRIBUTE: &str = "idle-notice";
 /// One line its parent opened, as the parent's own facts recorded it.
@@ -4806,6 +4834,8 @@ fn first_line(purpose: &str) -> String {
 
 struct BranchTool {
     tree: Arc<TreeCommands>,
+    /// The Session's cap on open tool lines (§6.1).
+    max_open_lines: usize,
 }
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 /// Target events per `read` page; the final atomic batch may exceed it.
@@ -5014,6 +5044,7 @@ impl BranchTool {
                 cancel,
                 ToolOpen {
                     idle_notice: input.idle_notice,
+                    max_open_lines: self.max_open_lines,
                 },
             )
             .await;
@@ -5023,6 +5054,10 @@ impl BranchTool {
                 refusal: BranchRefusal::NotOpener,
                 ..
             }) => Ok(refusal("branch_not_opener", NOT_OPENER_TEXT.into())),
+            Err(AgentError::BranchRefused {
+                refusal: BranchRefusal::LimitReached,
+                ..
+            }) => Ok(refusal("branch_limit_reached", LIMIT_REACHED_TEXT.into())),
             Err(AgentError::Cancelled(reason)) => Err(HostError::Cancelled(reason)),
             Err(error) => Err(HostError::failed(error.to_string())),
         }
@@ -5786,6 +5821,10 @@ fn status_note(
 /// The `branch` tool's refusal of `create` on a line that is neither the root
 /// nor the default branch (design §4, §11).
 const NOT_OPENER_TEXT: &str = "Only the root and the default branch open lines. Tell one of them if more parallel work is needed.";
+/// The `branch` tool's refusal of `create` when the open would cross the
+/// Session's cap of open tool lines (design §6.1, §11).
+const LIMIT_REACHED_TEXT: &str = "This Session holds its limit of open lines. Continue on this line, or end one of its open lines first.";
+
 /// The `branch` tool's description: its policy sentences are the coordination
 /// text for `main` ([timeline branches §12.4](../../../docs/design/timeline-branches.md#124-texts-and-their-classes)),
 /// replaceable at [`BranchToolConfig`].
@@ -5803,7 +5842,15 @@ pub struct BranchToolConfig {
     /// BranchLine, the part that writes the roster
     /// ([timeline branches §12.4](../../../docs/design/timeline-branches.md#124-texts-and-their-classes)).
     pub roster_closing: Option<Arc<str>>,
+    /// The Session's cap on open tool lines in place of the built-in four
+    /// ([timeline branches §6.1](../../../docs/design/timeline-branches.md#61-resources-and-limits)).
+    pub max_open_lines: Option<usize>,
 }
+
+/// The cap in force when the product sets none: four open tool lines at once,
+/// the larger of four and the two open at once that recorded runs reached, plus
+/// two (§6.1). The evaluation re-checks it.
+const DEFAULT_MAX_OPEN_LINES: usize = 4;
 
 fn branch_definition(description: &str) -> ToolDefinition {
     ToolDefinition {
