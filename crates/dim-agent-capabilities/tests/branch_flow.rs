@@ -12134,6 +12134,14 @@ async fn switch(session: &Session, line: &str) {
     .unwrap();
 }
 
+/// The head of `line` while it is idle: a committed boundary, so a turn that
+/// starts afterwards cannot leave the position inside an unfinished model
+/// output.
+async fn idle_cut(session: &Session, line: &str) -> u64 {
+    soon(session.idle(line)).await.unwrap();
+    session.sequence(line).unwrap()
+}
+
 const NOT_OPENER: &str = "Only the root and the default branch open lines. Tell one of them if more parallel work is needed.";
 const LIMIT_REACHED: &str = "This Session holds its limit of open lines. Continue on this line, or end one of its open lines first.";
 
@@ -12205,6 +12213,12 @@ async fn the_root_opens_a_line_while_another_line_is_default() {
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
+    // C inherits the root's history through a completed turn: the cut ends a
+    // committed batch, so no later turn can split it.
+    soon(session.submit("first turn".into(), InputMode::Queue, "main"))
+        .await
+        .unwrap();
+    let cut = idle_cut(&session, "main").await;
     let b = open_line(&session, "b").await;
     switch(&session, &b).await;
     let note = line_block(
@@ -12220,7 +12234,6 @@ async fn the_root_opens_a_line_while_another_line_is_default() {
         note.0
     );
     let before = line_ids(&session);
-    let cut = session.sequence("main").unwrap();
     let result = tool_call(
         &session,
         "main",
@@ -12246,9 +12259,14 @@ async fn the_root_opens_a_line_while_another_line_is_default() {
     );
     let prefix = chain_events(&session, &c, ..=cut).await.unwrap();
     assert_eq!(prefix[0].sequence, 1, "C inherits the root's history");
-    assert!(
-        prefix.last().is_some_and(|event| event.sequence < cut),
-        "C inherits the root's history only through its cut"
+    let own = prefix
+        .iter()
+        .rposition(|event| matches!(event.kind, EventKind::BranchStart(_)))
+        .expect("C's own branch/start follows the inherited prefix");
+    assert_eq!(
+        prefix[own - 1].sequence,
+        cut,
+        "C inherits the root's history through its cut and not past it"
     );
     let roster = until_events(&session, "main", |events| {
         roster_block(events).is_some_and(|(text, retired)| !retired && text.contains(&c))
@@ -12685,6 +12703,7 @@ async fn an_open_after_a_move_waits_and_counts_the_moves_result() {
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
+    let cut = idle_cut(&session, "main").await;
     let a = open_line(&session, "a").await;
     switch(&session, &a).await;
     let tree = session.session_service::<TreeCommands>().unwrap();
@@ -12700,7 +12719,6 @@ async fn an_open_after_a_move_waits_and_counts_the_moves_result() {
         result = &mut moved => panic!("the move answered before its fact committed: {result:?}"),
         _ = store.wait_holding() => {}
     }
-    let cut = session.sequence("main").unwrap();
     let before = line_ids(&session);
     let written = creates(&local_events(&session, "main").await);
     let mut created = Box::pin(open_with_tool(&probe, "main", cut, "b"));
@@ -12806,10 +12824,10 @@ async fn a_paused_build_does_not_hold_the_tree_lock() {
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
+    let cut = idle_cut(&session, "main").await;
     let a = open_line(&session, "a").await;
     probe.delay_child.store(true, Ordering::SeqCst);
     let builds = probe.child_builds.load(Ordering::SeqCst);
-    let cut = session.sequence("main").unwrap();
     let mut created = Box::pin(open_with_tool(&probe, "main", cut, "held"));
     tokio::select! {
         result = &mut created => panic!("the paused build answered: {result:?}"),
