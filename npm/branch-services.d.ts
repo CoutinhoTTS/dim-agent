@@ -9,7 +9,8 @@ export interface RustError<Name extends string = string, Code extends string = s
 
 export type BranchSource =
   | { kind: "tool"; turn_id: string; request_id: string; call_id: string }
-  | { kind: "host"; operation_id: string }
+  | /** A host operation: a client's own entry, or a plugin's id. */ { kind: "host"; operation_id: string }
+  | /** A line a client opened through `session.branch_create`, whose opener is the user. It is a conversation line, so the core tells it from a plugin's without reading the operation's id. */ { kind: "user"; operation_id: string }
 
 export interface ApprovalCallData {
   name: string
@@ -625,6 +626,22 @@ export interface TreeCommands {
    */
   end(id: string, source: BranchSource): Promise<void>
   /**
+   * The line the Session's conversation is on: the root until a
+   * `branch/default` moves it, then that fact's line while it is open and
+   * selectable (design §4, §5, §20.20).
+   * @throws {AgentErrorThrown}
+   */
+  defaultBranch(): Promise<string>
+  /**
+   * Moves the default branch to `id` and answers it. The target must be an
+   * open conversation line that is not already the default branch, and
+   * neither it nor any ancestor of it may be ending or ended. The move
+   * writes `branch/default` on the root and one status note to each
+   * participant that is not the root (design §4, §10, §14).
+   * @throws {AgentErrorThrown}
+   */
+  setDefaultBranch(id: string, source: BranchSource): Promise<string>
+  /**
    * One page of `id`'s committed batches up to `through`; an ended line
    * reads at its fixed head and `through` must end an atomic batch.
    * @throws {AgentErrorThrown}
@@ -653,7 +670,11 @@ export interface TreeCommands {
   create(parent: string, at: number | bigint, options: BranchOptions, cancelled: () => void | Promise<void>): Promise<string>
 }
 
-export type LineRole = "main" | "tool" | "host"
+export type LineRole =
+  | /** The root: the line with no parent. Its wire value stays `main`, the root's id on the wire and in storage. */ "main"
+  | "tool"
+  | "host"
+  | /** A line a client opened through `session.branch_create`: the user is its opener, so it is a conversation line the user ends (design §4). */ "user"
 
 export interface BranchLine {
   /** The line committed its own `branch/end`. */
@@ -1275,7 +1296,7 @@ export interface UiResources {
 }
 
 /** What a method returning `Err(AgentError)` throws. */
-export type AgentErrorThrown = RustError<"AgentError", "InvalidInput" | "Closed" | "UnknownBranch" | "BranchEnded" | "Storage" | "PublicationUnknown" | "Build" | "Cancelled" | "Reloading" | "AmbiguousSubmission" | "PartialSubmission" | "Fault" | "Framework" | "Multiple", undefined>
+export type AgentErrorThrown = RustError<"AgentError", "InvalidInput" | "Closed" | "UnknownBranch" | "BranchEnded" | "BranchRefused" | "Storage" | "PublicationUnknown" | "Build" | "Cancelled" | "Reloading" | "AmbiguousSubmission" | "PartialSubmission" | "Fault" | "Framework" | "Multiple", undefined>
 
 /** What a method returning `Err(ApprovalRespondError)` throws. */
 export type ApprovalRespondErrorThrown = RustError<"ApprovalRespondError", "Unknown" | "Cancelled" | "Closed", undefined>

@@ -979,6 +979,16 @@ pub struct TurnEndData {
     pub outcome: TurnOutcome,
 }
 
+/// The root line's id: the line of a Session that has no parent and no
+/// source, present in every Session for its whole life.
+pub const ROOT_BRANCH_ID: &str = "main";
+
+/// The root, standing in for the default branch at a site that does not read
+/// the Session's default branch. It is always the root: a site that reads it
+/// does not follow a Session whose default branch has moved, and a site that
+/// must follow one reads the Session's default branch instead.
+pub const DEFAULT_BRANCH_ID: &str = ROOT_BRANCH_ID;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
 pub enum BranchCreateAt {
@@ -997,9 +1007,12 @@ pub enum BranchSource {
         request_id: String,
         call_id: String,
     },
-    Host {
-        operation_id: String,
-    },
+    /// A host operation: a client's own entry, or a plugin's id.
+    Host { operation_id: String },
+    /// A line a client opened through `session.branch_create`, whose opener is
+    /// the user. It is a conversation line, so the core tells it from a
+    /// plugin's without reading the operation's id.
+    User { operation_id: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1021,6 +1034,16 @@ pub struct BranchEndData {
         deserialize_with = "crate::optional_non_null"
     )]
     pub ancestor: Option<String>,
+    /// The message the parent receives, present only on a tool end, because
+    /// only a tool end owes one and restore delivers a missing one from it
+    /// ([timeline branches §10](../../../docs/design/timeline-branches.md#10-ending-a-line)).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::optional_non_null",
+        rename = "final"
+    )]
+    pub final_message: Option<String>,
 }
 
 /// The result of an end, written on the ended line's parent by TimelineTree.
@@ -1038,6 +1061,22 @@ pub struct BranchEndedData {
         deserialize_with = "crate::optional_non_null"
     )]
     pub ancestor: Option<String>,
+}
+
+/// The default branch moved: `branch` is the line the Session's conversation
+/// is on, `from` the line it moved from, absent when that line was the root,
+/// and `source` the operation that moved it. Written on the root only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BranchDefaultData {
+    pub branch: String,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::optional_non_null"
+    )]
+    pub from: Option<String>,
+    pub source: BranchSource,
 }
 
 /// A branch begins: a child created from `parent` at `create_event`, or the
@@ -1361,6 +1400,7 @@ pub enum EventKind {
     BranchCreateFailed(BranchCreateFailedData),
     BranchEnd(BranchEndData),
     BranchEnded(BranchEndedData),
+    BranchDefault(BranchDefaultData),
     CollaborationRequest(CollaborationRequestData),
     CollaborationCancel(CollaborationPeerData),
     CollaborationClose(CollaborationPeerData),
@@ -1586,6 +1626,7 @@ impl EventKind {
             Self::BranchCreateFailed(_) => "branch/create-failed",
             Self::BranchEnd(_) => "branch/end",
             Self::BranchEnded(_) => "branch/ended",
+            Self::BranchDefault(_) => "branch/default",
             Self::CollaborationRequest(_) => "collaboration/request",
             Self::CollaborationCancel(_) => "collaboration/cancel",
             Self::CollaborationClose(_) => "collaboration/close",
@@ -1798,6 +1839,8 @@ enum BranchEvent {
     End(BranchEndData),
     #[serde(rename = "ended")]
     Ended(BranchEndedData),
+    #[serde(rename = "default")]
+    Default(BranchDefaultData),
 }
 
 #[derive(Deserialize)]
@@ -1967,6 +2010,7 @@ impl From<TaggedEvent> for EventKind {
             TaggedEvent::Branch(BranchEvent::CreateFailed(data)) => Self::BranchCreateFailed(data),
             TaggedEvent::Branch(BranchEvent::End(data)) => Self::BranchEnd(data),
             TaggedEvent::Branch(BranchEvent::Ended(data)) => Self::BranchEnded(data),
+            TaggedEvent::Branch(BranchEvent::Default(data)) => Self::BranchDefault(data),
             TaggedEvent::Collaboration(CollaborationEvent::Request(data)) => {
                 Self::CollaborationRequest(data)
             }
@@ -2208,6 +2252,11 @@ impl Serialize for EventKind {
             Self::BranchEnded(data) => {
                 state.serialize_field("type", "branch")?;
                 state.serialize_field("name", "ended")?;
+                state.serialize_field("data", data)?;
+            }
+            Self::BranchDefault(data) => {
+                state.serialize_field("type", "branch")?;
+                state.serialize_field("name", "default")?;
                 state.serialize_field("data", data)?;
             }
             Self::CollaborationRequest(data) => {

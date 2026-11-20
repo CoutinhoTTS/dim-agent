@@ -93,6 +93,8 @@ pub struct Tui {
     pub options: Options,
     /// Taken by the load; the render thread sends the result once.
     pub leave: Mutex<Option<oneshot::Sender<i32>>>,
+    /// `Update now`, sent before the interface closes its connection.
+    pub update: Mutex<Option<oneshot::Sender<ui::tui::UpdateRequest>>>,
     pub leaf_end: Mutex<Option<oneshot::Sender<()>>>,
 }
 
@@ -139,11 +141,19 @@ impl Plugin for Tui {
             self.root.clone(),
             leaf_end,
         );
+        let update = self
+            .update
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+            .ok_or_else(|| {
+                rutis::Error::from(ErrorKind::PluginFailed("Tui was loaded twice".into()))
+            })?;
         let env = self.env.clone();
         let render = std::thread::Builder::new()
             .name("dim-tui".into())
             .spawn(move || {
-                let _ = leave.send(ui::tui::run(Box::new(host), env));
+                let _ = leave.send(ui::tui::run(Box::new(host), env, update));
             })
             .map_err(|error| rutis::Error::from(ErrorKind::PluginFailed(error.into())))?;
         ctx.effect(|| async move {

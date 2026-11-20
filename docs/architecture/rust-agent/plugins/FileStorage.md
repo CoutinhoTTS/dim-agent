@@ -30,7 +30,17 @@ folding names would break case-sensitive directories and their aliases.
 
 `read_limited(path, limit, cancel)` preserves the same authorized-handle traversal and cancellation as `read`. It checks the opened file's length before allocating contents, then checks each chunk before extending the buffer to cover concurrent growth. Exceeding the byte limit returns `Io(InvalidData)` without partial bytes or a write. The lease's own `read_limited(limit, cancel)` applies the same rule under the held lock; `read` is its unbounded case. The business caller chooses its byte limit.
 
-## Pinned-reader data face
+## Filesystem data face
+
+`fsHost.createDirectory`, `list` and `remove` resolve absolute paths in the owner's
+authorized roots. They use the directory creation, listing and removal contracts above.
+Pass a listed name unchanged to `remove({parent, name})`. A Unicode name is a string. Other names carry the original Unix bytes (`{Unix: number[]}`) or Windows UTF-16 code units (`{Windows: number[]}`). The owner accepts a single component below the listed directory.
+
+`fsHost.stat({path})` returns the entry kind and the size of a regular file, without following links. An absent entry has kind `missing`.
+
+`fsHost.readBytes({path, limit, leaseId?})` returns base64 bytes and the length. A file over the limit fails with `too_large`. Hooks reads the authorized project settings path through this operation. `lock({path})` returns a lease ID for reads of that same file. `replace({path, bytes, permissions?, leaseId?})` accepts base64 bytes and atomically replaces the target under the supplied lease or a new lock. `backup({leaseId, suffix, permissions?})` creates an exclusive sibling copy under the same lease. Explicit `unlock({leaseId})` or caller unload releases the lease.
+
+### Pinned reads
 
 The process `fsHost` name provides the pinned-reader operations from
 [resource faces §4.1](../../../design/resource-faces.md#41-methods), using this

@@ -144,6 +144,7 @@ fn an_end_command_and_its_result_are_internal_branch_facts() {
             EventKind::BranchEnd(BranchEndData {
                 source: tool.clone(),
                 ancestor: None,
+                final_message: None,
             }),
             "branch/end",
             json!({"type":"branch","name":"end","data":{"source":{"kind":"tool","turn_id":"turn","request_id":"request","call_id":"call"}}}),
@@ -152,6 +153,7 @@ fn an_end_command_and_its_result_are_internal_branch_facts() {
             EventKind::BranchEnd(BranchEndData {
                 source: host.clone(),
                 ancestor: Some("parent".into()),
+                final_message: None,
             }),
             "branch/end",
             json!({"type":"branch","name":"end","data":{"source":{"kind":"host","operation_id":"goal:evaluate:9"},"ancestor":"parent"}}),
@@ -165,6 +167,26 @@ fn an_end_command_and_its_result_are_internal_branch_facts() {
             }),
             "branch/ended",
             json!({"type":"branch","name":"ended","data":{"branch":"child","endEvent":9,"source":{"kind":"host","operation_id":"goal:evaluate:9"}}}),
+        ),
+        (
+            EventKind::BranchDefault(BranchDefaultData {
+                branch: "child".into(),
+                from: None,
+                source: BranchSource::User {
+                    operation_id: "switch".into(),
+                },
+            }),
+            "branch/default",
+            json!({"type":"branch","name":"default","data":{"branch":"child","source":{"kind":"user","operation_id":"switch"}}}),
+        ),
+        (
+            EventKind::BranchDefault(BranchDefaultData {
+                branch: "other".into(),
+                from: Some("child".into()),
+                source: host.clone(),
+            }),
+            "branch/default",
+            json!({"type":"branch","name":"default","data":{"branch":"other","from":"child","source":{"kind":"host","operation_id":"goal:evaluate:9"}}}),
         ),
     ];
     for (kind, key, payload) in cases {

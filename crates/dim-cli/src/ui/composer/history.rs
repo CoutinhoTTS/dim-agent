@@ -87,6 +87,17 @@ pub fn flush() {
     }
 }
 
+/// [`flush`], waiting at most `limit`: `false` when an entry is still queued,
+/// as when another process keeps the history's lock.
+pub fn flush_within(limit: std::time::Duration) -> bool {
+    let (flushed, done) = mpsc::channel();
+    writer().send(Message::Flush(flushed)).is_err()
+        || !matches!(
+            done.recv_timeout(limit),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        )
+}
+
 enum Message {
     Append {
         home: PathBuf,

@@ -193,6 +193,7 @@ Settings 在内存中保存已登记的来源（声明已编译），各自保�
 | `register` | async | 一份声明（§3.1） | 无；被拒绝时 reject |
 | `read` | async | `{source, scope: Scope}` | `Snapshot` |
 | `update` | async | `{source, scope: Scope, expectedRevision, document}` | `Snapshot`（保存后的文档） |
+| `declaredBy` | sync | `{instanceId: string}`，加载器实例 ID 的十进制字符串 | 该实例已注册且仍有效的 JSON Schema 声明，按来源名称排序。无有效声明时返回空数组。 |
 | `projects` | sync | `{}` | `{projects: [{root, cwd}]}`：当前已授权的项目根 |
 
 - `register` 是调用行的登记，在该行卸载时撤回。它在该行自己的 `apply` 中调用；被拒绝（§3.1）时

@@ -84,8 +84,8 @@ specific target from its own `step/tool-use` and `step/tool-result` (design [§6
 Owner: [timeline_tree.rs](../../../../crates/dim-agent-capabilities/src/timeline_tree.rs).
 Folds the line's own committed facts into its role, the tool lines it opened,
 the state of its current turn and the line's read cursors, and writes its roster,
-the parent block, the idle notice, the ended notice and a status note through
-`S:TreeCommands`.
+the parent block, the idle notice, the ended notice and the one status note a
+move of the default branch writes on a participant, through `S:TreeCommands`.
 
 Its role and its parent come from
 `TreeCommands.info`, which is filled from the parent's `branch/create` at
@@ -94,8 +94,8 @@ creation and at restore.
 ### Data face
 
 The branch-scoped `branchLine` face exposes the owner's existing read operations:
-`resolved()` returns `[role, parent]` or `null`, where role is `main` (the root), `tool`, `user` or
-`plugin`; `defaultBranch()` reports whether the line is the current default branch; `ending()` reports whether the line committed its own `branch/end`;
+`resolved()` returns `[role, parent]` or `null`, where role is `main` (the root), `tool`, `host` (a plugin line) or
+`user` (a line a client opened); `ending()` reports whether the line committed its own `branch/end`;
 `cursor(target)` returns its latest successful read cursor for that target or
 `null`. Cursor read failures use the standard `AgentError` name, variant code
 and display message on the wire; native error source identity is not serialized.
@@ -113,7 +113,7 @@ are unchanged. See [service faces](../../../design/service-faces.md).
 | `B:TimelineIdentity` | The line's own id. |
 | `B:BranchLifecycle` | Wait for the branch to be Active before writing. |
 | `S:SessionLifecycle` | Wait for the restored child directory to be published before roster repair. |
-| `S:TreeCommands` | `info` for the role and its lines; `head`, the crate-internal `turn_ends` and the parent's new-activity check for the parent block; `input` for every write. |
+| `S:TreeCommands` | `info` for the role and its lines; `head`, the crate-internal `turn_ends` and the parent's new-activity check for the parent block; `default_branch`, the crate-internal move signal and the line's own queue of owed moves for the status note; `input` for every write. |
 | `S:GuideEntries` | Register the roster and message entries on every line, until this part unloads. |
 
 ### Events and lifetime
@@ -122,6 +122,12 @@ Consumes `branch/create`, `branch/create-failed`, `branch/ended`, `branch/end`,
 `input/message`, `input/consumed`, `input/deleted`, `turn/end`, `step/tool-use` and
 `step/tool-result`. It writes only `input/message`, through the tree's input path.
 
+- **Status note.** On a line that is not the root, one keyed Append under `branch:line` when the
+  line becomes the default branch or stops being it, read in commit order from the queue the tree
+  filled when the move committed, woken by its move signal. It
+  restates the line's birth identity byte for byte and then the sentences the move changes; the
+  root never receives one, and a load whose latest block disagrees with the tree writes the
+  missing note once (design [§5](../../../design/timeline-branches.md#5-parts), [§12.1](../../../design/timeline-branches.md#121-context-mapping)).
 - **Roster.** On a line that has opened tool lines, a keyed Append under `branch:roster` of `<dim-branch-lines>` lists the lines it opened with the tool that are still open, in the order it opened them, with the
   first line of each purpose; when none is open the key is retired. A plugin line is never on a roster, and neither is a line the user opened: it stays in the Session's directory and coordinates its own tool lines.
 - **Parent block.** On a line that is not the root, one keyed Append of

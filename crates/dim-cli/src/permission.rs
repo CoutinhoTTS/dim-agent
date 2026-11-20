@@ -21,7 +21,7 @@ use crate::{
 };
 use dim_agent_types::{
     ApprovalCallData, COMMAND_SEPARATORS, CommandMatch, CommandRule, CommandRuleDecision,
-    PermissionChangedData, PermissionPolicy, PermissionPreset,
+    DEFAULT_BRANCH_ID, PermissionChangedData, PermissionPolicy, PermissionPreset,
 };
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -76,7 +76,7 @@ pub async fn select_preset(
         state.policy.preset = preset;
         match client.typed::<Updated>(
             "session.permission.update",
-            json!({"sessionId":session_id,"branchId":"main","expectedVersion":state.version,"policy":state.policy}),
+            json!({"sessionId":session_id,"branchId":DEFAULT_BRANCH_ID,"expectedVersion":state.version,"policy":state.policy}),
         ).await {
             Ok(_) => return Ok(state.policy),
             Err(error) if client::app_error(&error) == Some("permission_conflict") => {
@@ -118,7 +118,7 @@ pub async fn read(client: &mut Client, session_id: &str) -> Result<State> {
     client
         .typed(
             "session.permission.get",
-            json!({"sessionId":session_id,"branchId":"main"}),
+            json!({"sessionId":session_id,"branchId":DEFAULT_BRANCH_ID}),
         )
         .await
 }
@@ -141,7 +141,7 @@ async fn update(
     let updated: Updated = client
         .typed(
             "session.permission.update",
-            json!({"sessionId":session_id,"branchId":"main","expectedVersion":state.version,"policy":policy}),
+            json!({"sessionId":session_id,"branchId":DEFAULT_BRANCH_ID,"expectedVersion":state.version,"policy":policy}),
         )
         .await?;
     Ok(updated.version)

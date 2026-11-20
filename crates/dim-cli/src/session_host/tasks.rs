@@ -95,7 +95,7 @@ impl Worker {
         self.context_stale = false;
         self.cursors.clear();
         self.tool_origins.clear();
-        self.focus = "main".into();
+        self.focus = DEFAULT_BRANCH_ID.into();
         self.side = None;
         self.lines.clear();
         self.task_history.clear();
@@ -208,7 +208,7 @@ impl Worker {
             .expect("discovered branch");
         history.ended |= matches!(event.content, EventContent::BranchEnd(_));
         let mut unread_changed = false;
-        if branch_id != "main"
+        if branch_id != DEFAULT_BRANCH_ID
             && event.sequence > applied.max(history.latest_reply)
             && matches!(&event.content, EventContent::Text(data) if !data.delta.trim().is_empty())
         {
@@ -365,7 +365,7 @@ impl Worker {
                 "This daemon cannot read a bounded transcript window; update the daemon".into(),
             );
         }
-        let (stage, method, params) = if branch_id != "main"
+        let (stage, method, params) = if branch_id != DEFAULT_BRANCH_ID
             && !self.lines.contains_key(&branch_id)
             && !self.task_history[&branch_id].window_complete
         {
@@ -596,7 +596,7 @@ impl Worker {
                 if history.earlier == EarlierRead::Reading {
                     history.earlier = EarlierRead::Failed;
                 }
-                let fatal = request.branch_id == "main" && !history.done;
+                let fatal = request.branch_id == DEFAULT_BRANCH_ID && !history.done;
                 let report = crate::report::Captured::observed(
                     crate::report::Operation::SessionRead,
                     code.as_deref(),
@@ -792,7 +792,7 @@ impl Worker {
                 format!("member {session_id}"),
                 "session.stop",
                 json!({
-                    "sessionId": session_id, "branchId": "main", "reason": "stopped by the user",
+                    "sessionId": session_id, "branchId": DEFAULT_BRANCH_ID, "reason": "stopped by the user",
                 }),
             ),
             TaskKind::Member(MemberTarget::Starting | MemberTarget::Provider) => {

@@ -542,6 +542,7 @@ impl<'a> EventRef<'a> {
                     | crate::EventKind::BranchCreateFailed(_)
                     | crate::EventKind::BranchEnd(_)
                     | crate::EventKind::BranchEnded(_)
+                    | crate::EventKind::BranchDefault(_)
                     | crate::EventKind::BranchResume(_)
                     | crate::EventKind::SessionForked(_)
                     | crate::EventKind::CollaborationRequest(_)

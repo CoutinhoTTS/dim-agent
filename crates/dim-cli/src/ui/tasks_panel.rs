@@ -21,6 +21,7 @@ use crate::ui::theme::ansi::fg;
 use crate::ui::transcript::block::{opens_group, project_row};
 use crate::ui::transcript::tool_group::Detail as ToolDetail;
 use crate::wire::{StageState, WorkflowReport, WorkflowState};
+use dim_agent_types::ROOT_BRANCH_ID;
 use std::cell::Cell;
 
 const HINT: &str = "Enter details · x stop selected · Ctrl+X stop all · Esc close";
@@ -453,7 +454,7 @@ impl TasksPanel {
                 let detail = row.compaction.as_ref()?.detail.as_ref()?;
                 Some(crate::model::view::CompactionTarget {
                     session_id: session_id.clone(),
-                    branch_id: "main".into(),
+                    branch_id: ROOT_BRANCH_ID.into(),
                     event_id: detail.event_id.clone(),
                     sequence: detail.sequence,
                 })

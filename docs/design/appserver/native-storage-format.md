@@ -285,6 +285,15 @@ home 目录继承的 ACL；正常打开不写）。说明只描述本次启动�
 打开时与遗留说明一起删除。CLI 等待规则与显示见
 [CLI 命令 §守护进程启动失败](../cli-commands.md#daemon-startup-failure)。
 
+**装配进度。** 库成功打开后，说明不再由存储改写：App Server 从库打开到监听端点
+open 之间把它写成 `assembly progress=<n>`，`n` 随装配记录的进展（某个 row 首次
+Active，或一次 `OpeningAdvanced` 报告）增加；库删除自己的说明后第一次进展立即写，
+之后最多每 500 毫秒写一次；区间内的最后一次进展在区间结束时写出，因此说明最多比装配
+进度晚一个区间，open 时删除。库在升级、失败和成功打开时对自己说明的处理
+不变；装配写法只在库删掉说明之后开始，因此两种写法不重叠。装配说明不打印升级行或
+阶段，只推进 CLI 的等待上限；读取规则见
+[CLI 命令 §守护进程启动失败](../cli-commands.md#daemon-startup-failure)。
+
 **库被其他进程占用。** 存储的准入租约 `<database>.lock` 已被另一个进程持有：它正在服务
 这个库，或正在启动。本次启动拿不到库，返回的错误文本不变；拒绝时同样写一份启动说明，
 正文点名占用者。库旁有进度说明时，正文带上该进程的 pid 和它正在升级的格式；否则只说库
@@ -1670,7 +1679,7 @@ Ordinary v44 opening does not rebuild indexes or scan history. Disposable-store
 verification covers both v43 and both v42 families, reopen, current-member
 semantics, preserved Steer candidates, automation origins and rollback.
 
-## Storage size report
+## SQLite owner operations
 
 Persistent Agents calls `sqliteStorage.agents`, `owners`, `save` and `delete` for its directory and Session ownership. Delegation reads use `members`, `ledMembers`, `ownedAgents`, `memberSessions` and `agentOwner`. Startup repair reads both lists from `unfinishedOwned`. SQLite owns all record reads and writes.
 
@@ -1685,5 +1694,7 @@ Direct callers supply a resolved absolute UTF-8 path in the Session command-outp
 Provider reads stored selections and the single model preferences field through `sqliteStorage.readSelection({scope})` and `readPreferences({providerId, modelId})`. A missing row returns null. After Provider validates a target, `writeSelection({scope, expectedVersion, selection})` commits it at the expected version and returns the stored selection.
 
 Settings reads user documents through `sqliteStorage.readUser({source})`. A missing row returns null. A present row returns its integer `version` and stored `document` text, including any inline credentials. Settings decodes it using the source's registered format. On a miss, Settings validates the legacy file and calls `importUserIfAbsent({source, document, importedRevision})`. SQLite inserts the document with its provenance if absent and returns the winning row in the same transaction. `replaceUser({source, expectedVersion, decision})` checks the version before applying a write or protected-field rejection. A successful write returns the new version. Settings publishes the change in commit order.
+
+### Storage size report
 
 StorageMethods serves `storage.report` from the SQLite owner operation `sqliteStorage.storageReport({})`. Both return `{databaseBytes, walBytes, reclaimableBytes}`. SQLite reads the current file sizes and counts free database pages.

@@ -118,6 +118,7 @@ const V3_EVENT_KINDS: &[&str] = &[
     "context/compaction",
     "branch/end",
     "branch/ended",
+    "branch/default",
     "session/forked",
 ];
 

@@ -130,7 +130,7 @@ async fn branches_list_main_and_its_lines_and_read_an_ended_line_through_its_hea
     assert_eq!(open["parentBranchId"], "main");
     assert!(open["branchPoint"].as_u64().is_some(), "{open}");
     assert!(open["createEvent"].as_u64().is_some(), "{open}");
-    assert_eq!(open["source"]["kind"], "host", "{open}");
+    assert_eq!(open["source"]["kind"], "user", "{open}");
     assert_eq!(row(&rows, &grandchild)["parentBranchId"], child);
 
     assert_ok(

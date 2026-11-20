@@ -2,7 +2,7 @@
 //! the `plugin` tool. A command goes to PluginManager's methods, or to
 //! Settings for `config`; Permission decides each call like any tool call.
 use super::{Manager, PluginError};
-use crate::settings::{SettingsScope, Writer, holds_write_only, without_write_only};
+use crate::settings::{SettingsScope, holds_write_only, without_write_only};
 use dim_agent_capabilities::{
     host::{HostFuture, ToolExecutionContext},
     tool_registry::{ToolContribution, ToolHandler, ToolRegistry, definition},
@@ -264,7 +264,7 @@ impl Plugin {
             for source in &sources {
                 shown.push(
                     match settings
-                        .read_declared(&source.source, SettingsScope::User, cancel)
+                        .read(&source.source, SettingsScope::User, cancel)
                         .await
                     {
                         Ok(snapshot) => {
@@ -312,18 +312,17 @@ impl Plugin {
             ));
         }
         let current = settings
-            .read_declared(&source.source, SettingsScope::User, cancel)
+            .read(&source.source, SettingsScope::User, cancel)
             .await
             .map_err(|error| error.to_string())?;
         let mut document = current.document;
         document[member] = value;
         let updated = settings
-            .update_declared(
+            .update(
                 &source.source,
                 SettingsScope::User,
                 &current.revision,
                 document,
-                Writer::Owner,
                 cancel,
             )
             .await

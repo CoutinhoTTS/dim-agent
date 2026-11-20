@@ -9,6 +9,7 @@ use dim_agent_capabilities::{
     timeline_tree::TreeCommands,
 };
 use dim_agent_runtime::{AgentError, Names, ReplyLanguage};
+use dim_agent_types::ROOT_BRANCH_ID;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use rutis::{Ctx, Error};
 use serde::Deserialize;
@@ -127,7 +128,7 @@ async fn change(
         }) => None,
         Change::Code(code) => Some(code),
     };
-    let branch = tree.get("main").map_err(RpcError::from)?;
+    let branch = tree.get(ROOT_BRANCH_ID).map_err(RpcError::from)?;
     let language_cell = cell(tree)?.language();
     let _guard = language_cell.gate().await;
     // A failure before this write leaves the value unchanged; once the record
@@ -154,7 +155,7 @@ async fn change(
     // branches to the periodic check, as on main. Unloaded branches read the
     // value when they load, and the periodic check remains the fallback.
     for info in tree.list() {
-        if info.id == "main" {
+        if info.id == ROOT_BRANCH_ID {
             continue;
         }
         let Ok(side) = tree.get(&info.id) else {
@@ -182,7 +183,7 @@ async fn change(
 /// PromptSources has none, which is an explicit unavailable result and never a
 /// default language.
 fn cell(tree: &TreeCommands) -> Result<Arc<PromptSourcesBranch>, RpcError> {
-    let branch = tree.get("main").map_err(RpcError::from)?;
+    let branch = tree.get(ROOT_BRANCH_ID).map_err(RpcError::from)?;
     match branch.service::<PromptSourcesBranch>() {
         Ok(service) => Ok(service),
         Err(AgentError::Closed(_)) => Err(RpcError::closed()),

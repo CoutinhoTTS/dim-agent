@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue"
 import { useI18n } from "vue-i18n"
-import { MAIN_BRANCH, type DraftAttachments, type QueuedInput, type SubmitMode, type WithdrawResult } from "../../rpc/protocol"
+import { ROOT_BRANCH_ID, type DraftAttachments, type QueuedInput, type SubmitMode, type WithdrawResult } from "../../rpc/protocol"
 import { useChatStore } from "../../stores/chat"
 import { useConnectionStore } from "../../stores/connection"
 import { useToastStore } from "../../stores/toast"
@@ -37,7 +37,7 @@ const state = computed(() => line.value?.state ?? (branch.value?.running ? { kin
 const parentName = computed(() => {
   const parentId = line.value?.parentId
   if (parentId === null || parentId === undefined) return ""
-  if (parentId === MAIN_BRANCH) return t("lines.main")
+  if (parentId === ROOT_BRANCH_ID) return t("lines.main")
   const parent = view.value?.lines.find((candidate) => candidate.id === parentId)
   return parent === undefined ? shortId(parentId) : lineName(t, parent, parentId)
 })
@@ -116,7 +116,7 @@ function noModel(): void {
         <span v-if="parentName">{{ t("lines.from", { name: parentName }) }}<template v-if="cut"> · {{ cut }}</template></span>
         <span v-else>{{ t("lines.main") }}</span>
         <UButton v-if="open && branch?.lastTurnEnd !== undefined" color="neutral" variant="ghost" size="xs" @click="newChild">{{ t("lines.newChild") }}</UButton>
-        <UButton v-if="open && line?.id !== 'main'" color="neutral" variant="ghost" size="xs" @click="end">{{ t("lines.end") }}</UButton>
+        <UButton v-if="open && line?.id !== ROOT_BRANCH_ID" color="neutral" variant="ghost" size="xs" @click="end">{{ t("lines.end") }}</UButton>
       </div>
     </header>
 
