@@ -1021,16 +1021,17 @@ impl Part {
                 settle(&mut state, Settled::Refused(reason));
                 return Ok(refused(reason));
             }
-            let ready = match self.decision(&state, &params.turn_id, &settings, Some(invocation), &line) {
-                Decision::Refused(reason) => {
-                    settle(&mut state, Settled::Refused(reason));
-                    return Ok(refused(reason));
-                }
-                // `ours` was just checked: the slot holds this invocation,
-                // and a decision about its own flight is never shared.
-                Decision::Shared => unreachable!("a request never shares its own flight"),
-                Decision::Ready(call, content) => (call, content),
-            };
+            let ready =
+                match self.decision(&state, &params.turn_id, &settings, Some(invocation), &line) {
+                    Decision::Refused(reason) => {
+                        settle(&mut state, Settled::Refused(reason));
+                        return Ok(refused(reason));
+                    }
+                    // `ours` was just checked: the slot holds this invocation,
+                    // and a decision about its own flight is never shared.
+                    Decision::Shared => unreachable!("a request never shares its own flight"),
+                    Decision::Ready(call, content) => (call, content),
+                };
             state.enabled = Some(settings.enabled);
             if let Some(flight) = state.in_flight.as_mut() {
                 flight.started = true;
@@ -1098,9 +1099,9 @@ impl Part {
         let settings = self.read_settings(self.stopping.child_token()).await?;
         let line = self.hosts.tree.default_branch().unwrap_or_default();
         let state = self.state.lock().unwrap();
-        Ok(refused(
-            self.cancelled_reason(&state, turn_id, &settings, invocation, &line),
-        ))
+        Ok(refused(self.cancelled_reason(
+            &state, turn_id, &settings, invocation, &line,
+        )))
     }
 
     /// What a request cancelled during its preflight answers. The gates see

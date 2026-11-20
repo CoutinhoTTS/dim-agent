@@ -121,7 +121,8 @@ impl FakeSessions {
     }
     /// Answers `exists` `false` for `session`, as a deleted Session does
     /// (design §3.4).
-    pub fn deleted(&self, session: &str) {        self.inner
+    pub fn deleted(&self, session: &str) {
+        self.inner
             .missing
             .lock()
             .unwrap()

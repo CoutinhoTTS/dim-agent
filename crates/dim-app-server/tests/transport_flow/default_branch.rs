@@ -483,7 +483,9 @@ async fn a_branches_read_advertises_an_open_default() {
     let hold = server
         .hold_next_branches()
         .expect("the ConnectionHub exists");
-    let read = client.send("session.branches", json!({"sessionId":id})).await;
+    let read = client
+        .send("session.branches", json!({"sessionId":id}))
+        .await;
     hold.entered.notified().await;
     // The competing calls land while the read waits before its snapshot.
     assert_ok(&switch(&mut client, &id, "main").await);

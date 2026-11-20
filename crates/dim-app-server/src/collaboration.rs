@@ -1128,10 +1128,7 @@ impl CollaborationSession {
                     ));
                 }
                 if branch_id.as_deref() == Some("") {
-                    return Ok(refusal(
-                        Refusal::InvalidInput,
-                        "branchId must not be empty",
-                    ));
+                    return Ok(refusal(Refusal::InvalidInput, "branchId must not be empty"));
                 }
                 return Ok(self
                     .read(&agent_id, &session_id, branch_id, after, limit)

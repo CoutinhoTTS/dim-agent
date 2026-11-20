@@ -1144,7 +1144,11 @@ async fn the_catalog_sequence_stays_the_roots_across_an_idle_unload() {
         "the cold row reports the root's sequence"
     );
     assert_eq!(cold, loaded, "loading or unloading changed no sequence");
-    assert_eq!(loads.of(&id), (1, false), "the catalog read restored nothing");
+    assert_eq!(
+        loads.of(&id),
+        (1, false),
+        "the catalog read restored nothing"
+    );
     server.shutdown();
     server.join().await.unwrap();
 }

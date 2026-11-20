@@ -8782,9 +8782,7 @@ async fn a_request_completes_from_the_line_its_input_was_delivered_to() {
         .iter()
         .rev()
         .find_map(|event| match &event.kind {
-            EventKind::CollaborationResult(data) if data.session_id == member => {
-                Some(data.clone())
-            }
+            EventKind::CollaborationResult(data) if data.session_id == member => Some(data.clone()),
             _ => None,
         })
         .unwrap();
@@ -8815,8 +8813,7 @@ async fn a_request_completes_from_the_line_its_input_was_delivered_to() {
 /// stop lands on the running turn and never on the idle line (design §9, §15).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_cancel_stops_the_line_the_request_was_delivered_to() {
-    let (server, agent, mut client, lead, lead_session, holder, _gate) =
-        launch_branch_team().await;
+    let (server, agent, mut client, lead, lead_session, holder, _gate) = launch_branch_team().await;
     let (member, member_session) =
         settled_member(&mut client, &agent, &lead, &lead_session, &holder).await;
     let side = side_line(&mut client, &member_session).await;
@@ -8866,8 +8863,7 @@ async fn a_cancel_stops_the_line_the_request_was_delivered_to() {
 /// overlap the new default's (design §9, §15).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_read_continuation_stays_on_the_branch_its_page_read() {
-    let (server, agent, mut client, lead, lead_session, holder, _gate) =
-        launch_branch_team().await;
+    let (server, agent, mut client, lead, lead_session, holder, _gate) = launch_branch_team().await;
     let (member, member_session) =
         settled_member(&mut client, &agent, &lead, &lead_session, &holder).await;
     let side = side_line(&mut client, &member_session).await;
