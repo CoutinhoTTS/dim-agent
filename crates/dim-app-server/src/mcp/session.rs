@@ -42,7 +42,7 @@ pub fn install(builder: &mut AgentBuilder) {
                 Ok(Box::new(super::publication::ConnectionPlugin::new(
                     value,
                     names.instance(dim_agent_runtime::SESSION_GROUP)?,
-                )?))
+                )))
             },
         )
         .require_part("McpSession")

@@ -319,7 +319,7 @@ A Session row reads its Session from the Session services every language has
 | --- | --- |
 | `sessionIdentity` | `get()` returns `{sessionId, restored}`. |
 | `sessionConfig` | `get()` returns the creation-time SessionConfig in the serde form ToolCall uses. |
-| `sessionLifecycle` | `activated()`, `closing()`, `hold()` and `release(id)`, the phases and activity holds of the Rust `SessionLifecycle`; `hold()` returns the id of a hold the calling row owns, which lasts until `release(id)` or that row's unload. |
+| `sessionLifecycle` | `activated()`, `closing()`, `hold()` and `release(id)`, the phases and activity holds of the Rust `SessionLifecycle`; `hold()` returns the id of a hold the calling row owns, which lasts until `release(id)` or that row's unload. `reportFault` reports a fault, `failure` reads it and `observeFault` subscribes. The calling row releases its subscription with `release(id)` or on unload. |
 
 There is no setup call and no `sessionEvents:<part>` entry: the row registers
 ``ctx.on(`session/${sessionId}`, listener)`` in its `apply` with the id it read. The channel name is
