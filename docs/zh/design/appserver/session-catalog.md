@@ -6,7 +6,7 @@ Issue：[#556](https://github.com/arcships/dim/issues/556)，要求有界的 `/r
 
 客户端用 `session.summaries` 列 Session，而这个回复是从历史构造的：App Server 为每个 Session 读起始于前 256 个事件内的批次找预览，再整条读最后一个事件取时间，一个接一个，回复一个没有页边界的数组。导入 Session 的最后一个事件是一个完整的 `context/compaction`，所以一次列目录会解码整个目录的历史，客户端还要排序并转换全部内容才能画出一行。
 
-目录读取改为有界的工作。SessionStore 保存一份列目录所需的投影——每个 Session 的最后活动时间（`main` 上最新一条属于 Session 自己活动的事件的时间，§3.2）、作为预览的第一条用户输入、以及工作区——由创建事务写入，之后在提交 `main` 每个携带活动的批次的事务里写入。新的内建方法 `session.catalog` 分页读取这份投影：缺省 50 行、不透明的键集游标，`query`、`cwd` 与 `withPreview` 在页边界之前的查询里应用。`session.summaries` 保留合同并读同一份投影，因此两个方法都不读历史。
+目录读取改为有界的工作。SessionStore 保存一份列目录所需的投影——每个 Session 的最后活动时间（默认分支上最新一条属于 Session 自己活动的事件的时间，§3.2）、作为预览的第一条用户输入、以及工作区——由创建事务写入，之后在提交默认分支每个携带活动的批次的事务里写入，并在记录 `branch/default` 的事务里刷新。新的内建方法 `session.catalog` 分页读取这份投影：缺省 50 行、不透明的键集游标，`query`、`cwd` 与 `withPreview` 在页边界之前的查询里应用。`session.summaries` 保留合同并读同一份投影，因此两个方法都不读历史。
 
 - **投影。** 归 SessionStore，随它的批次、并从创建起写入；本页只拥有目录如何被读取（§4）。
 - **方法。** `session.catalog {limit?, cursor?, query?, cwd?, withPreview?, withInternal?, withAcpSessions?, withAutomationSessions?, includeClosed?} -> {sessions, nextCursor?}`（§3.1）。
@@ -53,7 +53,7 @@ Issue：[#556](https://github.com/arcships/dim/issues/556)，要求有界的 `/r
 
 顺序是投影的活动时间，最新在前，Session ID 决定并列的次序，因此一页是某个全序里连续的一段，同一个库总是以同样的方式分页。游标是上一行的键而不是位置：两页之间变得活跃的 Session 移到第一页，后续页既不重复也不跳过任何其他 Session。它还带着取得它时的过滤（§3.1），因此一条页边界只能由同样的 `query`、`cwd`、`withPreview`、`withInternal`、`withAcpSessions`、`withAutomationSessions` 与 `includeClosed` 接着读。一组工作区按同一个顺序跨它的 Session 分页；它的游标在同一集合的任意顺序下继续可用，在其他集合或单个工作区下都不继续。单个工作区的游标在该工作区写成一个元素的数组时继续可用。
 
-**活动时间就是 Session 自己在 `main` 上的活动。** 它是 `main` 上最新一条属于 Session 自己活动的事件的 `create_at`：带用户部分的 `input/message`、`turn/end`、`branch/create`（父分支记下分支 prompt）或 `session/forked`。其余一切都是家事事件——没有用户部分的 `input/message`（宿主注入）、`branch/resume`、`branch/start`、`branch/ended`、`branch/end`、`branch/create-failed`、每一类 `context`/`prompt`/`model`/`step`/`tool`/`approval`/`stop`/`exec`/`permission`/`collaboration` 事件，以及扩展事件——不移动这一行。没有活动事件的 Session 停在创建时间。判断只此一处，写在投影代码旁边，投影的每个写入方都使用它；没有存储的守护进程在 `session.summaries` 里应用同一条选择（§3.3），两条列表不会给出不同答案。
+**活动时间就是 Session 自己在其默认分支上的活动。** 它是 Session 对话所在那条线上最新一条属于 Session 自己活动的事件的 `create_at`：带用户部分的 `input/message`、`turn/end`、`branch/create`（父分支记下分支 prompt）或 `session/forked`。其余一切都是家事事件——没有用户部分的 `input/message`（宿主注入）、`branch/resume`、`branch/start`、`branch/ended`、`branch/end`、`branch/create-failed`、每一类 `context`/`prompt`/`model`/`step`/`tool`/`approval`/`stop`/`exec`/`permission`/`collaboration` 事件，以及扩展事件——不移动这一行。没有活动事件的 Session 停在创建时间。判断只此一处，写在投影代码旁边，投影的每个写入方都使用它；没有存储的守护进程在 `session.summaries` 里应用同一条选择（§3.3），两条列表不会给出不同答案。持久化的 `branch/default` 在它自己的事务里用新默认分支的最新这类事件刷新该行（该线尚无活动时取 Session 的创建时间），移动本身不算活动，所以两条空闲线之间的移动报告移去的那条线，绝不报告离开的那条。这一行的 `sequence` 在存储查询和已加载覆盖两种投影里都是根的，因此加载或卸载 Session 都不会改变它；只有 `running` 与活动时间跟随默认分支（timeline branches §14）。
 
 ### 3.3 `session.summaries`
 

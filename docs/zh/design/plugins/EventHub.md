@@ -169,7 +169,7 @@ sequenceDiagram
   H-->>P: {eventId, deliveries}
 ```
 
-一条分支无论被多少个目标命中，都只投递一次。一个 `to` 条目给出了 `mode` 时用它；否则取匹配的订阅中有效模式最强者，顺序为 `steer` 高于 `queue` 高于 `append`，其中订阅的有效模式是它自己的 `mode`，没有则为类型声明的 `mode`。要求被唤醒的订阅者不会被没有这样要求的订阅者盖过。凡请求可省略 `branchId` 时，它表示该 Session 当前的默认分支：`subscribe` 把该分支记入订阅，`publish` 在开始之前经 `sessions` 数据面解析每个 `to` 条目，因此默认分支无法读取(`session_closed`、`reloading`)的 Session 会拒绝整个 publish，且不写入任何东西。已存订阅的目标永不改变。零个目标不是错误：`deliveries: []`。
+一条分支无论被多少个目标命中，都只投递一次。一个 `to` 条目给出了 `mode` 时用它；否则取匹配的订阅中有效模式最强者，顺序为 `steer` 高于 `queue` 高于 `append`，其中订阅的有效模式是它自己的 `mode`，没有则为类型声明的 `mode`。要求被唤醒的订阅者不会被没有这样要求的订阅者盖过。凡请求可省略 `branchId` 时，它表示该 Session 当前的默认分支：`subscribe` 把该分支记入订阅，`publish` 每个请求一次地经 `sessions` 数据面解析每个 `to` 条目，冷读受 hub 的投递预算约束。publish 先回答进程准入、来源归属和类型，再解析任何目标，所以被拒绝的 publish 绝不恢复冷的 Session，而是回答自己的错误；已准入的 publish 在其 Session 的默认分支无法读取(`session_closed`、`reloading`)时拒绝，且不写入任何东西。已存订阅的目标永不改变。零个目标不是错误：`deliveries: []`。
 
 投递给一条被订阅的分支时，先按该分支与来源取出记录的指南，与当前声明对比(3.3)。二者不同时，它先在该 Session 的锁下把当前指南作为一条带键的 `append` 写出，然后写事件；仅由 `to` 到达的分支没有记录，也不写指南。
 
