@@ -9,7 +9,7 @@ use dim_agent_runtime::{
     QueryOrderKey, QueryOutput, QueryPage, QueryPick, QuerySelect, QuerySpec, QueryValue,
     TimelineQuery,
 };
-use dim_agent_types::{BranchSource, DEFAULT_BRANCH_ID, InputBlock, InputMode, TimelinePosition};
+use dim_agent_types::{BranchSource, InputBlock, InputMode, TimelinePosition};
 
 impl Connection {
     /// Runs the Session's submit checks before writing operator input (Hooks
@@ -34,8 +34,14 @@ impl Connection {
             return Err(RpcError::invalid("text and user are mutually exclusive"));
         }
         let session = self.session(rpc, &params.session_id)?;
-        let branch = params.branch_id.as_deref().unwrap_or(DEFAULT_BRANCH_ID);
-        let publication = session.publication(branch).map_err(RpcError::from)?;
+        // A request that names no line goes to the line the Session's
+        // conversation is on, read once for everything this call does (design
+        // §9, §20.22).
+        let branch = match params.branch_id {
+            Some(branch) => branch,
+            None => session.default_branch().map_err(RpcError::from)?,
+        };
+        let publication = session.publication(&branch).map_err(RpcError::from)?;
         let user = params.user.or_else(|| {
             params.text.map(|text| UserInput {
                 content: vec![ContentBlock::Text { text }],
@@ -101,7 +107,7 @@ impl Connection {
                 &session,
                 SubmitCheckRequest {
                     entry: SubmitEntry::Submit,
-                    branch_id: branch.to_owned(),
+                    branch_id: branch.clone(),
                     user: data.user.clone(),
                     mode: data.effective_mode(),
                 },
@@ -120,7 +126,7 @@ impl Connection {
             }
         };
         let (event, commit) = session
-            .input_commit(data, branch)
+            .input_commit(data, &branch)
             .await
             .map_err(RpcError::from)?;
         // A warning describes the write of this call. A resubmission of a

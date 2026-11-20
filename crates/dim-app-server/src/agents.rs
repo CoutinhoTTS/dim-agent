@@ -14,7 +14,7 @@ use dim_agent_runtime::{
     TimelineReadScope, TimelineReadSegment,
 };
 pub use dim_agent_types::AgentProfile;
-use dim_agent_types::{DEFAULT_BRANCH_ID, ROOT_BRANCH_ID, TimelinePosition};
+use dim_agent_types::{ROOT_BRANCH_ID, TimelinePosition};
 use rutis::host::{
     BoxFuture, CtxHost, DynPlugin, Effect, ErrorKind, FiberState, FiberView, Key, TypeKey,
 };
@@ -179,6 +179,15 @@ struct SessionSlot {
     /// close of it must outlive the slot.
     deleted: AtomicBool,
 }
+/// The cutoffs one Session summary reads at: its preview stays on the root,
+/// where the Session's first words were written, while its activity follows
+/// the line the conversation is on (design §5, §15).
+pub(crate) struct SummaryCutoff {
+    pub(crate) preview_through: u64,
+    pub(crate) activity_through: u64,
+    pub(crate) default: String,
+}
+
 /// An accepted request or subscription pins one loaded instance.
 pub(crate) struct SessionUse {
     pub host: Arc<AgentHost>,
@@ -1059,10 +1068,10 @@ impl AgentIndex {
         for summary in &mut page.sessions {
             summary.closed = closed.contains(&summary.session.session_id);
             if let Some((_, session)) = self.session(&summary.session.session_id) {
-                match session
-                    .state(DEFAULT_BRANCH_ID)
-                    .and_then(|state| Ok((state.running, session.sequence(DEFAULT_BRANCH_ID)?)))
-                {
+                match session.default_branch().and_then(|default| {
+                    let running = session.state(&default)?.running;
+                    Ok((running, session.sequence(&default)?))
+                }) {
                     Ok((running, sequence)) => {
                         summary.session.running = running;
                         summary.session.sequence = sequence;
@@ -1107,6 +1116,9 @@ impl AgentIndex {
             },
             _ => (None, None),
         };
+        // The record reports the line the Session's conversation is on, so an
+        // attached client centres the default branch (design §14, §15).
+        let default = session.default_branch()?;
         Ok(crate::protocol::SessionInfo {
             session_id: session.id().to_owned(),
             cwd: session.config().cwd.clone(),
@@ -1115,10 +1127,8 @@ impl AgentIndex {
                 model_id: session.config().model.model_id.clone(),
             },
             created_at: session.created_at(),
-            running: session
-                .state(DEFAULT_BRANCH_ID)
-                .is_ok_and(|state| state.running),
-            sequence: session.sequence(DEFAULT_BRANCH_ID)?,
+            running: session.state(&default).is_ok_and(|state| state.running),
+            sequence: session.sequence(&default)?,
             attached_clients: 0,
             agent_id: (version >= 3).then(|| host.agent_id.clone()),
             origin,
@@ -1127,16 +1137,20 @@ impl AgentIndex {
         })
     }
 
+    /// One Session's preview from its root and its activity from the line its
+    /// conversation is on (design §5, §15): the preview is the Session's first
+    /// words, which stay where they were written, and a Session reads as recent
+    /// by its default branch.
     pub(crate) async fn session_summary(
         &self,
         id: &str,
-        through: u64,
+        cutoff: SummaryCutoff,
         created_at: u64,
     ) -> dim_agent_runtime::Result<(Option<String>, u64)> {
         let query = TimelineQuery {
             scope: TimelineQueryScope::Branch,
             from: None,
-            through: Some(through),
+            through: Some(cutoff.preview_through),
             include_publishing: false,
             query: QuerySpec {
                 filter: Some(QueryFilter::In {
@@ -1161,7 +1175,7 @@ impl AgentIndex {
             }),
         };
         let loaded = match self.session(id) {
-            Some((_, session)) => match session.query(DEFAULT_BRANCH_ID, query.clone()).await {
+            Some((_, session)) => match session.query(ROOT_BRANCH_ID, query.clone()).await {
                 Ok(reply) => Some(reply.result),
                 Err(_) if session.is_unloading() => None,
                 Err(error) => return Err(error),
@@ -1178,14 +1192,14 @@ impl AgentIndex {
                 let scope = TimelineReadScope {
                     key: TimelineKey {
                         session_id: id.into(),
-                        branch_id: DEFAULT_BRANCH_ID.into(),
+                        branch_id: ROOT_BRANCH_ID.into(),
                     },
-                    through,
+                    through: cutoff.preview_through,
                     segments: vec![TimelineReadSegment {
-                        branch_id: DEFAULT_BRANCH_ID.into(),
+                        branch_id: ROOT_BRANCH_ID.into(),
                         from: 1,
-                        through,
-                        stored_through: through,
+                        through: cutoff.preview_through,
+                        stored_through: cutoff.preview_through,
                         tail: vec![],
                     }],
                 };
@@ -1229,17 +1243,19 @@ impl AgentIndex {
                     .then(|| crate::storage::truncate_preview(&text, Self::SUMMARY_PREVIEW_CHARS))
             });
         let updated_at = self
-            .latest_activity(id, through)
+            .latest_activity(id, &cutoff.default, cutoff.activity_through)
             .await?
             .unwrap_or(created_at);
         Ok((preview, updated_at))
     }
 
-    /// The newest Session activity timestamp on main through the fixed cutoff.
-    /// Idle unload falls back to persisted facts, which include all published facts.
+    /// The newest Session activity timestamp on `default`, the line the
+    /// Session's conversation is on, through the fixed cutoff. Idle unload
+    /// falls back to persisted facts, which include all published facts.
     async fn latest_activity(
         &self,
         id: &str,
+        default: &str,
         through: u64,
     ) -> dim_agent_runtime::Result<Option<u64>> {
         let query = TimelineQuery {
@@ -1291,7 +1307,7 @@ impl AgentIndex {
             }),
         };
         let loaded = match self.session(id) {
-            Some((_, session)) => match session.query(ROOT_BRANCH_ID, query.clone()).await {
+            Some((_, session)) => match session.query(default, query.clone()).await {
                 Ok(reply) => Some(reply.result),
                 Err(_) if session.is_unloading() => None,
                 Err(error) => return Err(error),
@@ -1308,11 +1324,11 @@ impl AgentIndex {
                 let scope = TimelineReadScope {
                     key: TimelineKey {
                         session_id: id.into(),
-                        branch_id: ROOT_BRANCH_ID.into(),
+                        branch_id: default.into(),
                     },
                     through,
                     segments: vec![TimelineReadSegment {
-                        branch_id: ROOT_BRANCH_ID.into(),
+                        branch_id: default.into(),
                         from: 1,
                         through,
                         stored_through: through,

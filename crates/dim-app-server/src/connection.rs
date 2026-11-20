@@ -718,9 +718,8 @@ impl Connection {
             Call::Stop(p) => (Some(&p.session_id), Some(&p.branch_id)),
             Call::Idle(p) => (Some(&p.session_id), Some(&p.branch_id)),
             Call::ApprovalRespond(p) => (Some(&p.session_id), Some(&p.branch_id)),
-            Call::PermissionGet(p) | Call::SessionSkills(p) | Call::PromptRefresh(p) => {
-                (Some(&p.session_id), None)
-            }
+            Call::PermissionGet(p) | Call::SessionSkills(p) => (Some(&p.session_id), None),
+            Call::PromptRefresh(p) => (Some(&p.session_id), None),
             Call::PermissionUpdate(p) => (Some(&p.session_id), None),
             Call::ExecStop(p) => (Some(&p.session_id), None),
             Call::ModelUpdate(p) => (Some(&p.session_id), None),
@@ -825,20 +824,24 @@ impl Connection {
             _ => (None, None),
         };
         if let Some(branch) = branch {
+            // A v3 caller may omit the line on the calls that act on the
+            // Session's default branch (design §9, §15, §20.22); every other
+            // call names one, and a v1 caller has none to name.
             match (self.protocol_version(), branch) {
                 (1, None) => {}
                 (2..=4, Some(id)) if !id.is_empty() => {}
+                (3..=4, None) if call.defaults_to_the_default_branch() => {}
                 _ => {
-                    return Err(RpcError::invalid(
-                        "branchId is required in v2-v4 and absent in v1",
-                    ));
+                    return Err(RpcError::invalid(match self.protocol_version() {
+                        1 => "branchId must be absent in v1",
+                        _ => "branchId is required for this method",
+                    }));
                 }
             }
         }
         let product_branch = match call {
-            Call::PermissionGet(p) | Call::SessionSkills(p) | Call::PromptRefresh(p) => {
-                Some(p.branch_id.as_str())
-            }
+            Call::PermissionGet(p) | Call::SessionSkills(p) => Some(p.branch_id.as_str()),
+            Call::PromptRefresh(p) => p.branch_id.as_deref(),
             Call::PermissionUpdate(p) => {
                 if p.policy
                     .allowed_tools
@@ -851,7 +854,7 @@ impl Connection {
                 Some(p.branch_id.as_str())
             }
             Call::ExecStop(p) => Some(p.branch_id.as_str()),
-            Call::ModelUpdate(p) => Some(p.branch_id.as_str()),
+            Call::ModelUpdate(p) => p.branch_id.as_deref(),
             _ => None,
         };
         if product_branch.is_some_and(str::is_empty) {
@@ -942,9 +945,8 @@ impl Connection {
             Call::Stop(p) => Some(&p.session_id),
             Call::Idle(p) => Some(&p.session_id),
             Call::ApprovalRespond(p) => Some(&p.session_id),
-            Call::PermissionGet(p) | Call::SessionSkills(p) | Call::PromptRefresh(p) => {
-                Some(&p.session_id)
-            }
+            Call::PermissionGet(p) | Call::SessionSkills(p) => Some(&p.session_id),
+            Call::PromptRefresh(p) => Some(&p.session_id),
             Call::PermissionUpdate(p) => Some(&p.session_id),
             Call::ExecStop(p) => Some(&p.session_id),
             Call::ModelUpdate(p) => Some(&p.session_id),
@@ -1179,37 +1181,46 @@ impl Connection {
                             .is_some_and(|recorded| recorded <= self.protocol_version())
                     })
                     .map(|(host, s)| {
-                        let status = s.state(DEFAULT_BRANCH_ID).map_err(RpcError::from)?;
-                        Ok(SessionInfo {
-                            session_id: s.id().to_owned(),
-                            cwd: s.config().cwd.clone(),
-                            model: dim_agent_types::ModelId {
-                                provider_id: s.config().model.provider_id.clone(),
-                                model_id: s.config().model.model_id.clone(),
+                        let default = s.default_branch().map_err(RpcError::from)?;
+                        let status = s.state(&default).map_err(RpcError::from)?;
+                        let cutoff = crate::agents::SummaryCutoff {
+                            preview_through: s.sequence(ROOT_BRANCH_ID).map_err(RpcError::from)?,
+                            activity_through: s.sequence(&default).map_err(RpcError::from)?,
+                            default,
+                        };
+                        Ok((
+                            SessionInfo {
+                                session_id: s.id().to_owned(),
+                                cwd: s.config().cwd.clone(),
+                                model: dim_agent_types::ModelId {
+                                    provider_id: s.config().model.provider_id.clone(),
+                                    model_id: s.config().model.model_id.clone(),
+                                },
+                                created_at: s.created_at(),
+                                running: status.running,
+                                sequence: cutoff.activity_through,
+                                attached_clients: 0,
+                                agent_id: Some(host.agent_id.clone()),
+                                origin: None,
+                                parent_session_id: None,
+                                title: Some(crate::storage::TitleFields::default()),
                             },
-                            created_at: s.created_at(),
-                            running: status.running,
-                            sequence: s.sequence(DEFAULT_BRANCH_ID).map_err(RpcError::from)?,
-                            attached_clients: 0,
-                            agent_id: Some(host.agent_id.clone()),
-                            origin: None,
-                            parent_session_id: None,
-                            title: Some(crate::storage::TitleFields::default()),
-                        })
+                            cutoff,
+                        ))
                     })
                     .collect::<Result<Vec<_>, RpcError>>();
                 let mut records = match records {
                     Ok(records) => records,
                     Err(error) => return Some(Err(error)),
                 };
-                for record in &mut records {
+                for (record, _) in &mut records {
                     record.attached_clients = self.hub.attached_clients(&record.session_id);
                 }
                 let mut summaries = Vec::with_capacity(records.len());
-                for session in records {
+                for (session, cutoff) in records {
                     let summary = rpc
                         .index
-                        .session_summary(&session.session_id, session.sequence, session.created_at)
+                        .session_summary(&session.session_id, cutoff, session.created_at)
                         .await;
                     let (preview, updated_at) = match summary {
                         Ok(summary) => summary,
@@ -1271,10 +1282,16 @@ impl Connection {
             Call::Keys(params) => self.keys(rpc, params).await,
             Call::Stop(params) => match self.session(rpc, &params.session_id) {
                 Ok(session) => {
-                    let branch = params.branch_id.as_deref().unwrap_or(DEFAULT_BRANCH_ID);
+                    let branch = match params.branch_id {
+                        Some(branch) => branch,
+                        None => match session.default_branch() {
+                            Ok(branch) => branch,
+                            Err(error) => return Some(Err(error.into())),
+                        },
+                    };
                     let result = session
                         .stop(
-                            branch,
+                            &branch,
                             params
                                 .reason
                                 .unwrap_or_else(|| "User requested stop".into()),
@@ -1293,12 +1310,18 @@ impl Connection {
             },
             Call::Idle(params) => match self.session(rpc, &params.session_id) {
                 Ok(session) => {
-                    let branch = params.branch_id.as_deref().unwrap_or(DEFAULT_BRANCH_ID);
+                    let branch = match params.branch_id {
+                        Some(branch) => branch,
+                        None => match session.default_branch() {
+                            Ok(branch) => branch,
+                            Err(error) => return Some(Err(error.into())),
+                        },
+                    };
                     let result = tokio::select! {
                         biased;
                         _ = self.closed.cancelled() => return None,
                         _ = rpc.unloading.cancelled() => Err(RpcError::reloading()),
-                        result = session.idle(branch) => result.map_err(RpcError::from),
+                        result = session.idle(&branch) => result.map_err(RpcError::from),
                     };
                     match result {
                         Ok(sequence) => self.barrier(sequence, delivery, &rpc.unloading).await,
@@ -1560,9 +1583,13 @@ impl Connection {
                 Reply::SessionSkills(SessionSkillsResult { skills })
             }
             Call::ModelUpdate(p) => {
-                if p.branch_id != ROOT_BRANCH_ID {
-                    return Err(RpcError::invalid("Model updates only support main"));
-                }
+                // The update acts on the line it names, and on the default
+                // branch when it names none (design §20.23), instead of
+                // refusing every line but the root.
+                let branch = match p.branch_id {
+                    Some(branch) => branch,
+                    None => session.default_branch().map_err(RpcError::from)?,
+                };
                 let mut startup_admission = None;
                 let mut model = if let Some(startup) = p.startup {
                     if self.entry != Entry::Local || rpc.config.product_home.is_none() {
@@ -1578,7 +1605,7 @@ impl Connection {
                         ));
                     }
                     let state = session
-                        .get::<dim_agent_capabilities::prompt_state::PromptSnapshot>(&p.branch_id)?
+                        .get::<dim_agent_capabilities::prompt_state::PromptSnapshot>(&branch)?
                         .ok_or_else(RpcError::reloading)?;
                     let current = state
                         .configuration
@@ -1635,7 +1662,7 @@ impl Connection {
                             }
                             let state = session
                                 .get::<dim_agent_capabilities::prompt_state::PromptSnapshot>(
-                                    &p.branch_id,
+                                    &branch,
                                 )?
                                 .ok_or_else(RpcError::reloading)?;
                             let current = state.configuration.ok_or_else(|| {
@@ -1663,7 +1690,7 @@ impl Connection {
                 // branch adopted: the record names the profile whose prompt
                 // the branch runs, so it carries over until another adoption.
                 if let Some(agent_id) = session
-                    .get::<dim_agent_capabilities::prompt_state::PromptSnapshot>(&p.branch_id)?
+                    .get::<dim_agent_capabilities::prompt_state::PromptSnapshot>(&branch)?
                     .and_then(|state| state.configuration)
                     .and_then(|configuration| configuration.metadata)
                     .and_then(|metadata| metadata.agent_id)
@@ -1682,7 +1709,7 @@ impl Connection {
                             model: Some(model.clone()),
                             ..Default::default()
                         },
-                        &p.branch_id,
+                        &branch,
                     )
                     .await?;
                 let outcome = configuration_outcome(outcome)?;
@@ -1696,13 +1723,14 @@ impl Connection {
                 Reply::ModelUpdate(ModelUpdateResult { model: id, outcome })
             }
             Call::PromptRefresh(p) => {
-                if p.branch_id != ROOT_BRANCH_ID {
-                    return Err(RpcError::invalid("Prompt refresh only supports main"));
-                }
+                let branch = match p.branch_id {
+                    Some(branch) => branch,
+                    None => session.default_branch().map_err(RpcError::from)?,
+                };
                 let outcome = session
                     .configure(
                         dim_agent_capabilities::prompt_sources::refresh_update(),
-                        &p.branch_id,
+                        &branch,
                     )
                     .await?;
                 Reply::Configuration(ConfigurationResult {

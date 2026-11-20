@@ -129,7 +129,7 @@ pub enum Call {
     ExecStop(StopExec),
     SessionSkills(BranchRequest),
     ModelUpdate(UpdateModel),
-    PromptRefresh(BranchRequest),
+    PromptRefresh(PromptRefresh),
     SessionMcp(SessionId),
     McpRefresh(SessionId),
     McpAppWidget(McpAppWidget),
@@ -169,6 +169,11 @@ impl Call {
             self,
             Self::WebOpen(_) | Self::WebToggle(_) | Self::WebDisable | Self::WebStatus
         )
+    }
+    /// Methods that act on the line the Session's conversation is on when the
+    /// caller names none (design §9, §15).
+    pub(crate) fn defaults_to_the_default_branch(&self) -> bool {
+        matches!(self, Self::Submit(_) | Self::Stop(_) | Self::Idle(_))
     }
     /// Methods of the UI registry (Tui design §3.6); local transport only.
     pub(crate) fn is_ui_host(&self) -> bool {
@@ -387,7 +392,9 @@ pub struct StopExec {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UpdateModel {
     pub session_id: String,
-    pub branch_id: String,
+    /// The line the update acts on; the default branch when omitted.
+    #[serde(default, deserialize_with = "optional_non_null")]
+    pub branch_id: Option<String>,
     #[serde(default, deserialize_with = "optional_non_null")]
     pub provider_id: Option<String>,
     #[serde(default, deserialize_with = "optional_non_null")]
@@ -865,6 +872,16 @@ pub struct BranchEnd {
 pub struct BranchSetDefault {
     pub session_id: String,
     pub branch_id: String,
+}
+
+/// `session.prompt.refresh`: the line whose prompt sources are re-read; the
+/// default branch when omitted.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PromptRefresh {
+    pub session_id: String,
+    #[serde(default, deserialize_with = "optional_non_null")]
+    pub branch_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

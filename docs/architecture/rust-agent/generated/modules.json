@@ -16202,7 +16202,6 @@
       "from": "dim_agent_capabilities::prompt_suggestion",
       "to": "dim_agent_types::events",
       "references": [
-        "path DEFAULT_BRANCH_ID",
         "path EventKind",
         "path EventKind::InputApplied",
         "path EventKind::InputMessage",
@@ -16214,7 +16213,6 @@
         "path EventKind::ToolUseStart",
         "path EventKind::TurnEnd",
         "path EventKind::TurnStart",
-        "use dim_agent_types::DEFAULT_BRANCH_ID",
         "use dim_agent_types::EventKind",
         "use dim_agent_types::TurnOutcome"
       ]
@@ -16879,11 +16877,9 @@
       "from": "dim_agent_capabilities::shell_input",
       "to": "dim_agent_types::events",
       "references": [
-        "path DEFAULT_BRANCH_ID",
         "path InputMessageData",
         "path InputMessageData::default",
         "path InputMode::Append",
-        "use dim_agent_types::DEFAULT_BRANCH_ID",
         "use dim_agent_types::InputMessageData",
         "use dim_agent_types::InputMode"
       ]
@@ -24976,10 +24972,8 @@
       "from": "dim_app_server::agents",
       "to": "dim_agent_types::events",
       "references": [
-        "path DEFAULT_BRANCH_ID",
         "path ROOT_BRANCH_ID",
         "path dim_agent_types::AgentEvent",
-        "use dim_agent_types::DEFAULT_BRANCH_ID",
         "use dim_agent_types::ROOT_BRANCH_ID"
       ]
     },
@@ -25231,14 +25225,6 @@
       "references": [
         "path Names",
         "use dim_agent_runtime::Names"
-      ]
-    },
-    {
-      "from": "dim_app_server::agents::configuration",
-      "to": "dim_agent_types::events",
-      "references": [
-        "path DEFAULT_BRANCH_ID",
-        "use dim_agent_types::DEFAULT_BRANCH_ID"
       ]
     },
     {
@@ -26589,7 +26575,6 @@
         "path CollaborationTarget::Agent",
         "path CollaborationTarget::Member",
         "path CollaborationTarget::Temporary",
-        "path DEFAULT_BRANCH_ID",
         "path EventKind",
         "path EventKind::CollaborationCancel",
         "path EventKind::CollaborationClose",
@@ -26617,7 +26602,6 @@
         "path InterruptScope",
         "path InterruptScope::Branch",
         "path InterruptScope::Turn",
-        "path ROOT_BRANCH_ID",
         "path TurnOutcome::Cancelled",
         "path TurnOutcome::Completed",
         "path TurnOutcome::Failed",
@@ -27357,6 +27341,7 @@
         "path SessionUse",
         "path crate::agents::AgentOpError::Settle",
         "path crate::agents::AgentOpError::Unload",
+        "path crate::agents::SummaryCutoff",
         "path crate::agents::session_config",
         "use crate::agents::AgentIndex",
         "use crate::agents::DeleteOutcome",
@@ -28035,7 +28020,6 @@
       "references": [
         "path BranchSource::Host",
         "path BranchSource::User",
-        "path DEFAULT_BRANCH_ID",
         "path InputBlock",
         "path InputBlock::Raw",
         "path InputMessageData",
@@ -28044,7 +28028,6 @@
         "path UserInput",
         "path dim_agent_types::AgentEvent",
         "use dim_agent_types::BranchSource",
-        "use dim_agent_types::DEFAULT_BRANCH_ID",
         "use dim_agent_types::InputBlock",
         "use dim_agent_types::InputMode"
       ]
@@ -53225,14 +53208,6 @@
     },
     {
       "from": "dim_goal::session",
-      "to": "dim_agent_types::events",
-      "references": [
-        "path DEFAULT_BRANCH_ID",
-        "use dim_agent_types::DEFAULT_BRANCH_ID"
-      ]
-    },
-    {
-      "from": "dim_goal::session",
       "to": "dim_agent_types::tool",
       "references": [
         "path ToolCall",
@@ -53290,8 +53265,8 @@
       "from": "dim_goal::session::tests",
       "to": "dim_goal::session",
       "references": [
-        "path branch_of",
-        "use super::branch_of"
+        "path named_branch",
+        "use super::named_branch"
       ]
     },
     {

@@ -29,8 +29,7 @@ use dim_agent_runtime::{
     SessionLifecycle,
 };
 use dim_agent_types::{
-    DEFAULT_BRANCH_ID, EventKind, Message, MessageContent, MessagePart, ModelRequest, Role,
-    TurnOutcome,
+    EventKind, Message, MessageContent, MessagePart, ModelRequest, Role, TurnOutcome,
 };
 use futures_util::StreamExt;
 use rutis::Ctx;
@@ -773,7 +772,13 @@ impl Part {
         let SessionBroadcastEvent::Event { branch_id, event } = record else {
             return;
         };
-        if branch_id != DEFAULT_BRANCH_ID {
+        // The suggestion follows the line the Session's conversation is on: a
+        // move changes which line's turn the user's next request continues
+        // (design §9, §15).
+        let Ok(default) = self.hosts.tree.default_branch() else {
+            return;
+        };
+        if branch_id != &default {
             return;
         }
         // The notice is emitted under the state lock, so the order of
@@ -1100,7 +1105,10 @@ impl Part {
     }
 
     async fn compaction_due(&self, max_chars: u32, cancel: CancellationToken) -> bool {
-        let Ok(branch) = self.hosts.tree.get(DEFAULT_BRANCH_ID) else {
+        let Ok(default) = self.hosts.tree.default_branch() else {
+            return false;
+        };
+        let Ok(branch) = self.hosts.tree.get(&default) else {
             return false;
         };
         let Ok(preparation) = branch.service::<ContextPreparation>() else {
