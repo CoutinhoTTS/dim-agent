@@ -63,7 +63,9 @@ fn release_flag(release: bool) -> bool {
     release
 }
 
-/// Whether the release flow produced this build.
+/// Whether this process behaves as a released build: the compiled release mark
+/// installed by the binary crate, or in debug builds the `DIM_TEST_RELEASE_BUILD`
+/// override read during [`install`]. A release build ignores the override.
 pub fn release() -> bool {
     RELEASE.get().copied().unwrap_or(false)
 }
