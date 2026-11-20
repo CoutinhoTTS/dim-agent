@@ -244,7 +244,7 @@ watch([() => rows.value.length, () => virtualizer.value.getTotalSize(), () => pr
   if (following.value) void toEnd()
 })
 watch(() => props.rows, (next, previous) => {
-  if (following.value || unseen.value) return
+  if (following.value || unseen.value || previous.length === 0) return
   const shown = new Map(previous.map(row => [row.key, row]))
   const lastIndex = next.findIndex(row => row.key === previous.at(-1)?.key)
   unseen.value = next.some((row, index) => shown.has(row.key) ? shown.get(row.key) !== row : index > lastIndex)

@@ -475,6 +475,23 @@ describe("WebChatTimeline history and following", () => {
     expect(onEarlier).toHaveBeenCalledTimes(1)
   })
 
+  it("does not mark an earlier page loaded into an empty window as new output", async () => {
+    const state = shallowReactive<Record<string, unknown>>({ rows: [], earlier: true, running: false })
+    const onEarlier = vi.fn(() => { state.loadingEarlier = true })
+    state.onEarlier = onEarlier
+    const { root } = mountWith([], { props: state })
+    await idle()
+    root.querySelector<HTMLButtonElement>("[data-testid='web-chat-earlier'] button")!.click()
+    expect(onEarlier).toHaveBeenCalledTimes(1)
+
+    state.rows = project(turns(3, 1)).rows
+    state.loadingEarlier = false
+    await idle()
+    const jump = root.querySelector("[data-testid='web-chat-jump-latest']")
+    expect(jump?.textContent).toContain("Return to latest")
+    expect(jump?.textContent).not.toContain("New messages")
+  })
+
   it("loads earlier once when the reader scrolls up to the row, one request at a time", async () => {
     const state = shallowReactive<Record<string, unknown>>({ rows: project(turns(8, 1)).rows, earlier: true, loadingEarlier: false })
     const onEarlier = vi.fn(() => { state.loadingEarlier = true })
@@ -745,6 +762,46 @@ describe("WebChatTimeline history and following", () => {
     await idle()
     const top = viewport.scrollTop
     expect(viewport.scrollHeight - top - VIEWPORT_PX).toBeGreaterThan(96)
+    expect(root.querySelector("[data-testid='web-chat-jump-latest']"), "the pill returns").not.toBeNull()
+
+    for (const item of turns(1, 101)) projection.apply(item)
+    state.rows = [...projection.rows]
+    await idle()
+    expect(viewport.scrollTop, "output does not pull the reader back").toBe(top)
+  })
+
+  it("stops following when the jump's scroll ends short of the end", async () => {
+    const projection = project(turns(6, 1))
+    const state = shallowReactive<Record<string, unknown>>({ rows: [...projection.rows] })
+    const { root } = mountWith([], { props: state })
+    await idle()
+    await scrollTo(root, 0)
+    const viewport = viewportOf(root)
+    let step: ReturnType<typeof setTimeout> | undefined
+    let target = 0
+    const animate = (): void => {
+      step = undefined
+      const goal = Math.min(target, viewport.scrollHeight - VIEWPORT_PX)
+      if (viewport.scrollTop === goal) return
+      viewport.scrollTop = Math.min(goal, viewport.scrollTop + 300)
+      step = setTimeout(animate, 5)
+    }
+    viewport.scrollTo = ((options: ScrollToOptions) => {
+      target = options.top!
+      if (options.behavior === "smooth") step ??= setTimeout(animate, 5)
+      else viewport.scrollTop = target
+    }) as Element["scrollTo"]
+
+    root.querySelector<HTMLButtonElement>("[data-testid='web-chat-jump-latest']")!.click()
+    await vi.waitFor(() => expect(viewport.scrollTop).toBeGreaterThanOrEqual(600))
+    clearTimeout(step)
+    step = undefined
+    viewport.scrollTop += 300
+    await idle()
+    const top = viewport.scrollTop
+    expect(viewport.scrollHeight - top - VIEWPORT_PX).toBeGreaterThan(96)
+    viewport.dispatchEvent(new Event("scrollend"))
+    await idle()
     expect(root.querySelector("[data-testid='web-chat-jump-latest']"), "the pill returns").not.toBeNull()
 
     for (const item of turns(1, 101)) projection.apply(item)
