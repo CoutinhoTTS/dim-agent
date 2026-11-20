@@ -76,6 +76,8 @@ struct Inner {
     default_once: Mutex<HashMap<String, &'static str>>,
     /// The `defaultBranchId` reads answered (timeline branches §20.22).
     defaults: AtomicUsize,
+    /// The `lookup` calls answered (design §2.4).
+    lookups: AtomicUsize,
     sequence: AtomicU64,
     gate: Mutex<Option<Arc<Gate>>>,
 }
@@ -101,6 +103,7 @@ impl Default for FakeSessions {
                 default_failures: Mutex::new(HashMap::new()),
                 default_once: Mutex::new(HashMap::new()),
                 defaults: AtomicUsize::new(0),
+                lookups: AtomicUsize::new(0),
                 sequence: AtomicU64::new(0),
                 gate: Mutex::new(None),
             }),
@@ -163,6 +166,10 @@ impl FakeSessions {
     pub fn default_reads(&self) -> usize {
         self.inner.defaults.load(Ordering::SeqCst)
     }
+    /// How many `lookup` calls the fixture answered (design §2.4).
+    pub fn lookups(&self) -> usize {
+        self.inner.lookups.load(Ordering::SeqCst)
+    }
     /// Answers any input whose submission id contains `needle` with `code`,
     /// so one guide write of a creation fails while its others succeed
     /// (design §3.3).
@@ -221,6 +228,7 @@ impl HostDispatch for FakeSessions {
         match method {
             // The `sessions.lookup` reply (design §2.4).
             "lookup" => {
+                self.inner.lookups.fetch_add(1, Ordering::SeqCst);
                 let key = format!(
                     "{}|{}|{}",
                     write["sessionId"].as_str().unwrap_or_default(),

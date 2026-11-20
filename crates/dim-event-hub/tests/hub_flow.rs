@@ -553,10 +553,11 @@ async fn deleting_a_subscribed_session_removes_its_subscriptions() {
 
 /// EventHub §9.1 with a delete and a subscribe in flight. A write held on
 /// the store keeps the delete inside `delete_session` with the Session's
-/// admission gate in hand; the subscribe then waits for that gate in
-/// `acquire`, holding the EventHub Session lock across `sessions.input`.
-/// The delete must release the gate before it announces: its listener takes
-/// that lock, so announcing under the gate would deadlock the two.
+/// admission gate in hand; the subscribe names its branch, takes the EventHub
+/// Session lock and then waits for that gate in `acquire`, across
+/// `sessions.input`. The delete must release the gate before it announces: its
+/// listener takes that lock, so announcing under the gate would deadlock the
+/// two.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_delete_announces_after_its_gate_is_released() {
     let home = home();
@@ -596,7 +597,7 @@ async fn a_delete_announces_after_its_gate_is_released() {
         subscriber
             .rpc(
                 "eventhub.subscribe",
-                json!({"types": ["im.*"], "target": {"sessionId": target}}),
+                json!({"types": ["im.*"], "target": {"sessionId": target, "branchId": "main"}}),
             )
             .await
     });
