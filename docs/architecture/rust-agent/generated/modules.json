@@ -16203,6 +16203,7 @@
       "to": "dim_agent_types::events",
       "references": [
         "path EventKind",
+        "path EventKind::BranchDefault",
         "path EventKind::InputApplied",
         "path EventKind::InputMessage",
         "path EventKind::ModelCall",
@@ -25071,10 +25072,12 @@
         "path AgentInfo",
         "path CreateWorktree",
         "path SessionOrigin",
+        "path crate::protocol::BranchCursor",
         "path crate::protocol::Catalog",
         "path crate::protocol::CatalogResult",
         "path crate::protocol::PROTOCOL_VERSION",
         "path crate::protocol::SessionInfo",
+        "path crate::protocol::SessionRecord",
         "path crate::protocol::check_session_id",
         "use crate::protocol::AgentInfo",
         "use crate::protocol::CreateWorktree",
@@ -27264,6 +27267,7 @@
       "from": "dim_app_server::connection",
       "to": "dim_agent_runtime::error",
       "references": [
+        "path AgentError",
         "path AgentError::Cancelled",
         "path AgentError::Closed",
         "path AgentError::InvalidInput",
@@ -27341,6 +27345,8 @@
       "to": "dim_app_server",
       "references": [
         "path ServerConfig",
+        "path crate::BranchesHold",
+        "path crate::BranchesHold::default",
         "path crate::FollowHold",
         "path crate::FollowHold::default",
         "use crate::ServerConfig"
@@ -27855,6 +27861,7 @@
         "path Reply::Attach",
         "path RequestId",
         "path SessionInfo",
+        "path SessionRecord",
         "path StateNotice"
       ]
     },
@@ -35766,6 +35773,7 @@
         "path super::catalog::activity",
         "path super::catalog::create",
         "path super::catalog::initialize_session_catalog",
+        "path super::catalog::refresh_activity",
         "path super::catalog::refresh_preview"
       ]
     },
