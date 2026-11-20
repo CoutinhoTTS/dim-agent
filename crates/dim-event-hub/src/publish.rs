@@ -117,8 +117,6 @@ pub(crate) async fn publish(
     request: PublishRequest,
 ) -> Result<Value, EventHubError> {
     validate_publish(&request)?;
-    let to = resolved_to(&shared, request.to).await?;
-    let request = PublishRequest { to, ..request };
     let activity = shared
         .activity
         .take_hold()
@@ -144,6 +142,11 @@ pub(crate) async fn publish(
                 request.source, request.r#type
             ))
         })?;
+    // Admission, source ownership and the type all answer first: only an
+    // admitted publish resolves its omitted targets, so a refused one never
+    // restores a cold Session (design §2.3, timeline branches §20.22).
+    let to = resolved_to(&shared, request.to).await?;
+    let request = PublishRequest { to, ..request };
     // Once the publish starts it runs to completion in a task EventHub owns:
     // a caller that drops its reply, or a reload, neither stops it nor frees
     // the event lock (design §2.4).
@@ -156,8 +159,9 @@ pub(crate) async fn publish(
 }
 
 /// One explicit `to` target with its branch filled in (timeline branches
-/// §20.22); `publish` resolves them once per request before the task starts,
-/// reading a Session named by two entries once.
+/// §20.22); an admitted `publish` resolves them once per request before the
+/// task starts, reading a Session named by two entries once and holding the
+/// hub's delivery budget across each cold read.
 async fn resolved_to(
     shared: &Shared,
     to: Vec<crate::model::ToTarget>,
@@ -169,7 +173,9 @@ async fn resolved_to(
             let branch_id = match defaults.get(&target.session_id) {
                 Some(branch_id) => branch_id.clone(),
                 None => {
+                    let permit = shared.state.delivery_permit().await;
                     let branch_id = shared.default_branch(&target.session_id).await?;
+                    drop(permit);
                     defaults.insert(target.session_id.clone(), branch_id.clone());
                     branch_id
                 }

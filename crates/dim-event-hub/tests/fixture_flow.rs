@@ -706,3 +706,56 @@ async fn the_subscription_service_answers_the_same_through_the_binding_and_the_f
         Some(0)
     );
 }
+
+/// A publish refused before it is admitted resolves no target branch: the
+/// source's row and the type answer first, so a cold target is never restored
+/// and its `defaultBranchId` is never read (timeline branches §20.22).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_refused_publish_reads_no_target_default() {
+    let (_directory, fixture) = mounted().await;
+    let mut unknown_source = event_to("refused-source", &["cold-a"]);
+    unknown_source.source = "ci".into();
+    unknown_source.r#type = "ci.build".into();
+    let error = fixture
+        .producer
+        .publish(unknown_source)
+        .await
+        .expect_err("the source is refused");
+    assert_eq!(error.code, "unknown_source", "{error:?}");
+    assert_eq!(
+        fixture.sessions.default_reads(),
+        0,
+        "no target branch was resolved"
+    );
+
+    let mut unknown_type = event_to("refused-type", &["cold-b"]);
+    unknown_type.r#type = "im.other".into();
+    let error = fixture
+        .producer
+        .publish(unknown_type)
+        .await
+        .expect_err("the type is refused");
+    assert_eq!(error.code, "unknown_type", "{error:?}");
+    assert_eq!(
+        fixture.sessions.default_reads(),
+        0,
+        "no target branch was resolved"
+    );
+
+    // An admitted publish resolves one omitted branch per Session, once.
+    let receipt = fixture
+        .producer
+        .publish(event_to("admitted", &["cold-c", "cold-c"]))
+        .await
+        .unwrap();
+    assert_eq!(
+        receipt["deliveries"].as_array().unwrap().len(),
+        1,
+        "{receipt}"
+    );
+    assert_eq!(
+        fixture.sessions.default_reads(),
+        1,
+        "one read for a Session named twice: {receipt}"
+    );
+}

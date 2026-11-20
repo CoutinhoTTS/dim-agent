@@ -69,6 +69,8 @@ struct Inner {
     accepted: Mutex<HashMap<String, (String, u64)>>,
     /// Session ids `exists` answers `false` for (design §3.4).
     missing: Mutex<std::collections::HashSet<String>>,
+    /// The `defaultBranchId` reads answered (timeline branches §20.22).
+    defaults: AtomicUsize,
     sequence: AtomicU64,
     gate: Mutex<Option<Arc<Gate>>>,
 }
@@ -91,6 +93,7 @@ impl Default for FakeSessions {
                 transports: Mutex::new(Vec::new()),
                 accepted: Mutex::new(HashMap::new()),
                 missing: Mutex::new(std::collections::HashSet::new()),
+                defaults: AtomicUsize::new(0),
                 sequence: AtomicU64::new(0),
                 gate: Mutex::new(None),
             }),
@@ -118,8 +121,7 @@ impl FakeSessions {
     }
     /// Answers `exists` `false` for `session`, as a deleted Session does
     /// (design §3.4).
-    pub fn deleted(&self, session: &str) {
-        self.inner
+    pub fn deleted(&self, session: &str) {        self.inner
             .missing
             .lock()
             .unwrap()
@@ -127,6 +129,12 @@ impl FakeSessions {
     }
     pub fn restored(&self, session: &str) {
         self.inner.missing.lock().unwrap().remove(session);
+    }
+    /// How many `defaultBranchId` reads the fixture answered (timeline
+    /// branches §20.22): a publish that is refused before it resolves its
+    /// targets reads none.
+    pub fn default_reads(&self) -> usize {
+        self.inner.defaults.load(Ordering::SeqCst)
     }
     /// Answers any input whose submission id contains `needle` with `code`,
     /// so one guide write of a creation fails while its others succeed
@@ -215,6 +223,7 @@ impl HostDispatch for FakeSessions {
             // The `sessions.defaultBranchId` read (timeline branches §20.22):
             // every fixture Session is on its root.
             "defaultBranchId" => {
+                self.inner.defaults.fetch_add(1, Ordering::SeqCst);
                 return Ok(Value::future(async move {
                     Ok(json!({ "ok": true, "value": { "defaultBranchId": "main" } }).into())
                 }));
