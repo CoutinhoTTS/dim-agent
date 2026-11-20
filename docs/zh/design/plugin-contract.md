@@ -105,7 +105,7 @@ process (root)                 process parts: storage, catalogs, connections, Ag
 | `collaborationMembers:<kind>` | 进程 | 成员提供者 | 已设计，未实现 | [ExternalAgent](plugins/ExternalAgent.md)；实现时向 Collaboration 登记（rutis 使用 R6） |
 | `treeCommands` | `session` | TimelineTree | 是 | 按分支 id 的 `input`、`create`、`list`、`info` |
 | `sessionIdentity` | `session` | SessionScope | 是 | `get()`：`{sessionId, restored}` |
-| `sessionLifecycle` | `session` | SessionScope | 是 | `activated`、`closing`、`hold`、`release`：hold 是调用方的行拥有的 id，由 `release(id)` 或该行卸载结束 `reportFault` 上报故障，`failure` 读取当前故障，`observeFault` 订阅。调用 `release(id)` 或卸载该行会结束订阅。 |
+| `sessionLifecycle` | `session` | SessionScope | 是 | `activated`、`closing`、`hold`、`release`：hold 是调用方的行拥有的 id，由 `release(id)` 或该行卸载结束。`reportFault` 上报故障，`failure` 读取当前故障，`observeFault` 订阅。调用 `release(id)` 或卸载该行会结束订阅。 |
 | `sessionConfig` | `session` | SessionScope | 是 | `get()`：创建时的配置，即工具调用携带的快照 |
 | `agentConfig` | `session` | SessionScope | 是 | `get()`：Agent 的身份与默认模型 |
 | `timeline` | `branch` | BranchScope | 是，`before` 除外 | `append`、已发布序号与事件查询（§5.4）；查询随其声明到达其他语言 |
