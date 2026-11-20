@@ -25010,14 +25010,6 @@
     },
     {
       "from": "dim_app_server::agents",
-      "to": "dim_app_server::agent_records",
-      "references": [
-        "path AgentRecords",
-        "use crate::agent_records::AgentRecords"
-      ]
-    },
-    {
-      "from": "dim_app_server::agents",
       "to": "dim_app_server::agents::configuration",
       "references": [
         "mod configuration",
@@ -35477,6 +35469,14 @@
         "use dim_agent_runtime::AgentError",
         "use dim_agent_runtime::Result",
         "use dim_agent_runtime::panic_message"
+      ]
+    },
+    {
+      "from": "dim_app_server::storage::sqlite",
+      "to": "dim_agent_types::profile",
+      "references": [
+        "path dim_agent_types::AgentProfile",
+        "path dim_agent_types::ModelId"
       ]
     },
     {
@@ -57128,7 +57128,47 @@
     },
     {
       "module": "dim_app_server::storage::sqlite",
+      "path": "Request::AgentOwner"
+    },
+    {
+      "module": "dim_app_server::storage::sqlite",
+      "path": "Request::Agents"
+    },
+    {
+      "module": "dim_app_server::storage::sqlite",
+      "path": "Request::Delete"
+    },
+    {
+      "module": "dim_app_server::storage::sqlite",
       "path": "Request::ImportUserIfAbsent"
+    },
+    {
+      "module": "dim_app_server::storage::sqlite",
+      "path": "Request::LedMembers"
+    },
+    {
+      "module": "dim_app_server::storage::sqlite",
+      "path": "Request::MemberSessions"
+    },
+    {
+      "module": "dim_app_server::storage::sqlite",
+      "path": "Request::Members"
+    },
+    {
+      "module": "dim_app_server::storage::sqlite",
+      "path": "Request::OwnedAgents"
+    },
+    {
+      "module": "dim_app_server::storage::sqlite",
+      "path": "Request::Owners"
+    },
+    {
+      "module": "dim_app_server::storage::sqlite",
+      "path": "Request::ReadPreferences"
+    },
+    {
+      "module": "dim_app_server::storage::sqlite",
+      "path": "Request::ReadSelection"
     },
     {
       "module": "dim_app_server::storage::sqlite",
@@ -57140,7 +57180,19 @@
     },
     {
       "module": "dim_app_server::storage::sqlite",
+      "path": "Request::Save"
+    },
+    {
+      "module": "dim_app_server::storage::sqlite",
       "path": "Request::StorageReport"
+    },
+    {
+      "module": "dim_app_server::storage::sqlite",
+      "path": "Request::UnfinishedOwned"
+    },
+    {
+      "module": "dim_app_server::storage::sqlite",
+      "path": "Request::WriteSelection"
     },
     {
       "module": "dim_app_server::storage::timeline",

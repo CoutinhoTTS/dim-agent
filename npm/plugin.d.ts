@@ -624,7 +624,24 @@ export interface TimelineReadScope {
   through: number;
   segments: { branchId: string; from: number; through: number; storedThrough: number; tail: AgentEvent[] }[];
 }
+export type StoredAgentProfile = {
+  name: string; description: string; systemPrompt: string; tools?: string[]; model?: ModelId;
+};
+export type StoredProviderSelection = { provider_id: string; model_id: string; version: number };
 export interface SqliteStorage {
+  readSelection(request: { scope: string }): Promise<StoredProviderSelection | null>;
+  writeSelection(request: { scope: string; expectedVersion?: number | null; selection: ModelId }): Promise<StoredProviderSelection>;
+  readPreferences(request: { providerId: string; modelId: string }): Promise<{ reasoningEffort?: string; serviceTier?: string } | null>;
+  agents(request: Record<string, never>): Promise<{ id: string; profile: { Ok: StoredAgentProfile } | { Err: string }; default: boolean; owner: string | null }[]>;
+  owners(request: Record<string, never>): Promise<{ sessionId: string; owner: [string, number] | null; error: string | null }[]>;
+  save(request: { id: string; profile: StoredAgentProfile; default: boolean; owner?: string | null }): Promise<void>;
+  delete(request: { id: string }): Promise<void>;
+  members(request: Record<string, never>): Promise<[string, string][]>;
+  ledMembers(request: { leader: string }): Promise<string[]>;
+  ownedAgents(request: { owner: string }): Promise<string[]>;
+  memberSessions(request: { agent: string }): Promise<string[]>;
+  agentOwner(request: { agent: string }): Promise<string | null>;
+  unfinishedOwned(request: Record<string, never>): Promise<{ incomplete: string[]; orphaned: string[] }>;
   replaceUser(request: { source: string; expectedVersion: number | bigint; decision: { kind: 'write'; document: string } | { kind: 'reject'; field: string } }): Promise<{ version: number | bigint }>;
   importUserIfAbsent(request: { source: string; document: string; importedRevision: string }): Promise<{ version: number | bigint; document: string }>;
   readUser(request: { source: string }): Promise<{ version: number | bigint; document: string } | null>;

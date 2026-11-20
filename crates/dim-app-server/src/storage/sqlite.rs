@@ -2540,7 +2540,7 @@ struct SqliteDispatch(Arc<SqliteStorage>);
 impl HostDispatch for SqliteDispatch {
     fn methods(&self) -> Option<serde_json::Value> {
         Some(
-            serde_json::json!({"storageReport":"async","readUser":"async","importUserIfAbsent":"async","replaceUser":"async"}),
+            serde_json::json!({"storageReport":"async","readUser":"async","importUserIfAbsent":"async","replaceUser":"async","agents":"async","owners":"async","save":"async","delete":"async","members":"async","ledMembers":"async","ownedAgents":"async","memberSessions":"async","agentOwner":"async","unfinishedOwned":"async","readSelection":"async","writeSelection":"async","readPreferences":"async"}),
         )
     }
 
@@ -2560,8 +2560,49 @@ impl HostDispatch for SqliteDispatch {
             deny_unknown_fields
         )]
         enum Request {
+            ReadSelection {
+                scope: String,
+            },
+            #[serde(rename_all = "camelCase")]
+            WriteSelection {
+                scope: String,
+                expected_version: Option<u32>,
+                selection: dim_agent_types::ModelId,
+            },
+            #[serde(rename_all = "camelCase")]
+            ReadPreferences {
+                provider_id: String,
+                model_id: String,
+            },
+            Agents {},
+            Owners {},
+            Save {
+                id: String,
+                profile: dim_agent_types::AgentProfile,
+                default: bool,
+                owner: Option<String>,
+            },
+            Delete {
+                id: String,
+            },
+            Members {},
+            LedMembers {
+                leader: String,
+            },
+            OwnedAgents {
+                owner: String,
+            },
+            MemberSessions {
+                agent: String,
+            },
+            AgentOwner {
+                agent: String,
+            },
+            UnfinishedOwned {},
             StorageReport {},
-            ReadUser { source: String },
+            ReadUser {
+                source: String,
+            },
             ImportUserIfAbsent(ImportUser),
             ReplaceUser(ReplaceUser),
         }
@@ -2571,6 +2612,80 @@ impl HostDispatch for SqliteDispatch {
         let db = self.0.clone();
         Ok(BridgeValue::cancellable_future(async move {
             let value = match request {
+                Request::ReadSelection { scope } => {
+                    serde_json::json!(db.read_selection(scope).await.map_err(storage_failure)?)
+                }
+                Request::ReadPreferences {
+                    provider_id,
+                    model_id,
+                } => serde_json::json!(
+                    db.read_preferences(provider_id, model_id)
+                        .await
+                        .map_err(storage_failure)?
+                ),
+                Request::WriteSelection {
+                    scope,
+                    expected_version,
+                    selection,
+                } => {
+                    let saved = db
+                        .write_selection(scope, expected_version, selection)
+                        .await
+                        .map_err(|error| {
+                            let code =
+                                if matches!(error, crate::provider::ProviderError::Conflict(_)) {
+                                    "conflict"
+                                } else {
+                                    "storage_unavailable"
+                                };
+                            rutis_bridge::exports::failure(
+                                "StorageError",
+                                code,
+                                error.to_string(),
+                                None,
+                            )
+                        })?;
+                    serde_json::json!(saved)
+                }
+                Request::Agents {} => {
+                    serde_json::json!(db.agents().await.map_err(storage_failure)?)
+                }
+                Request::Owners {} => {
+                    serde_json::json!(db.owners().await.map_err(storage_failure)?)
+                }
+                Request::Save {
+                    id,
+                    profile,
+                    default,
+                    owner,
+                } => {
+                    db.save(&id, &profile, default, owner.as_deref())
+                        .await
+                        .map_err(storage_failure)?;
+                    return Ok(BridgeValue::Undefined);
+                }
+                Request::Delete { id } => {
+                    db.delete(&id).await.map_err(storage_failure)?;
+                    return Ok(BridgeValue::Undefined);
+                }
+                Request::Members {} => {
+                    serde_json::json!(db.members().await.map_err(storage_failure)?)
+                }
+                Request::LedMembers { leader } => {
+                    serde_json::json!(db.led_members(&leader).await.map_err(storage_failure)?)
+                }
+                Request::OwnedAgents { owner } => {
+                    serde_json::json!(db.owned_agents(&owner).await.map_err(storage_failure)?)
+                }
+                Request::MemberSessions { agent } => {
+                    serde_json::json!(db.member_sessions(&agent).await.map_err(storage_failure)?)
+                }
+                Request::AgentOwner { agent } => {
+                    serde_json::json!(db.agent_owner(&agent).await.map_err(storage_failure)?)
+                }
+                Request::UnfinishedOwned {} => {
+                    serde_json::json!(db.unfinished_owned().await.map_err(storage_failure)?)
+                }
                 Request::StorageReport {} => {
                     serde_json::json!(db.storage_report().await.map_err(storage_failure)?)
                 }
