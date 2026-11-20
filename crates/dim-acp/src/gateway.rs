@@ -245,6 +245,16 @@ fn cancelled_prompt(unconfirmed: bool) -> acp::PromptResponse {
         response
     }
 }
+
+/// The reply for a submitted prompt whose outcome this connection cannot read.
+fn submission_unknown(session: &str, submission: &str) -> Error {
+    Error::new(
+        -32001,
+        "Submission outcome is unknown; load this Session before sending again",
+    )
+    .data(json!({"code":"submission_unknown","sessionId":session,"submissionId":submission}))
+}
+
 struct Interaction {
     session: String,
     token: CancellationToken,
@@ -2084,7 +2094,11 @@ impl Gateway {
                         input,
                         prompt_turn,
                     }) => {
-                        let previous_through = session.projection.through;
+                        // The reattach follows the Session's default branch: a
+                        // history watermark is one line's, so another line's
+                        // events are all news to this session (design §14).
+                        let moved = session.projection.branch != prepared.branch;
+                        let previous_through = if moved { 0 } else { session.projection.through };
                         let branch = prepared.branch;
                         session.projection = Projection::new(
                             branch.clone(),
@@ -2136,6 +2150,18 @@ impl Gateway {
                                     prompt.terminal = Some(Err(Error::new(-32001,"The accepted input's turn outcome is unavailable").data(json!({"code":"turn_outcome_unavailable","inputId":prompt.input,"turnId":turn.turn_id}))));
                                 }
                             }
+                        }
+                        // An accepted prompt stays on the line that accepted it,
+                        // and this session now follows another: its outcome is
+                        // not readable here, so the recovery answers it
+                        // explicitly instead of leaving it open (design §14).
+                        if moved
+                            && let Some(prompt) = &mut session.prompt
+                            && prompt.terminal.is_none()
+                            && prompt.input.is_some()
+                        {
+                            prompt.terminal =
+                                Some(Err(submission_unknown(&id, &prompt.submission)));
                         }
                         let mut snapshots = Vec::new();
                         for event in &prepared.history {
@@ -2198,7 +2224,10 @@ impl Gateway {
                                 if prompt.cancelled {
                                     prompt.reply.respond(cancelled_prompt(true))?;
                                 } else {
-                                    prompt.reply.respond_with_error(Error::new(-32001,"Submission outcome is unknown; load this Session before sending again").data(json!({"code":"submission_unknown","sessionId":id,"submissionId":prompt.submission})))?;
+                                    prompt.reply.respond_with_error(submission_unknown(
+                                        &id,
+                                        &prompt.submission,
+                                    ))?;
                                 }
                             } else if session
                                 .prompt
@@ -2696,7 +2725,12 @@ impl Gateway {
                         .as_ref()
                         .map(|event| event.id.clone())
                         .or(accepted_input);
-                    let prompt_turn = if turn_id.is_some() || input_id.is_some() {
+                    // The prompt is on the branch that accepted it, and the
+                    // reattach follows the Session's default branch: another
+                    // line's cut and history cannot answer for it, so the
+                    // recovery settles the prompt instead (design §14).
+                    let kept = conversation == prepared.branch;
+                    let prompt_turn = if kept && (turn_id.is_some() || input_id.is_some()) {
                         let mut query =
                             json!({"sessionId":id,"branchId":prepared.branch.clone(),"through":prepared.through});
                         if let Some(turn) = turn_id {
@@ -3110,12 +3144,6 @@ async fn read_history(
                 error
             }
         })?;
-    let model = attached.model.map(|model| Configuration {
-        provider_id: model.provider_id,
-        model_id: model.model_id,
-        capability_snapshot: attached.capability_snapshot,
-        model_preferences: attached.model_preferences,
-    });
     let conversation = attached
         .default_branch
         .as_ref()
@@ -3126,6 +3154,20 @@ async fn read_history(
                 .and_then(|directory| directory.default_branch_id.clone())
         })
         .unwrap_or_else(|| ROOT_BRANCH_ID.to_owned());
+    // The reply's configuration is the root's (design §14): a conversation on
+    // a line takes that line's own, from the window below. A reply that names
+    // no line predates per-line configuration, so its model is the Session's.
+    let seeded = attached.default_branch.is_none() || conversation == ROOT_BRANCH_ID;
+    let model = if seeded {
+        attached.model.map(|model| Configuration {
+            provider_id: model.provider_id,
+            model_id: model.model_id,
+            capability_snapshot: attached.capability_snapshot,
+            model_preferences: attached.model_preferences,
+        })
+    } else {
+        None
+    };
 
     let (history, through, before) = {
         if !rpc.supports("session.history.latestTurn") {
@@ -3161,7 +3203,16 @@ async fn read_history(
             window.before,
         )
     };
-    let config = Config::read(rpc, id, &conversation, model).await?;
+    let mut config = Config::read(rpc, id, &conversation, model).await?;
+    // A line's configuration is the one its own window last adopted, at or
+    // below the cursor (design §14).
+    if !seeded {
+        for event in &history {
+            if let EventContent::Configuration(adopted) = &event.content {
+                config.model = Some(adopted.clone());
+            }
+        }
+    }
     let mut questions = HashMap::new();
     if config.methods.contains("session.question.pending") {
         let branches: Vec<String> = match &directory {
@@ -3256,13 +3307,18 @@ async fn read_history(
         .filter(|turn| !turn.ended)
         .map(|turn| turn.turn_id);
     // The attach reply's `defaultBranch` is this conversation's own cursor;
-    // its `sequence` stays the root's (design §14).
-    let model_through = dim_client::wire::resume_cursor(
-        attached.default_branch.as_ref(),
-        attached.sequence,
-        &conversation,
-    )
-    .unwrap_or(0);
+    // its `sequence` stays the root's (design §14). A line's configuration was
+    // read from its window, so only a later fact may replace it.
+    let model_through = if seeded {
+        dim_client::wire::resume_cursor(
+            attached.default_branch.as_ref(),
+            attached.sequence,
+            &conversation,
+        )
+        .unwrap_or(0)
+    } else {
+        0
+    };
     Ok(Prepared {
         branch: conversation.to_owned(),
         history,
