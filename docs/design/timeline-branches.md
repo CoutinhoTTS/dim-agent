@@ -666,8 +666,8 @@ The reply's `model`, `modelPreferences` and `capabilitySnapshot` stay the root's
 Session on its root has always read. A client that follows the move pairs the configuration with the cursor instead of
 mixing the two: it takes the configuration of the line the cursor names, so a Session whose conversation is on a line
 shows the model that line adopted at or below its cursor, and the reply's record seeds the root alone. A reply that
-carries no `defaultBranch` predates per-line configuration, so its record is the Session's one model and every client
-keeps using it.
+carries no `defaultBranch` names the root, because a server without the field cannot move the default branch, so
+its record is the Session's one model and every client keeps using it.
 
 The directory read performs no history I/O. Its display fields are null or absent.
 `session.branch.get {sessionId, branchId}` (v3, separately listed in

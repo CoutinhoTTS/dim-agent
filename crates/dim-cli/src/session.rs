@@ -346,7 +346,8 @@ pub async fn chat(
         // The reply's configuration is the root's (design §14): a conversation
         // on a line takes that line's own facts from the window below, and its
         // watermark starts below every one of them. A reply that names no line
-        // predates per-line configuration, so its model is the Session's.
+        // comes from a server that cannot move the default branch, so its model
+        // is the Session's.
         let seeded = attached.default_branch.is_none() || conversation == ROOT_BRANCH_ID;
         display.model = if seeded {
             attached.model.map(|model| crate::wire::Configuration {

@@ -3156,7 +3156,8 @@ async fn read_history(
         .unwrap_or_else(|| ROOT_BRANCH_ID.to_owned());
     // The reply's configuration is the root's (design §14): a conversation on
     // a line takes that line's own, from the window below. A reply that names
-    // no line predates per-line configuration, so its model is the Session's.
+    // no line comes from a server that cannot move the default branch, so its
+    // model is the Session's.
     let seeded = attached.default_branch.is_none() || conversation == ROOT_BRANCH_ID;
     let model = if seeded {
         attached.model.map(|model| Configuration {
