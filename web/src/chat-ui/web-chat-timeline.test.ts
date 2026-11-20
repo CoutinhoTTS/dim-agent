@@ -257,10 +257,15 @@ describe("WebChatTimeline", () => {
 describe("WebChatTimeline history and following", () => {
   const ROW_PX = 600
   const VIEWPORT_PX = 600
+  /** The surface's top padding and the earlier divider, above the first row. */
+  const HEAD_PX = 64
   let observers: { callback: IntersectionObserverCallback; targets: Element[] }[]
   const scrolled = new Set<Element>()
   const resized: (() => void)[] = []
   let frame: ReturnType<typeof setTimeout> | undefined
+  /** Instant `scrollTop` assignments, collected while set; a smooth scroll's own steps are not among them. */
+  let instant: number[] | undefined
+  let animating = false
   function nextFrame(): void {
     frame ??= setTimeout(async () => {
       frame = undefined
@@ -274,8 +279,9 @@ describe("WebChatTimeline history and following", () => {
   }
 
   /**
-   * Lays the scroll content out as the browser would: every row 600 px, the
-   * spacers at their styled height and a clamped scrollTop. A frame delivers
+   * Lays the scroll content out as the browser would: the head, then every row
+   * at 600 px (the virtualizer estimates 120), the spacers at their styled
+   * height and a clamped scrollTop. A frame delivers
    * scroll events first and resize observations after the updates they cause.
    */
   function layOut(): void {
@@ -286,7 +292,7 @@ describe("WebChatTimeline history and following", () => {
       : element.hasAttribute("data-timeline-row-index") ? ROW_PX : 0
     const contentHeight = (viewport: Element): number => {
       const content = viewport.querySelector("[data-testid='timeline-plain-scroller']")
-      return content === null ? 0 : [...content.children].reduce((sum, child) => sum + height(child), 0)
+      return content === null ? 0 : [...content.children].reduce((sum, child) => sum + height(child), HEAD_PX)
     }
     vi.spyOn(Element.prototype, "scrollHeight", "get").mockImplementation(function (this: Element) { return isViewport(this) ? contentHeight(this) : 0 })
     vi.spyOn(Element.prototype, "clientHeight", "get").mockImplementation(function (this: Element) { return isViewport(this) ? VIEWPORT_PX : 0 })
@@ -294,6 +300,7 @@ describe("WebChatTimeline history and following", () => {
     vi.spyOn(Element.prototype, "scrollTop", "set").mockImplementation(function (this: Element, value: number) {
       const max = Math.max(0, this.scrollHeight - this.clientHeight)
       scrollTops.set(this, Math.min(max, Math.max(0, value)))
+      if (!animating) instant?.push(value)
       scrolled.add(this)
       nextFrame()
     })
@@ -309,9 +316,10 @@ describe("WebChatTimeline history and following", () => {
       let size = 0
       if (this === viewport) size = VIEWPORT_PX
       else if (viewport !== null && this.matches("[data-testid='timeline-plain-scroller']")) {
-        top = -viewport.scrollTop
-        size = contentHeight(viewport)
+        top = HEAD_PX - viewport.scrollTop
+        size = contentHeight(viewport) - HEAD_PX
       } else if (viewport !== null && this.parentElement?.matches("[data-testid='timeline-plain-scroller']")) {
+        top = HEAD_PX
         for (let sibling = this.previousElementSibling; sibling !== null; sibling = sibling.previousElementSibling) top += height(sibling)
         top -= viewport.scrollTop
         size = height(this)
@@ -323,6 +331,7 @@ describe("WebChatTimeline history and following", () => {
   beforeEach(() => {
     observers = []
     clearTimeout(frame)
+    instant = undefined
     frame = undefined
     scrolled.clear()
     resized.length = 0
@@ -471,6 +480,23 @@ describe("WebChatTimeline history and following", () => {
     expect(row?.getBoundingClientRect().top).toBe(before.top)
   })
 
+  it("keeps the first row where it was when a page lands while the top of history is in view", async () => {
+    const projection = project(turns(12, 101))
+    const state = shallowReactive<Record<string, unknown>>({ rows: [...projection.rows], earlier: true })
+    const { root } = mountWith([], { props: state })
+    await idle()
+    await scrollTo(root, 0)
+    const before = visibleRow(root)
+    expect(before.top, "the first row starts below the head").toBe(HEAD_PX)
+
+    projection.prepend(project(turns(20, 1)), "before-101")
+    state.rows = [...projection.rows]
+    await idle()
+
+    const row = root.querySelector<HTMLElement>(`[data-timeline-row-key="${before.key}"]`)
+    expect(row?.getBoundingClientRect().top).toBe(before.top)
+  })
+
   it("stops observing once the last earlier page is loaded", async () => {
     const state = shallowReactive<Record<string, unknown>>({ rows: project(turns(8, 1)).rows, earlier: true })
     const { root } = mountWith([], { props: state })
@@ -539,6 +565,49 @@ describe("WebChatTimeline history and following", () => {
 
     await scrollTo(root, ROW_PX)
     expect(jump(), "the jump ends at the bottom; a later scroll away stops following").not.toBeNull()
+  })
+
+  it("keeps the jump smooth while rows grow under it and lands at the end", async () => {
+    const projection = project(turns(6, 1))
+    const state = shallowReactive<Record<string, unknown>>({ rows: [...projection.rows] })
+    const { root } = mountWith([], { props: state })
+    await idle()
+    await scrollTo(root, 0)
+    const viewport = viewportOf(root)
+    let target = 0
+    let step: ReturnType<typeof setTimeout> | undefined
+    const animate = (): void => {
+      step = undefined
+      const goal = Math.min(target, viewport.scrollHeight - VIEWPORT_PX)
+      const now = viewport.scrollTop
+      if (now === goal) return
+      animating = true
+      viewport.scrollTop = now + Math.sign(goal - now) * Math.min(300, Math.abs(goal - now))
+      animating = false
+      step = setTimeout(animate, 5)
+    }
+    viewport.scrollTo = ((options: ScrollToOptions) => {
+      if (options.behavior !== "smooth") {
+        viewport.scrollTop = options.top!
+        return
+      }
+      target = options.top!
+      step ??= setTimeout(animate, 5)
+    }) as Element["scrollTo"]
+
+    instant = []
+    root.querySelector<HTMLButtonElement>("[data-testid='web-chat-jump-latest']")!.click()
+    await new Promise(resolve => setTimeout(resolve, 12))
+    const heightBefore = viewport.scrollHeight
+    for (const item of turns(2, 101)) projection.apply(item)
+    state.rows = [...projection.rows]
+    await vi.waitFor(() => expect(step).toBeUndefined(), { timeout: 5_000 })
+    await idle()
+
+    expect(viewport.scrollHeight, "the rows grew during the jump").toBeGreaterThan(heightBefore)
+    expect(instant, "no instant scroll replaced the animation").toEqual([])
+    expect(viewport.scrollTop).toBe(viewport.scrollHeight - VIEWPORT_PX)
+    await vi.waitFor(() => expect(root.querySelector("[data-testid='web-chat-jump-latest']")).toBeNull())
   })
 
   it("stops following when the reader wheels up on the rail during a jump", async () => {

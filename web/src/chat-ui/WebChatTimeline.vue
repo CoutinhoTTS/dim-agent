@@ -138,10 +138,13 @@ const virtualizer = useVirtualizer(computed(() => ({
 // off, so the virtualizer alone keeps the reader in place. A resized row moves
 // the view only when it sits wholly above the viewport, judged by its current
 // start: TanStack rebuilds measurementsCache lazily, and the item it passes can
-// carry a stale estimated start.
+// carry a stale estimated start. While a prepend's reading position is held,
+// every row above the held row moves the view, measured or partly visible.
+let heldIndex: number | undefined
 virtualizer.value.shouldAdjustScrollPositionOnItemSizeChange = (item, _delta, instance) => {
   const element = viewport.value
   if (element === null) return false
+  if (heldIndex !== undefined && item.index < heldIndex) return true
   instance.getTotalSize()
   const start = instance.measurementsCache[item.index]?.start ?? item.start
   return start + item.size <= element.scrollTop
@@ -180,15 +183,16 @@ let jumpResumed = false
 function onScroll(): void {
   const element = viewport.value
   if (element === null) return
-  const atEnd = element.scrollHeight - element.scrollTop - element.clientHeight <= FOLLOW_THRESHOLD_PX
-  if (atEnd) jumpResumed = false
-  following.value = jumpResumed || atEnd
+  const distance = element.scrollHeight - element.scrollTop - element.clientHeight
+  if (distance <= 1) jumpResumed = false
+  following.value = jumpResumed || distance <= FOLLOW_THRESHOLD_PX
   quoteTarget.value = undefined
   autoLoadEarlier()
 }
 
 function onReaderScroll(): void {
   jumpResumed = false
+  heldIndex = undefined
 }
 
 const READER_SCROLL_EVENTS = ["wheel", "touchstart", "pointerdown", "keydown"] as const
@@ -203,13 +207,17 @@ watch(viewport, (element, previous) => {
 async function toEnd(): Promise<void> {
   await nextTick()
   const element = viewport.value
-  if (following.value && element !== null) element.scrollTop = element.scrollHeight
+  if (!following.value || element === null) return
+  if (jumpResumed) element.scrollTo({ top: element.scrollHeight, behavior: "smooth" })
+  else element.scrollTop = element.scrollHeight
 }
 
 const unseen = ref(false)
 watch(following, (value) => {
-  if (value) unseen.value = false
-  else jumpResumed = false
+  if (value) {
+    unseen.value = false
+    heldIndex = undefined
+  } else jumpResumed = false
 })
 
 function jumpToLatest(): void {
@@ -274,7 +282,9 @@ watch(() => rows.value[0]?.key, async (first, previous) => {
   const index = rows.value.findIndex(row => row.key === anchor.key)
   virtualizer.value.getTotalSize()
   const start = virtualizer.value.measurementsCache[index]?.start
-  if (start !== undefined) element.scrollTop = start - anchor.top
+  if (start === undefined) return
+  heldIndex = index
+  element.scrollTop = start - anchor.top
 }, { flush: "pre" })
 
 const markers = computed(() => deriveTimelineUserMessageMarkers(rows.value))
@@ -284,11 +294,13 @@ function jumpTo(marker: ChatUiTimelineUserMessageMarker): void {
   const index = rows.value.findIndex(row => row.key === marker.rowKey)
   if (index < 0) return
   following.value = false
+  heldIndex = undefined
   virtualizer.value.scrollToIndex(index, { align: "start" })
 }
 
 function onRailWheel(event: WheelEvent): void {
   jumpResumed = false
+  heldIndex = undefined
   viewport.value?.scrollBy({ top: event.deltaY })
 }
 
