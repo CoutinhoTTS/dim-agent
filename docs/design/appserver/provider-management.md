@@ -1122,7 +1122,7 @@ profile (`dim-agent-aimux`) provides it from the entries of its model file, so
 both deployments answer the same reads; that profile declares no modality
 operation, so its `selectableForModality` read answers none
 ([aimux](../../../crates/dim-agent-aimux/README.md)). The catalog registers the
-name shared ([service faces §4.10](../service-faces.md#410-宿主端口executionsettingshost-等五个)).
+name shared ([service faces §4.10](../service-faces.md#410-宿主读取端口与-provider-选择)).
 
 The owner implementations are `ProviderService::selectable_models` and
 `ProviderService::selectable_modality_models`; `ProductResolver` delegates to
@@ -1661,7 +1661,7 @@ disposable database; see [the storage contract](native-storage-format.md#329-格
 | §4.5 | Owned related selections/models/preferences/routes commit together; existing adoption remains atomic |
 | §4.6 | Management data does not enter model context; only existing adoption paths change configuration |
 | §4.7 | Accounts use public methods; Modality reads selectable models through §3.6's core host port; Migration uses §3.7's Provider-owned judgment; other owners' references are not rewritten |
-| §4.8 | The error-data requirement below uses the method owner's generic error fields; §5 uses existing metadata and v19 top-level JSON; §3.6's read is a data face ([service faces §4.10](../service-faces.md#410-宿主端口executionsettingshost-等五个)), so a non-Rust consumer calls it by name; §3.7 adds no requirement |
+| §4.8 | The error-data requirement below uses the method owner's generic error fields; §5 uses existing metadata and v19 top-level JSON; §3.6's read is a data face ([service faces §4.10](../service-faces.md#410-宿主读取端口与-provider-选择)), so a non-Rust consumer calls it by name; §3.7 adds no requirement |
 | §4.9 | No new Timeline event or pushed process notification |
 | §1 | Extend the existing process Provider; no Capability or wiring plugin |
 | ADR 002 D1 | Process records belong to Provider; adopted branch state to its owner; drafts to clients |
