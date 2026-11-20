@@ -879,11 +879,19 @@ export const useChatStore = defineStore("chat", () => {
     }
   }
 
-  /** Forks the Session at its root's newest finished turn, which only `/fork` copies, and returns the new Session's id. */
-  async function fork(sessionId: string): Promise<string> {
-    const turn = await client().call("session.turn.get", { sessionId, branchId: ROOT_BRANCH_ID }, readTurn)
-    if (turn.turn === undefined || !turn.turn.ended) throw new Error("No finished turn on the root to fork at")
-    return client().call("session.fork", { sessionId, at: turn.turn.sequence }, readForkedSessionId)
+  /**
+   * Forks the Session's root at `at`, a point on its own timeline, or after its
+   * newest finished turn when no point is named; the copy is the root's, never
+   * the centred line's (timeline UI §4.3), and returns the new Session's id.
+   */
+  async function fork(sessionId: string, at?: number): Promise<string> {
+    let point = at
+    if (point === undefined) {
+      const turn = await client().call("session.turn.get", { sessionId, branchId: ROOT_BRANCH_ID }, readTurn)
+      if (turn.turn === undefined || !turn.turn.ended) throw new Error("No finished turn on the root to fork at")
+      point = turn.turn.sequence
+    }
+    return client().call("session.fork", { sessionId, at: point }, readForkedSessionId)
   }
 
   /** The files an `@` mention offers under the Session's workspace. */
