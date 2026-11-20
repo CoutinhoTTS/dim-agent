@@ -1264,9 +1264,10 @@ pub enum Update {
         error: Option<String>,
     },
     /// `session.branch_set_default` refused the chosen line: the lines panel
-    /// shows the reason where the choice was made.
+    /// shows the reason on the line the choice was made on (design §14).
     LineRefusal {
         projection_id: u64,
+        branch_id: String,
         text: String,
     },
     Exported {

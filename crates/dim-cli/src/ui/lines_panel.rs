@@ -83,7 +83,7 @@ pub struct LinesPanel {
     /// The line the confirmation names, until the user answers.
     confirm: Option<String>,
     /// Why an action was refused and the line it was raised on, until the
-    /// selection moves or the choice changes.
+    /// choice changes (design §14).
     refusal: Option<(String, String)>,
 }
 
@@ -115,21 +115,21 @@ impl LinesPanel {
         self.session_id == snapshot.session_id && self.projection_id == snapshot.projection_id
     }
 
-    /// Shows why an action was refused, in the panel that raised it
-    /// (design §14), until the selection moves or another choice is made.
-    pub fn refuse(&mut self, projection_id: u64, text: String) -> bool {
+    /// Shows why an action was refused, in the panel that raised it, on the
+    /// line that raised it, until the choice changes (design §14).
+    pub fn refuse(&mut self, projection_id: u64, branch_id: &str, text: String) -> bool {
         if projection_id != self.projection_id {
             return false;
         }
-        let line = self.list.selected_id().unwrap_or_default();
-        self.refusal = Some((line, text));
+        self.refusal = Some((branch_id.to_owned(), text));
         self.refresh_note();
         true
     }
 
     /// Refuses the action on the selected line, without a round trip.
     fn refuse_selected(&mut self, text: String) {
-        self.refuse(self.projection_id, text);
+        let line = self.list.selected_id().unwrap_or_default();
+        self.refuse(self.projection_id, &line, text);
     }
 
     pub fn set_lines(&mut self, snapshot: &ViewSnapshot) {
@@ -314,20 +314,15 @@ impl LinesPanel {
         let selected = self.list.selected_id().unwrap_or_default();
         let keeps_its_right =
             selected == ROOT_BRANCH_ID || self.default_branch_id == ROOT_BRANCH_ID;
-        if self
-            .refusal
-            .as_ref()
-            .is_some_and(|(line, _)| *line != selected)
-        {
-            self.refusal = None;
-        }
         let mut notes = vec![t(if keeps_its_right {
             "The old default branch stays open and keeps the lines it opened. The root keeps its own right to open a line in either direction."
         } else {
             "The old default branch stays open and keeps the lines it opened. The two lines swap the right to open a line."
         })
         .to_owned()];
-        if let Some((_, refusal)) = &self.refusal {
+        if let Some((line, refusal)) = &self.refusal
+            && *line == selected
+        {
             notes.push(refusal.clone());
         }
         self.list.set_notes(notes);
@@ -649,12 +644,19 @@ mod tests {
     }
 
     #[test]
-    fn a_refused_move_is_shown_in_the_panel() {
+    fn a_refused_move_is_shown_on_the_line_that_raised_it() {
         let mut panel = LinesPanel::new(&snapshot("main"));
         assert!(panel.refuse(
             3,
+            "b-7c",
             "branch_already_default: the line is already the default branch".into()
         ));
+        assert!(
+            !text(&panel).contains("branch_already_default"),
+            "the refusal belongs to the line that raised it: {:#?}",
+            rows(&panel)
+        );
+        assert!(matches!(panel.handle_key(key(KeyCode::Down)), Effect::None));
         let drawn = rows(&panel);
         assert!(
             drawn
@@ -666,6 +668,6 @@ mod tests {
             text(&panel).contains("old default branch stays open"),
             "the panel keeps its own paragraph: {drawn:#?}"
         );
-        assert!(!panel.refuse(4, "another attachment".into()));
+        assert!(!panel.refuse(4, "b-7c", "another attachment".into()));
     }
 }

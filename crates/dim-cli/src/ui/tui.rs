@@ -2362,10 +2362,13 @@ impl App {
             }
             Update::LineRefusal {
                 projection_id,
+                branch_id,
                 text,
             } => {
                 let shown = match &mut self.prompt {
-                    Some(Prompt::Lines(panel)) => panel.refuse(projection_id, text.clone()),
+                    Some(Prompt::Lines(panel)) => {
+                        panel.refuse(projection_id, &branch_id, text.clone())
+                    }
                     _ => false,
                 };
                 if !shown {
