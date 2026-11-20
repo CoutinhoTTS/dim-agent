@@ -1019,6 +1019,24 @@ export interface PartRegistry {
   registerDefinition(scope: PartScope, name: string, definition: import('@arcships/rutis').Plugin | ((ctx: any, config: any) => unknown) | { apply(ctx: any, config: any): unknown }): Promise<void>
 }
 
+export interface SessionInstanceDefinition {
+  group: string
+  definitionId: string
+  instanceData: import('./plugin.js').BridgeJsonValue
+}
+
+export interface SessionInstance {
+  instanceId: number | bigint
+}
+
+/** The loader anchored in this Session's subtree. */
+export interface SessionLoader {
+  /** @throws {SessionInstanceErrorThrown} */
+  create(definition: SessionInstanceDefinition): Promise<SessionInstance>
+  /** @throws {SessionInstanceErrorThrown} */
+  remove(instance: SessionInstance): Promise<void>
+}
+
 /** A branch of a Session. */
 export interface SessionRef {
   sessionId: string
@@ -1367,6 +1385,9 @@ export type ReservedMethodsErrorThrown = RustError<"ReservedMethodsError", "rese
 /** What a method returning `Err(ResourceError)` throws. */
 export type ResourceErrorThrown = RustError<"ResourceError", string, ResourceError>
 
+/** What a method returning `Err(SessionInstanceError)` throws. */
+export type SessionInstanceErrorThrown = RustError<"SessionInstanceError", "Create" | "NotReady" | "Cleanup", undefined>
+
 /** What a method returning `Err(SessionsError)` throws. */
 export type SessionsErrorThrown = RustError<"SessionsError", "rejected" | "agent_unknown" | "session_closed" | "branch_missing" | "branch_ended" | "reloading" | "future_sequence" | "ambiguous" | "publication_unknown" | "failed", SessionsError>
 
@@ -1411,6 +1432,7 @@ export interface Services {
   dispatcher: Dispatcher
   timeline: Timeline
   partRegistry: PartRegistry
+  sessionLoader: SessionLoader
   sessionPermissions: SessionPermissions
   collaborationConfig: CollaborationConfig
   collaborationDirectory: CollaborationDirectory

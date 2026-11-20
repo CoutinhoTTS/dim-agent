@@ -620,3 +620,82 @@ async fn node_session_fault_is_observed_and_closes_the_native_session() {
     server.shutdown();
     server.join().await.unwrap();
 }
+
+struct FixtureInstance;
+impl rutis::Plugin for FixtureInstance {
+    type Deps = ();
+    fn name(&self) -> &str {
+        "FixtureInstance"
+    }
+    async fn apply(&self, _: &rutis::Ctx, (): ()) -> rutis::Result {
+        Ok(())
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires DIM_TEST_NODE and DIM_TEST_JS_RUNTIME"]
+async fn node_session_loader_creates_and_removes_only_its_own_instance() {
+    let mut parts = branch_part();
+    parts.rows = vec![json!({
+        "id": "session-loader",
+        "name": parts.anchor.parent().unwrap().join("fixtures/session-loader.ts"),
+        "provides": {},
+    })];
+    let (server, agent) = launch_with(
+        Arc::new(MockTools),
+        ServerConfig {
+            session_typescript: Some(parts),
+            ..Default::default()
+        },
+        |builder| {
+            builder.session_extension_part::<dim_agent_runtime::SessionInstanceDefinition>(
+                "FixtureInstances",
+                "FixtureInstance",
+                |_, definition| {
+                    if definition.definition_id != "fixture-content"
+                        || definition.instance_data != json!({"body":"content"})
+                    {
+                        return Err(rutis::Error::msg("unexpected instance definition"));
+                    }
+                    Ok(Box::new(FixtureInstance))
+                },
+            );
+            builder.require_part("SessionLoaderFixture");
+        },
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let first = super::session_typescript::new_session(&mut client, json!([])).await;
+    let second = super::session_typescript::new_session(&mut client, json!([])).await;
+    let leaves = || {
+        agent
+            .diagnostics()
+            .unwrap()
+            .plugins
+            .into_iter()
+            .filter(|plugin| {
+                plugin.name == "FixtureInstance" && plugin.state == rutis::host::FiberState::Active
+            })
+            .count()
+    };
+    let before = leaves();
+    let reply = client
+        .rpc("session.loaderfixture.create", json!({"sessionId": first}))
+        .await;
+    assert_ok(&reply);
+    let id = reply["result"]["instanceId"].as_u64().unwrap();
+    assert_eq!(leaves(), before + 1);
+    for (session, expected) in [(second, before + 1), (first, before)] {
+        assert_ok(
+            &client
+                .rpc(
+                    "session.loaderfixture.remove",
+                    json!({"sessionId":session,"instanceId":id}),
+                )
+                .await,
+        );
+        assert_eq!(leaves(), expected);
+    }
+    server.shutdown();
+    server.join().await.unwrap();
+}

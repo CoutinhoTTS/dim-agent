@@ -3031,6 +3031,12 @@
             "external": true
           },
           {
+            "service": "dim_agent_capabilities::skills::content::Contribution#user:graph@session",
+            "provider": 58,
+            "declared": false,
+            "external": true
+          },
+          {
             "service": "dim_agent_capabilities::tool_registry::ToolRegistry@session",
             "provider": 54,
             "declared": true,
@@ -4152,6 +4158,12 @@
       },
       {
         "service": "dyn rutis_bridge::session::services::HostDispatch#sessionLifecycle@session",
+        "provider": 33,
+        "generation": 1,
+        "removing": false
+      },
+      {
+        "service": "dyn rutis_bridge::session::services::HostDispatch#sessionLoader@session",
         "provider": 33,
         "generation": 1,
         "removing": false

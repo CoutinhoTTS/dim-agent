@@ -1511,7 +1511,6 @@ pub fn register_faces(builder: &mut dim_agent_runtime::AgentBuilder) {
         ("providerConnectionResolver", "host-resource"),
         ("providerService", "secret"),
         ("serverControl", "control"),
-        ("sessionLoader", "control"),
         ("sessionStore", "owner-api"),
         ("settingsService", "owner-api"),
         ("timelineFactory", "control"),

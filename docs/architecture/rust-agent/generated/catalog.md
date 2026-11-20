@@ -86,7 +86,7 @@ Each catalog name a part of the assembly provides or injects. `data` means share
 | `sessionIdentity` | session | SessionScope | data | `get` async |
 | `sessionLanguage` | session | PromptSources | data | `get` async |
 | `sessionLifecycle` | session | SessionScope | data | `activated` async, `closing` async, `failure` async, `hold` async, `observeFault` async, `release` async, `reportFault` async |
-| `sessionLoader` | session | SessionScope | internal(control) | — |
+| `sessionLoader` | session | SessionScope | data | `create` async, `remove` async |
 | `sessionMethods` | session | SessionMethods | data | `register` async |
 | `skillsConfig` | session | SessionScope | data | `get` async |
 | `submitChecks` | session | InputMethods | data | `check` async, `register` async |

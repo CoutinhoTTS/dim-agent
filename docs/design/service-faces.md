@@ -203,7 +203,6 @@ Proposed target operations: [Session and branch operations](contracts/runtime-ow
 | `hooksService` | process | HooksSettings | host-resource |
 | `providerService` | process | Provider | 当前为 secret，迁移后通过数据操作使用凭据 |
 | `providerConnectionResolver` | process | Provider | host-resource |
-| `sessionLoader` | session | SessionScope | control |
 | `timelineFactory` | session | SessionScope | control |
 
 ## 4. 批次契约（#1292）
