@@ -11,7 +11,8 @@ import type { TimelineRow } from "../projection"
 
 /** Web rows the shared timeline shows as system notices, one `message` row each. */
 type NoticeRow = Extract<TimelineRow, { kind: "line" | "line-ended" | "source-message" | "source-idle" | "source-ended" | "hook-follow-up" }>
-type TurnMember = Extract<TimelineRow, { kind: "assistant" | "thinking" | "tool" | "error" | "stopped" }>
+type Output = Extract<TimelineRow, { kind: "assistant" | "thinking" | "tool" }>
+type TurnMember = Output | Extract<TimelineRow, { kind: "error" | "stopped" }>
 type UserRow = Extract<TimelineRow, { kind: "user" }>
 
 /** A block both the row renderers (`ChatUiTimelineRowBlock`) and the session view (`ChatUiTimelineBlock`) accept; the tool card reads the tool fields. */
@@ -55,7 +56,7 @@ function userMessage(row: UserRow, sessionId: string): ChatUiTimelineRowMessage 
   }
 }
 
-function block(row: Exclude<TurnMember, { kind: "stopped" }>): Block {
+function block(row: Output): Block {
   switch (row.kind) {
     case "assistant":
       return { id: row.key, kind: "text", status: row.streaming ? "running" : "complete", content: row.text }
@@ -78,8 +79,6 @@ function block(row: Exclude<TurnMember, { kind: "stopped" }>): Block {
         toolCallId: row.callId,
         ...(row.result === undefined ? {} : { toolResult: { content: row.result.text, isError: row.result.isError } }),
       }
-    case "error":
-      return { id: row.key, kind: "status", status: "error", statusType: "error", content: row.text }
   }
 }
 
@@ -92,7 +91,7 @@ function terminal(row: Extract<TurnMember, { kind: "error" | "stopped" }>): Chat
 function turn(user: UserRow | undefined, members: readonly TurnMember[], sessionId: string): WebChatRow {
   const last = members.at(-1)
   const ending = last?.kind === "error" || last?.kind === "stopped" ? last : undefined
-  const blocks = members.flatMap(member => member === ending || member.kind === "stopped" ? [] : [block(member)])
+  const blocks = members.filter((member): member is Output => member.kind !== "error" && member.kind !== "stopped").map(block)
   const id = user?.key ?? members[0]!.key
   const value = {
     id,
@@ -123,8 +122,10 @@ type Cached = { sessionId: string; members: readonly TimelineRow[]; row: WebChat
 
 /**
  * Maps Projection rows to the shared timeline's rows. A turn starts at each
- * `user` row and collects the output rows after it; a notice row ends the turn
- * and output after it opens a turn without a user message. Projection rows are
+ * `user` row and collects the output rows after it. A notice row ends the turn,
+ * and so does an error row, which becomes the turn's terminal: the shared
+ * renderer shows one terminal per turn, with its details, and hides status
+ * blocks beside it. Output after either opens a turn without a user message. Projection rows are
  * replaced, never mutated, so a turn whose member rows are the same objects is
  * reused and only the streaming turn is rebuilt.
  */
@@ -155,7 +156,7 @@ export function createRowMapper(): (rows: readonly TimelineRow[], sessionId: str
     for (const row of rows) {
       if (row.kind === "user" || isNoticeRow(row)) flush()
       group.push(row)
-      if (isNoticeRow(row)) flush()
+      if (isNoticeRow(row) || row.kind === "error") flush()
     }
     flush()
     cache = next

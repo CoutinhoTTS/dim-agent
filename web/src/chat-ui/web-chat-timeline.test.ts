@@ -96,6 +96,42 @@ describe("WebChatTimeline", () => {
     expect(openLine).toHaveBeenCalledWith("b-7c0ffee1")
   })
 
+  it("keeps a provider failure and a different turn failure both visible, each with its details", async () => {
+    const projection = new Projection()
+    projection.apply(event(1, { kind: "input", text: "call the provider", content: [{ type: "text", text: "call the provider" }], blocks: [] }))
+    projection.apply(event(2, { kind: "model-end", requestId: "r1", error: "HTTP 503", failure: { kind: "server_error", status: 503, providerCode: "overloaded", cause: ["upstream unavailable"], attempts: 1, waitedMs: 0 } }))
+    projection.apply(event(3, { kind: "turn-end", outcome: "failed", error: "Outer turn failure" }))
+    expect(projection.rows.map(row => row.kind)).toEqual(["user", "error", "error"])
+
+    const root = mount(projection.rows, () => {})
+    await settle()
+    const lines = [...root.querySelectorAll("[data-testid='timeline-terminal-line']")]
+    expect(lines.map(line => line.querySelector("[data-testid='timeline-terminal-label']")?.textContent?.trim())).toEqual([
+      expect.stringContaining("The provider reported a server error"),
+      "Outer turn failure",
+    ])
+
+    const toggle = lines[0]!.querySelector<HTMLButtonElement>("[data-testid='timeline-terminal-toggle']")!
+    toggle.click()
+    await settle()
+    expect(toggle.getAttribute("aria-expanded")).toBe("true")
+    expect(lines[0]!.textContent).toContain("status: 503")
+    expect(lines[0]!.textContent).toContain("provider code: overloaded")
+  })
+
+  it("shows a turn failure that repeats the provider failure once", async () => {
+    const projection = new Projection()
+    projection.apply(event(1, { kind: "input", text: "call the provider", content: [{ type: "text", text: "call the provider" }], blocks: [] }))
+    projection.apply(event(2, { kind: "model-end", requestId: "r1", error: "HTTP 503", failure: { kind: "server_error", status: 503, cause: [], attempts: 1, waitedMs: 0 } }))
+    projection.apply(event(3, { kind: "turn-end", outcome: "failed", error: "HTTP 503" }))
+
+    const root = mount(projection.rows, () => {})
+    await settle()
+    const lines = root.querySelectorAll("[data-testid='timeline-terminal-line']")
+    expect(lines).toHaveLength(1)
+    expect(lines[0]!.textContent).toContain("The provider reported a server error")
+  })
+
   it("rebuilds only the turn whose rows changed", () => {
     const projection = new Projection()
     for (const item of recorded.slice(0, 7)) projection.apply(item)
