@@ -3076,8 +3076,9 @@ async fn read_history(
     }
     // The whole recovery reads one branch's conversation: the history window
     // that yields the cutoff, the pending requests read from that cutoff, and
-    // the reply check. The directory names that line once per ACP session
-    // (design §4); a server without the fact has a Session still on its root.
+    // the reply check. The attach reply names that line, and the directory
+    // answers only for a server that predates the field, whose Session is on
+    // its root (design §4, §14).
     let directory: Option<dim_client::wire::BranchDirectory> = if rpc.supports("session.branches") {
         Some(
             rpc.typed("session.branches", json!({"sessionId":id}))
@@ -3086,10 +3087,6 @@ async fn read_history(
     } else {
         None
     };
-    let conversation = directory
-        .as_ref()
-        .and_then(|directory| directory.default_branch_id.clone())
-        .unwrap_or_else(|| ROOT_BRANCH_ID.to_owned());
     let attached: Attached = rpc
         .typed("session.attach", {
             let mut params = json!({"sessionId":id});
@@ -3119,6 +3116,16 @@ async fn read_history(
         capability_snapshot: attached.capability_snapshot,
         model_preferences: attached.model_preferences,
     });
+    let conversation = attached
+        .default_branch
+        .as_ref()
+        .map(|cursor| cursor.branch_id.clone())
+        .or_else(|| {
+            directory
+                .as_ref()
+                .and_then(|directory| directory.default_branch_id.clone())
+        })
+        .unwrap_or_else(|| ROOT_BRANCH_ID.to_owned());
 
     let (history, through, before) = {
         if !rpc.supports("session.history.latestTurn") {

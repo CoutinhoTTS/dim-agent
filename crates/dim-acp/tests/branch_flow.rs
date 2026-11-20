@@ -237,10 +237,15 @@ async fn config_update(reader: &mut (impl AsyncBufReadExt + Unpin)) -> Value {
 
 /// The load cursor is the attach reply's `defaultBranch`: a configuration fact
 /// at that sequence is already the reply's model, so only a later one changes
-/// the Session's options (design §14).
+/// the Session's options. The reply names the line and the directory only
+/// answers for a server that does not carry the field (design §14).
 #[tokio::test]
 async fn a_gateway_load_folds_the_default_branchs_cursor() {
-    for (line, cursor) in [("main", 2), ("line-1", 5)] {
+    for (line, cursor, listed_line) in [
+        ("main", 2, "main"),
+        ("line-1", 5, "line-1"),
+        ("line-1", 5, "main"),
+    ] {
         let home = tempfile::tempdir_in("/tmp").unwrap();
         let endpoint = home.path().join("daemon.sock");
         let cwd = home.path().to_str().unwrap().to_owned();
@@ -272,7 +277,7 @@ async fn a_gateway_load_folds_the_default_branchs_cursor() {
                         if line != "main" {
                             branches.push(json!({"branchId":line,"parentBranchId":"main","branchPoint":1,"state":"open","head":2}));
                         }
-                        send(&mut write,json!({"jsonrpc":"2.0","id":id,"result":{"defaultBranchId":line,"branches":branches}})).await;
+                        send(&mut write,json!({"jsonrpc":"2.0","id":id,"result":{"defaultBranchId":listed_line,"branches":branches}})).await;
                     }
                     "session.history" => {
                         assert_eq!(branch, line, "the recovery reads the default branch");
