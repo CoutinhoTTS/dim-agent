@@ -38,6 +38,8 @@ type SessionCommands = {
 const props = withDefaults(defineProps<{
   running: boolean
   stopping?: boolean
+  /** The line this composer writes to; the send-now gesture belongs to it from start to finish. */
+  branchId?: string
   model: ModelId | undefined
   /**
    * The new Session's model resolution: the state the menu shows and the two
@@ -543,7 +545,9 @@ async function submitAlternate(): Promise<void> {
  * reply says the turn has settled. A submit written before the last interrupt
  * cannot start a run after it, so the order is the point. A stop that fails
  * keeps the whole draft, and a second trigger during the same stop sends
- * nothing: one reply decides one submit.
+ * nothing: one reply decides one submit. The gesture belongs to the line it
+ * started on: if the centre moves before it finishes, it stops without
+ * submitting and keeps the draft.
  */
 async function sendNowAndStop(): Promise<void> {
   if (sendNow.value || composing.value) return
@@ -555,6 +559,7 @@ async function sendNowAndStop(): Promise<void> {
   sendNow.value = true
   error.value = ""
   destination.value = undefined
+  const line = props.branchId
   recallBatch++
   let at = 0
   for (const item of held.value) {
@@ -566,9 +571,19 @@ async function sendNowAndStop(): Promise<void> {
       // the reason is reported and the gesture goes on, as the TUI's Esc does.
       error.value = cause instanceof Error ? cause.message : String(cause)
     }
+    if (props.branchId !== line) {
+      sendNow.value = false
+      error.value = t("composer.sendNowMoved")
+      return
+    }
   }
   await nextTick()
   resize()
+  if (props.branchId !== line) {
+    sendNow.value = false
+    error.value = t("composer.sendNowMoved")
+    return
+  }
   try {
     await props.stop?.()
   } catch (cause) {
@@ -577,6 +592,12 @@ async function sendNowAndStop(): Promise<void> {
     return
   }
   sendNow.value = false
+  // The centre moved while the stop was out: the draft belongs to the line the
+  // gesture started on, so it is kept rather than written to the new one.
+  if (props.branchId !== line) {
+    error.value = t("composer.sendNowMoved")
+    return
+  }
   await submit("queue")
   // This draft opens the run after the stopped one, so neither destination
   // above describes it.

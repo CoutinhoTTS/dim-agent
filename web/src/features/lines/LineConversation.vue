@@ -162,6 +162,7 @@ function noModel(): void {
           v-if="open && !prompting"
           ref="composer"
           :session-id="sessionId"
+          :branch-id="branchId"
           :running="running"
           :stopping="stopping"
           :model="view.model"

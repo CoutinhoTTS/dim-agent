@@ -728,6 +728,37 @@ test("interrupt and send now withdraws every held message oldest first, stops, t
   assert.deepEqual(sent.map((submission) => [submission.value, submission.mode]), [["one\ntwo\nand then", "queue"]], "one submit, after the stop's reply, with the recalled messages ahead of the draft")
 })
 
+test("interrupt and send now keeps its draft when the centre moves during the stop", async (t) => {
+  let releaseStop
+  const stopGate = new Promise((resolve) => { releaseStop = resolve })
+  const { root, view, submissions } = mount(t, "main")
+  const chat = globalThis.chatInputStores.chat
+  view.defaultBranchId = "main"
+  chat.stop = async (sessionId, branch) => {
+    globalThis.chatInputStops.push({ sessionId, branch })
+    await stopGate
+  }
+  await flush()
+  const field = all(root).find((element) => element.type === "textarea")
+  field.props.onFocus()
+  field.props["onUpdate:modelValue"]("carry on")
+  await flush()
+
+  const gesture = click(button(root, "composer.sendNowHint"))
+  await flush()
+  assert.deepEqual(globalThis.chatInputStops, [{ sessionId: "session", branch: "main" }], "the stop belongs to the line the gesture started on")
+
+  view.defaultBranchId = "worker"
+  await flush()
+  releaseStop()
+  await gesture
+  await flush()
+
+  assert.deepEqual(submissions, [], "the draft is not sent to the line the centre moved to")
+  assert.equal(field.value, "carry on", "the whole draft is kept")
+  assert.match(text(root), /composer\.sendNowMoved/, "the composer says why nothing was sent")
+})
+
 test("an empty draft held through a delayed withdrawal stops once, after every reply", async (t) => {
   let release
   const withdrawGate = { promise: new Promise((resolve) => { release = resolve }) }

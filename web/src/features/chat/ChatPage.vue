@@ -397,6 +397,7 @@ async function fork(): Promise<void> {
         v-if="!prompting"
         ref="composer"
         :session-id="sessionId"
+        :branch-id="centred"
         :running="view.running"
         :stopping="view.stopping"
         :model="view.model"

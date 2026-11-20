@@ -123,6 +123,7 @@ const en = {
   "composer.stopping": "Stopping the run before sending",
   "composer.stillStopping": "The run is still stopping; the draft was kept",
   "composer.sendNowFailed": "Send now failed: {error}. The draft was kept",
+  "composer.sendNowMoved": "The line changed while the run was stopping; the draft was kept",
   "composer.sentIntoRun": "Sent into the running turn",
   "composer.heldForNextTurn": "Held for the next turn",
   "failure.details.cause": "cause:",
