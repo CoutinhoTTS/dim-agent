@@ -8367,16 +8367,23 @@ impl App {
         let (full, essential) = run.map_or((None, None), |(full, essential)| {
             (Some(full), Some(essential))
         });
-        [
-            join(full, &optional),
-            join(essential, &optional),
-            join(essential, &[]),
-            join(None, &[]),
-        ]
-        .into_iter()
-        .flatten()
-        .find(|text| width_of(text) <= budget)
-        .or_else(|| join(essential, &[]))
+        // Candidates in priority order: the full run status with every
+        // optional part, then the essential phase with fewer and fewer
+        // optional parts (the last optional part is the first to go), then
+        // the optional parts without a run status, and the slot alone.
+        let mut candidates = vec![join(full, &optional)];
+        for keep in (0..=optional.len()).rev() {
+            candidates.push(join(essential, &optional[..keep]));
+        }
+        for keep in (0..=optional.len()).rev() {
+            candidates.push(join(None, &optional[..keep]));
+        }
+        candidates
+            .into_iter()
+            .flatten()
+            .find(|text| width_of(text) <= budget)
+            .or_else(|| join(essential, &[]))
+            .or_else(|| join(None, &optional[..optional.len().min(1)]))
     }
 
     /// The composer's bottom-right label, built to fit the cells the border
@@ -12293,6 +12300,42 @@ mod tests {
                 "the 32-column notice keeps its whole text (fullscreen: {fullscreen}):\n{}",
                 narrow.join("\n")
             );
+        }
+    }
+
+    #[test]
+    fn a_bottom_corner_without_run_or_slot_drops_its_lowest_parts_first() {
+        for fullscreen in [false, true] {
+            let (mut app, _home) = status_app("local", "fixture-model", Some("high"));
+            app.fullscreen = fullscreen;
+            app.context = Some(crate::model::session::ContextReading {
+                input: 98_300,
+                window: 256_000,
+                threshold: 900_000,
+            });
+            app.apply(Update::Snapshot(Box::new(ViewSnapshot {
+                session_id: "s1".into(),
+                tasks: vec![background_task("t1", "cargo build")],
+                goal: Some(dim_agent_types::GoalView {
+                    objective: "ship".into(),
+                    status: dim_agent_types::GoalViewStatus::Active,
+                    evaluator: false,
+                }),
+                ..ViewSnapshot::default()
+            })));
+
+            // 60 columns: all three parts need 53 cells, the budget is 51, so
+            // the context (the lowest part) goes and the other two stay.
+            let (_, bottom, _) = composer_chrome(&mut app, 60);
+            assert!(bottom.contains("1 in background · /tasks"), "{bottom}");
+            assert!(bottom.contains("◎ goal active"), "{bottom}");
+            assert!(!bottom.contains("98.3K"), "{bottom}");
+
+            // 40 columns: only the task count fits beside the corner's border.
+            let (_, bottom, _) = composer_chrome(&mut app, 40);
+            assert!(bottom.contains("1 in background · /tasks"), "{bottom}");
+            assert!(!bottom.contains("goal active"), "{bottom}");
+            assert!(!bottom.contains("98.3K"), "{bottom}");
         }
     }
 
