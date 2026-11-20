@@ -9460,7 +9460,9 @@ async fn a_fork_copies_the_root_and_its_default_branch_is_the_root() {
 
 /// The catalog's recent activity follows the default branch: a batch that
 /// carries activity on the line the Session is now on moves the catalog's
-/// time, and one on the root after a move does not (design §5, §15).
+/// time, the move itself reports the new line's own latest activity (or the
+/// Session's creation time when the line has none), and a root batch after a
+/// move does not move it (design §5, §14, §15).
 #[tokio::test]
 async fn the_writer_thread_keeps_recent_activity_on_the_default_branch() {
     let database = Database::new();
@@ -9553,10 +9555,20 @@ async fn the_writer_thread_keeps_recent_activity_on_the_default_branch() {
         .await
         .unwrap();
     let connection = Connection::open(&database.0).unwrap();
+    // The move reported the new line's own activity; the line has none yet, so
+    // the row sits at the Session's creation time, and the root's later
+    // activity does not move it.
+    let created: i64 = connection
+        .query_row(
+            "SELECT created_at_ms FROM agent_sessions WHERE session_id='s'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
     assert_eq!(
         activity_at(&connection),
-        5_000,
-        "the root's later activity is no longer the Session's"
+        created,
+        "an empty default line reports the Session's creation time"
     );
     drop(connection);
     append(&store, key("s", "line"), vec![write(1, 7_000)])
