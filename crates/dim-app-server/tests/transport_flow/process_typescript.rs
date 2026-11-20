@@ -1380,6 +1380,38 @@ async fn node_store_preserves_repository_results_and_worktree_removal_exclusion(
     assert_ok(&wire);
     assert_ok(&native);
     assert_eq!(wire["result"], native["result"]);
+    let missing = client
+        .rpc(
+            "storefixture.read_user",
+            json!({"source":"missing-fixture"}),
+        )
+        .await;
+    assert_ok(&missing);
+    assert!(missing["result"].is_null());
+    for text in [r#"{"value":1}"#, r#"{"value":2}"#] {
+        let winner = client
+            .rpc(
+                "storefixture.import_user",
+                json!({"source":"fixture-import","document":text,"importedRevision":"fixture"}),
+            )
+            .await;
+        assert_ok(&winner);
+        assert_eq!(
+            winner["result"],
+            json!({"version":1,"document":r#"{"value":1}"#})
+        );
+    }
+    let persisted = client
+        .rpc("storefixture.read_user", json!({"source":"fixture-import"}))
+        .await;
+    assert_ok(&persisted);
+    assert_eq!(
+        persisted["result"],
+        json!({"version":1,"document":r#"{"value":1}"#})
+    );
+    let replaced = client.rpc("storefixture.replace_user", json!({})).await;
+    assert_ok(&replaced);
+    assert_eq!(replaced["result"], json!({"version":2}));
     let store = server.service::<Store>().unwrap();
     let listed = client.rpc("agent.list", json!({})).await;
     assert_ok(&listed);

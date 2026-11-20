@@ -3689,8 +3689,7 @@
       "parent": "dim_app_server::settings",
       "file": "crates/dim-app-server/src/settings/native.rs",
       "unexpandedMacros": [
-        "format",
-        "params"
+        "format"
       ]
     },
     {
@@ -3962,6 +3961,7 @@
         "format",
         "matches",
         "panic",
+        "rusqlite::params",
         "serde_json::json",
         "tokio::pin",
         "tracing::error",
@@ -33666,19 +33666,50 @@
     },
     {
       "from": "dim_app_server::settings::native",
+      "to": "dim_agent_runtime::error",
+      "references": [
+        "path dim_agent_runtime::AgentError",
+        "path dim_agent_runtime::AgentError::Cancelled",
+        "path dim_agent_runtime::AgentError::Closed"
+      ]
+    },
+    {
+      "from": "dim_app_server::settings::native",
       "to": "dim_app_server::settings",
       "references": [
         "path Format",
         "path Result",
+        "path SettingsError",
         "path SettingsError::Cancelled",
         "path SettingsError::Closed",
         "path SettingsError::Conflict",
         "path SettingsError::Invalid",
         "path SettingsError::Persistence",
+        "path SettingsError::UserOnlyField",
         "path SettingsService",
         "path SettingsSnapshot",
         "path revision",
         "path snapshot"
+      ]
+    },
+    {
+      "from": "dim_app_server::settings::native",
+      "to": "dim_app_server::storage::sqlite",
+      "references": [
+        "path ImportUser",
+        "path ReplaceUser",
+        "path UserDecision::Reject",
+        "path UserDecision::Write",
+        "path UserDocument",
+        "path UserWriteError::Conflict",
+        "path UserWriteError::Missing",
+        "path UserWriteError::Overflow",
+        "path UserWriteError::Rejected",
+        "use crate::storage::ImportUser",
+        "use crate::storage::ReplaceUser",
+        "use crate::storage::UserDecision",
+        "use crate::storage::UserDocument",
+        "use crate::storage::UserWriteError"
       ]
     },
     {
@@ -34155,9 +34186,14 @@
         "mod sqlite",
         "use sqlite::AssemblyProgress",
         "use sqlite::FORMAT",
+        "use sqlite::ImportUser",
+        "use sqlite::ReplaceUser",
         "use sqlite::SqliteStorage",
         "use sqlite::SqliteStoragePlugin",
         "use sqlite::StorageReport",
+        "use sqlite::UserDecision",
+        "use sqlite::UserDocument",
+        "use sqlite::UserWriteError",
         "use sqlite::Vacuumed",
         "use sqlite::set_upgrade_report_delay",
         "use sqlite::vacuum_store"
@@ -35435,6 +35471,7 @@
       "references": [
         "path AgentError",
         "path AgentError::Cancelled",
+        "path AgentError::Closed",
         "path AgentError::Storage",
         "path Result",
         "use dim_agent_runtime::AgentError",
@@ -57088,6 +57125,22 @@
     {
       "module": "dim_app_server::storage::query",
       "path": "StatementStatus::VmStep"
+    },
+    {
+      "module": "dim_app_server::storage::sqlite",
+      "path": "Request::ImportUserIfAbsent"
+    },
+    {
+      "module": "dim_app_server::storage::sqlite",
+      "path": "Request::ReadUser"
+    },
+    {
+      "module": "dim_app_server::storage::sqlite",
+      "path": "Request::ReplaceUser"
+    },
+    {
+      "module": "dim_app_server::storage::sqlite",
+      "path": "Request::StorageReport"
     },
     {
       "module": "dim_app_server::storage::timeline",

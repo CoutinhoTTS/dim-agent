@@ -42,6 +42,7 @@ pub use sqlite::{
     FORMAT as STORE_FORMAT, SqliteStorage, SqliteStoragePlugin, StorageReport, Vacuumed,
     vacuum_store,
 };
+pub(crate) use sqlite::{ImportUser, ReplaceUser, UserDecision, UserDocument, UserWriteError};
 pub use text::initialize_session_text_index;
 /// Derives every text candidate from the stored rows, in order: what an upgrade
 /// from a format before the index ran. A flow test compares a per-row rebuild
