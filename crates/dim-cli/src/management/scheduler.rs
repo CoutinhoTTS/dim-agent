@@ -7,6 +7,7 @@
 //! request, not in the document, and the owner derives `created_by`,
 //! `disabled_reason` and `enabled_at`.
 
+use dim_agent_types::DEFAULT_BRANCH_ID;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
@@ -124,7 +125,7 @@ pub enum Target {
 }
 
 fn default_branch() -> String {
-    "main".to_owned()
+    DEFAULT_BRANCH_ID.to_owned()
 }
 
 fn default_max_run_minutes() -> u64 {

@@ -35,6 +35,40 @@
         "Qwen/Qwen3-235B-A22B-Thinking-2507": { "limit": { "context": 262000, "output": 131072 } },
         "Qwen/Qwen3-Coder-480B-A35B-Instruct": { "limit": { "context": 262000, "output": 65536 } }
       }
+    },
+    "zenmux": {
+      "models": {
+        "google/gemini-2.5-flash": { "modalities": { "input": ["text", "image", "audio", "video", "pdf"] } },
+        "google/gemini-2.5-flash-lite": { "modalities": { "input": ["text", "image", "audio", "video", "pdf"] } },
+        "google/gemini-3.1-flash-lite": { "modalities": { "input": ["text", "image", "audio", "video", "pdf"] } },
+        "google/gemini-3.1-pro-preview": { "modalities": { "input": ["text", "image", "audio", "video", "pdf"] } },
+        "google/gemini-3.5-flash": { "modalities": { "input": ["text", "image", "audio", "video", "pdf"] } },
+        "google/gemini-3.5-flash-lite": { "modalities": { "input": ["text", "image", "audio", "video", "pdf"] } },
+        "google/gemini-3.6-flash": { "modalities": { "input": ["text", "image", "audio", "video", "pdf"] } },
+        "google/gemini-3.7-flash": { "modalities": { "input": ["text", "image", "audio", "video", "pdf"] } },
+        "google/gemini-3.8-flash": { "modalities": { "input": ["text", "image", "audio", "video", "pdf"] } },
+        "google/gemini-4-argon": { "modalities": { "input": ["text", "image", "audio", "video", "pdf"] } },
+        "google/gemini-4-carbon": { "modalities": { "input": ["text", "image", "audio", "video", "pdf"] } },
+        "google/gemini-4-hydrogen": { "modalities": { "input": ["text", "image", "audio", "video", "pdf"] } },
+        "inclusionai/ling-3.0-flash-vl": { "modalities": { "input": ["text", "image", "video"] } },
+        "meta/muse-spark-1.1": { "modalities": { "input": ["text", "image", "audio", "video", "pdf"] } },
+        "meta/muse-spark-1.2": { "modalities": { "input": ["text", "image", "audio", "video", "pdf"] } },
+        "meta/muse-spark-1.3": { "modalities": { "input": ["text", "image", "audio", "video", "pdf"] } },
+        "meta/muse-spark-1.3-contributor": { "modalities": { "input": ["text", "image", "audio", "video", "pdf"] } },
+        "meta/muse-wonder-1.0": { "modalities": { "input": ["text", "image", "audio", "video", "pdf"] } },
+        "minimax/minimax-m3": { "modalities": { "input": ["text", "image", "video"] } },
+        "moonshotai/kimi-k2.6": { "modalities": { "input": ["text", "image", "video"] } },
+        "moonshotai/kimi-k2.7-code-highspeed": { "modalities": { "input": ["text", "image", "video"] } },
+        "moonshotai/kimi-k3.1-pro-highspeed": { "modalities": { "input": ["text", "image", "video"] } },
+        "qwen/qwen3.5-flash": { "modalities": { "input": ["text", "image", "video"] } },
+        "qwen/qwen3.5-plus": { "modalities": { "input": ["text", "image", "video"] } },
+        "qwen/qwen3.8-max": { "modalities": { "input": ["text", "image", "video"] } },
+        "stepfun/step-3.7-flash": { "modalities": { "input": ["text", "image", "video"] } },
+        "stepfun/step-5-preview": { "modalities": { "input": ["text", "image", "video"] }, "reasoning": { "supported": true } },
+        "xiaomi/mimo-v2.6-flash": { "modalities": { "input": ["text", "image", "audio", "video"] } },
+        "xiaomi/mimo-v2.6-pro": { "modalities": { "input": ["text", "image", "audio", "video"] } },
+        "xiaomi/mimo-v2.6-pro-ultraspeed": { "modalities": { "input": ["text", "image", "audio", "video"] } }
+      }
     }
   }
 }

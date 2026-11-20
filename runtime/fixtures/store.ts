@@ -1,21 +1,23 @@
 import { definePlugin } from '@arcships/rutis'
-import type { ManagementMethods, MethodReply, Store } from '../../npm/plugin.js'
+import type { ManagementMethods, MethodReply, SqliteStorage, Store } from '../../npm/plugin.js'
 import { writeFile, rename, rm } from 'node:fs/promises'
 import assert from 'node:assert/strict'
 
 export default definePlugin({
   name: 'StoreFixture',
   provides: {},
-  inject: ['managementMethods', 'store'],
+  inject: ['managementMethods', 'store', 'sqliteStorage'],
   async apply(ctx) {
     const store = ctx.use<Store>('store')
+    const sqlite = ctx.use<SqliteStorage>('sqliteStorage')
     let release: (() => void) | undefined
     await ctx.use<ManagementMethods>('managementMethods').register(
       'storefixture',
-      ['status', 'create', 'cycle', 'remove', 'refuse', 'release', 'invalid_id'].map(name => ({ name: `storefixture.${name}`, mutating: true, interruption: 'report', progress: false })),
+      ['status', 'report', 'create', 'cycle', 'remove', 'refuse', 'release', 'invalid_id'].map(name => ({ name: `storefixture.${name}`, mutating: true, interruption: 'report', progress: false })),
       async (call: { method: string; params: any }): Promise<MethodReply> => {
         const params = call.params
         if (call.method === 'storefixture.status') return { kind: 'value', value: {} }
+        if (call.method === 'storefixture.report') return { kind: 'value', value: await sqlite.storageReport({}) }
         if (call.method === 'storefixture.create') {
           if (!params.create) throw new Error('missing creation request')
           const result = await store.createOwnedSession(params.create)

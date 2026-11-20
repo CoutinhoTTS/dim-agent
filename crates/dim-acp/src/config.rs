@@ -1,6 +1,6 @@
 use crate::rpc::Rpc;
 use agent_client_protocol::{Error, schema::v1 as acp};
-use dim_agent_types::{ModelId, PermissionPolicy, PermissionPreset};
+use dim_agent_types::{DEFAULT_BRANCH_ID, ModelId, PermissionPolicy, PermissionPreset};
 use dim_client::wire::{Configuration, Event, EventContent};
 use serde::Deserialize;
 use serde_json::json;
@@ -134,7 +134,7 @@ impl Config {
             config.policy = Some(
                 rpc.typed(
                     "session.permission.get",
-                    json!({"sessionId":id,"branchId":"main"}),
+                    json!({"sessionId":id,"branchId":DEFAULT_BRANCH_ID}),
                 )
                 .await?,
             );
@@ -296,17 +296,17 @@ impl Config {
                 let current: Policy = rpc
                     .typed(
                         "session.permission.get",
-                        json!({"sessionId":id,"branchId":"main"}),
+                        json!({"sessionId":id,"branchId":DEFAULT_BRANCH_ID}),
                     )
                     .await?;
                 let mut policy = current.policy;
                 policy.preset =
                     serde_json::from_value(json!(value)).map_err(|_| Error::invalid_params())?;
-                rpc.call("session.permission.update",json!({"sessionId":id,"branchId":"main","expectedVersion":current.version,"policy":policy})).await?;
+                rpc.call("session.permission.update",json!({"sessionId":id,"branchId":DEFAULT_BRANCH_ID,"expectedVersion":current.version,"policy":policy})).await?;
                 self.policy = Some(
                     rpc.typed(
                         "session.permission.get",
-                        json!({"sessionId":id,"branchId":"main"}),
+                        json!({"sessionId":id,"branchId":DEFAULT_BRANCH_ID}),
                     )
                     .await?,
                 );
@@ -329,7 +329,7 @@ impl Config {
                 let result: Adopted = rpc
                     .typed(
                         "session.model.update",
-                        json!({"sessionId":id,"branchId":"main","modelPreferences":{"reasoningEffort":patch}}),
+                        json!({"sessionId":id,"branchId":DEFAULT_BRANCH_ID,"modelPreferences":{"reasoningEffort":patch}}),
                     )
                     .await?;
                 if !matches!(result.outcome.as_str(), "adopted" | "unchanged") {
@@ -347,7 +347,7 @@ impl Config {
                     .iter()
                     .find(|model| model.id == value)
                     .ok_or_else(Error::invalid_params)?;
-                let result: Adopted = rpc.typed("session.model.update",json!({"sessionId":id,"branchId":"main","providerId":model.provider,"modelId":model.id})).await?;
+                let result: Adopted = rpc.typed("session.model.update",json!({"sessionId":id,"branchId":DEFAULT_BRANCH_ID,"providerId":model.provider,"modelId":model.id})).await?;
                 if !matches!(result.outcome.as_str(), "adopted" | "unchanged") {
                     return Err(Error::internal_error());
                 }

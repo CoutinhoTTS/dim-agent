@@ -6,13 +6,13 @@ use rutis_bridge::session::{Error, HostDispatch, Reply, Value as RpcValue, host_
 use serde_json::{Value, json};
 
 /// A JSON Schema source an owner registers (§3.1).
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SourceDeclaration {
     pub source: String,
     pub user_file: String,
     /// Present when the source also has project scope.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_file: Option<String>,
     /// JSON Schema (draft 2020-12) whose root is `type: object`.
     pub schema: Value,
@@ -269,6 +269,12 @@ pub(crate) struct Update {
 #[serde(deny_unknown_fields)]
 struct Projects {}
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DeclaredBy {
+    instance_id: String,
+}
+
 /// The service error codes (§6).
 impl SettingsError {
     pub(crate) fn code(&self) -> &'static str {
@@ -313,6 +319,20 @@ fn request<T: DeserializeOwned>(args: RpcValue) -> std::result::Result<T, Error>
 /// calling row unloads; each source has one owner (AGENTS.md rule 11).
 pub struct Settings(Arc<SettingsService>);
 impl Settings {
+    /// The declarations of the JSON Schema sources the row `instance_id`
+    /// registered and still holds, by source name.
+    pub fn declared_by(&self, instance_id: &str) -> Vec<SourceDeclaration> {
+        self.0
+            .sources
+            .all()
+            .iter()
+            .filter(|registered| registered.value.owner == instance_id)
+            .filter_map(|registered| match &registered.value.kind {
+                Kind::Declared(declared) => Some(declared.declaration().clone()),
+                Kind::Rust(_) => None,
+            })
+            .collect()
+    }
     /// Registers a declared source until the calling owner unloads.
     pub fn register(&self, owner: &Ctx, declaration: SourceDeclaration) -> rutis::Result<()> {
         self.0.register_declared(owner, declaration)
@@ -357,7 +377,9 @@ impl Settings {
 }
 impl HostDispatch for Settings {
     fn methods(&self) -> Option<Value> {
-        Some(json!({"register": "async", "read": "async", "update": "async", "projects": "sync"}))
+        Some(
+            json!({"register": "async", "read": "async", "update": "async", "projects": "sync", "declaredBy": "sync"}),
+        )
     }
     fn invoke(&self, method: &str, args: RpcValue) -> Reply {
         let service = Self(self.0.clone());
@@ -379,6 +401,10 @@ impl HostDispatch for Settings {
                         .map_err(|error| Error::Value(error.to_string()))
                 });
                 Ok(RpcValue::future(async move { registered }))
+            }
+            "declaredBy" => {
+                let DeclaredBy { instance_id } = request(args)?;
+                Ok(json!(service.declared_by(&instance_id)).into())
             }
             "projects" => {
                 let Projects {} = request(args)?;

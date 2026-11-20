@@ -2,7 +2,7 @@ use crate::{
     AgentError, BoxFuture, BranchRecord, PublishCallback, Result, SessionConfig, StoredBranch,
     StoredEvent, TimelineKey, TimelineStore, TimelineTrace,
 };
-use dim_agent_types::{BranchCreateAt, EventKind, RecoverySnapshot};
+use dim_agent_types::{BranchCreateAt, EventKind, ROOT_BRANCH_ID, RecoverySnapshot};
 use std::{collections::BTreeMap, ops::RangeInclusive, sync::Mutex};
 
 mod query;
@@ -57,10 +57,10 @@ impl TimelineStore for MemoryTimelineStore {
                 branches: BTreeMap::new(),
             };
             session.branches.insert(
-                "main".into(),
+                ROOT_BRANCH_ID.into(),
                 MemoryBranch {
                     info: BranchRecord {
-                        id: "main".into(),
+                        id: ROOT_BRANCH_ID.into(),
                         parent: None,
                         branch_point: None,
                         create_anchor: None,

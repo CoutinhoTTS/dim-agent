@@ -1,7 +1,7 @@
 #![cfg(any(unix, windows))]
 
 use dim_agent_capabilities::file_storage::{
-    DirectoryEntry, EntryKind, FileStorage, FileStorageError, FileStoragePlugin,
+    DirectoryEntry, EntryKind, FileStorage, FileStorageError, FileStoragePlugin, FsRemove,
 };
 use rutis::host::{CtxHost, FiberState, FiberView};
 use rutis::{Ctx, Plugin};
@@ -358,6 +358,66 @@ async fn directory_listing_and_removal_stay_inside_the_authorized_root() {
     let (root, _, storage) = mount(root_path.clone()).await;
     let cancel = CancellationToken::new();
     let path = |relative: &str| storage.path(0, relative).unwrap();
+
+    let face = root
+        .get::<dim_agent_capabilities::file_storage::FsHost>()
+        .unwrap();
+    let nested = root_path.join("nested");
+    let child = nested.join("child");
+    face.create_directory(child.to_str().unwrap(), &cancel)
+        .await
+        .unwrap();
+    let entries = face.list(nested.to_str().unwrap(), &cancel).await.unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].name, "child");
+    assert_eq!(entries[0].kind, EntryKind::Directory);
+    let child_entry = entries.into_iter().next().unwrap();
+    face.remove(
+        FsRemove::Entry {
+            parent: nested.to_str().unwrap().to_owned(),
+            name: child_entry.name,
+        },
+        &cancel,
+    )
+    .await
+    .unwrap();
+    assert!(!child.exists());
+
+    #[cfg(unix)]
+    let (raw, encoded) = {
+        use std::os::unix::ffi::OsStringExt;
+        let bytes = b"orphan-\xff";
+        (
+            std::ffi::OsString::from_vec(bytes.to_vec()),
+            serde_json::json!({"Unix": bytes.as_slice()}),
+        )
+    };
+    #[cfg(windows)]
+    let (raw, encoded) = {
+        use std::os::windows::ffi::OsStringExt;
+        let units = [0x61, 0xd800];
+        (
+            std::ffi::OsString::from_wide(&units),
+            serde_json::json!({"Windows": units}),
+        )
+    };
+    let raw_entry = DirectoryEntry {
+        name: raw.clone(),
+        kind: EntryKind::File,
+    };
+    let name = serde_json::to_value(&raw_entry).unwrap()["name"].clone();
+    assert_eq!(name, encoded);
+    let remove: FsRemove =
+        serde_json::from_value(serde_json::json!({"parent":nested, "name":name})).unwrap();
+    assert!(matches!(&remove, FsRemove::Entry { name, .. } if name == &raw));
+    #[cfg(target_os = "linux")]
+    {
+        fs::write(nested.join(&raw), b"orphan").unwrap();
+        let entries = face.list(nested.to_str().unwrap(), &cancel).await.unwrap();
+        assert_eq!(entries, vec![raw_entry]);
+        face.remove(remove, &cancel).await.unwrap();
+        assert!(!nested.join(raw).exists());
+    }
 
     for id in ["a1", "a2"] {
         fs::create_dir_all(root_path.join(format!("sessions/s1/attachments/{id}"))).unwrap();

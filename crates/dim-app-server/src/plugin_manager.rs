@@ -11,7 +11,7 @@ mod tools;
 use crate::hooks_settings::HooksService;
 use crate::mcp::{McpError, McpServiceBinding};
 use crate::methods::ManagementMethods;
-use crate::settings::{SettingsError, SettingsService, SourceDeclaration};
+use crate::settings::{Settings, SettingsError, SourceDeclaration};
 use crate::ui_extensions::UiExtensions;
 use acquire::PluginsDir;
 use dim_agent_capabilities::methods::{Interruption, MethodCall, MethodDecl, Progress, RpcError};
@@ -681,7 +681,7 @@ pub(crate) struct Manager {
     ctx: Ctx,
     runtimes: Key<crate::runtime_manager::RuntimeService>,
     owners: Owners,
-    settings: Key<SettingsService>,
+    settings: Key<Settings>,
 }
 
 /// The content owners, read only if present (§1): an absent owner skips
@@ -2125,7 +2125,7 @@ impl Manager {
     pub(crate) fn sources(
         &self,
         name: &str,
-    ) -> Result<(Option<Arc<SettingsService>>, Vec<SourceDeclaration>), PluginError> {
+    ) -> Result<(Option<Arc<Settings>>, Vec<SourceDeclaration>), PluginError> {
         let record = self.state.record.lock().unwrap().clone();
         if !names(&record, &self.state.defaults, self.builtins()).contains(name) {
             return Err(not_found(name));
@@ -2142,7 +2142,7 @@ impl Manager {
             .loader
             .get(&row)
             .and_then(|entry| entry.view)
-            .map(|view| settings.declared_by(view.instance()))
+            .map(|view| settings.declared_by(&view.instance().to_string()))
             .unwrap_or_default();
         Ok((Some(settings), sources))
     }
@@ -2337,7 +2337,7 @@ pub(crate) struct PluginManagerPlugin {
     hooks: Key<HooksService>,
     ui: Key<UiExtensions>,
     runtimes: Key<crate::runtime_manager::RuntimeService>,
-    settings: Key<SettingsService>,
+    settings: Key<Settings>,
 }
 
 impl PluginManagerPlugin {

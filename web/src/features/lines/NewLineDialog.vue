@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue"
 import { useI18n } from "vue-i18n"
-import { MAIN_BRANCH } from "../../rpc/protocol"
+import { ROOT_BRANCH_ID } from "../../rpc/protocol"
 import { useChatStore } from "../../stores/chat"
 import { useUiStore } from "../../stores/ui"
 import { lineName, shortId } from "./line-state"
@@ -23,7 +23,7 @@ const open = computed({
 const parentName = computed(() => {
   const current = request.value
   if (current === undefined) return ""
-  if (current.parentBranchId === MAIN_BRANCH) return t("lines.main")
+  if (current.parentBranchId === ROOT_BRANCH_ID) return t("lines.main")
   const parent = chat.views[current.sessionId]?.lines.find((line) => line.id === current.parentBranchId)
   return parent === undefined ? shortId(current.parentBranchId) : lineName(t, parent, current.parentBranchId)
 })

@@ -78,8 +78,8 @@ impl Observation {
             self.cursor = event.sequence;
             self.goal_stale |= crate::goal::changed(&event.content);
             match replayed {
-                true => self.projection.replay("main", &event),
-                false => self.projection.apply("main", &event),
+                true => self.projection.replay(DEFAULT_BRANCH_ID, &event),
+                false => self.projection.apply(DEFAULT_BRANCH_ID, &event),
             }
         }
     }
@@ -210,7 +210,7 @@ impl Worker {
         let mut needed = HashSet::new();
         if self
             .task_history
-            .get("main")
+            .get(DEFAULT_BRANCH_ID)
             .is_some_and(|branch| branch.done)
         {
             needed.extend(self.projection.unfinished_members().map(str::to_owned));
@@ -298,11 +298,11 @@ impl Worker {
                 params["display"] = json!(true);
             }
             if method == "session.goal.get" {
-                params["branchId"] = json!("main");
+                params["branchId"] = json!(DEFAULT_BRANCH_ID);
             }
             if method == "session.tool.get" {
                 let (request, call) = missing.as_ref().unwrap();
-                params["branchId"] = json!("main");
+                params["branchId"] = json!(DEFAULT_BRANCH_ID);
                 params["requestId"] = json!(request);
                 params["callId"] = json!(call);
                 self.members
@@ -372,7 +372,7 @@ impl Worker {
             }
             let params = observation.window.params_with_display(
                 &id,
-                "main",
+                DEFAULT_BRANCH_ID,
                 self.client.offers("session.history.display.tail"),
                 self.client.offers("session.history.display.transcript"),
             );
@@ -400,7 +400,7 @@ impl Worker {
         if self.members.agents.is_some()
             || !self
                 .task_history
-                .get("main")
+                .get(DEFAULT_BRANCH_ID)
                 .is_some_and(|branch| branch.done)
         {
             return Ok(());
@@ -487,7 +487,10 @@ impl Worker {
                         .map_err(|error| error.to_string())
                 });
                 match read {
-                    Ok(turn) if turn.branch_id == "main" && turn.through == observation.cursor => {
+                    Ok(turn)
+                        if turn.branch_id == DEFAULT_BRANCH_ID
+                            && turn.through == observation.cursor =>
+                    {
                         observation
                             .projection
                             .set_running(turn.turn.is_some_and(|turn| !turn.ended));
@@ -548,7 +551,7 @@ impl Worker {
                 });
                 match read {
                     Ok(read)
-                        if read.branch_id == "main"
+                        if read.branch_id == DEFAULT_BRANCH_ID
                             && read.call.as_ref().is_none_or(|origin| {
                                 origin.request_id == request && origin.call.id == call
                             }) =>
@@ -588,7 +591,7 @@ impl Worker {
                             if observation.earlier == EarlierRead::Reading {
                                 let mut older = Projection::default();
                                 for event in observation.window.take() {
-                                    older.replay("main", &event);
+                                    older.replay(DEFAULT_BRANCH_ID, &event);
                                 }
                                 observation.projection.prepend(older);
                                 observation.earlier = EarlierRead::None;
@@ -612,7 +615,7 @@ impl Worker {
         if let Some(method) = next {
             let mut params = json!({"sessionId":id});
             if method != "session.methods" {
-                params["branchId"] = json!("main");
+                params["branchId"] = json!(DEFAULT_BRANCH_ID);
             }
             if method == "session.turn.get" {
                 params["through"] = json!(self.members.observations[&id].cursor);

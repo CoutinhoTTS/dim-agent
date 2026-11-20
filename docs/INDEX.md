@@ -103,6 +103,7 @@ This index is navigation. Delivery status lives in issues, not here.
 - [Scheduler/Workflow native access](design/p6-p7-bindings.md) (#317)
 - [C5 branch TypeScript binding](design/branch-typescript.md)
 - [F5 HostPlatform isolation spike and measurements](design/host-platform-isolation-spike.md)
+- [多模态请求预算与图像引用（研究提案，#687）](design/research/multimodal-input-budget.md)（中文）
 - [Compaction trigger point and verbatim retention (research, #128)](design/research/compaction-trigger.md)（[中文](zh/design/research/compaction-trigger.md)）
 - [Summary evaluation: reasoning and target length (research, #170)](design/research/summary-eval.md)（[中文](zh/design/research/summary-eval.md)）
 - [F5 HostPlatform process isolation boundary](design/host-platform-isolation.md)

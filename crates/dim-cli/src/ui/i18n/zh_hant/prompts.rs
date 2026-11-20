@@ -27,10 +27,13 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Version {latest} is available (you have {current})." => {
             "{latest} 已推出（目前 {current}）。"
         }
-        "To update, run: {command}" => "更新請執行：{command}",
-        "To update, exit every client and stop the server, then run {command}" => {
-            "要更新，請結束所有用戶端並停止伺服器，然後執行 {command}"
+        "Update now" => "立即更新",
+        "To update, exit DimCode and run: {command}" => "更新請退出 DimCode 後執行：{command}",
+        "Finish or stop the current work first (a running turn, shell command, or pending prompt)." => {
+            "請先完成或停止目前的工作（執行中的回合、Shell 指令或待處理的提問）。"
         }
+        "Checking for updates…" => "正在檢查更新…",
+        "DimCode {version} is up to date." => "DimCode {version} 已是最新版本。",
         "Skip this version" => "略過此版本",
         "Skipped {version}." => "已略過 {version}。",
         "Close" => "關閉",

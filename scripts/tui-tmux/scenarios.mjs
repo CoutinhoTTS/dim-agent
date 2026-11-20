@@ -262,6 +262,111 @@ const scenarios = [
     },
   },
   {
+    name: 'fullscreen_tool_body_click_collapses_only_its_node',
+    area: 'terminal-modes',
+    title: 'In fullscreen, clicking an expanded tool output row collapses only that call, cancels on drag/double-click/paste/resize, and keeps the collapsed header in view when scrolled',
+    async run(tui) {
+      const reply = [
+        'First reply paragraph.',
+        'Second reply paragraph.',
+        'Third reply paragraph.',
+        'Fourth reply paragraph.',
+        'Fifth reply paragraph.',
+      ].join('\n\n');
+      await tui.setup({
+        respond: (request) => {
+          if ((request.tools ?? []).length === 0) return {text: ANSWER};
+          if (lastMessage(request).role === 'tool') return {text: reply};
+          return {toolCalls: [{name: 'exec', arguments: {command: 'seq 1 15'}}]};
+        },
+      });
+      const terminal = await tui.launch(['--fullscreen'], {waitForComposer: true});
+      const cellOf = (needle, text = needle) => {
+        const lines = terminal.capture({join: false}).split('\n');
+        const index = lines.findIndex((line) => (needle instanceof RegExp ? needle.test(line) : line.includes(needle)));
+        assert(index !== -1, `pane missing ${needle}\n${lines.join('\n')}`);
+        const col = lines[index].indexOf(text);
+        assert(col !== -1, `row ${index + 1} missing ${text}: ${lines[index]}`);
+        return {col: col + 1, row: index + 1};
+      };
+      const mouse = (button, col, row, release = false) =>
+        terminal.bytes(Buffer.from(`\u001b[<${button};${col};${row}${release ? 'm' : 'M'}`, 'utf8'));
+      const click = ({col, row}) => {
+        mouse(0, col, row, false);
+        mouse(0, col, row, true);
+      };
+
+      terminal.send('count to fifteen');
+      terminal.key('Enter');
+      await terminal.waitFor('Permission required');
+      terminal.key('y');
+      await terminal.waitFor('Fifth reply paragraph.');
+      await terminal.waitFor('▸ ✓ Ran 1 command');
+      await terminal.untilComposer();
+
+      click(cellOf('▸ ✓ Ran 1 command', 'Ran 1 command'));
+      await terminal.waitFor('▾ ✓ Ran 1 command');
+      await terminal.waitFor('▸ $ seq 1 15');
+
+      const outputRow = (n) => new RegExp(`^ {4,}${n}(?:\\s*[\\u2581-\\u2588])?\\s*$`, 'm');
+      click(cellOf('▸ $ seq 1 15', 'seq 1 15'));
+      await terminal.waitFor('▾ $ seq 1 15');
+      await terminal.waitFor(outputRow(5), {describe: 'expanded seq output row 5'});
+
+      const five = cellOf(outputRow(5), '5');
+      mouse(0, five.col, five.row, false);
+      mouse(32, five.col + 2, five.row, false);
+      mouse(0, five.col + 2, five.row, true);
+      await sleep(550);
+      assert(terminal.capture().includes('▾ $ seq 1 15'), 'dragging across tool output does not collapse the call');
+      terminal.key('Escape');
+
+      click(five);
+      await sleep(60);
+      click(five);
+      await sleep(550);
+      assert(terminal.capture().includes('▾ $ seq 1 15'), 'double-clicking tool output does not collapse the call');
+      terminal.key('Escape');
+
+      click(five);
+      await sleep(60);
+      terminal.paste('pasted draft');
+      await terminal.waitFor('pasted draft', {describe: 'bracketed paste enters the composer'});
+      await sleep(550);
+      assert(terminal.capture().includes('▾ $ seq 1 15'), 'pasting after release cancels the pending collapse');
+      terminal.key('C-c');
+      await terminal.waitForAbsent('pasted draft');
+
+      click(cellOf(outputRow(5), '5'));
+      await sleep(320);
+      terminal.resize(92, 14);
+      await sleep(550);
+
+      // Start at the bottom of the 92x14 pane and scroll up until output row 5
+      // is visible while the owning `$ seq 1 15` header sits above the
+      // viewport (also proving the near-deadline resize cancelled collapse).
+      terminal.key('End');
+      await terminal.waitFor('Fifth reply paragraph.', {describe: 'scrolled to bottom of 92x14 pane'});
+      for (let step = 0; step < 30; step += 1) {
+        const view = terminal.capture({join: false});
+        if (outputRow(5).test(view) && !view.includes('$ seq 1 15')) break;
+        mouse(64, 10, 4, false);
+        await sleep(80);
+      }
+      const beforeCollapse = terminal.capture({join: false});
+      assert(outputRow(5).test(beforeCollapse), `expanded row 5 visible in 92x14 pane after resize:\n${beforeCollapse}`);
+      assert(!beforeCollapse.includes('$ seq 1 15'), `header scrolled above 92x14 pane:\n${beforeCollapse}`);
+
+      click(cellOf(outputRow(5), '5'));
+      await terminal.waitFor('▸ $ seq 1 15', {describe: 'collapsed tool header re-anchored in view'});
+      const after = terminal.capture({join: false});
+      assert(after.includes('First reply paragraph.'), `first reply paragraph stays visible:\n${after}`);
+      assert(!outputRow(5).test(after), `tool output is hidden after collapse:\n${after}`);
+
+      await exitWith(terminal);
+    },
+  },
+  {
     name: 'resize_rewraps_history_without_losing_rows',
     area: 'terminal-modes',
     title: 'Resizing rewraps a long message and its answer in place',

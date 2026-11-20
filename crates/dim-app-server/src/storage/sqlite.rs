@@ -1,8 +1,11 @@
 use super::reclaim::Reclaimed;
 use dim_agent_runtime::{AgentError, Result, panic_message};
 use rusqlite::{Connection, OpenFlags};
-use rutis::host::ErrorKind;
+use rutis::host::{CtxHost, ErrorKind};
 use rutis::{Ctx, Plugin};
+use rutis_bridge::session::{
+    Error as BridgeError, HostDispatch, Reply, Value as BridgeValue, host_key,
+};
 use serde::Serialize;
 use std::{
     collections::BTreeMap,
@@ -11,11 +14,11 @@ use std::{
     panic::{AssertUnwindSafe, catch_unwind},
     path::{Path, PathBuf},
     sync::{Arc, Condvar, Mutex, PoisonError},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 /// The native store format this daemon creates and opens.
-pub const FORMAT: u32 = 52;
+pub const FORMAT: u32 = 53;
 /// The oldest schema the startup transaction upgrades: the first step of
 /// `UPGRADES`, which is ordered oldest first.
 const MIN_FORMAT: u32 = UPGRADES[0].0;
@@ -91,7 +94,7 @@ const PROVIDER_V51: &[(&str, &str)] = &[
 pub(super) const SCHEMA: &[(&str, &str)] = &[
     (
         "agent_store_format",
-        "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 52))",
+        "CREATE TABLE agent_store_format (version INTEGER NOT NULL PRIMARY KEY CHECK (version = 53))",
     ),
     (
         "settings_documents",
@@ -350,7 +353,7 @@ const V45_COLUMNS: &str = "ALTER TABLE worktree_directories ADD COLUMN last_used
 /// The one-way upgrade steps, oldest first: the format a step starts from
 /// and the `SCHEMA` entries it adds, which are created in `SCHEMA` order,
 /// tables before their indexes. An upgrade also replaces the marker table.
-const UPGRADES: [(u32, &[&str]); 38] = [
+const UPGRADES: [(u32, &[&str]); 39] = [
     (
         13,
         &[
@@ -504,6 +507,11 @@ const UPGRADES: [(u32, &[&str]); 38] = [
             "provider_models_by_position",
         ],
     ),
+    // #427: the `branch/default` event kind and the `BranchSource` variant a
+    // line the user opened records, which a v52 daemon cannot decode; the
+    // marker only. Startup decodes no stored event, so without this a v52
+    // daemon would accept the store and fail on the first row of either.
+    (52, &[]),
 ];
 
 fn format_table(version: u32) -> String {
@@ -907,6 +915,148 @@ fn write_startup_progress(
             "dimcode-startup-progress v1 pid={}\nstore-upgrade from={from} to={to} progress={counter} stage={}\n",
             std::process::id(),
             stage.as_str()
+        ),
+    );
+}
+
+/// Reports a normal daemon assembly to the CLI waiting on it. From the store's
+/// opening until the listeners open, the App Server owns the startup note and
+/// rewrites this body whenever the opening records progress; the store removes
+/// its own upgrade note before [`Self::store_opened`], so the two writers never
+/// share the note.
+pub(crate) struct AssemblyProgress {
+    note: PathBuf,
+    /// The runtime that owns the trailing writes; the progress handler is
+    /// synchronous and runs in it.
+    handle: tokio::runtime::Handle,
+    state: Mutex<AssemblyNote>,
+}
+
+struct AssemblyNote {
+    opened: bool,
+    finished: bool,
+    counter: u64,
+    /// The counter the note carries, which is at most `counter`.
+    written: u64,
+    last_write: Option<Instant>,
+    /// A trailing write waits for the interval to end.
+    trailing: bool,
+}
+
+/// At most one assembly note per this interval, plus the first one at once.
+const ASSEMBLY_REPORT_INTERVAL: Duration = Duration::from_millis(500);
+
+impl AssemblyProgress {
+    pub(crate) fn new(database: &Path, handle: tokio::runtime::Handle) -> Self {
+        Self {
+            note: startup_note_path(database),
+            handle,
+            state: Mutex::new(AssemblyNote {
+                opened: false,
+                finished: false,
+                counter: 0,
+                written: 0,
+                last_write: None,
+                trailing: false,
+            }),
+        }
+    }
+
+    /// The store is open: progress recorded from now on is the assembly's.
+    pub(crate) fn store_opened(&self) {
+        self.state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .opened = true;
+    }
+
+    /// Records one progress. The first note after the store opens writes at
+    /// once; a later one writes at once only when the interval has passed, and
+    /// otherwise schedules one write for when it does, so the note is never
+    /// more than one interval behind the recorded progress. Best effort, like
+    /// the store's own progress note.
+    pub(crate) fn progress(self: &Arc<Self>) {
+        let now = Instant::now();
+        // Held across the write so `finish` cannot remove the note between
+        // deciding to write and writing it, and only one write runs at a time.
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if !state.opened || state.finished {
+            return;
+        }
+        state.counter += 1;
+        let due = state
+            .last_write
+            .is_none_or(|last| now.duration_since(last) >= ASSEMBLY_REPORT_INTERVAL);
+        if due {
+            state.written = state.counter;
+            state.last_write = Some(now);
+            write_assembly_note(&self.note, state.written);
+        } else if !state.trailing {
+            state.trailing = true;
+            let wake =
+                state.last_write.expect("not due only after a write") + ASSEMBLY_REPORT_INTERVAL;
+            let this = self.clone();
+            self.handle
+                .spawn(async move { this.trailing_write(wake).await });
+        }
+    }
+
+    /// Writes the counter recorded after the last note once the interval ends,
+    /// and never after [`Self::finish`] or [`Self::stop`].
+    async fn trailing_write(self: Arc<Self>, mut wake: Instant) {
+        loop {
+            tokio::time::sleep_until(wake.into()).await;
+            let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            if !state.opened || state.finished {
+                state.trailing = false;
+                return;
+            }
+            let Some(last) = state.last_write else {
+                state.trailing = false;
+                return;
+            };
+            let due = last + ASSEMBLY_REPORT_INTERVAL;
+            if Instant::now() < due {
+                // An immediate write moved the interval forward.
+                wake = due;
+                drop(state);
+                continue;
+            }
+            if state.counter > state.written {
+                state.written = state.counter;
+                state.last_write = Some(Instant::now());
+                write_assembly_note(&self.note, state.written);
+            }
+            state.trailing = false;
+            return;
+        }
+    }
+
+    /// Stops writing and removes the note when the listeners open.
+    pub(crate) fn finish(&self) {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.finished = true;
+        let _ = std::fs::remove_file(&self.note);
+    }
+
+    /// Stops writing without removing the note. A client waiting on this pid
+    /// keeps waiting while the failing process is alive, instead of spawning
+    /// a daemon that would find the store owned. Once the process exits, the
+    /// pid is dead and the note is stale; the next start's store removes it.
+    pub(crate) fn stop(&self) {
+        self.state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .finished = true;
+    }
+}
+
+fn write_assembly_note(path: &Path, counter: u64) {
+    write_note(
+        path,
+        &format!(
+            "dimcode-startup-progress v1 pid={}\nassembly progress={counter}\n",
+            std::process::id()
         ),
     );
 }
@@ -1897,7 +2047,7 @@ impl SqliteStorage {
 
     /// The bytes of the store's own files, and the space an offline `VACUUM`
     /// returns: the free pages of the database as it was last committed.
-    pub(crate) async fn storage_report(self: &Arc<Self>) -> Result<StorageReport> {
+    pub async fn storage_report(self: &Arc<Self>) -> Result<StorageReport> {
         let (page_size, free_pages) = self
             .run_read(|connection| {
                 let page_size: i64 = connection
@@ -2244,12 +2394,57 @@ fn store_bytes(path: &Path) -> u64 {
     file_bytes(path) + file_bytes(&wal_path(path))
 }
 
+struct SqliteDispatch(Arc<SqliteStorage>);
+
+impl HostDispatch for SqliteDispatch {
+    fn methods(&self) -> Option<serde_json::Value> {
+        Some(serde_json::json!({"storageReport":"async"}))
+    }
+
+    fn invoke(&self, method: &str, args: BridgeValue) -> Reply {
+        if method != "storageReport" {
+            return Err(BridgeError::Value(format!(
+                "unknown sqliteStorage method {method}"
+            )));
+        }
+        let [request]: [serde_json::Value; 1] = serde_json::from_value(args.json()?)
+            .map_err(|error| BridgeError::Value(error.to_string()))?;
+        if !request.as_object().is_some_and(|fields| fields.is_empty()) {
+            return Err(BridgeError::Value(
+                "storageReport expects an empty request object".into(),
+            ));
+        }
+        let db = self.0.clone();
+        Ok(BridgeValue::cancellable_future(async move {
+            let report = db.storage_report().await.map_err(|error| {
+                rutis_bridge::exports::failure(
+                    "StorageError",
+                    "storage_unavailable",
+                    error.to_string(),
+                    None,
+                )
+            })?;
+            Ok(serde_json::json!(report).into())
+        }))
+    }
+}
+
 pub struct SqliteStoragePlugin {
     path: PathBuf,
+    assembly: Option<Arc<AssemblyProgress>>,
 }
 impl SqliteStoragePlugin {
     pub fn new(path: PathBuf) -> Self {
-        Self { path }
+        Self {
+            path,
+            assembly: None,
+        }
+    }
+    /// Reports the opening's progress in the startup note after this store's
+    /// own note is gone; the host removes it when its listeners open.
+    pub(crate) fn with_assembly_progress(mut self, assembly: Arc<AssemblyProgress>) -> Self {
+        self.assembly = Some(assembly);
+        self
     }
 }
 impl Plugin for SqliteStoragePlugin {
@@ -2265,6 +2460,11 @@ impl Plugin for SqliteStoragePlugin {
         })
         .await
         .map_err(|error| rutis::Error::from(ErrorKind::PluginFailed(error.into())))??;
+        // The store removed its own startup note before returning; every
+        // note this opening writes from here on is the assembly's.
+        if let Some(assembly) = &self.assembly {
+            assembly.store_opened();
+        }
         if let Some(from) = storage.upgraded_from() {
             eprintln!(
                 "Upgraded native store {} from format v{from} to v{FORMAT}; earlier dimcode versions cannot open it.",
@@ -2278,6 +2478,10 @@ impl Plugin for SqliteStoragePlugin {
             storage.close().await?;
             return Err(error);
         }
+        ctx.provide_at(
+            host_key("sqliteStorage"),
+            Arc::new(SqliteDispatch(storage.clone())) as Arc<dyn HostDispatch>,
+        )?;
         ctx.provide_as::<SqliteStorage>(storage)?;
         Ok(())
     }

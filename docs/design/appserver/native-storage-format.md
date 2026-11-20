@@ -285,6 +285,15 @@ home 目录继承的 ACL；正常打开不写）。说明只描述本次启动�
 打开时与遗留说明一起删除。CLI 等待规则与显示见
 [CLI 命令 §守护进程启动失败](../cli-commands.md#daemon-startup-failure)。
 
+**装配进度。** 库成功打开后，说明不再由存储改写：App Server 从库打开到监听端点
+open 之间把它写成 `assembly progress=<n>`，`n` 随装配记录的进展（某个 row 首次
+Active，或一次 `OpeningAdvanced` 报告）增加；库删除自己的说明后第一次进展立即写，
+之后最多每 500 毫秒写一次；区间内的最后一次进展在区间结束时写出，因此说明最多比装配
+进度晚一个区间，open 时删除。库在升级、失败和成功打开时对自己说明的处理
+不变；装配写法只在库删掉说明之后开始，因此两种写法不重叠。装配说明不打印升级行或
+阶段，只推进 CLI 的等待上限；读取规则见
+[CLI 命令 §守护进程启动失败](../cli-commands.md#daemon-startup-failure)。
+
 **库被其他进程占用。** 存储的准入租约 `<database>.lock` 已被另一个进程持有：它正在服务
 这个库，或正在启动。本次启动拿不到库，返回的错误文本不变；拒绝时同样写一份启动说明，
 正文点名占用者。库旁有进度说明时，正文带上该进程的 pid 和它正在升级的格式；否则只说库
@@ -1669,3 +1678,7 @@ rejects unknown mixtures before writable PRAGMAs, and older writers reject v44.
 Ordinary v44 opening does not rebuild indexes or scan history. Disposable-store
 verification covers both v43 and both v42 families, reopen, current-member
 semantics, preserved Steer candidates, automation origins and rollback.
+
+## Storage size report
+
+StorageMethods serves `storage.report` from the SQLite owner operation `sqliteStorage.storageReport({})`. Both return `{databaseBytes, walBytes, reclaimableBytes}`. SQLite reads the current file sizes and counts free database pages.

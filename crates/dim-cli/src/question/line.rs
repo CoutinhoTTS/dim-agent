@@ -26,6 +26,7 @@ use crate::{
     input::Input,
     sanitize::safe,
 };
+use dim_agent_types::ROOT_BRANCH_ID;
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use unicode_width::UnicodeWidthStr;
@@ -74,7 +75,7 @@ impl Default for Questions {
             pending: Pending::default(),
             handled: HashSet::new(),
             asking: None,
-            branches: HashMap::from([("main".to_owned(), Some(0))]),
+            branches: HashMap::from([(ROOT_BRANCH_ID.to_owned(), Some(0))]),
             reads: Vec::new(),
             drained: HashSet::new(),
         }
@@ -92,7 +93,7 @@ fn key(call: &Call) -> (String, String, String) {
 impl Questions {
     /// Starts the main branch inventory independently of its transcript window.
     pub async fn start(&mut self, client: &mut Client, session_id: &str) -> Result<()> {
-        self.read(client, session_id, "main").await
+        self.read(client, session_id, ROOT_BRANCH_ID).await
     }
 
     /// Whether a question prompt owns the terminal input.
@@ -148,7 +149,7 @@ impl Questions {
         branches
     }
 
-    /// Stops `branch_id` for a question this client gave up on; `main` is
+    /// Stops `branch_id` for a question this client gave up on; the root is
     /// stopped by the turn loop.
     pub async fn stop(
         &mut self,
@@ -157,7 +158,7 @@ impl Questions {
         branch_id: &str,
         reason: &str,
     ) -> Result<()> {
-        if branch_id != "main" {
+        if branch_id != ROOT_BRANCH_ID {
             let id = client
                 .send(
                     "session.stop",
@@ -523,7 +524,7 @@ impl Asking {
                 title.push(' ');
                 title.push_str(header);
             }
-            if self.call.branch_id != "main" {
+            if self.call.branch_id != ROOT_BRANCH_ID {
                 title.push_str(&format!(" (branch {})", self.call.branch_id));
             }
             display.record(&title)?;

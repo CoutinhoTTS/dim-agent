@@ -152,6 +152,39 @@ async fn node_public_plugin_files_process_storage_and_close_drain() {
         std::fs::read(home.join("public-files/blob.bin")).unwrap(),
         vec![0, 1, 2, 250, 255, 128]
     );
+    let directory = client.rpc("files.directory", json!({})).await;
+    assert_eq!(directory["result"]["ok"], true);
+    let work = std::path::Path::new(directory["result"]["value"].as_str().unwrap());
+    assert!(work.is_absolute());
+    assert_eq!(
+        work.canonicalize().unwrap(),
+        home.join("media/work").canonicalize().unwrap()
+    );
+    assert_eq!(
+        client.rpc("files.stream", json!({})).await["result"],
+        json!({"ok":true,"value":null})
+    );
+    assert_eq!(
+        client.rpc("files.failed_stream", json!({})).await["result"],
+        json!({"ok":false,"error":"io"})
+    );
+    assert_eq!(
+        client.rpc("files.cancel_stream", json!({})).await["result"],
+        json!({"ok":false,"error":"closed"})
+    );
+    let contents = std::fs::read(work.join("input.bin")).unwrap();
+    assert_eq!(contents.len(), 17 * 1024 * 1024);
+    for (index, chunk) in contents.chunks(1024 * 1024).enumerate() {
+        assert!(chunk.iter().all(|&byte| byte as usize == index + 1));
+    }
+    assert_eq!(
+        client.rpc("files.absent", json!({})).await["result"],
+        json!({"ok":true,"value":null})
+    );
+    assert_eq!(
+        client.rpc("files.pinned", json!({})).await["result"],
+        json!({"bytes":"AQL6","size":6})
+    );
     assert_eq!(
         client.rpc("files.envelope", json!({})).await["result"],
         json!({"ok":true,"value":{"ok":true,"value":"{\"version\":1,\"text\":\"public process text\"}"}})
@@ -1342,6 +1375,11 @@ async fn node_store_preserves_repository_results_and_worktree_removal_exclusion(
     let (server, _, _) = session_typescript::start(config(&home, parts)).await;
     let mut client = Client::new_version(&server, false, 3).await;
     files_available(&mut client, "storefixture.status", json!({})).await;
+    let wire = client.rpc("storefixture.report", json!({})).await;
+    let native = client.rpc("storage.report", json!({})).await;
+    assert_ok(&wire);
+    assert_ok(&native);
+    assert_eq!(wire["result"], native["result"]);
     let store = server.service::<Store>().unwrap();
     let listed = client.rpc("agent.list", json!({})).await;
     assert_ok(&listed);
@@ -2001,6 +2039,71 @@ async fn node_fs_readers_share_pinned_files_and_release_with_the_caller() {
     let pid = i32::try_from(status["pid"].as_i64().unwrap()).unwrap();
     let storage = server.service::<FileStorage>().unwrap();
     let face = server.service::<FsHost>().unwrap();
+    let directory = storage.root_path(0).unwrap().join("wire-list");
+    assert_ok(
+        &client
+            .rpc("fsreader.mkdir", json!({"path":directory}))
+            .await,
+    );
+    std::fs::write(directory.join("contents"), b"payload").unwrap();
+    let link = directory.join("link");
+    std::os::unix::fs::symlink(directory.join("contents"), &link).unwrap();
+    for (path, expected) in [
+        (directory.clone(), json!({"kind":"directory"})),
+        (directory.join("contents"), json!({"kind":"file","size":7})),
+        (link.clone(), json!({"kind":"other"})),
+        (directory.join("absent/file"), json!({"kind":"missing"})),
+    ] {
+        let response = client.rpc("fsreader.stat", json!({"path":path})).await;
+        assert_ok(&response);
+        assert_eq!(response["result"], expected);
+    }
+    std::fs::remove_file(link).unwrap();
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let name = std::ffi::OsStr::from_bytes(b"contents-\xff");
+        std::fs::write(directory.join(name), b"raw name").unwrap();
+    }
+    let listed = client.rpc("fsreader.list", json!({"path":directory})).await;
+    assert_ok(&listed);
+    let entries = listed["result"]["entries"].as_array().unwrap();
+    assert_eq!(entries[0], json!({"name":"contents","kind":"file"}));
+    #[cfg(target_os = "linux")]
+    assert_eq!(
+        entries[1],
+        json!({"name":{"Unix":b"contents-\xff".as_slice()},"kind":"file"})
+    );
+    for entry in entries {
+        assert_ok(
+            &client
+                .rpc(
+                    "fsreader.remove",
+                    json!({"parent":directory,"name":entry["name"]}),
+                )
+                .await,
+        );
+    }
+    let listed = client.rpc("fsreader.list", json!({"path":directory})).await;
+    assert_eq!(listed["result"], json!({"entries":[]}));
+    let sibling = directory.with_file_name("sibling");
+    std::fs::write(&sibling, b"preserve").unwrap();
+    for name in [
+        json!("../sibling"),
+        json!({"Unix":b"../sibling".as_slice()}),
+    ] {
+        let refused = client
+            .rpc("fsreader.remove", json!({"parent":directory,"name":name}))
+            .await;
+        assert!(refused.get("error").is_some(), "{refused}");
+    }
+    assert_eq!(std::fs::read(sibling).unwrap(), b"preserve");
+    assert_ok(
+        &client
+            .rpc("fsreader.remove", json!({"path":directory}))
+            .await,
+    );
+    assert!(!directory.exists());
     let path = storage.root_path(0).unwrap().join("pinned-reader.bin");
     let bytes = Vec::from_fn(200_000, |index| (index % 251) as u8);
     std::fs::write(&path, &bytes).unwrap();
@@ -2062,6 +2165,65 @@ async fn node_fs_readers_share_pinned_files_and_release_with_the_caller() {
             .unwrap(),
         b"new"
     );
+    let readonly = path.with_file_name("readonly");
+    let created = client.rpc("fsreader.replace", json!({"path":readonly,"bytes":STANDARD.encode(b"immutable"),"permissions":"privateReadOnly"})).await;
+    assert_ok(&created);
+    assert_eq!(std::fs::read(&readonly).unwrap(), b"immutable");
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(
+        std::fs::metadata(&readonly).unwrap().permissions().mode() & 0o777,
+        0o400
+    );
+    let locked = client.rpc("fsreader.lock", json!({"path":path})).await;
+    assert_ok(&locked);
+    let lease = locked["result"]["leaseId"].as_str().unwrap();
+    let target = storage.resolve(&path).unwrap();
+    assert!(matches!(
+        storage.lock(&target, &cancel).await,
+        Err(FileStorageError::Locked)
+    ));
+    for (request, expected) in [
+        (
+            json!({"path":path,"limit":3,"leaseId":lease}),
+            json!({"bytes":STANDARD.encode(b"new"), "size":3}),
+        ),
+        (json!({"path":path,"limit":2}), json!({"code":"too_large"})),
+        (
+            json!({"path":directory,"limit":3,"leaseId":lease}),
+            json!({"code":"invalid"}),
+        ),
+    ] {
+        let read = client.rpc("fsreader.read_bytes", request).await;
+        assert_ok(&read);
+        assert_eq!(read["result"], expected);
+    }
+    assert_ok(
+        &client
+            .rpc(
+                "fsreader.backup",
+                json!({"leaseId":lease,"suffix":"previous","permissions":"private"}),
+            )
+            .await,
+    );
+    assert_ok(&client.rpc("fsreader.replace", json!({"path":path,"bytes":STANDARD.encode(b"replacement"),"permissions":"private","leaseId":lease})).await);
+    assert_eq!(std::fs::read(&path).unwrap(), b"replacement");
+    assert_eq!(
+        std::fs::read(path.with_extension("bin.previous")).unwrap(),
+        b"new"
+    );
+    assert_ok(
+        &client
+            .rpc("fsreader.unlock", json!({"leaseId":lease}))
+            .await,
+    );
+    let expired = client
+        .rpc(
+            "fsreader.read_bytes",
+            json!({"path":path,"limit":3,"leaseId":lease}),
+        )
+        .await;
+    assert_eq!(expired["result"], json!({"code":"invalid"}));
+    assert_ok(&client.rpc("fsreader.lock", json!({"path":path})).await);
     let retained = client.rpc("fsreader.open", json!({"path":path})).await;
     assert_ok(&retained);
     let retained = retained["result"]["readId"].as_str().unwrap().to_owned();
@@ -2084,6 +2246,17 @@ async fn node_fs_readers_share_pinned_files_and_release_with_the_caller() {
             .unwrap(),
         b"new"
     );
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            match storage.lock(&target, &cancel).await {
+                Ok(_) => break,
+                Err(FileStorageError::Locked) => tokio::task::yield_now().await,
+                Err(error) => panic!("reacquiring the unloaded caller's lease: {error}"),
+            }
+        }
+    })
+    .await
+    .unwrap();
     native_caller.shutdown().await.unwrap();
     assert!(matches!(
         face.read_at(native.read_id, 0, 1, &cancel).await,

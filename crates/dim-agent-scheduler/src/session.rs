@@ -14,7 +14,7 @@ use dim_agent_capabilities::{
     tool_registry::{ToolContribution, ToolHandler, ToolRegistry, definition},
 };
 use dim_agent_runtime::{CollaborationRole, Names, SessionConfig, SessionIdentity};
-use dim_agent_types::{ToolCall, ToolDefinition, ToolResult, ToolSource};
+use dim_agent_types::{DEFAULT_BRANCH_ID, ToolCall, ToolDefinition, ToolResult, ToolSource};
 use jiff::Timestamp;
 use rutis::Ctx;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
@@ -443,7 +443,7 @@ pub(crate) struct LoopStopParams {
 /// and the `loops` data face's `start`, so both answer the same errors.
 pub(crate) fn loop_start_request(params: LoopStartParams) -> Result<StartRequest, RpcError> {
     nonempty(&params.session_id, "sessionId")?;
-    let branch = params.branch_id.as_deref().unwrap_or("main");
+    let branch = params.branch_id.as_deref().unwrap_or(DEFAULT_BRANCH_ID);
     nonempty(branch, "branchId")?;
     nonempty(&params.prompt, "prompt")?;
     prompt_size(&params.prompt).map_err(RpcError::invalid)?;
@@ -458,7 +458,7 @@ pub(crate) fn loop_start_request(params: LoopStartParams) -> Result<StartRequest
 /// The one parse of a loop list scope, shared by the handler and the face.
 pub(crate) fn loop_list_scope(params: LoopListParams) -> Result<(String, String), RpcError> {
     nonempty(&params.session_id, "sessionId")?;
-    let branch = params.branch_id.as_deref().unwrap_or("main");
+    let branch = params.branch_id.as_deref().unwrap_or(DEFAULT_BRANCH_ID);
     nonempty(branch, "branchId")?;
     Ok((params.session_id, branch.to_owned()))
 }
@@ -542,7 +542,7 @@ fn wakeup_handler(wakeups: Arc<Wakeups>) -> dim_agent_capabilities::methods::Han
                 "session.wakeup.list" => {
                     let p: ListParams = params(value)?;
                     nonempty(&p.session_id, "sessionId")?;
-                    let branch_id = p.branch_id.as_deref().unwrap_or("main");
+                    let branch_id = p.branch_id.as_deref().unwrap_or(DEFAULT_BRANCH_ID);
                     nonempty(branch_id, "branchId")?;
                     let own = wakeups.list(&p.session_id, branch_id).await?;
                     reply(json!({

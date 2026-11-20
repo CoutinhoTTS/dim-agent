@@ -62,6 +62,20 @@ Skill 行读作 `/skill:<name>`，带其描述。只列出已启用、未被其�
 Scrollback 保留菜单上方的命令草稿，必要时省略菜单标题和页脚；fullscreen 保留输入框上方的
 命令面板查询行和选中项。顺序不随终端尺寸变化。
 
+当前状态下不能执行的命令仍保留在固定位置，以不加粗的弱化样式绘制，使其在各类主题下都能与可用行区分。
+它的不可用标记（如 `(unavailable)`、中文界面为 `（不可用）`）放在命令名旁，避免被长描述截断；行宽极窄时命令名优先于标记。
+选中不可用行时，标记仍然可见，整行在高亮条上保持不加粗且弱化。
+一旦满足前提状态（例如已有打开的会话），该行即恢复正常样式。
+
+```text
+会话尚未创建时：
+  /new                     start a new session
+  /resume                  resume a previous session
+  /models                  select a model
+  /compact (unavailable)   compact the context of the shown line
+  /usage (unavailable)     show the context window usage
+```
+
 当通常的历史保留空间使实时区域不足八行时，实时控件优先：两种渲染器都可为实时区域使用最多八行，
 但不超过终端高度。Fullscreen 先减少输入框的空白内边距和命令面板查询行的留白，避免两个输入区域
 重叠。命令面板只剩三行时，查询放在顶边框内，保留选中命令，不遮挡输入框或权限页脚。
@@ -1141,15 +1155,22 @@ CLI 保留它，先等那个进程，不启动自己的守护进程。子进程�
 格式升级运行期间，守护进程把同一份说明写成进度类型：首行
 `dimcode-startup-progress v1 pid=<pid>`，正文
 `store-upgrade from=<from> to=<to> progress=<n>`，最多每秒一次，并在每个升级步骤结束时
-再写一次；库新建或已是最新格式时不写。三个启动等待都读它：spawn 之前的等待和 start 锁
-等待认任意 pid，spawn 等待只认自己子进程的 pid；计数每增加一次，等待上限就向后推一个
-上限本身（spawn 之前的等待和 spawn 等待为 10 秒，start 锁为一次验证过的 shutdown 加一次
-启动再加一段余量）。格式升级是会上报进展并推进上限的长阶段；启动的其他阶段都受客户端
-固定上限约束。spawn 之前，说明指向其他存活 pid 时客户端等待：库被占用，升级结束前没有
-socket。进展推进上限，客户端重试 socket，守护进程开始服务后即连上；pid 已不存在、或
-指向客户端自己的说明是过期的，客户端启动自己的守护进程。客户端第一次读到这类说明时在
-所有模式下向 stderr 打印一次 `正在把本地库从格式 v<from> 升级到 v<to>；大库可能需要一段时间。`；
-stdout 和 JSON 输出不变。只认识失败类型的客户端忽略进度类型，退回上面的通用错误文本。
+再写一次。库打开之后、监听端点 open 之前，守护进程把同一份说明写成装配类型
+`assembly progress=<n>`：装配每记录一次进展（某个 row 首次 Active，或一次
+`OpeningAdvanced` 报告），`<n>` 就增加；库删掉自己的说明后第一次进展立即写，之后最多
+每 500 毫秒写一次，区间内的最后一次进展在区间结束时写出，因此说明最多比守护进程自己
+的进展晚一个区间，open 时删除。库新建或已是最新格式时不写任何说明；正常启动上报的是
+这份装配说明。四个启动等待都读两种类型：spawn 之前的等待和 start 锁等待认任意 pid，
+spawn 等待只认自己子进程的 pid，应答等待认接受连接的那个服务端；计数每增加一次，等待
+上限就向后推一个上限本身（spawn 之前的等待、spawn 等待和应答等待为 10 秒，start 锁为
+一次验证过的 shutdown 加一次启动再加一段余量）。上报进展的启动无论多久都会等；一段
+上限内没有进展就失败。spawn 之前，说明指向其他存活 pid 时客户端等待：库被占用，
+升级或装配结束前没有 socket。进展推进上限，客户端重试 socket，守护进程开始服务后即
+连上；pid 已不存在、或指向客户端自己的说明是过期的，客户端启动自己的守护进程。只有
+`store-upgrade` 类型打印：客户端第一次读到它时在所有模式下向 stderr 打印一次
+`正在把本地库从格式 v<from> 升级到 v<to>；大库可能需要一段时间。`；装配说明不打印
+任何内容，stdout 和 JSON 输出不变。只认识失败类型的客户端忽略进度类型，退回上面的
+通用错误文本；只认识 `store-upgrade` 类型的客户端也同样把装配类型当作没有进展说明。
 开发说明继续使用 `./dev` 和它的隔离 home；终端说明本身只给兼容
 构建或 `--home PATH` 两条路。
 
@@ -1157,8 +1178,8 @@ stdout 和 JSON 输出不变。只认识失败类型的客户端忽略进度类�
 拿到的是能接受连接、却什么都不应答的 socket。这段等待是启动阶段，不是自带上限的
 请求：`hello` 没有自己的上限，客户端按所在阶段的不活跃上限等应答，进度计数按上限
 本身向后推（连接和 spawn 等待 10 秒，start 锁等待为 shutdown 加启动加余量）。因此升级
-推进握手的上限与推进 spawn 的上限同源，所有会连接的动作（包括 `daemon stop`）都按所在
-阶段的上限等。`Client::greet` 发出 `hello`，`Client::complete_hello` 校验应答，有等待的
+或装配推进握手的上限与推进 spawn 的上限同源，所有会连接的动作（包括 `daemon stop`）都按
+所在阶段的上限等。`Client::greet` 发出 `hello`，`Client::complete_hello` 校验应答，有等待的
 调用方自己取应答；`Client::hello` 留给没有等待的调用方，例如 ACP gateway 的重连，它把
 整次尝试收在自己的期限（deadline）内。上限真正到期时，客户端报出当时所在阶段并给出
 `<native home>/daemon.log`；这条路径不会把 tokio 自己的 `deadline has elapsed` 交给用户。
@@ -1190,7 +1211,7 @@ Error: Cannot open native store /Users/me/.dimcode-alpha/rust/dimcode.sqlite.
 禁用恢复并保留诊断，而不是反复重启。
 CLI 按当前渠道标签暂存新版，与[更新命令](#更新对话框)一致，因此 npm 用与安装相同的
 仓库配置解析版本；`DIMCODE_NPM_REGISTRY` 仍然只决定可用性检查用哪个仓库，不必与
-安装用的仓库一致。[更新命令](#更新对话框)负责安装锁、旧消费者退出确认、进度和取消。
+安装用的仓库一致。[更新命令](#更新对话框)负责安装锁、进度和取消。
 替换前检查暂存的平台发行清单，要求声明它实际暂存的版本，并列出本地库的格式。
 缺少声明或格式不受支持时，恢复在替换当前安装前停止。
 
@@ -1504,10 +1525,19 @@ npm 装在 `<prefix>\node_modules` 下并把命令 shim 直接放在 `<prefix>`�
 进程同样失败，因此可识别的消费者不会在未登记的情况下运行。锁文件创建时所有用户可读，
 释放后保留；运行中删除它会允许另一个进程在新 inode 上独立加锁。
 
-旧版不持有该锁，所以管理器根目录下没有 `.dimcode-consumers` 时 `update` 也会拒绝。
-操作者退出全部客户端、停止全部旧服务器后运行 `update --confirm-legacy-exited`，创建
-该标记并安装。该标志只对旧进程作声明，不能绕过存在的锁。源码构建和无法识别的布局
-不持有锁，也不会被更新。
+`update` 从不停止服务器，即使它空闲：当前 home 的 daemon 持有租约时，操作者先用
+`daemon stop` 停止它；其他 home 持有的租约到那个 home 处理。刚退出的进程可能还会短暂
+持有租约，所以 `update` 最多等待两秒再拒绝；Ctrl+C 会结束这段等待，之后不会再启动包
+管理器。拒绝信息使用运行它的入口命令，调用时指定了 `--home` 就带上它：
+
+```text
+$ dima update
+Error: DimCode is currently running (another window, server, or update is active).
+Close all DimCode windows, run `dima daemon stop`, and try again.
+```
+
+早于租约机制的旧版不持有该锁，`update` 看不到它们；首次更新前由操作者退出它们。
+源码构建和无法识别的布局不持有锁，也不会被更新。
 
 ```text
 $ dima update
@@ -1517,9 +1547,59 @@ $ dima update
 | Updatin… (alpha) · 5s
 ```
 
-更新对话框本身不安装。它给出新版本，以及在所有客户端退出、服务器停止后应执行的命令
-（可识别的安装为 `dima update`，否则是包管理器自己的命令），并提供“跳过此版本”和
-“关闭”。fullscreen 和 scrollback 使用相同布局，并适应可用列数和行数。较长的版本和命令
+更新对话框给出新版本。可识别的安装、服务器由客户端管理（没有 `--server`）且能在空闲时
+停止（`daemon.shutdown.ifIdle`）时，提供
+“立即升级”“跳过此版本”和“关闭”，默认聚焦“立即升级”：
+
+```text
+╭──────────────────────────────────────────────────────────────╮
+│ Update available                                             │
+│                                                              │
+│ Version 0.1.0-alpha.26 is available (you have 0.1.0-alpha.25).│
+│                                                              │
+│ › Update now   Skip this version   Close                     │
+│                                                              │
+│ ←→ move · Enter confirm · Esc close                          │
+╰──────────────────────────────────────────────────────────────╯
+```
+
+其他安装、连接外部 `--server` 的客户端，或不支持 `daemon.shutdown.ifIdle` 的 daemon，只有“跳过此版本”和“关闭”，并给出退出 DimCode
+后要执行的命令（`dima update`，或包管理器自己的命令）：
+
+```text
+│ Version 0.1.0-alpha.26 is available (you have 0.1.0-alpha.25).│
+│ To update, exit DimCode and run: dima update                 │
+│                                                              │
+│ › Skip this version   Close                                  │
+```
+
+“立即升级”不在界面保持连接时升级：
+
+1. 当前 Session 有运行中的轮次、前台 Shell 命令，或待处理的审批或提问时，对话框保留，
+   提示先完成或停止这些工作，不询问 daemon。
+2. 否则界面像退出一样离开：恢复终端并关闭连接，它自己的 attach 不再计入。
+3. 同一进程用 `daemon.shutdown {ifIdle: true}` 请求当前 home 的 daemon 停止（空闲判断
+   由 [Tui](../../design/plugins/Tui.md) 拥有）。刚关闭的连接可能仍被计入，因此拒绝后最多重试两秒。
+4. daemon 已停止或本来没有运行时，按 `update` 的方式安装，进度行和错误相同。
+5. npm 暂存安装随后用更新后的入口命令替换当前进程，保留离开时的模式（`--fullscreen`
+   或 `--scrollback`），有 Session 时带上 `--resume <session>`；新客户端自行启动 daemon。
+   其他布局提示重新启动 DimCode。
+
+daemon 忙碌、daemon 不支持 `daemon.shutdown.ifIdle`、租约被其他地方持有、安装失败或
+按下 Ctrl+C 时，不再停止任何东西：CLI 打印阻塞原因和下一步，再给出恢复会话的命令，并以
+非零状态退出。界面离开后就开始监听 Ctrl+C，包括询问 daemon 期间；daemon 已接受的关闭会
+自行完成。调用时指定了 `--home` 时，打印的每条命令都带上它，指向同一个 daemon 和 Session：
+
+```text
+Could not update: Other DimCode windows or tasks are using the server (clients: 1, attached sessions: 1, running turns: 0).
+Close them or let them finish, then run: dima --home /tmp/work update
+Resume this session with: dima --home /tmp/work --resume s-42
+```
+
+安装失败时另外打印 `To try again, run: dima --home /tmp/work update`；按下 Ctrl+C 时打印
+`Update cancelled. To update later, run: dima --home /tmp/work update`。
+
+对话框在 fullscreen 和 scrollback 使用相同布局，并适应可用列数和行数。较长的版本和命令
 文字换行，必要时用 Up/Down 滚动。标题和动作行保持可见。所有动作无法放在同一行时，只
 显示当前聚焦的动作及其序号；Left/Right 和 Tab/BackTab 仍循环切换所有动作，Enter 确认，
 Esc 关闭。宽屏空间足够时保留确认布局。
@@ -1533,14 +1613,13 @@ Esc 关闭。宽屏空间足够时保留确认布局。
 +----------- Up/Down 1-2/7-+
 ```
 
-`/update` 就是那条命令在两种终端 UI 模式下的客户端侧报告。它不执行任何安装：更新命令持有
-安装的排他租约，而界面本身就是持有该租约共享锁的客户端，服务操作者期间无法释放。因此
-`/update` 只给出对话框会给的命令：可识别的安装给出该命令，其他布局给出[手动与重建
-说明](#更新对话框)，并且不查询渠道——自动启动检查仍独占对话框与跳过列表。
+`/update` 在两种终端 UI 模式下按需查询当前构建的渠道，包括用户跳过的版本。有新版本时
+打开更新对话框；否则在记录中说明已是最新版本，源码构建或无法识别的布局则给出[手动与
+重建说明](#更新对话框)。启动检查仍遵循跳过列表。
 
 ```text
 > /update
-要升级，请退出所有客户端并停止服务器，然后运行 dima update
+DimCode 0.1.0-alpha.26 已是最新版本。
 ```
 
 ### 客户端／服务器协调升级
@@ -1582,12 +1661,9 @@ daemon 的程序镜像、同时替换其插件或 Web 文件不构成隔离，�
   以独占方式加锁；存在任何租约时拒绝，且不启动包管理器。更新持有锁期间，租约持有方
   无法启动。进程退出时 OS 释放租约，崩溃不会留下过期占用。源码构建或无法识别的布局不
   持有租约，也不会被更新。
-- **首次迁移：**旧版不持有租约，所以支持租约的新版无法证明它们已退出。管理器根目录下
-  没有 `.dimcode-consumers` 时 `update` 拒绝。操作者退出全部客户端、停止全部旧服务器后，
-  运行 `update --confirm-legacy-exited`，创建该标记并安装。该标志只对旧进程作信任声明，
-  存在活动租约时仍然拒绝。
-- **尚未完成：**关闭前的进程准入静默、Windows 的安全替换以及新客户端启用后继服务器，
-  尚不属于该命令。
+- **尚未完成：**Windows 的安全替换尚不属于该命令，`update` 本身也不停止服务器。
+  “立即升级”只通过 `daemon.shutdown {ifIdle: true}` 停止当前 home 的 daemon，后继服务器
+  由它启动的新客户端启用。
 - **影响及归属：**静默操作改变准入，不改变 Timeline 顺序、批次、恢复格式或已受理
   工作。App Server／生命周期所有者实现并验证通用操作；原生启动与安装所有者实现
   跨进程租约和新客户端启用，升级器消费这些合同。
