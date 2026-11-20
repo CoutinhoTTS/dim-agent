@@ -12564,3 +12564,58 @@ async fn a_status_note_and_a_live_roster_do_not_retire_each_other() {
     );
     soon(agent.close()).await.unwrap();
 }
+
+/// E3: cold restore with two openers, the root and the default branch, each
+/// holding open tool lines. Run with `--release --ignored --nocapture`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore]
+async fn measure_e3_cold_restore_with_two_openers() {
+    async fn tool_line(session: &Session, opener: &str, purpose: &str) -> String {
+        let cut = session.sequence(opener).unwrap();
+        let turn = format!("turn-{purpose}");
+        let id = soon(session.branch(
+            opener.into(),
+            cut,
+            BranchOptions {
+                prompt: purpose.into(),
+                source: BranchSource::Tool {
+                    turn_id: turn.clone(),
+                    request_id: format!("request-{purpose}"),
+                    call_id: format!("call-{purpose}"),
+                },
+            },
+        ))
+        .await
+        .unwrap();
+        soon(session.idle(&id)).await.unwrap();
+        id
+    }
+    let mut elapsed = Vec::new();
+    for _ in 0..5 {
+        let probe = Arc::new(Probe::default());
+        let agent = setup(&probe).await;
+        let session = soon(agent.create_session(SessionConfig::default()))
+            .await
+            .unwrap();
+        let opener = tool_line(&session, "main", "the default branch").await;
+        switch(&session, &opener).await;
+        for index in 0..2 {
+            tool_line(&session, &opener, &format!("default {index}")).await;
+        }
+        for index in 0..2 {
+            tool_line(&session, "main", &format!("root {index}")).await;
+        }
+        let id = session.id();
+        soon(session.close()).await.unwrap();
+        let started = std::time::Instant::now();
+        let restored = soon(agent.restore_session(id.into())).await.unwrap();
+        soon(restored.idle("main")).await.unwrap();
+        elapsed.push(started.elapsed());
+        soon(agent.close()).await.unwrap();
+    }
+    elapsed.sort();
+    println!(
+        "E3 cold restore with two openers and four open lines: median {:.1} ms",
+        elapsed[elapsed.len() / 2].as_secs_f64() * 1e3
+    );
+}
