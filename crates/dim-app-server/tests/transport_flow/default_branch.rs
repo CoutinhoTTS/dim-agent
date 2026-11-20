@@ -702,6 +702,92 @@ async fn newest_activity(client: &mut Client, session: &str, branch: &str) -> u6
         .unwrap_or(0)
 }
 
+/// One catalog row, as a client reads it.
+async fn catalog_row(client: &mut Client, session: &str) -> Value {
+    let listed = client.rpc("session.catalog", json!({})).await;
+    assert_ok(&listed);
+    listed["result"]["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["sessionId"] == json!(session))
+        .unwrap_or_else(|| panic!("{session} is listed: {listed}"))
+        .clone()
+}
+
+/// §14: the writer republishes the new default's own activity in the switch's
+/// transaction, and the switch itself is not activity, so two idle lines never
+/// leave the catalog recent by the line the Session left.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_switch_republishes_the_new_defaults_activity() {
+    let store = Store::new();
+    let (server, agent) = launch_with_agent(Arc::new(MockTools), store.config()).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let created = client.rpc("session.create", with_branch()).await;
+    assert_ok(&created);
+    let id = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    let session = agent.get_session(&id).unwrap();
+    let b = open_line(&mut client, &id, "main", "b").await;
+    session.idle(&b).await.unwrap();
+    // The line's turn runs while the root is the default, so the catalog
+    // still reports the root's activity.
+    assert_ok(
+        &client
+            .rpc(
+                "session.submit",
+                json!({"sessionId":id,"branchId":b,"text":"line turn"}),
+            )
+            .await,
+    );
+    session.idle(&b).await.unwrap();
+    let line_activity = newest_activity(&mut client, &id, &b).await;
+    let root_activity = newest_activity(&mut client, &id, "main").await;
+    assert!(
+        line_activity > root_activity,
+        "the line is the newer one: {line_activity} vs {root_activity}"
+    );
+    assert_eq!(
+        catalog_row(&mut client, &id).await["updatedAt"],
+        json!(root_activity),
+        "the root is the default while the line works"
+    );
+
+    assert_ok(&switch(&mut client, &id, &b).await);
+    assert_eq!(
+        catalog_row(&mut client, &id).await["updatedAt"],
+        json!(line_activity),
+        "the switch publishes the line's own activity, not the switch's time"
+    );
+
+    // A root turn makes the root the newer line while the line is default.
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    assert_ok(
+        &client
+            .rpc(
+                "session.submit",
+                json!({"sessionId":id,"branchId":"main","text":"root turn"}),
+            )
+            .await,
+    );
+    session.idle("main").await.unwrap();
+    let root_activity = newest_activity(&mut client, &id, "main").await;
+    assert!(
+        root_activity > line_activity,
+        "the root is the newer one now: {root_activity} vs {line_activity}"
+    );
+    assert_eq!(
+        catalog_row(&mut client, &id).await["updatedAt"],
+        json!(line_activity),
+        "a non-default line's turn does not move the catalog"
+    );
+    assert_ok(&switch(&mut client, &id, "main").await);
+    assert_eq!(
+        catalog_row(&mut client, &id).await["updatedAt"],
+        json!(root_activity),
+        "the move back publishes the root's activity"
+    );
+}
+
 /// §20.10: v3 clients are offered the method and read the new kind; v1 and v2
 /// clients see neither.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

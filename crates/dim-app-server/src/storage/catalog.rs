@@ -86,8 +86,14 @@ pub(super) fn refresh(connection: &Connection, session: &str, default: &str) -> 
 
 /// Rebuilds `session`'s activity time from its most recent activity on
 /// `default`, the line its conversation is on (design §5, §15). Writes only
-/// `updated_at_ms`.
-fn refresh_activity(connection: &Connection, session: &str, default: &str) -> Result<()> {
+/// `updated_at_ms`. The writer calls it in the transaction that records a
+/// `branch/default`, so a move between idle lines leaves the catalog on the
+/// new line's own activity at once (design §14, §15).
+pub(super) fn refresh_activity(
+    connection: &Connection,
+    session: &str,
+    default: &str,
+) -> Result<()> {
     let last: Option<String> = connection
         .query_row(
             &format!(
