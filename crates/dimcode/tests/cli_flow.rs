@@ -6012,6 +6012,76 @@ fn a_resumed_session_draws_the_adopted_model_and_effort() {
     daemon.join().unwrap();
 }
 
+/// The capability declaration a configuration states for the test model.
+fn effort_snapshot(efforts: &[&str]) -> Value {
+    let mut capabilities = dim_agent_types::ModelCapabilities::with_limits(64_000, 2_048);
+    capabilities.reasoning = true;
+    json!({"target":{"providerId":"test","modelId":"model"},
+        "capabilities":capabilities,
+        "reasoning":{"supported":true,"effortOptions":efforts}})
+}
+
+/// A resumed line-mode Session folds the shown line from the cursor its attach
+/// reply carries: a configuration fact at that sequence is already the reply's
+/// model, and a later one reaches `/effort` (design §14).
+#[test]
+fn a_resumed_line_mode_session_folds_the_default_branchs_cursor() {
+    for (line, cursor) in [("main", 8), ("line-1", 5)] {
+        let home = Home::new();
+        let daemon = home.daemon(move |wire| {
+            wire.hello(&["session.branches"]);
+            let branches = wire.read("session.branches");
+            let mut entries = vec![json!({"branchId":"main","state":"open","head":8})];
+            if line != "main" {
+                entries.push(json!({"branchId":line,"parentBranchId":"main","branchPoint":1,"state":"open","head":8}));
+            }
+            wire.reply(&branches, json!({"defaultBranchId":line,"branches":entries}));
+            let attach = wire.read("session.attach");
+            let mut record = attach_record(&attach);
+            record["defaultBranch"] = json!({"branchId":line,"sequence":cursor});
+            record["capabilitySnapshot"] = effort_snapshot(&["low", "high"]);
+            wire.reply(&attach, record);
+            let history = wire.read("session.history");
+            assert_eq!(history["params"]["branchId"], json!(line));
+            assert!(
+                history["params"].get("through").is_none(),
+                "the line's window starts from its head"
+            );
+            let mut event = configured_event(cursor, "model", json!({}));
+            event["data"]["capability_snapshot"] = effort_snapshot(&["minimal"]);
+            wire.reply(
+                &history,
+                json!({"events":[event],"through":cursor,"nextAfter":cursor,"done":true}),
+            );
+            let idle = wire.read("session.idle");
+            assert_eq!(idle["params"]["branchId"], json!(line));
+            wire.reply(&idle, json!({"sequence":cursor}));
+            loop {
+                let request = wire.read_any();
+                match request["method"].as_str().unwrap() {
+                    "session.history" => {
+                        let through = request["params"]["through"].as_u64().unwrap_or(cursor);
+                        wire.reply(
+                            &request,
+                            json!({"events":[],"through":through,"nextAfter":through,"done":true}),
+                        );
+                    }
+                    other => panic!("unexpected {other}: {request}"),
+                }
+            }
+        });
+        let mut command = home.command();
+        command.args(["--resume", "session"]);
+        let mut terminal = Terminal::launch(command);
+        terminal.editor();
+        terminal.write(b"/effort\r");
+        terminal.until("Reasoning effort choices: low, high");
+        home.kill(&terminal);
+        terminal.wait();
+        daemon.join().unwrap();
+    }
+}
+
 /// An adoption written by another client reaches the label as it arrives.
 #[test]
 fn another_clients_adoption_redraws_the_model_label() {

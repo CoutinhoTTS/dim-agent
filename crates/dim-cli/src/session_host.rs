@@ -1022,11 +1022,8 @@ impl Worker {
         self.preview = None;
         self.pending = None;
         // The Session's conversation starts where its default branch is
-        // (design §4): the directory names that line. `attached.sequence` is
-        // the root's sequence, so it is the conversation's own cursor only
-        // while the conversation is the root; a line's window and model fold
-        // start from its own history until the App Server reports a
-        // branch-qualified cursor (§14).
+        // (design §4): the directory names that line, and the attach reply
+        // carries that line's own cursor beside the root's `sequence` (§14).
         self.default_branch = ROOT_BRANCH_ID.into();
         if self.client.supports(&["session.branches"]) {
             let directory: dim_client::wire::BranchDirectory = self
@@ -1050,8 +1047,11 @@ impl Worker {
         self.focus = self.default_branch.clone();
         let conversation_line = self.focus.clone();
         self.discover_branch(&conversation_line);
-        let conversation_cursor =
-            (self.default_branch == ROOT_BRANCH_ID).then_some(attached.sequence);
+        let conversation_cursor = dim_client::wire::resume_cursor(
+            attached.default_branch.as_ref(),
+            attached.sequence,
+            &conversation_line,
+        );
         if self.client.offers("session.history.display.transcript")
             && let Some(cursor) = conversation_cursor
         {

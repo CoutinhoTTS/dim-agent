@@ -5,7 +5,7 @@ use crate::{
     rpc::{self, Native, Rpc},
 };
 use agent_client_protocol::{Client, ConnectionTo, Error, UntypedMessage, schema::v1 as acp};
-use dim_agent_types::{DEFAULT_BRANCH_ID, ROOT_BRANCH_ID, TurnOutcome};
+use dim_agent_types::{ROOT_BRANCH_ID, TurnOutcome};
 use dim_client::window::Window;
 use dim_client::wire::{
     Attached, Configuration, DisplayNotice, DisplayPage, Event, EventContent, EventNotice,
@@ -3089,7 +3089,7 @@ async fn read_history(
     let conversation = directory
         .as_ref()
         .and_then(|directory| directory.default_branch_id.clone())
-        .unwrap_or_else(|| DEFAULT_BRANCH_ID.to_owned());
+        .unwrap_or_else(|| ROOT_BRANCH_ID.to_owned());
     let attached: Attached = rpc
         .typed("session.attach", {
             let mut params = json!({"sessionId":id});
@@ -3248,6 +3248,14 @@ async fn read_history(
         .turn
         .filter(|turn| !turn.ended)
         .map(|turn| turn.turn_id);
+    // The attach reply's `defaultBranch` is this conversation's own cursor;
+    // its `sequence` stays the root's (design §14).
+    let model_through = dim_client::wire::resume_cursor(
+        attached.default_branch.as_ref(),
+        attached.sequence,
+        &conversation,
+    )
+    .unwrap_or(0);
     Ok(Prepared {
         branch: conversation.to_owned(),
         history,
@@ -3262,14 +3270,6 @@ async fn read_history(
         inputs,
         turn,
         output,
-        // `attached.sequence` is the root's sequence, which is this
-        // conversation's own cursor only while the conversation is the root; a
-        // line's configuration arrives with its history until the App Server
-        // reports a branch-qualified cursor (design §14).
-        model_through: if conversation == DEFAULT_BRANCH_ID {
-            attached.sequence
-        } else {
-            0
-        },
+        model_through,
     })
 }

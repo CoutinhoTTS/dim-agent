@@ -283,3 +283,72 @@ fn tui_a_refused_continue_is_shown_in_the_lines_panel() {
     terminal.wait();
     daemon.join().unwrap();
 }
+
+/// The shown line resumes from the cursor its attach reply carries: a line's
+/// own sequence, and the root's `sequence` when the conversation is the root
+/// (design §14).
+#[test]
+fn tui_resumes_the_shown_line_from_the_attach_cursor() {
+    for (line, cursor, entries) in [
+        ("main", 8, &[("main", None)][..]),
+        ("line-1", 5, &[("main", None), ("line-1", Some("main"))][..]),
+    ] {
+        let home = Home::new();
+        let daemon = home.daemon(move |wire| {
+            wire.hello(&[
+                "session.methods",
+                "session.branches",
+                "session.branch.get",
+                "session.branch_set_default",
+                "session.branch_end",
+                "session.history.display",
+                "session.history.detail",
+                "session.history.display.tail",
+                "session.history.display.transcript",
+            ]);
+            wire.2 = true;
+            let attach = wire.read("session.attach");
+            let mut record = attach_record(&attach);
+            record["defaultBranch"] = json!({"branchId":line,"sequence":cursor});
+            wire.reply(&attach, record);
+            let branches = next(wire);
+            assert_eq!(branches["method"], "session.branches");
+            wire.reply(&branches, directory(line, entries));
+            let window = next(wire);
+            assert_eq!(window["method"], "session.history.display");
+            assert_eq!(window["params"]["branchId"], json!(line));
+            assert_eq!(
+                window["params"]["through"],
+                json!(cursor),
+                "the shown line resumes from the attach reply's default cursor"
+            );
+            wire.reply(
+                &window,
+                json!({"items":[],"through":cursor,"nextBefore":null,"nextAfter":cursor,"done":true}),
+            );
+            let parent = entries.iter().find(|(id, _)| *id == line).and_then(|(_, parent)| *parent);
+            loop {
+                let request = next(wire);
+                match request["method"].as_str().unwrap() {
+                    "session.branch.get" => {
+                        assert_eq!(request["params"]["branchId"], json!(line));
+                        let detail = match parent {
+                            Some(parent) => entry(line, parent),
+                            None => json!({"branchId":line,"state":"open","head":8}),
+                        };
+                        wire.reply(&request, detail);
+                    }
+                    "session.history" => wire.reply(&request, history(cursor, vec![])),
+                    other => panic!("unexpected {other}: {request}"),
+                }
+            }
+        });
+        let mut command = home.command();
+        sized(&mut command, 100, 32);
+        let mut terminal = Terminal::resume_tui(command);
+        terminal.until("test / model");
+        home.kill(&terminal);
+        terminal.wait();
+        daemon.join().unwrap();
+    }
+}

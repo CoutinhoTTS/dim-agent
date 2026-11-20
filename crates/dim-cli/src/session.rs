@@ -1,4 +1,4 @@
-use crate::wire::{Attached, Created, DisplayNotice, EventNotice, Progress};
+use crate::wire::{Attached, Created, DisplayNotice, EventNotice, Progress, resume_cursor};
 use crate::{
     Result,
     args::{Action, Options},
@@ -337,15 +337,11 @@ pub async fn chat(
             capability_snapshot: attached.capability_snapshot,
             model_preferences: attached.model_preferences,
         });
-        // `attached.sequence` is the root's sequence, which is the
-        // conversation's own cursor only while the conversation is the root; a
-        // line's configuration arrives with its history until the App Server
-        // reports a branch-qualified cursor (design §14).
-        display.model_through = if conversation == ROOT_BRANCH_ID {
-            attached.sequence
-        } else {
-            0
-        };
+        // The attach reply's `defaultBranch` is the conversation's own cursor;
+        // its `sequence` stays the root's (design §14).
+        display.model_through =
+            resume_cursor(attached.default_branch.as_ref(), attached.sequence, &conversation)
+                .unwrap_or(0);
         display.cursor = window::read(client, &session_id, &conversation, &mut display).await?;
         questions.start(client, &session_id, &conversation).await?;
         display.failed = false;

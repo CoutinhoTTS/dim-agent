@@ -11,7 +11,7 @@ use tokio::{
     sync::oneshot,
 };
 
-async fn line(reader: &mut (impl AsyncBufReadExt + Unpin)) -> Option<Value> {
+async fn read_frame(reader: &mut (impl AsyncBufReadExt + Unpin)) -> Option<Value> {
     let mut line = String::new();
     let read = tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut line))
         .await
@@ -21,7 +21,7 @@ async fn line(reader: &mut (impl AsyncBufReadExt + Unpin)) -> Option<Value> {
 }
 
 async fn frame(reader: &mut (impl AsyncBufReadExt + Unpin)) -> Value {
-    line(reader).await.expect("the peer stays open")
+    read_frame(reader).await.expect("the peer stays open")
 }
 
 /// The reply to `id`, skipping the notifications that may come first.
@@ -60,7 +60,7 @@ async fn a_gateway_call_without_a_line_targets_the_default_branch() {
         let hello = frame(&mut read).await;
         send(&mut write,json!({"jsonrpc":"2.0","id":hello["id"],"result":{"instanceId":"fixture","serverVersion":"fixture","protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.attach","session.attach.expectedCwd","session.detach","session.history","session.history.latestTurn","session.input_lookup","session.submit","session.stop","session.branches","session.methods","session.input.pending","session.question.pending","session.turn.get","session.exec.pending"]}})).await;
         let mut submitted = Some(submitted);
-        while let Some(request) = line(&mut read).await {
+        while let Some(request) = read_frame(&mut read).await {
             let method = request["method"].as_str().unwrap_or_default().to_owned();
             let branch = request["params"]["branchId"]
                 .as_str()
@@ -211,4 +211,172 @@ async fn a_gateway_call_without_a_line_targets_the_default_branch() {
     mounted.dispose().await.unwrap();
     root.shutdown().await.unwrap();
     server.await.unwrap();
+}
+
+/// The option a session reply or a config update states for `id`.
+fn option<'a>(value: &'a Value, id: &str) -> &'a Value {
+    value
+        .pointer("/result/configOptions")
+        .or_else(|| value.pointer("/params/update/configOptions"))
+        .and_then(Value::as_array)
+        .expect("config options")
+        .iter()
+        .find(|option| option["id"] == json!(id))
+        .expect("the named option")
+}
+
+/// The next `session/update` that carries config options.
+async fn config_update(reader: &mut (impl AsyncBufReadExt + Unpin)) -> Value {
+    loop {
+        let frame = frame(reader).await;
+        if frame["params"]["update"]["sessionUpdate"] == json!("config_option_update") {
+            return frame;
+        }
+    }
+}
+
+/// The load cursor is the attach reply's `defaultBranch`: a configuration fact
+/// at that sequence is already the reply's model, so only a later one changes
+/// the Session's options (design §14).
+#[tokio::test]
+async fn a_gateway_load_folds_the_default_branchs_cursor() {
+    for (line, cursor) in [("main", 2), ("line-1", 5)] {
+        let home = tempfile::tempdir_in("/tmp").unwrap();
+        let endpoint = home.path().join("daemon.sock");
+        let cwd = home.path().to_str().unwrap().to_owned();
+        let listener = UnixListener::bind(&endpoint).unwrap();
+        std::fs::set_permissions(&endpoint, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let daemon_cwd = cwd.clone();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut read = BufReader::new(read);
+            let hello = frame(&mut read).await;
+            send(&mut write,json!({"jsonrpc":"2.0","id":hello["id"],"result":{"instanceId":"fixture","serverVersion":"fixture","protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.attach","session.attach.expectedCwd","session.branches","session.detach","session.exec.pending","session.history","session.history.latestTurn","session.input.pending","session.input_lookup","session.methods","session.model.update","session.question.pending","session.stop","session.submit","session.summaries","session.turn.get","provider.models.query"]}})).await;
+            let mut listed = 0;
+            while let Some(request) = read_frame(&mut read).await {
+                let method = request["method"].as_str().unwrap_or_default().to_owned();
+                let branch = request["params"]["branchId"]
+                    .as_str()
+                    .unwrap_or(line)
+                    .to_owned();
+                let through = request["params"]["through"].as_u64().unwrap_or(cursor);
+                let id = request["id"].clone();
+                match method.as_str() {
+                    "session.attach" => {
+                        assert_eq!(request["params"]["expectedCwd"], json!(daemon_cwd));
+                        send(&mut write,json!({"jsonrpc":"2.0","id":id,"result":{"sequence":2,"cwd":daemon_cwd,"model":{"providerId":"fixture","modelId":"A"},"defaultBranch":{"branchId":line,"sequence":cursor}}})).await;
+                    }
+                    "session.branches" => {
+                        let mut branches = vec![json!({"branchId":"main","state":"open","head":2})];
+                        if line != "main" {
+                            branches.push(json!({"branchId":line,"parentBranchId":"main","branchPoint":1,"state":"open","head":2}));
+                        }
+                        send(&mut write,json!({"jsonrpc":"2.0","id":id,"result":{"defaultBranchId":line,"branches":branches}})).await;
+                    }
+                    "session.history" => {
+                        assert_eq!(branch, line, "the recovery reads the default branch");
+                        send(&mut write,json!({"jsonrpc":"2.0","id":id,"result":{"events":[],"through":cursor - 1,"nextBefore":null,"nextAfter":cursor - 1}})).await;
+                    }
+                    "provider.models.query" => {
+                        send(&mut write,json!({"jsonrpc":"2.0","id":id,"result":{"models":[{"providerId":"fixture","model":{"id":"A","name":"A"}},{"providerId":"fixture","model":{"id":"B","name":"B"}}],"next":null}})).await;
+                    }
+                    "session.summaries" => {
+                        send(&mut write, json!({"jsonrpc":"2.0","id":id,"result":[]})).await;
+                        let sequence = if listed == 0 { cursor } else { cursor + 1 };
+                        listed += 1;
+                        send(&mut write,json!({"jsonrpc":"2.0","method":"session.event","params":{"sessionId":"session","branchId":line,"event":{"id":format!("configured-{sequence}"),"sequence":sequence,"create_at":1,"type":"context","name":"configured","data":{"timeline":"main","revision":"r1","provider_id":"fixture","model_id":"B"}}}})).await;
+                    }
+                    "session.methods" => {
+                        let methods: Vec<_> = [
+                            "session.input.pending",
+                            "session.question.pending",
+                            "session.exec.pending",
+                            "session.turn.get",
+                        ]
+                        .into_iter()
+                        .map(|name| json!({"name":name,"mutating":false}))
+                        .collect();
+                        send(
+                            &mut write,
+                            json!({"jsonrpc":"2.0","id":id,"result":{"methods":methods}}),
+                        )
+                        .await;
+                    }
+                    "session.exec.pending" => {
+                        send(&mut write,json!({"jsonrpc":"2.0","id":id,"result":{"branchId":branch,"through":through,"tasks":[],"next":null}})).await;
+                    }
+                    "session.input.pending" => {
+                        send(&mut write,json!({"jsonrpc":"2.0","id":id,"result":{"branchId":branch,"through":through,"inputs":[],"next":null}})).await;
+                    }
+                    "session.question.pending" => {
+                        send(&mut write,json!({"jsonrpc":"2.0","id":id,"result":{"branchId":branch,"through":through,"batches":[],"next":null}})).await;
+                    }
+                    "session.turn.get" => {
+                        send(&mut write,json!({"jsonrpc":"2.0","id":id,"result":{"branchId":branch,"through":through,"turn":null,"output":null}})).await;
+                    }
+                    "session.detach" => {
+                        send(&mut write, json!({"jsonrpc":"2.0","id":id,"result":{}})).await;
+                        break;
+                    }
+                    other => panic!("unexpected {other}: {request}"),
+                }
+            }
+        });
+        let client = Client::connect(&ConnectionConfig {
+            endpoint,
+            server: Server {
+                program: "unused".into(),
+                embedded: false,
+            },
+            profile: Some(DaemonProfile::Product),
+            client_kind: "other",
+            client_name: "AcpGateway",
+            protocol_version: 3,
+        })
+        .await
+        .unwrap();
+        let (peer, transport) = tokio::io::duplex(64 * 1024);
+        let (reader, writer) = tokio::io::split(transport);
+        let (gateway, finished) = AcpGateway::new(
+            client,
+            Io {
+                reader: Box::new(reader),
+                writer: Box::new(writer),
+            },
+            None,
+            env!("CARGO_PKG_VERSION").to_owned(),
+        );
+        let root = rutis::Ctx::root().unwrap();
+        let mounted = root.plugin(gateway);
+        (&mounted).await.unwrap();
+        let (read, mut write) = tokio::io::split(peer);
+        let mut read = BufReader::new(read);
+        send(&mut write,json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{}}})).await;
+        let initialize = reply(&mut read, 1).await;
+        assert!(initialize["error"].is_null(), "{initialize}");
+        send(&mut write,json!({"jsonrpc":"2.0","id":2,"method":"session/load","params":{"sessionId":"session","cwd":cwd,"mcpServers":[]}})).await;
+        let loaded = reply(&mut read, 2).await;
+        assert!(loaded["error"].is_null(), "{loaded}");
+        assert_eq!(option(&loaded, "model")["currentValue"], json!("A"));
+        for (id, model) in [(3, "A"), (4, "B")] {
+            send(
+                &mut write,
+                json!({"jsonrpc":"2.0","id":id,"method":"session/list","params":{}}),
+            )
+            .await;
+            let update = config_update(&mut read).await;
+            assert_eq!(
+                option(&update, "model")["currentValue"],
+                json!(model),
+                "the fact at the cursor is already in the reply's model: {update}"
+            );
+        }
+        drop(read);
+        let _ = write.shutdown().await;
+        let _ = tokio::time::timeout(Duration::from_secs(5), finished).await;
+        mounted.dispose().await.unwrap();
+        root.shutdown().await.unwrap();
+        server.await.unwrap();
+    }
 }
