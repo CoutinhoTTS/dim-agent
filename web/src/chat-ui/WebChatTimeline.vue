@@ -180,8 +180,11 @@ let jumpResumed = false
 function onScroll(): void {
   const element = viewport.value
   if (element === null) return
-  following.value = jumpResumed || element.scrollHeight - element.scrollTop - element.clientHeight <= FOLLOW_THRESHOLD_PX
+  const atEnd = element.scrollHeight - element.scrollTop - element.clientHeight <= FOLLOW_THRESHOLD_PX
+  if (atEnd) jumpResumed = false
+  following.value = jumpResumed || atEnd
   quoteTarget.value = undefined
+  autoLoadEarlier()
 }
 
 function onReaderScroll(): void {
@@ -233,14 +236,21 @@ function loadEarlier(): void {
   void nextTick(() => { earlierPending = false })
 }
 
-const earlierRow = ref<HTMLElement>()
+let earlierVisible = false
+function autoLoadEarlier(): void {
+  if (earlierVisible && !following.value && !props.historyError) loadEarlier()
+}
+
+const earlierRow = ref<HTMLElement | null>(null)
 let earlierObserver: IntersectionObserver | undefined
-watch([earlierRow, viewport], ([row, root]) => {
+watch([earlierRow, viewport, () => props.loadingEarlier], ([row, root]) => {
   earlierObserver?.disconnect()
   earlierObserver = undefined
-  if (row === undefined || root === null) return
+  earlierVisible = false
+  if (row === null || root === null) return
   earlierObserver = new IntersectionObserver((entries) => {
-    if (!following.value && entries.some(entry => entry.isIntersecting)) loadEarlier()
+    earlierVisible = entries.at(-1)!.isIntersecting
+    autoLoadEarlier()
   }, { root })
   earlierObserver.observe(row)
 }, { flush: "post" })
@@ -278,6 +288,7 @@ function jumpTo(marker: ChatUiTimelineUserMessageMarker): void {
 }
 
 function onRailWheel(event: WheelEvent): void {
+  jumpResumed = false
   viewport.value?.scrollBy({ top: event.deltaY })
 }
 

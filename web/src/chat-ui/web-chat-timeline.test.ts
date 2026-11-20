@@ -264,7 +264,7 @@ describe("WebChatTimeline history and following", () => {
   function nextFrame(): void {
     frame ??= setTimeout(async () => {
       frame = undefined
-      for (const element of [...scrolled]) {
+      for (const element of scrolled) {
         scrolled.delete(element)
         element.dispatchEvent(new Event("scroll"))
       }
@@ -300,6 +300,9 @@ describe("WebChatTimeline history and following", () => {
     Element.prototype.scrollTo = vi.fn(function (this: Element, options?: ScrollToOptions | number) {
       if (typeof options === "object" && options.top !== undefined) this.scrollTop = options.top
     }) as Element["scrollTo"]
+    Element.prototype.scrollBy = function (this: Element, options?: ScrollToOptions | number) {
+      if (typeof options === "object" && options.top !== undefined) this.scrollTop += options.top
+    } as Element["scrollBy"]
     vi.spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(function (this: Element) {
       const viewport = this.closest(".chat-scroll-viewport")
       let top = 0
@@ -329,7 +332,10 @@ describe("WebChatTimeline history and following", () => {
         this.entry = { callback, targets: [] }
         observers.push(this.entry)
       }
-      observe(target: Element): void { this.entry.targets.push(target) }
+      observe(target: Element): void {
+        if (!(target instanceof Element)) throw new TypeError("IntersectionObserver.observe: target is not an Element")
+        this.entry.targets.push(target)
+      }
       disconnect(): void { this.entry.targets = [] }
     })
     vi.stubGlobal("ResizeObserver", class {
@@ -345,6 +351,7 @@ describe("WebChatTimeline history and following", () => {
   })
   afterEach(() => {
     delete (Element.prototype as Partial<Element>).scrollTo
+    delete (Element.prototype as Partial<Element>).scrollBy
   })
 
   /**
@@ -464,6 +471,46 @@ describe("WebChatTimeline history and following", () => {
     expect(row?.getBoundingClientRect().top).toBe(before.top)
   })
 
+  it("stops observing once the last earlier page is loaded", async () => {
+    const state = shallowReactive<Record<string, unknown>>({ rows: project(turns(8, 1)).rows, earlier: true })
+    const { root } = mountWith([], { props: state })
+    await idle()
+    const divider = root.querySelector("[data-testid='web-chat-earlier']")!
+    expect(observers.some(observer => observer.targets.includes(divider))).toBe(true)
+
+    state.earlier = false
+    await idle()
+    expect(root.querySelector("[data-testid='web-chat-earlier']")).toBeNull()
+    expect(observers.filter(observer => observer.targets.includes(divider))).toEqual([])
+  })
+
+  it("loads earlier when following stops while the divider is already in view", async () => {
+    const state = shallowReactive<Record<string, unknown>>({ rows: project(turns(3, 1)).rows, earlier: true, loadingEarlier: false })
+    const onEarlier = vi.fn(() => { state.loadingEarlier = true })
+    state.onEarlier = onEarlier
+    const { root } = mountWith([], { props: state })
+    await idle()
+    const viewport = viewportOf(root)
+    const end = viewport.scrollHeight - VIEWPORT_PX
+    expect(viewport.scrollTop).toBe(end)
+
+    intersect(root.querySelector("[data-testid='web-chat-earlier']")!)
+    await scrollTo(root, end - 50)
+    expect(onEarlier, "within the follow threshold the reader still follows").not.toHaveBeenCalled()
+
+    await scrollTo(root, end - 200)
+    expect(onEarlier).toHaveBeenCalledTimes(1)
+    await scrollTo(root, end - 300)
+    expect(onEarlier).toHaveBeenCalledTimes(1)
+
+    state.loadingEarlier = false
+    state.historyError = "connection lost"
+    await idle()
+    intersect(root.querySelector("[data-testid='web-chat-earlier']")!)
+    await scrollTo(root, end - 350)
+    expect(onEarlier, "a failed read waits for Retry").toHaveBeenCalledTimes(1)
+  })
+
   it("offers a jump to the latest message while scrolled up, marks new output and resumes following", async () => {
     const projection = project(turns(6, 1))
     const state = shallowReactive<Record<string, unknown>>({ rows: [...projection.rows] })
@@ -489,6 +536,34 @@ describe("WebChatTimeline history and following", () => {
     const viewport = viewportOf(root)
     expect(viewport.scrollTop).toBe(viewport.scrollHeight - VIEWPORT_PX)
     await vi.waitFor(() => expect(jump(), "the pill fades out once following resumes").toBeNull())
+
+    await scrollTo(root, ROW_PX)
+    expect(jump(), "the jump ends at the bottom; a later scroll away stops following").not.toBeNull()
+  })
+
+  it("stops following when the reader wheels up on the rail during a jump", async () => {
+    const projection = project(turns(6, 1))
+    const state = shallowReactive<Record<string, unknown>>({ rows: [...projection.rows] })
+    const { root } = mountWith([], { props: state })
+    await idle()
+    await scrollTo(root, 0)
+    const viewport = viewportOf(root)
+    const smooth = vi.fn()
+    viewport.scrollTo = smooth as Element["scrollTo"]
+    root.querySelector<HTMLButtonElement>("[data-testid='web-chat-jump-latest']")!.click()
+    expect(smooth).toHaveBeenCalledOnce()
+    await scrollTo(root, ROW_PX)
+
+    const rail = root.querySelector(".web-chat-rail")!.firstElementChild!
+    rail.dispatchEvent(new WheelEvent("wheel", { deltaY: -300, bubbles: true, cancelable: true }))
+    await idle()
+    const top = viewport.scrollTop
+    expect(viewport.scrollHeight - top - VIEWPORT_PX).toBeGreaterThan(96)
+
+    for (const item of turns(1, 101)) projection.apply(item)
+    state.rows = [...projection.rows]
+    await idle()
+    expect(viewport.scrollTop, "a reader who scrolled up from the rail stays where they are").toBe(top)
   })
 })
 

@@ -189,7 +189,7 @@ A line is a Timeline of the same Session ([Timeline branches](timeline-branches.
 
 The main chat and every line share one timeline with two history controls:
 
-- While an earlier page exists, the first item of the scroll content, above the oldest row and in the message column, is a divider row: “Load earlier messages”, “Loading…” with a spinner, or the error with an inline Retry. It loads when it scrolls into view after the reader has scrolled up, or on click; a history that fits the viewport and is still following waits for the click. One read runs at a time. When the page lands, the first visible row keeps its offset from the viewport top. The row disappears when nothing earlier is left.
+- While an earlier page exists, the first item of the scroll content, above the oldest row and in the message column, is a divider row: “Load earlier messages”, “Loading…” with a spinner, or the error with an inline Retry. It loads while it is in view and the reader has scrolled away from the end, whichever happens last, or on click; a history that fits the viewport and is still following waits for the click, and a failed read waits for Retry. One read runs at a time. When the page lands, the first visible row keeps its offset from the viewport top. The row disappears when nothing earlier is left.
 - While the reader is more than the follow threshold (96 px) from the end, a “Return to latest” pill with a down arrow sits centered at the bottom of the timeline, above the composer; output that arrives meanwhile adds “New messages” to it. The pill scrolls smoothly to the end and resumes following until the reader scrolls again. The line panel draws a smaller pill. The shared surface's own icon button is not shown.
 
 ```
