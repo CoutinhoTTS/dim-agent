@@ -30,8 +30,6 @@ const props = defineProps<{
   historyError?: string
   rows: readonly TimelineRow[]
   running: boolean
-  /** The shown line's newest turn end (`Projection.lastTurnEnd`). */
-  lastTurnEnd?: number
   retry?: ModelRetryProgress
   quotable: boolean
   branchable?: boolean
@@ -87,15 +85,15 @@ const { host, actions } = createWebChatUiHost({
   openBranch: (text, cut) => emit("branch", text, cut),
 })
 /**
- * The user messages of the running turn: every one after the last turn end,
- * the message that started it and any queued or steered beside it. A notice or
- * error inside the turn splits it into several display rows, so the renderer's
- * latest-row check alone does not find them.
+ * While the line runs, the user messages no turn end has settled: the running
+ * turn's own, steered into it, or held for the next. A notice or error inside
+ * the turn splits it into several display rows, so the renderer's latest-row
+ * check alone does not find them.
  */
 const runningUserMessageIds = computed(() => {
   const ids = new Set<string>()
   if (!props.running) return ids
-  for (const row of props.rows) if (row.kind === "user" && row.sequence > (props.lastTurnEnd ?? -1)) ids.add(row.key)
+  for (const row of props.rows) if (row.kind === "user" && !row.settled) ids.add(row.key)
   return ids
 })
 provide(CHAT_UI_HOST, host)

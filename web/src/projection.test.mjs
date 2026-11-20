@@ -135,6 +135,8 @@ test("a user row carries the Skills its message loaded", () => {
     at: 1_005,
     sequence: 5,
     cut: 4,
+    inputId: "e5",
+    settled: false,
   }])
 })
 
@@ -150,6 +152,8 @@ test("a hook-bearing user row carries the number of hook contexts", () => {
     at: 1_005,
     sequence: 5,
     cut: 4,
+    inputId: "e5",
+    settled: false,
   }])
 })
 
@@ -246,4 +250,26 @@ test("a Stop hook's follow-up is a notice row, not the operator's words", () => 
     projection.apply(event(projection.cursor + 1, { kind: "source-input", text, blocks: [] }))
     assert.equal(projection.rows.length, 1, text)
   }
+})
+
+test("a user row is settled by the turn end after its adoption, across an earlier window", () => {
+  const say = (sequence, text) => event(sequence, { kind: "input", text, content: [{ type: "text", text }], blocks: [] })
+  const settled = (projection) => Object.fromEntries(projection.rows.filter(row => row.kind === "user").map(row => [row.text, row.settled]))
+
+  const earlier = new Projection()
+  for (const item of [say(1, "first"), event(2, { kind: "input-applied", inputId: "e1" }), say(3, "queued")]) earlier.apply(item)
+  assert.deepEqual(settled(earlier), { first: false, queued: false })
+
+  const latest = new Projection()
+  for (const item of [
+    event(5, { kind: "turn-end", outcome: "completed" }),
+    event(6, { kind: "input-applied", inputId: "e3" }),
+    say(7, "steered"),
+    event(8, { kind: "input-applied", inputId: "e7" }),
+  ]) latest.apply(item)
+  latest.prepend(earlier, "before-5")
+  assert.deepEqual(settled(latest), { first: true, queued: false, steered: false }, "the queued input was adopted after the turn end that settled the first")
+
+  latest.apply(event(9, { kind: "turn-end", outcome: "completed" }))
+  assert.deepEqual(settled(latest), { first: true, queued: true, steered: true })
 })

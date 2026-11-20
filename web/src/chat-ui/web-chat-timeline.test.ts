@@ -296,43 +296,71 @@ describe("WebChatTimeline actions", () => {
     expect(onBranch).not.toHaveBeenCalled()
   })
 
-  it("keeps the running turn's message from branching or forking when a notice splits the turn", async () => {
-    const projection = project([
-      ...recorded.slice(0, 7),
-      event(9, { kind: "input", text: "keep going", content: [{ type: "text", text: "keep going" }], blocks: [] }),
-      event(10, { kind: "branch-create", branchId: "b-1", at: 8, prompt: "side quest", source: { kind: "tool", turnId: "t", requestId: "r2", callId: "c" } }),
-      event(11, { kind: "text", requestId: "r2", delta: "still working" }),
-    ])
-    expect(createRowMapper()(projection.rows, "s-1").map(row => row.kind)).toEqual(["turn", "turn", "message", "turn"])
-    const { root } = mountWith(projection.rows, { features: HELLO_FEATURES, props: { running: true, lastTurnEnd: projection.lastTurnEnd, branchable: true } })
+  /** A user message written at `sequence`, its `input/message` event id `e<sequence>`. */
+  const say = (sequence: number, text: string) => event(sequence, { kind: "input", text, content: [{ type: "text", text }], blocks: [] })
+  /** The queue's release of the input written at `input`. */
+  const applied = (sequence: number, input: number) => event(sequence, { kind: "input-applied", inputId: `e${input}` })
+  /** A finished first turn: its message adopted, an answer, the turn end at 7. */
+  const finishedTurn = [
+    say(1, "read the entry point"),
+    applied(2, 1),
+    event(3, { kind: "text", requestId: "r1", delta: "done" }),
+    event(4, { kind: "model-end", requestId: "r1" }),
+    event(7, { kind: "turn-end", outcome: "completed" }),
+  ]
+  const notice = (sequence: number) => event(sequence, { kind: "branch-create", branchId: "b-1", at: 7, prompt: "side quest", source: { kind: "tool", turnId: "t", requestId: "r", callId: "c" } })
+
+  /** The user messages' branch and fork state, by message text. */
+  async function actionsOf(events: readonly SessionEvent[]): Promise<Record<string, { branch: string | null; fork: string | null }>> {
+    const projection = project(events)
+    const { root } = mountWith(projection.rows, { features: HELLO_FEATURES, props: { running: true, branchable: true } })
     await settle()
-    const button = (index: number, id: string) => userActions(root, index).querySelector<HTMLButtonElement>(`[data-testid='${id}']`)!
-    expect(button(1, "timeline-user-branch").disabled).toBe(true)
-    expect(button(1, "timeline-user-branch").getAttribute("aria-label")).toBe("You can branch from here once this turn finishes.")
-    expect(button(1, "timeline-user-fork").disabled).toBe(true)
-    expect(button(1, "timeline-user-fork").getAttribute("aria-label")).toBe("You can fork from here once this turn finishes.")
-    expect(button(0, "timeline-user-branch").disabled, "an earlier message").toBe(false)
-    expect(button(0, "timeline-user-fork").disabled, "an earlier message").toBe(false)
+    const state = (button: HTMLButtonElement | null): string | null => button === null ? null : button.disabled ? `disabled: ${button.getAttribute("aria-label")}` : "enabled"
+    return Object.fromEntries([...root.querySelectorAll<HTMLElement>(".web-user-message")].map(message => [
+      message.querySelector(".timeline-user-bubble")!.textContent!.trim(),
+      { branch: state(message.querySelector("[data-testid='timeline-user-branch']")), fork: state(message.querySelector("[data-testid='timeline-user-fork']")) },
+    ]))
+  }
+  const running = { branch: "disabled: You can branch from here once this turn finishes.", fork: "disabled: You can fork from here once this turn finishes." }
+  const open = { branch: "enabled", fork: "enabled" }
+
+  it("keeps the running turn's message from branching or forking when a notice splits the turn", async () => {
+    const events = [...finishedTurn, say(9, "keep going"), applied(10, 9), notice(11), event(12, { kind: "text", requestId: "r2", delta: "still working" })]
+    expect(createRowMapper()(project(events).rows, "s-1").map(row => row.kind)).toEqual(["turn", "turn", "message", "turn"])
+    expect(await actionsOf(events)).toEqual({ "read the entry point": open, "keep going": running })
   })
 
-  it("keeps every message after the last turn end from branching or forking while the turn runs", async () => {
-    const projection = project([
-      ...recorded.slice(0, 7),
-      event(8, { kind: "input", text: "start the run", content: [{ type: "text", text: "start the run" }], blocks: [] }),
-      event(9, { kind: "input", text: "and also this", content: [{ type: "text", text: "and also this" }], blocks: [] }),
-    ])
-    expect(projection.rows.filter(row => row.kind === "user").map(row => row.kind === "user" && row.sequence)).toEqual([1, 8, 9])
-    const { root } = mountWith(projection.rows, { features: HELLO_FEATURES, props: { running: true, lastTurnEnd: projection.lastTurnEnd, branchable: true } })
-    await settle()
-    const button = (index: number, id: string) => userActions(root, index).querySelector<HTMLButtonElement>(`[data-testid='${id}']`)!
-    for (const index of [1, 2]) {
-      expect(button(index, "timeline-user-branch").disabled, `message ${index}`).toBe(true)
-      expect(button(index, "timeline-user-branch").getAttribute("aria-label")).toBe("You can branch from here once this turn finishes.")
-      expect(button(index, "timeline-user-fork").disabled, `message ${index}`).toBe(true)
-      expect(button(index, "timeline-user-fork").getAttribute("aria-label")).toBe("You can fork from here once this turn finishes.")
-    }
-    expect(button(0, "timeline-user-branch").disabled, "the completed turn's message").toBe(false)
-    expect(button(0, "timeline-user-fork").disabled, "the completed turn's message").toBe(false)
+  it("keeps a message steered or queued before the turn's first output from branching or forking", async () => {
+    expect(await actionsOf([...finishedTurn, say(8, "start the run"), applied(9, 8), say(10, "and also this")])).toEqual({
+      "read the entry point": open,
+      "start the run": running,
+      "and also this": running,
+    })
+  })
+
+  it("follows a queued message into its own turn after the turn it waited behind ends", async () => {
+    const whileHeld = [
+      ...finishedTurn,
+      say(8, "first"),
+      applied(9, 8),
+      say(10, "queued next"),
+      event(11, { kind: "text", requestId: "r2", delta: "answering first" }),
+    ]
+    expect(await actionsOf(whileHeld), "the queued message is held during the first one's turn").toEqual({ "read the entry point": open, first: running, "queued next": running })
+    const ownTurn = [
+      ...whileHeld,
+      event(12, { kind: "model-end", requestId: "r2" }),
+      event(13, { kind: "turn-end", outcome: "completed" }),
+      applied(14, 10),
+      notice(15),
+      event(16, { kind: "text", requestId: "r3", delta: "answering the queued one" }),
+    ]
+    expect(await actionsOf(ownTurn)).toEqual({ "read the entry point": open, first: open, "queued next": running })
+  })
+
+  it("settles a withdrawn message", async () => {
+    const events = [...finishedTurn, say(8, "first"), applied(9, 8), say(10, "withdrawn"), event(11, { kind: "input-deleted", inputId: "e10" }), event(12, { kind: "turn-end", outcome: "completed" }), say(13, "next"), applied(14, 13)]
+    expect(await actionsOf(events)).toEqual({ "read the entry point": open, first: open, withdrawn: open, next: running })
   })
 
   it("forks the main line before a message after confirmation and opens the new session", async () => {

@@ -139,7 +139,6 @@ function noModel(): void {
         :history-error="branch.historyError"
         @earlier="chat.loadEarlier(sessionId, branchId)"
         :running="running"
-        :last-turn-end="branch.lastTurnEnd"
         :quotable="open && !approval && questions.length === 0"
         :branchable="open && !approval && questions.length === 0"
         :empty="t('lines.empty')"
