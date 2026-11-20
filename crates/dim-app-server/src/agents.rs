@@ -1068,14 +1068,15 @@ impl AgentIndex {
         for summary in &mut page.sessions {
             summary.closed = closed.contains(&summary.session.session_id);
             if let Some((_, session)) = self.session(&summary.session.session_id) {
-                match session.default_branch().and_then(|default| {
-                    let running = session.state(&default)?.running;
-                    Ok((running, session.sequence(&default)?))
-                }) {
-                    Ok((running, sequence)) => {
-                        summary.session.running = running;
-                        summary.session.sequence = sequence;
-                    }
+                // The row's `sequence` stays the root's, as the persisted row
+                // stores it, so loading or unloading never changes it; the
+                // running state follows the line the conversation is on
+                // (design §14, §15).
+                match session
+                    .default_branch()
+                    .and_then(|default| session.state(&default))
+                {
+                    Ok(state) => summary.session.running = state.running,
                     Err(_) if session.is_unloading() => {}
                     Err(error) => {
                         tracing::warn!(session_id=%summary.session.session_id, %error, "Session state was not read for the catalog");
@@ -1095,12 +1096,17 @@ impl AgentIndex {
     /// title that cannot be read now leaves the title fields absent, and a
     /// branch whose Loop is being replaced reports not running; both reach an
     /// attached client as notices.
+    ///
+    /// The record's own `sequence` is the root's, the cutoff a client built
+    /// before the default branch moved reads its root transcript from; the
+    /// line the conversation is on travels beside it as the branch-qualified
+    /// cursor (design §14, §15).
     pub(crate) async fn session_record(
         &self,
         host: &AgentHost,
         session: &Session,
         version: u32,
-    ) -> dim_agent_runtime::Result<crate::protocol::SessionInfo> {
+    ) -> dim_agent_runtime::Result<crate::protocol::SessionRecord> {
         let title = match (&self.session_metadata, version >= 3) {
             (_, false) => None,
             (Some(store), true) => Some(match store.read(session.id()).await {
@@ -1116,24 +1122,31 @@ impl AgentIndex {
             },
             _ => (None, None),
         };
-        // The record reports the line the Session's conversation is on, so an
-        // attached client centres the default branch (design §14, §15).
+        // The running state and the cursor report the line the Session's
+        // conversation is on, read once; the record's own sequence stays the
+        // root's (design §14, §15).
         let default = session.default_branch()?;
-        Ok(crate::protocol::SessionInfo {
-            session_id: session.id().to_owned(),
-            cwd: session.config().cwd.clone(),
-            model: dim_agent_types::ModelId {
-                provider_id: session.config().model.provider_id.clone(),
-                model_id: session.config().model.model_id.clone(),
+        Ok(crate::protocol::SessionRecord {
+            info: crate::protocol::SessionInfo {
+                session_id: session.id().to_owned(),
+                cwd: session.config().cwd.clone(),
+                model: dim_agent_types::ModelId {
+                    provider_id: session.config().model.provider_id.clone(),
+                    model_id: session.config().model.model_id.clone(),
+                },
+                created_at: session.created_at(),
+                running: session.state(&default).is_ok_and(|state| state.running),
+                sequence: session.sequence(ROOT_BRANCH_ID)?,
+                attached_clients: 0,
+                agent_id: (version >= 3).then(|| host.agent_id.clone()),
+                origin,
+                parent_session_id,
+                title,
             },
-            created_at: session.created_at(),
-            running: session.state(&default).is_ok_and(|state| state.running),
-            sequence: session.sequence(&default)?,
-            attached_clients: 0,
-            agent_id: (version >= 3).then(|| host.agent_id.clone()),
-            origin,
-            parent_session_id,
-            title,
+            default_branch: crate::protocol::BranchCursor {
+                sequence: session.sequence(&default)?,
+                branch_id: default,
+            },
         })
     }
 

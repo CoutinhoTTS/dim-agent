@@ -610,6 +610,26 @@ impl Connection {
     fn protocol_version(&self) -> u32 {
         *self.version.get().expect("handshake precedes requests")
     }
+    /// The line a call acts on when it omits `branchId`: the root while this
+    /// connection's event projection carries the root alone, the Session's
+    /// default branch otherwise (design §14, §15, §20.22). A v1 connection
+    /// receives no other line's turn events (`subscription::project`), so
+    /// routing its unnamed calls to the default branch would accept work whose
+    /// output that client cannot observe; the new meaning reaches clients that
+    /// can name a line, and v1 keeps the meaning it was built with.
+    fn unnamed_branch(&self, session: &Session) -> Result<String, AgentError> {
+        if self.projection_carries_the_root_alone() {
+            Ok(ROOT_BRANCH_ID.to_owned())
+        } else {
+            session.default_branch()
+        }
+    }
+    /// Whether this connection's negotiated protocol projects only the root's
+    /// events. v1 is the one: v2 carries every branch, and every later version
+    /// adds to v2's set.
+    fn projection_carries_the_root_alone(&self) -> bool {
+        self.protocol_version() == 1
+    }
     fn validate_call(&self, rpc: &RpcService, call: &Call) -> Result<(), RpcError> {
         if call.is_web_entry() || call.is_ui_host() {
             if self.protocol_version() < 3 {
@@ -1198,7 +1218,11 @@ impl Connection {
                                 },
                                 created_at: s.created_at(),
                                 running: status.running,
-                                sequence: cutoff.activity_through,
+                                // The row's sequence stays the root's, as the
+                                // stored catalog row reads it; the running
+                                // state and the activity follow the line the
+                                // conversation is on (design §14, §15).
+                                sequence: cutoff.preview_through,
                                 attached_clients: 0,
                                 agent_id: Some(host.agent_id.clone()),
                                 origin: None,
@@ -1284,7 +1308,7 @@ impl Connection {
                 Ok(session) => {
                     let branch = match params.branch_id {
                         Some(branch) => branch,
-                        None => match session.default_branch() {
+                        None => match self.unnamed_branch(&session) {
                             Ok(branch) => branch,
                             Err(error) => return Some(Err(error.into())),
                         },
@@ -1312,7 +1336,7 @@ impl Connection {
                 Ok(session) => {
                     let branch = match params.branch_id {
                         Some(branch) => branch,
-                        None => match session.default_branch() {
+                        None => match self.unnamed_branch(&session) {
                             Ok(branch) => branch,
                             Err(error) => return Some(Err(error.into())),
                         },
@@ -1588,7 +1612,7 @@ impl Connection {
                 // refusing every line but the root.
                 let branch = match p.branch_id {
                     Some(branch) => branch,
-                    None => session.default_branch().map_err(RpcError::from)?,
+                    None => self.unnamed_branch(&session).map_err(RpcError::from)?,
                 };
                 let mut startup_admission = None;
                 let mut model = if let Some(startup) = p.startup {
@@ -1725,7 +1749,7 @@ impl Connection {
             Call::PromptRefresh(p) => {
                 let branch = match p.branch_id {
                     Some(branch) => branch,
-                    None => session.default_branch().map_err(RpcError::from)?,
+                    None => self.unnamed_branch(&session).map_err(RpcError::from)?,
                 };
                 let outcome = session
                     .configure(

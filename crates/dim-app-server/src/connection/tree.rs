@@ -35,11 +35,12 @@ impl Connection {
         }
         let session = self.session(rpc, &params.session_id)?;
         // A request that names no line goes to the line the Session's
-        // conversation is on, read once for everything this call does (design
-        // §9, §20.22).
+        // conversation is on, read once for everything this call does, and to
+        // the root on a connection whose stream carries the root alone (design
+        // §9, §14, §15, §20.22).
         let branch = match params.branch_id {
             Some(branch) => branch,
-            None => session.default_branch().map_err(RpcError::from)?,
+            None => self.unnamed_branch(&session).map_err(RpcError::from)?,
         };
         let publication = session.publication(&branch).map_err(RpcError::from)?;
         let user = params.user.or_else(|| {

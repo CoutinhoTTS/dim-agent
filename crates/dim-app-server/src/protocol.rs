@@ -1355,6 +1355,22 @@ pub struct SessionInfo {
     #[serde(flatten)]
     pub title: Option<crate::storage::TitleFields>,
 }
+/// The line the Session's conversation is on, with that line's sequence: the
+/// branch-qualified cursor beside [`SessionInfo::sequence`], which keeps the
+/// root's meaning (design §14, §15).
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BranchCursor {
+    pub branch_id: String,
+    pub sequence: u64,
+}
+/// One Session's record as `session.attach` answers it: the summary fields
+/// plus the branch-qualified cursor beside the root's `sequence`.
+#[derive(Debug)]
+pub struct SessionRecord {
+    pub info: SessionInfo,
+    pub default_branch: BranchCursor,
+}
 /// The `session.attach` reply: the attached Session's directory record, as
 /// `session.summaries` gives it, plus the preferences its adopted
 /// configuration sends. Summaries do not include these preferences.
@@ -1362,6 +1378,12 @@ pub struct SessionInfo {
 pub struct AttachResult {
     #[serde(flatten)]
     pub session: SessionInfo,
+    /// The line the configured conversation is on and its sequence. New
+    /// clients resume the shown line from it; `sequence` above stays the
+    /// root's, the cutoff every client built before this field existed reads
+    /// (design §14, §15).
+    #[serde(rename = "defaultBranch")]
+    pub default_branch: BranchCursor,
     #[serde(rename = "capabilitySnapshot", skip_serializing_if = "Option::is_none")]
     pub capability_snapshot: Option<Box<dim_agent_types::ModelCapabilitySnapshot>>,
     #[serde(rename = "modelPreferences", skip_serializing_if = "Option::is_none")]
