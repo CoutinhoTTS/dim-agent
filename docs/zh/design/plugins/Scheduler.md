@@ -670,7 +670,7 @@ loop pass 与 job 窗口、wakeup 在同一个每秒 pass 中运行（§3.1）�
 | 种类 | 形式 | 规则 |
 | --- | --- | --- |
 | `cron` | `{cron: "m h dom mon dow", tz?: IANA}` | 五字段，支持列表、区间、步长；`tz` 缺省为控制节点时区；DST 空档时刻跳过，重复时刻只触发一次 |
-| `every` | `{every_minutes: n}` | `n` ≥ 1；窗口在 `anchor + k·n`，锚点为 `Job.enabled_at`(A.1) |
+| `every` | `{every_minutes: n}` | `n` ≥ 1；窗口在 `anchor + k·n`（k ≥ 1），锚点为 `Job.enabled_at`(A.1)：首个窗口在任务保存或启用后一个间隔，因此保存时不投递任何东西，立即运行用 `schedule.run_now` |
 | `at` | `{at: RFC 3339 时刻}` | 一个窗口；触发或错过之后任务被禁用 |
 
 调度必须恰为上述对象中的一种；拒绝混合形式和未知字段。例如：
@@ -681,7 +681,7 @@ loop pass 与 job 窗口、wakeup 在同一个每秒 pass 中运行（§3.1）�
 {"at": "2030-01-01T00:00:00Z"}
 ```
 
-`every_minutes` 是正整数。cron 形式省略 `tz` 时使用宿主本地时区，而非 UTC。`at` 值包含 UTC 偏移量（`Z` 或显式偏移量）。
+`every_minutes` 是正整数。cron 形式省略 `tz` 时使用宿主本地时区，而非 UTC。`at` 值包含 UTC 偏移量（`Z` 或显式偏移量）。已启用的 `every` 任务总带 `enabled_at`，即窗口计数的保存或启用时刻：新任务与重新启用的任务首窗都在一个间隔之后；保持启用的保存或调度编辑不移动它(A.1)。
 
 固定分钟间隔优先使用 `every_minutes`，所选时区中的日历时间使用 `cron`，特定时刻的一次投递使用 `at`。
 

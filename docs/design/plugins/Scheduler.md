@@ -715,7 +715,7 @@ The process row's `schedule` namespace (§1.3) uses existing method admission: `
 | Kind | Form | Rule |
 | --- | --- | --- |
 | `cron` | `{cron: "m h dom mon dow", tz?: IANA}` | Five fields with lists, ranges, steps; `tz` defaults to the control node's zone; DST-gap times skipped, repeated times fire once |
-| `every` | `{every_minutes: n}` | `n` ≥ 1; windows at `anchor + k·n`, anchor = `Job.enabled_at` (A.1) |
+| `every` | `{every_minutes: n}` | `n` ≥ 1; windows at `anchor + k·n` for k ≥ 1, anchor = `Job.enabled_at` (A.1): the first window is one interval after the job is saved or enabled, so a saved job delivers nothing at its save time, and `schedule.run_now` is the immediate run |
 | `at` | `{at: RFC 3339 instant}` | One window; after it fires or is missed the job is disabled |
 
 A schedule is exactly one of these objects; mixed forms and unknown fields are rejected. For example:
@@ -726,7 +726,7 @@ A schedule is exactly one of these objects; mixed forms and unknown fields are r
 {"at": "2030-01-01T00:00:00Z"}
 ```
 
-`every_minutes` is a positive integer. Omitting `tz` from the cron form uses the host's local time zone, not UTC. An `at` value includes its UTC offset (`Z` or an explicit offset).
+`every_minutes` is a positive integer. Omitting `tz` from the cron form uses the host's local time zone, not UTC. An `at` value includes its UTC offset (`Z` or an explicit offset). An enabled `every` job always carries `enabled_at`, the save or enable time its windows count from: a new job and a re-enabled job both have their first window one interval later, and an enabled save or schedule edit preserves the anchor (A.1).
 
 Prefer `every_minutes` for fixed-minute intervals, `cron` for calendar times in the chosen time zone, and `at` for one delivery at a specific instant.
 
