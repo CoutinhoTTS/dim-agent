@@ -86,7 +86,7 @@ Subscription {
   id: "sub_<uuid>",
   types: ["im.message" | "im.*"],    // 1..16; an exact type or "<source>.*"
   match?: { "<attr>": "<value>" },   // at most 16 pairs; every pair must equal the event's attribute
-  target: { sessionId, branchId },   // branchId defaults to "main"
+  target: { sessionId, branchId },   // branchId is the default branch when the request omits it
   mode?: "queue" | "steer" | "append",
   origin: "tool" | "client",
   createdAt: "2026-11-08T09:15:04.120Z",
@@ -175,7 +175,7 @@ sequenceDiagram
   H-->>P: {eventId, deliveries}
 ```
 
-A branch is delivered once however many targets reach it. Its mode is the `to` entry's `mode` when a `to` entry names one; otherwise it is the strongest effective mode among the matching subscriptions, `steer` over `queue` over `append`, where a subscription's effective mode is its own `mode` or else the type's declared `mode`. A subscriber that asked to be woken is not overridden by one that did not. `branchId` defaults to `main` everywhere it is optional. Zero targets is not an error: `deliveries: []`.
+A branch is delivered once however many targets reach it. Its mode is the `to` entry's `mode` when a `to` entry names one; otherwise it is the strongest effective mode among the matching subscriptions, `steer` over `queue` over `append`, where a subscription's effective mode is its own `mode` or else the type's declared `mode`. A subscriber that asked to be woken is not overridden by one that did not. Wherever a request may omit `branchId`, it names the Session's current default branch: `subscribe` records that branch in the subscription, and `publish` resolves each `to` entry against the `sessions` data face before the publish starts, so a Session whose default branch cannot be read (`session_closed`, `reloading`) refuses the publish and writes nothing. A stored subscription's target never changes. Zero targets is not an error: `deliveries: []`.
 
 A delivery to a subscribed branch first checks the guide it recorded for that branch and source against the current declaration (3.3). When they differ it writes the current guide as one keyed `append`, under the Session's lock, and then the event; a branch reached only through `to` has no record and gets no guide write.
 
@@ -363,7 +363,7 @@ publish { source: "im",
           title?: "Build failed",
           body: "…",
           attributes?: { "channel": "general", "user": "u1" },
-          to?: [ { sessionId: "…", branchId?: "main", mode?: "steer" } ] }
+          to?: [ { sessionId: "…", branchId?: "<branch>", mode?: "steer" } ] }
      -> { eventId: "7f3a", deliveries: [ Delivery ] }
 ```
 
@@ -374,7 +374,7 @@ publish { source: "im",
 | `title` | One line, at most 256 bytes |
 | `body` | Text, at most 1 MiB (`too_large`) |
 | `attributes` | At most 16 entries; keys `[a-z][a-z0-9_-]{0,31}`; values one line, at most 256 bytes each. `source`, `type`, `id`, `file`, `bytes` and `truncated` are reserved (`invalid_event`) |
-| `to` | 0 to 16 targets, each `{sessionId, branchId?, mode?}` |
+| `to` | 0 to 16 targets, each `{sessionId, branchId?, mode?}`; an omitted `branchId` is the Session's current default branch |
 
 `Delivery` is one of the three rows of 2.3: a `delivered` entry carries `repeated: true` and no `truncated` when the branch already held the input, and `truncated: true` only from the publish that wrote the input (2.4, 3.2). A malformed field other than an oversized body is `invalid_event`. Zero targets replies `deliveries: []`.
 

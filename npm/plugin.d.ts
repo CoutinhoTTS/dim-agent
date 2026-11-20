@@ -286,6 +286,9 @@ export interface Sessions {
    * restorable Session exists. Reads only; never acquires or restores a
    * Session. */
   exists(request: { sessionId: string }): Promise<SessionsResult<{ exists: boolean }>>;
+  /** The line the Session's conversation is on; reads the tree's current
+   * default and no history page. */
+  defaultBranchId(request: { sessionId: string }): Promise<SessionsResult<{ defaultBranchId: string }>>;
   history(request: HistoryRequest): Promise<SessionsResult<HistoryPage>>;
   withdraw(request: WithdrawRequest): Promise<SessionsResult<WithdrawReply>>;
   pending(request: PendingRequest): Promise<SessionsResult<{ pending: boolean }>>;
@@ -310,6 +313,7 @@ export interface EventHubDeclaration {
 /** One explicit target of a publish (design A.2). */
 export interface EventHubTarget {
   sessionId: string;
+  /** Defaults to the Session's current default branch. */
   branchId?: string;
   mode?: 'queue' | 'steer' | 'append';
 }
@@ -358,7 +362,7 @@ export interface EventSubscriptionCall {
   types: string[];
   match?: Record<string, string>;
   mode?: 'queue' | 'steer' | 'append';
-  /** Defaults to `main`. */
+  /** Defaults to the Session's current default branch. */
   branchId?: string;
 }
 /** `eventSubscriptions.unsubscribe` (design A.3). */

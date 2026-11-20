@@ -13,7 +13,7 @@ use crate::{
     text::{digest, preview, stamp},
 };
 use dim_agent_capabilities::host::{SessionFiles, StoredSessionFile};
-use dim_agent_types::{DEFAULT_BRANCH_ID, InputMode, markup::escaped};
+use dim_agent_types::{InputMode, markup::escaped};
 use futures_util::{StreamExt, stream};
 use jiff::Timestamp;
 use rutis::Ctx;
@@ -117,6 +117,8 @@ pub(crate) async fn publish(
     request: PublishRequest,
 ) -> Result<Value, EventHubError> {
     validate_publish(&request)?;
+    let to = resolved_to(&shared, request.to).await?;
+    let request = PublishRequest { to, ..request };
     let activity = shared
         .activity
         .take_hold()
@@ -151,6 +153,32 @@ pub(crate) async fn publish(
     })
     .await
     .map_err(|error| EventHubError::transport(format!("the publish task ended: {error}")))?
+}
+
+/// One explicit `to` target with its branch filled in (timeline branches
+/// §20.22); `publish` resolves them once per request before the task starts,
+/// reading a Session named by two entries once.
+async fn resolved_to(
+    shared: &Shared,
+    to: Vec<crate::model::ToTarget>,
+) -> Result<Vec<crate::model::ToTarget>, EventHubError> {
+    let mut defaults: HashMap<String, String> = HashMap::new();
+    let mut resolved = Vec::with_capacity(to.len());
+    for mut target in to {
+        if target.branch_id.is_none() {
+            let branch_id = match defaults.get(&target.session_id) {
+                Some(branch_id) => branch_id.clone(),
+                None => {
+                    let branch_id = shared.default_branch(&target.session_id).await?;
+                    defaults.insert(target.session_id.clone(), branch_id.clone());
+                    branch_id
+                }
+            };
+            target.branch_id = Some(branch_id);
+        }
+        resolved.push(target);
+    }
+    Ok(resolved)
 }
 
 /// One publish from taking its event lock to its receipt, in the task
@@ -271,8 +299,8 @@ async fn publish_to_completion(
     }))
 }
 
-/// Builds one target per branch: the `to` targets plus the in-memory matches
-/// as they stand when the publish starts, in that order (design §3.1).
+/// Builds one target per branch: the resolved `to` targets plus the in-memory
+/// matches as they stand when the publish starts, in that order (design §3.1).
 fn plan_targets(
     subscriptions: &[Subscription],
     request: &PublishRequest,
@@ -300,7 +328,10 @@ fn plan_targets(
         let index = find(
             &mut plans,
             &target.session_id,
-            target.branch_id.as_deref().unwrap_or(DEFAULT_BRANCH_ID),
+            target
+                .branch_id
+                .as_deref()
+                .expect("publish targets resolve their branch before planning"),
         );
         if plans[index].explicit_mode.is_none() {
             plans[index].explicit_mode = target.mode;

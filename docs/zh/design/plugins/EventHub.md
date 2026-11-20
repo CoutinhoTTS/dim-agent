@@ -80,7 +80,7 @@ Subscription {
   id: "sub_<uuid>",
   types: ["im.message" | "im.*"],    // 1..16；精确类型或 "<source>.*"
   match?: { "<attr>": "<value>" },   // 至多 16 对；每一对都必须等于事件的属性
-  target: { sessionId, branchId },   // branchId 默认为 "main"
+  target: { sessionId, branchId },   // 请求省略 branchId 时取该 Session 的默认分支
   mode?: "queue" | "steer" | "append",
   origin: "tool" | "client",
   createdAt: "2026-11-08T09:15:04.120Z",
@@ -169,7 +169,7 @@ sequenceDiagram
   H-->>P: {eventId, deliveries}
 ```
 
-一条分支无论被多少个目标命中，都只投递一次。一个 `to` 条目给出了 `mode` 时用它；否则取匹配的订阅中有效模式最强者，顺序为 `steer` 高于 `queue` 高于 `append`，其中订阅的有效模式是它自己的 `mode`，没有则为类型声明的 `mode`。要求被唤醒的订阅者不会被没有这样要求的订阅者盖过。凡可选的 `branchId` 都默认为 `main`。零个目标不是错误：`deliveries: []`。
+一条分支无论被多少个目标命中，都只投递一次。一个 `to` 条目给出了 `mode` 时用它；否则取匹配的订阅中有效模式最强者，顺序为 `steer` 高于 `queue` 高于 `append`，其中订阅的有效模式是它自己的 `mode`，没有则为类型声明的 `mode`。要求被唤醒的订阅者不会被没有这样要求的订阅者盖过。凡请求可省略 `branchId` 时，它表示该 Session 当前的默认分支：`subscribe` 把该分支记入订阅，`publish` 在开始之前经 `sessions` 数据面解析每个 `to` 条目，因此默认分支无法读取(`session_closed`、`reloading`)的 Session 会拒绝整个 publish，且不写入任何东西。已存订阅的目标永不改变。零个目标不是错误：`deliveries: []`。
 
 投递给一条被订阅的分支时，先按该分支与来源取出记录的指南，与当前声明对比(3.3)。二者不同时，它先在该 Session 的锁下把当前指南作为一条带键的 `append` 写出，然后写事件；仅由 `to` 到达的分支没有记录，也不写指南。
 
@@ -358,7 +358,7 @@ publish { source: "im",
           title?: "Build failed",
           body: "…",
           attributes?: { "channel": "general", "user": "u1" },
-          to?: [ { sessionId: "…", branchId?: "main", mode?: "steer" } ] }
+          to?: [ { sessionId: "…", branchId?: "<branch>", mode?: "steer" } ] }
      -> { eventId: "7f3a", deliveries: [ Delivery ] }
 ```
 
@@ -369,7 +369,7 @@ publish { source: "im",
 | `title` | 一行，至多 256 字节 |
 | `body` | 文本，至多 1 MiB，否则 `too_large` |
 | `attributes` | 至多 16 项；键匹配 `[a-z][a-z0-9_-]{0,31}`；值是单行，每项至多 256 字节。`source`、`type`、`id`、`file`、`bytes` 与 `truncated` 是保留名，出现即 `invalid_event` |
-| `to` | 0 到 16 个目标，每项 `{sessionId, branchId?, mode?}` |
+| `to` | 0 到 16 个目标，每项 `{sessionId, branchId?, mode?}`；省略 `branchId` 时取该 Session 当前的默认分支 |
 
 `Delivery` 是 2.3 的三行之一：分支已持有该输入时，`delivered` 项带 `repeated: true` 且不含 `truncated`；`truncated: true` 只由写出该输入的那次发布给出(2.4、3.2)。除正文超限以外的字段格式错误都是 `invalid_event`。零个目标回复 `deliveries: []`。
 

@@ -22969,6 +22969,7 @@
         "path Origin::User",
         "path Schedule",
         "path Target",
+        "path Target::Launch",
         "path Target::Session",
         "path canonical_instant",
         "path crate::document::ScheduleDocument",
@@ -22989,6 +22990,7 @@
         "path crate::engine::accept",
         "path crate::engine::prune",
         "path crate::engine::recover",
+        "path crate::engine::sessions",
         "path crate::engine::settle_delivering",
         "path crate::engine::tick"
       ]
@@ -23069,6 +23071,14 @@
       "references": [
         "path InputMode",
         "use dim_agent_types::InputMode"
+      ]
+    },
+    {
+      "from": "dim_agent_scheduler::methods",
+      "to": "dim_agent_types::permission",
+      "references": [
+        "path PermissionPreset",
+        "use dim_agent_types::PermissionPreset"
       ]
     },
     {
@@ -23265,10 +23275,21 @@
       "references": [
         "path Caller",
         "path ScheduleJobs",
+        "path Shared",
         "path ToolRequest",
         "use crate::methods::Caller",
         "use crate::methods::ScheduleJobs",
+        "use crate::methods::Shared",
         "use crate::methods::ToolRequest"
+      ]
+    },
+    {
+      "from": "dim_agent_scheduler::session",
+      "to": "dim_agent_scheduler::runs",
+      "references": [
+        "path SchedulerError",
+        "path SchedulerError::new",
+        "use crate::runs::SchedulerError"
       ]
     },
     {
@@ -23280,14 +23301,6 @@
         "path crate::wakeups::Wakeup",
         "use crate::wakeups::WakeupRequest",
         "use crate::wakeups::Wakeups"
-      ]
-    },
-    {
-      "from": "dim_agent_scheduler::session",
-      "to": "dim_agent_types::events",
-      "references": [
-        "path DEFAULT_BRANCH_ID",
-        "use dim_agent_types::DEFAULT_BRANCH_ID"
       ]
     },
     {
@@ -23529,11 +23542,13 @@
         "path CreateParams",
         "path ListParams",
         "path nonempty",
+        "path wakeup_list_scope",
         "path wakeup_request",
         "use crate::session::CancelParams",
         "use crate::session::CreateParams",
         "use crate::session::ListParams",
         "use crate::session::nonempty",
+        "use crate::session::wakeup_list_scope",
         "use crate::session::wakeup_request",
         "use crate::session::wire_scheduled"
       ]
@@ -23543,14 +23558,6 @@
       "to": "dim_agent_scheduler::wakeup_pass",
       "references": [
         "path crate::wakeup_pass::pause"
-      ]
-    },
-    {
-      "from": "dim_agent_scheduler::wakeups",
-      "to": "dim_agent_types::events",
-      "references": [
-        "path DEFAULT_BRANCH_ID",
-        "use dim_agent_types::DEFAULT_BRANCH_ID"
       ]
     },
     {
@@ -25367,6 +25374,14 @@
     },
     {
       "from": "dim_app_server::agents::sessions",
+      "to": "dim_agent_capabilities::timeline_tree",
+      "references": [
+        "path TreeCommands",
+        "use dim_agent_capabilities::timeline_tree::TreeCommands"
+      ]
+    },
+    {
+      "from": "dim_app_server::agents::sessions",
       "to": "dim_agent_runtime::branch",
       "references": [
         "path Publication",
@@ -25561,10 +25576,10 @@
       "from": "dim_app_server::agents::sessions::tests",
       "to": "dim_app_server::agents::sessions",
       "references": [
-        "path ExistsRequest",
         "path InputWrite",
         "path LookupReply::Accepted",
         "path LookupRequest",
+        "path SessionRequest",
         "path call",
         "path published",
         "path request"

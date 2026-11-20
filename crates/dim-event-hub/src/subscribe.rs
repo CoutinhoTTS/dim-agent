@@ -26,11 +26,16 @@ pub(crate) async fn subscribe(
     origin: Origin,
     request: SubscribeRequest,
 ) -> Result<Value, EventHubError> {
-    let crate::model::CheckedSubscribe {
-        types,
-        matches,
-        target,
-    } = validate_subscribe(&request)?;
+    let crate::model::CheckedSubscribe { types, matches } = validate_subscribe(&request)?;
+    // An omitted branch is the line the Session is on, read once before any
+    // guide is written (timeline branches §20.22).
+    let target = Target {
+        session_id: request.target.session_id.clone(),
+        branch_id: match &request.target.branch_id {
+            Some(branch_id) => branch_id.clone(),
+            None => shared.default_branch(&request.target.session_id).await?,
+        },
+    };
     // One lock per target Session, from the first check to the last guide
     // write or retire (design §3.3): an unsubscribe or a delete of the same
     // Session cannot retire a guide this subscribe wrote before its record

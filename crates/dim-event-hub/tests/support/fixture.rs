@@ -171,7 +171,10 @@ impl FakeSessions {
 
 impl HostDispatch for FakeSessions {
     fn methods(&self) -> Option<Json> {
-        Some(json!({ "input": "async", "lookup": "async", "exists": "async" }))
+        Some(
+            json!({ "input": "async", "lookup": "async", "exists": "async",
+            "defaultBranchId": "async" }),
+        )
     }
     fn invoke(&self, method: &str, args: Value) -> Reply {
         let Json::Array(args) = args.json()? else {
@@ -207,6 +210,13 @@ impl HostDispatch for FakeSessions {
                 let exists = !self.inner.missing.lock().unwrap().contains(&session);
                 return Ok(Value::future(async move {
                     Ok(json!({ "ok": true, "value": { "exists": exists } }).into())
+                }));
+            }
+            // The `sessions.defaultBranchId` read (timeline branches §20.22):
+            // every fixture Session is on its root.
+            "defaultBranchId" => {
+                return Ok(Value::future(async move {
+                    Ok(json!({ "ok": true, "value": { "defaultBranchId": "main" } }).into())
                 }));
             }
             "input" => {}
