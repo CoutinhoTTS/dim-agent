@@ -418,17 +418,24 @@ test("indexed transcript pages use one fixed head for initial and earlier reads"
 })
 
 test("a moved centre keeps the model its own timeline adopted", async t => {
-  const chat = session(t, params => params.branchId === "worker"
-    ? page([event(1, { kind: "context-configured", model: { providerId: "worker", modelId: "B" } })], 1)
-    : page([], 0), {
-    "session.branches": () => ({ branches: [{ branchId: "worker", parentBranchId: "main", branchPoint: 0, head: 1, state: "open" }], defaultBranchId: "worker" }),
+  // The production display transcript omits `context/configured`, so a bounded
+  // window cannot carry a line's adoption: the centre reads that line's own
+  // fact at the window's head.
+  const chat = session(t, params => page([], params.branchId === "worker" ? 7 : 0), {
+    "session.branches": () => ({ branches: [{ branchId: "worker", parentBranchId: "main", branchPoint: 0, head: 7, state: "open" }], defaultBranchId: "worker" }),
+    "session.history": params => {
+      assert.equal(params.branchId, "worker")
+      assert.equal(params.through, 7)
+      assert.equal(params.before, 8)
+      return { ...page([event(3, { kind: "context-configured", model: { providerId: "worker", modelId: "B" } })], 7), nextBefore: 1 }
+    },
   })
   await flush()
   assert.equal(chat.views.session.defaultBranchId, "worker")
   assert.deepEqual(
     chat.views.session.model,
     { providerId: "worker", modelId: "B" },
-    "the centre keeps the model its own window adopted instead of the attach reply's, which is the root's (design §14)",
+    "the centre keeps the model its own line adopted instead of the attach reply's, which is the root's (design §14)",
   )
 })
 
@@ -490,6 +497,32 @@ test("a move keeps the outgoing transcript and its target until the new centre i
   await moving
   assert.equal(chat.views.session.defaultBranchId, "worker")
   assert.deepEqual(chat.views.session.rows.map(row => row.text), ["on the line"], "the centre and its transcript change together")
+})
+
+test("a late history load cannot undo a newer default move", async t => {
+  const held = deferred()
+  let hold = false
+  const chat = session(t, async params => {
+    if (params.branchId === "worker" && hold) await held.promise
+    const sequence = params.branchId === "worker" ? 7 : 9
+    return page([input(sequence, params.branchId)], sequence)
+  }, {
+    "session.branches": () => ({ branches: [
+      { branchId: "worker", parentBranchId: "main", branchPoint: 0, head: 7, state: "open" },
+      { branchId: "other", parentBranchId: "main", branchPoint: 0, head: 9, state: "open" },
+    ], defaultBranchId: "main" }),
+    "session.branch_set_default": params => params.branchId,
+  })
+  await flush()
+  hold = true
+  const first = chat.setDefaultBranch("session", "worker")
+  await flush()
+  await chat.setDefaultBranch("session", "other")
+  assert.equal(chat.views.session.defaultBranchId, "other", "the newer move is the centre")
+  held.resolve()
+  await first
+  assert.equal(chat.views.session.defaultBranchId, "other", "the earlier load finishing late does not revert the move")
+  assert.deepEqual(chat.views.session.rows.map(row => row.text), ["other"], "the transcript stays the newer centre's")
 })
 
 test("a move to the root does not label the outgoing line's rows as root rows", async t => {

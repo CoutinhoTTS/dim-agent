@@ -95,6 +95,8 @@ type Channel = {
   branches: Map<string, BranchStream>
   lines: Lines
   states: Map<string, { running: boolean; stopping: boolean }>
+  /** The newest move `setDefaultBranch` started; a completion older than it is stale. */
+  moves: number
   /** While `syncing`, every notification waits here so history applies first. */
   syncing: boolean
   queued: Notification[]
@@ -163,6 +165,7 @@ export const useChatStore = defineStore("chat", () => {
       branches: new Map(),
       lines: new Lines(),
       states: new Map(),
+      moves: 0,
       syncing: false,
       queued: [],
       historyQueue: [],
@@ -223,7 +226,8 @@ export const useChatStore = defineStore("chat", () => {
           branch.projection.restoreControls([], asks, entry.head)
         }
       }
-      const main = await loadHistory(channel, view.defaultBranchId)
+      const centreId = view.defaultBranchId
+      const main = await loadHistory(channel, centreId)
       if (main !== "ok") {
         if (main === "failed" && view.status !== "closed") {
           view.status = "failed"
@@ -232,8 +236,10 @@ export const useChatStore = defineStore("chat", () => {
         return
       }
       // The reply's model is the root's (design §14): a centre on a line keeps
-      // the model its own window adopted.
-      if (view.defaultBranchId === ROOT_BRANCH_ID) channel.main.projection.model = model
+      // the model its own line adopted.
+      const shown = ensureBranch(channel, centreId)
+      if (centreId === ROOT_BRANCH_ID) shown.projection.model = model
+      await adoptModel(channel, centreId, shown)
       await refreshGoal(channel)
       if (view.status === "failed") return
       const queued = channel.queued
@@ -500,6 +506,40 @@ export const useChatStore = defineStore("chat", () => {
       projection.apply(event)
     }
     return { window, events, projection }
+  }
+
+  /**
+   * The newest configuration a line adopted at or below `through`, read from
+   * its own event history: a display transcript omits `context/configured`
+   * and a bounded window can begin after the adoption.
+   */
+  async function lineConfiguration(channel: Channel, branchId: string, through: number): Promise<ModelId | undefined> {
+    let before = through + 1
+    for (;;) {
+      const page = await client().call("session.history", {
+        sessionId: channel.view.sessionId,
+        branchId,
+        through,
+        before,
+        limit: 256,
+      }, readHistory)
+      if (page.through !== through) throw new ProtocolError("History snapshot changed")
+      for (let index = page.events.length - 1; index >= 0; index--) {
+        const content = page.events[index]!.content
+        if (content.kind === "context-configured") return content.model
+      }
+      const next = page.nextBefore
+      if (next === undefined || next <= 1 || next >= before) return undefined
+      before = next
+    }
+  }
+
+  /** Gives a centre the model its own line adopted when its window carried none. */
+  async function adoptModel(channel: Channel, branchId: string, branch: BranchStream): Promise<void> {
+    if (branch.projection.model !== undefined) return
+    const model = await lineConfiguration(channel, branchId, branch.through)
+    // A live configuration that arrived while the read was in flight is newer.
+    if (model !== undefined && branch.projection.model === undefined) branch.projection.model = model
   }
 
   async function loadHistory(channel: Channel, branchId: string): Promise<"ok" | "lost" | "failed"> {
@@ -869,10 +909,12 @@ export const useChatStore = defineStore("chat", () => {
    * one round trip's result (design §14, §20.27).
    */
   async function setDefaultBranch(sessionId: string, branchId: string): Promise<void> {
-    const moved = await client().call("session.branch_set_default", { sessionId, branchId }, readDefaultBranch)
     const channel = channels.get(sessionId)
     if (channel === undefined) return
     const view = channel.view
+    const move = ++channel.moves
+    const moved = await client().call("session.branch_set_default", { sessionId, branchId }, readDefaultBranch)
+    if (channel.moves !== move) return
     if (moved !== view.defaultBranchId) {
       // The new centre's window is read before the stream changes hands: the
       // transcript on screen, its running state and every action that names
@@ -881,6 +923,11 @@ export const useChatStore = defineStore("chat", () => {
       const branch = ensureBranch(channel, moved)
       branch.opened = true
       const loaded = await loadHistory(channel, moved)
+      // A later move owns the centre: its completion, not this earlier load,
+      // decides what the page shows.
+      if (channel.moves !== move) return
+      if (loaded === "ok") await adoptModel(channel, moved, branch)
+      if (channel.moves !== move) return
       centre(channel, moved, branch)
       if (loaded !== "ok") {
         // The move stands, but the centre has no transcript to show: report it
