@@ -464,6 +464,54 @@ async fn attach_keeps_the_root_sequence_beside_the_default_cursor() {
     );
 }
 
+/// §14: `session.branches` takes the default and the rows from one tree
+/// snapshot. The move away and the end of the former default complete while
+/// the read waits before its snapshot, so the advertised default is open in
+/// the directory the same answer carries.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_branches_read_advertises_an_open_default() {
+    let (server, agent) = launch_with_agent(Arc::new(MockTools), ServerConfig::default()).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let created = client.rpc("session.create", with_branch()).await;
+    assert_ok(&created);
+    let id = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    let session = agent.get_session(&id).unwrap();
+    let b = open_line(&mut client, &id, "main", "b").await;
+    session.idle(&b).await.unwrap();
+    assert_ok(&switch(&mut client, &id, &b).await);
+
+    let hold = server
+        .hold_next_branches()
+        .expect("the ConnectionHub exists");
+    let read = client.send("session.branches", json!({"sessionId":id})).await;
+    hold.entered.notified().await;
+    // The competing calls land while the read waits before its snapshot.
+    assert_ok(&switch(&mut client, &id, "main").await);
+    assert_ok(
+        &client
+            .rpc("session.branch_end", json!({"sessionId":id,"branchId":b}))
+            .await,
+    );
+    hold.release.notify_one();
+    let reply = client.response(read).await;
+    assert_ok(&reply);
+    let default = reply["result"]["defaultBranchId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(default, "main", "the move is in the answer: {reply}");
+    let row = reply["result"]["branches"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["branchId"] == json!(default))
+        .unwrap_or_else(|| panic!("the default is in the directory: {reply}"));
+    assert_eq!(
+        row["state"], "open",
+        "the advertised default accepts input: {reply}"
+    );
+}
+
 /// §20.22: a call that names no line reaches the line the fact names, and
 /// `session.submit`, `session.stop` and `session.idle` are among them.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -2045,6 +2045,10 @@ pub(crate) struct ConnectionHub {
     /// Feature `testing`: holds the next subscription's `follow` task.
     #[cfg(feature = "testing")]
     follow_hold: Mutex<Option<Arc<crate::FollowHold>>>,
+    /// Feature `testing`: holds the next `session.branches` before its tree
+    /// snapshot.
+    #[cfg(feature = "testing")]
+    branches_hold: Mutex<Option<Arc<crate::BranchesHold>>>,
     /// Feature `testing`: fails the next attach before it registers its
     /// listener.
     #[cfg(feature = "testing")]
@@ -2076,6 +2080,8 @@ impl ConnectionHub {
             config,
             #[cfg(feature = "testing")]
             follow_hold: Mutex::new(None),
+            #[cfg(feature = "testing")]
+            branches_hold: Mutex::new(None),
             #[cfg(feature = "testing")]
             fail_attach_before_registration: std::sync::atomic::AtomicBool::new(false),
         }
@@ -2207,6 +2213,18 @@ impl ConnectionHub {
     #[cfg(feature = "testing")]
     pub(crate) fn take_follow_hold(&self) -> Option<Arc<crate::FollowHold>> {
         self.follow_hold.lock().expect("follow hold").take()
+    }
+    /// Holds the next `session.branches` before its tree snapshot until
+    /// `release`. Feature `testing` only.
+    #[cfg(feature = "testing")]
+    pub(crate) fn hold_next_branches(&self) -> Arc<crate::BranchesHold> {
+        let hold = Arc::new(crate::BranchesHold::default());
+        *self.branches_hold.lock().expect("branches hold") = Some(hold.clone());
+        hold
+    }
+    #[cfg(feature = "testing")]
+    pub(crate) fn take_branches_hold(&self) -> Option<Arc<crate::BranchesHold>> {
+        self.branches_hold.lock().expect("branches hold").take()
     }
     /// Feature `testing`: the next attach fails before it registers its
     /// listener.
