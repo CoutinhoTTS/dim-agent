@@ -440,7 +440,7 @@ describe("WebChatTimeline history and following", () => {
     const earlier = (): HTMLElement | null => root.querySelector<HTMLElement>("[data-testid='web-chat-earlier']")
     expect(root.querySelector(".web-chat-history")).toBeNull()
     expect(viewportOf(root).contains(earlier())).toBe(true)
-    expect(earlier()!.nextElementSibling?.matches("[data-testid='timeline-plain-scroller']")).toBe(true)
+    expect(earlier()!.compareDocumentPosition(root.querySelector("[data-testid='timeline-plain-scroller']")!) & Node.DOCUMENT_POSITION_FOLLOWING, "the divider comes before the rows").toBeTruthy()
     expect(earlier()!.textContent?.trim()).toBe("Load earlier messages")
     earlier()!.querySelector("button")!.click()
     expect(state.onEarlier).toHaveBeenCalledTimes(1)
@@ -462,6 +462,17 @@ describe("WebChatTimeline history and following", () => {
     state.earlier = false
     await settle()
     expect(earlier()).toBeNull()
+  })
+
+  it("offers Load earlier when the loaded window has no rows", async () => {
+    const onEarlier = vi.fn()
+    const { root } = mountWith([], { props: { earlier: true, running: false, onEarlier } })
+    await idle()
+    const earlier = root.querySelector<HTMLElement>("[data-testid='web-chat-earlier']")
+    expect(viewportOf(root).contains(earlier)).toBe(true)
+    expect(root.textContent, "the empty state stays below the divider").toContain("Send a message")
+    earlier!.querySelector("button")!.click()
+    expect(onEarlier).toHaveBeenCalledTimes(1)
   })
 
   it("loads earlier once when the reader scrolls up to the row, one request at a time", async () => {
@@ -700,6 +711,46 @@ describe("WebChatTimeline history and following", () => {
     expect(grown.get(first), "row 0 was measured again above the viewport").toBe(700)
     expect(instant, "no instant scroll replaced the animation").toEqual([])
     expect(viewport.scrollTop).toBe(viewport.scrollHeight - VIEWPORT_PX)
+  })
+
+  it("stops following when a plain scroll cancels the jump short of the end", async () => {
+    const projection = project(turns(6, 1))
+    const state = shallowReactive<Record<string, unknown>>({ rows: [...projection.rows] })
+    const { root } = mountWith([], { props: state })
+    await idle()
+    await scrollTo(root, 0)
+    const viewport = viewportOf(root)
+    let step: ReturnType<typeof setTimeout> | undefined
+    let target = 0
+    const animate = (): void => {
+      step = undefined
+      const goal = Math.min(target, viewport.scrollHeight - VIEWPORT_PX)
+      if (viewport.scrollTop === goal) return
+      viewport.scrollTop = Math.min(goal, viewport.scrollTop + 300)
+      step = setTimeout(animate, 5)
+    }
+    viewport.scrollTo = ((options: ScrollToOptions) => {
+      target = options.top!
+      if (options.behavior === "smooth") step ??= setTimeout(animate, 5)
+      else viewport.scrollTop = target
+    }) as Element["scrollTo"]
+
+    root.querySelector<HTMLButtonElement>("[data-testid='web-chat-jump-latest']")!.click()
+    await vi.waitFor(() => expect(viewport.scrollTop).toBeGreaterThanOrEqual(600))
+    clearTimeout(step)
+    step = undefined
+    viewport.scrollTop -= 600
+    await idle()
+    viewport.dispatchEvent(new Event("scrollend"))
+    await idle()
+    const top = viewport.scrollTop
+    expect(viewport.scrollHeight - top - VIEWPORT_PX).toBeGreaterThan(96)
+    expect(root.querySelector("[data-testid='web-chat-jump-latest']"), "the pill returns").not.toBeNull()
+
+    for (const item of turns(1, 101)) projection.apply(item)
+    state.rows = [...projection.rows]
+    await idle()
+    expect(viewport.scrollTop, "output does not pull the reader back").toBe(top)
   })
 
   it("stops following when the reader wheels up on the rail during a jump", async () => {

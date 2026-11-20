@@ -181,15 +181,22 @@ function measureRows(): void {
 const quoteTarget = ref<{ text: string; top: number; left: number }>()
 
 let jumpResumed = false
+let jumpTop = 0
 
 function onScroll(): void {
   const element = viewport.value
   if (element === null) return
   const distance = element.scrollHeight - element.scrollTop - element.clientHeight
-  if (distance <= 1) jumpResumed = false
+  if (distance <= 1 || element.scrollTop < jumpTop - 1) jumpResumed = false
+  jumpTop = element.scrollTop
   following.value = jumpResumed || distance <= FOLLOW_THRESHOLD_PX
   quoteTarget.value = undefined
   autoLoadEarlier()
+}
+
+function onScrollEnd(): void {
+  jumpResumed = false
+  onScroll()
 }
 
 function onReaderScroll(): void {
@@ -201,8 +208,10 @@ const READER_SCROLL_EVENTS = ["wheel", "touchstart", "pointerdown", "keydown"] a
 
 watch(viewport, (element, previous) => {
   previous?.removeEventListener("scroll", onScroll)
+  previous?.removeEventListener("scrollend", onScrollEnd)
   for (const name of READER_SCROLL_EVENTS) previous?.removeEventListener(name, onReaderScroll)
   element?.addEventListener("scroll", onScroll, { passive: true })
+  element?.addEventListener("scrollend", onScrollEnd, { passive: true })
   for (const name of READER_SCROLL_EVENTS) element?.addEventListener(name, onReaderScroll, { passive: true })
 })
 
@@ -226,6 +235,7 @@ function jumpToLatest(): void {
   const element = viewport.value
   if (element === null) return
   jumpResumed = true
+  jumpTop = element.scrollTop
   following.value = true
   element.scrollTo({ top: element.scrollHeight, behavior: "smooth" })
 }
@@ -455,6 +465,7 @@ onBeforeUnmount(() => {
   themeObserver?.disconnect()
   clearInterval(countdown)
   viewport.value?.removeEventListener("scroll", onScroll)
+  viewport.value?.removeEventListener("scrollend", onScrollEnd)
   for (const name of READER_SCROLL_EVENTS) viewport.value?.removeEventListener(name, onReaderScroll)
   earlierObserver?.disconnect()
 })

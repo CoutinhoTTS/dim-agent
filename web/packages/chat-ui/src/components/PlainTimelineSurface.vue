@@ -64,6 +64,8 @@ defineExpose({
         :data-timeline-message-count="props.state.messageCount"
         :data-timeline-row-count="props.state.rowCount"
       >
+        <slot name="before-rows" />
+
         <div v-if="props.state.messageCount === 0 && !props.state.isRunning && !props.state.restoreCovered" class="flex min-h-full flex-1 items-center justify-center py-10 text-sm text-muted-foreground">
           {{ props.labels.emptySession }}
         </div>
@@ -109,8 +111,6 @@ defineExpose({
               @wheel.prevent="emit('rail-wheel', $event)"
             />
           </Teleport>
-
-          <slot name="before-rows" />
 
           <div ref="timelineContentRef" class="timeline-plain-scroller" data-testid="timeline-plain-scroller">
             <div
