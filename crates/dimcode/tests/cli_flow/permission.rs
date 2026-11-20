@@ -20,7 +20,8 @@ fn branch() -> Value {
 /// A resumed launch writes the explicit preset on the line its attach reply
 /// names, never on a line read from the directory before the attach: the
 /// directory and the reply are one round trip apart (design §14). A refused
-/// write still ends the launch before any turn runs.
+/// write ends the launch before the startup `--model` is adopted on any line
+/// and before any turn runs.
 #[test]
 fn tui_resume_writes_the_explicit_permission_on_the_attached_line() {
     for fullscreen in [false, true] {
@@ -45,7 +46,12 @@ fn tui_resume_writes_the_explicit_permission_on_the_attached_line() {
                         return;
                     }
                     wire.2 = true;
-                    let attach = wire.read("session.attach");
+                    let attach = wire.read_any();
+                    assert_eq!(
+                        attach["method"],
+                        json!("session.attach"),
+                        "the launch attaches before it adopts --model or writes the preset's line"
+                    );
                     let mut record = attach_record(&attach);
                     record["defaultBranch"] = json!({"branchId":"line-1","sequence":5});
                     wire.reply(&attach, record);
@@ -84,6 +90,9 @@ fn tui_resume_writes_the_explicit_permission_on_the_attached_line() {
                                 fail(wire, &request, "permission_failed");
                                 break;
                             }
+                            "session.model.update" => panic!(
+                                "a refused preset must not adopt the startup model on any line: {request}"
+                            ),
                             "session.context.usage" => wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
                                 "code":-32601,"message":"Unknown method: session.context.usage",
                                 "data":{"appError":"unknown_method"}}})),
@@ -95,9 +104,15 @@ fn tui_resume_writes_the_explicit_permission_on_the_attached_line() {
                             other => panic!("unexpected {other}: {request}"),
                         }
                     }
-                    // The refused write ends the launch: no turn runs.
+                    // The refused write ends the launch: no model is adopted
+                    // and no turn runs.
                     while let Some(line) = wire.trailing_request() {
                         let request: Value = serde_json::from_str(&line).unwrap();
+                        assert_ne!(
+                            request["method"],
+                            json!("session.model.update"),
+                            "a refused preset must not adopt the startup model on any line"
+                        );
                         assert_ne!(
                             request["method"],
                             json!("session.submit"),
@@ -106,7 +121,7 @@ fn tui_resume_writes_the_explicit_permission_on_the_attached_line() {
                     }
                 });
                 let mut command = home.command();
-                command.args(["--permission", "read-only"]);
+                command.args(["--permission", "read-only", "--model", "replacement"]);
                 if fullscreen {
                     command.arg("--fullscreen");
                 }

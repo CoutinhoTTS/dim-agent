@@ -808,7 +808,6 @@ impl Worker {
                         .into(),
                 );
             }
-            adopt_startup(&mut self.client, &self.options, &id).await?;
             self.attach(id.clone(), SwitchKind::Resumed).await?;
             // The preset belongs to the line the attach reply named
             // (design §14); a directory read would be one round trip older.
@@ -820,6 +819,7 @@ impl Worker {
                         client::resume_failure("Cannot set the permission preset", error)
                     })?;
             }
+            adopt_startup(&mut self.client, &self.options, &id).await?;
             return Ok(());
         }
         if self.client.offers("session.model.preview")
@@ -1081,8 +1081,8 @@ impl Worker {
         // A conversation on the root takes the reply's configuration as its
         // own; one on a line takes that line's facts, which the window replays
         // from a watermark below every one of them. A reply that names no line
-        // predates per-line configuration, so its model is the Session's
-        // (design §14).
+        // comes from a server that cannot move the default branch, so its model
+        // is the Session's (design §14).
         let seeded = attached.default_branch.is_none() || conversation_line == ROOT_BRANCH_ID;
         self.model_through = if seeded {
             conversation_cursor.unwrap_or(0)
