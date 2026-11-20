@@ -586,7 +586,12 @@ fn tui_p_shows_the_moved_lines_own_model_permission_and_usage() {
     terminal.write(b"p");
     move_seen.recv_timeout(PATIENCE).unwrap();
     terminal.write(b"\x1b");
-    terminal.until_anywhere("test / replacement · high");
+    terminal.until("⑂ main ▸ line-1 work");
+    let shown = strip_ansi(&terminal.transcript);
+    assert!(
+        shown.contains("test / replacement · high"),
+        "the bar folds the line's adopted model: {shown}"
+    );
     terminal.until_anywhere("⏵⏵ Full access");
     terminal.until_anywhere("64K / 256K");
     assert_eq!(
