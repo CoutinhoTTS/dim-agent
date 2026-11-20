@@ -6365,7 +6365,12 @@ impl App {
             cols.saturating_sub(2 + MARGIN).max(4)
         };
         let margin = " ".repeat(panel_margin);
-        let composer_rows = if replaced { 0 } else { rows.len() + 2 };
+        let notice_row = replaced.then(|| self.replaced_notice(cols)).flatten();
+        let composer_rows = if replaced {
+            usize::from(notice_row.is_some())
+        } else {
+            rows.len() + 2
+        };
         let panel_rows = if native_selection {
             size.1 as usize
         } else {
@@ -6509,7 +6514,10 @@ impl App {
         if let Some(panel) = panel {
             live.extend(panel.into_iter().map(|row| format!("{margin}{row}")));
         }
-        live.push(self.status_line(cols, replaced));
+        if let Some(row) = notice_row {
+            live.push(row);
+        }
+        live.push(self.status_line(cols));
         let composer_cursor = (
             (box_top + 1 + cursor_row) as u16,
             (MARGIN + 2 + cursor_col).min(cols.saturating_sub(1)) as u16,
@@ -8365,10 +8373,8 @@ impl App {
         }
     }
 
-    /// The footer line: the permission mode, plus the status slot while a
-    /// prompt replaces the composer, because the composer's bottom border
-    /// (which otherwise carries the slot) is not drawn then.
-    fn status_line(&self, cols: usize, replaced: bool) -> String {
+    /// The footer line: the permission mode and its shortcut hint.
+    fn status_line(&self, cols: usize) -> String {
         use dim_agent_types::PermissionPreset;
         let p = &self.palette;
         let preset = self.permission_policy.preset;
@@ -8381,23 +8387,25 @@ impl App {
         let hint = fg(t("(shift+tab to cycle)"), &p.muted);
         let total = cols.saturating_sub(2);
         let prefix = format!("{}{permission}", " ".repeat(MARGIN));
-        let slot = replaced.then(|| self.slot()).flatten().map(|slot| {
-            let color = if self.notice.is_some() {
-                &p.highlight
-            } else {
-                &p.muted
-            };
-            fg(&slot, color)
-        });
-        let Some(slot) = slot else {
-            return clip(&format!("{prefix} {hint}"), total).0;
-        };
-        let with_hint = format!("{prefix} {hint}  {slot}");
-        if width_of(&with_hint) <= total {
-            with_hint
-        } else {
-            clip(&format!("{prefix}  {slot}"), total).0
+        clip(&format!("{prefix} {hint}"), total).0
+    }
+
+    /// The notice or disconnect line drawn above the footer while a prompt
+    /// replaces the composer, because the composer's bottom border (which
+    /// otherwise carries the slot) is not drawn then. Only a notice or a
+    /// failure is drawn: the prompt itself already names an approval or answer.
+    fn replaced_notice(&self, cols: usize) -> Option<String> {
+        if self.notice.is_none() && self.failure.is_none() {
+            return None;
         }
+        let text = self.slot()?;
+        let color = if self.notice.is_some() {
+            &self.palette.highlight
+        } else {
+            &self.palette.muted
+        };
+        let line = format!("{}{}", " ".repeat(MARGIN), fg(&text, color));
+        Some(clip(&line, cols.saturating_sub(2)).0)
     }
 }
 
@@ -12122,22 +12130,27 @@ mod tests {
     }
 
     #[test]
-    fn a_disconnect_stays_visible_once_while_a_prompt_replaces_the_composer() {
+    fn a_replaced_composer_still_shows_the_disconnect_and_keyboard_notices_once() {
         use crate::ui::render::panel::strip_escapes;
-        const SLOT: &str = "Disconnected · draft kept";
-        fn count(app: &mut App, fullscreen: bool) -> usize {
+        const DISCONNECT: &str = "Disconnected · draft kept";
+        const RESUME: &str = "Disconnected; draft kept. Exit and resume this Session.";
+        const INTERRUPT: &str = "Interrupt requested; Ctrl+C again to exit";
+        const CTRL_C_AGAIN: &str = "Press Ctrl+C again to exit";
+
+        fn visible(app: &mut App, fullscreen: bool, text: &str) -> usize {
             app.fullscreen = fullscreen;
             app.frame((100, 24))
                 .live
                 .iter()
                 .map(|row| strip_escapes(row))
-                .filter(|row| row.contains(SLOT))
+                .filter(|row| row.contains(text))
                 .count()
         }
-
-        for fullscreen in [false, true] {
-            let (mut app, _home) = status_app("local", "fixture-model", Some("high"));
-            let open = ViewSnapshot {
+        fn approval_app(fullscreen: bool) -> (App, tempfile::TempDir) {
+            let (mut app, home) = status_app("local", "fixture-model", Some("high"));
+            app.fullscreen = fullscreen;
+            app.apply(Update::Snapshot(Box::new(ViewSnapshot {
+                session_id: "s1".into(),
                 approvals: vec![crate::model::view::ApprovalView {
                     member: None,
                     request_id: "r1".into(),
@@ -12148,37 +12161,45 @@ mod tests {
                     always: None,
                 }],
                 ..ViewSnapshot::default()
-            };
-            app.apply(Update::Snapshot(Box::new(open)));
+            })));
+            assert!(
+                matches!(app.prompt, Some(Prompt::Permission(_))),
+                "the approval snapshot opens its permission panel"
+            );
+            (app, home)
+        }
+
+        for fullscreen in [false, true] {
+            let (mut app, _home) = approval_app(fullscreen);
             app.apply(Update::Failed("daemon disconnected".into()));
             assert!(matches!(app.prompt, Some(Prompt::Permission(_))));
             assert_eq!(
-                count(&mut app, fullscreen),
+                visible(&mut app, fullscreen, DISCONNECT),
                 1,
                 "a disconnect shows once beside an open approval (fullscreen: {fullscreen})"
             );
 
-            let (mut app, _home) = status_app("local", "fixture-model", Some("high"));
-            app.apply(Update::Snapshot(Box::default()));
-            app.apply(Update::Failed("daemon disconnected".into()));
-            let snapshot = app.snapshot.as_ref().unwrap();
-            app.open_prompt(Prompt::Queue(QueuePanel::new(snapshot)));
-            assert!(matches!(app.prompt, Some(Prompt::Queue(_))));
+            press(&mut app, KeyCode::Enter);
             assert_eq!(
-                count(&mut app, fullscreen),
+                visible(&mut app, fullscreen, RESUME),
                 1,
-                "a disconnect shows once beside an open queue (fullscreen: {fullscreen})"
+                "Enter over a stale panel shows its notice once (fullscreen: {fullscreen})"
             );
+            assert_eq!(visible(&mut app, fullscreen, DISCONNECT), 0);
         }
 
         for fullscreen in [false, true] {
-            let (mut app, _home) = status_app("local", "fixture-model", Some("high"));
-            app.apply(Update::Failed("daemon disconnected".into()));
-            app.fullscreen = fullscreen;
-            let (_, bottom, footer) = composer_chrome(&mut app, 100);
-            assert!(bottom.contains(SLOT), "{bottom}");
-            assert!(!footer.contains(SLOT), "{footer}");
-            assert_eq!(count(&mut app, fullscreen), 1, "fullscreen: {fullscreen}");
+            let (mut app, _home) = approval_app(fullscreen);
+            let _ = app.handle(InputEvent::Key(crate::ui::terminal::KeyEvent::new(
+                KeyCode::Char('c'),
+                Modifiers::CTRL,
+            )));
+            let expected = if fullscreen { CTRL_C_AGAIN } else { INTERRUPT };
+            assert_eq!(
+                visible(&mut app, fullscreen, expected),
+                1,
+                "Ctrl+C over a replaced panel shows its notice once (fullscreen: {fullscreen})"
+            );
         }
     }
 
@@ -12253,8 +12274,8 @@ mod tests {
             assert!(bottom.contains("esc interrupt"), "{bottom}");
             assert!(bottom.contains("98.3K / 1M"), "{bottom}");
             assert!(
-                bottom.contains('…'),
-                "place shortens from the left: {bottom}"
+                bottom.contains("…robe ─╯") && !bottom.contains("dima-probe"),
+                "place shortens from the left to its tail, without the full workspace path: {bottom}"
             );
             assert!(!footer.contains("esc interrupt"), "{footer}");
             assert!(!footer.contains("local / fixture-model"), "{footer}");
@@ -12377,6 +12398,37 @@ mod tests {
         assert!(narrow_bottom.contains("working…"), "{narrow_bottom}");
         assert!(narrow_bottom.contains("esc interrupt"), "{narrow_bottom}");
         assert!(narrow_bottom.contains("/lines (1)"), "{narrow_bottom}");
+
+        // A real approval opens its panel, which replaces the composer. A
+        // disconnect while it is open is drawn once, on the live rows.
+        app.apply(Update::Snapshot(Box::new(ViewSnapshot {
+            session_id: "s1".into(),
+            approvals: vec![ApprovalView {
+                member: None,
+                branch_id: "main".into(),
+                request_id: "req-2".into(),
+                tool_name: "exec".into(),
+                reason: "run".into(),
+                tool_input: serde_json::json!({"command": "echo hi"}),
+                always: None,
+            }],
+            ..ViewSnapshot::default()
+        })));
+        assert!(matches!(app.prompt, Some(Prompt::Permission(_))));
+        app.apply(Update::Failed("daemon disconnected".into()));
+        let live: Vec<String> = app
+            .frame((100, 24))
+            .live
+            .iter()
+            .map(|row| crate::ui::render::panel::strip_escapes(row))
+            .collect();
+        assert_eq!(
+            live.iter()
+                .filter(|row| row.contains("Disconnected · draft kept"))
+                .count(),
+            1,
+            "{live:?}"
+        );
     }
 
     impl SessionPort for Recorder {

@@ -918,7 +918,8 @@ const scenarios = [
           const chrome = composerChrome(terminal);
           const widest = Math.max(0, ...chrome.lines.map((line) => line.length));
           if (
-            widest <= 60 &&
+            chrome.top.trimEnd().endsWith('╮') &&
+            chrome.bottom.trimEnd().endsWith('╯') &&
             chrome.top.includes('local / fixture-model') &&
             chrome.bottom.includes('thinking…') &&
             chrome.bottom.includes('esc interrupt') &&

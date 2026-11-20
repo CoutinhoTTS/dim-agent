@@ -37,9 +37,9 @@ of the composer’s bottom border. The place and unread badge continue to share
 the right side of the bottom border. The model label sits on the right side of
 the top border, while shell mode keeps the top-border left title. The footer
 line below the composer keeps only the permission mode in both modes. While a
-prompt replaces the composer, the footer also carries the status slot, because
-the composer's bottom border is not drawn then. The slot appears once, either on
-the bottom border or on the footer. Keep the existing notice slots and
+prompt replaces the composer, the composer is not drawn, so a notice or the
+disconnect state is drawn once on a row above the footer. Keep the existing
+notice slots and
 [notification and clipping priorities](timeline-ui.md#unread-replies).
 Shorten the status within its existing space by terminal cell width. Preserve
 the phase and any known object ahead of optional elapsed text.

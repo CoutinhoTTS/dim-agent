@@ -677,22 +677,14 @@ prints two lines: usage, then the no-goal notice.
 The line client and both terminal UI modes print these lines; in the terminal UI they are one
 report in the transcript, so earlier reports stay readable above later ones. The status area
 carries one short element while the shown line follows a goal, and nothing for a completed,
-blocked or cleared one:
+blocked or cleared one. Both modes draw it the same way: on the composer's bottom border, beside
+the run status and context usage, with the place on its right:
 
 ```text
- ╭──────────────────────────────────────────────────────────────────────────────╮
+ ╭────────────────────────────────────────────────────── local / fixture-model ─╮
  │ › _                                                                          │
- ╰────────────────────────────── ⑂ main ▸ child work · after message 0 ─────────╯
-  ⏵⏵ Workspace write (shift+tab to cycle)  ◎ goal active  1.8K / 256K
-```
-
-Fullscreen draws the same element in the composer's bottom border, beside the run status:
-
-```text
- ╭──────────────────────────────────────────────────────────────────────────────╮
- │ › _                                                                          │
- ╰──── ◎ goal paused   1.8K / 256K ────────────────── ● main · after message 4 ─╯
-  ⏵⏵ Full access (shift+tab to cycle)
+ ╰─ ◎ goal active  1.8K / 256K ───────── ⑂ main ▸ child work · after message 0 ─╯
+  ⏵⏵ Workspace write (shift+tab to cycle)
 ```
 
 ## Loop
@@ -1490,7 +1482,7 @@ Enter also writes the default a new Session in this folder reads ([provider mana
 
 Bare `/effort` and `/reasoning` open the current model's inline effort picker in both TUI
 modes; explicit-value forms and the line client keep their command behavior. At Home the
-picker and the explicit-value forms act on the footer's preview, the model the first
+picker and the explicit-value forms act on the top border's preview, the model the first
 message's Session adopts. The selection contract is owned by [model
 configuration](model-configuration.md#scrollback-interaction).
 
@@ -3115,8 +3107,8 @@ or permission, `esc interrupt`, or disconnect), background task count, goal and 
 information on the left side of the composer's bottom border, leaving only the permission
 preset and its shortcut hint on the footer line. While a prompt replaces the composer
 (permission, question, effort, exit, upgrade, fork, timeline, queue, export or report),
-the composer is not drawn, so the footer line also carries the status slot. The slot
-is drawn once, on the bottom border or on the footer, never both.
+the composer is not drawn, so a notice or the disconnect state is drawn once on a row
+just above the footer, and the footer stays permission-only.
 
 ### Submit check warnings
 

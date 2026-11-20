@@ -578,7 +578,7 @@ and show supported choices from the existing `provider.catalog` response, withou
 mutation or a new query method. Bare `/agent` uses existing `agent.list` IDs, names
 and descriptions; selection uses an exact ID. Empty/unavailable choices are explicit.
 
-At Home there is no adopted model yet: the footer's preview is the model the first
+At Home there is no adopted model yet: the top border's preview is the model the first
 message's Session adopts, so the same commands act on it. Bare `/effort` and `/fast`
 list that model's advertised choices, and a value is held for the Session the first
 message creates instead of writing the shown one. The preview reported the model's
