@@ -88,6 +88,13 @@ describe('TimelineCompressionDivider', () => {
       expect(host.querySelector('[data-testid="compression-summary-plaintext"]')?.textContent)
         .toBe('summary text')
     })
+
+    toggle!.click()
+    await nextTick()
+    expect(toggle?.getAttribute('aria-expanded')).toBe('false')
+    toggle!.click()
+    await nextTick()
+    expect(loadSummary).toHaveBeenCalledTimes(1)
   })
 
   it('renders failure details without requesting a summary', async () => {

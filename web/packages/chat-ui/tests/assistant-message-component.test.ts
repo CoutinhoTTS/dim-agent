@@ -184,6 +184,7 @@ async function mountMessage(options: {
   terminalLineText?: string
   terminalExplainText?: string
   toolCategories?: Record<string, ChatUiTimelineToolSummaryCategory>
+  notificationText?: Record<string, string>
   onViewPlan?: () => Promise<void>
   chatUiHost?: ChatUiHost
 } = {}) {
@@ -208,7 +209,7 @@ async function mountMessage(options: {
         detailsToggleVisible: options.detailsToggleVisible ?? true,
         blockExpandedById: {},
         blockGroupExpandedById: {},
-        notificationTextByBlockId: {},
+        notificationTextByBlockId: options.notificationText ?? {},
         subagentTargetByNotificationBlockId: {},
         toolCategoryByBlockId: options.toolCategories ?? {},
         terminal: options.terminal ?? null,
@@ -269,10 +270,12 @@ describe('TimelineAssistantMessage', () => {
     const { host, events } = await mountMessage({
       blocks: [
         block('thinking-1', 'thinking', { content: 'reasoning' }),
+        block('notify-1', 'notification', { content: 'notice' }),
         block('tool-1', 'tool', { toolName: 'read' }),
         block('text-1', 'text', { content: 'final answer' }),
       ],
       toolCategories: { 'tool-1': 'read' },
+      notificationText: { 'notify-1': 'notice' },
     })
 
     expect(host.querySelector('[data-testid="timeline-work-summary"]')).not.toBeNull()
