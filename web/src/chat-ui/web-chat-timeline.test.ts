@@ -567,6 +567,35 @@ describe("WebChatTimeline history and following", () => {
     expect(jump(), "the jump ends at the bottom; a later scroll away stops following").not.toBeNull()
   })
 
+  it("marks a tool result that updates a row above the tail, but not an earlier page", async () => {
+    const projection = project(turns(6, 101))
+    for (const item of [
+      event(201, { kind: "input", text: "read both files", content: [{ type: "text", text: "read both files" }], blocks: [] }),
+      event(202, { kind: "tool-use", requestId: "r201", callId: "call-a", name: "read", input: { path: "a.rs" } }),
+      event(203, { kind: "tool-use", requestId: "r201", callId: "call-b", name: "read", input: { path: "b.rs" } }),
+    ]) projection.apply(item)
+    const state = shallowReactive<Record<string, unknown>>({ rows: [...projection.rows], earlier: true, running: true })
+    const { root } = mountWith([], { props: state })
+    await idle()
+    const jump = (): HTMLButtonElement | null => root.querySelector<HTMLButtonElement>("[data-testid='web-chat-jump-latest']")
+    await scrollTo(root, ROW_PX)
+    expect(jump()?.textContent).not.toContain("New messages")
+
+    projection.prepend(project(turns(3, 1)), "before-101")
+    state.rows = [...projection.rows]
+    await idle()
+    expect(jump()?.textContent, "an earlier page is not new output").not.toContain("New messages")
+
+    const tail = projection.rows.at(-1)
+    const top = viewportOf(root).scrollTop
+    projection.apply(event(204, { kind: "tool-completed", requestId: "r201", callId: "call-a", result: { text: "fn a() {}", isError: false } }))
+    state.rows = [...projection.rows]
+    await idle()
+    expect(projection.rows.at(-1), "call B is still the same tail row").toBe(tail)
+    expect(jump()?.textContent).toContain("New messages")
+    expect(viewportOf(root).scrollTop, "the result does not move a reader who scrolled up").toBe(top)
+  })
+
   it("keeps the jump smooth while rows grow under it and lands at the end", async () => {
     const projection = project(turns(6, 1))
     const state = shallowReactive<Record<string, unknown>>({ rows: [...projection.rows] })
