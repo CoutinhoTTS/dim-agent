@@ -10,7 +10,7 @@ import { useChatStore } from "../stores/chat"
 import { useConnectionStore } from "../stores/connection"
 import { useSessionsStore } from "../stores/sessions"
 import { createRowMapper } from "./rows"
-import { WEB_CHAT_ACTION_METHODS, createWebChatUiHost } from "./web-host"
+import { createWebChatUiHost } from "./web-host"
 import WebChatTimeline from "./WebChatTimeline.vue"
 
 function event(sequence: number, content: SessionEvent["content"]): SessionEvent {
@@ -41,8 +41,14 @@ const UModal = defineComponent({
   setup: (props, { slots }) => () => props.open ? h("div", { "data-testid": "modal" }, [slots.header?.(), slots.footer?.()]) : null,
 })
 
-/** Every write method the timeline maps; a test removes one to see it disabled. */
-const ALL_METHODS: string[] = Object.values(WEB_CHAT_ACTION_METHODS)
+/**
+ * What a real App Server announces for the timeline's commands
+ * (`crates/dim-app-server/src/transport.rs`): these in hello's features,
+ * `session.question.respond` in the Session's method table, and the built-in
+ * `approval.respond` in neither.
+ */
+const HELLO_FEATURES: string[] = ["session.submit", "session.stop", "session.fork", "session.branch_create"]
+const SESSION_METHODS: string[] = ["session.input.pending", "session.question.pending", "session.turn.get", "session.question.respond"]
 
 const mounted: App[] = []
 // jsdom lays nothing out; the virtualizer needs a viewport size to render a window.
@@ -71,21 +77,22 @@ function testRouter(): Router {
 }
 
 /** A pinia whose connection serves `features` and whose chat store has a loaded view of `s-1`. */
-function stores(features: readonly string[] | undefined, view: Record<string, unknown> = {}): Pinia {
+/** A pinia whose connection serves `features` and whose chat store has a loaded view of `s-1` unless `view` is null. */
+function stores(features: readonly string[] | undefined, view: Record<string, unknown> | null = {}): Pinia {
   const pinia = createPinia()
   setActivePinia(pinia)
   if (features !== undefined) useConnectionStore().hello = { instanceId: "i", serverVersion: "0", protocolVersion: 4, features: [...features] }
   const chat = useChatStore()
-  chat.views["s-1"] = { sessionId: "s-1", status: "ready", approvals: [], questions: [], methods: [], ...view } as unknown as (typeof chat.views)[string]
+  if (view !== null) chat.views["s-1"] = { sessionId: "s-1", status: "ready", approvals: [], questions: [], methods: SESSION_METHODS, ...view } as unknown as (typeof chat.views)[string]
   return pinia
 }
 
 type Mounted = { root: HTMLElement; pinia: Pinia; router: Router }
 
-function mountWith(rows: Projection["rows"], options: { features?: readonly string[]; props?: Record<string, unknown> } = {}): Mounted {
+function mountWith(rows: Projection["rows"], options: { features?: readonly string[]; view?: null; props?: Record<string, unknown> } = {}): Mounted {
   const container = document.createElement("div")
   document.body.append(container)
-  const pinia = stores(options.features)
+  const pinia = stores(options.features, options.view)
   const router = testRouter()
   const app = createApp({
     render: () => h(WebChatTimeline, { sessionId: "s-1", branchId: "main", rows, running: false, quotable: true, ...options.props }),
@@ -250,7 +257,7 @@ describe("WebChatTimeline", () => {
 describe("WebChatTimeline actions", () => {
   it("branches from an older message of the main chat at that message's cut", async () => {
     const onBranch = vi.fn()
-    const { root } = mountWith(project(recorded).rows, { features: ALL_METHODS, props: { branchable: true, onBranch } })
+    const { root } = mountWith(project(recorded).rows, { features: HELLO_FEATURES, props: { branchable: true, onBranch } })
     await settle()
     const branch = userActions(root, 0).querySelector<HTMLButtonElement>("[data-testid='timeline-user-branch']")!
     expect(branch.disabled).toBe(false)
@@ -269,7 +276,7 @@ describe("WebChatTimeline actions", () => {
       event(7, { kind: "turn-end", outcome: "completed" }),
       event(8, { kind: "input", text: "second on the line", content: [{ type: "text", text: "second on the line" }], blocks: [] }),
     ])
-    const { root } = mountWith(line.rows, { features: ALL_METHODS, props: { branchId: "b-7c0ffee1", variant: "panel", branchable: true, onBranch } })
+    const { root } = mountWith(line.rows, { features: HELLO_FEATURES, props: { branchId: "b-7c0ffee1", variant: "panel", branchable: true, onBranch } })
     await settle()
     expect(userActions(root, 0).querySelector("[data-testid='timeline-user-fork']"), "a fork copies the main line only").toBeNull()
     userActions(root, 0).querySelector<HTMLButtonElement>("[data-testid='timeline-user-branch']")!.click()
@@ -279,7 +286,7 @@ describe("WebChatTimeline actions", () => {
 
   it("keeps branching disabled, with its reason, while the line is not branchable", async () => {
     const onBranch = vi.fn()
-    const { root } = mountWith(project(recorded).rows, { features: ALL_METHODS, props: { branchable: false, onBranch } })
+    const { root } = mountWith(project(recorded).rows, { features: HELLO_FEATURES, props: { branchable: false, onBranch } })
     await settle()
     const branch = userActions(root, 0).querySelector<HTMLButtonElement>("[data-testid='timeline-user-branch']")!
     expect(branch.disabled).toBe(true)
@@ -289,8 +296,27 @@ describe("WebChatTimeline actions", () => {
     expect(onBranch).not.toHaveBeenCalled()
   })
 
+  it("keeps the running turn's message from branching or forking when a notice splits the turn", async () => {
+    const projection = project([
+      ...recorded.slice(0, 7),
+      event(9, { kind: "input", text: "keep going", content: [{ type: "text", text: "keep going" }], blocks: [] }),
+      event(10, { kind: "branch-create", branchId: "b-1", at: 8, prompt: "side quest", source: { kind: "tool", turnId: "t", requestId: "r2", callId: "c" } }),
+      event(11, { kind: "text", requestId: "r2", delta: "still working" }),
+    ])
+    expect(createRowMapper()(projection.rows, "s-1").map(row => row.kind)).toEqual(["turn", "turn", "message", "turn"])
+    const { root } = mountWith(projection.rows, { features: HELLO_FEATURES, props: { running: true, lastTurnEnd: projection.lastTurnEnd, branchable: true } })
+    await settle()
+    const button = (index: number, id: string) => userActions(root, index).querySelector<HTMLButtonElement>(`[data-testid='${id}']`)!
+    expect(button(1, "timeline-user-branch").disabled).toBe(true)
+    expect(button(1, "timeline-user-branch").getAttribute("aria-label")).toBe("You can branch from here once this turn finishes.")
+    expect(button(1, "timeline-user-fork").disabled).toBe(true)
+    expect(button(1, "timeline-user-fork").getAttribute("aria-label")).toBe("You can fork from here once this turn finishes.")
+    expect(button(0, "timeline-user-branch").disabled, "an earlier message").toBe(false)
+    expect(button(0, "timeline-user-fork").disabled, "an earlier message").toBe(false)
+  })
+
   it("forks the main line before a message after confirmation and opens the new session", async () => {
-    const { root, pinia, router } = mountWith(project(recorded).rows, { features: ALL_METHODS, props: { branchable: true } })
+    const { root, pinia, router } = mountWith(project(recorded).rows, { features: HELLO_FEATURES, props: { branchable: true } })
     const fork = vi.spyOn(useChatStore(pinia), "fork").mockResolvedValue("s-2")
     vi.spyOn(useSessionsStore(pinia), "refresh").mockResolvedValue()
     await settle()
@@ -307,14 +333,14 @@ describe("WebChatTimeline actions", () => {
 
   it("quotes a message into the composer from its action row", async () => {
     const onQuote = vi.fn()
-    const { root } = mountWith(project(recorded).rows, { features: ALL_METHODS, props: { onQuote } })
+    const { root } = mountWith(project(recorded).rows, { features: HELLO_FEATURES, props: { onQuote } })
     await settle()
     userActions(root, 1).querySelector<HTMLButtonElement>("[data-testid='web-user-quote']")!.click()
     expect(onQuote).toHaveBeenCalledWith("now run /skill:commit it")
   })
 
   it("shows the actions the web cannot run disabled, each with its reason", async () => {
-    const { root } = mountWith(project(recorded).rows, { features: ALL_METHODS, props: { branchable: true } })
+    const { root } = mountWith(project(recorded).rows, { features: HELLO_FEATURES, props: { branchable: true } })
     await settle()
     const edit = userActions(root, 0).querySelector<HTMLButtonElement>("[data-testid='web-user-edit']")!
     expect(edit.disabled).toBe(true)
@@ -325,15 +351,15 @@ describe("WebChatTimeline actions", () => {
   })
 
   it("names the missing method when the server does not serve branching", async () => {
-    const { root } = mountWith(project(recorded).rows, { features: ALL_METHODS.filter(method => method !== "session.branch_create"), props: { branchable: true } })
+    const { root } = mountWith(project(recorded).rows, { features: HELLO_FEATURES.filter(method => method !== "session.branch_create"), props: { branchable: true } })
     await settle()
     const branch = userActions(root, 0).querySelector<HTMLButtonElement>("[data-testid='timeline-user-branch']")!
     expect(branch.disabled).toBe(true)
     expect(branch.getAttribute("aria-label")).toBe("This server does not offer session.branch_create.")
   })
 
-  it("stays read-only when the connection serves none of the timeline's commands", async () => {
-    const { root } = mountWith(project(recorded).rows, { features: [], props: { branchable: true } })
+  it("stays read-only while its session is not loaded", async () => {
+    const { root } = mountWith(project(recorded).rows, { features: HELLO_FEATURES, view: null, props: { branchable: true } })
     await settle()
     for (const id of ["timeline-user-branch", "timeline-user-fork", "web-user-edit", "timeline-assistant-retry"]) {
       expect(root.querySelector(`[data-testid='${id}']`), id).toBeNull()
@@ -349,7 +375,7 @@ describe("WebChatTimeline actions", () => {
       event(4, { kind: "model-end", requestId: "r1" }),
       event(5, { kind: "turn-end", outcome: "completed" }),
     ])
-    const { root } = mountWith(projection.rows, { features: ALL_METHODS })
+    const { root } = mountWith(projection.rows, { features: HELLO_FEATURES })
     await settle()
     root.querySelector<HTMLButtonElement>("[data-testid='timeline-work-summary'] button")!.click()
     await settle()
@@ -368,7 +394,7 @@ describe("WebChatTimeline actions", () => {
       event(4, { kind: "model-end", requestId: "r1" }),
       event(5, { kind: "turn-end", outcome: "completed" }),
     ])
-    const { root } = mountWith(projection.rows, { features: ALL_METHODS })
+    const { root } = mountWith(projection.rows, { features: HELLO_FEATURES })
     await settle()
     root.querySelector<HTMLButtonElement>("[data-testid='timeline-work-summary'] button")!.click()
     await settle()
@@ -392,8 +418,8 @@ describe("Web ChatUiHost commands", () => {
   }
   const rows = project(recorded).rows
 
-  function setup(features: readonly string[] = ALL_METHODS) {
-    const pinia = stores(features, { approvals: [approval], questions: [question] })
+  function setup(features: readonly string[] = HELLO_FEATURES, methods: readonly string[] = SESSION_METHODS, view: "loaded" | "missing" = "loaded") {
+    const pinia = stores(features, view === "missing" ? null : { approvals: [approval], questions: [question], methods })
     const router = testRouter()
     const openBranch = vi.fn()
     const confirmFork = vi.fn(async () => true)
@@ -446,7 +472,7 @@ describe("Web ChatUiHost commands", () => {
   })
 
   it("rejects what it cannot run without calling the store", async () => {
-    const { host, chat } = setup(ALL_METHODS.filter(method => method !== "session.stop"))
+    const { host, chat } = setup(HELLO_FEATURES.filter(method => method !== "session.stop"))
     const stop = vi.spyOn(chat, "stop")
     const answer = vi.spyOn(chat, "answerQuestion")
     await expect(host.commands.stop()).rejects.toThrow("This server does not offer session.stop.")
@@ -459,7 +485,26 @@ describe("Web ChatUiHost commands", () => {
     expect(answer).not.toHaveBeenCalled()
   })
 
-  it("is not interactive when the connection serves none of its methods", () => {
-    expect(setup([]).host.capabilities.value.interactive).toBe(false)
+  it("approves through the built-in approval.respond, which hello does not announce", async () => {
+    const { host, chat } = setup([])
+    expect(host.capabilities.value.interactive).toBe(true)
+    const respond = vi.spyOn(chat, "respond").mockResolvedValue()
+    await host.commands.approve("req-1", "allow")
+    expect(respond).toHaveBeenCalledWith("s-1", approval, "allow")
+  })
+
+  it("answers only when the Session serves session.question.respond", async () => {
+    const { host, chat } = setup(HELLO_FEATURES, SESSION_METHODS.filter(method => method !== "session.question.respond"))
+    const answer = vi.spyOn(chat, "answerQuestion")
+    await expect(host.commands.answer("ask-1", [{ questionId: "q-pick", answer: "Yes" }])).rejects.toThrow("This session does not offer session.question.respond.")
+    expect(answer).not.toHaveBeenCalled()
+  })
+
+  it("is not interactive while its session is not loaded", async () => {
+    const { host, chat } = setup(HELLO_FEATURES, SESSION_METHODS, "missing")
+    expect(host.capabilities.value.interactive).toBe(false)
+    const respond = vi.spyOn(chat, "respond")
+    await expect(host.commands.approve("req-1", "allow")).rejects.toThrow("The session is not loaded.")
+    expect(respond).not.toHaveBeenCalled()
   })
 })

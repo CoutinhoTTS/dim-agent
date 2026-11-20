@@ -14,6 +14,8 @@ export type WebTimelineContext = {
   /** The composer is shown, so a message can be quoted into it. */
   quotable: Readonly<Ref<boolean>>
   quote: (text: string) => void
+  /** The user message whose turn is still running, if one is: no cut falls inside it. */
+  activeUserMessageId: Readonly<Ref<string | undefined>>
 }
 
 export const WEB_TIMELINE: InjectionKey<WebTimelineContext> = Symbol("web-timeline")

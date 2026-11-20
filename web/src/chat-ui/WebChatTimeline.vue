@@ -30,6 +30,8 @@ const props = defineProps<{
   historyError?: string
   rows: readonly TimelineRow[]
   running: boolean
+  /** The shown line's newest turn end (`Projection.lastTurnEnd`). */
+  lastTurnEnd?: number
   retry?: ModelRetryProgress
   quotable: boolean
   branchable?: boolean
@@ -84,8 +86,22 @@ const { host, actions } = createWebChatUiHost({
   confirmFork: async text => await forkConfirm.value?.open(text, { confirmLabel: t("fork.confirmLabel") }) === true,
   openBranch: (text, cut) => emit("branch", text, cut),
 })
+/**
+ * The running turn's user message: the newest one after the last turn end. A
+ * notice or error inside the turn splits it into several display rows, so the
+ * renderer's latest-row check alone does not find it.
+ */
+const activeUserMessageId = computed(() => {
+  if (!props.running) return undefined
+  for (let index = props.rows.length - 1; index >= 0; index--) {
+    const row = props.rows[index]!
+    if (row.kind === "user") return row.sequence > (props.lastTurnEnd ?? -1) ? row.key : undefined
+  }
+  return undefined
+})
 provide(CHAT_UI_HOST, host)
 provide(WEB_TIMELINE, {
+  activeUserMessageId,
   rowByKey,
   isDark,
   labels,

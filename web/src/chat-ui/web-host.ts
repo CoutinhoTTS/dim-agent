@@ -21,14 +21,18 @@ import { createChatUiI18n } from "./i18n"
 import type { WebChatRow } from "./rows"
 import WebNoticeOutput from "./WebNoticeOutput.vue"
 
-/** The timeline's write actions and the App Server method each one calls. */
+/**
+ * The timeline's write actions, the App Server method each one calls, and the
+ * table that announces it: hello's feature list, the Session's method table
+ * (`session.methods`), or none for a built-in every connection serves.
+ */
 export const WEB_CHAT_ACTION_METHODS = {
-  send: "session.submit",
-  stop: "session.stop",
-  fork: "session.fork",
-  branch: "session.branch_create",
-  approve: "approval.respond",
-  answer: "session.question.respond",
+  send: { method: "session.submit", served: "connection" },
+  stop: { method: "session.stop", served: "connection" },
+  fork: { method: "session.fork", served: "connection" },
+  branch: { method: "session.branch_create", served: "connection" },
+  approve: { method: "approval.respond", served: "builtin" },
+  answer: { method: "session.question.respond", served: "session" },
 } as const
 
 export type WebChatAction = keyof typeof WEB_CHAT_ACTION_METHODS
@@ -98,8 +102,12 @@ export function createWebChatUiHost(input: WebChatUiHostInput): { host: ChatUiHo
   const pending = ref(false)
 
   const actions = computed<WebChatActions>(() => {
-    const entries = Object.entries(WEB_CHAT_ACTION_METHODS).map(([action, method]) => {
-      if (!connection.supports(method)) return [action, { available: false, reason: t("chatTimeline.unavailable.server", { method }) }]
+    const id = input.sessionId.value
+    const view = id === undefined ? undefined : chat.views[id]
+    const entries = Object.entries(WEB_CHAT_ACTION_METHODS).map(([action, { method, served }]) => {
+      if (view === undefined) return [action, { available: false, reason: t("chatTimeline.unavailable.session") }]
+      if (served === "connection" && !connection.supports(method)) return [action, { available: false, reason: t("chatTimeline.unavailable.server", { method }) }]
+      if (served === "session" && !view.methods.includes(method)) return [action, { available: false, reason: t("chatTimeline.unavailable.sessionMethod", { method }) }]
       if (action === "fork" && input.branchId.value !== ROOT_BRANCH_ID) return [action, { available: false, reason: t("chatTimeline.unavailable.forkLine") }]
       if (action === "branch" && !input.branchable.value) return [action, { available: false, reason: t("chatTimeline.unavailable.branchBlocked") }]
       return [action, { available: true }]

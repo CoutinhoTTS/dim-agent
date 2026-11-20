@@ -374,6 +374,7 @@ async function fork(): Promise<void> {
       :history-error="view.historyError"
       @earlier="chat.loadEarlier(sessionId, ROOT_BRANCH_ID)"
       :running="view.running"
+      :last-turn-end="view.lastTurnEnd"
       :retry="view.retry"
       :quotable="!approval && questions.length === 0"
       :branchable="branchable && !approval && questions.length === 0"

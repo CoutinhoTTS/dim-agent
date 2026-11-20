@@ -27,15 +27,21 @@ const context = useWebTimeline()
 const actions = useChatUiHost().timeline?.actions
 const pending = computed(() => actions?.pending.value === true)
 const canFork = computed(() => !props.readOnly && actions?.canFork(props.message.id) === true)
+/** This message's turn is still running, so no cut before it is a rest point yet. */
+const inRunningTurn = computed(() => props.branchDisabled || context.activeUserMessageId.value === props.message.id)
 /** Why branching is off for this message, or undefined when it is on. */
 const branchBlocked = computed(() => {
   const branch = context.actions.value.branch
   if (!branch.available) return branch.reason
-  return props.branchDisabled ? t("chatTimeline.unavailable.branchRunning") : undefined
+  return inRunningTurn.value ? t("chatTimeline.unavailable.branchRunning") : undefined
 })
 const userLabels = computed(() => {
   const labels = context.labels.value.user
-  return branchBlocked.value === undefined ? labels : { ...labels, branch: branchBlocked.value }
+  return {
+    ...labels,
+    ...(branchBlocked.value === undefined ? {} : { branch: branchBlocked.value }),
+    ...(inRunningTurn.value ? { fork: t("chatTimeline.unavailable.forkRunning") } : {}),
+  }
 })
 const row = computed(() => {
   const source = context.rowByKey(props.message.id)
@@ -103,7 +109,7 @@ async function copy(): Promise<void> {
         :can-fork="canFork"
         :can-branch="canBranch"
         :branch-disabled="branchBlocked !== undefined"
-        :action-pending="pending"
+        :action-pending="pending || inRunningTurn"
         :copied="copied"
         :labels="userLabels"
         :icons="actionIcons"
