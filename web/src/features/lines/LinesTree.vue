@@ -94,7 +94,7 @@ function parent(line: LineView): string {
         <template v-if="line.id === ROOT_BRANCH_ID">
           <span class="lines-state" :data-tone="tone(line)" aria-hidden="true" />
           <span class="lines-name">{{ t("lines.main") }}</span>
-          <span v-if="marks(line).includes('start')" class="lines-mark">{{ t("lines.start") }}</span>
+          <span v-for="mark in marks(line)" :key="mark" class="lines-mark">{{ t(mark === "main-line" ? "lines.mainLine" : "lines.start") }}</span>
           <span class="lines-meta">{{ t("lines.mainHint") }}</span>
           <UButton v-if="canContinue(line)" class="lines-continue" color="neutral" variant="ghost" size="xs" :aria-label="t('lines.continueFromLine', { name: t('lines.main') })" @click="continueFrom(line)">
             {{ t("lines.continueFrom") }}
