@@ -3804,6 +3804,39 @@ async fn stopped_turn(
     Ok(exists)
 }
 
+/// The member's line that holds `input`, the event the leader's delivery fact
+/// names. A recovered request has no stored branch, so the input's own line is
+/// the only evidence of where it was delivered; `None` when the fact names no
+/// input or no open line holds it (timeline branches §20.22).
+async fn delivered_input_line(member: &Session, input: Option<&str>) -> Option<String> {
+    let input = input?;
+    for branch in member.branches() {
+        let query = TimelineQuery {
+            scope: TimelineQueryScope::Branch,
+            from: None,
+            through: None,
+            include_publishing: false,
+            query: QuerySpec {
+                filter: Some(QueryFilter::In {
+                    value: QueryOperand::Field { path: "id".into() },
+                    values: vec![input.into()],
+                }),
+                select: QuerySelect::Exists,
+                group_by: vec![],
+                pick: None,
+                order_by: vec![],
+            },
+            page: None,
+        };
+        if let Ok(reply) = member.query(&branch.id, query).await
+            && matches!(reply.result, QueryOutput::Exists { exists: true })
+        {
+            return Some(branch.id);
+        }
+    }
+    None
+}
+
 async fn restore(
     service: Arc<CollaborationSession>,
     phase: Arc<BranchLifecycle>,
@@ -3818,7 +3851,7 @@ async fn restore(
     let mut stale_inputs = BTreeSet::new();
     let current_turn = None;
     let interrupted = BTreeSet::new();
-    let mut open: BTreeMap<String, (String, String)> = BTreeMap::new();
+    let mut open: BTreeMap<String, (String, String, Option<String>)> = BTreeMap::new();
     let kind = |kind: &str| QueryFilter::In {
         value: QueryOperand::Field {
             path: "kind".into(),
@@ -3967,9 +4000,14 @@ async fn restore(
                             ],
                         }),
                         select: QuerySelect::Fields {
-                            fields: ["data.status", "data.agent_id", "data.session_id"]
-                                .map(String::from)
-                                .to_vec(),
+                            fields: [
+                                "data.status",
+                                "data.agent_id",
+                                "data.session_id",
+                                "data.input_event_id",
+                            ]
+                            .map(String::from)
+                            .to_vec(),
                         },
                         group_by: vec![],
                         pick: Some(dim_agent_runtime::QueryPick::Last),
@@ -3995,12 +4033,19 @@ async fn restore(
                     QueryValue::Value {
                         value: Value::String(session),
                     },
+                    input,
                 ] = row.values.as_slice()
                 else {
                     unreachable!("successful delivery identities")
                 };
+                // The fact's own input, the only evidence of the line it was
+                // delivered to: a record written before that field has none.
+                let input = match input {
+                    QueryValue::Value { value } => value.as_str().map(str::to_owned),
+                    _ => None,
+                };
                 if status == "ok" {
-                    open.insert(op, (agent.clone(), session.clone()));
+                    open.insert(op, (agent.clone(), session.clone(), input));
                 }
             } else {
                 timeline.append(
@@ -4084,7 +4129,7 @@ async fn restore(
         let Some(next) = reply.next else { break };
         pending.page.as_mut().unwrap().after = Some(next);
     }
-    for (op, (agent_id, session_id)) in open {
+    for (op, (agent_id, session_id, input)) in open {
         let leads = service
             .collaboration
             .directory
@@ -4102,10 +4147,25 @@ async fn restore(
             if !phase.activated().await {
                 return;
             }
-            if let Some(member) = member
-                && let Ok(line) = member.default_branch()
-            {
-                let _ = member.stop(&line, INTERRUPTED.into()).await;
+            // The delivery line, not the member's current default: the fact
+            // names the member's input, and the input names its line. Without
+            // that evidence the recovery stops nothing, because a stop on the
+            // default could end an unrelated turn the member moved to.
+            let line = match &member {
+                Some(member) => delivered_input_line(member, input.as_deref()).await,
+                None => None,
+            };
+            match line {
+                Some(line) => {
+                    if let Some(member) = &member {
+                        let _ = member.stop(&line, INTERRUPTED.into()).await;
+                    }
+                }
+                None => tracing::warn!(
+                    session_id = %session_id,
+                    input = input.as_deref().unwrap_or_default(),
+                    "collaboration recovery found no line for a delivered input; stopping nothing"
+                ),
             }
             let _ = timeline.append(
                 EventKind::CollaborationResult(CollaborationResultData {

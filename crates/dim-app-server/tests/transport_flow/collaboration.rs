@@ -2,7 +2,7 @@ use super::deletion::Store;
 use super::*;
 use dim_agent_capabilities::prompt_state::PromptSnapshot;
 use dim_agent_runtime::testing::{branch_events, chain_events, timeline_events};
-use dim_agent_runtime::{Agent, CollaborationRole, Session, TimelineQueryScope};
+use dim_agent_runtime::{Agent, CollaborationRole, Session, TimelineQueryScope, TimelineStore};
 use dim_agent_types::{
     AgentEvent, CollaborationDelivery, CollaborationOutcome, ContentBlock, EventKind, InputBlock,
     InputMessageData, MessageContent, ToolContent, ToolEffect,
@@ -8933,4 +8933,288 @@ async fn a_read_continuation_stays_on_the_branch_its_page_read() {
     );
     server.shutdown();
     server.join().await.unwrap();
+}
+
+/// Appends the recovered history a leader reload reads: one open request and
+/// its delivery fact, the way a process that died before settling leaves
+/// them. `input` is the member's input the fact names, or `None` for a record
+/// written without one.
+async fn seed_recovery_facts(
+    database: &std::path::Path,
+    lead: &str,
+    holder: &str,
+    member: &str,
+    input: Option<&str>,
+) {
+    let db = dim_app_server::storage::SqliteStorage::open(database.to_path_buf()).unwrap();
+    let store = dim_app_server::storage::SqliteTimelineStore::new(db.clone());
+    let key = dim_agent_runtime::TimelineKey {
+        session_id: lead.into(),
+        branch_id: "main".into(),
+    };
+    let head = store.head(&key).await.unwrap();
+    let request_id = format!("recovery-request-{}", uuid::Uuid::new_v4());
+    let mut events = Vec::new();
+    for (index, kind) in [
+        EventKind::CollaborationRequest(dim_agent_types::CollaborationRequestData {
+            turn_id: "recovery-turn".into(),
+            request_id: "recovery-request".into(),
+            call_id: "recovery-call".into(),
+            target: dim_agent_types::CollaborationTarget::Member {
+                agent_id: holder.into(),
+                session_id: member.into(),
+            },
+            prompt: "recovered work".into(),
+            title: None,
+        }),
+        EventKind::CollaborationDelivered(dim_agent_types::CollaborationDeliveredData {
+            op_event_id: request_id.clone(),
+            delivery: CollaborationDelivery::Ok {
+                agent_id: holder.into(),
+                session_id: member.into(),
+                input_event_id: input.map(str::to_owned),
+                outcome: None,
+            },
+        }),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let sequence = head + 1 + index as u64;
+        events.push(dim_agent_runtime::StoredEvent {
+            event: Arc::new(AgentEvent {
+                id: if index == 0 {
+                    request_id.clone()
+                } else {
+                    format!("{request_id}-delivery")
+                },
+                sequence,
+                create_at: 1_000 + sequence,
+                tags: None,
+                parent_call_id: None,
+                kind,
+            }),
+            trace: None,
+            batch_end: head + 2,
+        });
+    }
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    store
+        .append(
+            key,
+            events,
+            Box::new(move |result| {
+                let _ = sender.send(result);
+            }),
+        )
+        .unwrap();
+    receiver.await.unwrap().unwrap();
+}
+
+/// Whether `branch` holds the recovery's own stop.
+fn stopped_by_recovery(reasons: &[String]) -> bool {
+    reasons
+        .iter()
+        .any(|reason| reason == "interrupted by leader")
+}
+
+/// The stop reasons `branch` holds.
+async fn stop_reasons_on(session: &Session, branch: &str) -> Vec<String> {
+    branch_events(session, branch, ..)
+        .await
+        .unwrap()
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::StopInterrupt(data) => Some(data.reason.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The leader's recovered request ends `Failed` once recovery has settled it.
+async fn recovered_failure(lead: &Agent, lead_id: &str, member: &str) {
+    poll("the recovered request fails", async || {
+        result_of(&events(&agent_session(lead, lead_id)).await, member)
+            .into_iter()
+            .find(|outcome| matches!(outcome, CollaborationOutcome::Failed { .. }))
+    })
+    .await;
+}
+
+fn agent_session(agent: &Agent, id: &str) -> Session {
+    agent
+        .get_session(id)
+        .unwrap_or_else(|| panic!("{id} is loaded"))
+}
+
+/// Recovery stops the line the request's input was delivered to, not the
+/// member's current default: the recovered request names an input on B while
+/// the member's conversation is on C, so B is stopped and C is left alone
+/// (design §9, §15).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn recovery_stops_the_delivery_line_after_the_member_moves_its_default() {
+    let directory = std::env::temp_dir().join(format!("dim-recovery-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let database = directory.join("dimcode.sqlite");
+    let mut config = ServerConfig {
+        database_path: Some(database.clone()),
+        ..Default::default()
+    };
+    config.session_defaults.tools = Some(vec!["branch".into(), "echo".into(), "wait".into()]);
+    let (server, agent) = launch_with_agent(Arc::new(MockTools), config.clone()).await;
+    let mut client = Client::new_version(&server, false, 4).await;
+    let lead = leader(
+        &mut client,
+        json!({"allowedTools": ["echo", "wait", "agent"]}),
+    )
+    .await;
+    let lead_session = agent.get_session(&lead).unwrap();
+    let holder = client.rpc("agent.list", json!({})).await["result"][0]["agentId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (member, member_session) =
+        settled_member(&mut client, &agent, &lead, &lead_session, &holder).await;
+    let b = side_line(&mut client, &member_session).await;
+    let submission = uuid::Uuid::new_v4().to_string();
+    assert_ok(
+        &client
+            .rpc(
+                "session.submit",
+                json!({"sessionId":member,"branchId":b,"submissionId":submission,
+                    "text":"the delivery line's input"}),
+            )
+            .await,
+    );
+    member_session.idle(&b).await.unwrap();
+    let input = branch_events(&member_session, &b, ..)
+        .await
+        .unwrap()
+        .iter()
+        .rev()
+        .find_map(|event| match &event.kind {
+            EventKind::InputMessage(data) if data.submission_id.as_deref() == Some(&submission) => {
+                Some(event.id.clone())
+            }
+            _ => None,
+        })
+        .expect("the delivery line holds the input");
+    let c = side_line(&mut client, &member_session).await;
+    assert_ok(
+        &client
+            .rpc(
+                "session.branch_set_default",
+                json!({"sessionId":member,"branchId":c}),
+            )
+            .await,
+    );
+    drop(client);
+    drop(agent);
+    server.shutdown();
+    server.join().await.unwrap();
+
+    seed_recovery_facts(&database, &lead, &holder, &member, Some(&input)).await;
+
+    let (server, agent) = launch_with_agent(Arc::new(MockTools), config).await;
+    let mut client = Client::new_version(&server, false, 4).await;
+    // The member loads first, so its stored Team relation is live when the
+    // leader's recovery reads it.
+    assert_ok(
+        &client
+            .rpc("session.attach", json!({"sessionId":member}))
+            .await,
+    );
+    assert_ok(
+        &client
+            .rpc("session.attach", json!({"sessionId":lead}))
+            .await,
+    );
+    recovered_failure(&agent, &lead, &member).await;
+    let member_session = agent_session(&agent, &member);
+    assert!(
+        stopped_by_recovery(&stop_reasons_on(&member_session, &b).await),
+        "the delivery line is stopped"
+    );
+    assert!(
+        !stopped_by_recovery(&stop_reasons_on(&member_session, &c).await),
+        "the moved default is left alone"
+    );
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    let _ = std::fs::remove_dir_all(directory);
+}
+
+/// A recovered record whose member input cannot be found stops nothing: the
+/// member's current default keeps running instead of being stopped
+/// (design §9, §15).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn recovery_without_the_delivered_input_stops_nothing() {
+    let directory = std::env::temp_dir().join(format!("dim-recovery-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let database = directory.join("dimcode.sqlite");
+    let mut config = ServerConfig {
+        database_path: Some(database.clone()),
+        ..Default::default()
+    };
+    config.session_defaults.tools = Some(vec!["branch".into(), "echo".into(), "wait".into()]);
+    let (server, agent) = launch_with_agent(Arc::new(MockTools), config.clone()).await;
+    let mut client = Client::new_version(&server, false, 4).await;
+    let lead = leader(
+        &mut client,
+        json!({"allowedTools": ["echo", "wait", "agent"]}),
+    )
+    .await;
+    let lead_session = agent.get_session(&lead).unwrap();
+    let holder = client.rpc("agent.list", json!({})).await["result"][0]["agentId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (member, member_session) =
+        settled_member(&mut client, &agent, &lead, &lead_session, &holder).await;
+    let b = side_line(&mut client, &member_session).await;
+    let c = side_line(&mut client, &member_session).await;
+    assert_ok(
+        &client
+            .rpc(
+                "session.branch_set_default",
+                json!({"sessionId":member,"branchId":c}),
+            )
+            .await,
+    );
+    drop(client);
+    drop(agent);
+    server.shutdown();
+    server.join().await.unwrap();
+
+    seed_recovery_facts(&database, &lead, &holder, &member, None).await;
+
+    let (server, agent) = launch_with_agent(Arc::new(MockTools), config).await;
+    let mut client = Client::new_version(&server, false, 4).await;
+    // The member loads first, so its stored Team relation is live when the
+    // leader's recovery reads it.
+    assert_ok(
+        &client
+            .rpc("session.attach", json!({"sessionId":member}))
+            .await,
+    );
+    assert_ok(
+        &client
+            .rpc("session.attach", json!({"sessionId":lead}))
+            .await,
+    );
+    recovered_failure(&agent, &lead, &member).await;
+    let member_session = agent_session(&agent, &member);
+    assert!(
+        !stopped_by_recovery(&stop_reasons_on(&member_session, &b).await),
+        "the delivery line is untouched"
+    );
+    assert!(
+        !stopped_by_recovery(&stop_reasons_on(&member_session, &c).await),
+        "the moved default is untouched"
+    );
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    let _ = std::fs::remove_dir_all(directory);
 }
