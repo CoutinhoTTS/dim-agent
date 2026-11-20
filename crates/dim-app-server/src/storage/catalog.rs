@@ -118,21 +118,29 @@ pub(super) fn refresh_activity(
                 .and_then(|wire| wire.event["create_at"].as_u64())
                 .ok_or_else(|| error("catalog activity event has no timestamp"))?
         }
-        None if default != ROOT_BRANCH_ID => connection
-            .query_row(
-                "SELECT body FROM timeline_events WHERE session_id=?1 AND branch_id=?2 ORDER BY sequence ASC LIMIT 1",
-                params![session, default],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()
-            .map_err(error)?
-            .and_then(|body| serde_json::from_str::<Row>(&body).ok())
-            .and_then(|row| {
-                row.wires()
-                    .first()
-                    .and_then(|wire| wire.event["create_at"].as_u64())
-            })
-            .map_or_else(|| created_at(connection, session), Ok)?,
+        None if default != ROOT_BRANCH_ID => {
+            let first: Option<String> = connection
+                .query_row(
+                    "SELECT body FROM timeline_events WHERE session_id=?1 AND branch_id=?2 ORDER BY sequence ASC LIMIT 1",
+                    params![session, default],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(error)?;
+            match first {
+                // The same failures the activity read answers: a row that
+                // exists but cannot be dated is damaged storage, not a line
+                // without an opening.
+                Some(body) => {
+                    let row: Row = serde_json::from_str(&body).map_err(error)?;
+                    row.wires()
+                        .first()
+                        .and_then(|wire| wire.event["create_at"].as_u64())
+                        .ok_or_else(|| error("catalog activity event has no timestamp"))?
+                }
+                None => created_at(connection, session)?,
+            }
+        }
         None => created_at(connection, session)?,
     };
     connection
