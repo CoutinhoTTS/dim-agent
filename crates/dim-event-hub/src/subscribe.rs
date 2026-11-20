@@ -54,14 +54,11 @@ pub(crate) async fn subscribe(
         }
     }
     let session_id = request.target.session_id.clone();
-    // One lock per target Session, from the first check to the last guide
-    // write or retire (design §3.3): an unsubscribe or a delete of the same
-    // Session cannot retire a guide this subscribe wrote before its record
-    // was stored.
-    let _session = shared.state.session_lock(&session_id).await;
     // An omitted branch is the line the Session is on, resolved once under the
     // permit a publish's cold read takes, and only after the checks above
-    // (timeline branches §20.22).
+    // (timeline branches §20.22). The resolution is a read: it touches no
+    // guide and no record, so it runs before the Session lock, the way every
+    // other permit is taken before that lock (design §2.5).
     let target = Target {
         session_id: session_id.clone(),
         branch_id: match &request.target.branch_id {
@@ -74,6 +71,11 @@ pub(crate) async fn subscribe(
             }
         },
     };
+    // One lock per target Session, from the limits check to the last guide
+    // write or retire (design §3.3): an unsubscribe or a delete of the same
+    // Session cannot retire a guide this subscribe wrote before its record
+    // was stored.
+    let _session = shared.state.session_lock(&session_id).await;
     check_limits(shared, &target)?;
     let subscription = Subscription {
         id: format!("sub_{}", uuid::Uuid::new_v4()),

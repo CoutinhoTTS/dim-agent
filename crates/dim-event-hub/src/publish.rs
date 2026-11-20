@@ -148,7 +148,7 @@ pub(crate) async fn publish(
     // Admission, source ownership and the type all answer first: only an
     // admitted publish resolves its omitted targets, so a refused one never
     // restores a cold Session (design §2.3, timeline branches §20.22).
-    let (to, unresolved) = resolved_to(&shared, request.to).await?;
+    let (to, unresolved) = resolved_to(&shared, request.to).await;
     let request = PublishRequest { to, ..request };
     // Once the publish starts it runs to completion in a task EventHub owns:
     // a caller that drops its reply, or a reload, neither stops it nor frees
@@ -164,6 +164,7 @@ pub(crate) async fn publish(
 /// A `to` target whose omitted branch could not be resolved: its failure is
 /// the target's own receipt entry, and the rest of the publish is planned and
 /// delivered as usual (design §2.3, §3.2).
+#[derive(Clone)]
 struct UnresolvedTarget {
     session_id: String,
     code: String,
@@ -173,48 +174,56 @@ struct UnresolvedTarget {
 /// One explicit `to` target with its branch filled in (timeline branches
 /// §20.22); an admitted `publish` resolves them once per request before the
 /// task starts, reading a Session named by two entries once and holding the
-/// hub's delivery budget across each cold read. A target that cannot be
+/// hub's delivery budget across each cold read. A Session's answer, its
+/// branch or its failure, serves every entry that names it, so a failed read
+/// cannot turn a later duplicate into a delivery. A target that cannot be
 /// resolved is answered in its own receipt entry instead of failing the
 /// publish, whatever the read answered.
 async fn resolved_to(
     shared: &Shared,
     to: Vec<crate::model::ToTarget>,
-) -> Result<(Vec<crate::model::ToTarget>, Vec<UnresolvedTarget>), EventHubError> {
-    let mut defaults: HashMap<String, String> = HashMap::new();
+) -> (Vec<crate::model::ToTarget>, Vec<UnresolvedTarget>) {
+    let mut defaults: HashMap<String, Result<String, UnresolvedTarget>> = HashMap::new();
     let mut resolved = Vec::with_capacity(to.len());
     let mut unresolved = Vec::new();
     for mut target in to {
         if target.branch_id.is_none() {
-            let branch_id = match defaults.get(&target.session_id) {
-                Some(branch_id) => Some(branch_id.clone()),
+            let answer = match defaults.get(&target.session_id) {
+                Some(answer) => answer.clone(),
                 None => {
                     let permit = shared.state.delivery_permit().await;
                     let answer = shared.default_branch(&target.session_id).await;
                     drop(permit);
-                    match answer {
-                        Ok(branch_id) => {
-                            defaults.insert(target.session_id.clone(), branch_id.clone());
-                            Some(branch_id)
-                        }
-                        Err(error) => {
-                            unresolved.push(UnresolvedTarget {
-                                session_id: target.session_id.clone(),
-                                code: error.code.to_owned(),
-                                message: error.message,
-                            });
-                            None
-                        }
-                    }
+                    let answer = match answer {
+                        Ok(branch_id) => Ok(branch_id),
+                        Err(error) => Err(UnresolvedTarget {
+                            session_id: target.session_id.clone(),
+                            code: error.code.to_owned(),
+                            message: error.message,
+                        }),
+                    };
+                    defaults.insert(target.session_id.clone(), answer.clone());
+                    answer
                 }
             };
-            let Some(branch_id) = branch_id else {
-                continue;
-            };
-            target.branch_id = Some(branch_id);
+            match answer {
+                Ok(branch_id) => target.branch_id = Some(branch_id),
+                Err(failure) => {
+                    // The resolution is the Session's, so duplicate entries
+                    // for it answer one receipt entry, not one each.
+                    if !unresolved
+                        .iter()
+                        .any(|seen: &UnresolvedTarget| seen.session_id == failure.session_id)
+                    {
+                        unresolved.push(failure);
+                    }
+                    continue;
+                }
+            }
         }
         resolved.push(target);
     }
-    Ok((resolved, unresolved))
+    (resolved, unresolved)
 }
 
 /// One publish from taking its event lock to its receipt, in the task

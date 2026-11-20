@@ -71,8 +71,13 @@ struct Inner {
     missing: Mutex<std::collections::HashSet<String>>,
     /// Session id to the error code its `defaultBranchId` read answers.
     default_failures: Mutex<HashMap<String, &'static str>>,
+    /// Session id to the error code its first `defaultBranchId` read answers;
+    /// that read removes it, so the next one answers the branch.
+    default_once: Mutex<HashMap<String, &'static str>>,
     /// The `defaultBranchId` reads answered (timeline branches §20.22).
     defaults: AtomicUsize,
+    /// The `lookup` calls answered (design §2.4).
+    lookups: AtomicUsize,
     sequence: AtomicU64,
     gate: Mutex<Option<Arc<Gate>>>,
 }
@@ -96,7 +101,9 @@ impl Default for FakeSessions {
                 accepted: Mutex::new(HashMap::new()),
                 missing: Mutex::new(std::collections::HashSet::new()),
                 default_failures: Mutex::new(HashMap::new()),
+                default_once: Mutex::new(HashMap::new()),
                 defaults: AtomicUsize::new(0),
+                lookups: AtomicUsize::new(0),
                 sequence: AtomicU64::new(0),
                 gate: Mutex::new(None),
             }),
@@ -131,6 +138,16 @@ impl FakeSessions {
             .unwrap()
             .insert(session.to_owned(), code);
     }
+    /// Answers `session`'s first `defaultBranchId` read with `code` and the
+    /// next ones with its branch, so a test can tell a reused answer from a
+    /// second read (timeline branches §20.22).
+    pub fn fail_default_once(&self, session: &str, code: &'static str) {
+        self.inner
+            .default_once
+            .lock()
+            .unwrap()
+            .insert(session.to_owned(), code);
+    }
     /// Answers `exists` `false` for `session`, as a deleted Session does
     /// (design §3.4).
     pub fn deleted(&self, session: &str) {
@@ -148,6 +165,10 @@ impl FakeSessions {
     /// targets reads none.
     pub fn default_reads(&self) -> usize {
         self.inner.defaults.load(Ordering::SeqCst)
+    }
+    /// How many `lookup` calls the fixture answered (design §2.4).
+    pub fn lookups(&self) -> usize {
+        self.inner.lookups.load(Ordering::SeqCst)
     }
     /// Answers any input whose submission id contains `needle` with `code`,
     /// so one guide write of a creation fails while its others succeed
@@ -207,6 +228,7 @@ impl HostDispatch for FakeSessions {
         match method {
             // The `sessions.lookup` reply (design §2.4).
             "lookup" => {
+                self.inner.lookups.fetch_add(1, Ordering::SeqCst);
                 let key = format!(
                     "{}|{}|{}",
                     write["sessionId"].as_str().unwrap_or_default(),
@@ -241,11 +263,18 @@ impl HostDispatch for FakeSessions {
                 let session = write["sessionId"].as_str().unwrap_or_default().to_owned();
                 let failure = self
                     .inner
-                    .default_failures
+                    .default_once
                     .lock()
                     .unwrap()
-                    .get(&session)
-                    .copied()
+                    .remove(&session)
+                    .or_else(|| {
+                        self.inner
+                            .default_failures
+                            .lock()
+                            .unwrap()
+                            .get(&session)
+                            .copied()
+                    })
                     .or_else(|| {
                         self.inner
                             .missing
