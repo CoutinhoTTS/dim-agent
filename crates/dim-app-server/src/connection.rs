@@ -1612,7 +1612,7 @@ impl Connection {
                 // refusing every line but the root.
                 let branch = match p.branch_id {
                     Some(branch) => branch,
-                    None => self.unnamed_branch(&session).map_err(RpcError::from)?,
+                    None => self.unnamed_branch(session).map_err(RpcError::from)?,
                 };
                 let mut startup_admission = None;
                 let mut model = if let Some(startup) = p.startup {
@@ -1749,7 +1749,7 @@ impl Connection {
             Call::PromptRefresh(p) => {
                 let branch = match p.branch_id {
                     Some(branch) => branch,
-                    None => self.unnamed_branch(&session).map_err(RpcError::from)?,
+                    None => self.unnamed_branch(session).map_err(RpcError::from)?,
                 };
                 let outcome = session
                     .configure(
