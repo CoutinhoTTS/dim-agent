@@ -106,9 +106,11 @@ part), `branch/resume`, `branch/start`, `branch/ended`, `branch/end`, `branch/cr
 events — and does not move the row. A Session with no activity event sits at its creation time. The judgement lives
 once, beside the projection code, and every writer of the projection uses it; a daemon without a store applies the
 same selection in `session.summaries` (§3.3), so the two listings cannot disagree. A persisted `branch/default`
-refreshes the row in its own transaction from the new default's newest such event, or the Session's creation time
-when that line has none yet, and the switch itself is not
-activity, so an idle move between lines reports the line it moved to and never the one it left. The row's `sequence`
+refreshes the row in its own transaction from the new default's newest such event; a line other than the root with no
+activity yet is dated by its own opening event, because a tool line switched to while its first turn runs is work in
+progress and its opening input carries no user, and the Session's creation time answers only for the root or a line
+with no event at all. The switch itself is not activity, so an idle move between lines reports the line it moved to and
+never the one it left. The row's `sequence`
 stays the root's in both projections, the stored query and the loaded overlay, so loading or unloading a Session
 never changes it; `running` and the activity time alone follow the default branch (timeline branches §14).
 
