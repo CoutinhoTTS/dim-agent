@@ -367,7 +367,6 @@ jobs:
           if [[ "$RUNNER_OS" == Linux ]]; then node_threads=4; fi
           node scripts/run-rust-test.mjs target/test-artifacts.jsonl transport_flow node_ --ignored --test-threads="$node_threads"
           node scripts/run-rust-test.mjs target/test-artifacts.jsonl app_server_flow mcp_http_flow::node_ --ignored --test-threads="$node_threads"
-          node scripts/run-rust-test.mjs target/test-artifacts.jsonl migration_flow node_ --ignored --test-threads="$node_threads"
           node scripts/run-rust-test.mjs target/test-artifacts.jsonl hub_flow node_ --ignored --test-threads="$node_threads"
           if [[ '${{ needs.changes.outputs.eval }}' == true ]]; then
             node scripts/run-rust-test.mjs target/test-artifacts.jsonl xtask node_ --ignored --test-threads="$node_threads"

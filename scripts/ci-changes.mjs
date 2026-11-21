@@ -16,6 +16,8 @@ const rules=[
   [/^docs\/architecture\/tui-e2e\.md$/,['scripts']],
   // crates/dim-event-hub tests compare their strings to its appendix blocks.
   [/^docs\/design\/plugins\/EventHub\.md$/,['rust']],
+  // runtime/plugin-sdk.test.mjs compiles its fenced TypeScript blocks.
+  [/^docs\/typescript-plugin-authoring\.md$/,['rust','node']],
   // The ADR check runs in the changes job; docs alone need no build group.
   [documentation,[]],
   [/^deny\.toml$|^LICENSE$/,['dependencies']],

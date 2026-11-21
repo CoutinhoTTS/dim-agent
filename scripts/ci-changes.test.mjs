@@ -45,6 +45,7 @@ test('documents that code reads keep their checks',()=>{
   assert.deepEqual(classify(['docs/design/appserver/native-storage-format.md']),only('rust'));
   assert.deepEqual(classify(['docs/architecture/tui-e2e.md']),only('scripts'));
   assert.deepEqual(classify(['docs/design/plugins/EventHub.md']),only('rust'));
+  assert.deepEqual(classify(['docs/typescript-plugin-authoring.md']),only('rust','node'));
 });
 
 test('Web sources that static checks read avoid the heavy xtask build',()=>{
