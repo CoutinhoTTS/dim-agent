@@ -522,7 +522,8 @@ pub struct ModelUpdateResult {
 #[serde(rename_all = "camelCase")]
 pub struct ModelGetResult {
     pub branch_id: String,
-    /// The requested line's committed cutoff, never an ancestor's sequence.
+    /// The requested line's own cutoff, never an ancestor's sequence: the
+    /// configuration is the one reading at this cutoff answers.
     pub through: u64,
     pub configuration: Option<ModelConfigurationView>,
 }

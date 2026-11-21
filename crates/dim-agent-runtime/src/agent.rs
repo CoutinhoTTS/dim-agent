@@ -464,7 +464,7 @@ impl Session {
     fn activate(&self) {
         self.0.owner.lifecycle.advance(SessionPhase::Active);
         let weak = Arc::downgrade(&self.0);
-        let mut faults = self.0.owner.faults.watch();
+        let mut faults = self.0.owner.lifecycle.faults.watch();
         let stop = self.0.owner.closing.clone();
         let supervisor = tokio::spawn(async move {
             loop {
@@ -505,7 +505,7 @@ impl Session {
             .await
     }
     pub async fn input(&self, data: InputMessageData, branch: &str) -> Result<Arc<AgentEvent>> {
-        if let Some(error) = self.0.owner.faults.failure() {
+        if let Some(error) = self.0.owner.lifecycle.faults.failure() {
             return Err(error);
         }
         if self.0.owner.closing.is_cancelled() {
@@ -520,7 +520,7 @@ impl Session {
         data: InputMessageData,
         branch: &str,
     ) -> Result<(Arc<AgentEvent>, InputCommit)> {
-        if let Some(error) = self.0.owner.faults.failure() {
+        if let Some(error) = self.0.owner.lifecycle.faults.failure() {
             return Err(error);
         }
         if self.0.owner.closing.is_cancelled() {
@@ -535,7 +535,7 @@ impl Session {
         inputs: Vec<InputMessageData>,
         branch: &str,
     ) -> Result<Vec<Arc<AgentEvent>>> {
-        if let Some(error) = self.0.owner.faults.failure() {
+        if let Some(error) = self.0.owner.lifecycle.faults.failure() {
             return Err(error);
         }
         if self.0.owner.closing.is_cancelled() {
@@ -552,7 +552,7 @@ impl Session {
         update: ConfigureUpdate,
         branch: &str,
     ) -> Result<ConfigureOutcome> {
-        if let Some(error) = self.0.owner.faults.failure() {
+        if let Some(error) = self.0.owner.lifecycle.faults.failure() {
             return Err(error);
         }
         if self.0.owner.closing.is_cancelled() {
@@ -734,7 +734,7 @@ impl Session {
     }
     /// The runtime fault that stopped this Session, if any; separate from cleanup.
     pub fn failure(&self) -> Option<AgentError> {
-        self.0.owner.faults.failure()
+        self.0.owner.lifecycle.faults.failure()
     }
     /// Observes complete Session cleanup without initiating it.
     pub fn closed(&self) -> BoxFuture<'static, Result<()>> {
@@ -832,7 +832,7 @@ impl Session {
             );
             let mut errors = vec![];
             this.0.tree.begin_close();
-            if let Some(error) = this.0.owner.faults.failure() {
+            if let Some(error) = this.0.owner.lifecycle.faults.failure() {
                 for info in this.0.tree.list() {
                     if let Some(branch) = this.0.tree.get(&info.id) {
                         branch.0.mark_failure(&error);

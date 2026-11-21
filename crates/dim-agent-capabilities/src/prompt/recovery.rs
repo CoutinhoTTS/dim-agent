@@ -1380,12 +1380,22 @@ impl Prompt {
 }
 
 impl Prompt {
-    pub(super) async fn advance(&self, through: u64) -> Result<()> {
+    /// Brings the projection to `through` and answers the cutoff it reached:
+    /// `through` itself while the line is active, or the published head when
+    /// the line is closing. A closing line may already have committed an
+    /// interrupt whose publication is pending, and no read may pass the
+    /// published head; answering at that head keeps the returned cutoff and the
+    /// configuration the same pinned read.
+    pub(super) async fn advance(&self, through: u64) -> Result<u64> {
         if self.branch_phase.phase() != BranchPhase::Active {
-            return self.recover_sources(through).await;
+            let through = self.timeline.sequence().min(through);
+            self.recover_sources(through).await?;
+            return Ok(through);
         }
         let mut progress = self.dispatcher.watch();
         while self.dispatcher.sequence() < through {
+            #[cfg(feature = "testing")]
+            super::testing::read_waiting(&self.identity.session_id, &self.identity.branch_id);
             if let Some(error) = self.dispatcher.failure() {
                 return Err(error);
             }
@@ -1408,7 +1418,7 @@ impl Prompt {
         let written = self.projection.lock().unwrap().written_result;
         self.publisher.await_published(written).await?;
         self.projection.lock().unwrap().publish(self, written);
-        Ok(())
+        Ok(through)
     }
 
     pub(super) async fn recover_sources(&self, through: u64) -> Result<()> {

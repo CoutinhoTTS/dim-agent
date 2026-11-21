@@ -109,7 +109,7 @@
 
 BranchLine 注入 `B:Dispatcher`、`B:TimelineIdentity`、`B:BranchLifecycle` 和 `S:TreeCommands`，提供 `B:BranchLine`。
 
-它的决定方式与 Goal 相同：依据已消费的状态，通过一个写入前会复核的自有写任务，并且只对加载截点之后的实时事件作决定。所以重载时什么都不会写两次，只有一个例外：如果加载时自己的历史里最后有一个仍在生效的名册键，而与折叠出的名册不一致，它就把名册写一次——因为补完一条已结束线的重启（§20.7）在根重放之前就记下了 `branch/ended`，之后没有实时事件跟随（§6.2）。同一条例外补上一次停在事实与说明之间的移动。`branch/default` 和每条状态说明分别是独立的批次（§4.5），所以进程在事实提交之后、某条说明写出之前停下时，事实照样生效、说明却缺了。加载时 BranchLine 对自己这条线比较两件事：它上面最新的有效 `branch:line` 块的 `default` 属性（没有这个属性就算不是默认分支），以及 `TreeCommands` 现在是否报告这条线是默认分支。两者不一致时，它在这条线的下一次模型请求之前补写与树一致的那条说明，一次；根永远不写。给新默认分支的说明会写出移动从哪条线开始，所以补写的加载必须知道那条线：`branch/default` 带着它，放在说明本来就需要的 `from` 字段里（§16），这正是 §4.9 允许一条事实存在的理由——补写的说明要用它来决定。把这条线的块与树对上的加载什么也不写，所以再次重启也不写。
+它的决定方式与 Goal 相同：依据已消费的状态，通过一个写入前会复核的自有写任务，并且只对加载截点之后的实时事件作决定。所以重载时什么都不会写两次，只有一个例外：如果加载时自己的历史里最后有一个仍在生效的名册键，而与折叠出的名册不一致，它就把名册写一次——因为补完一条已结束线的重启（§20.7）在根重放之前就记下了 `branch/ended`，之后没有实时事件跟随（§6.2）。同一条例外补上一次停在事实与说明之间的移动。`branch/default` 和每条状态说明分别是独立的批次（§4.5），所以进程在事实提交之后、某条说明写出之前停下时，事实照样生效、说明却缺了。加载时 BranchLine 对自己这条线比较两件事：它上面最新的有效 `branch:line` 块的 `default` 属性（没有这个属性就算不是默认分支），以及 `TreeCommands` 现在是否报告这条线是默认分支。两者不一致时，它在这条线的下一次模型请求之前补写与树一致的那条说明，一次；根永远不写。给新默认分支的说明会写出移动从哪条线开始，所以补写的加载必须知道那条线：`branch/default` 带着它，放在说明本来就需要的 `from` 字段里（§16），这正是 §4.9 允许一条事实存在的理由——补写的说明要用它来决定。把这条线的块与树对上的加载什么也不写，所以再次重启也不写。只有对树报告为默认分支的那条线，比较还会读这个块的文本，所以旧规则写下的说明在加载时被替换一次。
 
 **默认分支的恢复。** 目录里只有一条线的 Session 就在根上，不为它读任何事实。有多条线的 Session 只读一条事实：在根自己的事件里，最新的一条 `branch/default` 或 `session/forked`，走现有的 `timeline_events_by_kind` 索引。目标仍未结束且可以被选中的 `branch/default` 指明默认分支；最新的一条是 `session/forked` 时，默认分支就是根，因为 fork 拷过来的所有 `branch/default` 都写在它的 `session/forked` 之前、一律失效；什么也没记就是根。目标已经不再是开着的线、指向插件线、以及指向升级前经客户端开出的线时，都回退到根（§4）。
 
@@ -559,7 +559,7 @@ WorkspaceTools 不变。
 
 目录读取不访问历史，显示字段为空或省略。`session.branch.get {sessionId, branchId}`（v3，在 `hello.features` 单独声明）读取一条线的目录记录和显示详情：`purpose` 为创建提示的首行；`cutMessages` 为该分叉点继承的用户输入数，排除截止位置前已删除的输入；`end` 为可用的 `BranchEndData`。main 的前两项为空，没有可读结束事实时 `end` 为空。该读取由 TimelineTree 完成点查与固定前缀计数；未知分支和读取失败在本次详情调用中报错，不阻断目录列举，不写事实，也不重新打开结束的线。CLI 在选中一条线时才读取详情。
 
-`session.model.get {sessionId, branchId, through?}`（v3，与其他 Session 方法一起列在 `hello.features`，准入与 `session.attach` 相同）读取一条线在它自己截止位上的已采纳配置：`{branchId, through, configuration: {model: {providerId, modelId}, capabilitySnapshot?, modelPreferences?} | null}`。返回的 `through` 永远是所请求这条线自己的已提交截止位，绝不是祖先某次采纳的序号，所以客户端只应用这条线上 `sequence > through` 的 `Configuration` 事件，刷新时不传 `through` 再调一次。打开的线由它的 owner 在已提交头上读取，先等 Dispatcher 追平，所以刚提交的采纳也会包含在内，不会被漏掉。已结束的线按它固定的头经祖先链读取，不会被重新打开；传入 `through` 时按同一规则读那个截止位，超过这条线头的值按未来序号拒绝。不存在的线报错。旧服务器不宣告这个方法：客户端对根线或 attach 命名的线继续用 attach 回复，绝不把根线的配置当成另一条线的。
+`session.model.get {sessionId, branchId, through?}`（v3，与其他 Session 方法一起列在 `hello.features`，准入与 `session.attach` 相同）读取一条线在它自己截止位上的已采纳配置：`{branchId, through, configuration: {model: {providerId, modelId}, capabilitySnapshot?, modelPreferences?} | null}`。返回的 `through` 永远是所请求这条线自己的已提交截止位，绝不是祖先某次采纳的序号，所以客户端只应用这条线上 `sequence > through` 的 `Configuration` 事件，刷新时不传 `through` 再调一次。打开的线先等 Dispatcher 追平已提交的头，所以刚提交的采纳也会包含在内，不会被漏掉；返回的 `through` 是它作答时那个状态的截止位：owner 还停在捕获的头时就是那个头，owner 已经应用了更晚的 source 事件时就是最后那条已应用 source 事件的序号，所以按返回的 `through` 去读，读到的永远是返回的那份配置。作用域正在关闭的线按它已发布的头作答：发布还没完成的事实对任何读取都不可见，这条线也不越过它作答。已结束的线按它固定的头经祖先链读取，不会被重新打开；传入 `through` 时按同一规则读那个截止位，超过这条线头的值按未来序号拒绝。不存在的线报错。旧服务器不宣告这个方法：客户端只对根线继续用 attach 回复（attach 回复里的 model 字段描述的始终是根线，即使它的 `defaultBranch` 指向另一条线），绝不把根线的配置当成另一条线的。
 
 
 `head` 有三条规则，决定客户端能用它做什么：

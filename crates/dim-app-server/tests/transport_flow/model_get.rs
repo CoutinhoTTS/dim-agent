@@ -1,7 +1,8 @@
 //! `session.model.get`: one line's adopted configuration at that line's own
 //! cutoff.
 use super::*;
-use dim_agent_runtime::{ConfigureUpdate, Timeline, TimelineIdentity};
+use dim_agent_capabilities::prompt_state::PromptSnapshot;
+use dim_agent_runtime::{ConfigureUpdate, Dispatcher, Timeline, TimelineIdentity};
 use dim_agent_types::{ContextConfiguredData, ModelConfiguration};
 use rutis::Ctx;
 use rutis::host::{BoxFuture, DynPlugin, Effect, Key, TypeKey};
@@ -306,8 +307,102 @@ fn timeline_probe(
     }
 }
 
+/// Stops the Dispatcher before a committed `context/configured` reaches the
+/// owner, so a read can be taken while the fact is committed and not yet
+/// dispatched.
+struct DispatchGate {
+    armed: AtomicBool,
+    arrived: tokio::sync::mpsc::UnboundedSender<()>,
+    release: tokio::sync::watch::Receiver<bool>,
+}
+
+struct HeldDispatch {
+    gate: Arc<DispatchGate>,
+    arrived: tokio::sync::mpsc::UnboundedReceiver<()>,
+    released: tokio::sync::watch::Sender<bool>,
+}
+impl HeldDispatch {
+    fn new() -> Self {
+        let (arrived, arrivals) = tokio::sync::mpsc::unbounded_channel();
+        let (released, release) = tokio::sync::watch::channel(false);
+        Self {
+            gate: Arc::new(DispatchGate {
+                armed: AtomicBool::new(false),
+                arrived,
+                release,
+            }),
+            arrived: arrivals,
+            released,
+        }
+    }
+    /// Stops the Dispatcher at the next committed `context/configured`.
+    fn arm(&self) {
+        self.gate.armed.store(true, Ordering::SeqCst);
+    }
+    /// Resolves when the Dispatcher is stopped.
+    async fn arrived(&mut self) {
+        let _ = self.arrived.recv().await;
+    }
+    fn release(&self) {
+        self.released.send_replace(true);
+    }
+}
+
+struct HoldDispatchPart {
+    dispatcher: Key<Dispatcher>,
+    gate: Arc<DispatchGate>,
+}
+impl DynPlugin for HoldDispatchPart {
+    fn name(&self) -> &str {
+        "HoldDispatch"
+    }
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.dispatcher.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
+        Box::pin(async move {
+            let dispatcher = ctx.require_at(&self.dispatcher)?;
+            let gate = self.gate.clone();
+            dispatcher.subscribe(ctx, "HoldDispatch", &["context/configured"], move |_| {
+                let gate = gate.clone();
+                Box::pin(async move {
+                    if gate.armed.swap(false, Ordering::SeqCst) {
+                        let _ = gate.arrived.send(());
+                        let mut release = gate.release.clone();
+                        while !*release.borrow_and_update() {
+                            if release.changed().await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                    Ok(())
+                })
+            })?;
+            Ok(Effect::Done)
+        })
+    }
+}
+
+fn hold_dispatch(
+    gate: Arc<DispatchGate>,
+) -> impl FnOnce(&mut AgentBuilder) + Send + Sync + 'static {
+    move |builder| {
+        builder.require_feature(Feature::new("HoldDispatch").branch(
+            "HoldDispatch",
+            move |names| {
+                Ok(Box::new(HoldDispatchPart {
+                    dispatcher: names.key()?,
+                    gate: gate.clone(),
+                }))
+            },
+        ));
+    }
+}
+
+/// The owner can apply a later adoption while a read is in flight. The read
+/// must then answer that adoption at that adoption's own cutoff.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_configuration_committed_just_before_the_read_is_included() {
+async fn a_live_read_answers_the_adoption_it_reports_as_its_cutoff() {
     let probe = Arc::new(std::sync::Mutex::new(None));
     let (server, agent) = launch_with(
         Arc::new(MockTools),
@@ -323,8 +418,82 @@ async fn a_configuration_committed_just_before_the_read_is_included() {
     session.idle("main").await.unwrap();
     adopt(&session, "main", "alpha").await;
 
+    // The read stops after it has captured its cutoff and before it takes the
+    // owner's answer, so a later adoption lands in that window.
+    let mut held = dim_agent_capabilities::prompt::testing::hold_read(&id, "main");
+    let mut reading = Client::new_version(&server, false, 3).await;
+    let reading_id = id.clone();
+    let reading = tokio::spawn(async move {
+        let reply = read(&mut reading, &reading_id, "main", None).await;
+        (reading, reply)
+    });
+    held.arrived().await;
     let timeline = probe.lock().unwrap().clone().expect("the root's Timeline");
-    let written = timeline
+    let adopted = timeline
+        .append_batch_registered(
+            vec![EventKind::ContextConfigured(configured("beta")).into()],
+            |_| Ok(()),
+        )
+        .unwrap();
+    let cutoff = adopted.last().unwrap().sequence;
+    // Let the owner apply the adoption, so the read meets it whatever it does
+    // next instead of racing the Dispatcher.
+    let mut snapshot = session.on::<PromptSnapshot>("main").unwrap().unwrap();
+    while snapshot
+        .borrow()
+        .configuration
+        .as_ref()
+        .is_none_or(|data| data.model_id != "beta")
+    {
+        snapshot.changed().await.unwrap();
+    }
+    held.release();
+
+    let (_reading, reply) = reading.await.unwrap();
+    assert_eq!(model_of(&reply), "beta");
+    assert_eq!(
+        through_of(&reply),
+        cutoff,
+        "the cutoff is the one the answer is read at"
+    );
+    let pinned = read(&mut client, &id, "main", Some(cutoff)).await;
+    assert_eq!(model_of(&pinned), "beta");
+
+    drop(client);
+    drop(agent);
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// An adoption can be committed before the Dispatcher reaches it. The read
+/// must wait for it and answer it at its own cutoff.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_live_read_waits_for_a_committed_adoption_the_dispatcher_has_not_reached() {
+    let probe = Arc::new(std::sync::Mutex::new(None));
+    let watched = probe.clone();
+    let mut dispatch = HeldDispatch::new();
+    let gate = dispatch.gate.clone();
+    let (server, agent) = launch_with(
+        Arc::new(MockTools),
+        ServerConfig::default(),
+        move |builder| {
+            timeline_probe(watched.clone())(builder);
+            hold_dispatch(gate.clone())(builder);
+        },
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let created = client.rpc("session.create", create()).await;
+    assert_ok(&created);
+    let id = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    let session = agent.get_session(&id).unwrap();
+    session.idle("main").await.unwrap();
+    adopt(&session, "main", "alpha").await;
+
+    let timeline = probe.lock().unwrap().clone().expect("the root's Timeline");
+    let mut held = dim_agent_capabilities::prompt::testing::hold_read(&id, "main");
+    dispatch.arm();
+    let committed = timeline
         .append_batch_registered(
             vec![
                 EventKind::ContextConfigured(configured("hot-1")).into(),
@@ -333,14 +502,231 @@ async fn a_configuration_committed_just_before_the_read_is_included() {
             |_| Ok(()),
         )
         .unwrap();
-    let last = written.last().unwrap().sequence;
+    let cutoff = committed.last().unwrap().sequence;
+    dispatch.arrived().await;
 
-    let reply = read(&mut client, &id, "main", None).await;
-    assert_eq!(model_of(&reply), "hot-2");
-    assert_eq!(through_of(&reply), last);
+    let mut reading = Client::new_version(&server, false, 3).await;
+    let reading_id = id.clone();
+    let mut reading = tokio::spawn(async move {
+        let reply = read(&mut reading, &reading_id, "main", None).await;
+        (reading, reply)
+    });
+    held.arrived().await;
+    held.release();
+    let reply = tokio::select! {
+        biased;
+        replied = &mut reading => replied.unwrap().1,
+        _ = held.waiting() => {
+            dispatch.release();
+            reading.await.unwrap().1
+        }
+    };
+    dispatch.release();
+
+    assert_eq!(
+        model_of(&reply),
+        "hot-2",
+        "the committed adoption is read even though the Dispatcher has not reached it"
+    );
+    assert_eq!(through_of(&reply), cutoff);
+    let pinned = read(&mut client, &id, "main", Some(cutoff)).await;
+    assert_eq!(model_of(&pinned), "hot-2");
 
     drop(client);
     drop(agent);
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// A line's scope closes before its parent records the end. The read of that
+/// closing line must answer its own facts instead of a reload error.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_closing_line_answers_its_adopted_configuration() {
+    let (server, agent) = launch_with_agent(Arc::new(MockTools), ServerConfig::default()).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let created = client.rpc("session.create", create()).await;
+    assert_ok(&created);
+    let id = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    let session = agent.get_session(&id).unwrap();
+    session.idle("main").await.unwrap();
+    adopt(&session, "main", "alpha").await;
+    let child = open_line(&mut client, &id, "main", "worker work").await;
+    session.idle(&child).await.unwrap();
+    adopt(&session, &child, "beta").await;
+
+    let mut held = dim_agent_capabilities::timeline_tree::testing::hold_end_record(&id, &child);
+    let mut ending = Client::new_version(&server, false, 3).await;
+    let ending_id = id.clone();
+    let ending_child = child.clone();
+    let ending = tokio::spawn(async move {
+        let reply = ending
+            .rpc(
+                "session.branch_end",
+                json!({"sessionId":ending_id,"branchId":ending_child}),
+            )
+            .await;
+        (ending, reply)
+    });
+    held.arrived().await;
+
+    let line = read(&mut client, &id, &child, None).await;
+    assert_eq!(model_of(&line), "beta");
+    let through = through_of(&line);
+    let pinned = read(&mut client, &id, &child, Some(through)).await;
+    assert_eq!(model_of(&pinned), "beta");
+    assert_eq!(through_of(&pinned), through);
+
+    held.release();
+    let (_ending, ended) = ending.await.unwrap();
+    assert_ok(&ended);
+    let after = read(&mut client, &id, &child, None).await;
+    assert_eq!(model_of(&after), "beta");
+
+    drop(client);
+    drop(agent);
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// A closing line commits its interrupt before the store publishes it. The read
+/// of that line must answer at a published cutoff instead of passing it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_closing_line_answers_at_its_published_cutoff() {
+    use std::os::unix::fs::DirBuilderExt;
+    let directory = std::path::PathBuf::from("/tmp")
+        .join(format!("dim-model-get-published-{}", uuid::Uuid::new_v4()));
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&directory)
+        .unwrap();
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    builder.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(Arc::new(
+        dim_agent_runtime::MemoryTimelineStore::default(),
+    )));
+    defaults::install(&mut builder);
+    defaults::mock_model_hosts(&mut builder);
+    dim_agent_capabilities::defaults::tool_host(&mut builder, Arc::new(MockTools));
+    let server = serve(
+        builder,
+        ServerConfig {
+            database_path: Some(directory.join("dimcode.sqlite")),
+            unix_path: Some(std::path::PathBuf::from("/tmp").join(format!(
+                "dim-model-get-published-{}/server.sock",
+                uuid::Uuid::new_v4()
+            ))),
+            websocket_address: None,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let mut client = Client::new_version(&server, false, 3).await;
+    let created = client.rpc("session.create", create()).await;
+    assert_ok(&created);
+    let id = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    let session = server.agent().unwrap().get_session(&id).unwrap();
+    session.idle("main").await.unwrap();
+    adopt(&session, "main", "alpha").await;
+    let child = open_line(&mut client, &id, "main", "worker work").await;
+    session.idle(&child).await.unwrap();
+    adopt(&session, &child, "beta").await;
+
+    // The store commits the close's interrupt, then this holds its publication:
+    // the line is closing, its Prompt is still mounted, and the interrupt is a
+    // sequence no read may pass yet.
+    let mut held =
+        dim_app_server::storage::timeline_testing::hold_publication(&id, &child, "stop/interrupt");
+    let mut ending = Client::new_version(&server, false, 3).await;
+    let ending_id = id.clone();
+    let ending_child = child.clone();
+    let ending = tokio::spawn(async move {
+        let reply = ending
+            .rpc(
+                "session.branch_end",
+                json!({"sessionId":ending_id,"branchId":ending_child}),
+            )
+            .await;
+        (ending, reply)
+    });
+    held.arrived().await;
+
+    let line = read(&mut client, &id, &child, None).await;
+    assert_eq!(model_of(&line), "beta");
+    let through = through_of(&line);
+    let pinned = read(&mut client, &id, &child, Some(through)).await;
+    assert_eq!(model_of(&pinned), "beta");
+    assert_eq!(through_of(&pinned), through);
+
+    held.release();
+    let (_ending, ended) = ending.await.unwrap();
+    assert_ok(&ended);
+    let after = read(&mut client, &id, &child, None).await;
+    assert_eq!(model_of(&after), "beta");
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// A reload of a line's owner is not a closing line: the read keeps the reload
+/// error instead of answering from the tree.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_reloading_active_line_keeps_its_error() {
+    let tools = ToolReload::default();
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    builder.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(Arc::new(
+        dim_agent_runtime::MemoryTimelineStore::default(),
+    )));
+    defaults::install(&mut builder);
+    defaults::mock_model_hosts(&mut builder);
+    tools.install(&mut builder, Arc::new(MockTools));
+    let server = serve(
+        builder,
+        ServerConfig {
+            unix_path: Some(std::path::PathBuf::from("/tmp").join(format!(
+                "dim-model-get-reload-{}/server.sock",
+                uuid::Uuid::new_v4()
+            ))),
+            websocket_address: None,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let mut client = Client::new_version(&server, false, 3).await;
+    let created = client.rpc("session.create", create()).await;
+    assert_ok(&created);
+    let id = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    let session = server.agent().unwrap().get_session(&id).unwrap();
+    session.idle("main").await.unwrap();
+    adopt(&session, "main", "alpha").await;
+
+    // Hold the reloaded provider's start, so the line stays unloaded until a
+    // read has observed it.
+    let gate = tools.hold_next();
+    let restart = tokio::spawn({
+        let tools = tools.clone();
+        async move { tools.restart().await }
+    });
+    let mut reloading = None;
+    for _ in 0..64 {
+        let reply = read(&mut client, &id, "main", None).await;
+        if let Some(error) = reply.get("error") {
+            reloading = Some(error.clone());
+            break;
+        }
+    }
+    let reloading = reloading.expect("a read observed the reload");
+    assert_eq!(
+        reloading["data"]["appError"], "service_reloading",
+        "{reloading}"
+    );
+    gate.notify_one();
+    restart.await.unwrap();
+
+    drop(client);
     server.shutdown();
     server.join().await.unwrap();
 }

@@ -583,9 +583,10 @@ impl Connection {
     }
 
     /// `session.model.get`: the configuration the requested line adopted at
-    /// that line's own cutoff. An open line answers from its owner; an ended
-    /// line or an explicit earlier cutoff reads the tree's chain at its fixed
-    /// or requested head. The App Server owns none of the answer.
+    /// that line's own cutoff. An open line answers from its owner; a line
+    /// whose own end is committed, or an explicit earlier cutoff, reads the
+    /// tree's chain at its fixed or requested head. The App Server owns none of
+    /// the answer.
     pub(super) async fn model_get(
         &self,
         rpc: &RpcService,
@@ -596,30 +597,34 @@ impl Connection {
         let tree = session
             .session_service::<TreeCommands>()
             .map_err(RpcError::from)?;
-        let read = match params.through {
-            Some(through) => {
-                tree.adopted_configuration(branch.clone(), Some(through))
-                    .await
-            }
+        let live = match params.through {
+            Some(_) => None,
             None => match session.service::<Prompt>(&branch) {
                 Ok(prompt) => match prompt.adopted_configuration().await {
                     // The line ended or began closing after it was published:
                     // its own facts still answer at its fixed head.
                     Err(AgentError::BranchEnded(_))
                     | Err(AgentError::Cancelled(_))
-                    | Err(AgentError::Closed(_)) => {
-                        tree.adopted_configuration(branch.clone(), None).await
-                    }
-                    read => read,
+                    | Err(AgentError::Closed(_)) => None,
+                    read => Some(read),
                 },
-                Err(AgentError::BranchEnded(_)) => {
-                    tree.adopted_configuration(branch.clone(), None).await
-                }
-                Err(error) => Err(error),
+                // A line that is ending has already lost its scope when the
+                // parent has not recorded the end yet: its own facts still
+                // answer at its head. An active line that is reloading keeps
+                // its error instead of being answered from the tree.
+                Err(error) => match tree.end_committed(&branch) {
+                    Ok(true) => None,
+                    _ => return Err(RpcError::from(error)),
+                },
             },
-        }
-        .map_err(RpcError::from)?;
-        let (configuration, through) = read;
+        };
+        let (configuration, through) = match live {
+            Some(read) => read.map_err(RpcError::from)?,
+            None => tree
+                .adopted_configuration(branch.clone(), params.through)
+                .await
+                .map_err(RpcError::from)?,
+        };
         Ok(Reply::ModelGet(ModelGetResult {
             branch_id: branch,
             through,

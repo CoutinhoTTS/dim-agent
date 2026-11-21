@@ -145,6 +145,28 @@ impl TreeCommands {
         })
     }
 
+    /// Whether `id`'s own `branch/end` is committed: the line is ending or
+    /// ended, so its facts answer at the cutoff that fact left even while its
+    /// scope is closing. An active line answers `false`; an unknown line is an
+    /// error.
+    pub fn end_committed(&self, id: &str) -> Result<bool> {
+        let tree = self
+            .tree
+            .upgrade()
+            .ok_or_else(|| AgentError::Closed("TimelineTree".into()))?;
+        let state = tree.state.lock().unwrap();
+        if state.ended.contains_key(id) {
+            return Ok(true);
+        }
+        match state.nodes.get(id) {
+            Some(node) => Ok(node
+                .context
+                .as_ref()
+                .is_some_and(|context| context.end_event().is_some())),
+            None => Err(AgentError::UnknownBranch(id.into())),
+        }
+    }
+
     /// The configuration `id` adopted at `through`, or at its head when
     /// omitted, with that cutoff. The cutoff belongs to `id` alone: a value an
     /// ancestor adopted is reported at `id`'s own head, never at the ancestor's
