@@ -8,7 +8,7 @@ import { ConnectionLost, RpcError } from "../rpc/client"
 import type { Goal, GoalCall } from "../goal"
 import { readLoops as readLoopsReply, readStartedLoop, type Loop } from "../loop"
 import { readUploadedImage } from "../rpc/read"
-import { ROOT_BRANCH_ID, type ApprovalDecision, type ApprovalRequest, type DraftAttachments, type FileCandidate, type ModelId, type ModelProgress, type Notification, type PendingQuestion, type PermissionPreset, type ModelRetryProgress, type PermissionPolicy, type QueuedInput, type QuestionAnswer, type SessionEvent, type SubmitMode, type UserInput, type WithdrawResult } from "../rpc/protocol"
+import { ROOT_BRANCH_ID, type ApprovalDecision, type ApprovalRequest, type DraftAttachments, type FileCandidate, type ModelId, type ModelProgress, type Notification, type PendingQuestion, type PermissionPreset, type ModelRetryProgress, type PermissionPolicy, type PermissionState, type QueuedInput, type QuestionAnswer, type SessionEvent, type SubmitMode, type UserInput, type WithdrawResult } from "../rpc/protocol"
 import { readRevision, readRules } from "../rpc/general-settings"
 import { ProtocolError, readAdoptedConfiguration, type AdoptedConfiguration, readAttached, readBranches, readBranchDetail, readDefaultBranch, readPendingInputs, readPendingQuestions, readTurn, readGoal, readTool, readAck, readAttachmentPath, readBranchCreate, readCompactResult, readConfigurationOutcome, readContextUsage, readFileCandidates, readForkedSessionId, readHistory, readDisplayHistory, readModelUpdate, readMemberApproval, readPermissionState, readPermissionVersion, readSessionMethods, readSessionSkills, readWithdrawResult } from "../rpc/read"
 import { useConnectionStore } from "./connection"
@@ -58,6 +58,8 @@ export type SessionView = {
   methods: readonly string[]
   /** The default branch's policy: read after history loads, then kept current by `permission/changed`. */
   permission: PermissionPolicy | undefined
+  /** The version `permission` was published at: the line's last `permission/changed`, so a read that left earlier is stale. */
+  permissionVersion: number | undefined
   /** The default branch's current goal from its owner. */
   goal: Goal | undefined
   /** Messages queued on the default branch while it runs, oldest first. */
@@ -151,6 +153,7 @@ export const useChatStore = defineStore("chat", () => {
       questions: [],
       methods: [],
       permission: undefined,
+      permissionVersion: undefined,
       goal: undefined,
       queued: [],
       model: stored?.model,
@@ -246,7 +249,7 @@ export const useChatStore = defineStore("chat", () => {
       channel.queued = []
       channel.syncing = false
       for (const notification of queued) receive(notification)
-      if (view.status !== "closed") view.permission = await sessionPermission(view.sessionId)
+      if (view.status !== "closed") showPermission(view, centreId, await sessionPermission(view.sessionId, centreId))
       if (view.status !== "closed") {
         view.status = "ready"
         view.error = ""
@@ -374,7 +377,10 @@ export const useChatStore = defineStore("chat", () => {
     const applied = event.content
     if (applied.kind === "turn-end" || ((applied.kind === "model-end" || applied.kind === "tool-use-start" || applied.kind === "tool-use") && applied.requestId === stream.progress?.requestId)) stream.progress = undefined
     if (event.content.kind === "branch-create") ensureBranch(channel, event.content.branchId)
-    if (branchId === channel.view.defaultBranchId && event.content.kind === "permission-changed") channel.view.permission = event.content.policy
+    if (branchId === channel.view.defaultBranchId && event.content.kind === "permission-changed") {
+      channel.view.permission = event.content.policy
+      channel.view.permissionVersion = event.sequence
+    }
     if (branchId === channel.view.defaultBranchId && (applied.kind === "input-deleted" || ((applied.kind === "input" || applied.kind === "source-input") && applied.blocks.some(block => block.key?.startsWith("goal:"))))) void refreshGoal(channel)
     changed(channel)
   }
@@ -423,6 +429,10 @@ export const useChatStore = defineStore("chat", () => {
    * before the call, so the centre and its transcript change in one step.
    */
   function centre(channel: Channel, branchId: string, branch: BranchStream = stream()): void {
+    // The policy shown belonged to the line that is no longer the centre; the
+    // new line's own read publishes its own (design §14).
+    channel.view.permission = undefined
+    channel.view.permissionVersion = undefined
     channel.view.defaultBranchId = branchId
     useUiStore().followDefault(channel.view.sessionId, branchId)
     channel.branches.delete(branchId)
@@ -918,9 +928,7 @@ export const useChatStore = defineStore("chat", () => {
     // decides what the page shows.
     if (channel.moves !== move) return
     // The server's default has already moved: install the accepted centre even
-    // when a read that describes it fails, and show no stale policy while the
-    // new one is in flight.
-    view.permission = undefined
+    // when a read that describes it fails.
     centre(channel, moved, branch)
     if (loaded !== "ok") {
       // The move stands, but the centre has no transcript to show: report it
@@ -938,10 +946,11 @@ export const useChatStore = defineStore("chat", () => {
     await refreshGoal(channel)
     if (view.status === "closed") return
     const policy = await sessionPermission(sessionId, moved)
-    // Only the move that still owns the centre applies its policy: a later
-    // move's read is the current one.
+    // Only the move that still owns the centre applies its policy, and only
+    // when no later edit or `permission/changed` on that line has overtaken
+    // the version it read: a later move's read and a newer policy both win.
     if (channel.moves !== move || view.defaultBranchId !== moved) return
-    view.permission = policy
+    showPermission(view, moved, policy)
     publish(channel)
   }
 
@@ -976,11 +985,23 @@ export const useChatStore = defineStore("chat", () => {
     return client().call("session.input.withdraw", { sessionId, branchId, inputId, ...(steer === undefined ? {} : { steer }) }, readWithdrawResult)
   }
 
-  /** The named line's policy, or undefined when the Session serves no permission method or the read fails. */
-  async function sessionPermission(sessionId: string, branchId = defaultBranch(sessionId)): Promise<PermissionPolicy | undefined> {
+  /** The named line's policy and version, or undefined when the Session serves no permission method or the read fails. */
+  async function sessionPermission(sessionId: string, branchId = defaultBranch(sessionId)): Promise<PermissionState | undefined> {
     if (!useConnectionStore().supports("session.permission.get")) return undefined
     return client().call("session.permission.get", { sessionId, branchId }, readPermissionState)
-      .then((state) => state.policy, () => undefined)
+      .then((state) => state, () => undefined)
+  }
+
+  /**
+   * Shows `state` for the centre when it is that line's and not older than the
+   * policy already shown: a read that left before a later edit or a newer
+   * `permission/changed` must not undo it (design §14).
+   */
+  function showPermission(view: SessionView, line: string, state: PermissionState | undefined): void {
+    if (state === undefined || view.defaultBranchId !== line) return
+    if (view.permissionVersion !== undefined && state.version < view.permissionVersion) return
+    view.permission = state.policy
+    view.permissionVersion = state.version
   }
 
   /**
@@ -993,14 +1014,15 @@ export const useChatStore = defineStore("chat", () => {
     const branchId = defaultBranch(sessionId)
     const state = await client().call("session.permission.get", { sessionId, branchId }, readPermissionState)
     const view = views[sessionId]
-    const publish = (policy: PermissionPolicy | undefined) => {
-      if (view !== undefined && defaultBranch(sessionId) === branchId) view.permission = policy
+    const publish = (state: PermissionState | undefined) => {
+      if (view !== undefined) showPermission(view, branchId, state)
     }
-    publish(state.policy)
+    publish(state)
     if (state.policy.preset === preset) return "unchanged"
     const policy = { ...state.policy, preset }
+    let version: number
     try {
-      await client().call("session.permission.update", {
+      version = await client().call("session.permission.update", {
         sessionId,
         branchId,
         expectedVersion: state.version,
@@ -1008,12 +1030,12 @@ export const useChatStore = defineStore("chat", () => {
       }, readPermissionVersion)
     } catch (cause) {
       if (cause instanceof RpcError && cause.appError === "permission_conflict") {
-        publish(await sessionPermission(sessionId))
+        publish(await sessionPermission(sessionId, branchId))
         return "conflict"
       }
       throw cause
     }
-    publish(policy)
+    publish({ version, policy })
     return "updated"
   }
 
@@ -1022,15 +1044,22 @@ export const useChatStore = defineStore("chat", () => {
   }
 
   async function setModel(sessionId: string, model: ModelId): Promise<void> {
+    const channel = channels.get(sessionId)
+    if (channel === undefined) return
+    const branchId = defaultBranch(sessionId)
+    const branch = ensureBranch(channel, branchId)
+    const before = branch.projection.model
     const result = await client().call("session.model.update", {
       sessionId,
-      branchId: defaultBranch(sessionId),
+      branchId,
       providerId: model.providerId,
       modelId: model.modelId,
     }, readModelUpdate)
-    const channel = channels.get(sessionId)
-    if (channel === undefined) return
-    channel.main.projection.model = result.model
+    // The reply belongs to the line the request named: a move while it was out
+    // does not install it into the new centre, and a configuration fact that
+    // arrived meanwhile is newer (design §14).
+    if (channels.get(sessionId) !== channel || branch.projection.model !== before) return
+    branch.projection.model = result.model
     publish(channel)
   }
 

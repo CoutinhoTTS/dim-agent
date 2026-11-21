@@ -10,6 +10,7 @@ import type { ApprovalRequest, ModelRetryProgress, PendingQuestion, SessionEvent
 import { useChatStore } from "../stores/chat"
 import { useConnectionStore } from "../stores/connection"
 import { useSessionsStore } from "../stores/sessions"
+import { readNotification } from "../rpc/read"
 import { createRowMapper } from "./rows"
 import { createWebChatUiHost } from "./web-host"
 import WebChatTimeline from "./WebChatTimeline.vue"
@@ -1200,8 +1201,8 @@ describe("Web ChatUiHost commands", () => {
 /** The features a Session on a line serves: a bounded transcript, the line's own configuration and its policy. */
 const LINE_FEATURES = ["session.branches", "session.methods", "session.history.display", "session.history.detail", "session.history.display.tail", "session.history.display.transcript", "session.history.latestTurn", "session.model.get", "session.permission.get"]
 
-function permission(preset: string) {
-  return { version: 1, policy: { preset, allowedTools: [], disallowedTools: [] } }
+function permission(preset: string, version = 1) {
+  return { version, policy: { preset, allowedTools: [], disallowedTools: [] } }
 }
 
 /** Answers the reads a Session's attach and a move make, with per-method overrides. */
@@ -1298,5 +1299,87 @@ describe("chat store moves", () => {
     await first
     expect(chat.views["s-1"]!.permission?.preset).toBe("full-access")
     expect(chat.views["s-1"]!.defaultBranchId).toBe("other")
+  })
+
+  it("does not let a move's policy read undo a newer edit on the same line", async () => {
+    const pinia = stores(LINE_FEATURES, null)
+    const held: { resolve?: (value: unknown) => void } = {}
+    let reads = 0
+    serveChat({
+      "session.permission.get": (params) => {
+        if (params.branchId === "main") return permission("workspace-write")
+        reads += 1
+        // The move's own read is held at the old version while the user edits
+        // the line it names.
+        return reads === 1 ? new Promise<unknown>(resolve => { held.resolve = resolve }) : permission("workspace-write")
+      },
+      "session.permission.update": () => ({ version: 2 }),
+    })
+    const chat = useChatStore(pinia)
+    chat.open("s-1")
+    await vi.waitFor(() => expect(chat.views["s-1"]?.status).toBe("ready"))
+
+    const moved = chat.setDefaultBranch("s-1", "worker")
+    await vi.waitFor(() => expect(reads).toBe(1))
+    await expect(chat.setPermission("s-1", "read-only")).resolves.toBe("updated")
+    expect(chat.views["s-1"]!.permission?.preset).toBe("read-only")
+    held.resolve!(permission("workspace-write", 1))
+    await moved
+    expect(chat.views["s-1"]!.permission?.preset).toBe("read-only")
+    expect(chat.views["s-1"]!.defaultBranchId).toBe("worker")
+  })
+
+  it("does not let a move's policy read undo a newer permission event on the same line", async () => {
+    const pinia = stores(LINE_FEATURES, null)
+    const held: { resolve?: (value: unknown) => void } = {}
+    let reads = 0
+    serveChat({
+      "session.permission.get": (params) => {
+        if (params.branchId === "main") return permission("workspace-write")
+        reads += 1
+        return reads === 1 ? new Promise<unknown>(resolve => { held.resolve = resolve }) : permission("workspace-write")
+      },
+    })
+    const chat = useChatStore(pinia)
+    chat.open("s-1")
+    await vi.waitFor(() => expect(chat.views["s-1"]?.status).toBe("ready"))
+
+    const moved = chat.setDefaultBranch("s-1", "worker")
+    await vi.waitFor(() => expect(reads).toBe(1))
+    // Another client changes the policy of the very line the move is reading,
+    // after the read left the server.
+    chat.receive(readNotification("session.event", {
+      sessionId: "s-1",
+      branchId: "worker",
+      event: { id: "e6", sequence: 6, create_at: 1, type: "permission", name: "changed", data: { policy: { preset: "read-only", allowedTools: [], disallowedTools: [] } } },
+    })!)
+    await vi.waitFor(() => expect(chat.views["s-1"]!.permission?.preset).toBe("read-only"))
+    held.resolve!(permission("workspace-write", 1))
+    await moved
+    expect(chat.views["s-1"]!.permission?.preset).toBe("read-only")
+    expect(chat.views["s-1"]!.defaultBranchId).toBe("worker")
+  })
+
+  it("publishes a model update only to the line that issued it", async () => {
+    const pinia = stores(LINE_FEATURES, null)
+    const held: { resolve?: (value: unknown) => void } = {}
+    const calls = serveChat({
+      "session.model.update": () => new Promise<unknown>(resolve => { held.resolve = resolve }),
+    })
+    const chat = useChatStore(pinia)
+    chat.open("s-1")
+    await vi.waitFor(() => expect(chat.views["s-1"]?.status).toBe("ready"))
+
+    const choosing = chat.setModel("s-1", { providerId: "fixture", modelId: "picked" })
+    await vi.waitFor(() => expect(held.resolve).toBeDefined())
+    expect(calls.find(call => call.method === "session.model.update")?.params.branchId).toBe("main")
+    await chat.setDefaultBranch("s-1", "worker")
+    expect(chat.views["s-1"]!.model).toEqual({ providerId: "fixture", modelId: "worker-model" })
+
+    // The reply reaches the line that asked for it after the centre moved.
+    held.resolve!({ model: { providerId: "fixture", modelId: "picked" }, outcome: "updated" })
+    await choosing
+    expect(chat.views["s-1"]!.model).toEqual({ providerId: "fixture", modelId: "worker-model" })
+    expect(chat.views["s-1"]!.defaultBranchId).toBe("worker")
   })
 })
