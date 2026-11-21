@@ -27,6 +27,16 @@ pub(crate) enum Incoming {
     Work(u64, Box<Work>),
 }
 
+/// A configuration re-read while a write was in flight: the line it belongs
+/// to and, when the line's model was read, the cutoff that read answered at.
+pub(crate) struct Refreshed {
+    branch: String,
+    /// The line's model cutoff; `None` when the refresh kept the model the
+    /// write started from instead of reading the line's.
+    model_through: Option<u64>,
+    config: Config,
+}
+
 pub(crate) enum Work {
     Initialized {
         reply: Responder,
@@ -78,7 +88,7 @@ pub(crate) enum Work {
         mode: bool,
         revision: u64,
         result: Result<Config, Error>,
-        refreshed: Option<Config>,
+        refreshed: Option<Refreshed>,
     },
     Answer {
         key: String,
@@ -1260,7 +1270,11 @@ impl Gateway {
                                 current.ok().map(|policy| {
                                     let mut config = config;
                                     config.policy = Some(policy);
-                                    config
+                                    Refreshed {
+                                        branch: conversation.clone(),
+                                        model_through: None,
+                                        config,
+                                    }
                                 })
                             }
                             Some("configuration_superseded") => async {
@@ -1279,18 +1293,25 @@ impl Gateway {
                                 // configured takes its own configuration at the
                                 // line's head, re-read after the change it reported
                                 // (design §14).
-                                let model = if conversation == ROOT_BRANCH_ID
+                                let (model, model_through) = if conversation == ROOT_BRANCH_ID
                                     || attached.default_branch.is_none()
                                 {
-                                    attached.configuration()
+                                    (attached.configuration(), Some(attached.sequence))
                                 } else if rpc.supports("session.model.get") {
-                                    crate::config::adopted(&rpc, &id, &conversation, None)
-                                        .await?
-                                        .1
+                                    let (cutoff, model) =
+                                        crate::config::adopted(&rpc, &id, &conversation, None)
+                                            .await?;
+                                    (model, Some(cutoff))
                                 } else {
-                                    None
+                                    (None, None)
                                 };
-                                Config::read(&rpc, &id, &conversation, model).await
+                                Config::read(&rpc, &id, &conversation, model)
+                                    .await
+                                    .map(|config| Refreshed {
+                                        branch: conversation,
+                                        model_through,
+                                        config,
+                                    })
                             }
                             .await
                             .ok(),
@@ -1962,14 +1983,24 @@ impl Gateway {
                         }
                     }
                     Err(error) => {
-                        if let Some(mut config) = refreshed {
-                            if revision != session.config_revision {
-                                config.model.clone_from(&session.config.model);
-                                if let (Some(policy), Some(current)) =
+                        if let Some(refreshed) = refreshed
+                            && refreshed.branch == session.projection.branch
+                        {
+                            let mut config = refreshed.config;
+                            if revision != session.config_revision
+                                && let (Some(policy), Some(current)) =
                                     (&mut config.policy, &session.config.policy)
-                                {
-                                    policy.policy = current.policy.clone();
+                            {
+                                policy.policy = current.policy.clone();
+                            }
+                            if let Some(through) = refreshed.model_through {
+                                if through < session.model_through {
+                                    config.model.clone_from(&session.config.model);
+                                } else {
+                                    session.model_through = through;
                                 }
+                            } else {
+                                config.model.clone_from(&session.config.model);
                             }
                             session.config = config;
                             let options = session.config.options();

@@ -893,7 +893,9 @@ export const useChatStore = defineStore("chat", () => {
   /**
    * Continues on a line: makes it the Session's default branch and shows it.
    * The new centre's transcript, its state and its goal and permission are the
-   * one round trip's result (design §14, §20.27).
+   * one round trip's result (design §14, §20.27). The model is that line's own
+   * read: when it fails the move stands, the menu offers no model, and a later
+   * pick writes one.
    */
   async function setDefaultBranch(sessionId: string, branchId: string): Promise<void> {
     const channel = channels.get(sessionId)
@@ -904,34 +906,43 @@ export const useChatStore = defineStore("chat", () => {
     // none, so an earlier accepted move still finishes rather than being
     // discarded as stale (design §14).
     const move = ++channel.moves
-    if (moved !== view.defaultBranchId) {
-      // The new centre's window is read before the stream changes hands: the
-      // transcript on screen, its running state and every action that names
-      // the centre keep naming the outgoing line until its replacement is
-      // ready, then both change together.
-      const branch = ensureBranch(channel, moved)
-      branch.opened = true
-      const loaded = await loadHistory(channel, moved)
-      // A later move owns the centre: its completion, not this earlier load,
-      // decides what the page shows.
-      if (channel.moves !== move) return
-      if (loaded === "ok") await adoptModel(channel, moved, branch)
-      if (channel.moves !== move) return
-      centre(channel, moved, branch)
-      if (loaded !== "ok") {
-        // The move stands, but the centre has no transcript to show: report it
-        // as `sync` reports the same failure rather than an empty conversation.
-        if (loaded === "failed" && view.status !== "closed") {
-          view.status = "failed"
-          view.error = channel.main.error
-        }
-        publish(channel)
-        return
+    if (moved === view.defaultBranchId) return
+    // The new centre's window is read before the stream changes hands: the
+    // transcript on screen, its running state and every action that names
+    // the centre keep naming the outgoing line until its replacement is
+    // ready, then both change together.
+    const branch = ensureBranch(channel, moved)
+    branch.opened = true
+    const loaded = await loadHistory(channel, moved)
+    // A later move owns the centre: its completion, not this earlier load,
+    // decides what the page shows.
+    if (channel.moves !== move) return
+    // The server's default has already moved: install the accepted centre even
+    // when a read that describes it fails, and show no stale policy while the
+    // new one is in flight.
+    view.permission = undefined
+    centre(channel, moved, branch)
+    if (loaded !== "ok") {
+      // The move stands, but the centre has no transcript to show: report it
+      // as `sync` reports the same failure rather than an empty conversation.
+      if (loaded === "failed" && view.status !== "closed") {
+        view.status = "failed"
+        view.error = channel.main.error
       }
-      await refreshGoal(channel)
-      if (view.status !== "closed") view.permission = await sessionPermission(sessionId)
       publish(channel)
+      return
     }
+    await adoptModel(channel, moved, branch).catch(() => undefined)
+    if (channel.moves !== move) return
+    publish(channel)
+    await refreshGoal(channel)
+    if (view.status === "closed") return
+    const policy = await sessionPermission(sessionId, moved)
+    // Only the move that still owns the centre applies its policy: a later
+    // move's read is the current one.
+    if (channel.moves !== move || view.defaultBranchId !== moved) return
+    view.permission = policy
+    publish(channel)
   }
 
   /**
@@ -965,10 +976,10 @@ export const useChatStore = defineStore("chat", () => {
     return client().call("session.input.withdraw", { sessionId, branchId, inputId, ...(steer === undefined ? {} : { steer }) }, readWithdrawResult)
   }
 
-  /** The default branch's policy, or undefined when the Session serves no permission method or the read fails. */
-  async function sessionPermission(sessionId: string): Promise<PermissionPolicy | undefined> {
+  /** The named line's policy, or undefined when the Session serves no permission method or the read fails. */
+  async function sessionPermission(sessionId: string, branchId = defaultBranch(sessionId)): Promise<PermissionPolicy | undefined> {
     if (!useConnectionStore().supports("session.permission.get")) return undefined
-    return client().call("session.permission.get", { sessionId, branchId: defaultBranch(sessionId) }, readPermissionState)
+    return client().call("session.permission.get", { sessionId, branchId }, readPermissionState)
       .then((state) => state.policy, () => undefined)
   }
 

@@ -14,10 +14,10 @@ mod accounts;
 mod acp;
 #[path = "cli_flow/hooks.rs"]
 mod hooks;
-#[path = "cli_flow/mcp.rs"]
-mod mcp;
 #[path = "cli_flow/lines.rs"]
 mod lines;
+#[path = "cli_flow/mcp.rs"]
+mod mcp;
 #[path = "cli_flow/permission.rs"]
 mod permission;
 #[path = "cli_flow/staged_update.rs"]

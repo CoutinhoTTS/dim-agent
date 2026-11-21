@@ -474,7 +474,7 @@ async fn a_gateway_line_reads_its_model_when_display_omits_the_configuration() {
                     send(&mut write,json!({"jsonrpc":"2.0","id":id,"error":{"code":-32000,"message":"Configuration was superseded by another update","data":{"appError":"configuration_superseded"}}})).await;
                 }
                 "session.summaries" => {
-                    send(&mut write, json!({"jsonrpc":"2.0","id":id,"result":[]})).await
+                    send(&mut write, json!({"jsonrpc":"2.0","id":id,"result":[]})).await;
                 }
                 "session.question.pending" => {
                     let branch = request["params"]["branchId"].clone();
@@ -556,6 +556,184 @@ async fn a_gateway_line_reads_its_model_when_display_omits_the_configuration() {
         option(&update, "model")["currentValue"],
         json!("B"),
         "the refresh keeps the line's own model instead of reseeding the reply's root model: {update}"
+    );
+    drop(read);
+    let _ = write.shutdown().await;
+    let _ = tokio::time::timeout(Duration::from_secs(5), finished).await;
+    mounted.dispose().await.unwrap();
+    root.shutdown().await.unwrap();
+    server.await.unwrap();
+}
+
+/// A superseded refresh re-reads the line's configuration at its own cutoff:
+/// a configuration older than that cutoff arrives late and must not replace
+/// the refreshed model.
+#[tokio::test]
+async fn a_gateway_refresh_keeps_its_cutoff_against_a_delayed_configuration() {
+    let home = tempfile::tempdir_in("/tmp").unwrap();
+    let endpoint = home.path().join("daemon.sock");
+    let cwd = home.path().to_str().unwrap().to_owned();
+    let listener = UnixListener::bind(&endpoint).unwrap();
+    std::fs::set_permissions(&endpoint, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let daemon_cwd = cwd.clone();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (read, mut write) = stream.into_split();
+        let mut read = BufReader::new(read);
+        let hello = frame(&mut read).await;
+        send(&mut write,json!({"jsonrpc":"2.0","id":hello["id"],"result":{"instanceId":"fixture","serverVersion":"fixture","protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.attach","session.attach.expectedCwd","session.branches","session.detach","session.exec.pending","session.history","session.history.display","session.history.detail","session.history.display.tail","session.history.display.transcript","session.history.latestTurn","session.input.pending","session.input_lookup","session.list","session.methods","session.model.get","session.model.update","session.question.pending","session.stop","session.submit","session.summaries","session.turn.get","provider.models.query"]}})).await;
+        let mut attachments = 0;
+        let mut delayed = false;
+        while let Some(request) = read_frame(&mut read).await {
+            let method = request["method"].as_str().unwrap_or_default().to_owned();
+            let id = request["id"].clone();
+            match method.as_str() {
+                "session.attach" => {
+                    attachments += 1;
+                    let (sequence, model) = if attachments == 1 { (5, "A") } else { (6, "C") };
+                    send(&mut write,json!({"jsonrpc":"2.0","id":id,"result":{"sequence":2,"cwd":daemon_cwd,"model":{"providerId":"fixture","modelId":model},"defaultBranch":{"branchId":"line-1","sequence":sequence}}})).await;
+                }
+                "session.branches" => {
+                    send(&mut write,json!({"jsonrpc":"2.0","id":id,"result":{"defaultBranchId":"line-1","branches":[{"branchId":"main","state":"open","head":2},{"branchId":"line-1","parentBranchId":"main","branchPoint":1,"state":"open","head":7}]}})).await;
+                }
+                "session.history.display" => {
+                    assert_eq!(request["params"]["branchId"], json!("line-1"));
+                    send(&mut write,json!({"jsonrpc":"2.0","id":id,"result":{"items":[],"through":5,"nextBefore":1,"nextAfter":5,"done":true}})).await;
+                }
+                "session.model.get" => {
+                    assert_eq!(request["params"]["branchId"], json!("line-1"));
+                    let through = request["params"]["through"].as_u64().unwrap_or(7);
+                    send(&mut write,json!({"jsonrpc":"2.0","id":id,"result":{"branchId":"line-1","through":through,"configuration":{"model":{"providerId":"fixture","modelId":"B"}}}})).await;
+                }
+                "session.methods" => {
+                    let methods: Vec<_> = [
+                        "session.input.pending",
+                        "session.question.pending",
+                        "session.exec.pending",
+                        "session.turn.get",
+                        "session.model.update",
+                    ]
+                    .into_iter()
+                    .map(|name| json!({"name":name,"mutating":name == "session.model.update"}))
+                    .collect();
+                    send(
+                        &mut write,
+                        json!({"jsonrpc":"2.0","id":id,"result":{"methods":methods}}),
+                    )
+                    .await;
+                }
+                "provider.models.query" => {
+                    send(
+                        &mut write,
+                        json!({"jsonrpc":"2.0","id":id,"result":{"models":[
+                        {"providerId":"fixture","model":{"id":"A","name":"A"}},
+                        {"providerId":"fixture","model":{"id":"B","name":"B"}},
+                        {"providerId":"fixture","model":{"id":"C","name":"C"}}],"next":null}}),
+                    )
+                    .await;
+                }
+                "session.model.update" => {
+                    assert_eq!(request["params"]["branchId"], json!("line-1"));
+                    send(&mut write,json!({"jsonrpc":"2.0","id":id,"error":{"code":-32000,"message":"Configuration was superseded by another update","data":{"appError":"configuration_superseded"}}})).await;
+                }
+                "session.summaries" => {
+                    send(&mut write, json!({"jsonrpc":"2.0","id":id,"result":[]})).await;
+                    if !delayed {
+                        delayed = true;
+                        send(&mut write,json!({"jsonrpc":"2.0","method":"session.event","params":{"sessionId":"session","branchId":"line-1","event":{"id":"configured-6","sequence":6,"create_at":1,"type":"context","name":"configured","data":{"timeline":"line-1","revision":"revision-1","provider_id":"fixture","model_id":"A"}}}})).await;
+                    }
+                }
+                "session.question.pending" => {
+                    let branch = request["params"]["branchId"].clone();
+                    let through = request["params"]["through"].as_u64().unwrap_or(5);
+                    send(&mut write,json!({"jsonrpc":"2.0","id":id,"result":{"branchId":branch,"through":through,"batches":[],"next":null}})).await;
+                }
+                "session.input.pending" => {
+                    let branch = request["params"]["branchId"].clone();
+                    let through = request["params"]["through"].as_u64().unwrap_or(5);
+                    send(&mut write,json!({"jsonrpc":"2.0","id":id,"result":{"branchId":branch,"through":through,"inputs":[],"next":null}})).await;
+                }
+                "session.exec.pending" => {
+                    let branch = request["params"]["branchId"].clone();
+                    let through = request["params"]["through"].as_u64().unwrap_or(5);
+                    send(&mut write,json!({"jsonrpc":"2.0","id":id,"result":{"branchId":branch,"through":through,"tasks":[],"next":null}})).await;
+                }
+                "session.turn.get" => {
+                    let branch = request["params"]["branchId"].clone();
+                    let through = request["params"]["through"].as_u64().unwrap_or(5);
+                    send(&mut write,json!({"jsonrpc":"2.0","id":id,"result":{"branchId":branch,"through":through,"turn":null,"output":null}})).await;
+                }
+                "session.detach" => {
+                    send(&mut write, json!({"jsonrpc":"2.0","id":id,"result":{}})).await;
+                    break;
+                }
+                other => panic!("unexpected {other}: {request}"),
+            }
+        }
+    });
+    let client = Client::connect(&ConnectionConfig {
+        endpoint,
+        server: Server {
+            program: "unused".into(),
+            embedded: false,
+        },
+        profile: Some(DaemonProfile::Product),
+        client_kind: "other",
+        client_name: "AcpGateway",
+        protocol_version: 3,
+    })
+    .await
+    .unwrap();
+    let (peer, transport) = tokio::io::duplex(64 * 1024);
+    let (reader, writer) = tokio::io::split(transport);
+    let (gateway, finished) = AcpGateway::new(
+        client,
+        Io {
+            reader: Box::new(reader),
+            writer: Box::new(writer),
+        },
+        None,
+        env!("CARGO_PKG_VERSION").to_owned(),
+    );
+    let root = rutis::Ctx::root().unwrap();
+    let mounted = root.plugin(gateway);
+    (&mounted).await.unwrap();
+    let (read, mut write) = tokio::io::split(peer);
+    let mut read = BufReader::new(read);
+    send(&mut write,json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{}}})).await;
+    let initialize = reply(&mut read, 1).await;
+    assert!(initialize["error"].is_null(), "{initialize}");
+    send(&mut write,json!({"jsonrpc":"2.0","id":2,"method":"session/load","params":{"sessionId":"session","cwd":cwd,"mcpServers":[]}})).await;
+    let loaded = reply(&mut read, 2).await;
+    assert!(loaded["error"].is_null(), "{loaded}");
+    assert_eq!(
+        option(&loaded, "model")["currentValue"],
+        json!("B"),
+        "the load shows the model `session.model.get` adopted for the line"
+    );
+    send(&mut write,json!({"jsonrpc":"2.0","id":3,"method":"session/set_config_option","params":{"sessionId":"session","configId":"model","value":"A"}})).await;
+    let refused = reply(&mut read, 3).await;
+    assert_eq!(
+        refused["error"]["data"]["nativeAppError"],
+        json!("configuration_superseded"),
+        "{refused}"
+    );
+    let refreshed = config_update(&mut read).await;
+    assert_eq!(
+        option(&refreshed, "model")["currentValue"],
+        json!("B"),
+        "the refresh reads the line's current configuration: {refreshed}"
+    );
+    send(
+        &mut write,
+        json!({"jsonrpc":"2.0","id":4,"method":"session/list","params":{}}),
+    )
+    .await;
+    let delayed = config_update(&mut read).await;
+    assert_eq!(
+        option(&delayed, "model")["currentValue"],
+        json!("B"),
+        "a configuration older than the refresh's cutoff must not replace its model: {delayed}"
     );
     drop(read);
     let _ = write.shutdown().await;
