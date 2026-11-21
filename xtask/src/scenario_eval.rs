@@ -5929,9 +5929,9 @@ enum SwitchFire {
     NotFired,
     /// The default branch moved and the next input was sent.
     Fired,
-    /// The target line had already ended, so the move answered
-    /// `branch_ended`: the run stops with its own outcome rather than a
-    /// harness error.
+    /// The target line had already ended, or a line above it was ending, so
+    /// the move answered `branch_ended` or `branch_target_protected`: the run
+    /// stops with its own outcome rather than a harness error.
     TargetEnded { line: String, error: String },
 }
 
@@ -5961,13 +5961,15 @@ async fn fire_switch(
         )
         .await
     {
-        if dim_client::app_error(&error) == Some("branch_ended") {
-            return Ok(SwitchFire::TargetEnded {
-                line: line.clone(),
-                error: error.to_string(),
-            });
+        match dim_client::app_error(&error) {
+            Some("branch_ended" | "branch_target_protected") => {
+                return Ok(SwitchFire::TargetEnded {
+                    line: line.clone(),
+                    error: error.to_string(),
+                });
+            }
+            _ => return Err(format!("the switch to {line} failed: {error}")),
         }
-        return Err(format!("the switch to {line} failed: {error}"));
     }
     submit(
         client,
@@ -7435,33 +7437,39 @@ mod tests {
         );
     }
 
-    /// A target line that ended before the move is its own outcome, read from
-    /// the refusal's application code rather than its text, and not a harness
-    /// error (design §14, model-prompts §9.8).
+    /// A target line that ended, or whose chain was ending, before the move is
+    /// its own outcome, read from the refusal's application code rather than
+    /// its text, and not a harness error (design §14, §20.26a; model-prompts
+    /// §9.8).
     #[tokio::test]
     async fn a_target_that_ended_before_the_move_is_its_own_outcome() {
-        let mut client = SwitchRecorder {
-            refusal: Some(dim_client::RpcError {
-                code: -32000,
-                message: "branch 2 has ended".into(),
-                data: Some(json!({"appError": "branch_ended"})),
-            }),
-            ..SwitchRecorder::default()
-        };
-        let mut switch = Some(PendingSwitch::new(Switch {
-            to: SwitchTarget::Id("2".into()),
-            message: "next".into(),
-            branch_id: None,
-        }));
-        let turn_end = json!({"type": "turn", "name": "end", "data": {}});
-        match fire_switch(&mut client, "session", &mut switch, "2", &turn_end).await {
-            Ok(SwitchFire::TargetEnded { line, error }) => {
-                assert_eq!(line, "2");
-                assert!(error.contains("branch_ended"), "{error}");
+        for (code, message) in [
+            ("branch_ended", "branch 2 has ended"),
+            ("branch_target_protected", "line 2 is ending or ended"),
+        ] {
+            let mut client = SwitchRecorder {
+                refusal: Some(dim_client::RpcError {
+                    code: -32000,
+                    message: message.into(),
+                    data: Some(json!({"appError": code})),
+                }),
+                ..SwitchRecorder::default()
+            };
+            let mut switch = Some(PendingSwitch::new(Switch {
+                to: SwitchTarget::Id("2".into()),
+                message: "next".into(),
+                branch_id: None,
+            }));
+            let turn_end = json!({"type": "turn", "name": "end", "data": {}});
+            match fire_switch(&mut client, "session", &mut switch, "2", &turn_end).await {
+                Ok(SwitchFire::TargetEnded { line, error }) => {
+                    assert_eq!(line, "2");
+                    assert!(error.contains(code), "{code}: {error}");
+                }
+                outcome => panic!("{code}: the ended target is its own outcome, not {outcome:?}"),
             }
-            outcome => panic!("the ended target is its own outcome, not {outcome:?}"),
+            assert_eq!(client.calls.len(), 1, "{code}: no input is sent to an ended line");
         }
-        assert_eq!(client.calls.len(), 1, "no input is sent to an ended line");
     }
 
     /// The committed set parses through the runner's own reader, its two
