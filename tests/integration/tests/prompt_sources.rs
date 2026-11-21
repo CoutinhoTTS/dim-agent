@@ -84,9 +84,17 @@ async fn system_is_static_and_instructions_and_environment_arrive_as_inputs() {
         &[
             "You are DimAgent.",
             "Safety:",
+            "Tone and communication:",
+            "Progress updates:",
+            "your thinking and most tool call details stay hidden",
+            "Before the first substantive tool call of a task",
             "<skills_instructions>",
             "SESSION-S",
         ],
+    );
+    assert!(
+        !system.contains("skip preamble") && !system.contains("several tool calls have passed"),
+        "{system}"
     );
     for absent in [
         "PROJECT-P",
