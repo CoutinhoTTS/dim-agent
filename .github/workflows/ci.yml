@@ -203,8 +203,9 @@ jobs:
         run: |
           echo "CPUs: $(nproc)"
           grep -E 'MemTotal|MemAvailable' /proc/meminfo
-          # Without a working bubblewrap the confined process tests return without running.
-          bwrap --ro-bind / / true
+          # The confined tests create a user namespace and a private /proc, so
+          # check the sandbox they use instead of a plain read-only bind.
+          bwrap --unshare-user --unshare-pid --proc /proc --dev /dev --ro-bind / / true
       - name: Build and lint the Rust workspace
         if: needs.changes.outputs.rust == 'true'
         shell: bash
