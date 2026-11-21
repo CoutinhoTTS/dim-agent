@@ -48,8 +48,8 @@ const props = withDefaults(defineProps<{
   modelPreview?: ModelMenuPreview
   /** False when this connection may not change the model; the menu then only names it. */
   modelSelectable: boolean
-  /** Sends the text and the draft's attachments in `mode`; resolves once the server accepted it. */
-  send: (text: string, attachments: DraftAttachments, mode: SubmitMode) => Promise<void>
+  /** Sends the text and the draft's attachments in `mode`, to `branchId` when the caller names the line the draft was written on; resolves once the server accepted it. */
+  send: (text: string, attachments: DraftAttachments, mode: SubmitMode, branchId?: string) => Promise<void>
   /** False where a draft cannot carry attachments, as on a new Session's page. */
   attachments?: boolean
   /** True when the Session stores long pastes through `attachment.put`. */
@@ -58,14 +58,14 @@ const props = withDefaults(defineProps<{
   searchFiles?: (query: string) => Promise<FileCandidate[]>
   /** The Session policy and its independent controls; absent where permission methods are unavailable. */
   permission?: { policy: PermissionPolicy | undefined; select: (preset: PermissionPreset) => Promise<void> }
-  stop?: () => Promise<void>
+  stop?: (branchId?: string) => Promise<void>
   /**
    * The messages the server holds for this branch, oldest first: the composer
    * recalls them into the draft through `withdrawHeld`.
    */
   held?: readonly QueuedInput[]
   /** Withdraws one held message; absent where the Session serves no `session.input.withdraw`. */
-  withdrawHeld?: (input: QueuedInput) => Promise<WithdrawResult["status"]>
+  withdrawHeld?: (input: QueuedInput, branchId?: string) => Promise<WithdrawResult["status"]>
   /** The Session whose stored image files a recalled message names, for its thumbnail. */
   sessionId?: string
   selectModel: (model: ModelId) => Promise<void> | void
@@ -452,6 +452,7 @@ async function submit(sendMode: SubmitMode = primaryMode.value): Promise<void> {
     return
   }
   const message = text.value
+  const line = props.branchId
   if (!dismissed.value && connection.supports("schedule.list") && /^\/schedule(?:d)?\s*$/i.test(message)) {
     await runCommand("scheduled")
     return
@@ -514,7 +515,7 @@ async function submit(sendMode: SubmitMode = primaryMode.value): Promise<void> {
         cursor = offset
       }
       body += linkMentions(message.slice(cursor), sentMentions)
-      await props.send(body, { images: sentImages.map((image) => image.file), pastes: sentPastes.map((paste) => paste.text), ...(gaps.length === 0 ? {} : { restored: gaps }), onProgress: (percent) => { uploadProgress.value = percent } }, sendMode)
+      await props.send(body, { images: sentImages.map((image) => image.file), pastes: sentPastes.map((paste) => paste.text), ...(gaps.length === 0 ? {} : { restored: gaps }), onProgress: (percent) => { uploadProgress.value = percent } }, sendMode, line)
       fileMentions.value = fileMentions.value.filter((mention) => !sentMentions.includes(mention))
       sentImages.forEach((image) => URL.revokeObjectURL(image.url))
       images.value = images.value.filter((image) => !sentImages.includes(image))
@@ -565,7 +566,7 @@ async function sendNowAndStop(): Promise<void> {
   for (const item of held.value) {
     if (props.withdrawHeld === undefined) break
     try {
-      if (await props.withdrawHeld(item) === "deleted") at = recall(item, at)
+      if (await props.withdrawHeld(item, line) === "deleted") at = recall(item, at)
     } catch (cause) {
       // A message that stays held is not recalled and so is not sent twice;
       // the reason is reported and the gesture goes on, as the TUI's Esc does.
@@ -585,7 +586,7 @@ async function sendNowAndStop(): Promise<void> {
     return
   }
   try {
-    await props.stop?.()
+    await props.stop?.(line)
   } catch (cause) {
     sendNow.value = false
     error.value = t("composer.sendNowFailed", { error: cause instanceof Error ? cause.message : String(cause) })
@@ -608,7 +609,7 @@ async function stop(): Promise<void> {
   if (sendNow.value) return
   error.value = ""
   try {
-    await props.stop?.()
+    await props.stop?.(props.branchId)
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : String(cause)
   }

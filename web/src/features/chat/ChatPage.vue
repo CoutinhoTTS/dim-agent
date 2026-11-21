@@ -89,17 +89,23 @@ const sessionCommands = computed(() => {
   }
 })
 
-function send(text: string, attachments: DraftAttachments, mode: SubmitMode): Promise<void> {
-  return chat.submit(props.sessionId, centred.value, text, attachments, mode)
+/**
+ * Sends the composer's draft to the line it was written on, which the
+ * composer names: a centre that moved while the gesture was out keeps the
+ * draft rather than writing it into the new conversation (design §14).
+ */
+function send(text: string, attachments: DraftAttachments, mode: SubmitMode, branchId = centred.value): Promise<void> {
+  if (branchId !== centred.value) return Promise.reject(new Error(t("composer.sendNowMoved")))
+  return chat.submit(props.sessionId, branchId, text, attachments, mode)
 }
 
-function stop(): Promise<void> {
-  return chat.stop(props.sessionId, centred.value)
+function stop(branchId = centred.value): Promise<void> {
+  return chat.stop(props.sessionId, branchId)
 }
 
-/** Withdraws one held message of main, so the composer can recall it into the draft; reports a message the run already adopted. */
-async function withdrawHeld(input: QueuedInput): Promise<WithdrawResult["status"]> {
-  const result = await chat.withdrawInput(props.sessionId, centred.value, input.id, undefined)
+/** Withdraws one held message of `branchId`, so the composer can recall it into the draft; reports a message the run already adopted. */
+async function withdrawHeld(input: QueuedInput, branchId = centred.value): Promise<WithdrawResult["status"]> {
+  const result = await chat.withdrawInput(props.sessionId, branchId, input.id, undefined)
   if (result.status === "notHeld") toast.push({ tone: "info", title: t("queue.notHeld") })
   return result.status
 }

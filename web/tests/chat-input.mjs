@@ -799,6 +799,44 @@ const promptTakes = {
   }),
 }
 
+test("interrupt and send now keeps its draft when the centre moves while a prompt holds the composer", async (t) => {
+  let releaseStop
+  const stopGate = new Promise((resolve) => { releaseStop = resolve })
+  const { root, view, submissions } = mount(t, "main")
+  const chat = globalThis.chatInputStores.chat
+  view.defaultBranchId = "main"
+  chat.stop = async (sessionId, branch) => {
+    globalThis.chatInputStops.push({ sessionId, branch })
+    await stopGate
+  }
+  await flush()
+  const field = all(root).find((element) => element.type === "textarea")
+  field.props.onFocus()
+  field.props["onUpdate:modelValue"]("carry on")
+  await flush()
+
+  const gesture = click(button(root, "composer.sendNowHint"))
+  await flush()
+  assert.deepEqual(globalThis.chatInputStops, [{ sessionId: "session", branch: "main" }], "the stop belongs to the line the gesture started on")
+
+  // The centre moves to a line whose prompt hides the composer: KeepAlive
+  // caches it, so its props keep naming the outgoing line while the page
+  // reads the live centre.
+  view.defaultBranchId = "worker"
+  const prompts = promptTakes.approval(view, "worker")
+  await prompts.take()
+  assert.equal(all(root).some((element) => element.type === "textarea"), false, "the approval takes the composer's place")
+  releaseStop()
+  await gesture
+  await flush()
+
+  assert.deepEqual(submissions, [], "the draft is not sent to the line the centre moved to")
+  await prompts.clear()
+  const back = all(root).find((element) => element.type === "textarea")
+  assert.equal(back.value, "carry on", "the whole draft is kept")
+  assert.match(text(root), /composer\.sendNowMoved/, "the composer says why nothing was sent")
+})
+
 for (const [branchId, kind] of [["main", "question"], ["main", "approval"], ["worker", "question"], ["worker", "approval"]]) {
   test(`${kind} on ${branchId}: a prompt that takes the composer's place keeps a withdrawn draft through a failed stop`, async (t) => {
     const picture = storedImage("stored-before")
