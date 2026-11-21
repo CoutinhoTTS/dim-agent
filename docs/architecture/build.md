@@ -334,7 +334,10 @@ Per [ADR 026](../adr/026-verification-tiers-and-ci-governance.md) D4, synchronou
 | `web` (stage + test + lint + build) | L1 / L2 | Self-hosted Windows x64 | ≤ 5 min | 15 min | Isolated npm workspace check |
 | `windows-cli` (`dim-cli --lib`) | L3 | Self-hosted Windows x64 | ≤ 1 min warm (≤ 4 min cold) | 15 min | Per-runner target dir capped at 6 GiB |
 | `macos-native` (macOS Rust + packaging) | L3 | Self-hosted macOS ARM64 | ≤ 6 min | 30 min | `CARGO_BUILD_JOBS=4`, checkout `target/` |
-| `verify (linux)` (build + clippy + tests) | L1 / L2 / L3 | Self-hosted Linux x64 (`dim-verify`) | ≤ 15 min | 75 min | `CARGO_BUILD_JOBS=8`, `CARGO_PROFILE_DEV_DEBUG=0`, CPU-scaled `DIM_TEST_JOBS` / `--test-threads`, 15 min target cap |
+| `verify (linux)` (build + clippy + tests) | L1 / L2 / L3 | Self-hosted Linux x64 (`dim-verify`) | ≤ 15 min target (steady state not yet measured at these settings) | 75 min | `CARGO_BUILD_JOBS=8`, `CARGO_PROFILE_DEV_DEBUG=0`, CPU-scaled `DIM_TEST_JOBS` / `--test-threads`, 15 min target cap |
+| `code-layout` (native layout matrix) | L3 | Hosted Linux, macOS, Windows | Not yet recorded | 10 / 30 / 240 min per job | Hosted runners; `native-layout` runs on layout changes |
+
+The `verify (linux)` row records a target rather than a measurement: no full green run exists at these settings yet. The last six full runs on the `dim-verify` pool before this change completed in 18m17s, 21m18s, 23m42s, 21m29s, 30m49s and 25m38s (runs 44716244403, 44717853591, 44718768375, 44719273152, 44722644428, 44724315336). Record the new steady state once a full green run at these settings completes.
 
 Approaching or exceeding a steady-state budget is treated as a regression and resolved by narrowing path scope, optimizing slow tests, improving parallelism or demoting heavy cases to Retained — never by raising job or target timeouts alone. Any change that adds a required PR check or widens path selection must disclose its incremental wall-clock cost, added compile dependencies and target runner pool.
 
