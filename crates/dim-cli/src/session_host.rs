@@ -346,6 +346,10 @@ struct Worker {
     /// Browser callbacks its local listener captured.
     login_callbacks: (UnboundedSender<McpCallback>, UnboundedReceiver<McpCallback>),
     opening_reads: Vec<(u64, OpeningRead)>,
+    /// The centre handoffs since this interface started: an opening read that
+    /// left before the last one describes a line that is no longer the
+    /// conversation's (design §14).
+    moves: u64,
     /// The composer's context reading is out of date: a model request on main
     /// finished, a run on main ended, a compaction result arrived on main, or
     /// the session or its model changed.
@@ -379,7 +383,12 @@ struct OutputWatch {
 
 enum OpeningRead {
     Catalog(ModelId),
-    Permissions,
+    /// The policy of `line` as of the move `generation`: a reply that arrives
+    /// after the conversation moved on is stale (design §14).
+    Permissions {
+        line: String,
+        generation: u64,
+    },
     Skills,
 }
 
@@ -776,6 +785,7 @@ impl Worker {
             login: None,
             login_callbacks: unbounded_channel(),
             opening_reads: Vec::new(),
+            moves: 0,
             context_stale: false,
             context_request: None,
             last_usage: None,
@@ -1067,6 +1077,9 @@ impl Worker {
                 }
             }
         }
+        // This attachment's centre is the first move of this interface; the
+        // reads it starts belong to this generation (design §14).
+        self.moves += 1;
         self.focus = self.default_branch.clone();
         let conversation_line = self.focus.clone();
         self.discover_branch(&conversation_line);
@@ -1123,7 +1136,10 @@ impl Worker {
             reads.push((
                 "session.permission.get",
                 json!({"sessionId":session_id,"branchId":self.default_branch}),
-                OpeningRead::Permissions,
+                OpeningRead::Permissions {
+                    line: self.default_branch.clone(),
+                    generation: self.moves,
+                },
             ));
         }
         if self.client.offers("skills.catalog") {
@@ -1167,7 +1183,10 @@ impl Worker {
                     });
                 self.send(catalog_features(entry));
             }
-            OpeningRead::Permissions => {
+            OpeningRead::Permissions { line, generation } => {
+                if generation != self.moves || line != self.default_branch {
+                    return;
+                }
                 let policy = result
                     .map_err(|error| error.to_string())
                     .and_then(|value| {
@@ -4837,7 +4856,7 @@ impl Worker {
             && let EventContent::PermissionChanged(data) = &event.content
         {
             self.opening_reads
-                .retain(|(_, kind)| !matches!(kind, OpeningRead::Permissions));
+                .retain(|(_, kind)| !matches!(kind, OpeningRead::Permissions { .. }));
             self.send(Update::Permissions(Ok(data.policy.clone())));
         }
         if branch_id == self.default_branch
@@ -4969,6 +4988,7 @@ impl Worker {
         {
             Ok(reply) => {
                 self.default_branch = reply.default_branch_id;
+                self.moves += 1;
                 self.continue_on_line().await;
             }
             Err(error) => self.send(Update::LineRefusal {
@@ -5023,7 +5043,13 @@ impl Worker {
         if self.client.supports(&permission::PRESET_METHODS) {
             let params = json!({"sessionId":self.session_id,"branchId":self.default_branch});
             match self.client.send("session.permission.get", params).await {
-                Ok(id) => self.opening_reads.push((id, OpeningRead::Permissions)),
+                Ok(id) => self.opening_reads.push((
+                    id,
+                    OpeningRead::Permissions {
+                        line: self.default_branch.clone(),
+                        generation: self.moves,
+                    },
+                )),
                 Err(error) => self.send(Update::Notice(format!("permission: {error}"))),
             }
         }

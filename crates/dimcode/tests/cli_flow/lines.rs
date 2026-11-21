@@ -1063,3 +1063,128 @@ fn tui_continuing_on_a_line_without_a_configuration_read_reports_it_once() {
     terminal.wait();
     daemon.join().unwrap();
 }
+
+/// A policy read left before the conversation moved on does not become the new
+/// centre's policy: the reply belongs to the line and the move that started it
+/// (design §14). The new centre's read is released first, then the earlier
+/// line's, so only the guard can keep the older reply out of the display.
+#[test]
+fn tui_a_late_policy_reply_from_an_earlier_line_does_not_replace_the_centres() {
+    let home = Home::new();
+    let (moved, move_seen) = std::sync::mpsc::channel();
+    let (back, back_seen) = std::sync::mpsc::channel();
+    let (new_read, new_seen) = std::sync::mpsc::channel();
+    let (release_old, release_old_rx) = std::sync::mpsc::channel::<()>();
+    let daemon = home.daemon(move |wire| {
+        wire.hello(&[
+            "session.methods",
+            "session.branches",
+            "session.branch.get",
+            "session.branch_set_default",
+            "session.permission.get",
+            "session.permission.update",
+        ]);
+        let attach = wire.read("session.attach");
+        let mut record = attach_record(&attach);
+        record["defaultBranch"] = json!({"branchId":"main","sequence":8});
+        wire.reply(&attach, record);
+        let branches = next(wire);
+        assert_eq!(branches["method"], "session.branches");
+        wire.reply(
+            &branches,
+            directory("main", &[("main", None), ("line-1", Some("main"))]),
+        );
+        let root = next(wire);
+        assert_eq!(root["method"], "session.history");
+        wire.reply(&root, history(8, vec![]));
+        let mut usage = |_request: &Value| None;
+        let mut moves = 0;
+        let mut held: Option<Value> = None;
+        loop {
+            let request = next_usage(wire, &mut usage);
+            let branch = request["params"]["branchId"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned();
+            match request["method"].as_str().unwrap_or_default() {
+                "session.permission.get" => match (moves, branch.as_str()) {
+                    (0, "main") => wire.reply(
+                        &request,
+                        json!({"version":1,"policy":policy("workspace-write")}),
+                    ),
+                    (1, "line-1") => held = Some(request),
+                    (2, "main") => {
+                        wire.reply(&request, json!({"version":5,"policy":policy("read-only")}));
+                        new_read.send(()).unwrap();
+                        release_old_rx.recv_timeout(PATIENCE).unwrap();
+                        wire.reply(
+                            &held.take().expect("the earlier line's read"),
+                            json!({"version":4,"policy":policy("full-access")}),
+                        );
+                        wire.notice(
+                            "session.event",
+                            json!({"sessionId":"session","branchId":"main","event":said(9, "after the late policy")}),
+                        );
+                        wire.notice(
+                            "session.event",
+                            json!({"sessionId":"session","branchId":"main","event":applied(10, "input-9")}),
+                        );
+                    }
+                    other => panic!("permission read on {other:?}"),
+                },
+                "session.branch_set_default" => {
+                    moves += 1;
+                    let target = if moves == 1 { "line-1" } else { "main" };
+                    assert_eq!(branch, target);
+                    wire.reply(&request, json!({"defaultBranchId":target}));
+                    if moves == 1 {
+                        moved.send(()).unwrap();
+                    } else {
+                        back.send(()).unwrap();
+                    }
+                }
+                "session.branch.get" => {
+                    assert_eq!(branch, "line-1");
+                    wire.reply(&request, entry("line-1", "main"));
+                }
+                "session.history" => wire.reply(&request, history(8, vec![])),
+                other => panic!("unexpected {other}: {request}"),
+            }
+        }
+    });
+    let mut command = home.command();
+    sized(&mut command, 110, 34);
+    let mut terminal = Terminal::resume_tui(command);
+    terminal.until("test / model");
+    terminal.until("⏵⏵ Workspace write");
+
+    terminal.write(b"/lines\r");
+    terminal.until("Main line");
+    terminal.write(b"\x1b[B");
+    terminal.write(b"p");
+    move_seen.recv_timeout(PATIENCE).unwrap();
+
+    // The panel stays open across the move; the root becomes the centre again
+    // and its policy is read anew.
+    terminal.write(b"\x1b[A");
+    terminal.write(b"p");
+    back_seen.recv_timeout(PATIENCE).unwrap();
+    let from = terminal.consumed;
+    new_seen.recv_timeout(PATIENCE).unwrap();
+    terminal.until_anywhere("⏵⏵ Read only");
+
+    release_old.send(()).unwrap();
+    terminal.until_anywhere("after the late policy");
+    let painted = terminal.painted_rows(from);
+    assert!(
+        painted.iter().any(|row| row.contains("⏵⏵ Read only")),
+        "the new centre's own policy is shown: {painted:?}"
+    );
+    assert!(
+        !painted.iter().any(|row| row.contains("⏵⏵ Full access")),
+        "the earlier line's late reply does not replace it: {painted:?}"
+    );
+    home.kill(&terminal);
+    terminal.wait();
+    daemon.join().unwrap();
+}
