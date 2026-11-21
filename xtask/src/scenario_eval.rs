@@ -7468,7 +7468,11 @@ mod tests {
                 }
                 outcome => panic!("{code}: the ended target is its own outcome, not {outcome:?}"),
             }
-            assert_eq!(client.calls.len(), 1, "{code}: no input is sent to an ended line");
+            assert_eq!(
+                client.calls.len(),
+                1,
+                "{code}: no input is sent to an ended line"
+            );
         }
     }
 
