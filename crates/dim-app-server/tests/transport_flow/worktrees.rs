@@ -9,8 +9,9 @@ use dim_agent_capabilities::{
     workspace_tools::WorkspaceToolsConfig,
 };
 use dim_agent_runtime::testing::chain_events;
-use dim_agent_runtime::{Session, SessionConfig};
+use dim_agent_runtime::{AgentError, Session, SessionConfig};
 use dim_agent_types::{ApprovalCallData, InputMode, PermissionPolicy, PermissionPreset};
+use dim_app_server::protocol::SessionOrigin;
 use dim_app_server::storage::SessionStore;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -1058,6 +1059,104 @@ async fn unregistered_remove_refuses_a_task_directory_a_session_uses() {
         std::fs::read_to_string(filled.join("notes.txt")).unwrap(),
         "keep"
     );
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// A Session created after the content check but before the removal keeps
+/// the directory: the store re-checks under the ownership lock creation uses.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unregistered_remove_refuses_a_session_created_after_the_content_check() {
+    let work = Work::new();
+    let server = host(&work).await;
+    let task = unregistered_task(&work, "aaaaaa");
+    std::fs::create_dir_all(task.join("repo")).unwrap();
+    let hold = server
+        .hold_next_unregistered_removal()
+        .expect("the ManagedWorktrees part exists");
+    let mut remover = Client::new_version(&server, false, 3).await;
+    let removal = tokio::spawn(async move {
+        remover
+            .rpc("worktree.remove", json!({"taskId": "aaaaaa"}))
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(30), hold.reached.notified())
+        .await
+        .expect("the removal reaches the end of its content check");
+    let mut creator = Client::new_version(&server, false, 3).await;
+    assert_ok(&creator.rpc("session.create", json!({"cwd": task})).await);
+    hold.release.notify_one();
+    let refused = removal.await.unwrap();
+    assert_eq!(refused["error"]["data"]["appError"], "worktree_in_use");
+    assert!(task.is_dir());
+    assert!(task.join("repo").is_dir());
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// A removal that holds the ownership lock first deletes the directory, so a
+/// creation queued behind it fails its own cwd check instead of leaving a
+/// Session that points at a deleted workspace.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn session_creation_after_an_unregistered_removal_fails_its_workspace_check() {
+    let work = Work::new();
+    let server = host(&work).await;
+    let store = server.service::<SessionStore>().unwrap();
+    let task = unregistered_task(&work, "aaaaaa");
+    std::fs::create_dir_all(task.join("repo")).unwrap();
+    let reached = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let removal = tokio::spawn({
+        let store = store.clone();
+        let task = task.clone();
+        let reached = reached.clone();
+        let release = release.clone();
+        async move {
+            store
+                .remove_unregistered_directory(task, move |path| {
+                    Box::pin(async move {
+                        reached.notify_one();
+                        release.notified().await;
+                        tokio::fs::remove_dir_all(&path)
+                            .await
+                            .map_err(|error| AgentError::Storage(error.to_string()))
+                    })
+                })
+                .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(30), reached.notified())
+        .await
+        .expect("the removal holds the ownership lock");
+    let config = SessionConfig {
+        cwd: task.to_string_lossy().into_owned(),
+        ..Default::default()
+    };
+    let creation = tokio::spawn({
+        let store = store.clone();
+        async move {
+            store
+                .create_owned_session(
+                    "fixture-session",
+                    &config,
+                    "fixture-agent",
+                    4,
+                    None,
+                    SessionOrigin::Client,
+                    None,
+                )
+                .await
+        }
+    });
+    release.notify_one();
+    let error = creation
+        .await
+        .unwrap()
+        .expect_err("the removed workspace fails the creation check");
+    assert!(error.to_string().contains("no longer exists"), "{error}");
+    removal.await.unwrap().unwrap();
+    assert!(!task.exists());
+    assert!(!store.has_records("fixture-session").await.unwrap());
     server.shutdown();
     server.join().await.unwrap();
 }

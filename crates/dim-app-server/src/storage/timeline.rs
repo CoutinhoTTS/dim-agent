@@ -1796,6 +1796,28 @@ impl SessionStore {
         Ok(removed > 0)
     }
 
+    /// Removes an unregistered directory under the store's exclusion: the
+    /// ownership lock is held from the final workspace check through
+    /// `remove`, so a Session created after the check fails this call and a
+    /// creation after the removal re-checks its missing workspace. The
+    /// directory must have no stored Session workspace at or under it;
+    /// `remove` performs the deletion.
+    pub async fn remove_unregistered_directory(
+        &self,
+        path: PathBuf,
+        remove: impl FnOnce(PathBuf) -> BoxFuture<'static, Result<()>>,
+    ) -> Result<()> {
+        let _ownership = self.ownership.lock().await;
+        let sessions = self.sessions_under_workspace(&path).await?;
+        if let Some(session) = sessions.first() {
+            return Err(AgentError::InvalidInput(format!(
+                "Session {session} uses {}",
+                path.display()
+            )));
+        }
+        remove(path).await
+    }
+
     /// Lists the Session associations of a recorded directory. An unknown
     /// directory or a candidate without remaining associations has no usages.
     pub async fn worktree_usages(

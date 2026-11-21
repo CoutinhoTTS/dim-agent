@@ -213,6 +213,16 @@ pub struct FollowHold {
     pub release: tokio::sync::Notify,
 }
 
+/// Feature `testing`: a hold on one unregistered worktree removal after its
+/// content check and before the store's final Session check. It notifies
+/// `reached` once held and returns once `release` is notified.
+#[cfg(feature = "testing")]
+#[derive(Default)]
+pub struct UnregisteredRemovalHold {
+    pub reached: tokio::sync::Notify,
+    pub release: tokio::sync::Notify,
+}
+
 pub struct RunningServer {
     pub unix_path: Option<PathBuf>,
     pub pipe_name: Option<String>,
@@ -310,6 +320,15 @@ impl RunningServer {
         self.root
             .get::<ConnectionHub>()
             .map(|hub| hub.hold_next_follow())
+    }
+    /// Holds the next unregistered worktree removal after its content check,
+    /// so a test can create a Session before the store's final check. Feature
+    /// `testing` only.
+    #[cfg(feature = "testing")]
+    pub fn hold_next_unregistered_removal(&self) -> Option<Arc<UnregisteredRemovalHold>> {
+        self.root
+            .get::<worktrees::ManagedWorktrees>()
+            .map(|managed| managed.hold_next_unregistered_removal())
     }
     /// Makes the next attach fail before it registers its listener. Feature
     /// `testing` only.

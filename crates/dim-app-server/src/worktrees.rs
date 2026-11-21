@@ -32,6 +32,8 @@ const ALLOCATION_ATTEMPTS: usize = 3;
 pub struct ManagedWorktrees {
     root: PathBuf,
     sessions: Arc<Store>,
+    #[cfg(feature = "testing")]
+    removal_hold: std::sync::Mutex<Option<Arc<crate::UnregisteredRemovalHold>>>,
 }
 
 /// A worktree this call created, with what it needs to be reported or
@@ -140,7 +142,30 @@ impl From<AgentError> for WorktreeError {
 
 impl ManagedWorktrees {
     pub fn new(root: PathBuf, sessions: Arc<Store>) -> Self {
-        Self { root, sessions }
+        Self {
+            root,
+            sessions,
+            #[cfg(feature = "testing")]
+            removal_hold: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// Holds the next unregistered removal after its content check and
+    /// before the store's final Session check. Feature `testing` only.
+    #[cfg(feature = "testing")]
+    pub(crate) fn hold_next_unregistered_removal(&self) -> Arc<crate::UnregisteredRemovalHold> {
+        let hold = Arc::new(crate::UnregisteredRemovalHold::default());
+        *self.removal_hold.lock().expect("removal hold") = Some(hold.clone());
+        hold
+    }
+
+    #[cfg(feature = "testing")]
+    async fn wait_for_unregistered_removal_hold(&self) {
+        let hold = self.removal_hold.lock().expect("removal hold").take();
+        if let Some(hold) = hold {
+            hold.reached.notify_one();
+            hold.release.notified().await;
+        }
     }
 
     /// Creates one worktree for `source` at `$HOME/worktrees/<task-id>/<repo>`
@@ -884,7 +909,21 @@ impl ManagedWorktrees {
             }
         }
         drop(children);
-        remove_checked_entry(&entry, &empty_children, force).await?;
+        #[cfg(feature = "testing")]
+        self.wait_for_unregistered_removal_hold().await;
+        self.sessions
+            .remove_unregistered_directory(entry, move |entry| {
+                Box::pin(async move {
+                    remove_checked_entry(&entry, &empty_children, force)
+                        .await
+                        .map_err(|error| match error {
+                            WorktreeError::InUse(message) => AgentError::InvalidInput(message),
+                            error => AgentError::Storage(error.message().to_owned()),
+                        })
+                })
+            })
+            .await
+            .map_err(WorktreeError::from)?;
         Ok(true)
     }
 
