@@ -1,11 +1,8 @@
 //! Integration tests for the persistent shell execution capability.
 //! Recovery contract: docs/design/shell-exec-recovery.md.
 
-#![cfg(unix)]
-#[path = "local_support/compaction.rs"]
-mod compaction_support;
-#[path = "local_support/process.rs"]
-mod process_support;
+use crate::compaction_support;
+use crate::process_support;
 use dim_agent_capabilities::toolchain::ToolchainSourceHost;
 use dim_agent_capabilities::{
     adapters::DefaultPrepareModelPlugin,

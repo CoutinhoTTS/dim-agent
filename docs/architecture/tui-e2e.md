@@ -26,7 +26,7 @@ node scripts/tui-tmux/run.mjs --artifacts /tmp/tui-failure # failed cases go her
 ```
 
 A migrated case in `crates/dimcode/tests/cli_flow*` runs only here: it is
-`#[ignore]`d, and `cargo test -p dimcode --test cli_flow -- --ignored` runs it
+`#[ignore]`d, and `cargo test -p dimcode --test cli_flow --test cli_tui_flow --test cli_session_flow --test cli_daemon_flow -- --ignored` runs it
 locally beside the production flows. A case without a scenario stays selected by
 CI.
 
@@ -373,11 +373,14 @@ tmux scenario: `unix_npm_wrapper_…`, `tui_provider_management_…`,
 for the tmux suite: 10; moved to the tmux suite: 14; still ignored with no
 scenario: `a_cold_ui_leaf_…`, `a_resumed_session_of_an_older_protocol_opens`,
 `managed_worktree_tui_…`, `the_model_label_shows_a_configured_profile_effort`;
-selected by CI: 287 in `cli_flow` plus the 4 `ui_leaf` cases (291).
+selected by CI: 287 in the `cli_flow*` targets; the 4 `ui_leaf` cases run in
+their own target.
 
-The `cli_flow` target also holds the line-mode, ACP, daemon and production flows
-that CI keeps: 417 cases, of which 405 run by default and 12 are `--ignored`
-production flows that the CI selection names one by one. The five cases #1805
+The `cli_flow*` targets (`cli_flow`, `cli_tui_flow`, `cli_daemon_flow`,
+`cli_session_flow`) also hold the line-mode, ACP, daemon and production flows
+that CI keeps: 434 cases on Linux (432 on macOS), of which 422 run by default
+(420 on macOS) and 12 are `--ignored` production flows in `cli_flow` that the
+CI selection names one by one. The five cases #1805
 merged, and the one case #1805 added, are recorded in the dispositions above
 rather than listed here.
 
@@ -407,7 +410,7 @@ No CI job runs a **migrated** TUI flow. The 10 cases whose behavior a tmux
 scenario proves are `#[ignore]`d with the reason "TUI E2E runs in the local tmux
 suite", so the ordinary `cargo test --workspace` selection compiles them and
 runs none of them; the production `--ignored` step names only the flows CI
-keeps. The other 287 `cli_flow` TUI cases and the 4 `ui_leaf` cases have no
+keeps. The other 287 `cli_flow*` TUI cases and the 4 `ui_leaf` cases have no
 replacement yet and stay selected by CI, because dropping them would remove
 runtime coverage that only they assert (#1810). Terminal E2E coverage that has
 moved is a local verification step: a display-less runner and the suite's
@@ -419,9 +422,9 @@ component and protocol tests do not already cover.
 CI keeps:
 
 - Ordinary workspace tests: the `dim-cli` component render and keyboard tests,
-  `dim-app-server` protocol and transport flows, the 405 non-TUI `cli_flow`
+  `dim-app-server` protocol and transport flows, the 422 non-TUI `cli_flow*`
   cases (`--no-tui`, `exec`, piped prompts, ACP, `staged_update::recovery::`,
-  and the scripted daemon flows), and the 291 TUI cases #1810 still tracks
+  and the scripted daemon flows), and the 287 TUI cases #1810 still tracks
   (including the 6 `staged_update::tui_update::` cases, which use the debug-only
   `DIM_TEST_RELEASE_BUILD=1` override instead of a separate release-stamped
   build step).
