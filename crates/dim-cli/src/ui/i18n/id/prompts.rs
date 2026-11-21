@@ -39,6 +39,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Waiting for this Session's state after the switch." => {
             "Menunggu status sesi ini setelah peralihan."
         }
+        "Waiting for the resumed Session to load." => "Menunggu sesi yang dilanjutkan dimuat.",
         "Checking for updates…" => "Memeriksa pembaruan…",
         "DimCode {version} is up to date." => "DimCode {version} sudah terbaru.",
         "Skip this version" => "Lewati versi ini",

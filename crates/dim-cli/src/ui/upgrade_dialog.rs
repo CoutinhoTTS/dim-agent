@@ -56,9 +56,12 @@ pub struct UpgradeDialog {
 pub enum Blocked {
     /// Work in the shown Session, or a prompt waiting for an answer.
     Busy,
-    /// A Session was just switched to; the daemon has not reported its state
-    /// yet.
+    /// A Session was just switched to; the daemon has not reported every
+    /// live line's state yet.
     Session,
+    /// A startup resume has not resolved: the resumed Session's activity is
+    /// not known yet.
+    Startup,
 }
 
 impl UpgradeDialog {
@@ -128,6 +131,7 @@ impl UpgradeDialog {
                     Blocked::Session => {
                         t("Waiting for this Session's state after the switch.")
                     }
+                    Blocked::Startup => t("Waiting for the resumed Session to load."),
                 }
                 .to_owned(),
             );

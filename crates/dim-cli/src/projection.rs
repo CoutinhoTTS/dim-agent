@@ -159,6 +159,7 @@ impl Projection {
                         parent: Some(parent.to_owned()),
                         purpose,
                         state: LineState::Waiting,
+                        reported: false,
                         cut: Some(LineCut {
                             sequence,
                             messages: inherited + own,
@@ -1361,6 +1362,7 @@ impl Projection {
             } else {
                 LineState::Waiting
             },
+            reported: false,
             cut: entry
                 .branch_point
                 .zip(entry.cut_messages)
@@ -2859,6 +2861,7 @@ mod tests {
                 parent: Some("main".into()),
                 purpose: "parser race hypothesis".into(),
                 state: LineState::Waiting,
+                reported: false,
                 cut: Some(LineCut {
                     sequence: 5,
                     messages: 2,
@@ -2943,6 +2946,7 @@ mod tests {
                 parent: Some("b-7c".into()),
                 purpose: "review the change".into(),
                 state: LineState::Waiting,
+                reported: false,
                 cut: Some(LineCut {
                     sequence: 12,
                     messages: 3,

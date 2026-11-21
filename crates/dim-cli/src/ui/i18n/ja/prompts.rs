@@ -39,6 +39,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Waiting for this Session's state after the switch." => {
             "切り替え後のセッションの状態を待っています。"
         }
+        "Waiting for the resumed Session to load." => {
+            "再開したセッションの読み込みを待っています。"
+        }
         "Checking for updates…" => "更新を確認しています…",
         "DimCode {version} is up to date." => "DimCode {version} は最新です。",
         "Skip this version" => "このバージョンをスキップ",

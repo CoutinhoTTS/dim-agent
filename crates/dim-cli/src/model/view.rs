@@ -229,6 +229,9 @@ pub struct LineView {
     /// The first line of the purpose it was opened with.
     pub purpose: String,
     pub state: LineState,
+    /// The daemon has reported this line's running state; until it does,
+    /// the line stands in the directory but its activity is unknown.
+    pub reported: bool,
     /// Where it was cut from its parent; `None` for `main`.
     pub cut: Option<LineCut>,
 }
@@ -469,10 +472,6 @@ pub struct ViewSnapshot {
     pub projection_id: u64,
     /// The shown line's history has loaded: its transcript can be laid out.
     pub history_complete: bool,
-    /// The daemon has reported the shown line's running state: `running` is
-    /// the Session's activity, not the empty projection a switch publishes
-    /// before the first `session.state` notice.
-    pub state_reported: bool,
     /// Whether history older than the loaded window exists, and whether an
     /// earlier read is in flight; `/earlier`, PageUp at the drawn top and the
     /// load-more row act on it.

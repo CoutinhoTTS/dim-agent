@@ -311,6 +311,7 @@ fn run_terminal(
     app.fullscreen = full.is_some();
     app.initial = surroundings.initial;
     app.awaiting_window = surroundings.resume;
+    app.startup_resume = surroundings.resume;
     app.terminal_clipboard =
         terminal.clipboard_protocol() && crate::clipboard::terminal::native_unreachable();
     app.host.send(Command::LoginStatus(DIM_OAUTH_ID.into()));
@@ -1216,6 +1217,9 @@ struct App {
     landing: Option<(String, bool)>,
     /// A session was just switched; the next snapshot decides the window.
     awaiting_window: bool,
+    /// A startup `--resume` whose attach has not resolved yet: the interface
+    /// is not Home even though `session_id` is still empty.
+    startup_resume: bool,
     /// What to write once the switched-to history is out.
     pending_boundary: Option<SwitchKind>,
     /// The line the transcript switched to, until its boundary row is out.
@@ -1642,6 +1646,7 @@ impl App {
             reveal_pending: false,
             landing: None,
             awaiting_window: false,
+            startup_resume: false,
             pending_boundary: None,
             pending_line: None,
             window_info: (0, 0),
@@ -2057,17 +2062,27 @@ impl App {
     }
 
     /// Why `Update now` cannot leave yet, if it cannot: work in the shown
-    /// Session, or a Session whose current state has not been reported yet.
+    /// Session, a live line whose current state the daemon has not reported
+    /// yet, or a startup resume whose attach has not resolved. A line that
+    /// has ended, or that the tree never built, is settled without a report.
     /// Home has no Session state to wait for.
     fn update_blocked(&self) -> Option<Blocked> {
         if self.shell.is_some() || self.busy_reason().is_some() {
             return Some(Blocked::Busy);
         }
+        if self.startup_resume && self.session_id.is_empty() {
+            return Some(Blocked::Startup);
+        }
         let waiting = !self.session_id.is_empty()
-            && self
-                .snapshot
-                .as_ref()
-                .is_none_or(|snapshot| !snapshot.state_reported);
+            && self.snapshot.as_ref().is_none_or(|snapshot| {
+                snapshot.lines.is_empty()
+                    || snapshot.lines.iter().any(|line| {
+                        matches!(
+                            line.state,
+                            LineState::Main | LineState::Waiting | LineState::Working
+                        ) && !line.reported
+                    })
+            });
         waiting.then_some(Blocked::Session)
     }
 
@@ -3150,6 +3165,7 @@ impl App {
             }
             Update::StartupFailed { message, resumable } => {
                 self.prompt = None;
+                self.startup_resume = false;
                 self.failure = Some(message);
                 self.failure_resumable = resumable;
                 // A first message the invocation supplied has no Session
@@ -7314,6 +7330,7 @@ impl App {
     }
 
     fn switch_session(&mut self, session_id: String, kind: SwitchKind) {
+        self.startup_resume = false;
         self.report_error = None;
         self.release_compaction_details();
         let first = self.session_id.is_empty();
@@ -9649,6 +9666,7 @@ mod tests {
                         parent: None,
                         purpose: String::new(),
                         state: LineState::Main,
+                        reported: true,
                         cut: None,
                     },
                     LineView {
@@ -9656,6 +9674,7 @@ mod tests {
                         parent: Some("main".into()),
                         purpose: "parser race".into(),
                         state: LineState::Working,
+                        reported: true,
                         cut: None,
                     },
                 ],
@@ -10239,18 +10258,50 @@ mod tests {
     fn switched_placeholder(session_id: &str) -> ViewSnapshot {
         let projection = crate::projection::Projection::default();
         let mut snapshot = projection.snapshot();
-        snapshot.lines = vec![LineView {
-            id: "main".into(),
-            parent: None,
-            purpose: String::new(),
-            state: LineState::Main,
-            cut: None,
-        }];
+        snapshot.lines = vec![reported_line("main", LineState::Main, false)];
         snapshot.focus = "main".into();
         snapshot.main_running = projection.running();
         snapshot.session_id = session_id.into();
         snapshot.task_history_loading = 1;
         snapshot
+    }
+
+    /// A line as `session_host` lists it; `main` unless named otherwise.
+    fn reported_line(id: &str, state: LineState, reported: bool) -> LineView {
+        LineView {
+            id: id.into(),
+            parent: (id != "main").then(|| "main".into()),
+            purpose: String::new(),
+            state,
+            reported,
+            cut: None,
+        }
+    }
+
+    /// A snapshot of Session `s2` showing `focus`.
+    fn session_snapshot(focus: &str, lines: Vec<LineView>) -> ViewSnapshot {
+        ViewSnapshot {
+            session_id: "s2".into(),
+            focus: focus.into(),
+            lines,
+            ..ViewSnapshot::default()
+        }
+    }
+
+    fn update_offer() -> crate::update::Offer {
+        crate::update::Offer {
+            current: "0.1.0-alpha.29".into(),
+            version: "0.1.0-alpha.30".into(),
+            manual: "dima update".into(),
+            direct: true,
+        }
+    }
+
+    fn enter(drawn: &mut Drawn) -> Outcome {
+        drawn.app.handle(InputEvent::Key(KeyEvent::new(
+            KeyCode::Enter,
+            Modifiers::NONE,
+        )))
     }
 
     /// The switch clears the old Session's state and publishes an empty
@@ -10259,22 +10310,10 @@ mod tests {
     /// then leaves only when that report says the Session is idle.
     #[test]
     fn update_now_waits_for_the_switched_sessions_first_snapshot() {
-        let offer = || crate::update::Offer {
-            current: "0.1.0-alpha.29".into(),
-            version: "0.1.0-alpha.30".into(),
-            manual: "dima update".into(),
-            direct: true,
-        };
-        let enter = |drawn: &mut Drawn| {
-            drawn.app.handle(InputEvent::Key(KeyEvent::new(
-                KeyCode::Enter,
-                Modifiers::NONE,
-            )))
-        };
         for fullscreen in [false, true] {
             let mut drawn = Drawn::new((80, 24), None, true);
             drawn.app.fullscreen = fullscreen;
-            drawn.app.apply(Update::Upgrade(offer()));
+            drawn.app.apply(Update::Upgrade(update_offer()));
             drawn.app.apply(Update::Switched {
                 session_id: "s2".into(),
                 kind: SwitchKind::Resumed,
@@ -10303,10 +10342,8 @@ mod tests {
             );
 
             drawn.app.apply(Update::Snapshot(Box::new(ViewSnapshot {
-                session_id: "s2".into(),
-                state_reported: true,
                 running: true,
-                ..ViewSnapshot::default()
+                ..session_snapshot("main", vec![reported_line("main", LineState::Main, true)])
             })));
             assert!(matches!(drawn.app.prompt, Some(Prompt::Upgrade(_))));
             assert!(
@@ -10320,14 +10357,154 @@ mod tests {
                 "fullscreen={fullscreen}: {screen}"
             );
 
-            drawn.app.apply(Update::Snapshot(Box::new(ViewSnapshot {
-                session_id: "s2".into(),
-                state_reported: true,
-                ..ViewSnapshot::default()
-            })));
+            drawn.app.apply(Update::Snapshot(Box::new(session_snapshot(
+                "main",
+                vec![reported_line("main", LineState::Main, true)],
+            ))));
             assert!(
                 matches!(enter(&mut drawn), Outcome::Exit(0)),
                 "fullscreen={fullscreen}: an idle Session did not let Update now leave"
+            );
+            assert!(drawn.app.update_requested);
+        }
+    }
+
+    /// A report for the shown line alone does not make the Session idle: a
+    /// child line's delayed running report keeps `Update now` waiting, and
+    /// the interface leaves only after every live line reported idle.
+    #[test]
+    fn update_now_waits_for_every_live_line() {
+        for fullscreen in [false, true] {
+            let mut drawn = Drawn::new((80, 24), None, true);
+            drawn.app.fullscreen = fullscreen;
+            drawn.app.apply(Update::Upgrade(update_offer()));
+            drawn.app.apply(Update::Switched {
+                session_id: "s2".into(),
+                kind: SwitchKind::Resumed,
+                cwd: None,
+            });
+            drawn.app.apply(Update::Snapshot(Box::new(session_snapshot(
+                "main",
+                vec![
+                    reported_line("main", LineState::Main, true),
+                    reported_line("b-1", LineState::Waiting, false),
+                ],
+            ))));
+            assert!(
+                matches!(enter(&mut drawn), Outcome::Continue),
+                "fullscreen={fullscreen}: Update now left while a live line had not reported"
+            );
+            assert!(!drawn.app.update_requested);
+            let screen = drawn.app.frame((80, 24)).live.join("\n");
+            assert!(
+                screen.contains(t("Waiting for this Session's state after the switch.")),
+                "fullscreen={fullscreen}: {screen}"
+            );
+
+            drawn.app.apply(Update::Snapshot(Box::new(session_snapshot(
+                "main",
+                vec![
+                    reported_line("main", LineState::Main, true),
+                    reported_line("b-1", LineState::Working, true),
+                ],
+            ))));
+            assert!(
+                matches!(enter(&mut drawn), Outcome::Continue),
+                "fullscreen={fullscreen}: Update now left while the child line was running"
+            );
+            assert!(!drawn.app.update_requested);
+            let screen = drawn.app.frame((80, 24)).live.join("\n");
+            assert!(
+                screen.contains("Finish or stop the current work"),
+                "fullscreen={fullscreen}: {screen}"
+            );
+
+            drawn.app.apply(Update::Snapshot(Box::new(session_snapshot(
+                "main",
+                vec![
+                    reported_line("main", LineState::Main, true),
+                    reported_line("b-1", LineState::Waiting, true),
+                ],
+            ))));
+            assert!(
+                matches!(enter(&mut drawn), Outcome::Exit(0)),
+                "fullscreen={fullscreen}: every live line was idle and Update now stayed"
+            );
+            assert!(drawn.app.update_requested);
+        }
+    }
+
+    /// `--resume` starts the update check before the Session is attached, so
+    /// the offer can arrive while the startup resume is unresolved. Real Home
+    /// still leaves at once; the pending resume may not.
+    #[test]
+    fn update_now_waits_for_a_pending_startup_resume() {
+        for fullscreen in [false, true] {
+            let mut home = Drawn::new((80, 24), None, true);
+            home.app.fullscreen = fullscreen;
+            home.app.apply(Update::Upgrade(update_offer()));
+            assert!(
+                matches!(enter(&mut home), Outcome::Exit(0)),
+                "fullscreen={fullscreen}: Home no longer leaves at once"
+            );
+            assert!(home.app.update_requested);
+
+            let mut drawn = Drawn::new((80, 24), None, true);
+            drawn.app.fullscreen = fullscreen;
+            drawn.app.startup_resume = true;
+            drawn.app.apply(Update::Upgrade(update_offer()));
+            assert!(
+                matches!(enter(&mut drawn), Outcome::Continue),
+                "fullscreen={fullscreen}: Update now left before the resume resolved"
+            );
+            assert!(!drawn.app.update_requested);
+            let screen = drawn.app.frame((80, 24)).live.join("\n");
+            assert!(
+                screen.contains(t("Waiting for the resumed Session to load.")),
+                "fullscreen={fullscreen}: {screen}"
+            );
+
+            drawn.app.apply(Update::Switched {
+                session_id: "s2".into(),
+                kind: SwitchKind::Resumed,
+                cwd: None,
+            });
+            drawn.app.apply(Update::Snapshot(Box::new(session_snapshot(
+                "main",
+                vec![reported_line("main", LineState::Main, true)],
+            ))));
+            assert!(
+                matches!(enter(&mut drawn), Outcome::Exit(0)),
+                "fullscreen={fullscreen}: the resolved resume did not let Update now leave"
+            );
+            assert!(drawn.app.update_requested);
+        }
+    }
+
+    /// A line that ended before this client attached never reports a running
+    /// state. A view on it is settled, so Update now leaves while the other
+    /// lines are idle.
+    #[test]
+    fn update_now_leaves_a_settled_ended_line() {
+        for fullscreen in [false, true] {
+            let mut drawn = Drawn::new((80, 24), None, true);
+            drawn.app.fullscreen = fullscreen;
+            drawn.app.apply(Update::Upgrade(update_offer()));
+            drawn.app.apply(Update::Switched {
+                session_id: "s2".into(),
+                kind: SwitchKind::Resumed,
+                cwd: None,
+            });
+            drawn.app.apply(Update::Snapshot(Box::new(session_snapshot(
+                "b-gone",
+                vec![
+                    reported_line("main", LineState::Main, true),
+                    reported_line("b-gone", LineState::Ended, false),
+                ],
+            ))));
+            assert!(
+                matches!(enter(&mut drawn), Outcome::Exit(0)),
+                "fullscreen={fullscreen}: the ended line held Update now"
             );
             assert!(drawn.app.update_requested);
         }
@@ -11465,6 +11642,7 @@ mod tests {
                 parent: None,
                 purpose: String::new(),
                 state: LineState::Main,
+                reported: true,
                 cut: None,
             }],
             ..ViewSnapshot::default()
@@ -14730,6 +14908,7 @@ mod tests {
                         parent: None,
                         purpose: String::new(),
                         state: LineState::Main,
+                        reported: true,
                         cut: None,
                     },
                     LineView {
@@ -14737,6 +14916,7 @@ mod tests {
                         parent: Some("main".into()),
                         purpose: "parser race".into(),
                         state: LineState::Waiting,
+                        reported: true,
                         cut: Some(crate::model::view::LineCut {
                             sequence: 1,
                             messages: 1,
@@ -14874,6 +15054,7 @@ mod tests {
                     parent: None,
                     purpose: String::new(),
                     state: LineState::Main,
+                    reported: true,
                     cut: None,
                 },
                 crate::model::view::LineView {
@@ -14881,6 +15062,7 @@ mod tests {
                     parent: Some("main".into()),
                     purpose: "review".into(),
                     state: LineState::Working,
+                    reported: true,
                     cut: Some(crate::model::view::LineCut {
                         sequence: 1,
                         messages: 0,

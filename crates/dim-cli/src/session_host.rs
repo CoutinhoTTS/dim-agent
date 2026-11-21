@@ -4798,11 +4798,13 @@ impl Worker {
     }
 
     fn line_views(&self) -> Vec<LineView> {
+        let running = |id: &str| self.task_history.get(id).and_then(|branch| branch.running);
         let mut lines = vec![LineView {
             id: ROOT_BRANCH_ID.into(),
             parent: None,
             purpose: String::new(),
             state: LineState::Main,
+            reported: running(ROOT_BRANCH_ID).is_some(),
             cut: None,
         }];
         lines.extend(
@@ -4811,13 +4813,8 @@ impl Worker {
                 .iter()
                 .cloned()
                 .map(|mut line| {
-                    if line.state == LineState::Waiting
-                        && self
-                            .task_history
-                            .get(&line.id)
-                            .and_then(|history| history.running)
-                            == Some(true)
-                    {
+                    line.reported = running(&line.id).is_some();
+                    if line.state == LineState::Waiting && running(&line.id) == Some(true) {
                         line.state = LineState::Working;
                     }
                     line
@@ -4925,10 +4922,6 @@ impl Worker {
         }
         snapshot.session_id = self.session_id.clone();
         snapshot.projection_id = self.projection_id;
-        snapshot.state_reported = self
-            .task_history
-            .get(&self.focus)
-            .is_some_and(|branch| branch.running.is_some());
         snapshot.history_complete = self
             .task_history
             .get(&self.focus)
@@ -5595,7 +5588,9 @@ mod tests {
         assert_eq!(placeholder.session_id, "s2");
         assert!(placeholder.rows.is_empty(), "the projection is still empty");
         assert!(
-            snapshots.iter().all(|view| !view.state_reported),
+            snapshots
+                .iter()
+                .all(|view| view.lines.iter().all(|line| !line.reported)),
             "the switch has no Session state to report yet"
         );
 
@@ -5611,8 +5606,138 @@ mod tests {
         let reported = reported
             .last()
             .expect("the state report published a snapshot");
-        assert!(reported.state_reported, "the report is the Session's state");
+        assert!(
+            reported.lines.iter().all(|line| line.reported),
+            "the report is the Session's state"
+        );
         assert!(reported.running, "the report carries the running turn");
+    }
+
+    /// Every live line reports on its own: an idle `main` leaves a known
+    /// child unreported until its own `session.state` arrives, and only then
+    /// does that child's running flag show as work.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn every_live_line_carries_its_own_state_report() {
+        let (mut worker, mut receiver, _sent) = test_worker(&TEST_FEATURES).await;
+        worker
+            .attach("s2".into(), SwitchKind::Resumed)
+            .await
+            .expect("the switch attaches");
+        let lines = |receiver: &mut mpsc::Receiver<Update>| {
+            receiver
+                .try_iter()
+                .filter_map(|update| match update {
+                    Update::Snapshot(view) => Some(*view),
+                    _ => None,
+                })
+                .last()
+                .expect("the worker published a snapshot")
+                .lines
+        };
+        let create = json!({
+            "id": "create", "sequence": 1, "create_at": 1000, "type": "branch", "name": "create",
+            "data": {
+                "at": {"kind": "sequence", "sequence": 0}, "branch": "b-1", "prompt": "Check the parser",
+                "source": {"kind": "host", "operation_id": "op"}
+            }
+        });
+        let create: Event = serde_json::from_value(create).unwrap();
+        worker.discover_task_branches(&create);
+        worker.apply("main", create);
+        worker
+            .message(Message::Notice {
+                method: "session.state".into(),
+                params: json!({"sessionId":"s2","branchId":"main","running":false}),
+            })
+            .await
+            .unwrap();
+        worker.publish();
+        let shown = lines(&mut receiver);
+        assert!(shown[0].reported, "main reported its idle state");
+        assert_eq!(shown[1].state, LineState::Waiting);
+        assert!(!shown[1].reported, "the child line has not reported yet");
+
+        worker
+            .message(Message::Notice {
+                method: "session.state".into(),
+                params: json!({"sessionId":"s2","branchId":"b-1","running":true}),
+            })
+            .await
+            .unwrap();
+        worker.publish();
+        let shown = lines(&mut receiver);
+        assert!(
+            shown[1].reported,
+            "the child line reported its running state"
+        );
+        assert_eq!(shown[1].state, LineState::Working);
+    }
+
+    /// A line that ended before this client attached never sends a
+    /// `session.state`. The host still lists it, ended and unreported, so the
+    /// interface can settle it without waiting.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_ended_line_is_listed_without_a_state_report() {
+        let (mut worker, receiver, _sent) = test_worker(&TEST_FEATURES).await;
+        worker
+            .attach("s2".into(), SwitchKind::Resumed)
+            .await
+            .expect("the switch attaches");
+        let create = json!({
+            "id": "create", "sequence": 1, "create_at": 1000, "type": "branch", "name": "create",
+            "data": {
+                "at": {"kind": "sequence", "sequence": 0}, "branch": "b-gone", "prompt": "Old line",
+                "source": {"kind": "host", "operation_id": "op"}
+            }
+        });
+        let ended = json!({
+            "id": "ended", "sequence": 2, "create_at": 2000, "type": "branch", "name": "ended",
+            "data": {"branch": "b-gone", "endEvent": 2, "source": {"kind": "host", "operation_id": "op"}}
+        });
+        let create: Event = serde_json::from_value(create).unwrap();
+        worker.discover_task_branches(&create);
+        worker.apply("main", create);
+        let ended: Event = serde_json::from_value(ended).unwrap();
+        worker.discover_task_branches(&ended);
+        worker.apply("main", ended);
+        worker
+            .command(Command::FocusLine("b-gone".into()))
+            .await
+            .unwrap();
+        worker
+            .message(Message::Notice {
+                method: "session.state".into(),
+                params: json!({"sessionId":"s2","branchId":"main","running":false}),
+            })
+            .await
+            .unwrap();
+        worker.publish();
+        let shown = receiver
+            .try_iter()
+            .filter_map(|update| match update {
+                Update::Snapshot(view) => Some(*view),
+                _ => None,
+            })
+            .last()
+            .expect("the worker published a snapshot");
+        assert_eq!(shown.focus, "b-gone");
+        let gone = shown
+            .lines
+            .iter()
+            .find(|line| line.id == "b-gone")
+            .expect("the ended line is listed");
+        assert_eq!(gone.state, LineState::EndedByOperation);
+        assert!(!gone.reported, "the ended line never sends a state report");
+        assert!(
+            shown
+                .lines
+                .iter()
+                .filter(|line| line.id == "main")
+                .all(|line| line.reported),
+            "main did report"
+        );
     }
 
     #[cfg(unix)]
