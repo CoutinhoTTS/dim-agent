@@ -78,7 +78,7 @@ use crate::ui::transcript::tool_group::{
     disclosure_at, disclosure_rows, group_id, project_fullscreen_group, project_group,
     render_group,
 };
-use crate::ui::upgrade_dialog::UpgradeDialog;
+use crate::ui::upgrade_dialog::{Blocked, UpgradeDialog};
 use crate::usage::format_tokens;
 use crate::wire::Configuration;
 
@@ -2054,6 +2054,16 @@ impl App {
                 .iter()
                 .any(|line| line.state == LineState::Working);
         working.then_some(ExitReason::AgentRunning)
+    }
+
+    /// Why `Update now` cannot leave yet, if it cannot: work in the shown
+    /// Session, or a switch whose first snapshot has not arrived. Home has no
+    /// Session snapshot to wait for.
+    fn update_blocked(&self) -> Option<Blocked> {
+        if self.shell.is_some() || self.busy_reason().is_some() {
+            return Some(Blocked::Busy);
+        }
+        (self.snapshot.is_none() && !self.session_id.is_empty()).then_some(Blocked::Session)
     }
 
     /// Opens the prompt for the first pending approval or question, and
@@ -4060,7 +4070,7 @@ impl App {
             }
             Effect::Exit => return Outcome::Exit(130),
             Effect::UpgradeNow => {
-                if self.shell.is_some() || self.busy_reason().is_some() {
+                if self.update_blocked().is_some() {
                     if let Some(Prompt::Upgrade(dialog)) = &mut self.prompt {
                         dialog.block();
                     }
@@ -6517,12 +6527,9 @@ impl App {
             Some(Prompt::Settings(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Isolation(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Exit(prompt)) => Some(prompt.render(outer, p)),
-            Some(Prompt::Upgrade(prompt)) => Some(prompt.render(
-                outer,
-                panel_rows,
-                self.shell.is_some() || self.busy_reason().is_some(),
-                p,
-            )),
+            Some(Prompt::Upgrade(prompt)) => {
+                Some(prompt.render(outer, panel_rows, self.update_blocked(), p))
+            }
             Some(Prompt::Permission(prompt)) => Some(prompt.render_sized(outer, panel_rows, p)),
             Some(Prompt::Ask(prompt)) => Some(prompt.render(outer, panel_rows, p)),
             Some(Prompt::Effort(prompt)) => Some(prompt.render(outer, panel_rows, p)),
@@ -10219,6 +10226,107 @@ mod tests {
             let screen = drawn.app.frame((80, 24)).live.join("\n");
             assert!(screen.contains(t("Update available")), "{screen}");
         }
+    }
+
+    /// The switch clears the old Session's state, so `Update now` waits for
+    /// the new Session's first snapshot: a key landing in that window must not
+    /// leave on a screen that only looks idle.
+    #[test]
+    fn update_now_waits_for_the_switched_sessions_first_snapshot() {
+        let offer = || crate::update::Offer {
+            current: "0.1.0-alpha.29".into(),
+            version: "0.1.0-alpha.30".into(),
+            manual: "dima update".into(),
+            direct: true,
+        };
+        let enter = |drawn: &mut Drawn| {
+            drawn.app.handle(InputEvent::Key(KeyEvent::new(
+                KeyCode::Enter,
+                Modifiers::NONE,
+            )))
+        };
+        for fullscreen in [false, true] {
+            let mut drawn = Drawn::new((80, 24), None, true);
+            drawn.app.fullscreen = fullscreen;
+            drawn.app.apply(Update::Upgrade(offer()));
+            drawn.app.apply(Update::Switched {
+                session_id: "s2".into(),
+                kind: SwitchKind::Resumed,
+                cwd: None,
+            });
+            assert!(matches!(drawn.app.prompt, Some(Prompt::Upgrade(_))));
+            assert!(
+                matches!(enter(&mut drawn), Outcome::Continue),
+                "fullscreen={fullscreen}: Update now left before the switch's state arrived"
+            );
+            assert!(!drawn.app.update_requested);
+            let screen = drawn.app.frame((80, 24)).live.join("\n");
+            assert!(
+                screen.contains(t("Waiting for this Session's state after the switch.")),
+                "fullscreen={fullscreen}: {screen}"
+            );
+
+            drawn.app.apply(Update::Snapshot(Box::new(ViewSnapshot {
+                session_id: "s2".into(),
+                running: true,
+                ..ViewSnapshot::default()
+            })));
+            assert!(matches!(drawn.app.prompt, Some(Prompt::Upgrade(_))));
+            assert!(
+                matches!(enter(&mut drawn), Outcome::Continue),
+                "fullscreen={fullscreen}: Update now left while the Session was running"
+            );
+            assert!(!drawn.app.update_requested);
+            let screen = drawn.app.frame((80, 24)).live.join("\n");
+            assert!(
+                screen.contains("Finish or stop the current work"),
+                "fullscreen={fullscreen}: {screen}"
+            );
+
+            drawn.app.apply(Update::Snapshot(Box::new(ViewSnapshot {
+                session_id: "s2".into(),
+                ..ViewSnapshot::default()
+            })));
+            assert!(
+                matches!(enter(&mut drawn), Outcome::Exit(0)),
+                "fullscreen={fullscreen}: an idle Session did not let Update now leave"
+            );
+            assert!(drawn.app.update_requested);
+        }
+    }
+
+    /// Waiting for a state that never arrives refuses `Update now` alone: Skip
+    /// and Close still dismiss the dialog, so the user is not trapped.
+    #[test]
+    fn update_now_waits_without_trapping_the_user() {
+        let offer = || crate::update::Offer {
+            current: "0.1.0-alpha.29".into(),
+            version: "0.1.0-alpha.30".into(),
+            manual: "dima update".into(),
+            direct: true,
+        };
+        let mut drawn = Drawn::new((80, 24), None, true);
+        drawn.app.apply(Update::Upgrade(offer()));
+        drawn.app.apply(Update::Switched {
+            session_id: "s2".into(),
+            kind: SwitchKind::Resumed,
+            cwd: None,
+        });
+        drawn.key(KeyCode::Tab);
+        drawn.key(KeyCode::Enter);
+        assert!(drawn.app.prompt.is_none(), "Skip closes the dialog");
+        let skipped = tf("Skipped {version}.", &[("version", &offer().version)]);
+        assert_eq!(
+            drawn.app.notice.as_ref().map(|(text, _)| text.as_str()),
+            Some(skipped.as_str())
+        );
+        assert!(!drawn.app.update_requested);
+
+        drawn.app.apply(Update::Upgrade(offer()));
+        assert!(matches!(drawn.app.prompt, Some(Prompt::Upgrade(_))));
+        drawn.key(KeyCode::Esc);
+        assert!(drawn.app.prompt.is_none(), "Esc closes the dialog");
+        assert!(!drawn.app.update_requested);
     }
 
     /// The offer waits while another panel has the screen. The panel's own

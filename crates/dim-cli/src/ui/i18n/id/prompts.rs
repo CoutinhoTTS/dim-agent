@@ -36,6 +36,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Finish or stop the current work first (a running turn, shell command, or pending prompt)." => {
             "Selesaikan atau hentikan dulu pekerjaan yang berjalan (giliran, perintah shell, atau pertanyaan tertunda)."
         }
+        "Waiting for this Session's state after the switch." => {
+            "Menunggu status sesi ini setelah peralihan."
+        }
         "Checking for updates…" => "Memeriksa pembaruan…",
         "DimCode {version} is up to date." => "DimCode {version} sudah terbaru.",
         "Skip this version" => "Lewati versi ini",
