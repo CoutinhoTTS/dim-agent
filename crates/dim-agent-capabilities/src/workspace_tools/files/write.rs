@@ -490,6 +490,12 @@ fn preserve_metadata(source: &std::fs::File, target: &std::fs::File) -> std::io:
         {
             return Err(std::io::Error::last_os_error());
         }
+        let now = std::time::SystemTime::now();
+        target.set_times(
+            std::fs::FileTimes::new()
+                .set_accessed(now)
+                .set_modified(now),
+        )?;
     }
     #[cfg(target_os = "linux")]
     {
