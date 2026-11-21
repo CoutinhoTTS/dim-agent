@@ -122,7 +122,7 @@ sequenceDiagram
   end
 ```
 
-Web 部件 Active 时，`web_search` 只在搜索服务可用时被声明：配置了带 API 密钥的适配器，或者对默认情况（`searchService` 缺省或为 `{"kind": "dim-oauth"}`）存在经 `managedSearch` 使用的已登录 Dim 账号。部件以动态来源提供该工具，并在配置或账号使服务不可用时撤回它；下一个模型请求即携带变化，无需重载（A3）。可用服务的调用期失败——网络、服务错误或无效响应——不撤回工具，而是返回调用错误（附录 C）。挂载列表（`SessionConfig.tools`）未列出 `web_search` 的 Session 永远不声明它。
+Web 部件 Active 时，`web_search` 只在搜索服务可用时被声明：配置了带 API 密钥的适配器，或者对默认情况（`searchService` 缺省或为 `{"kind": "dim-oauth"}`）存在经 `managedSearch` 使用的已登录 Dim 账号。部件以动态来源提供该工具，并在配置或账号使服务不可用时撤回它；变化在分支采用新集合之后构造的第一个请求中生效，无需重载，采用之前构造的请求保持其构造时的声明（A3）。可用服务的调用期失败——网络、服务错误或无效响应——不撤回工具，而是返回调用错误（附录 C）。挂载列表（`SessionConfig.tools`）未列出 `web_search` 的 Session 永远不声明它。
 
 ## 4. 时序与冲突
 

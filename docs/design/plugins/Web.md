@@ -122,7 +122,7 @@ sequenceDiagram
   end
 ```
 
-While a Session's Web part is Active, `web_search` is declared only while a search service is usable: an adapter configured with its API key, or, for the default (when `searchService` is absent or `{"kind": "dim-oauth"}`) a signed-in Dim account used through `managedSearch`. The part offers the tool as a dynamic source and withdraws it when the configuration or the account makes the service unusable; the next model request carries the change without a reload (A3). A call-time failure of a usable service — network, service error or invalid response — does not withdraw the tool; it returns the call error (Appendix C). A Session whose mount list (`SessionConfig.tools`) does not name `web_search` never declares it.
+While a Session's Web part is Active, `web_search` is declared only while a search service is usable: an adapter configured with its API key, or, for the default (when `searchService` is absent or `{"kind": "dim-oauth"}`) a signed-in Dim account used through `managedSearch`. The part offers the tool as a dynamic source and withdraws it when the configuration or the account makes the service unusable; the change applies to the first request built after the branch adopts the new set, without a reload, and a request built before that adoption keeps the declaration it was built with (A3). A call-time failure of a usable service — network, service error or invalid response — does not withdraw the tool; it returns the call error (Appendix C). A Session whose mount list (`SessionConfig.tools`) does not name `web_search` never declares it.
 
 ## 4. Timing and conflicts
 
