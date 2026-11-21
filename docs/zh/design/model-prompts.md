@@ -218,7 +218,7 @@ SessionTitle 不在范围内：它的 `SYSTEM`（`crates/dim-session-title/src/l
 
 - **协议。** 标记名与属性、身份块里的事实句、branch 工具的 action 与 mode、以及它的拒绝码，只随分支机制一起改，并与断言它们的流程测试同一个改动（§4）。
 - **`main` 的协调文字覆盖 [Timeline 分支 §12.2](timeline-branches.md#122-交给提示词层的事项429) 的事项。**
-- **评估。** 这些文字是策略：改动用 [Timeline 分支 §12.3](timeline-branches.md#123-评估场景) 的场景评估——重做工作、过度拆线、刷屏、不肯结束、兄弟转达、乒乓、压缩后的身份、直接问用户——当前对照候选（§8）。
+- **评估。** 这些文字是策略：改动用 [Timeline 分支 §12.3](timeline-branches.md#123-评估场景) 的十六个场景评估，当前对照候选（§8）。
 
 ### 9.5 Goal
 

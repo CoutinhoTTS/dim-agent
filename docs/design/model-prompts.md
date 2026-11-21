@@ -219,7 +219,7 @@ SessionTitle is out of scope: its `SYSTEM` (`crates/dim-session-title/src/lib.rs
 
 - **Protocol.** The marker names and attributes, the identity blocks' factual sentences, the branch tool's actions and modes, and its refusal codes change only with the branch mechanism, in the same change as the flow tests that assert them (§4).
 - **The coordination text for `main` covers the items of [Timeline branches §12.2](timeline-branches.md#122-items-for-the-prompt-layer-429).**
-- **Evaluation.** These texts are policy: a change is evaluated with the scenarios of [Timeline branches §12.3](timeline-branches.md#123-evaluation-scenarios) — redone work, over-splitting, flooding, never ending, sibling relay, ping-pong, identity after compaction, asking the user — current against candidate (§8).
+- **Evaluation.** These texts are policy: a change is evaluated with the sixteen scenarios of [Timeline branches §12.3](timeline-branches.md#123-evaluation-scenarios), current against candidate (§8).
 
 ### 9.5 Goal
 

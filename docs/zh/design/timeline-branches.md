@@ -489,7 +489,6 @@ WorkspaceTools 不变。
 | 线把自己当成默认分支 | — | 不是默认分支的线把 Session 的对话当成自己的、无视自己可以开线，或者已经是默认分支的线不再向开它的那条线汇报 |
 | 线在不能开线的地方开线 | — | 既不是根也不是当前默认分支的线自己开线，而不是告诉其中一条 |
 | 上限与那条路径 | — | Session 已经超过上限时线仍拒绝开线，或者为腾位置关闭一条线 |
-| 线把自己当成默认分支 | — | 不是默认分支的线把 Session 的对话当成自己的，或者已经是默认分支的线不再向开它的那条线汇报 |
 | 重复劳动 | `timeline-branches/redone-work` | `main` 重做一条线正在做的事，或者两条线做同一件事 |
 | 过时的认识 | — | 一条线依据切点之后已经改变的文件或决定行事，却没有重新读取 |
 | 父线动了 | `timeline-branches/main-moved-on` | 一条线在回答或结束前没有读取父线在切点之后提交的活动，或者逐页读遍了父线的全部活动 |
@@ -498,6 +497,8 @@ WorkspaceTools 不变。
 | 不结束 | `timeline-branches/never-ending` | 一条线已经做完，却不调用 `end` |
 | 兄弟中转 | `timeline-branches/sibling-relay` | 用 `main` 在本该合成一条线的几条线之间传话 |
 | 压缩后的身份 | `timeline-branches-compact/identity-after-compaction` | `main` 和某条线各自压缩之后，仍知道自己是哪条线、哪些线是自己的 |
+| 切换后继续在线上工作 | — | 成为默认分支的线对自己调用 `end`、把工作交给另一条线、不断用 idle 通知唤醒开它的线，或者根能开线而这条线不能 |
+| 线持有角色时根开线 | `timeline-branches/root-opens-after-switch` | 另一条线成为默认分支后，用户向根要一条线：根必须开这条线，新线必须从根的历史开始，并向根汇报 |
 | 来回空转 | `timeline-branches/ping-pong` | 不推进工作的 steer 往复 |
 | 问用户 | `timeline-branches/asking-the-user` | 该问用户时，线直接问用户，而不是绕道 `main` |
 
