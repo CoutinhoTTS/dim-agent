@@ -190,6 +190,36 @@ async fn atomic_mutations_preserve_native_metadata() {
         );
     }
 }
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn atomic_mutations_advance_modification_time() {
+    use std::time::{Duration, SystemTime};
+    let old = SystemTime::UNIX_EPOCH + Duration::from_secs(1_577_836_800);
+    for tool in ["write", "edit"] {
+        let workspace = Workspace::new();
+        workspace.put("file", b"before\n");
+        let path = workspace.path("file");
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(old))
+            .unwrap();
+        assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), old);
+        let recent = SystemTime::now() - Duration::from_secs(300);
+        let reads = branch();
+        workspace.read(&reads, "file").await;
+        let result = workspace.call(&reads, tool, json!({"path": "file", "content": "after\n", "oldText": "before", "newText": "after"})).await;
+        assert_eq!(result.is_error, None, "{}", text(&result));
+        assert_eq!(workspace.bytes("file"), b"after\n");
+        let modified = fs::metadata(&path).unwrap().modified().unwrap();
+        assert!(
+            modified > old && modified >= recent,
+            "{tool} kept the previous modification time: {modified:?}"
+        );
+    }
+}
 fn structured(result: &ToolResult) -> &serde_json::Map<String, Value> {
     result.structured_content.as_ref().unwrap()
 }
