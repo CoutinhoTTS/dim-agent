@@ -807,7 +807,7 @@ impl ManagedWorktrees {
                 entry.display()
             )));
         }
-        if path_exists(&entry.join(".git"))
+        if entry_exists(&entry.join(".git"))
             .await
             .map_err(|error| WorktreeError::Store(error.message().to_owned()))?
         {
@@ -816,6 +816,7 @@ impl ManagedWorktrees {
                 entry.display()
             )));
         }
+        let mut empty_children = Vec::new();
         let mut children = tokio::fs::read_dir(&entry)
             .await
             .map_err(|error| WorktreeError::Store(error.to_string()))?;
@@ -844,7 +845,7 @@ impl ManagedWorktrees {
                     path.display()
                 )));
             }
-            if path_exists(&path.join(".git"))
+            if entry_exists(&path.join(".git"))
                 .await
                 .map_err(|error| WorktreeError::Store(error.message().to_owned()))?
             {
@@ -879,12 +880,11 @@ impl ManagedWorktrees {
                         path.display()
                     )));
                 }
+                empty_children.push(path);
             }
         }
         drop(children);
-        tokio::fs::remove_dir_all(&entry)
-            .await
-            .map_err(|error| WorktreeError::Store(error.to_string()))?;
+        remove_checked_entry(&entry, &empty_children, force).await?;
         Ok(true)
     }
 
@@ -1026,6 +1026,17 @@ async fn path_exists(path: &Path) -> Result<bool, WorktreeError> {
     }
 }
 
+/// Whether `path` names a directory entry, without following a symlink: a
+/// dangling `.git` link still counts, so a directory carrying one is never
+/// deleted.
+async fn entry_exists(path: &Path) -> Result<bool, WorktreeError> {
+    match tokio::fs::symlink_metadata(path).await {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(WorktreeError::Store(format!("{}: {error}", path.display()))),
+    }
+}
+
 /// A recorded root must still be a plain directory at its canonical path under
 /// the managed root. A swapped task-directory symlink makes `canonical` differ
 /// from the stored path, and the destructive cleanup must not follow it.
@@ -1086,6 +1097,40 @@ async fn checked_subtree(root: &Path, relative: &Path) -> Result<PathBuf, Worktr
         ));
     }
     Ok(subtree)
+}
+
+/// A task directory whose checks passed. `force` removes everything; otherwise
+/// only the plain empty subdirectories the check recorded are removed, each
+/// without recursion, so content that appears after the check fails the
+/// removal with `worktree_in_use` instead of being deleted.
+async fn remove_checked_entry(
+    entry: &Path,
+    empty_children: &[PathBuf],
+    force: bool,
+) -> Result<(), WorktreeError> {
+    if force {
+        return tokio::fs::remove_dir_all(entry)
+            .await
+            .map_err(|error| WorktreeError::Store(error.to_string()));
+    }
+    for child in empty_children {
+        remove_empty_dir(child).await?;
+    }
+    remove_empty_dir(entry).await
+}
+
+/// Remove one directory only while it is still empty.
+async fn remove_empty_dir(path: &Path) -> Result<(), WorktreeError> {
+    match tokio::fs::remove_dir(path).await {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::DirectoryNotEmpty => {
+            Err(WorktreeError::InUse(format!(
+                "{} is not empty; --force removes it",
+                path.display()
+            )))
+        }
+        Err(error) => Err(WorktreeError::Store(error.to_string())),
+    }
 }
 
 /// A recorded root that exists but Git no longer names: there is no working
@@ -1409,4 +1454,56 @@ fn parse_duration(text: &str) -> Result<Duration, RpcError> {
     Ok(Duration::from_secs(count.checked_mul(seconds).ok_or_else(
         || RpcError::invalid(format!("{text} is too long")),
     )?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch(name: &str) -> PathBuf {
+        let path =
+            std::env::temp_dir().join(format!("dim-worktrees-{name}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    /// Content that appears in the task directory after the check must refuse
+    /// the non-force removal instead of being deleted with the directory.
+    #[tokio::test]
+    async fn content_that_appears_after_the_check_is_not_deleted() {
+        let entry = scratch("late-content");
+        std::fs::write(entry.join("late.txt"), "keep").unwrap();
+        let error = remove_checked_entry(&entry, &[], false)
+            .await
+            .expect_err("a file present after the check must refuse the removal");
+        assert!(
+            matches!(&error, WorktreeError::InUse(message) if message.contains("not empty")),
+            "{error:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(entry.join("late.txt")).unwrap(),
+            "keep"
+        );
+        std::fs::remove_dir_all(&entry).unwrap();
+    }
+
+    /// Content that appears in a subdirectory the check recorded as empty must
+    /// refuse the removal before that subdirectory is deleted.
+    #[tokio::test]
+    async fn content_that_appears_in_a_checked_child_is_not_deleted() {
+        let entry = scratch("late-child");
+        let child = entry.join("repo");
+        std::fs::create_dir_all(&child).unwrap();
+        std::fs::write(child.join("late.txt"), "keep").unwrap();
+        let error = remove_checked_entry(&entry, std::slice::from_ref(&child), false)
+            .await
+            .expect_err("content in a checked child must refuse the removal");
+        assert!(matches!(&error, WorktreeError::InUse(_)), "{error:?}");
+        assert_eq!(
+            std::fs::read_to_string(child.join("late.txt")).unwrap(),
+            "keep"
+        );
+        assert!(child.is_dir());
+        std::fs::remove_dir_all(&entry).unwrap();
+    }
 }

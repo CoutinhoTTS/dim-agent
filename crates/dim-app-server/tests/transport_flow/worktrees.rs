@@ -12,6 +12,8 @@ use dim_agent_runtime::testing::chain_events;
 use dim_agent_runtime::{Session, SessionConfig};
 use dim_agent_types::{ApprovalCallData, InputMode, PermissionPolicy, PermissionPreset};
 use dim_app_server::storage::SessionStore;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 struct Work {
@@ -911,15 +913,31 @@ async fn unregistered_remove_checks_every_child_before_deleting() {
 }
 
 #[cfg(unix)]
+struct RestorePermissions(PathBuf);
+#[cfg(unix)]
+impl Drop for RestorePermissions {
+    fn drop(&mut self) {
+        let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+    }
+}
+
+/// A task directory that cannot be emptied must report the failure, and the
+/// permissions must not outlive the test. File permissions do not bind a user
+/// that bypasses them, such as root, so the test skips itself there.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unregistered_remove_reports_a_failed_deletion() {
-    use std::os::unix::fs::PermissionsExt;
     let work = Work::new();
-    let server = host(&work).await;
-    let mut client = Client::new_version(&server, false, 3).await;
     let task = unregistered_task(&work, "aaaaaa");
     std::fs::write(task.join("notes.txt"), "keep").unwrap();
+    std::fs::set_permissions(&task, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let _restore = RestorePermissions(task.clone());
+    if std::fs::write(task.join("probe"), b"").is_ok() {
+        return;
+    }
     std::fs::set_permissions(&task, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let server = host(&work).await;
+    let mut client = Client::new_version(&server, false, 3).await;
     let failed = client
         .rpc(
             "worktree.remove",
@@ -927,7 +945,6 @@ async fn unregistered_remove_reports_a_failed_deletion() {
         )
         .await;
     assert_eq!(failed["error"]["data"]["appError"], "worktree_store_failed");
-    std::fs::set_permissions(&task, std::fs::Permissions::from_mode(0o755)).unwrap();
     assert_eq!(
         std::fs::read_to_string(task.join("notes.txt")).unwrap(),
         "keep"
@@ -980,6 +997,34 @@ async fn unregistered_remove_refuses_a_git_entry_even_with_force() {
         .await;
     assert_eq!(refused["error"]["data"]["appError"], "worktree_in_use");
     assert!(task.join(".git").is_file());
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// A `.git` entry that is a dangling symlink still counts: the directory is
+/// never deleted, with or without `--force`.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unregistered_remove_refuses_a_dangling_git_symlink_even_with_force() {
+    let work = Work::new();
+    let server = host(&work).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let task = unregistered_task(&work, "aaaaaa");
+    std::os::unix::fs::symlink(work.home.join("missing-gitdir"), task.join(".git")).unwrap();
+    let refused = client
+        .rpc(
+            "worktree.remove",
+            json!({"taskId": "aaaaaa", "force": true}),
+        )
+        .await;
+    assert_eq!(refused["error"]["data"]["appError"], "worktree_in_use");
+    assert!(
+        task.join(".git")
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
     server.shutdown();
     server.join().await.unwrap();
 }
