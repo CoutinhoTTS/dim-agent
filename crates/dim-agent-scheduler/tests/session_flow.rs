@@ -2,7 +2,7 @@
 //! A.1, A.6): one input per window on the target branch, the delivery
 //! vocabulary, bounded lookup settling, overlap skips, legacy mapping and
 //! retention.
-mod support;
+use crate::support;
 use dim_agent_scheduler::testing::retention;
 use serde_json::{Value, json};
 use std::sync::Arc;
