@@ -20,6 +20,18 @@ const ALPHA_PACKAGE: &str = "dimcode-alpha";
 const ALPHA_COMMAND: &str = "dima";
 const REGISTRY: &str = "https://registry.npmjs.org";
 const TIMEOUT: Duration = Duration::from_secs(4);
+
+/// The registry deadline; a debug build takes `DIM_TEST_UPDATE_TIMEOUT_MS` so
+/// a flow can keep it past a loaded runner's scheduling delay.
+fn timeout() -> Duration {
+    #[cfg(debug_assertions)]
+    if let Some(millis) = std::env::var_os("DIM_TEST_UPDATE_TIMEOUT_MS")
+        .and_then(|value| value.to_str().and_then(|value| value.parse().ok()))
+    {
+        return Duration::from_millis(millis);
+    }
+    TIMEOUT
+}
 /// The version the user chose to skip, shared with the TypeScript CLI.
 const SKIP_FILE: &str = "upgrade-skip.json";
 
@@ -306,10 +318,7 @@ fn upgrade_tag(version: &str, release: bool) -> Option<&str> {
 pub async fn available(home: &Path, current: &str) -> Option<Offer> {
     let tag = upgrade_tag(current, dim_agent_capabilities::build::release())?;
     let package = package().ok()?;
-    let version = match channel_version(&package, tag).await {
-        Ok(version) => version,
-        Err(_) => channel_version(&package, tag).await.ok()?,
-    };
+    let version = channel_version(&package, tag).await.ok()?;
     if !newer(current, &version) || skipped(home).as_deref() == Some(version.as_str()) {
         return None;
     }
@@ -350,7 +359,7 @@ pub async fn check(current: &str) -> Result<Option<Offer>, String> {
 }
 
 async fn channel_version(package: &str, tag: &str) -> crate::Result<String> {
-    let client = reqwest::Client::builder().timeout(TIMEOUT).build()?;
+    let client = reqwest::Client::builder().timeout(timeout()).build()?;
     let tags: serde_json::Value = client
         .get(format!("{}/-/package/{package}/dist-tags", registry()))
         .send()
