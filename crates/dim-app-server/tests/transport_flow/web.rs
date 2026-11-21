@@ -18,6 +18,19 @@ struct SearchProvider(Arc<AtomicBool>);
 fn unused<T: Send + 'static>() -> ManagedFuture<T> {
     Box::pin(async { Err(ManagedError::InvalidInput) })
 }
+fn account(signed_in: bool) -> AccountSnapshot {
+    AccountSnapshot {
+        credential_epoch: "epoch".into(),
+        generation: u64::from(signed_in) + 1,
+        account: signed_in.then(|| dim_app_server::managed_provider::AccountView {
+            issuer: "https://accounts.example".into(),
+            subject: "subject".into(),
+            email: None,
+            name: None,
+            granted_scopes: vec![],
+        }),
+    }
+}
 impl ManagedProvider for SearchProvider {
     fn providers(&self) -> Vec<ProviderDescriptor> {
         vec![ProviderDescriptor {
@@ -28,7 +41,8 @@ impl ManagedProvider for SearchProvider {
         }]
     }
     fn status(&self, _: &str) -> ManagedFuture<AccountSnapshot> {
-        unused()
+        let signed_in = self.0.load(Ordering::SeqCst);
+        Box::pin(async move { Ok(account(signed_in)) })
     }
     fn recover(&self, _: &str) -> ManagedFuture<AccountSnapshot> {
         unused()
@@ -49,7 +63,8 @@ impl ManagedProvider for SearchProvider {
         unused()
     }
     fn logout(&self, _: &str) -> ManagedFuture<AccountSnapshot> {
-        unused()
+        self.0.store(false, Ordering::SeqCst);
+        Box::pin(async { Ok(account(false)) })
     }
     fn usage(&self, _: &str) -> ManagedFuture<Usage> {
         unused()
@@ -145,13 +160,22 @@ async fn create_web(client: &mut Client, preset: &str, interactive: bool) -> Str
         )
         .await;
     assert_ok(&created);
-    created["result"]["sessionId"].as_str().unwrap().to_owned()
+    let id = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    assert_ok(
+        &client
+            .rpc(
+                "session.model.update",
+                json!({"sessionId":id,"branchId":"main",
+            "providerId":"018ec73f-0000-7000-8000-000000000011","modelId":"fixture"}),
+            )
+            .await,
+    );
+    id
 }
 
 async fn result(session: &dim_agent_runtime::Session) -> ToolResult {
-    chain_events(session, "main", ..)
-        .await
-        .unwrap()
+    let events = chain_events(session, "main", ..).await.unwrap();
+    events
         .iter()
         .rev()
         .find_map(|event| {
@@ -161,7 +185,23 @@ async fn result(session: &dim_agent_runtime::Session) -> ToolResult {
                 None
             }
         })
-        .expect("tool result")
+        .unwrap_or_else(|| {
+            let outcome = events.iter().rev().find_map(|event| match &event.kind {
+                EventKind::TurnEnd(data) => Some(format!("{:?}", data.outcome)),
+                _ => None,
+            });
+            let text = events.iter().rev().find_map(|event| match &event.kind {
+                EventKind::Text(data) => Some(data.delta.clone()),
+                _ => None,
+            });
+            panic!(
+                "tool result; keys {:?}; last turn {outcome:?}; last text {text:?}",
+                events
+                    .iter()
+                    .map(|event| event.kind.key())
+                    .collect::<Vec<_>>()
+            )
+        })
 }
 
 fn text(result: &ToolResult) -> &str {
@@ -189,6 +229,318 @@ async fn idle(client: &mut Client, id: &str) {
             .rpc("session.idle", json!({"sessionId":id,"branchId":"main"}))
             .await,
     );
+}
+
+async fn say(client: &mut Client, id: &str, text: &str) {
+    assert_ok(
+        &client
+            .rpc(
+                "session.submit",
+                json!({"sessionId":id,"branchId":"main","text":text}),
+            )
+            .await,
+    );
+    idle(client, id).await;
+}
+
+async fn create_with_tools(client: &mut Client, tools: Option<Value>) -> String {
+    let mut params = json!({"cwd":std::env::temp_dir(),"interactive":false,
+        "permissionPolicy":{"preset":"full-access","allowedTools":[],"disallowedTools":[]}});
+    if let Some(tools) = tools {
+        params["tools"] = tools;
+    }
+    let created = client.rpc("session.create", params.clone()).await;
+    assert!(
+        created.get("error").is_none(),
+        "session.create {params} -> {created}"
+    );
+    let id = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    assert_ok(
+        &client
+            .rpc(
+                "session.model.update",
+                json!({"sessionId":id,"branchId":"main",
+            "providerId":"018ec73f-0000-7000-8000-000000000011","modelId":"fixture"}),
+            )
+            .await,
+    );
+    id
+}
+
+async fn account_status(client: &mut Client) {
+    assert_ok(
+        &client
+            .rpc("account.status", json!({"providerId":"dimcode-api-oauth"}))
+            .await,
+    );
+}
+
+async fn account_logout(client: &mut Client) {
+    assert_ok(
+        &client
+            .rpc("account.logout", json!({"providerId":"dimcode-api-oauth"}))
+            .await,
+    );
+}
+
+/// Waits for the branch's adopted tool part to state whether `web_search` is
+/// declared. Adoption runs in its own task; yielding lets it finish, so the
+/// test never depends on a sleep.
+async fn await_search_declared(session: &dim_agent_runtime::Session, present: bool) {
+    use dim_agent_capabilities::tool_registry::ToolSourcesView;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let declared = chain_events(session, "main", ..)
+            .await
+            .unwrap()
+            .iter()
+            .rev()
+            .find_map(|event| match &event.kind {
+                EventKind::ContextConfigured(data) => Some(
+                    data.settings
+                        .tools
+                        .as_ref()
+                        .map(|tools| tools.iter().any(|tool| tool.name == "web_search")),
+                ),
+                _ => None,
+            });
+        if declared == Some(Some(present)) {
+            return;
+        }
+        let sources = session
+            .session_service::<ToolSourcesView>()
+            .map(|view| view.get());
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "web_search declaration did not become {present}: {declared:?}; sources {sources:?}"
+        );
+        tokio::task::yield_now().await;
+    }
+}
+
+/// The newest turn's outcome on the main branch.
+async fn last_turn_outcome(session: &dim_agent_runtime::Session) -> Option<String> {
+    chain_events(session, "main", ..)
+        .await
+        .unwrap()
+        .iter()
+        .rev()
+        .find_map(|event| match &event.kind {
+            EventKind::TurnEnd(data) => Some(format!("{:?}", data.outcome)),
+            _ => None,
+        })
+}
+
+/// Every committed tool result on the main branch, oldest first.
+async fn tool_results(session: &dim_agent_runtime::Session) -> Vec<ToolResult> {
+    chain_events(session, "main", ..)
+        .await
+        .unwrap()
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::ToolResult(batch) => batch.results.first().map(|entry| entry.result.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Waits for the result after `before` committed results.
+async fn next_tool_result(session: &dim_agent_runtime::Session, before: usize) -> ToolResult {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let results = tool_results(session).await;
+        if let Some(result) = results.get(before) {
+            return result.clone();
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "tool result did not arrive; {} committed",
+            results.len()
+        );
+        tokio::task::yield_now().await;
+    }
+}
+
+/// A text turn: its first request's declarations, once the turn and any later
+/// request are drained.
+async fn text_turn(
+    client: &mut Client,
+    id: &str,
+    requests: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<String>>,
+    text: &str,
+) -> Vec<String> {
+    say(client, id, text).await;
+    let names = requests.recv().await.unwrap();
+    idle(client, id).await;
+    while requests.try_recv().is_ok() {}
+    names
+}
+
+/// A tool turn: its first request's declarations and its result.
+async fn tool_turn(
+    client: &mut Client,
+    session: &dim_agent_runtime::Session,
+    id: &str,
+    requests: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<String>>,
+    name: &str,
+    arguments: Value,
+) -> (Vec<String>, ToolResult) {
+    let before = tool_results(session).await.len();
+    submit(client, id, name, arguments).await;
+    let names = requests.recv().await.unwrap();
+    let result = next_tool_result(session, before).await;
+    idle(client, id).await;
+    while requests.try_recv().is_ok() {}
+    (names, result)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn web_search_is_declared_only_while_a_search_service_is_usable() {
+    disable_system_proxy();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let stop = CancellationToken::new();
+    let stopping = stop.clone();
+    let http = tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = stopping.cancelled() => return,
+                accepted = listener.accept() => {
+                    let (mut socket, _) = accepted.unwrap();
+                    tokio::spawn(async move {
+                        let mut header = Vec::new();
+                        let mut chunk = [0; 4096];
+                        while !header.windows(4).any(|part| part == b"\r\n\r\n") {
+                            let n = socket.read(&mut chunk).await.unwrap();
+                            if n == 0 { return; }
+                            header.extend_from_slice(&chunk[..n]);
+                        }
+                        let body = r#"{"type":"search","web":{"results":[{"title":"fixture","url":"https://example.com/","description":"snippet"}]}}"#;
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        );
+                        socket.write_all(response.as_bytes()).await.unwrap();
+                    });
+                }
+            }
+        }
+    });
+    let home = std::fs::canonicalize("/tmp")
+        .unwrap()
+        .join(format!("dws-{}", uuid::Uuid::new_v4()));
+    let signed_in = Arc::new(AtomicBool::new(false));
+    let signed_in_row = signed_in.clone();
+    let config = ServerConfig {
+        product_home: Some(home.clone()),
+        target_home: Some(home.join("rust")),
+        managed_provider: Some(ManagedProviderRow(Arc::new(move |builtins, _| {
+            let flag = signed_in_row.clone();
+            builtins
+                .builtins
+                .register::<Value, _, _>("SearchProviderFixture", move |_| {
+                    Ok(SearchProviderPlugin(flag.clone()))
+                });
+            "SearchProviderFixture".to_owned()
+        }))),
+        ..Default::default()
+    };
+    let (server, mut requests, _) = super::session_typescript::start(config).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    assert_ok(&client.rpc("provider.create", json!({"providerId":"018ec73f-0000-7000-8000-000000000011","displayName":"Fixture","connection":{"driverKind":"openai-compatible","baseUrl":"http://localhost/v1","auth":{"type":"anonymous"}},"models":[{"modelId":"fixture","displayName":"fixture","status":"active",
+            "capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)}],"enabled":true})).await);
+    assert_ok(
+        &client
+            .rpc(
+                "provider.select",
+                json!({"providerId":"018ec73f-0000-7000-8000-000000000011","modelId":"fixture"}),
+            )
+            .await,
+    );
+    let id = create_with_tools(&mut client, Some(json!(["web_search", "web_fetch"]))).await;
+    let session = server.agent().unwrap().get_session(&id).unwrap();
+
+    let names = text_turn(&mut client, &id, &mut requests, "hello").await;
+    assert!(!names.iter().any(|name| name == "web_search"), "{names:?}");
+    assert!(names.iter().any(|name| name == "web_fetch"), "{names:?}");
+
+    configure(
+        &mut client,
+        json!({"searchService":{"kind":"brave","endpoint":format!("{base}/search"),"apiKey":"fixture-web-key"}}),
+    )
+    .await;
+    await_search_declared(&session, true).await;
+    let (names, searched) = tool_turn(
+        &mut client,
+        &session,
+        &id,
+        &mut requests,
+        "web_search",
+        json!({"query":"configured"}),
+    )
+    .await;
+    assert!(names.iter().any(|name| name == "web_search"), "{names:?}");
+    assert_ne!(searched.is_error, Some(true), "{searched:?}");
+    assert!(text(&searched).contains("https://example.com/"));
+
+    configure(&mut client, json!({})).await;
+    await_search_declared(&session, false).await;
+    let names = text_turn(&mut client, &id, &mut requests, "after removal").await;
+    assert!(!names.iter().any(|name| name == "web_search"), "{names:?}");
+
+    signed_in.store(true, Ordering::SeqCst);
+    account_status(&mut client).await;
+    await_search_declared(&session, true).await;
+    let (names, managed) = tool_turn(
+        &mut client,
+        &session,
+        &id,
+        &mut requests,
+        "web_search",
+        json!({"query":"managed"}),
+    )
+    .await;
+    assert!(names.iter().any(|name| name == "web_search"), "{names:?}");
+    assert_ne!(managed.is_error, Some(true), "{managed:?}");
+    assert!(text(&managed).contains("https://managed.example.com/hit"));
+
+    signed_in.store(false, Ordering::SeqCst);
+    account_logout(&mut client).await;
+    await_search_declared(&session, false).await;
+    let names = text_turn(&mut client, &id, &mut requests, "after logout").await;
+    assert!(!names.iter().any(|name| name == "web_search"), "{names:?}");
+
+    signed_in.store(true, Ordering::SeqCst);
+    account_status(&mut client).await;
+    await_search_declared(&session, true).await;
+    let (_, failed) = tool_turn(
+        &mut client,
+        &session,
+        &id,
+        &mut requests,
+        "web_search",
+        json!({"query":"fail"}),
+    )
+    .await;
+    assert_eq!(failed.is_error, Some(true));
+    assert!(text(&failed).contains("search_failed"), "{failed:?}");
+    let names = text_turn(&mut client, &id, &mut requests, "after a failure").await;
+    assert!(
+        names.iter().any(|name| name == "web_search"),
+        "a call-time failure keeps the declaration: {names:?}"
+    );
+
+    let narrow = create_with_tools(&mut client, Some(json!(["web_fetch"]))).await;
+    let names = text_turn(&mut client, &narrow, &mut requests, "narrow").await;
+    assert!(!names.iter().any(|name| name == "web_search"), "{names:?}");
+    assert!(names.iter().any(|name| name == "web_fetch"), "{names:?}");
+
+    stop.cancel();
+    http.await.unwrap();
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -342,8 +694,17 @@ async fn web_settings_permission_cancellation_and_restore() {
             let session = server.agent().unwrap().get_session(&id).unwrap();
             submit(&mut client, &id, "web_search", json!({"query":"initial"})).await;
             idle(&mut client, &id).await;
-            assert!(text(&result(&session).await).contains("search_unavailable"));
+            let initial = last_turn_outcome(&session).await;
+            assert!(
+                initial
+                    .as_deref()
+                    .is_some_and(|outcome| outcome
+                        .contains("Tool was not offered in this request: web_search")),
+                "{initial:?}"
+            );
             signed_in.store(true, Ordering::SeqCst);
+            account_status(&mut client).await;
+            await_search_declared(&session, true).await;
             submit(
                 &mut client,
                 &id,
@@ -413,11 +774,20 @@ async fn web_settings_permission_cancellation_and_restore() {
                     .contains("fixture-web-key")
             );
             signed_in.store(false, Ordering::SeqCst);
+            account_status(&mut client).await;
             configure(&mut client, json!({"allowPrivateHosts":["127.0.0.1"]})).await;
+            await_search_declared(&session, false).await;
             let before = requests.load(Ordering::SeqCst);
             submit(&mut client, &id, "web_search", json!({"query":"removed"})).await;
             idle(&mut client, &id).await;
-            assert!(text(&result(&session).await).contains("search_unavailable"));
+            let removed = last_turn_outcome(&session).await;
+            assert!(
+                removed
+                    .as_deref()
+                    .is_some_and(|outcome| outcome
+                        .contains("Tool was not offered in this request: web_search")),
+                "{removed:?}"
+            );
             assert_eq!(requests.load(Ordering::SeqCst), before);
 
             let denied = create_web(&mut client, "read-only", true).await;
@@ -949,6 +1319,7 @@ async fn web_fetch_blocks_untrusted_targets_and_follows_same_host_redirects() {
         }),
     )
     .await;
+    await_search_declared(&session, true).await;
     submit(
         &mut client,
         &id,

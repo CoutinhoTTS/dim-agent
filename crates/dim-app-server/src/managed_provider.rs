@@ -15,6 +15,7 @@ use std::{
     collections::HashMap,
     sync::{Arc, Mutex, Weak},
 };
+use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -355,6 +356,10 @@ impl From<ManagedError> for ManagedProviderError {
 pub struct ManagedProviders {
     provider: Mutex<Option<Bound>>,
     stop: CancellationToken,
+    /// Whether the bound provider last reported a signed-in account. The
+    /// owner writes it from every account observation and reads it in-process
+    /// for capabilities that depend on a usable account.
+    usable: watch::Sender<bool>,
 }
 /// A published provider and the identity of the binding that published it.
 /// A replacement, even of an equal provider, is a new binding.
@@ -371,6 +376,50 @@ fn retired() -> ManagedProviderError {
     }
 }
 impl ManagedProviders {
+    /// The account availability the bound provider last reported: `true` when
+    /// an observed snapshot carries an account. Without a binding it is
+    /// `false`.
+    pub fn usable(&self) -> bool {
+        *self.usable.borrow()
+    }
+    /// Notified when [`Self::usable`] changes.
+    pub fn subscribe_usable(&self) -> watch::Receiver<bool> {
+        self.usable.subscribe()
+    }
+    /// Re-reads the bound provider's account and publishes whether it is
+    /// signed in, returning the published value. A provider without a binding
+    /// or a failed read leaves the last value.
+    pub async fn refresh_usable(&self, cancel: &CancellationToken) -> bool {
+        let Ok(bound) = self.bound(cancel) else {
+            return self.usable();
+        };
+        let mut usable = false;
+        for descriptor in bound.provider.providers() {
+            if cancel.is_cancelled() {
+                break;
+            }
+            if let Ok(account) = bound.provider.status(&descriptor.provider_id).await {
+                usable |= account.account.is_some();
+            }
+        }
+        if !cancel.is_cancelled() {
+            self.observe_bound(bound.binding, usable);
+        }
+        self.usable()
+    }
+    /// Publishes an observation only while `binding` is still the bound one,
+    /// so a retired provider never changes the value.
+    fn observe_bound(&self, binding: u64, usable: bool) {
+        let current = self
+            .provider
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|bound| bound.binding == binding);
+        if current {
+            self.usable.send_replace(usable);
+        }
+    }
     /// Called before Agent/RPC settlement, not only during plugin disposal.
     pub async fn quiesce(&self) {
         self.stop.cancel();
@@ -439,14 +488,20 @@ impl ManagedProviders {
         id: &str,
         cancel: &CancellationToken,
     ) -> Result<AccountSnapshot, ManagedProviderError> {
-        checked_account(self.provider(cancel)?.status(id).await?)
+        let bound = self.bound(cancel)?;
+        let account = checked_account(bound.provider.status(id).await?)?;
+        self.observe_bound(bound.binding, account.account.is_some());
+        Ok(account)
     }
     pub async fn recover_account(
         &self,
         id: &str,
         cancel: &CancellationToken,
     ) -> Result<AccountSnapshot, ManagedProviderError> {
-        checked_account(self.provider(cancel)?.recover(id).await?)
+        let bound = self.bound(cancel)?;
+        let account = checked_account(bound.provider.recover(id).await?)?;
+        self.observe_bound(bound.binding, account.account.is_some());
+        Ok(account)
     }
     pub async fn begin_browser(
         &self,
@@ -460,7 +515,10 @@ impl ManagedProviders {
         login: ManagedBrowserLoginComplete,
         cancel: &CancellationToken,
     ) -> Result<AccountSnapshot, ManagedProviderError> {
-        checked_account(self.provider(cancel)?.complete_browser(login).await?)
+        let bound = self.bound(cancel)?;
+        let account = checked_account(bound.provider.complete_browser(login).await?)?;
+        self.observe_bound(bound.binding, account.account.is_some());
+        Ok(account)
     }
     pub async fn begin_device(
         &self,
@@ -474,9 +532,11 @@ impl ManagedProviders {
         attempt: &ManagedLoginAttempt,
         cancel: &CancellationToken,
     ) -> Result<LoginState, ManagedProviderError> {
-        let state = self.provider(cancel)?.attempt_status(attempt)?;
+        let bound = self.bound(cancel)?;
+        let state = bound.provider.attempt_status(attempt)?;
         if let LoginState::Completed { account } = &state {
             checked_account(account.clone())?;
+            self.observe_bound(bound.binding, account.account.is_some());
         }
         Ok(state)
     }
@@ -492,7 +552,10 @@ impl ManagedProviders {
         id: &str,
         cancel: &CancellationToken,
     ) -> Result<AccountSnapshot, ManagedProviderError> {
-        checked_account(self.provider(cancel)?.logout(id).await?)
+        let bound = self.bound(cancel)?;
+        let account = checked_account(bound.provider.logout(id).await?)?;
+        self.observe_bound(bound.binding, account.account.is_some());
+        Ok(account)
     }
     pub async fn usage(
         &self,
@@ -689,6 +752,7 @@ impl DynPlugin for ManagedProvidersPlugin {
             let service = Arc::new(ManagedProviders {
                 provider: Mutex::new(None),
                 stop: CancellationToken::new(),
+                usable: watch::Sender::new(false),
             });
             let owner = service.clone();
             ctx.effect(move || async move {
@@ -715,6 +779,19 @@ impl DynPlugin for ManagedProvidersPlugin {
 pub struct ManagedSearch(Arc<ManagedProviders>);
 
 impl ManagedSearch {
+    /// The account availability the bound provider last reported, read
+    /// in-process by capabilities that depend on a usable signed-in account.
+    pub fn usable(&self) -> bool {
+        self.0.usable()
+    }
+    /// Notified when [`Self::usable`] changes.
+    pub fn subscribe_usable(&self) -> watch::Receiver<bool> {
+        self.0.subscribe_usable()
+    }
+    /// Re-reads the bound provider's account and publishes the result.
+    pub async fn refresh_usable(&self, cancel: &CancellationToken) -> bool {
+        self.0.refresh_usable(cancel).await
+    }
     /// Searches with the current managed provider. Dropping or cancelling the
     /// call cancels its provider request without cancelling the caller's token.
     pub async fn search(
@@ -791,11 +868,17 @@ impl DynPlugin for ManagedProviderBinding {
                 binding,
             });
             ctx.effect(move || async move {
-                {
+                let retired = {
                     let mut slot = owner.provider.lock().unwrap();
                     if slot.as_ref().is_some_and(|bound| bound.binding == binding) {
                         *slot = None;
+                        true
+                    } else {
+                        false
                     }
+                };
+                if retired {
+                    owner.usable.send_replace(false);
                 }
                 provider.quiesce().await;
                 Ok(())
