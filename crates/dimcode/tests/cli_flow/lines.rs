@@ -98,14 +98,10 @@ fn consumed(sequence: u64, input_id: &str) -> Value {
 /// names its title right after the corner; the composer's model label sits
 /// at the right end of its own.
 fn bar_since(terminal: &Terminal, from: usize) -> Option<String> {
-    terminal
-        .painted_rows(from)
-        .into_iter()
-        .filter(|row| {
-            let row = row.trim_start();
-            row.starts_with('╭') && row.ends_with('╮') && !row.starts_with("╭─ ")
-        })
-        .last()
+    terminal.painted_rows(from).into_iter().rfind(|row| {
+        let row = row.trim_start();
+        row.starts_with('╭') && row.ends_with('╮') && !row.starts_with("╭─ ")
+    })
 }
 
 fn directory(default_branch_id: &str, lines: &[(&str, Option<&str>)]) -> Value {
