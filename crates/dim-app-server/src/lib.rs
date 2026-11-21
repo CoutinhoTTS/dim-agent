@@ -202,6 +202,16 @@ pub enum ShutdownReason {
     Forced,
 }
 
+/// Feature `testing`: a hold on one unregistered worktree removal after its
+/// content check and before the store's final Session check. It notifies
+/// `reached` once held and returns once `release` is notified.
+#[cfg(feature = "testing")]
+#[derive(Default)]
+pub struct UnregisteredRemovalHold {
+    pub reached: tokio::sync::Notify,
+    pub release: tokio::sync::Notify,
+}
+
 /// Feature `testing`: a hold on one subscription's `follow` task. It notifies
 /// `waiting` once it is held, `cancelled` once retirement cancels it, and
 /// returns once `release` is notified.
@@ -210,16 +220,6 @@ pub enum ShutdownReason {
 pub struct FollowHold {
     pub waiting: tokio::sync::Notify,
     pub cancelled: tokio::sync::Notify,
-    pub release: tokio::sync::Notify,
-}
-
-/// Feature `testing`: a hold on one unregistered worktree removal after its
-/// content check and before the store's final Session check. It notifies
-/// `reached` once held and returns once `release` is notified.
-#[cfg(feature = "testing")]
-#[derive(Default)]
-pub struct UnregisteredRemovalHold {
-    pub reached: tokio::sync::Notify,
     pub release: tokio::sync::Notify,
 }
 
@@ -312,15 +312,6 @@ impl RunningServer {
             .get::<AgentIndex>()
             .map(|index| index.idle_admitted())
     }
-    /// Holds the next subscription's `follow` task open until `release`, so a
-    /// test can keep an attach or detach in flight at a known point. Feature
-    /// `testing` only.
-    #[cfg(feature = "testing")]
-    pub fn hold_next_follow(&self) -> Option<Arc<FollowHold>> {
-        self.root
-            .get::<ConnectionHub>()
-            .map(|hub| hub.hold_next_follow())
-    }
     /// Holds the next unregistered worktree removal after its content check,
     /// so a test can create a Session before the store's final check. Feature
     /// `testing` only.
@@ -329,6 +320,15 @@ impl RunningServer {
         self.root
             .get::<worktrees::ManagedWorktrees>()
             .map(|managed| managed.hold_next_unregistered_removal())
+    }
+    /// Holds the next subscription's `follow` task open until `release`, so a
+    /// test can keep an attach or detach in flight at a known point. Feature
+    /// `testing` only.
+    #[cfg(feature = "testing")]
+    pub fn hold_next_follow(&self) -> Option<Arc<FollowHold>> {
+        self.root
+            .get::<ConnectionHub>()
+            .map(|hub| hub.hold_next_follow())
     }
     /// Makes the next attach fail before it registers its listener. Feature
     /// `testing` only.
