@@ -8,9 +8,12 @@ settlement and bounded retry/recovery.
 
 ## Image handling
 
-Every conversational request replaces image blocks in user content and tool
-results with content references, regardless of the model's vision capability.
-The reference and omission-placeholder rules are owned by
+Every conversational request routes image blocks in user content and tool
+results by the model's vision capability. A vision-capable model, or a request
+whose capability is unknown, receives a sendable image as an image block; a
+model without image input, or an image that cannot be sent, receives a content
+reference or omission placeholder. The routing, reference and placeholder
+rules are owned by
 [Attachments A.1](../../../design/plugins/Attachments.md#a1-image-handling-cli-checks-and-modelprovider),
 implemented by [images.rs](../../../../crates/dim-agent-capabilities/src/model_provider/images.rs)
 using the shared `images::image_reference` helper. The transformation changes
@@ -141,9 +144,9 @@ a continuation declines it.
 `invalid_model_stream_is_cancelled_and_drained_before_settlement`,
 `transient_retries_are_bounded_and_stop_after_irreversible_output`,
 `stop_during_native_drain_keeps_an_already_completed_model_result`,
-`image_references_survive_vision_and_text_model_switches_without_changing_history`,
+`vision_and_text_models_route_images_without_changing_history`,
 `replacing_a_tool_image_preserves_other_messages_and_the_stored_result`,
-`stored_attachment_and_tool_images_share_a_reference_without_changing_file_history`.
+`stored_attachment_and_tool_images_route_by_vision_capability`.
 
 <!-- generated:plugin ModelProvider — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
 | 项 | 值 |
@@ -156,21 +159,23 @@ a continuation declines it.
 
 ## Durable images at model execution
 
-During reference adaptation and before budget validation, ModelProvider uses
-`session_files::resolve` to read one file-backed image for the request
-metadata's Session, hashes it and releases its bytes before reading the next.
-The same path handles user content and tool results for vision and text-only
-models; only images in effective context are read. Adaptation retains only
-references, not the resolved images. The stored request and its File sources
-remain unchanged.
+During request adaptation and before budget validation, ModelProvider uses
+`session_files::resolve` to read a file-backed image for the request metadata's
+Session, then keeps the bytes for a vision-capable model, or hashes and
+releases them for a model that needs a reference. The same path handles user
+content and tool results for both kinds of model; only images in effective
+context are read. A reference route retains only the reference; the vision route
+retains the resolved bytes. The stored request and its File sources remain
+unchanged.
 
 The optional dependency is named through `Names` and read with `get_at` at
 load. It does not gate or create a reload relation. A missing file service,
 Session identity or stored image fails a request that needs file bytes, rather
 than inventing a reference or silently omitting it. Cancellation propagates to
 bounded reads with the existing per-file storage limit. The aggregate image-data
-budget applies only at Aimux's image-consuming boundary, not to conversational
-references, so retained images totaling more than 32 MiB do not block text calls.
+budget applies at Aimux's image-consuming boundary; a reference route carries no
+image data, so retained images totaling more than 32 MiB do not block text
+calls, while a vision request that carries them fails before sending.
 
 SessionStore provides `sessionFiles` in the process, under both its shared
 dispatch name and the native binding. The native-storage profile also gates

@@ -2626,7 +2626,6 @@ async fn respond_native(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn four_native_apis_preserve_signed_blocks_and_tool_continuation() {
-    let reference = String::from("img:12c5f2d047c10416");
     tokio::time::timeout(Duration::from_secs(30), async {
         for kind in ["openai-chat","openai-responses","anthropic","gemini"] {
             let server = NativeServer::start(kind).await;
@@ -2655,18 +2654,16 @@ async fn four_native_apis_preserve_signed_blocks_and_tool_continuation() {
                 assert_eq!(headers.get_all(header).iter().count(),1);
                 assert_eq!(headers.get_all("content-type").iter().count(),1,"{kind}");
                 assert!(!request.to_string().contains("native-secret"));
-                assert!(request.to_string().contains(&reference), "{kind}: {request}");
-                assert!(!request.to_string().contains(IMAGE), "{kind}: {request}");
                 if kind != "anthropic" {
                     assert!(!request.to_string().contains("cache_control"), "{kind}: {request}");
                 }
             }
             let first = &requests[0].2;
             match kind {
-                "anthropic" => assert_eq!(first["messages"].as_array().unwrap().iter().find(|message| message["role"]=="user").unwrap()["content"][1],json!({"type":"text","text":reference,"cache_control":{"type":"ephemeral"}})),
-                "gemini" => assert!(first["contents"].as_array().unwrap().iter().flat_map(|message| message["parts"].as_array().unwrap()).any(|part|part["text"]==reference)),
-                "openai-responses" => assert!(first["input"].as_array().unwrap().iter().find(|message| message["role"]=="user").unwrap()["content"].to_string().contains(&reference)),
-                _ => assert!(first["messages"].as_array().unwrap().iter().find(|message| message["role"]=="user").unwrap()["content"].to_string().contains(&reference)),
+                "anthropic" => assert_eq!(first["messages"].as_array().unwrap().iter().find(|message| message["role"]=="user").unwrap()["content"][1],json!({"type":"image","source":{"type":"base64","media_type":"image/png","data":IMAGE},"cache_control":{"type":"ephemeral"}})),
+                "gemini" => assert_eq!(*first["contents"].as_array().unwrap().iter().flat_map(|message| message["parts"].as_array().unwrap()).find(|part|part.get("inlineData").is_some()).unwrap(),json!({"inlineData":{"mimeType":"image/png","data":IMAGE}})),
+                "openai-responses" => assert_eq!(first["input"].as_array().unwrap().iter().find(|message| message["role"]=="user").unwrap()["content"][1],json!({"type":"input_image","image_url":format!("data:image/png;base64,{IMAGE}")})),
+                _ => assert_eq!(first["messages"].as_array().unwrap().iter().find(|message| message["role"]=="user").unwrap()["content"][1],json!({"type":"image_url","image_url":{"url":format!("data:image/png;base64,{IMAGE}")}})),
             }
             let next = &requests[1].2;
             match kind {
@@ -3838,6 +3835,7 @@ impl ToolDriver for ImageEcho {
 }
 
 const TOOL_IMAGE_MARKER: &str = "[Image: sent in the following user message as tool output.]";
+const TOOL_IMAGE_LABEL: &str = "Tool output from tool call";
 
 fn tool_result_events(events: &[Arc<AgentEvent>]) -> Vec<&ToolContent> {
     events
@@ -3850,8 +3848,7 @@ fn tool_result_events(events: &[Arc<AgentEvent>]) -> Vec<&ToolContent> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn tool_result_images_become_references_in_every_native_protocol() {
-    let reference = String::from("img:12c5f2d047c10416");
+async fn tool_result_images_take_the_form_its_protocol_defines() {
     tokio::time::timeout(Duration::from_secs(30), async {
         for kind in ["openai-chat", "openai-responses", "anthropic", "gemini"] {
             let server = NativeServer::start(kind).await;
@@ -3892,8 +3889,6 @@ async fn tool_result_images_become_references_in_every_native_protocol() {
             let requests = server.endpoint.requests.lock().unwrap().clone();
             assert_eq!(requests.len(), 2, "{kind}");
             let next = &requests[1].2;
-            assert!(!next.to_string().contains(IMAGE), "{kind}: {next}");
-            assert!(!next.to_string().contains(TOOL_IMAGE_MARKER), "{kind}: references need no image follow-up");
             let omitted = "[Image omitted: the image cannot be sent to this model.]";
             match kind {
                 "anthropic" => {
@@ -3906,9 +3901,15 @@ async fn tool_result_images_become_references_in_every_native_protocol() {
                         .unwrap();
                     assert_eq!(
                         result["content"],
-                        format!("result text{reference}{omitted}{omitted}"),
+                        json!([
+                            {"type":"text","text":"result text"},
+                            {"type":"image","source":{"type":"base64","media_type":"image/png","data":IMAGE}},
+                            {"type":"text","text":omitted},
+                            {"type":"text","text":omitted},
+                        ]),
                         "{kind}"
                     );
+                    assert!(!next.to_string().contains(TOOL_IMAGE_MARKER), "{kind}: no marker when the protocol carries the image inside");
                 }
                 "gemini" => {
                     let contents = next["contents"].as_array().unwrap();
@@ -3918,22 +3919,39 @@ async fn tool_result_images_become_references_in_every_native_protocol() {
                         .find(|part| part.get("functionResponse").is_some())
                         .unwrap();
                     let content = response["functionResponse"]["response"]["content"].as_str().unwrap();
-                    assert!(content.contains("result text") && content.contains(&reference), "{kind}: {response}");
+                    assert!(
+                        content.contains("result text") && content.contains(TOOL_IMAGE_MARKER),
+                        "{kind}: {response}"
+                    );
                     assert_eq!(content.matches(omitted).count(), 2, "{kind}: {response}");
+                    let user = contents.last().unwrap();
+                    assert_eq!(user["role"], "user", "{kind}");
+                    let parts = user["parts"].as_array().unwrap();
+                    assert!(parts[0]["text"].as_str().unwrap().starts_with(TOOL_IMAGE_LABEL), "{kind}: {}", parts[0]);
+                    assert_eq!(parts[1], json!({"inlineData":{"mimeType":"image/png","data":IMAGE}}), "{kind}");
                 }
                 "openai-responses" => {
                     let input = next["input"].as_array().unwrap();
                     let output = input.iter().find(|item| item["type"] == "function_call_output").unwrap();
                     let content = output["output"].as_str().unwrap();
-                    assert!(content.contains("result text") && content.contains(&reference), "{kind}: {output}");
+                    assert!(content.contains(TOOL_IMAGE_MARKER), "{kind}: {output}");
                     assert_eq!(content.matches(omitted).count(), 2, "{kind}: {output}");
+                    let user = input.iter().rev().find(|item| item["role"] == "user").unwrap();
+                    let parts = user["content"].as_array().unwrap();
+                    assert!(parts[0]["text"].as_str().unwrap().starts_with(TOOL_IMAGE_LABEL), "{kind}: {}", parts[0]);
+                    assert_eq!(parts[1], json!({"type":"input_image","image_url":format!("data:image/png;base64,{IMAGE}")}), "{kind}");
                 }
                 _ => {
                     let messages = next["messages"].as_array().unwrap();
                     let tool = messages.iter().find(|message| message["role"] == "tool").unwrap();
                     let content = tool["content"].as_str().unwrap();
-                    assert!(content.contains("result text") && content.contains(&reference), "{kind}: {tool}");
+                    assert!(content.contains(TOOL_IMAGE_MARKER), "{kind}: {tool}");
                     assert_eq!(content.matches(omitted).count(), 2, "{kind}: {tool}");
+                    let user = messages.last().unwrap();
+                    assert_eq!(user["role"], "user", "{kind}");
+                    let parts = user["content"].as_array().unwrap();
+                    assert_eq!(parts[0]["text"], format!("{TOOL_IMAGE_LABEL} call-1: the image after this text is that call's result."), "{kind}");
+                    assert_eq!(parts[1], json!({"type":"image_url","image_url":{"url":format!("data:image/png;base64,{IMAGE}")}}), "{kind}");
                 }
             }
             session.submit("another".into(), InputMode::Queue, "main").await.unwrap();

@@ -334,7 +334,7 @@ impl DynPlugin for ImageUnderstandingPlugin {
             });
             let mut tool = definition(
                 TOOL,
-                "Ask about an image visible in this branch. Copy its img: reference from an attachment or read result and ask a specific question. Uses the current image-understanding model; returns its answer as text. A cut can make a reference unavailable; incomplete answers are marked.",
+                "Ask about an image visible in this branch. Optional for a model that receives images directly; for a model that receives img: references, copy the reference from an attachment or read result and ask a specific question. Uses the current image-understanding model; returns its answer as text. A cut can make a reference unavailable; incomplete answers are marked.",
                 json!({
                     "type": "object", "additionalProperties": false, "required": ["image", "question"],
                     "properties": {
@@ -354,7 +354,7 @@ impl DynPlugin for ImageUnderstandingPlugin {
             )?;
             ctx.require_at(&self.guide)?.register(ctx, GuideScope::Session, GuideEntry {
                 markers: vec!["img".into()], order: 140,
-                text: "Images appear as img: references instead of pixels. Use image_understand with the reference and your question to inspect an image. References remain usable after compaction, but cannot resolve images outside this branch's inherited history or removed by a cut.".into(),
+                text: "An image reaches this model as pixels when the model accepts images; otherwise it appears as an img: reference, and an image that cannot be sent appears as an omitted-image placeholder. Use image_understand with a reference and your question for a one-shot answer; it is optional and returns text, not lasting visual context. References remain usable after compaction, but cannot resolve images outside this branch's inherited history or removed by a cut.".into(),
             })?;
             Ok(Effect::Done)
         })

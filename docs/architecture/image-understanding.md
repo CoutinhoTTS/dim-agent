@@ -2,8 +2,10 @@
 
 Owner: [dim-image-understanding](../../crates/dim-image-understanding/src/lib.rs).
 The product installs this Session Capability next to Modality. Its contract is
-[ImageUnderstanding](../design/plugins/ImageUnderstanding.md): the conversational
-model sees image references and asks `image_understand {image, question}` for an answer.
+[ImageUnderstanding](../design/plugins/ImageUnderstanding.md): a vision-capable
+conversational model receives a sendable image as pixels; a model without image
+input, or an image that cannot be sent, sees an `img:` reference or placeholder and
+can ask `image_understand {image, question}` for a one-shot answer.
 The tool is risk `session`; unknown input fields are rejected.
 
 ## Dependencies
@@ -16,7 +18,7 @@ The tool is risk `session`; unknown input fields are rejected.
 | `S:SessionIdentity` | Scope file reads to the calling Session. |
 | `P:ModalityTargets` | Resolve `image.understand` on every call, including reuse. |
 | `P:AuxiliaryModel` | Execute against the resolved target without conversation or tools. |
-| `S:GuideEntries` | Explain image references through the input guide. |
+| `S:GuideEntries` | Explain image routing and references through the input guide. |
 
 These are the existing owners' faces, not new services. The tool consumes only
 `treeCommands.query` with published chain scope, `sessionFiles.read`,
@@ -50,5 +52,6 @@ through the real Modality and auxiliary-model owners, with an isolated home and
 a fixture HTTP provider. Its compaction case consumes a completed compaction fact,
 then rebuilds the reference index after restore; it does not run a summarizer.
 Request adaptation and immutable file-backed history are covered
-by `dim-agent-capabilities`'s `host_flows`; published inheritance and ended/restored
-queries are covered by `branch_flow`.
+by `dim-agent-capabilities`'s `host_flows`; routing by the conversational model's
+vision capability is covered by `image_flow` and `read_image_flow`; published
+inheritance and ended/restored queries are covered by `branch_flow`.

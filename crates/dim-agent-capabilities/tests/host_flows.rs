@@ -4344,8 +4344,54 @@ fn sent_parts(request: &ModelRequest) -> Vec<String> {
         .collect()
 }
 
+fn sent_image_sources(request: &ModelRequest) -> Vec<ImageSource> {
+    let mut images = Vec::new();
+    for message in &request.messages {
+        let MessageContent::Parts(parts) = &message.content else {
+            continue;
+        };
+        for part in parts {
+            match part {
+                MessagePart::Image { source } => images.push(source.clone()),
+                MessagePart::ToolResult {
+                    content: ToolContent::Blocks(blocks),
+                    ..
+                } => images.extend(blocks.iter().filter_map(|block| match block {
+                    ContentBlock::Image { source } => Some(source.clone()),
+                    _ => None,
+                })),
+                _ => {}
+            }
+        }
+    }
+    images
+}
+
+fn sent_texts(request: &ModelRequest) -> Vec<String> {
+    let mut texts = Vec::new();
+    for message in &request.messages {
+        let MessageContent::Parts(parts) = &message.content else {
+            continue;
+        };
+        for part in parts {
+            match part {
+                MessagePart::Text { text, .. } => texts.push(text.clone()),
+                MessagePart::ToolResult {
+                    content: ToolContent::Blocks(blocks),
+                    ..
+                } => texts.extend(blocks.iter().filter_map(|block| match block {
+                    ContentBlock::Text { text } => Some(text.clone()),
+                    _ => None,
+                })),
+                _ => {}
+            }
+        }
+    }
+    texts
+}
+
 #[tokio::test]
-async fn image_references_survive_vision_and_text_model_switches_without_changing_history() {
+async fn vision_and_text_models_route_images_without_changing_history() {
     tokio::time::timeout(Duration::from_secs(5), async {
         let requests = Arc::new(Mutex::new(Vec::new()));
         let agent = MinimalHost::start(&builder(
@@ -4387,7 +4433,7 @@ async fn image_references_survive_vision_and_text_model_switches_without_changin
         let unsendable = "[Image omitted: the image cannot be sent to this model.]";
         assert_eq!(
             sent_parts(requests.lock().unwrap().last().unwrap()),
-            ["look", TOOL_IMAGE_REFERENCE, TOOL_IMAGE_REFERENCE, unsendable, unsendable, unsendable, unsendable, unsendable, unsendable]
+            ["look", "image:image/png", "image:image/jpeg", unsendable, unsendable, unsendable, unsendable, unsendable, unsendable]
         );
 
         session
@@ -4415,7 +4461,7 @@ async fn image_references_survive_vision_and_text_model_switches_without_changin
         session.idle("main").await.unwrap();
         let restored = requests.lock().unwrap().last().unwrap().clone();
         assert_eq!(restored.model_id, "seeing-again");
-        assert_eq!(sent_parts(&restored)[..9], ["look", TOOL_IMAGE_REFERENCE, TOOL_IMAGE_REFERENCE, unsendable, unsendable, unsendable, unsendable, unsendable, unsendable]);
+        assert_eq!(sent_parts(&restored)[..9], ["look", "image:image/png", "image:image/jpeg", unsendable, unsendable, unsendable, unsendable, unsendable, unsendable]);
         agent.close().await.unwrap();
     })
     .await
@@ -4486,7 +4532,7 @@ impl SessionFilesService for StoredImages {
 }
 
 #[tokio::test]
-async fn stored_attachment_and_tool_images_share_a_reference_without_changing_file_history() {
+async fn stored_attachment_and_tool_images_route_by_vision_capability() {
     use base64::Engine;
 
     let files = Arc::new(StoredImages::default());
@@ -4598,35 +4644,43 @@ async fn stored_attachment_and_tool_images_share_a_reference_without_changing_fi
         session.idle("main").await.unwrap();
         let sent = requests.lock().unwrap().last().unwrap().clone();
         assert_eq!(sent.model_id, model_id);
-        assert_eq!(
-            sent_parts(&sent)
-                .iter()
-                .filter(|part| *part == "img:4739787cfd409e67")
-                .count(),
-            3,
-            "retained images exceeding the pixel budget still reach {model_id} as references"
-        );
-        assert!(
-            sent_parts(&sent)
-                .iter()
-                .any(|part| part == TOOL_IMAGE_REFERENCE)
-        );
-        assert!(sent.messages.iter().any(|message| matches!(&message.content,
-            MessageContent::Parts(parts) if parts.iter().any(|part| matches!(part,
-                MessagePart::ToolResult { content: ToolContent::Blocks(blocks), .. }
-                    if blocks.contains(&ContentBlock::Text { text: TOOL_IMAGE_REFERENCE.into() }))))));
-        assert!(
-            !sent
-                .messages
-                .iter()
-                .any(|message| matches!(&message.content,
-                MessageContent::Parts(parts) if parts.iter().any(|part| match part {
-                    MessagePart::Image { .. } => true,
-                    MessagePart::ToolResult { content: ToolContent::Blocks(blocks), .. } =>
-                        blocks.iter().any(|block| matches!(block, ContentBlock::Image { .. })),
-                    _ => false,
-                })))
-        );
+        if vision {
+            assert_eq!(
+                sent_image_sources(&sent).len(),
+                5,
+                "the attachment, three large images and the tool image reach {model_id} as pixels"
+            );
+            assert!(
+                sent_image_sources(&sent)
+                    .iter()
+                    .all(|source| source.source_type == ImageSourceType::Base64),
+                "a file-backed source is resolved for {model_id}"
+            );
+            assert!(
+                sent_texts(&sent)
+                    .iter()
+                    .all(|text| !text.starts_with("img:") && !text.contains("Image omitted")),
+                "a vision model needs no reference or placeholder"
+            );
+        } else {
+            assert!(sent_image_sources(&sent).is_empty());
+            assert_eq!(
+                sent_texts(&sent)
+                    .iter()
+                    .filter(|text| *text == "img:4739787cfd409e67")
+                    .count(),
+                3,
+                "retained images still reach {model_id} as references"
+            );
+            assert_eq!(
+                sent_texts(&sent)
+                    .iter()
+                    .filter(|text| *text == TOOL_IMAGE_REFERENCE)
+                    .count(),
+                3,
+                "the attachment and both tool images share one reference"
+            );
+        }
     }
     let events = chain_events(&session, "main", ..).await.unwrap();
     assert!(events.iter().any(|event| matches!(&event.kind,
@@ -4715,17 +4769,25 @@ async fn replacing_a_tool_image_preserves_other_messages_and_the_stored_result()
             assert_eq!(
                 content,
                 &ToolContent::Blocks({
-                    let mut blocks = vec![
-                        ContentBlock::Text {
-                            text: "screenshot".into(),
+                    let image = || ContentBlock::Image {
+                        source: ImageSource {
+                            file_id: None,
+                            source_type: ImageSourceType::Base64,
+                            media_type: "image/png".into(),
+                            data: Some(TOOL_IMAGE.into()),
+                            url: None,
                         },
-                        ContentBlock::Text {
+                    };
+                    let mut blocks = vec![ContentBlock::Text {
+                        text: "screenshot".into(),
+                    }];
+                    if vision {
+                        blocks.extend([image(), image()]);
+                    } else {
+                        blocks.extend((0..2).map(|_| ContentBlock::Text {
                             text: TOOL_IMAGE_REFERENCE.into(),
-                        },
-                        ContentBlock::Text {
-                            text: TOOL_IMAGE_REFERENCE.into(),
-                        },
-                    ];
+                        }));
+                    }
                     blocks.extend((0..5).map(|_| {
                         ContentBlock::Text {
                             text: if vision {

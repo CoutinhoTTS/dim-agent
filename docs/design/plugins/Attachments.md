@@ -119,17 +119,22 @@ The accepted image formats and scaling rule are owned by
 Image preparation uses that same rule. A submission accepts at most 20 images.
 Image bytes follow the Session file limit; the submission carries file IDs.
 
-ModelProvider replaces every image block in a conversational request, in user
-content and tool results alike, with `img:` followed by the first 16 lowercase
-hexadecimal characters of SHA-256 of the base64-decoded image file bytes, not
-the pixels or base64 text. The rule applies to vision, text-only and
-unknown-capability models alike. Equal bytes have equal references; the
-reference contract is [ImageUnderstanding §3](ImageUnderstanding.md#3-references).
+ModelProvider routes every image block in a conversational request, in user
+content and tool results alike, by the request model's vision capability. A
+vision-capable model, or a request whose model capability is unknown, receives
+a sendable image as an image block; a file-backed source is resolved to its
+bytes. A model without image input never receives pixels. An image that cannot
+be sent — a URL source, a file without an id, missing or undecodable base64, or
+a format this build cannot decode — becomes the omission placeholder:
+`[Image omitted: the current model does not accept images.]` for a model
+without image input, otherwise `[Image omitted: the image cannot be sent to this model.]`.
+
+When the pixels are not sent, a decodable image becomes `img:` followed by the
+first 16 lowercase hexadecimal characters of SHA-256 of the base64-decoded
+image file bytes, not the pixels or base64 text. Equal bytes have equal
+references; the reference contract is [ImageUnderstanding §3](ImageUnderstanding.md#3-references).
 File-backed sources must be resolved before computing the reference.
 
-URL sources, missing or undecodable base64, and formats this build cannot decode
-keep their existing omission placeholders: `[Image omitted: the current model does not accept images.]`
-for a text-only model, otherwise `[Image omitted: the image cannot be sent to this model.]`.
 Only the request changes: history, the Timeline and adopted input retain their
 original image blocks. There is no persisted reference or cross-request cache.
 
@@ -165,9 +170,9 @@ continue to show the accepted image's format and dimensions.
 ### A.4 Requirements to other owners
 
 ModelProvider preserves each image's position in user and tool content and applies
-A.1's reference rule after resolving file-backed sources. Read failures fail
-execution and preserve history. Model changes never restore conversational image
-pixels; references are recomputed only for images still in effective context.
+A.1's routing after resolving file-backed sources. Read failures fail execution
+and preserve history. Model changes route the stored images again; references are
+computed only for images routed away from the current model.
 
 ## Appendix B. Full conflict table
 

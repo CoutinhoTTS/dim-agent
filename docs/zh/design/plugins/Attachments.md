@@ -176,7 +176,7 @@ Client      Rpc        Branch Timeline                      Model           Work
 | --- | --- | --- |
 | `attachment.put` | `sessionMethods`（Session，命名空间 `attachment`） | 把文本附件存为 Session 文件，返回其路径 |
 | CLI 图片检查与粘贴引用 | 客户端契约（A.1、A.3） | 提交前嗅探格式、执行限制；用路径引用已存的粘贴 |
-| 构建请求时的图片处理 | ModelProvider 补充（已实现，S11，A.1） | 按请求所用模型发送图片块，或换成文本占位 |
+| 构建请求时的图片处理 | ModelProvider 补充（已实现，S11，A.1） | 按请求所用模型的视觉能力发送图片块，或换成引用/文本占位 |
 | `attachment.put` 错误 | `appError`（A.2、附录 C） | 拒绝原因 |
 
 ## 7. 安全
@@ -227,16 +227,17 @@ CLI 在提交前检查：
 
 限制（A2）：每次提交最多 20 张图片，整个编码请求不超过 16 MiB 传输帧；仍然超出帧的提交被拒绝并保留草稿。块保持其顺序。
 
-ModelProvider 在构建对话模型请求时处理每个图片块，覆盖所有写入方的用户内容和工具结果。文件来源先解析为字节，再应用下表；引用契约见 [ImageUnderstanding §3](../../../design/plugins/ImageUnderstanding.md#3-references)。
+ModelProvider 在构建对话模型请求时按所用模型的视觉能力处理每个图片块，覆盖所有写入方的用户内容和工具结果。支持视觉的模型（或能力未知的请求）收到可发送的图片块，文件来源先解析为字节；不支持图像的模型从不收到像素。引用契约见 [ImageUnderstanding §3](../../../design/plugins/ImageUnderstanding.md#3-references)。
 
 | 图片块 | 请求内容 |
 | --- | --- |
-| 可解码的 base64 图片，格式为 PNG、JPEG、WebP 或 GIF；模型接受图片、不接受图片或能力未知均相同 | 文本 `img:` 加 base64 解码后的图片文件字节的 SHA-256 前 16 个小写十六进制字符；不散列像素或 base64 文本，相同字节得到相同引用 |
-| URL 来源、缺失或无法解码的 base64 数据，或本构建无法解码的格式 | 保留原有占位：纯文本模型为 `[Image omitted: the current model does not accept images.]`，否则为 `[Image omitted: the image cannot be sent to this model.]`（A10） |
+| 支持视觉的模型收到的、可发送的 PNG、JPEG、WebP 或 GIF base64 图片或带 id 的同格式文件 | 图片块本身；文件来源先解析为字节 |
+| 不支持图像的模型收到的、可发送的图片 | 文本 `img:` 加 base64 解码后的图片文件字节的 SHA-256 前 16 个小写十六进制字符；不散列像素或 base64 文本，相同字节得到相同引用 |
+| URL 来源、缺少 id 的文件、缺失或无法解码的 base64 数据，或本构建无法解码的格式 | 保留原有占位：不支持图像的模型为 `[Image omitted: the current model does not accept images.]`，否则为 `[Image omitted: the image cannot be sent to this model.]`（A10） |
 
 CLI 的缩放规则和限制（A2）在提交前仍然适用；引用散列图片块实际携带的文件字节，不再次缩放或重编码。
 
-仅请求改变；历史、Timeline 和已采用输入保留原始图片块。不持久化引用，不增加跨请求缓存，切换回视觉模型也不发送像素。
+仅请求改变；历史、Timeline 和已采用输入保留原始图片块。不持久化引用，不增加跨请求缓存；模型切换时按新模型的视觉能力重新处理原始图片块。
 
 为什么放在 ModelProvider：图片处理不能放在 RPC 入口或 App Server（原则 §4 第 3 条和 §1），CLI 的检查覆盖不到原始客户端和其他写入方。这项处理不写事件，历史不变；中断和重载只影响正在构建的请求。[#27](https://github.com/arcships/dim/issues/27) 已确认，构建请求时的格式转换不是新的上下文路径。
 

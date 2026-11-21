@@ -161,7 +161,7 @@ The CLI owns terminal and command interactions; the App Server owns host configu
 
 ## Workspace tools
 
-- `read`: read text files; vision models can read supported image formats.
+- `read`: read text files and PNG, JPEG, WebP or GIF images; a vision-capable model receives the image itself, any other model an `img:` reference.
 - `write`: create or overwrite files.
 - `edit`: make precise file-content changes.
 - `glob`: find files by path pattern.

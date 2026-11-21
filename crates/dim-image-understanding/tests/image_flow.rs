@@ -386,7 +386,8 @@ impl Fixture {
             "connection":{"driverKind":"openai-compatible","baseUrl":endpoint,"auth":{"type":"anonymous"}},
             "models":[
                 {"modelId":"alpha","displayName":"alpha","status":"active","capabilities":vision},
-                {"modelId":"beta","displayName":"beta","status":"active","capabilities":vision}
+                {"modelId":"beta","displayName":"beta","status":"active","capabilities":vision},
+                {"modelId":"text","displayName":"text","status":"active","capabilities":CatalogCapabilities::with_limits(128_000, 1024)}
             ]
         })).await;
         fixture
@@ -461,7 +462,29 @@ async fn idle(session: &Session, branch: &str) {
         .unwrap()
         .unwrap();
 }
+async fn turn(session: &Session, text: &str) {
+    session
+        .submit(text.into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    idle(session, "main").await;
+}
 async fn attach(fixture: &Fixture, session: &Session, branch: &str) {
+    attach_with(
+        fixture,
+        session,
+        branch,
+        ModelSelection {
+            metadata: Some(RequestMetadata {
+                session_id: Some(session.id().into()),
+                ..Default::default()
+            }),
+            ..SessionConfig::default().model
+        },
+    )
+    .await;
+}
+async fn attach_with(fixture: &Fixture, session: &Session, branch: &str, model: ModelSelection) {
     use base64::Engine;
     let stored = fixture
         .server
@@ -481,13 +504,7 @@ async fn attach(fixture: &Fixture, session: &Session, branch: &str) {
     session
         .configure(
             ConfigureUpdate {
-                model: Some(ModelSelection {
-                    metadata: Some(RequestMetadata {
-                        session_id: Some(session.id().into()),
-                        ..Default::default()
-                    }),
-                    ..SessionConfig::default().model
-                }),
+                model: Some(model),
                 ..Default::default()
             },
             branch,
@@ -514,6 +531,42 @@ async fn attach(fixture: &Fixture, session: &Session, branch: &str) {
         .unwrap();
     idle(session, branch).await;
 }
+fn selection(model_id: &str, vision: bool, session: &str) -> ModelSelection {
+    let target = ModelId {
+        provider_id: PROVIDER.into(),
+        model_id: model_id.into(),
+    };
+    ModelSelection {
+        provider_id: PROVIDER.into(),
+        model_id: model_id.into(),
+        capability_snapshot: Some(ModelCapabilitySnapshot {
+            target,
+            capabilities: ModelCapabilities {
+                vision,
+                ..ModelCapabilities::with_limits(128_000, 1024)
+            },
+            reasoning: None,
+            service_tier: None,
+        }),
+        config: None,
+        metadata: Some(RequestMetadata {
+            session_id: Some(session.into()),
+            ..Default::default()
+        }),
+    }
+}
+async fn configure_model(session: &Session, branch: &str, model_id: &str, vision: bool) {
+    session
+        .configure(
+            ConfigureUpdate {
+                model: Some(selection(model_id, vision, session.id())),
+                ..Default::default()
+            },
+            branch,
+        )
+        .await
+        .unwrap();
+}
 fn question() -> Value {
     json!({"image":REFERENCE, "question":"What is visible?"})
 }
@@ -522,6 +575,50 @@ fn text(result: &ToolResult) -> &str {
         panic!("text answer")
     };
     text
+}
+fn request_images(request: &ModelRequest) -> Vec<ImageSource> {
+    let mut images = Vec::new();
+    for message in &request.messages {
+        let MessageContent::Parts(parts) = &message.content else {
+            continue;
+        };
+        for part in parts {
+            match part {
+                MessagePart::Image { source } => images.push(source.clone()),
+                MessagePart::ToolResult {
+                    content: ToolContent::Blocks(blocks),
+                    ..
+                } => images.extend(blocks.iter().filter_map(|block| match block {
+                    ContentBlock::Image { source } => Some(source.clone()),
+                    _ => None,
+                })),
+                _ => {}
+            }
+        }
+    }
+    images
+}
+fn request_texts(request: &ModelRequest) -> Vec<String> {
+    let mut texts = Vec::new();
+    for message in &request.messages {
+        let MessageContent::Parts(parts) = &message.content else {
+            continue;
+        };
+        for part in parts {
+            match part {
+                MessagePart::Text { text, .. } => texts.push(text.clone()),
+                MessagePart::ToolResult {
+                    content: ToolContent::Blocks(blocks),
+                    ..
+                } => texts.extend(blocks.iter().filter_map(|block| match block {
+                    ContentBlock::Text { text } => Some(text.clone()),
+                    _ => None,
+                })),
+                _ => {}
+            }
+        }
+    }
+    texts
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -602,8 +699,298 @@ async fn image_questions_follow_current_defaults_and_reuse_only_completed_own_an
                 .unwrap()
                 .contains("image_understand")
         );
-        assert!(requests[0].messages.iter().any(|m| matches!(&m.content, MessageContent::Parts(parts) if parts.iter().any(|p| matches!(p, MessagePart::Text { text, .. } if text == REFERENCE)))));
+        assert!(
+            request_images(&requests[0])
+                .iter()
+                .any(|source| source.data.as_deref() == Some(PNG))
+        );
+        assert!(
+            !request_texts(&requests[0])
+                .iter()
+                .any(|text| text == REFERENCE)
+        );
     }
+    fixture.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_vision_model_receives_a_read_image_as_pixels() {
+    let fixture = Fixture::new().await;
+    let session = fixture.session().await;
+    configure_model(&session, "main", "alpha", true).await;
+    fixture.script.push(&[("read", "read-image", json!({}))]);
+    turn(&session, "read the image").await;
+    let request = fixture
+        .script
+        .requests
+        .lock()
+        .unwrap()
+        .last()
+        .unwrap()
+        .clone();
+    assert_eq!(request.model_id, "alpha");
+    assert!(
+        request
+            .capability_snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.capabilities.vision)
+    );
+    let images = request_images(&request);
+    assert_eq!(
+        images.len(),
+        1,
+        "the read image reaches the model as pixels"
+    );
+    assert_eq!(images[0].source_type, ImageSourceType::Base64);
+    assert_eq!(images[0].data.as_deref(), Some(PNG));
+    assert!(!request_texts(&request).iter().any(|text| text == REFERENCE));
+    assert!(fixture.script.auxiliary.lock().unwrap().is_empty());
+    fixture.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_vision_model_keeps_two_read_images_in_later_turns_without_image_understanding() {
+    let fixture = Fixture::new().await;
+    let session = fixture.session().await;
+    configure_model(&session, "main", "alpha", true).await;
+    fixture
+        .script
+        .push(&[("read", "read-a", json!({})), ("read", "read-b", json!({}))]);
+    turn(&session, "read both images").await;
+    turn(&session, "compare the second difference").await;
+    let request = fixture
+        .script
+        .requests
+        .lock()
+        .unwrap()
+        .last()
+        .unwrap()
+        .clone();
+    assert_eq!(
+        request_images(&request).len(),
+        2,
+        "both read images stay in the later turn"
+    );
+    assert!(!request_texts(&request).iter().any(|text| text == REFERENCE));
+    let events = branch_events(&session, "main", ..).await.unwrap();
+    assert!(!events.iter().any(|event| matches!(&event.kind,
+        EventKind::ToolCall(data) if data.calls.iter().any(|call| call.name == "image_understand"))));
+    assert!(fixture.script.auxiliary.lock().unwrap().is_empty());
+    fixture.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_text_model_receives_references_and_can_still_ask_image_understand() {
+    let fixture = Fixture::new().await;
+    let session = fixture.session().await;
+    configure_model(&session, "main", "text", false).await;
+    fixture.script.push(&[("read", "read-image", json!({}))]);
+    fixture
+        .script
+        .push(&[("image_understand", "understand", question())]);
+    turn(&session, "read and inspect").await;
+    let after_read = {
+        let requests = fixture.script.requests.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        requests[1].clone()
+    };
+    assert!(request_images(&after_read).is_empty());
+    assert!(
+        request_texts(&after_read)
+            .iter()
+            .any(|text| text == REFERENCE),
+        "a text model receives the reference"
+    );
+    assert!(
+        after_read
+            .tools
+            .as_ref()
+            .is_some_and(|tools| tools.iter().any(|tool| tool.name == "image_understand")),
+        "image_understand stays available to a text model"
+    );
+    let events = branch_events(&session, "main", ..).await.unwrap();
+    let answer = events
+        .iter()
+        .rev()
+        .find_map(|event| match &event.kind {
+            EventKind::ToolResult(data) => data
+                .results
+                .iter()
+                .find(|result| result.call_id == "understand"),
+            _ => None,
+        })
+        .expect("the image question ran");
+    assert_eq!(text(&answer.result), "answer from alpha");
+    assert_eq!(fixture.script.auxiliary.lock().unwrap().len(), 1);
+    configure_model(&session, "main", "alpha", true).await;
+    turn(&session, "look again").await;
+    let after_switch = fixture
+        .script
+        .requests
+        .lock()
+        .unwrap()
+        .last()
+        .unwrap()
+        .clone();
+    assert_eq!(
+        request_images(&after_switch).len(),
+        1,
+        "a later vision turn receives the stored image as pixels"
+    );
+    assert!(
+        !request_texts(&after_switch)
+            .iter()
+            .any(|text| text == REFERENCE)
+    );
+    fixture.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn attachments_and_read_images_route_alike_on_both_models() {
+    let fixture = Fixture::new().await;
+    for (model_id, vision) in [("alpha", true), ("text", false)] {
+        let session = fixture.session().await;
+        attach_with(
+            &fixture,
+            &session,
+            "main",
+            selection(model_id, vision, session.id()),
+        )
+        .await;
+        fixture.script.push(&[("read", "read-image", json!({}))]);
+        turn(&session, "read the attached image").await;
+        let request = fixture
+            .script
+            .requests
+            .lock()
+            .unwrap()
+            .last()
+            .unwrap()
+            .clone();
+        assert_eq!(request.model_id, model_id);
+        if vision {
+            assert_eq!(
+                request_images(&request).len(),
+                2,
+                "the attachment and the read image are both pixels for {model_id}"
+            );
+            assert!(!request_texts(&request).iter().any(|text| text == REFERENCE));
+        } else {
+            assert!(request_images(&request).is_empty());
+            assert_eq!(
+                request_texts(&request)
+                    .iter()
+                    .filter(|text| *text == REFERENCE)
+                    .count(),
+                2,
+                "the attachment and the read image share one reference for {model_id}"
+            );
+        }
+    }
+    fixture.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unsendable_image_is_a_placeholder_for_a_vision_model() {
+    let fixture = Fixture::new().await;
+    let session = fixture.session().await;
+    configure_model(&session, "main", "alpha", true).await;
+    session
+        .input(
+            InputMessageData {
+                user: Some(UserInput {
+                    content: vec![
+                        ContentBlock::Image { source: image() },
+                        ContentBlock::Image {
+                            source: ImageSource {
+                                source_type: ImageSourceType::Url,
+                                media_type: "image/png".into(),
+                                data: None,
+                                url: Some("https://example.invalid/a.png".into()),
+                                file_id: None,
+                            },
+                        },
+                        ContentBlock::Image {
+                            source: ImageSource {
+                                source_type: ImageSourceType::Base64,
+                                media_type: "image/svg+xml".into(),
+                                data: Some(PNG.into()),
+                                url: None,
+                                file_id: None,
+                            },
+                        },
+                        ContentBlock::Image {
+                            source: ImageSource {
+                                source_type: ImageSourceType::Base64,
+                                media_type: "image/png".into(),
+                                data: Some("not base64!".into()),
+                                url: None,
+                                file_id: None,
+                            },
+                        },
+                    ],
+                }),
+                ..Default::default()
+            },
+            "main",
+        )
+        .await
+        .unwrap();
+    idle(&session, "main").await;
+    let request = fixture
+        .script
+        .requests
+        .lock()
+        .unwrap()
+        .last()
+        .unwrap()
+        .clone();
+    assert_eq!(
+        request_images(&request).len(),
+        1,
+        "the sendable image still reaches the vision model"
+    );
+    assert_eq!(
+        request_texts(&request)
+            .iter()
+            .filter(|text| text.starts_with("[Image omitted:"))
+            .count(),
+        3,
+        "an unsendable image is a placeholder even for a vision model"
+    );
+    fixture.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_image_understanding_default_does_not_change_conversational_routing() {
+    let fixture = Fixture::new().await;
+    let session = fixture.session().await;
+    configure_model(&session, "main", "alpha", true).await;
+    fixture.configure(Some("beta")).await;
+    attach_with(
+        &fixture,
+        &session,
+        "main",
+        selection("alpha", true, session.id()),
+    )
+    .await;
+    fixture.script.push(&[("read", "read-image", json!({}))]);
+    turn(&session, "read the attached image").await;
+    let request = fixture
+        .script
+        .requests
+        .lock()
+        .unwrap()
+        .last()
+        .unwrap()
+        .clone();
+    assert_eq!(request.model_id, "alpha");
+    assert_eq!(
+        request_images(&request).len(),
+        2,
+        "the understood default does not replace pixels"
+    );
+    assert!(fixture.script.auxiliary.lock().unwrap().is_empty());
     fixture.close().await;
 }
 
