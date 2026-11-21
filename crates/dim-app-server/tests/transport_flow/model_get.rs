@@ -754,10 +754,102 @@ async fn a_closing_line_answers_at_its_published_cutoff() {
     let _ = std::fs::remove_dir_all(&directory);
 }
 
+/// A configuration read that has passed its phase check must not become a
+/// writer when its line starts closing before it advances: it answers the
+/// line's published facts and commits nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_read_whose_line_starts_closing_before_it_advances_commits_nothing() {
+    let probe = Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::new()));
+    let mut dispatch = HeldDispatch::new();
+    let gate = dispatch.gate.clone();
+    let (server, directory) =
+        launch_with_sqlite(probe.clone(), move |builder| hold_dispatch(gate)(builder)).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let created = client.rpc("session.create", create()).await;
+    assert_ok(&created);
+    let id = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    let session = server.agent().unwrap().get_session(&id).unwrap();
+    session.idle("main").await.unwrap();
+    adopt(&session, "main", "alpha").await;
+    let child = open_line(&mut client, &id, "main", "worker work").await;
+    session.idle(&child).await.unwrap();
+    adopt(&session, &child, "beta").await;
+    let timeline = probe
+        .lock()
+        .unwrap()
+        .get(&child)
+        .cloned()
+        .expect("the line's Timeline");
+
+    // A change is committed and published while the Dispatcher is stopped
+    // before it, so the owner's projection still ends below it and a replay
+    // would have to write a checkpoint.
+    dispatch.arm();
+    pending_prompt_change(&timeline, &child);
+    tokio::time::timeout(std::time::Duration::from_secs(10), dispatch.arrived())
+        .await
+        .expect("the Dispatcher stopped at the change");
+
+    // The read stops after its phase check passed and before it advances.
+    let mut held = dim_agent_capabilities::prompt::testing::hold_read_after_check(&id, &child);
+    let mut reading = Client::new_version(&server, false, 3).await;
+    let reading_id = id.clone();
+    let reading_child = child.clone();
+    let reading = tokio::spawn(async move {
+        let reply = read(&mut reading, &reading_id, &reading_child, None).await;
+        (reading, reply)
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(10), held.arrived())
+        .await
+        .expect("the read stopped after its phase check");
+
+    // The close runs until its own interrupt is committed and its publication
+    // is held: the line's phase is closing and its Timeline has not closed.
+    let mut held_interrupt =
+        dim_app_server::storage::timeline_testing::hold_publication(&id, &child, "stop/interrupt");
+    let closing_session = session.clone();
+    let closing = tokio::spawn(async move { closing_session.close().await });
+    tokio::time::timeout(std::time::Duration::from_secs(10), held_interrupt.arrived())
+        .await
+        .expect("the close committed its interrupt");
+    let before = timeline.committed();
+
+    held.release();
+    let reply = tokio::time::timeout(std::time::Duration::from_secs(10), reading)
+        .await
+        .expect("the read answered its closing line")
+        .unwrap()
+        .1;
+    assert_eq!(model_of(&reply), "beta");
+    let through = through_of(&reply);
+    let pinned = read(&mut client, &id, &child, Some(through)).await;
+    assert_eq!(model_of(&pinned), "beta");
+    assert_eq!(through_of(&pinned), through);
+    assert_eq!(
+        timeline.committed(),
+        before,
+        "the read committed nothing after its line started closing"
+    );
+
+    dispatch.release();
+    held_interrupt.release();
+    let closed = tokio::time::timeout(std::time::Duration::from_secs(10), closing)
+        .await
+        .expect("the session closed")
+        .unwrap();
+    assert!(closed.is_ok(), "{closed:?}");
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
 /// A closing line answers from its published facts without waiting for the
-/// recovery checkpoint the owner writes when it consumes a change. The
-/// checkpoint's publication is held while the line is ending, so a read that
-/// went through the owner would wait for that write.
+/// recovery checkpoint the owner writes when it consumes a change. The close
+/// is stopped after its own end is committed and before its Timeline closes;
+/// the change lands above that end, so the owner applies it and writes the
+/// checkpoint the hold stops.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_closing_line_answers_without_waiting_for_its_recovery_checkpoint() {
     let probe = Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::new()));
@@ -772,12 +864,19 @@ async fn a_closing_line_answers_without_waiting_for_its_recovery_checkpoint() {
     let child = open_line(&mut client, &id, "main", "worker work").await;
     session.idle(&child).await.unwrap();
     adopt(&session, &child, "beta").await;
+    let timeline = probe
+        .lock()
+        .unwrap()
+        .get(&child)
+        .cloned()
+        .expect("the line's Timeline");
 
     let mut held_recovered = dim_app_server::storage::timeline_testing::hold_publication(
         &id,
         &child,
         "prompt-state/recovered",
     );
+    let mut held_close = dim_agent_runtime::testing::hold_close(&id, &child);
     let ending_session = session.clone();
     let ending_child = child.clone();
     let ending = tokio::spawn(async move {
@@ -791,25 +890,17 @@ async fn a_closing_line_answers_without_waiting_for_its_recovery_checkpoint() {
             .await
     });
 
-    // The line's own end is committed: it takes no more work, while its head
-    // and its owner are still live. The change lands above that end, so the
-    // owner applies it and writes the checkpoint the hold stops.
-    while !session.directory().iter().any(|line| {
-        line.info.id == child && line.state == dim_agent_runtime::BranchDirectoryState::Ending
-    }) {
-        tokio::task::yield_now().await;
-    }
-    let timeline = probe
-        .lock()
-        .unwrap()
-        .get(&child)
-        .cloned()
-        .expect("the line's Timeline");
-    let changed = pending_prompt_change(&timeline, &child);
-    while session.dispatch_watch(&child).unwrap().borrow().sequence < changed.sequence {
-        tokio::task::yield_now().await;
-    }
-    held_recovered.arrived().await;
+    // The close is stopped after the line's own end is committed and before
+    // its Timeline closes: the line is closing, its head is live, and it still
+    // accepts appends. The change lands above that end, so the owner applies
+    // it and writes the checkpoint the hold stops.
+    tokio::time::timeout(std::time::Duration::from_secs(10), held_close.arrived())
+        .await
+        .expect("the close stopped after the line's end was committed");
+    pending_prompt_change(&timeline, &child);
+    tokio::time::timeout(std::time::Duration::from_secs(10), held_recovered.arrived())
+        .await
+        .expect("the owner wrote its recovery checkpoint while the line was closing");
 
     let line = tokio::time::timeout(
         std::time::Duration::from_secs(10),
@@ -824,7 +915,11 @@ async fn a_closing_line_answers_without_waiting_for_its_recovery_checkpoint() {
     assert_eq!(through_of(&pinned), through);
 
     held_recovered.release();
-    let ended = ending.await.unwrap();
+    held_close.release();
+    let ended = tokio::time::timeout(std::time::Duration::from_secs(10), ending)
+        .await
+        .expect("the line ended")
+        .unwrap();
     assert!(ended.is_ok(), "{ended:?}");
     let after = read(&mut client, &id, &child, None).await;
     assert_eq!(model_of(&after), "beta");

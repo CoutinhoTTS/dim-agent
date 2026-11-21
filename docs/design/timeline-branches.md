@@ -685,8 +685,9 @@ committed just before the call is included rather than missed, and it reports th
 state it answers from: that is the captured head while the owner is still there, and the last
 applied source fact's sequence when the owner has already applied a later one, so reading at the
 returned cutoff always answers the returned configuration. A line whose scope is closing answers
-at its published head: a fact whose publication is still pending is not visible to any read, so
-the line does not answer past it. An ended line reads at
+at its published head instead of its owner: a fact whose publication is still pending is not visible
+to any read, so the line does not answer past it, and the read never replays sources or writes a
+recovery checkpoint while the line closes. An ended line reads at
 its fixed head through the ancestor chain and is not reopened; an explicit `through` reads the same
 chain at that cutoff, and a value past the line's head is refused as a future sequence. An unknown
 line is an error. Old servers do not advertise the method: a client then uses the attach reply for
