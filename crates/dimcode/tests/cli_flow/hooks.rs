@@ -436,7 +436,12 @@ fn project_hooks_start_disabled_and_the_user_enables_them() {
     let binary = std::env::var("DIM_TEST_APP_SERVER").unwrap();
     let home = Home::new();
     let _daemon = OwnedDaemon(home.0.join("rust/daemon.sock"));
-    let (config, _model) = rejecting_model_config(&home, 2);
+    let config = home.0.join("model.json");
+    fs::write(
+        &config,
+        include_str!("../../../dim-agent-aimux/examples/offline.json"),
+    )
+    .unwrap();
     let project = home.0.join("work");
     fs::create_dir_all(project.join(".dimcode")).unwrap();
     fs::write(
