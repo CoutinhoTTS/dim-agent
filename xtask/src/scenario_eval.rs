@@ -7116,10 +7116,10 @@ mod tests {
 
     /// The progress-updates set parses through the runner's own reader
     /// (model-prompts §8.2): three scenarios that judge the reply text's
-    /// progress updates, each with a starting workspace, a statement to see
-    /// and a statement not to see, and no EventHub source, since the reply
-    /// text is the subject. No model runs, so CI catches a schema or layout
-    /// drift before a manual run.
+    /// progress updates and the interactive task's outcome, each with a
+    /// starting workspace, a statement to see and a statement not to see,
+    /// and no EventHub source, since the reply text is the subject. No model
+    /// runs, so CI catches a schema or layout drift before a manual run.
     #[test]
     fn the_progress_updates_scenario_set_parses() {
         let root = repository()
@@ -7168,6 +7168,22 @@ mod tests {
                 scenario.id
             );
         }
+        let interactive = scenarios
+            .iter()
+            .find(|scenario| scenario.id == "interactive-multi-tool")
+            .expect("the interactive case is in the committed set");
+        assert!(
+            interactive
+                .probes
+                .iter()
+                .any(|probe| probe.id == "task-succeeds" && probe.kind == ProbeKind::MustShow),
+            "interactive-multi-tool checks that both repairs land and the test run passes"
+        );
+        assert!(
+            !interactive.message.contains("progress"),
+            "the interactive case asks for the work without coaching the progress updates: {}",
+            interactive.message
+        );
     }
 
     /// The `schedule` description is injected through the product's own
@@ -7288,6 +7304,78 @@ mod tests {
                 .iter()
                 .all(|description| description.as_deref() == Some(CANDIDATE)),
             "the candidate arm's schedule tool description is the candidate text: {offered:?}"
+        );
+    }
+
+    /// The `prompt-sources/base` candidate survives the serve child's JSON
+    /// overrides and arrives in the run's first model request as the base of
+    /// its System (model-prompts §8.2, PromptSources §2): the candidate arm's
+    /// System begins with the candidate text, the current arm's with the
+    /// shipped identity. The input guide the assembly appends follows the
+    /// base.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_base_prompt_candidate_reaches_the_run_through_the_child() {
+        const CANDIDATE: &str = "CANDIDATE BASE PROMPT";
+        /// The shipped base prompt's opening (`prompt_sources.rs` `IDENTITY`).
+        const SHIPPED: &str = "You are DimAgent.";
+        fn answers(text: &str) -> Option<Value> {
+            judged(text).or_else(|| Some(content("ok")))
+        }
+        let fixture = Fixture::start(
+            "base-prompt",
+            answers,
+            json!({
+                "message": "Say ok.",
+                "budget": {"turns": 2, "seconds": 60, "window": 24000},
+                "probes": [{"id": "ran", "kind": "must_show", "text": "the run has a transcript"}]
+            }),
+            &[],
+        )
+        .await;
+        let options = fixture.options(fixture.directory.join("out"));
+        let candidate = overrides(&pairs(&[("prompt-sources/base", CANDIDATE)])).unwrap();
+        for (arm, overrides) in [("current", Overrides::default()), ("candidate", candidate)] {
+            let record = run_arm(&fixture, &options, arm, &overrides, 0).await;
+            assert_eq!(record.error, None, "{arm}");
+            assert!(!record.failed, "{arm}");
+        }
+        // The System the run's first request carries: the first request of the
+        // arm that declares the run's tools, before any title or judge call.
+        let system = |arm: &str| -> String {
+            fixture
+                .arm(arm)
+                .iter()
+                .find_map(|request| {
+                    let request: Value = serde_json::from_str(request).ok()?;
+                    let tools = request["tools"].as_array()?;
+                    if tools.is_empty() {
+                        return None;
+                    }
+                    request["messages"][0]["content"]
+                        .as_str()
+                        .map(str::to_owned)
+                })
+                .unwrap_or_else(|| {
+                    panic!("{arm}: the run's first model request declares the tools")
+                })
+        };
+        let current = system("current");
+        let offered = system("candidate");
+        assert!(
+            current.starts_with(SHIPPED),
+            "the current arm's System begins with the shipped base prompt: {current}"
+        );
+        assert!(
+            !current.contains(CANDIDATE),
+            "the current arm never carries the candidate text: {current}"
+        );
+        assert!(
+            offered.starts_with(CANDIDATE),
+            "the candidate arm's System begins with the candidate base prompt: {offered}"
+        );
+        assert!(
+            !offered.contains(SHIPPED),
+            "the candidate arm never carries the shipped base prompt: {offered}"
         );
     }
 
