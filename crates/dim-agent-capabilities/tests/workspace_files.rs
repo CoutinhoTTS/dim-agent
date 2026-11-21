@@ -223,6 +223,54 @@ async fn atomic_mutations_advance_modification_time() {
 
 #[cfg(target_os = "macos")]
 #[tokio::test]
+async fn atomic_mutations_preserve_bsd_flags() {
+    use std::{
+        os::macos::fs::MetadataExt,
+        process::Command,
+        time::{Duration, SystemTime},
+    };
+    let old = SystemTime::UNIX_EPOCH + Duration::from_secs(1_577_836_800);
+    let recent = SystemTime::now() - Duration::from_secs(300);
+    for tool in ["write", "edit"] {
+        let workspace = Workspace::new();
+        workspace.put("file", b"before\n");
+        let path = workspace.path("file");
+        assert!(
+            Command::new("chflags")
+                .arg("nodump")
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success()
+        );
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(old))
+            .unwrap();
+        assert_ne!(fs::metadata(&path).unwrap().st_flags() & libc::UF_NODUMP, 0);
+        let reads = branch();
+        workspace.read(&reads, "file").await;
+        let result = workspace.call(&reads, tool, json!({"path": "file", "content": "after\n", "oldText": "before", "newText": "after"})).await;
+        assert_eq!(result.is_error, None, "{} {}", tool, text(&result));
+        assert_eq!(workspace.bytes("file"), b"after\n");
+        let after = fs::metadata(&path).unwrap();
+        assert_ne!(
+            after.st_flags() & libc::UF_NODUMP,
+            0,
+            "{tool} dropped the BSD flags"
+        );
+        let modified = after.modified().unwrap();
+        assert!(
+            modified > old && modified >= recent,
+            "{tool} kept the previous modification time: {modified:?}"
+        );
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
 async fn atomic_mutations_succeed_when_acl_denies_writeattr() {
     use std::{
         process::Command,
