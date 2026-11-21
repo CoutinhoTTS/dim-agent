@@ -1,14 +1,17 @@
 //! Hooks that hold a line's live configuration read open and report when it
-//! has to wait for the Dispatcher, so a test commits an adoption in a window
-//! it chose. Feature `testing` only: a production build has no hook.
+//! has to wait for the Dispatcher or for a recovery result to publish, so a
+//! test commits an adoption or starts a close in a window it chose. Feature
+//! `testing` only: a production build has no hook.
 use std::sync::Mutex;
 use tokio::sync::{mpsc, watch};
 
 /// One line's held read: where it arrived, whether it is waiting for the
-/// Dispatcher, and the release that lets it continue.
+/// Dispatcher, whether it is waiting for a written result to publish, and the
+/// release that lets it continue.
 type Hold = (
     String,
     String,
+    mpsc::UnboundedSender<()>,
     mpsc::UnboundedSender<()>,
     mpsc::UnboundedSender<()>,
     watch::Receiver<bool>,
@@ -20,6 +23,7 @@ pub struct HeldRead {
     branch: String,
     arrived: mpsc::UnboundedReceiver<()>,
     waiting: mpsc::UnboundedReceiver<()>,
+    publishing: mpsc::UnboundedReceiver<()>,
     release: watch::Sender<bool>,
 }
 impl HeldRead {
@@ -31,6 +35,11 @@ impl HeldRead {
     /// cutoff; a read that never waits never resolves.
     pub async fn waiting(&mut self) {
         let _ = self.waiting.recv().await;
+    }
+    /// Resolves when the read has to wait for a written recovery result to
+    /// publish; a read that never waits never resolves.
+    pub async fn publishing(&mut self) {
+        let _ = self.publishing.recv().await;
     }
     /// Lets the stopped read continue. Later reads of the line pass through.
     pub fn release(&self) {
@@ -56,6 +65,7 @@ impl Drop for HeldRead {
 pub fn hold_read(session_id: &str, branch_id: &str) -> HeldRead {
     let (arrived, arrivals) = mpsc::unbounded_channel();
     let (waiting, waits) = mpsc::unbounded_channel();
+    let (publishing, publishes) = mpsc::unbounded_channel();
     let (release, released) = watch::channel(false);
     let mut holds = HOLDS.lock().unwrap();
     holds.retain(|(session, branch, ..)| session != session_id || branch != branch_id);
@@ -64,6 +74,7 @@ pub fn hold_read(session_id: &str, branch_id: &str) -> HeldRead {
         branch_id.to_owned(),
         arrived,
         waiting,
+        publishing,
         released,
     ));
     HeldRead {
@@ -71,28 +82,32 @@ pub fn hold_read(session_id: &str, branch_id: &str) -> HeldRead {
         branch: branch_id.to_owned(),
         arrived: arrivals,
         waiting: waits,
+        publishing: publishes,
         release,
     }
 }
 
-fn armed(
-    session_id: &str,
-    branch_id: &str,
-) -> Option<(
-    mpsc::UnboundedSender<()>,
-    mpsc::UnboundedSender<()>,
-    watch::Receiver<bool>,
-)> {
+/// One line's held read as the hook sees it: the arrival, Dispatcher wait and
+/// publication wait reporters, and the release.
+type Signal = mpsc::UnboundedSender<()>;
+type Armed = (Signal, Signal, Signal, watch::Receiver<bool>);
+
+fn armed(session_id: &str, branch_id: &str) -> Option<Armed> {
     let holds = HOLDS.lock().unwrap();
-    let (_, _, arrived, waiting, release) = holds
+    let (_, _, arrived, waiting, publishing, release) = holds
         .iter()
         .find(|(session, branch, ..)| session == session_id && branch == branch_id)?;
-    Some((arrived.clone(), waiting.clone(), release.clone()))
+    Some((
+        arrived.clone(),
+        waiting.clone(),
+        publishing.clone(),
+        release.clone(),
+    ))
 }
 
 /// Stops the read until the test releases it; the cutoff is already captured.
 pub(super) async fn read_captured(session_id: &str, branch_id: &str) {
-    let Some((arrived, _, mut release)) = armed(session_id, branch_id) else {
+    let Some((arrived, _, _, mut release)) = armed(session_id, branch_id) else {
         return;
     };
     let _ = arrived.send(());
@@ -106,7 +121,14 @@ pub(super) async fn read_captured(session_id: &str, branch_id: &str) {
 /// Reports that the read cannot answer at its cutoff before the Dispatcher
 /// reaches it.
 pub(super) fn read_waiting(session_id: &str, branch_id: &str) {
-    if let Some((_, waiting, _)) = armed(session_id, branch_id) {
+    if let Some((_, waiting, _, _)) = armed(session_id, branch_id) {
         let _ = waiting.send(());
+    }
+}
+
+/// Reports that the read waits for a written recovery result to publish.
+pub(super) fn read_publishing(session_id: &str, branch_id: &str) {
+    if let Some((_, _, publishing, _)) = armed(session_id, branch_id) {
+        let _ = publishing.send(());
     }
 }

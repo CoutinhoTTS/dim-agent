@@ -585,8 +585,8 @@ impl Connection {
     /// `session.model.get`: the configuration the requested line adopted at
     /// that line's own cutoff. An open line answers from its owner; a line
     /// whose own end is committed, or an explicit earlier cutoff, reads the
-    /// tree's chain at its fixed or requested head. The App Server owns none of
-    /// the answer.
+    /// tree's chain at its fixed, published or requested head. The App Server
+    /// owns none of the answer.
     pub(super) async fn model_get(
         &self,
         rpc: &RpcService,
@@ -599,23 +599,24 @@ impl Connection {
             .map_err(RpcError::from)?;
         let live = match params.through {
             Some(_) => None,
+            // A line that committed its own end is closing or ended. Its
+            // closing scope may still hold its owner, and that owner may be
+            // waiting on a publication the close holds back, so this read is
+            // answered from the tree at the published head without replaying
+            // or waiting.
+            None if tree.end_committed(&branch).map_err(RpcError::from)? => None,
             None => match session.service::<Prompt>(&branch) {
                 Ok(prompt) => match prompt.adopted_configuration().await {
-                    // The line ended or began closing after it was published:
+                    // The line ended or began closing after the check above:
                     // its own facts still answer at its fixed head.
                     Err(AgentError::BranchEnded(_))
                     | Err(AgentError::Cancelled(_))
                     | Err(AgentError::Closed(_)) => None,
                     read => Some(read),
                 },
-                // A line that is ending has already lost its scope when the
-                // parent has not recorded the end yet: its own facts still
-                // answer at its head. An active line that is reloading keeps
-                // its error instead of being answered from the tree.
-                Err(error) => match tree.end_committed(&branch) {
-                    Ok(true) => None,
-                    _ => return Err(RpcError::from(error)),
-                },
+                // An active line that is reloading keeps its error instead of
+                // being answered from the tree.
+                Err(error) => return Err(RpcError::from(error)),
             },
         };
         let (configuration, through) = match live {
