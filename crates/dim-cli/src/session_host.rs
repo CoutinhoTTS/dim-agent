@@ -5022,7 +5022,8 @@ impl Worker {
     /// One line's adopted configuration through `session.model.get`, at
     /// `through` or at the line's head, with the line's own cutoff. A server
     /// without that read cannot name this line's configuration, and the attach
-    /// reply's is the root's, so none stands in for it (design §14).
+    /// reply's is the root's, so the line reports that and carries no model
+    /// (design §14).
     async fn line_configuration(
         &mut self,
         line: &str,
@@ -5034,13 +5035,8 @@ impl Worker {
             )));
             return None;
         }
-        match dim_client::configuration::adopted(
-            &mut self.client,
-            &self.session_id,
-            line,
-            through,
-        )
-        .await
+        match dim_client::configuration::adopted(&mut self.client, &self.session_id, line, through)
+            .await
         {
             Ok(adopted) => Some(adopted),
             Err(error) => {

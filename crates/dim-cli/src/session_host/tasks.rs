@@ -641,9 +641,12 @@ impl Worker {
         // A display transcript omits `context/configured`, and a bounded window
         // can start after it: the shown line's configuration is read through
         // `session.model.get` once its window is ready, unless a later fact
-        // already set it (design §14).
+        // already set it (design §14). A server without the read has nothing to
+        // answer, and the reply's configuration is the root's, so this refresh
+        // asks only a server that offers it.
         if window_ready
             && self.model.is_none()
+            && self.client.offers("session.model.get")
             && request.branch_id == self.default_branch
             && self.default_branch != ROOT_BRANCH_ID
         {
@@ -651,9 +654,8 @@ impl Worker {
                 .task_history
                 .get(&request.branch_id)
                 .and_then(|history| history.window.through);
-            if let Some((cutoff, configuration)) = self
-                .line_configuration(&request.branch_id, through)
-                .await
+            if let Some((cutoff, configuration)) =
+                self.line_configuration(&request.branch_id, through).await
                 && request.branch_id == self.default_branch
                 && cutoff > self.model_through
             {

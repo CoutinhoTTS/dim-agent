@@ -3224,7 +3224,8 @@ async fn read_history(
         0
     };
     if !seeded && rpc.supports("session.model.get") {
-        let (cutoff, adopted) = crate::config::adopted(rpc, id, &conversation, Some(through)).await?;
+        let (cutoff, adopted) =
+            crate::config::adopted(rpc, id, &conversation, Some(through)).await?;
         config.model = adopted;
         model_through = cutoff;
     }
