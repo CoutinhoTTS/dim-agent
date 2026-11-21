@@ -5608,7 +5608,9 @@ mod tests {
             .unwrap();
         worker.publish();
         let reported = published(&mut receiver);
-        let reported = reported.last().expect("the state report published a snapshot");
+        let reported = reported
+            .last()
+            .expect("the state report published a snapshot");
         assert!(reported.state_reported, "the report is the Session's state");
         assert!(reported.running, "the report carries the running turn");
     }
