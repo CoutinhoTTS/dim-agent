@@ -690,10 +690,11 @@ async fn web_search_is_declared_at_the_next_request_after_the_added_service_is_a
             ..Default::default()
         },
         move |builder| {
-            builder.require_feature(Feature::new("test.adoption-gate").session(
-                "test.adoption-gate",
-                move |names| Ok(Box::new(GatedSourcePlugin::new(names, install.clone())?)),
-            ));
+            builder.require_feature(
+                Feature::new("test.adoption-gate").session("test.adoption-gate", move |names| {
+                    Ok(Box::new(GatedSourcePlugin::new(names, install.clone())?))
+                }),
+            );
         },
     )
     .await;
@@ -784,10 +785,11 @@ async fn web_search_stays_declared_with_a_failing_call_until_the_removed_service
             ..Default::default()
         },
         move |builder| {
-            builder.require_feature(Feature::new("test.adoption-gate").session(
-                "test.adoption-gate",
-                move |names| Ok(Box::new(GatedSourcePlugin::new(names, install.clone())?)),
-            ));
+            builder.require_feature(
+                Feature::new("test.adoption-gate").session("test.adoption-gate", move |names| {
+                    Ok(Box::new(GatedSourcePlugin::new(names, install.clone())?))
+                }),
+            );
         },
     )
     .await;
@@ -865,7 +867,13 @@ async fn web_search_stays_declared_with_a_failing_call_until_the_removed_service
 
     gate.release();
     await_search_declared(&session, false).await;
-    let names = text_turn(&mut client, &id, &mut requests, "after the sign-out's adoption").await;
+    let names = text_turn(
+        &mut client,
+        &id,
+        &mut requests,
+        "after the sign-out's adoption",
+    )
+    .await;
     assert!(!names.iter().any(|name| name == "web_search"), "{names:?}");
 
     stop.cancel();
