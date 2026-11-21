@@ -816,6 +816,17 @@ impl ManagedWorktrees {
                 entry.display()
             )));
         }
+        let sessions = self
+            .sessions
+            .sessions_under_workspace(&entry)
+            .await
+            .map_err(WorktreeError::from)?;
+        if let Some(session) = sessions.first() {
+            return Err(WorktreeError::InUse(format!(
+                "Session {session} uses {}",
+                entry.display()
+            )));
+        }
         let mut empty_children = Vec::new();
         let mut children = tokio::fs::read_dir(&entry)
             .await
@@ -851,17 +862,6 @@ impl ManagedWorktrees {
             {
                 return Err(WorktreeError::InUse(format!(
                     "{} is a Git worktree with no record; inspect it before deleting",
-                    path.display()
-                )));
-            }
-            let sessions = self
-                .sessions
-                .sessions_under_workspace(&path)
-                .await
-                .map_err(WorktreeError::from)?;
-            if let Some(session) = sessions.first() {
-                return Err(WorktreeError::InUse(format!(
-                    "Session {session} uses {}",
                     path.display()
                 )));
             }

@@ -1029,6 +1029,39 @@ async fn unregistered_remove_refuses_a_dangling_git_symlink_even_with_force() {
     server.join().await.unwrap();
 }
 
+/// A Session whose workspace is the task directory itself keeps it, with or
+/// without `--force`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unregistered_remove_refuses_a_task_directory_a_session_uses() {
+    let work = Work::new();
+    let server = host(&work).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let empty = unregistered_task(&work, "aaaaaa");
+    std::fs::create_dir_all(empty.join("repo")).unwrap();
+    assert_ok(&client.rpc("session.create", json!({"cwd": empty})).await);
+    let refused = client
+        .rpc("worktree.remove", json!({"taskId": "aaaaaa"}))
+        .await;
+    assert_eq!(refused["error"]["data"]["appError"], "worktree_in_use");
+    assert!(empty.join("repo").is_dir());
+    let filled = unregistered_task(&work, "bbbbbb");
+    std::fs::write(filled.join("notes.txt"), "keep").unwrap();
+    assert_ok(&client.rpc("session.create", json!({"cwd": filled})).await);
+    let refused = client
+        .rpc(
+            "worktree.remove",
+            json!({"taskId": "bbbbbb", "force": true}),
+        )
+        .await;
+    assert_eq!(refused["error"]["data"]["appError"], "worktree_in_use");
+    assert_eq!(
+        std::fs::read_to_string(filled.join("notes.txt")).unwrap(),
+        "keep"
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
 #[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn committed_shell_completion_recovers_after_notice_failure_and_host_loss() {
