@@ -1211,6 +1211,8 @@ fn stop_name(stop: &str) -> Result<&'static str> {
         "idle" => Ok("idle"),
         "turns" => Ok("turns"),
         "seconds" => Ok("seconds"),
+        "switch_target_not_reached" => Ok("switch_target_not_reached"),
+        "switch_target_ended" => Ok("switch_target_ended"),
         "error" => Ok("error"),
         other => Err(format!("the saved run has an unknown stop {other}").into()),
     }
@@ -2089,7 +2091,8 @@ struct RunRecord {
     scenario: String,
     run: usize,
     session: Option<String>,
-    /// `idle`, `turns`, `seconds` or `error`.
+    /// `idle`, `turns`, `seconds`, `switch_target_not_reached`,
+    /// `switch_target_ended` or `error`.
     stop: &'static str,
     turns: u32,
     window: Option<f64>,
@@ -4272,6 +4275,8 @@ fn child_record(
         "idle" => "idle",
         "turns" => "turns",
         "seconds" => "seconds",
+        "switch_target_not_reached" => "switch_target_not_reached",
+        "switch_target_ended" => "switch_target_ended",
         _ => "error",
     };
     let error = match &outcome.harness {
@@ -4507,12 +4512,14 @@ async fn drive_once(
 }
 
 /// Whether the run is a failed run (model-prompts §8.1): it failed on its
-/// own, an error or its wall-clock budget, or its judging did not happen — a
-/// judge call failed, there was no export to judge, or no model host for the
-/// judge.
+/// own, an error, its wall-clock budget or a switch that could not happen,
+/// or its judging did not happen — a judge call failed, there was no export
+/// to judge, or no model host for the judge.
 fn failed(stop: &str, error: Option<&str>, judge_outcome: JudgeOutcome) -> bool {
-    stop == "seconds"
-        || error.is_some()
+    matches!(
+        stop,
+        "seconds" | "switch_target_not_reached" | "switch_target_ended"
+    ) || error.is_some()
         || matches!(
             judge_outcome,
             JudgeOutcome::CallFailed | JudgeOutcome::NotAsked
@@ -4850,7 +4857,8 @@ async fn drive(
         // first in this pass, so a subscription the model made in its last
         // turn has already started the clock and keeps the run open here
         // (EventHub design A.4).
-        let pending = steers.iter().any(|(_, fired)| !fired)
+        let pending = switch.is_some()
+            || steers.iter().any(|(_, fired)| !fired)
             || events.iter().any(|(event, fired)| {
                 !fired
                     && (event.after_subscribed_seconds.is_none() || event.subscribed_at.is_some())
@@ -4912,7 +4920,15 @@ async fn drive(
                             }
                         }
                         match fire_switch(client, &session, &mut switch, &branch, &event).await {
-                            Ok(submitted) => awaiting |= submitted,
+                            Ok(SwitchFire::Fired) => awaiting = true,
+                            Ok(SwitchFire::NotFired) => {}
+                            Ok(SwitchFire::TargetEnded { line, error }) => {
+                                driven.stop = "switch_target_ended";
+                                driven.error = Some(format!(
+                                    "line {line} ended before the switch could move to it: {error}"
+                                ));
+                                return driven;
+                            }
                             Err(error) => {
                                 driven.stop = "error";
                                 driven.error = Some(error);
@@ -5012,6 +5028,27 @@ async fn drive(
         }
         if driven.error.is_some() {
             driven.stop = "error";
+        }
+    }
+    if let Some(pending) = &switch {
+        let reason = match &pending.line {
+            Some(line) => format!(
+                "the switch never fired: line {line}'s first turn did not end before the run stopped on {}",
+                driven.stop
+            ),
+            None => format!(
+                "the switch never fired: no tool line was opened before the run stopped on {}",
+                driven.stop
+            ),
+        };
+        if driven.stop == "error" {
+            driven.error = Some(match driven.error.take() {
+                Some(error) => format!("{error}; {reason}"),
+                None => reason,
+            });
+        } else {
+            driven.stop = "switch_target_not_reached";
+            driven.error = Some(reason);
         }
     }
     driven
@@ -5860,7 +5897,7 @@ fn submit_params(
 }
 
 async fn submit(
-    client: &mut Client,
+    client: &mut impl SwitchClient,
     session: &str,
     text: &str,
     mode: Option<InputMode>,
@@ -5873,31 +5910,65 @@ async fn submit(
         .map_err(|error| format!("session.submit failed: {error}"))
 }
 
+/// The one RPC a switch and its next input make; the tests' fake records the
+/// calls and their order without a Session behind them.
+trait SwitchClient {
+    async fn rpc(&mut self, method: &str, params: Value) -> dim_client::Result<Value>;
+}
+
+impl SwitchClient for Client {
+    async fn rpc(&mut self, method: &str, params: Value) -> dim_client::Result<Value> {
+        Client::rpc(self, method, params).await
+    }
+}
+
+/// What one notice did with the scenario's pending switch.
+#[derive(Debug)]
+enum SwitchFire {
+    /// The notice is not the trigger; the switch stays pending.
+    NotFired,
+    /// The default branch moved and the next input was sent.
+    Fired,
+    /// The target line had already ended, so the move answered
+    /// `branch_ended`: the run stops with its own outcome rather than a
+    /// harness error.
+    TargetEnded { line: String, error: String },
+}
+
 /// Runs the scenario's switch when this notice is the target line's first
-/// `turn/end`, and whether it sent the input after the move: the Session's
-/// default branch moves first, then the next input is submitted, naming a
-/// line only when the scenario does.
+/// `turn/end`: the Session's default branch moves first, then the next input
+/// is submitted, naming a line only when the scenario does. A switch fires
+/// once, on the target line's first `turn/end`; a later notice leaves it
+/// unfired.
 async fn fire_switch(
-    client: &mut Client,
+    client: &mut impl SwitchClient,
     session: &str,
     switch: &mut Option<PendingSwitch>,
     branch: &str,
     event: &Value,
-) -> std::result::Result<bool, String> {
+) -> std::result::Result<SwitchFire, String> {
     let Some(pending) = switch.as_mut() else {
-        return Ok(false);
+        return Ok(SwitchFire::NotFired);
     };
     let Some(line) = pending.notice(branch, event) else {
-        return Ok(false);
+        return Ok(SwitchFire::NotFired);
     };
     let pending = switch.take().expect("the switch is pending");
-    client
+    if let Err(error) = client
         .rpc(
             "session.branch_set_default",
             json!({"sessionId": session, "branchId": line}),
         )
         .await
-        .map_err(|error| format!("the switch to {line} failed: {error}"))?;
+    {
+        if dim_client::app_error(&error) == Some("branch_ended") {
+            return Ok(SwitchFire::TargetEnded {
+                line: line.clone(),
+                error: error.to_string(),
+            });
+        }
+        return Err(format!("the switch to {line} failed: {error}"));
+    }
     submit(
         client,
         session,
@@ -5906,7 +5977,7 @@ async fn fire_switch(
         pending.switch.branch_id.as_deref(),
     )
     .await?;
-    Ok(true)
+    Ok(SwitchFire::Fired)
 }
 
 /// Sends the timed steers that are due, and whether it sent one.
@@ -7183,7 +7254,7 @@ mod tests {
 
     /// A switch names the line to move to by role or by id, and the input
     /// after the move; the runner moves the default branch after the target
-    /// line's first `turn/end` (Timeline branches §12.3).
+    /// line's first `turn/end` (model-prompts §9.8).
     #[test]
     fn a_switch_step_names_a_line_and_its_next_input() {
         let directory =
@@ -7275,6 +7346,124 @@ mod tests {
         assert_eq!(pending.notice("4", &turn_end), Some("4".into()));
     }
 
+    /// The switch's calls, recorded, and the refusal its first call answers;
+    /// no Session stands behind it.
+    #[derive(Default)]
+    struct SwitchRecorder {
+        calls: Vec<(String, Value)>,
+        refusal: Option<dim_client::RpcError>,
+    }
+    impl SwitchClient for SwitchRecorder {
+        async fn rpc(&mut self, method: &str, params: Value) -> dim_client::Result<Value> {
+            self.calls.push((method.to_owned(), params));
+            match self.calls.len() {
+                1 => match self.refusal.take() {
+                    Some(refusal) => Err(refusal.into()),
+                    None => Ok(json!({})),
+                },
+                _ => Ok(json!({})),
+            }
+        }
+    }
+
+    /// A switch moves the Session's default branch before it sends the next
+    /// input, and fires once: after the move the switch is gone, so the
+    /// target's later `turn/end` sends nothing (model-prompts §9.8).
+    #[tokio::test]
+    async fn a_switch_moves_the_default_branch_before_its_next_input_and_fires_once() {
+        let mut client = SwitchRecorder::default();
+        let mut switch = Some(PendingSwitch::new(Switch {
+            to: SwitchTarget::Id("2".into()),
+            message: "next".into(),
+            branch_id: None,
+        }));
+        let turn_end = json!({"type": "turn", "name": "end", "data": {}});
+        assert!(matches!(
+            fire_switch(&mut client, "session", &mut switch, "2", &turn_end).await,
+            Ok(SwitchFire::Fired)
+        ));
+        let calls: Vec<&str> = client
+            .calls
+            .iter()
+            .map(|(method, _)| method.as_str())
+            .collect();
+        assert_eq!(
+            calls,
+            ["session.branch_set_default", "session.submit"],
+            "the default branch moves before the next input is sent"
+        );
+        assert_eq!(client.calls[0].1["branchId"], "2");
+        assert_eq!(client.calls[1].1["text"], "next");
+        assert!(
+            client.calls[1].1.get("branchId").is_none(),
+            "the next input lands on the new default branch"
+        );
+        assert!(matches!(
+            fire_switch(&mut client, "session", &mut switch, "2", &turn_end).await,
+            Ok(SwitchFire::NotFired)
+        ));
+        assert_eq!(client.calls.len(), 2, "a switch fires once");
+    }
+
+    /// A refused move answers the error that failed it and sends no input.
+    #[tokio::test]
+    async fn a_refused_switch_move_propagates_its_error_and_sends_no_input() {
+        let mut client = SwitchRecorder {
+            refusal: Some(dim_client::RpcError {
+                code: -32000,
+                message: "the tree is closing".into(),
+                data: Some(json!({"appError": "session_closed"})),
+            }),
+            ..SwitchRecorder::default()
+        };
+        let mut switch = Some(PendingSwitch::new(Switch {
+            to: SwitchTarget::Id("2".into()),
+            message: "next".into(),
+            branch_id: None,
+        }));
+        let turn_end = json!({"type": "turn", "name": "end", "data": {}});
+        let error = match fire_switch(&mut client, "session", &mut switch, "2", &turn_end).await {
+            Err(error) => error,
+            Ok(outcome) => panic!("the move was refused, not {outcome:?}"),
+        };
+        assert!(error.contains("the switch to 2 failed"), "{error}");
+        assert!(error.contains("the tree is closing"), "{error}");
+        assert_eq!(
+            client.calls.len(),
+            1,
+            "no input is sent after a refused move"
+        );
+    }
+
+    /// A target line that ended before the move is its own outcome, read from
+    /// the refusal's application code rather than its text, and not a harness
+    /// error (design §14, model-prompts §9.8).
+    #[tokio::test]
+    async fn a_target_that_ended_before_the_move_is_its_own_outcome() {
+        let mut client = SwitchRecorder {
+            refusal: Some(dim_client::RpcError {
+                code: -32000,
+                message: "branch 2 has ended".into(),
+                data: Some(json!({"appError": "branch_ended"})),
+            }),
+            ..SwitchRecorder::default()
+        };
+        let mut switch = Some(PendingSwitch::new(Switch {
+            to: SwitchTarget::Id("2".into()),
+            message: "next".into(),
+            branch_id: None,
+        }));
+        let turn_end = json!({"type": "turn", "name": "end", "data": {}});
+        match fire_switch(&mut client, "session", &mut switch, "2", &turn_end).await {
+            Ok(SwitchFire::TargetEnded { line, error }) => {
+                assert_eq!(line, "2");
+                assert!(error.contains("branch_ended"), "{error}");
+            }
+            outcome => panic!("the ended target is its own outcome, not {outcome:?}"),
+        }
+        assert_eq!(client.calls.len(), 1, "no input is sent to an ended line");
+    }
+
     /// The committed set parses through the runner's own reader, its two
     /// switch scenarios carry the move, and the two pairs that share a
     /// premise stay equal: the compact scenario reuses `redone-work`'s
@@ -7355,6 +7544,13 @@ mod tests {
                 .as_ref()
                 .is_some_and(|switch| switch.branch_id.is_none()),
             "switch-then-open-lines sends its next input to the new default branch"
+        );
+        assert!(
+            find(&branches, "switch-continue-directly")
+                .switch
+                .as_ref()
+                .is_some_and(|switch| switch.branch_id.is_none()),
+            "switch-continue-directly sends its next input to the new default branch"
         );
         assert!(
             find(&branches, "root-opens-after-switch")
