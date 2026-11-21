@@ -20,7 +20,7 @@ use std::sync::{
     Arc, Mutex, OnceLock, Weak,
     atomic::{AtomicBool, AtomicUsize, Ordering},
 };
-use tokio::sync::Notify;
+use tokio::sync::{Notify, watch};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Default)]
@@ -53,6 +53,10 @@ struct Fixture {
     status_entered: Notify,
     status_resume: Notify,
     empty_catalog: AtomicBool,
+    /// The account transitions this provider reports, when it reports them.
+    watch: Mutex<Option<watch::Sender<Option<bool>>>>,
+    /// Account reads, which an installed watch must make unnecessary.
+    status_reads: AtomicUsize,
 }
 fn account(generation: u64) -> AccountSnapshot {
     AccountSnapshot {
@@ -129,6 +133,7 @@ impl ManagedProvider for Provider {
         }]
     }
     fn status(&self, _: &str) -> ManagedFuture<AccountSnapshot> {
+        self.0.status_reads.fetch_add(1, Ordering::SeqCst);
         let fixture = self.0.clone();
         Box::pin(async move {
             if fixture.pause_status.swap(false, Ordering::SeqCst) {
@@ -137,6 +142,14 @@ impl ManagedProvider for Provider {
             }
             Ok(account(1))
         })
+    }
+    fn subscribe_account(&self) -> Option<watch::Receiver<Option<bool>>> {
+        self.0
+            .watch
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(watch::Sender::subscribe)
     }
     fn recover(&self, _: &str) -> ManagedFuture<AccountSnapshot> {
         unused()
@@ -375,6 +388,50 @@ async fn unbinding_withdraws_the_provider_after_quiescing_it() {
         .unwrap();
     assert_eq!(unavailable.code, "account_provider_unavailable");
     root.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn installing_a_binding_publishes_its_initialized_account() {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let root = Ctx::root().unwrap();
+        let catalog = dim_app_server::catalog();
+        root.plugin(dim_app_server::methods::ManagementMethodsPlugin::typed(&catalog).unwrap());
+        let owner_plugin = root.plugin(ManagedProvidersPlugin::new(None));
+        let captured = Arc::new(OnceLock::new());
+        let first = Arc::new(Fixture::default());
+        *first.recovered_generation.lock().unwrap() = 1;
+        *first.watch.lock().unwrap() = Some(watch::channel(Some(false)).0);
+        let first_plugin = root.plugin(FixturePlugin(first.clone()));
+        let binding = root.plugin(ManagedProviderBinding);
+        let capture = root.plugin(Capture(captured.clone()));
+        for view in [&owner_plugin, &first_plugin, &binding, &capture] {
+            active(view).await;
+        }
+        let owner = captured.get().unwrap().clone();
+        assert!(!owner.usable());
+
+        first_plugin.shutdown().await.unwrap();
+        let second = Arc::new(Fixture::default());
+        *second.recovered_generation.lock().unwrap() = 1;
+        *second.watch.lock().unwrap() = Some(watch::channel(Some(true)).0);
+        let second_plugin = root.plugin(FixturePlugin(second.clone()));
+        active(&second_plugin).await;
+        active(&binding).await;
+        assert!(
+            owner.usable(),
+            "the installed account observation was not published"
+        );
+        assert_eq!(
+            second.status_reads.load(Ordering::SeqCst),
+            0,
+            "installing a watched binding must not read the account"
+        );
+
+        drop((first_plugin, second_plugin));
+        root.shutdown().await.unwrap();
+    })
+    .await
+    .unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

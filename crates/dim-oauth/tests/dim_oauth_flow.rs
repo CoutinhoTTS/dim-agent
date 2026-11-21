@@ -127,6 +127,13 @@ fn auth(home: &Path) -> Value {
 }
 
 async fn login(providers: &ManagedProviders, directory: &str) -> AccountSnapshot {
+    login_attempt(providers, directory).await.0
+}
+
+async fn login_attempt(
+    providers: &ManagedProviders,
+    directory: &str,
+) -> (AccountSnapshot, ManagedLoginAttempt) {
     let device = providers
         .begin_device(
             LoginBegin {
@@ -143,17 +150,29 @@ async fn login(providers: &ManagedProviders, directory: &str) -> AccountSnapshot
         provider_id: PROVIDER.into(),
         attempt_id: device.attempt_id,
     };
-    tokio::time::timeout(Duration::from_secs(10), async {
+    let account = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             match providers.attempt_status(&attempt, &cancel()).unwrap() {
-                LoginState::Pending => tokio::time::sleep(Duration::from_millis(50)).await,
+                LoginState::Pending => tokio::task::yield_now().await,
                 LoginState::Completed { account } => break account,
                 state => panic!("device login ended as {state:?}"),
             }
         }
     })
     .await
-    .unwrap()
+    .unwrap();
+    (account, attempt)
+}
+
+async fn await_usable(providers: &ManagedProviders, expected: bool) {
+    let mut usable = providers.subscribe_usable();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while *usable.borrow_and_update() != expected {
+            usable.changed().await.unwrap();
+        }
+    })
+    .await
+    .expect("the account observation was not published");
 }
 
 async fn title_call(
@@ -559,6 +578,30 @@ async fn account_transitions_publish_without_a_client_read() {
         signed_out.is_ok_and(|signed_out| signed_out),
         "the settled rejection was not published: {:?}",
         auth(&home)["dimAccountState"]["state"]
+    );
+    root.shutdown().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// A completed login attempt is history: polling it after logout must not
+/// republish its account over the watch's signed-out transition.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_completed_login_attempt_does_not_reenable_search_after_logout() {
+    let fixture = oauth::start().await;
+    let home = home();
+    let Process { root, providers } = process(&home).await;
+    let (_, attempt) = login_attempt(&providers, &fixture.base).await;
+    await_usable(&providers, true).await;
+    providers.logout(PROVIDER, &cancel()).await.unwrap();
+    await_usable(&providers, false).await;
+    let state = providers.attempt_status(&attempt, &cancel()).unwrap();
+    assert!(
+        matches!(state, LoginState::Completed { .. }),
+        "the completed attempt stays readable as history: {state:?}"
+    );
+    assert!(
+        !providers.usable(),
+        "polling a completed attempt must not re-enable the account"
     );
     root.shutdown().await.unwrap();
     std::fs::remove_dir_all(home).unwrap();

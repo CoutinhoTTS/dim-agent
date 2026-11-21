@@ -298,6 +298,13 @@ impl Inner {
             }
         }
     }
+    /// Publishes the account file's current state as the watch's initialized
+    /// observation, so a binding installed over an existing account starts from
+    /// it instead of waiting for the next write. A failed read leaves the watch
+    /// uninitialized; the next write still moves it.
+    async fn initialize_account(self: Arc<Self>) {
+        let _ = self.store.initialize_account().await;
+    }
     fn update(&self, id: &str, change: impl FnOnce(&mut Attempt)) {
         if let Some(attempt) = self.attempts.lock().unwrap().get_mut(id) {
             change(attempt);
@@ -1088,7 +1095,7 @@ impl ManagedProvider for DimOAuth {
             inner.store.status().await
         })
     }
-    fn subscribe_account(&self) -> Option<tokio::sync::watch::Receiver<bool>> {
+    fn subscribe_account(&self) -> Option<tokio::sync::watch::Receiver<Option<bool>>> {
         Some(self.0.store.account())
     }
     fn recover(&self, provider: &str) -> ManagedFuture<AccountSnapshot> {
@@ -1266,6 +1273,10 @@ impl DynPlugin for DimOAuthPlugin {
                 Ok(())
             })?;
             service.0.tasks.spawn(service.0.clone().keep_fresh());
+            service
+                .0
+                .tasks
+                .spawn(service.0.clone().initialize_account());
             ctx.provide_at(
                 rutis_bridge::session::host_key(dim_session_title::GENERATOR),
                 service.clone() as Arc<dyn rutis_bridge::session::HostDispatch>,

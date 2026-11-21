@@ -334,8 +334,9 @@ fn document(bytes: &[u8]) -> Result<Doc> {
 struct AuthFile {
     lease: FileLease,
     /// The owner's read of whether the file stores a signed-in account, moved
-    /// after every write of this file.
-    account: watch::Sender<bool>,
+    /// after every write of this file. `None` until an observation initializes
+    /// it.
+    account: watch::Sender<Option<bool>>,
 }
 impl AuthFile {
     async fn read(&mut self) -> Result<(Doc, Option<Vec<u8>>)> {
@@ -356,7 +357,7 @@ impl AuthFile {
             .await
             .map_err(file_error)?;
         if let Some(signed_in) = signed_in(doc) {
-            self.account.send_replace(signed_in);
+            self.account.send_replace(Some(signed_in));
         }
         Ok(())
     }
@@ -442,8 +443,8 @@ pub(super) struct Store {
     stopping: CancellationToken,
     /// Whether the account file stores a signed-in account, moved after every
     /// write of it: the provider publishes the App Server's availability from
-    /// the account's own transitions.
-    account: watch::Sender<bool>,
+    /// the account's own transitions. `None` until the store reads the file.
+    account: watch::Sender<Option<bool>>,
 }
 impl Store {
     pub fn new(files: Arc<FileStorage>, root: usize, client: Client) -> Self {
@@ -452,13 +453,30 @@ impl Store {
             root,
             client,
             stopping: CancellationToken::new(),
-            account: watch::Sender::new(false),
+            account: watch::Sender::new(None),
         }
     }
-    /// Whether the account file stores a signed-in account, replayed and moved
-    /// at every write.
-    pub fn account(&self) -> watch::Receiver<bool> {
+    /// The account file's signed-in state: the initialized observation, then
+    /// every write. A subscriber that sees `None` waits for the provider's
+    /// first read rather than treating it as signed out.
+    pub fn account(&self) -> watch::Receiver<Option<bool>> {
         self.account.subscribe()
+    }
+    /// Reads the account file under its lease and publishes the initialized
+    /// observation. The lease keeps a concurrent write from overtaking the
+    /// read; a later write moves the watch again.
+    pub async fn initialize_account(&self) -> Result<()> {
+        let mut file = self.open(None).await?;
+        let (mut doc, _) = file.read().await?;
+        file.normalize(&mut doc).await?;
+        if !doc.contains_key(STATE) && !doc.contains_key(TOKENS) {
+            doc.insert(STATE.into(), signed_out(None, false)?);
+            file.write(&doc).await?;
+        }
+        if let Some(signed_in) = signed_in(&doc) {
+            self.account.send_replace(Some(signed_in));
+        }
+        Ok(())
     }
     /// Stops lock acquisition. A transaction that holds the lock still
     /// persists its result.

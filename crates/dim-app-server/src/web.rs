@@ -280,10 +280,15 @@ impl DynPlugin for WebSessionPlugin {
                 })?;
             let mut settings_wake = wake.subscribe();
             let mut usable_changes = managed.subscribe_usable();
-            let signed_in = managed.refresh_usable(&cancel).await;
+            let document = state.document(&cancel).await;
+            let signed_in = if mounted && document.as_ref().is_ok_and(managed_search_needed) {
+                managed.refresh_usable(&cancel).await
+            } else {
+                false
+            };
             let available = mounted
-                && match state.document(&cancel).await {
-                    Ok(document) => search_configured(&document, signed_in),
+                && match &document {
+                    Ok(document) => search_configured(document, signed_in),
                     Err(_) => false,
                 };
             let source = SearchSource::new(state.clone());
@@ -991,10 +996,20 @@ impl SessionState {
 fn search_configured(document: &WebDocument, signed_in: bool) -> bool {
     match document.search_service.as_ref() {
         None => signed_in,
-        Some(service) if service.kind == "dim-oauth" => {
-            service.endpoint.is_none() && service.api_key.is_none() && signed_in
+        Some(service) if service.kind == "brave" => service.api_key.is_some(),
+        Some(_) => managed_search_needed(document) && signed_in,
+    }
+}
+
+/// Whether deciding the declaration needs the managed account: the default
+/// service, or `dim-oauth` without an endpoint or key. An explicit adapter or
+/// an unusable `dim-oauth` configuration answers without an account read.
+fn managed_search_needed(document: &WebDocument) -> bool {
+    match document.search_service.as_ref() {
+        None => true,
+        Some(service) => {
+            service.kind == "dim-oauth" && service.endpoint.is_none() && service.api_key.is_none()
         }
-        Some(service) => service.kind == "brave" && service.api_key.is_some(),
     }
 }
 
