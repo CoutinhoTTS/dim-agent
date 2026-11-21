@@ -104,6 +104,11 @@ async fn restored_task_branches_are_discovered_locally_and_named_stops_preserve_
         .await;
     assert_ok(&created);
     let session = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    assert_ok(
+        &client
+            .rpc("session.attach", json!({"sessionId":session}))
+            .await,
+    );
     let mut branches = Vec::new();
     let mut receipts = Vec::new();
     let mut parent = "main".to_owned();
@@ -126,32 +131,26 @@ async fn restored_task_branches_are_discovered_locally_and_named_stops_preserve_
             .as_str()
             .unwrap()
             .to_owned();
-        let history = tokio::time::timeout(Duration::from_secs(10), async {
-            loop {
-                let history = page(&mut client, &session, &branch).await;
-                if history["events"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .any(|event| event["type"] == "exec" && event["name"] == "ended")
-                {
-                    break history;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
+        let task = loop {
+            let notice = client.notice("session.event").await;
+            let params = &notice["params"];
+            if params["sessionId"] == session
+                && params["branchId"] == branch
+                && params["event"]["type"] == "exec"
+                && params["event"]["name"] == "ended"
+                && params["event"]["data"]["status"] == "completed"
+            {
+                break params["event"]["data"]["task_id"].clone();
             }
-        })
-        .await
-        .unwrap();
+        };
+        let history = page(&mut client, &session, &branch).await;
         let events = history["events"].as_array().unwrap();
-        let started = events
-            .iter()
-            .find(|event| event["type"] == "exec" && event["name"] == "started")
-            .unwrap();
-        let task = started["data"]["task_id"].clone();
-        assert!(events.iter().any(|event| event["type"] == "exec"
-            && event["name"] == "ended"
-            && event["data"]["task_id"] == task
-            && event["data"]["status"] == "completed"));
+        assert!(
+            events.iter().any(|event| event["type"] == "exec"
+                && event["name"] == "started"
+                && event["data"]["task_id"] == task),
+            "the history carries the started fact of the ended command"
+        );
         receipts.push(task);
         assert_ok(
             &client
