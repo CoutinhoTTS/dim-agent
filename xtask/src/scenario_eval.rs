@@ -1666,8 +1666,84 @@ struct ScenarioFile {
     events: Vec<EventSpec>,
     #[serde(default)]
     steers: Vec<Steer>,
+    /// The mid-run move of the default branch, when the scenario runs one.
+    #[serde(default)]
+    switch: Option<Switch>,
     budget: Budget,
     probes: Vec<Probe>,
+}
+
+/// A scenario's mid-run move of the Session's default branch: after the
+/// target line's first `turn/end`, the runner calls
+/// `session.branch_set_default` and then sends the next input. A scenario
+/// without the step runs as before.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct Switch {
+    /// The line to move to.
+    pub(crate) to: SwitchTarget,
+    /// The input sent after the move. It carries no mode and is queued, like
+    /// the operator's first message.
+    pub(crate) message: String,
+    /// The line the next input names. Omitted, the input lands on the line
+    /// that just became the default branch; `main` names the root after a
+    /// switch.
+    #[serde(default)]
+    pub(crate) branch_id: Option<String>,
+}
+
+/// The line a [`Switch`] moves to, by role or by id.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) enum SwitchTarget {
+    Role(SwitchRole),
+    Id(String),
+}
+
+/// The role a [`SwitchTarget`] names. A tool line is a line the branch tool
+/// opened; the latest one is the line most recently opened that way.
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SwitchRole {
+    LatestToolLine,
+}
+
+/// A [`Switch`] as the run drives it: the target the role currently names,
+/// kept current while the switch is pending.
+struct PendingSwitch {
+    switch: Switch,
+    line: Option<String>,
+}
+impl PendingSwitch {
+    fn new(switch: Switch) -> Self {
+        let line = match &switch.to {
+            SwitchTarget::Id(id) => Some(id.clone()),
+            SwitchTarget::Role(_) => None,
+        };
+        Self { switch, line }
+    }
+
+    /// Reads one notice: a tool `branch/create` renames the role's target, and
+    /// the target's first `turn/end` is when the move and the next input
+    /// happen.
+    fn notice(&mut self, branch: &str, event: &Value) -> Option<String> {
+        if event["type"] == "branch" && event["name"] == "create" {
+            if matches!(
+                &self.switch.to,
+                SwitchTarget::Role(SwitchRole::LatestToolLine)
+            ) && event["data"]["source"]["kind"] == "tool"
+                && let Some(line) = event["data"]["branch"].as_str()
+            {
+                self.line = Some(line.to_owned());
+            }
+            return None;
+        }
+        if event["type"] == "turn" && event["name"] == "end" && self.line.as_deref() == Some(branch)
+        {
+            return Some(branch.to_owned());
+        }
+        None
+    }
 }
 /// One source a scenario declares through the `eventHub` service, and
 /// optionally subscribes its Session's `main` branch to (EventHub design A.1,
@@ -1798,6 +1874,9 @@ pub(crate) struct Scenario {
     pub(crate) sources: Vec<Source>,
     pub(crate) events: Vec<EventSpec>,
     pub(crate) steers: Vec<Steer>,
+    /// The mid-run move of the default branch, when the scenario runs one.
+    #[serde(default)]
+    pub(crate) switch: Option<Switch>,
     pub(crate) budget: Budget,
     probes: Vec<Probe>,
 }
@@ -1860,6 +1939,23 @@ fn into_scenario(
                     steer.text
                 ));
             }
+        }
+    }
+    if let Some(switch) = &raw.switch {
+        if switch.message.trim().is_empty() {
+            return Err("a switch needs the input to send after the move".into());
+        }
+        if let SwitchTarget::Id(id) = &switch.to
+            && id.trim().is_empty()
+        {
+            return Err("a switch target id is empty".into());
+        }
+        if switch
+            .branch_id
+            .as_deref()
+            .is_some_and(|branch| branch.trim().is_empty())
+        {
+            return Err("a switch names an empty branch for its input".into());
         }
     }
     for call in &raw.calls {
@@ -1979,6 +2075,7 @@ fn into_scenario(
         sources: raw.sources,
         events: raw.events,
         steers: raw.steers,
+        switch: raw.switch,
         budget: raw.budget,
         probes: raw.probes,
     })
@@ -2823,7 +2920,7 @@ async fn product_probe(
         .rpc("session.attach", json!({"sessionId": probe}))
         .await
         .map_err(|error| format!("session.attach failed: {error}"))?;
-    submit(client, &probe, "PRODUCT-TOOLS\n", None)
+    submit(client, &probe, "PRODUCT-TOOLS\n", None, None)
         .await
         .map_err(|error| error.to_string())?;
     loop {
@@ -2986,7 +3083,7 @@ async fn preflight_session(
         .rpc("session.attach", json!({"sessionId": session}))
         .await
         .map_err(|error| (Vec::new(), format!("session.attach failed: {error}")))?;
-    submit(client, &session, &message, None)
+    submit(client, &session, &message, None, None)
         .await
         .map_err(|error| (Vec::new(), error))?;
     // The tool results in arrival order: the scripted steps run one per
@@ -4674,7 +4771,7 @@ async fn drive(
             return driven;
         }
     }
-    if let Err(error) = submit(client, &session, &scenario.message, None).await {
+    if let Err(error) = submit(client, &session, &scenario.message, None, None).await {
         driven.stop = "error";
         driven.error = Some(error);
         return driven;
@@ -4687,6 +4784,7 @@ async fn drive(
         .cloned()
         .map(|steer| (steer, false))
         .collect();
+    let mut switch = scenario.switch.clone().map(PendingSwitch::new);
     let mut last_event = Instant::now();
     // The events still to publish, and whether each was.
     let mut events: Vec<(EventSpec, bool)> = scenario
@@ -4810,6 +4908,14 @@ async fn drive(
                                     "{branch}: the turn failed: {}",
                                     event["data"]["error"].as_str().unwrap_or("no error given")
                                 ));
+                                return driven;
+                            }
+                        }
+                        match fire_switch(client, &session, &mut switch, &branch, &event).await {
+                            Ok(submitted) => awaiting |= submitted,
+                            Err(error) => {
+                                driven.stop = "error";
+                                driven.error = Some(error);
                                 return driven;
                             }
                         }
@@ -5731,11 +5837,22 @@ async fn fire_events_after_subscribe(
     Ok((published, starts))
 }
 
-/// The `session.submit` params. A mode names how `main` takes the input: a
-/// steer ends a wait and replaces a request that has produced no output yet,
-/// while the operator's first message carries no mode and is queued.
-fn submit_params(session: &str, text: &str, mode: Option<InputMode>) -> Value {
-    let mut params = json!({"sessionId": session, "branchId": "main", "text": text});
+/// The `session.submit` params. A mode names how the target line takes the
+/// input: a steer ends a wait and replaces a request that has produced no
+/// output yet, while the operator's first message carries no mode and is
+/// queued. A call that names no `branchId` lands on the Session's default
+/// branch (design §9, §14), which is what a scenario after a switch wants; a
+/// scenario that names a line passes it here.
+fn submit_params(
+    session: &str,
+    text: &str,
+    mode: Option<InputMode>,
+    branch: Option<&str>,
+) -> Value {
+    let mut params = json!({"sessionId": session, "text": text});
+    if let Some(branch) = branch {
+        params["branchId"] = json!(branch);
+    }
     if let Some(mode) = mode {
         params["mode"] = json!(mode);
     }
@@ -5747,12 +5864,49 @@ async fn submit(
     session: &str,
     text: &str,
     mode: Option<InputMode>,
+    branch: Option<&str>,
 ) -> std::result::Result<(), String> {
     client
-        .rpc("session.submit", submit_params(session, text, mode))
+        .rpc("session.submit", submit_params(session, text, mode, branch))
         .await
         .map(|_| ())
         .map_err(|error| format!("session.submit failed: {error}"))
+}
+
+/// Runs the scenario's switch when this notice is the target line's first
+/// `turn/end`, and whether it sent the input after the move: the Session's
+/// default branch moves first, then the next input is submitted, naming a
+/// line only when the scenario does.
+async fn fire_switch(
+    client: &mut Client,
+    session: &str,
+    switch: &mut Option<PendingSwitch>,
+    branch: &str,
+    event: &Value,
+) -> std::result::Result<bool, String> {
+    let Some(pending) = switch.as_mut() else {
+        return Ok(false);
+    };
+    let Some(line) = pending.notice(branch, event) else {
+        return Ok(false);
+    };
+    let pending = switch.take().expect("the switch is pending");
+    client
+        .rpc(
+            "session.branch_set_default",
+            json!({"sessionId": session, "branchId": line}),
+        )
+        .await
+        .map_err(|error| format!("the switch to {line} failed: {error}"))?;
+    submit(
+        client,
+        session,
+        &pending.switch.message,
+        None,
+        pending.switch.branch_id.as_deref(),
+    )
+    .await?;
+    Ok(true)
 }
 
 /// Sends the timed steers that are due, and whether it sent one.
@@ -5769,7 +5923,7 @@ async fn fire_due(
             .is_some_and(|after| started.elapsed().as_secs_f64() >= after);
         if due && !*fired {
             *fired = true;
-            submit(client, session, &steer.text, Some(InputMode::Steer)).await?;
+            submit(client, session, &steer.text, Some(InputMode::Steer), None).await?;
             sent = true;
         }
     }
@@ -5796,7 +5950,7 @@ async fn fire_triggered(
             .is_some_and(|trigger| data.contains(trigger.as_str()));
         if triggered && !*fired {
             *fired = true;
-            submit(client, session, &steer.text, Some(InputMode::Steer)).await?;
+            submit(client, session, &steer.text, Some(InputMode::Steer), None).await?;
             sent = true;
         }
     }
@@ -6818,6 +6972,7 @@ mod tests {
             sources: Vec::new(),
             events: Vec::new(),
             steers: Vec::new(),
+            switch: None,
             budget: Budget {
                 turns: 4,
                 seconds: 60.,
@@ -7004,28 +7159,128 @@ mod tests {
     }
 
     /// A scenario's steers are the operator's: they go out in Steer mode, so
-    /// a waiting `main` takes them, and the initial message carries no mode
-    /// and is queued input (issue #728).
+    /// a waiting line takes them, and the initial message carries no mode and
+    /// is queued input (issue #728). Neither names a line: an input without
+    /// `branchId` lands on the Session's default branch, which is the line a
+    /// steer after a switch reaches.
     #[test]
     fn a_steer_is_submitted_in_steer_mode_and_the_message_without_one() {
-        let params = submit_params("session", "go", None);
+        let params = submit_params("session", "go", None, None);
         assert!(params.get("mode").is_none(), "{params}");
+        assert!(params.get("branchId").is_none(), "{params}");
         let message: dim_app_server::protocol::Submit =
             serde_json::from_value(params).expect("the first message is a Submit");
         assert_eq!(message.text.as_deref(), Some("go"));
         assert_eq!(message.mode, None);
-        let params = submit_params("session", "also", Some(InputMode::Steer));
+        assert_eq!(message.branch_id, None);
+        let params = submit_params("session", "also", Some(InputMode::Steer), Some("main"));
         let steer: dim_app_server::protocol::Submit =
             serde_json::from_value(params).expect("a steer is a Submit");
         assert_eq!(steer.text.as_deref(), Some("also"));
         assert_eq!(steer.mode, Some(InputMode::Steer));
+        assert_eq!(steer.branch_id.as_deref(), Some("main"));
     }
 
-    /// The committed set parses through the runner's own reader, and the two
-    /// pairs that share a premise stay equal: the compact scenario reuses
-    /// `redone-work`'s message and workspace, and `flooding` and
-    /// `never-ending` share one workspace (Timeline branches §12.3). No model
-    /// runs, so CI catches a schema, layout or pair drift before a manual run.
+    /// A switch names the line to move to by role or by id, and the input
+    /// after the move; the runner moves the default branch after the target
+    /// line's first `turn/end` (Timeline branches §12.3).
+    #[test]
+    fn a_switch_step_names_a_line_and_its_next_input() {
+        let directory =
+            std::env::temp_dir().join(format!("dim-scenario-eval-switch-{}", std::process::id()));
+        std::fs::create_dir_all(directory.join("workspace")).unwrap();
+        let parse = |switch: Value| {
+            let file: ScenarioFile = serde_json::from_value(json!({
+                "message": "first",
+                "switch": switch,
+                "budget": {"turns": 3, "seconds": 60, "window": 1000},
+                "probes": [{"id": "ran", "kind": "must_show", "text": "it ran"}]
+            }))
+            .unwrap();
+            into_scenario("case".into(), directory.clone(), file)
+        };
+        let scenario = parse(json!({
+            "to": {"role": "latest_tool_line"},
+            "message": "second"
+        }))
+        .unwrap();
+        let switch = scenario.switch.expect("the scenario switches");
+        assert!(matches!(
+            switch.to,
+            SwitchTarget::Role(SwitchRole::LatestToolLine)
+        ));
+        assert_eq!(switch.message, "second");
+        assert_eq!(switch.branch_id, None);
+        let scenario = parse(json!({
+            "to": {"id": "3"},
+            "message": "second",
+            "branchId": "main"
+        }))
+        .unwrap();
+        let switch = scenario.switch.expect("the scenario switches");
+        assert!(matches!(&switch.to, SwitchTarget::Id(id) if id == "3"));
+        assert_eq!(switch.branch_id.as_deref(), Some("main"));
+        assert!(
+            parse(json!({"to": {"role": "latest_tool_line"}, "message": " "})).is_err(),
+            "a switch needs the input to send after the move"
+        );
+        assert!(
+            parse(json!({"to": {"id": ""}, "message": "second"})).is_err(),
+            "a switch target id is not empty"
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// The move's trigger is the target line's first `turn/end`: a tool
+    /// `branch/create` names the role's latest line, and another line's turn
+    /// does not fire it. The run drops the switch after the move, so one
+    /// scenario switches once.
+    #[test]
+    fn a_switch_fires_on_the_target_lines_first_turn_end() {
+        let turn_end = json!({"type": "turn", "name": "end", "data": {}});
+        let create = |branch: &str, kind: &str| {
+            json!({"type": "branch", "name": "create",
+                   "data": {"branch": branch, "source": {"kind": kind}}})
+        };
+        let mut pending = PendingSwitch::new(Switch {
+            to: SwitchTarget::Role(SwitchRole::LatestToolLine),
+            message: "next".into(),
+            branch_id: None,
+        });
+        assert_eq!(pending.notice("main", &turn_end), None);
+        assert_eq!(pending.notice("main", &create("2", "tool")), None);
+        assert_eq!(pending.notice("2", &turn_end), Some("2".into()));
+        let mut pending = PendingSwitch::new(Switch {
+            to: SwitchTarget::Role(SwitchRole::LatestToolLine),
+            message: "next".into(),
+            branch_id: None,
+        });
+        pending.notice("main", &create("2", "tool"));
+        assert_eq!(
+            pending.notice("3", &turn_end),
+            None,
+            "another line's turn ends no switch"
+        );
+        pending.notice("main", &create("3", "user"));
+        assert_eq!(
+            pending.notice("3", &turn_end),
+            None,
+            "a line the user opened is not a tool line"
+        );
+        let mut pending = PendingSwitch::new(Switch {
+            to: SwitchTarget::Id("4".into()),
+            message: "next".into(),
+            branch_id: None,
+        });
+        assert_eq!(pending.notice("4", &turn_end), Some("4".into()));
+    }
+
+    /// The committed set parses through the runner's own reader, its two
+    /// switch scenarios carry the move, and the two pairs that share a
+    /// premise stay equal: the compact scenario reuses `redone-work`'s
+    /// message and workspace, and `flooding` and `never-ending` share one
+    /// workspace (Timeline branches §12.3). No model runs, so CI catches a
+    /// schema, layout or pair drift before a manual run.
     #[test]
     fn the_committed_scenario_set_parses_and_its_shared_premises_stay_equal() {
         let root = repository().join("xtask").join("scenario-eval");
@@ -7037,6 +7292,77 @@ mod tests {
                 .find(|scenario| scenario.id == id)
                 .unwrap_or_else(|| panic!("{id} is in the committed set"))
         }
+        let ids: Vec<_> = branches
+            .iter()
+            .map(|scenario| scenario.id.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                "asking-the-user",
+                "background-command-not-branch",
+                "flooding",
+                "long-work-and-a-flaky-test",
+                "main-moved-on",
+                "never-ending",
+                "over-splitting",
+                "ping-pong",
+                "redone-work",
+                "refactor-and-a-pasted-report",
+                "root-opens-after-switch",
+                "same-file-tradeoff",
+                "sibling-relay",
+                "switch-continue-directly",
+                "switch-then-open-lines",
+            ],
+            "the committed branch set is the fifteen scenarios"
+        );
+        assert_eq!(
+            compact
+                .iter()
+                .map(|scenario| scenario.id.as_str())
+                .collect::<Vec<_>>(),
+            ["identity-after-compaction"],
+            "the committed compact set is the one scenario"
+        );
+        for scenario in &branches {
+            assert_eq!(
+                scenario.budget.window, 131_072,
+                "{}: the branch scenarios declare one window",
+                scenario.id
+            );
+        }
+        assert_eq!(
+            find(&compact, "identity-after-compaction").budget.window,
+            16_000,
+            "the compact scenario declares the window that compacts it"
+        );
+        for scenario in &branches {
+            let switches = matches!(
+                scenario.id.as_str(),
+                "switch-continue-directly" | "switch-then-open-lines" | "root-opens-after-switch"
+            );
+            assert_eq!(
+                scenario.switch.is_some(),
+                switches,
+                "{}: only the switch scenarios carry the move",
+                scenario.id
+            );
+        }
+        assert!(
+            find(&branches, "switch-then-open-lines")
+                .switch
+                .as_ref()
+                .is_some_and(|switch| switch.branch_id.is_none()),
+            "switch-then-open-lines sends its next input to the new default branch"
+        );
+        assert!(
+            find(&branches, "root-opens-after-switch")
+                .switch
+                .as_ref()
+                .is_some_and(|switch| switch.branch_id.as_deref() == Some("main")),
+            "root-opens-after-switch names the root after the move"
+        );
         let redone = find(&branches, "redone-work");
         let identity = find(&compact, "identity-after-compaction");
         assert_eq!(
