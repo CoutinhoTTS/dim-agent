@@ -476,9 +476,11 @@ WorkspaceTools 不变。
 
 ### 12.3 评估场景
 
-场景放在仓库里，一个场景一个目录，目录里是 `scenario.json` 和它旁边的起始 `workspace/`：八个在 [`xtask/scenario-eval/timeline-branches/`](../../../xtask/scenario-eval/timeline-branches/) 下，各自声明 131,072 tokens 的窗口；`identity-after-compaction` 在 [`xtask/scenario-eval/timeline-branches-compact/`](../../../xtask/scenario-eval/timeline-branches-compact/) 下，声明 16,000，以便发生压缩。`budget.window` 是校验而不是设置：Session 声明的窗口与之不同时，这次运行在第一轮之前就失败，所以复跑需要模型声明正好这个窗口；没有声明窗口的模型回退到 128,000，同样失败。这些场景在本地用真实模型运行，结果在实现 PR 里报告。CI 只断言行为。
+场景放在仓库里，一个场景一个目录，目录里是 `scenario.json` 和它旁边的起始 `workspace/`：十五个在 [`xtask/scenario-eval/timeline-branches/`](../../../xtask/scenario-eval/timeline-branches/) 下，各自声明 131,072 tokens 的窗口；`identity-after-compaction` 在 [`xtask/scenario-eval/timeline-branches-compact/`](../../../xtask/scenario-eval/timeline-branches-compact/) 下，声明 16,000，以便发生压缩。`budget.window` 是校验而不是设置：Session 声明的窗口与之不同时，这次运行在第一轮之前就失败，所以复跑需要模型声明正好这个窗口；没有声明窗口的模型回退到 128,000，同样失败。这些场景在本地用真实模型运行，结果在实现 PR 里报告。CI 只断言行为。
 
 `main-moved-on` 是父线块（§7.1.1）的场景：`main` 在切点之前有工作，开一条线，然后继续工作；这条线在回答或结束之前必须读取 `main` 在切点之后做的事，并且不能逐页读遍 `main` 的全部活动。它是 [§12.4](#124-文本及其类别) 父线块策略句的场景。
+
+开线与切换角色新增七个场景：`long-work-and-a-flaky-test`、`refactor-and-a-pasted-report`、`same-file-tradeoff`、`background-command-not-branch`、`switch-continue-directly`、`switch-then-open-lines`、`root-opens-after-switch`。
 
 `identity-after-compaction` 沿用 `redone-work` 的消息和 workspace，`flooding` 与 `never-ending` 共用同一个 workspace：这两对保持完全相同，改动其中一份而不同步另一份时，读取两个提交目录的无模型测试会失败。
 
