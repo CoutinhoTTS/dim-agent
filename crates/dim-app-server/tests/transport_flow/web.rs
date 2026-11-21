@@ -11,10 +11,17 @@ use dim_app_server::managed_provider::{
 };
 use rutis::host::BoxFuture;
 use rutis::{Ctx, Plugin};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicUsize;
 use tokio::io::AsyncReadExt;
+use tokio::sync::watch;
 
-struct SearchProvider(Arc<AtomicBool>);
+struct SearchProvider {
+    /// The account the owner stores; the test moves it directly, as a login
+    /// completing without its client does.
+    signed_in: watch::Sender<bool>,
+    /// Account observations, which the transition must not need.
+    reads: Arc<AtomicUsize>,
+}
 fn unused<T: Send + 'static>() -> ManagedFuture<T> {
     Box::pin(async { Err(ManagedError::InvalidInput) })
 }
@@ -41,8 +48,12 @@ impl ManagedProvider for SearchProvider {
         }]
     }
     fn status(&self, _: &str) -> ManagedFuture<AccountSnapshot> {
-        let signed_in = self.0.load(Ordering::SeqCst);
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        let signed_in = *self.signed_in.borrow();
         Box::pin(async move { Ok(account(signed_in)) })
+    }
+    fn subscribe_account(&self) -> Option<watch::Receiver<bool>> {
+        Some(self.signed_in.subscribe())
     }
     fn recover(&self, _: &str) -> ManagedFuture<AccountSnapshot> {
         unused()
@@ -63,7 +74,7 @@ impl ManagedProvider for SearchProvider {
         unused()
     }
     fn logout(&self, _: &str) -> ManagedFuture<AccountSnapshot> {
-        self.0.store(false, Ordering::SeqCst);
+        self.signed_in.send_replace(false);
         Box::pin(async { Ok(account(false)) })
     }
     fn usage(&self, _: &str) -> ManagedFuture<Usage> {
@@ -74,7 +85,7 @@ impl ManagedProvider for SearchProvider {
         req: WebSearchRequest,
         _: CancellationToken,
     ) -> ManagedFuture<WebSearchResponse> {
-        let signed_in = self.0.load(Ordering::SeqCst);
+        let signed_in = *self.signed_in.borrow();
         Box::pin(async move {
             if !signed_in {
                 return Err(ManagedError::TokenMissing);
@@ -116,14 +127,17 @@ impl ManagedProvider for SearchProvider {
         Box::pin(async {})
     }
 }
-struct SearchProviderPlugin(Arc<AtomicBool>);
+struct SearchProviderPlugin(watch::Sender<bool>, Arc<AtomicUsize>);
 impl Plugin for SearchProviderPlugin {
     type Deps = ();
     fn name(&self) -> &str {
         "search-provider-fixture"
     }
     async fn apply(&self, ctx: &Ctx, (): ()) -> rutis::Result {
-        ctx.provide_as::<dyn ManagedProvider>(Arc::new(SearchProvider(self.0.clone())))?;
+        ctx.provide_as::<dyn ManagedProvider>(Arc::new(SearchProvider {
+            signed_in: self.0.clone(),
+            reads: self.1.clone(),
+        }))?;
         Ok(())
     }
 }
@@ -265,22 +279,6 @@ async fn create_with_tools(client: &mut Client, tools: Option<Value>) -> String 
             .await,
     );
     id
-}
-
-async fn account_status(client: &mut Client) {
-    assert_ok(
-        &client
-            .rpc("account.status", json!({"providerId":"dimcode-api-oauth"}))
-            .await,
-    );
-}
-
-async fn account_logout(client: &mut Client) {
-    assert_ok(
-        &client
-            .rpc("account.logout", json!({"providerId":"dimcode-api-oauth"}))
-            .await,
-    );
 }
 
 /// Waits for the branch's adopted tool part to state whether `web_search` is
@@ -429,17 +427,19 @@ async fn web_search_is_declared_only_while_a_search_service_is_usable() {
     let home = std::fs::canonicalize("/tmp")
         .unwrap()
         .join(format!("dws-{}", uuid::Uuid::new_v4()));
-    let signed_in = Arc::new(AtomicBool::new(false));
-    let signed_in_row = signed_in.clone();
+    let signed_in = watch::Sender::new(false);
+    let transition = signed_in.clone();
+    let reads = Arc::new(AtomicUsize::new(0));
+    let reads_row = reads.clone();
     let config = ServerConfig {
         product_home: Some(home.clone()),
         target_home: Some(home.join("rust")),
         managed_provider: Some(ManagedProviderRow(Arc::new(move |builtins, _| {
-            let flag = signed_in_row.clone();
+            let (signed_in, reads) = (signed_in.clone(), reads_row.clone());
             builtins
                 .builtins
                 .register::<Value, _, _>("SearchProviderFixture", move |_| {
-                    Ok(SearchProviderPlugin(flag.clone()))
+                    Ok(SearchProviderPlugin(signed_in.clone(), reads.clone()))
                 });
             "SearchProviderFixture".to_owned()
         }))),
@@ -488,8 +488,7 @@ async fn web_search_is_declared_only_while_a_search_service_is_usable() {
     let names = text_turn(&mut client, &id, &mut requests, "after removal").await;
     assert!(!names.iter().any(|name| name == "web_search"), "{names:?}");
 
-    signed_in.store(true, Ordering::SeqCst);
-    account_status(&mut client).await;
+    transition.send_replace(true);
     await_search_declared(&session, true).await;
     let (names, managed) = tool_turn(
         &mut client,
@@ -504,14 +503,12 @@ async fn web_search_is_declared_only_while_a_search_service_is_usable() {
     assert_ne!(managed.is_error, Some(true), "{managed:?}");
     assert!(text(&managed).contains("https://managed.example.com/hit"));
 
-    signed_in.store(false, Ordering::SeqCst);
-    account_logout(&mut client).await;
+    transition.send_replace(false);
     await_search_declared(&session, false).await;
     let names = text_turn(&mut client, &id, &mut requests, "after logout").await;
     assert!(!names.iter().any(|name| name == "web_search"), "{names:?}");
 
-    signed_in.store(true, Ordering::SeqCst);
-    account_status(&mut client).await;
+    transition.send_replace(true);
     await_search_declared(&session, true).await;
     let (_, failed) = tool_turn(
         &mut client,
@@ -537,6 +534,83 @@ async fn web_search_is_declared_only_while_a_search_service_is_usable() {
 
     stop.cancel();
     http.await.unwrap();
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// An account transition the provider reports by itself reaches an open
+/// Session's next request: nothing reads the account or a login attempt after
+/// the owner changes it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn web_search_follows_an_owner_account_transition_without_an_account_read() {
+    disable_system_proxy();
+    let home = std::fs::canonicalize("/tmp")
+        .unwrap()
+        .join(format!("dwt-{}", uuid::Uuid::new_v4()));
+    let signed_in = watch::Sender::new(false);
+    let transition = signed_in.clone();
+    let reads = Arc::new(AtomicUsize::new(0));
+    let reads_row = reads.clone();
+    let config = ServerConfig {
+        product_home: Some(home.clone()),
+        target_home: Some(home.join("rust")),
+        managed_provider: Some(ManagedProviderRow(Arc::new(move |builtins, _| {
+            let (signed_in, reads) = (signed_in.clone(), reads_row.clone());
+            builtins
+                .builtins
+                .register::<Value, _, _>("SearchProviderFixture", move |_| {
+                    Ok(SearchProviderPlugin(signed_in.clone(), reads.clone()))
+                });
+            "SearchProviderFixture".to_owned()
+        }))),
+        ..Default::default()
+    };
+    let (server, mut requests, _) = super::session_typescript::start(config).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    assert_ok(&client.rpc("provider.create", json!({"providerId":"018ec73f-0000-7000-8000-000000000011","displayName":"Fixture","connection":{"driverKind":"openai-compatible","baseUrl":"http://localhost/v1","auth":{"type":"anonymous"}},"models":[{"modelId":"fixture","displayName":"fixture","status":"active",
+            "capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)}],"enabled":true})).await);
+    assert_ok(
+        &client
+            .rpc(
+                "provider.select",
+                json!({"providerId":"018ec73f-0000-7000-8000-000000000011","modelId":"fixture"}),
+            )
+            .await,
+    );
+    let id = create_with_tools(&mut client, Some(json!(["web_search", "web_fetch"]))).await;
+    let session = server.agent().unwrap().get_session(&id).unwrap();
+    let names = text_turn(&mut client, &id, &mut requests, "hello").await;
+    assert!(!names.iter().any(|name| name == "web_search"), "{names:?}");
+    assert!(names.iter().any(|name| name == "web_fetch"), "{names:?}");
+
+    let observed = reads.load(Ordering::SeqCst);
+    transition.send_replace(true);
+    await_search_declared(&session, true).await;
+    let (names, managed) = tool_turn(
+        &mut client,
+        &session,
+        &id,
+        &mut requests,
+        "web_search",
+        json!({"query":"managed"}),
+    )
+    .await;
+    assert!(names.iter().any(|name| name == "web_search"), "{names:?}");
+    assert_ne!(managed.is_error, Some(true), "{managed:?}");
+    assert!(text(&managed).contains("https://managed.example.com/hit"));
+
+    transition.send_replace(false);
+    await_search_declared(&session, false).await;
+    let names = text_turn(&mut client, &id, &mut requests, "after the sign-out").await;
+    assert!(!names.iter().any(|name| name == "web_search"), "{names:?}");
+    assert_eq!(
+        reads.load(Ordering::SeqCst),
+        observed,
+        "an account transition must be published from the change, not read back"
+    );
+
     drop(client);
     server.shutdown();
     server.join().await.unwrap();
@@ -647,17 +721,19 @@ async fn web_settings_permission_cancellation_and_restore() {
     let home = std::fs::canonicalize("/tmp")
         .unwrap()
         .join(format!("dw-{}", uuid::Uuid::new_v4()));
-    let signed_in = Arc::new(AtomicBool::new(false));
-    let signed_in_row = signed_in.clone();
+    let signed_in = watch::Sender::new(false);
+    let transition = signed_in.clone();
+    let reads = Arc::new(AtomicUsize::new(0));
+    let reads_row = reads.clone();
     let config = ServerConfig {
         product_home: Some(home.clone()),
         target_home: Some(home.join("rust")),
         managed_provider: Some(ManagedProviderRow(Arc::new(move |builtins, _| {
-            let flag = signed_in_row.clone();
+            let (signed_in, reads) = (signed_in.clone(), reads_row.clone());
             builtins
                 .builtins
                 .register::<Value, _, _>("SearchProviderFixture", move |_| {
-                    Ok(SearchProviderPlugin(flag.clone()))
+                    Ok(SearchProviderPlugin(signed_in.clone(), reads.clone()))
                 });
             "SearchProviderFixture".to_owned()
         }))),
@@ -702,8 +778,7 @@ async fn web_settings_permission_cancellation_and_restore() {
                         .contains("Tool was not offered in this request: web_search")),
                 "{initial:?}"
             );
-            signed_in.store(true, Ordering::SeqCst);
-            account_status(&mut client).await;
+            transition.send_replace(true);
             await_search_declared(&session, true).await;
             submit(
                 &mut client,
@@ -773,8 +848,7 @@ async fn web_settings_permission_cancellation_and_restore() {
                     .unwrap()
                     .contains("fixture-web-key")
             );
-            signed_in.store(false, Ordering::SeqCst);
-            account_status(&mut client).await;
+            transition.send_replace(false);
             configure(&mut client, json!({"allowPrivateHosts":["127.0.0.1"]})).await;
             await_search_declared(&session, false).await;
             let before = requests.load(Ordering::SeqCst);
@@ -1658,8 +1732,10 @@ async fn node_managed_search_matches_native_results_and_errors() {
     let home = std::fs::canonicalize("/tmp")
         .unwrap()
         .join(format!("dms-{}", uuid::Uuid::new_v4()));
-    let signed_in = Arc::new(AtomicBool::new(true));
-    let signed_in_row = signed_in.clone();
+    let signed_in = watch::Sender::new(true);
+    let transition = signed_in.clone();
+    let reads = Arc::new(AtomicUsize::new(0));
+    let reads_row = reads.clone();
     let mut parts = super::session_typescript::fixture();
     parts.rows = vec![json!({
         "id":"managed-search",
@@ -1671,11 +1747,11 @@ async fn node_managed_search_matches_native_results_and_errors() {
         target_home: Some(home.join("rust")),
         session_typescript: Some(parts),
         managed_provider: Some(ManagedProviderRow(Arc::new(move |builtins, _| {
-            let flag = signed_in_row.clone();
+            let (signed_in, reads) = (signed_in.clone(), reads_row.clone());
             builtins
                 .builtins
                 .register::<Value, _, _>("SearchProviderFixture", move |_| {
-                    Ok(SearchProviderPlugin(flag.clone()))
+                    Ok(SearchProviderPlugin(signed_in.clone(), reads.clone()))
                 });
             "SearchProviderFixture".to_owned()
         }))),
@@ -1685,7 +1761,7 @@ async fn node_managed_search_matches_native_results_and_errors() {
     let mut client = Client::new_version(&server, false, 3).await;
     let search = server.service::<ManagedSearch>().unwrap();
     for (query, logged_in) in [("dim", true), ("fail", true), ("dim", false)] {
-        signed_in.store(logged_in, Ordering::SeqCst);
+        transition.send_replace(logged_in);
         let request = WebSearchRequest {
             query: query.into(),
             count: 2,

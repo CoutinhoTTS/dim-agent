@@ -506,6 +506,64 @@ async fn device_login_publishes_identity_catalog_usage_and_leases() {
     std::fs::remove_dir_all(home).unwrap();
 }
 
+/// A completed device login is published from the account transition itself:
+/// neither the attempt nor the account is read after the login starts.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn account_transitions_publish_without_a_client_read() {
+    let fixture = oauth::start().await;
+    let home = home();
+    let Process { root, providers } = process(&home).await;
+    let mut usable = providers.subscribe_usable();
+    assert!(!providers.usable());
+    let device = providers
+        .begin_device(
+            LoginBegin {
+                provider_id: PROVIDER.into(),
+                directory: fixture.base.clone(),
+                email: None,
+            },
+            &cancel(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(device.user_code, "USER-CODE");
+    let signed_in = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            if *usable.borrow_and_update() {
+                return true;
+            }
+            usable.changed().await.unwrap();
+        }
+    })
+    .await;
+    assert!(
+        signed_in.is_ok_and(|signed_in| signed_in),
+        "the completed login was not published: {:?}",
+        auth(&home)["dimAccountState"]["state"]
+    );
+    let lease = providers
+        .credential(PROVIDER, "fixture-model", &cancel())
+        .await
+        .unwrap();
+    providers.finish_rejected(&lease, &cancel()).await.unwrap();
+    let signed_out = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            if !*usable.borrow_and_update() {
+                return true;
+            }
+            usable.changed().await.unwrap();
+        }
+    })
+    .await;
+    assert!(
+        signed_out.is_ok_and(|signed_out| signed_out),
+        "the settled rejection was not published: {:?}",
+        auth(&home)["dimAccountState"]["state"]
+    );
+    root.shutdown().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn account_referrals_and_credit_resets_stay_with_the_authenticated_owner() {
     use dim_app_server::managed_provider::management::{ApplyReset, ResetType};

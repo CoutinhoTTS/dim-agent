@@ -243,6 +243,15 @@ impl std::fmt::Debug for ManagedProviderRow {
 pub trait ManagedProvider: Send + Sync + 'static {
     fn providers(&self) -> Vec<ProviderDescriptor>;
     fn status(&self, provider: &str) -> ManagedFuture<AccountSnapshot>;
+    /// A replayable watch over whether this provider stores a signed-in
+    /// account, moved at every change of that account. The binding publishes
+    /// each move while its binding is current, so a login that completes after
+    /// every client polling it is gone still reaches open Sessions. `None`
+    /// when the provider cannot report its own changes: observations are then
+    /// the only source.
+    fn subscribe_account(&self) -> Option<watch::Receiver<bool>> {
+        None
+    }
     fn recover(&self, provider: &str) -> ManagedFuture<AccountSnapshot>;
     fn begin_browser(&self, login: BrowserLoginBegin) -> ManagedFuture<BrowserLogin>;
     fn complete_browser(
@@ -863,11 +872,31 @@ impl DynPlugin for ManagedProviderBinding {
                 )));
             }
             let binding = NEXT_BINDING.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let account = provider.subscribe_account();
             *owner.provider.lock().unwrap() = Some(Bound {
                 provider: provider.clone(),
                 binding,
             });
+            let stop = ctx.cancellation_token();
+            let mirror = account.map(|mut account| {
+                let owner = owner.clone();
+                tokio::spawn(async move {
+                    loop {
+                        tokio::select! {
+                            _ = stop.cancelled() => return,
+                            moved = account.changed() => if moved.is_err() {
+                                return;
+                            },
+                        }
+                        owner.observe_bound(binding, *account.borrow_and_update());
+                    }
+                })
+            });
             ctx.effect(move || async move {
+                if let Some(mirror) = mirror {
+                    mirror.abort();
+                    let _ = mirror.await;
+                }
                 let retired = {
                     let mut slot = owner.provider.lock().unwrap();
                     if slot.as_ref().is_some_and(|bound| bound.binding == binding) {

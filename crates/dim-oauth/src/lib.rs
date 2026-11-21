@@ -1088,6 +1088,9 @@ impl ManagedProvider for DimOAuth {
             inner.store.status().await
         })
     }
+    fn subscribe_account(&self) -> Option<tokio::sync::watch::Receiver<bool>> {
+        Some(self.0.store.account())
+    }
     fn recover(&self, provider: &str) -> ManagedFuture<AccountSnapshot> {
         let provider = provider.to_owned();
         self.owned(|inner| async move {

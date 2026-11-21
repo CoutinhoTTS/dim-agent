@@ -11,6 +11,7 @@ use reqwest::Client;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use std::{io, sync::Arc, time::Duration};
+use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -247,6 +248,14 @@ fn authenticated(
     }))
 }
 
+/// Whether `doc` stores a signed-in account. `None` for a document this build
+/// cannot read, which leaves the published value alone.
+fn signed_in(doc: &Doc) -> Option<bool> {
+    parse(doc, false)
+        .ok()
+        .map(|parsed| parsed.state.is_some_and(|state| state.identity.is_some()))
+}
+
 fn snapshot(doc: &Doc) -> Result<AccountSnapshot> {
     let Parsed { tokens, state } = parse(doc, true)?;
     let state = state.ok_or(ManagedError::AccountRecoveryRequired)?;
@@ -324,6 +333,9 @@ fn document(bytes: &[u8]) -> Result<Doc> {
 /// One locked `auth.json`.
 struct AuthFile {
     lease: FileLease,
+    /// The owner's read of whether the file stores a signed-in account, moved
+    /// after every write of this file.
+    account: watch::Sender<bool>,
 }
 impl AuthFile {
     async fn read(&mut self) -> Result<(Doc, Option<Vec<u8>>)> {
@@ -342,7 +354,11 @@ impl AuthFile {
         self.lease
             .replace(bytes, private_permissions(), &CancellationToken::new())
             .await
-            .map_err(file_error)
+            .map_err(file_error)?;
+        if let Some(signed_in) = signed_in(doc) {
+            self.account.send_replace(signed_in);
+        }
+        Ok(())
     }
     /// Drops a stored client secret and moves a legacy `dimcode.cn` grant to
     /// `dimagent.cn`, advancing the revision when the grant changes.
@@ -424,6 +440,10 @@ pub(super) struct Store {
     root: usize,
     client: Client,
     stopping: CancellationToken,
+    /// Whether the account file stores a signed-in account, moved after every
+    /// write of it: the provider publishes the App Server's availability from
+    /// the account's own transitions.
+    account: watch::Sender<bool>,
 }
 impl Store {
     pub fn new(files: Arc<FileStorage>, root: usize, client: Client) -> Self {
@@ -432,7 +452,13 @@ impl Store {
             root,
             client,
             stopping: CancellationToken::new(),
+            account: watch::Sender::new(false),
         }
+    }
+    /// Whether the account file stores a signed-in account, replayed and moved
+    /// at every write.
+    pub fn account(&self) -> watch::Receiver<bool> {
+        self.account.subscribe()
     }
     /// Stops lock acquisition. A transaction that holds the lock still
     /// persists its result.
@@ -460,6 +486,7 @@ impl Store {
     async fn open(&self, cancel: Option<&CancellationToken>) -> Result<AuthFile> {
         Ok(AuthFile {
             lease: self.lease(AUTH_FILE, cancel).await?,
+            account: self.account.clone(),
         })
     }
 
