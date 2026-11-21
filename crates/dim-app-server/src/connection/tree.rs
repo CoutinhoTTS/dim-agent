@@ -614,9 +614,14 @@ impl Connection {
                     | Err(AgentError::Closed(_)) => None,
                     read => Some(read),
                 },
-                // An active line that is reloading keeps its error instead of
-                // being answered from the tree.
-                Err(error) => return Err(RpcError::from(error)),
+                // A line that is ending has already lost its scope when the
+                // parent has not recorded the end yet: its own facts still
+                // answer at its head. An active line that is reloading keeps
+                // its error instead of being answered from the tree.
+                Err(error) => match tree.end_committed(&branch) {
+                    Ok(true) => None,
+                    _ => return Err(RpcError::from(error)),
+                },
             },
         };
         let (configuration, through) = match live {

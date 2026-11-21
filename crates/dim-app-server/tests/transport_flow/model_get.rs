@@ -890,7 +890,7 @@ async fn a_live_read_ends_when_its_line_starts_closing() {
             panic!("the session closed before the read answered: {closed:?}");
         }
         _ = tokio::time::sleep(std::time::Duration::from_secs(10)) => {
-            panic!("the live read ended when its line started closing");
+            panic!("the live read did not end when its line started closing");
         }
     };
     assert_eq!(model_of(&reply), "beta");
