@@ -1,5 +1,7 @@
 //! Web through actual C4, Settings, Permission and ToolExecutor boundaries.
 use super::*;
+use dim_agent_capabilities::tool_registry::{ToolProvider, ToolRegistry, ToolSourceSet};
+use dim_agent_runtime::Names;
 use dim_agent_runtime::testing::{branch_events, chain_events};
 use dim_app_server::managed_provider::{
     AccountSnapshot, CredentialLease, ManagedCatalog, ManagedError, ManagedFuture, ManagedProvider,
@@ -9,7 +11,7 @@ use dim_app_server::managed_provider::{
         ManagedBrowserLoginComplete, ManagedLoginAttempt, Usage,
     },
 };
-use rutis::host::BoxFuture;
+use rutis::host::{BoxFuture, DynPlugin, Effect, Key, TypeKey};
 use rutis::{Ctx, Plugin};
 use std::sync::atomic::AtomicUsize;
 use tokio::io::AsyncReadExt;
@@ -139,6 +141,112 @@ impl Plugin for SearchProviderPlugin {
             reads: self.1.clone(),
         }))?;
         Ok(())
+    }
+}
+
+/// A Session tool source that withholds every `sets()` read while armed.
+///
+/// The registry refreshes its sources, and the branch adopts them, from the
+/// last read: a held read holds the adoption, so a test can write the `web`
+/// source and still bind a request to the declaration from before it.
+struct AdoptionGate {
+    armed: AtomicBool,
+    reads: watch::Sender<u64>,
+    open: std::sync::Mutex<bool>,
+    opened: std::sync::Condvar,
+}
+impl Default for AdoptionGate {
+    fn default() -> Self {
+        Self {
+            armed: AtomicBool::new(false),
+            reads: watch::Sender::new(0),
+            open: std::sync::Mutex::new(true),
+            opened: std::sync::Condvar::new(),
+        }
+    }
+}
+impl AdoptionGate {
+    /// Holds every read from here on, and answers how many it held so far so
+    /// the caller can wait for the next one.
+    fn arm(&self) -> u64 {
+        *self.open.lock().unwrap() = false;
+        self.armed.store(true, Ordering::SeqCst);
+        *self.reads.borrow()
+    }
+    fn release(&self) {
+        *self.open.lock().unwrap() = true;
+        self.opened.notify_all();
+    }
+    fn hold(&self) {
+        if !self.armed.load(Ordering::SeqCst) {
+            return;
+        }
+        tokio::task::block_in_place(|| {
+            let open = self.open.lock().unwrap();
+            if *open {
+                return;
+            }
+            self.reads.send_modify(|reads| *reads += 1);
+            drop(self.opened.wait_while(open, |open| !*open).unwrap());
+        });
+    }
+    /// Waits until the registry read the held source after `since`: every
+    /// earlier source change was announced, and none of them is applied yet.
+    async fn reached(&self, since: u64) {
+        let mut reads = self.reads.subscribe();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while *reads.borrow_and_update() <= since {
+                reads.changed().await.expect("the gate outlives the read");
+            }
+        })
+        .await
+        .expect("the registry never read the gated tool source");
+    }
+}
+
+struct GatedSource(Arc<AdoptionGate>);
+impl ToolProvider for GatedSource {
+    fn sets(&self) -> Vec<Arc<ToolSourceSet>> {
+        self.0.hold();
+        Vec::new()
+    }
+}
+
+/// Releases the gate it holds when it goes out of scope: a failed assertion
+/// must not leave a held read waiting for the runtime to shut down.
+struct ReleaseOnDrop(Arc<AdoptionGate>);
+impl Drop for ReleaseOnDrop {
+    fn drop(&mut self) {
+        self.0.release();
+    }
+}
+
+struct GatedSourcePlugin {
+    gate: Arc<AdoptionGate>,
+    registry: Key<ToolRegistry>,
+}
+impl GatedSourcePlugin {
+    fn new(names: &Names<'_>, gate: Arc<AdoptionGate>) -> rutis::Result<Self> {
+        Ok(Self {
+            gate,
+            registry: names.key()?,
+        })
+    }
+}
+impl DynPlugin for GatedSourcePlugin {
+    fn name(&self) -> &str {
+        "test.adoption-gate"
+    }
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.registry.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
+        let gate = self.gate.clone();
+        Box::pin(async move {
+            let registry = ctx.require_at(&self.registry)?;
+            registry.register_source(ctx, "gate", Arc::new(GatedSource(gate)))?;
+            Ok(Effect::Done)
+        })
     }
 }
 
@@ -395,35 +503,7 @@ async fn tool_turn(
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn web_search_is_declared_only_while_a_search_service_is_usable() {
     disable_system_proxy();
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let base = format!("http://{}", listener.local_addr().unwrap());
-    let stop = CancellationToken::new();
-    let stopping = stop.clone();
-    let http = tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                _ = stopping.cancelled() => return,
-                accepted = listener.accept() => {
-                    let (mut socket, _) = accepted.unwrap();
-                    tokio::spawn(async move {
-                        let mut header = Vec::new();
-                        let mut chunk = [0; 4096];
-                        while !header.windows(4).any(|part| part == b"\r\n\r\n") {
-                            let n = socket.read(&mut chunk).await.unwrap();
-                            if n == 0 { return; }
-                            header.extend_from_slice(&chunk[..n]);
-                        }
-                        let body = r#"{"type":"search","web":{"results":[{"title":"fixture","url":"https://example.com/","description":"snippet"}]}}"#;
-                        let response = format!(
-                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                            body.len()
-                        );
-                        socket.write_all(response.as_bytes()).await.unwrap();
-                    });
-                }
-            }
-        }
-    });
+    let (base, stop, http) = brave_fixture().await;
     let home = std::fs::canonicalize("/tmp")
         .unwrap()
         .join(format!("dws-{}", uuid::Uuid::new_v4()));
@@ -531,6 +611,262 @@ async fn web_search_is_declared_only_while_a_search_service_is_usable() {
     let names = text_turn(&mut client, &narrow, &mut requests, "narrow").await;
     assert!(!names.iter().any(|name| name == "web_search"), "{names:?}");
     assert!(names.iter().any(|name| name == "web_fetch"), "{names:?}");
+
+    stop.cancel();
+    http.await.unwrap();
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// A Brave-compatible search endpoint, its base URL, and the stop that ends
+/// it.
+async fn brave_fixture() -> (String, CancellationToken, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let stop = CancellationToken::new();
+    let stopping = stop.clone();
+    let http = tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = stopping.cancelled() => return,
+                accepted = listener.accept() => {
+                    let (mut socket, _) = accepted.unwrap();
+                    tokio::spawn(async move {
+                        let mut header = Vec::new();
+                        let mut chunk = [0; 4096];
+                        while !header.windows(4).any(|part| part == b"\r\n\r\n") {
+                            let n = socket.read(&mut chunk).await.unwrap();
+                            if n == 0 { return; }
+                            header.extend_from_slice(&chunk[..n]);
+                        }
+                        let body = r#"{"type":"search","web":{"results":[{"title":"fixture","url":"https://example.com/","description":"snippet"}]}}"#;
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        );
+                        socket.write_all(response.as_bytes()).await.unwrap();
+                    });
+                }
+            }
+        }
+    });
+    (base, stop, http)
+}
+
+/// A fixture model provider selected for the process and a Session that mounts
+/// both Web tools.
+async fn provider_session(client: &mut Client) -> String {
+    assert_ok(&client.rpc("provider.create", json!({"providerId":"018ec73f-0000-7000-8000-000000000011","displayName":"Fixture","connection":{"driverKind":"openai-compatible","baseUrl":"http://localhost/v1","auth":{"type":"anonymous"}},"models":[{"modelId":"fixture","displayName":"fixture","status":"active",
+            "capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)}],"enabled":true})).await);
+    assert_ok(
+        &client
+            .rpc(
+                "provider.select",
+                json!({"providerId":"018ec73f-0000-7000-8000-000000000011","modelId":"fixture"}),
+            )
+            .await,
+    );
+    create_with_tools(client, Some(json!(["web_search", "web_fetch"]))).await
+}
+
+/// Adding a service changes the declaration at the request the branch adopts
+/// it for: a request bound before that adoption does not see `web_search`, and
+/// the next one declares it and calls it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn web_search_is_declared_at_the_next_request_after_the_added_service_is_adopted() {
+    disable_system_proxy();
+    let (base, stop, http) = brave_fixture().await;
+    let home = std::fs::canonicalize("/tmp")
+        .unwrap()
+        .join(format!("dwa-{}", uuid::Uuid::new_v4()));
+    let gate = Arc::new(AdoptionGate::default());
+    let install = gate.clone();
+    let (server, mut requests, _) = super::session_typescript::start_with(
+        ServerConfig {
+            product_home: Some(home.clone()),
+            target_home: Some(home.join("rust")),
+            ..Default::default()
+        },
+        move |builder| {
+            builder.require_feature(Feature::new("test.adoption-gate").session(
+                "test.adoption-gate",
+                move |names| Ok(Box::new(GatedSourcePlugin::new(names, install.clone())?)),
+            ));
+        },
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let id = provider_session(&mut client).await;
+    let session = server.agent().unwrap().get_session(&id).unwrap();
+    let names = text_turn(&mut client, &id, &mut requests, "hello").await;
+    assert!(!names.iter().any(|name| name == "web_search"), "{names:?}");
+
+    // The request after the first adopted source change carries a tool part;
+    // from then on a declaration follows the branch's adoption, not a read of
+    // the registry, which is what the gate below holds.
+    configure(
+        &mut client,
+        json!({"searchService":{"kind":"brave","endpoint":format!("{base}/search"),"apiKey":"fixture-web-key"}}),
+    )
+    .await;
+    await_search_declared(&session, true).await;
+    configure(&mut client, json!({})).await;
+    await_search_declared(&session, false).await;
+
+    let since = gate.arm();
+    let _released = ReleaseOnDrop(gate.clone());
+    configure(
+        &mut client,
+        json!({"searchService":{"kind":"brave","endpoint":format!("{base}/search"),"apiKey":"fixture-web-key"}}),
+    )
+    .await;
+    gate.reached(since).await;
+    let names = text_turn(&mut client, &id, &mut requests, "before the adoption").await;
+    assert!(
+        !names.iter().any(|name| name == "web_search"),
+        "a request bound before the adoption must not see the added service: {names:?}"
+    );
+
+    gate.release();
+    await_search_declared(&session, true).await;
+    let (names, searched) = tool_turn(
+        &mut client,
+        &session,
+        &id,
+        &mut requests,
+        "web_search",
+        json!({"query":"configured"}),
+    )
+    .await;
+    assert!(names.iter().any(|name| name == "web_search"), "{names:?}");
+    assert_ne!(searched.is_error, Some(true), "{searched:?}");
+    assert!(text(&searched).contains("https://example.com/"));
+
+    stop.cancel();
+    http.await.unwrap();
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// Removing a service changes the declaration at the request the branch adopts
+/// it for: a request bound before that adoption still declares `web_search`,
+/// its call finds no service, and the next request does not declare it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn web_search_stays_declared_with_a_failing_call_until_the_removed_service_is_adopted() {
+    disable_system_proxy();
+    let (base, stop, http) = brave_fixture().await;
+    let home = std::fs::canonicalize("/tmp")
+        .unwrap()
+        .join(format!("dwr-{}", uuid::Uuid::new_v4()));
+    let gate = Arc::new(AdoptionGate::default());
+    let install = gate.clone();
+    let signed_in = watch::Sender::new(false);
+    let transition = signed_in.clone();
+    let reads = Arc::new(AtomicUsize::new(0));
+    let reads_row = reads.clone();
+    let (server, mut requests, _) = super::session_typescript::start_with(
+        ServerConfig {
+            product_home: Some(home.clone()),
+            target_home: Some(home.join("rust")),
+            managed_provider: Some(ManagedProviderRow(Arc::new(move |builtins, _| {
+                let (signed_in, reads) = (signed_in.clone(), reads_row.clone());
+                builtins
+                    .builtins
+                    .register::<Value, _, _>("SearchProviderFixture", move |_| {
+                        Ok(SearchProviderPlugin(signed_in.clone(), reads.clone()))
+                    });
+                "SearchProviderFixture".to_owned()
+            }))),
+            ..Default::default()
+        },
+        move |builder| {
+            builder.require_feature(Feature::new("test.adoption-gate").session(
+                "test.adoption-gate",
+                move |names| Ok(Box::new(GatedSourcePlugin::new(names, install.clone())?)),
+            ));
+        },
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let id = provider_session(&mut client).await;
+    let session = server.agent().unwrap().get_session(&id).unwrap();
+    configure(
+        &mut client,
+        json!({"searchService":{"kind":"brave","endpoint":format!("{base}/search"),"apiKey":"fixture-web-key"}}),
+    )
+    .await;
+    await_search_declared(&session, true).await;
+    let (names, searched) = tool_turn(
+        &mut client,
+        &session,
+        &id,
+        &mut requests,
+        "web_search",
+        json!({"query":"configured"}),
+    )
+    .await;
+    assert!(names.iter().any(|name| name == "web_search"), "{names:?}");
+    assert_ne!(searched.is_error, Some(true), "{searched:?}");
+
+    let since = gate.arm();
+    let _released = ReleaseOnDrop(gate.clone());
+    configure(&mut client, json!({})).await;
+    gate.reached(since).await;
+    let (names, removed) = tool_turn(
+        &mut client,
+        &session,
+        &id,
+        &mut requests,
+        "web_search",
+        json!({"query":"after the removal"}),
+    )
+    .await;
+    assert!(
+        names.iter().any(|name| name == "web_search"),
+        "a request bound before the adoption keeps the declaration: {names:?}"
+    );
+    assert_eq!(removed.is_error, Some(true), "{removed:?}");
+    assert!(
+        text(&removed).contains("search_unavailable"),
+        "a bound request's call must report the missing service: {removed:?}"
+    );
+
+    gate.release();
+    await_search_declared(&session, false).await;
+    let names = text_turn(&mut client, &id, &mut requests, "after the adoption").await;
+    assert!(!names.iter().any(|name| name == "web_search"), "{names:?}");
+
+    transition.send_replace(true);
+    await_search_declared(&session, true).await;
+    let since = gate.arm();
+    transition.send_replace(false);
+    gate.reached(since).await;
+    let (names, signed_out) = tool_turn(
+        &mut client,
+        &session,
+        &id,
+        &mut requests,
+        "web_search",
+        json!({"query":"after the sign-out"}),
+    )
+    .await;
+    assert!(
+        names.iter().any(|name| name == "web_search"),
+        "a request bound before the sign-out's adoption keeps the declaration: {names:?}"
+    );
+    assert!(
+        text(&signed_out).contains("search_unavailable"),
+        "a bound request's call must report the signed-out account: {signed_out:?}"
+    );
+
+    gate.release();
+    await_search_declared(&session, false).await;
+    let names = text_turn(&mut client, &id, &mut requests, "after the sign-out's adoption").await;
+    assert!(!names.iter().any(|name| name == "web_search"), "{names:?}");
 
     stop.cancel();
     http.await.unwrap();

@@ -1212,27 +1212,42 @@ type RecordedTools = tokio::sync::mpsc::UnboundedReceiver<Vec<ToolDefinition>>;
 pub(super) async fn start(
     config: ServerConfig,
 ) -> (RunningServer, ModelRequests, Arc<tokio::sync::Notify>) {
-    let (server, requests, release, _) = start_recording(config).await;
+    start_with(config, |_| {}).await
+}
+
+/// `start` with the fixture builder exposed before the server is served, so a
+/// test installs its own parts next to the default ones.
+pub(super) async fn start_with(
+    config: ServerConfig,
+    install: impl FnOnce(&mut AgentBuilder),
+) -> (RunningServer, ModelRequests, Arc<tokio::sync::Notify>) {
+    let (mut builder, requests, release, _) = setup_recording();
+    install(&mut builder);
+    let server = serve(builder, prepare(config)).await.unwrap();
     (server, requests, release)
 }
 
 /// `start` that also returns the full tool definitions each model request
 /// carries.
 pub(super) async fn start_recording(
-    mut config: ServerConfig,
+    config: ServerConfig,
 ) -> (
     RunningServer,
     ModelRequests,
     Arc<tokio::sync::Notify>,
     RecordedTools,
 ) {
+    let (builder, requests, release, tools) = setup_recording();
+    let server = serve(builder, prepare(config)).await.unwrap();
+    (server, requests, release, tools)
+}
+
+fn prepare(mut config: ServerConfig) -> ServerConfig {
     config.unix_path = Some(std::env::temp_dir().join(format!(
         "dm-ts-{}/server.sock",
         &uuid::Uuid::new_v4().simple().to_string()[..8]
     )));
-    let (builder, requests, release, tools) = setup_recording();
-    let server = serve(builder, config).await.unwrap();
-    (server, requests, release, tools)
+    config
 }
 
 pub(super) fn setup() -> (AgentBuilder, ModelRequests, Arc<tokio::sync::Notify>) {
