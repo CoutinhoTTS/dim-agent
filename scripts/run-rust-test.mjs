@@ -13,7 +13,7 @@ const matches=readFileSync(artifacts,'utf8').split('\n').filter(Boolean).map(lin
   .filter(record=>record.reason==='compiler-artifact'&&record.profile.test&&record.executable&&(workspace||record.target.name===target));
 if(workspace){
   assert(matches.length,'Expected compiled workspace test targets');
-  const longTargets=new Set(['transport_flow','cli_flow']);
+  const longTargets=new Set(['transport_flow','cli_flow','cli_tui_flow','cli_session_flow','cli_daemon_flow']);
   matches.sort((a,b)=>Number(longTargets.has(b.target.name))-Number(longTargets.has(a.target.name)));
 }else{
   assert.equal(matches.length,1,`Expected one compiled test target named ${target}`);

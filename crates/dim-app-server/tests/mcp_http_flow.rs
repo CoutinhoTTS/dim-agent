@@ -60,8 +60,7 @@ struct Fixture {
     mcp: mcp_host::Directory,
     home: PathBuf,
 }
-#[path = "fixtures/mcp_host.rs"]
-mod mcp_host;
+use crate::mcp_host;
 impl Fixture {
     async fn new(url: &str, token: &str) -> Self {
         Self::configured(json!({"type":"http","url":url,"auth":{"type":"bearer","token":token}}))
