@@ -1948,8 +1948,8 @@ fn repicking_the_current_model_keeps_the_effort() {
     terminal.write(b"/models\r");
     terminal.until("‹ high ›");
     terminal.write(b"\r");
-    terminal.until("Ask anything...");
     terminal.until("test / model · high");
+    terminal.until("Ask anything...");
     // The picker closes and the label redraws before the host task reads
     // provider management twice and sends the update; wait for the call the
     // test asserts, so the deliberate kill cannot land inside that window.
@@ -7188,9 +7188,20 @@ fn tui_models_picker_edits_only_the_subagent_model_policy() {
     terminal.write(b"\r");
     thread::sleep(Duration::from_millis(300));
     terminal.write(b"\r");
+    terminal.until("Subagent model policy saved");
     terminal.until("Subagent models");
     terminal.until("Inherit requesting branch");
-    terminal.until("Subagent model policy saved");
+    terminal.wait_for("the previous save notice to clear", |tail| {
+        tail.match_indices("/workspace")
+            .find_map(|(end, workspace)| {
+                let (_, border) = tail[..end].rsplit_once('╰')?;
+                strip_ansi(border)
+                    .trim()
+                    .chars()
+                    .all(|ch| ch == '─')
+                    .then_some(end + workspace.len())
+            })
+    });
     terminal.write(b"\r");
     terminal.until("Fixed model");
     terminal.raw(b"\x1b");
