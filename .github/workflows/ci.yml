@@ -260,11 +260,24 @@ jobs:
           set -euo pipefail
           if [[ "$RUNNER_OS" == Linux ]]; then
             cpus=$(nproc)
-            test_jobs=$(( cpus / 3 ))
-            (( test_jobs < 4 )) && test_jobs=4
+            # Runner hosts may share their physical cores between instances and
+            # report SMT siblings as CPUs; scale by the cores this job can use.
+            if command -v lscpu >/dev/null; then
+              cores=$(lscpu -p=Core,Socket | grep -v '^#' | sort -u | wc -l)
+              logical=$(lscpu -p=CPU | grep -vc '^#')
+              (( cores > 0 )) || cores=1
+              smt=$(( logical / cores ))
+              (( smt < 1 )) && smt=1
+              physical=$(( cpus / smt ))
+            else
+              physical=$cpus
+            fi
+            (( physical < 1 )) && physical=1
+            test_jobs=$(( physical / 3 ))
+            (( test_jobs < 3 )) && test_jobs=3
             (( test_jobs > 8 )) && test_jobs=8
-            test_threads=$(( cpus / 4 ))
-            (( test_threads < 4 )) && test_threads=4
+            test_threads=$(( physical / 4 ))
+            (( test_threads < 2 )) && test_threads=2
             (( test_threads > 6 )) && test_threads=6
           else
             test_jobs=3
