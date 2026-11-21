@@ -1352,8 +1352,6 @@ printf 'Updated launcher started\n'
             .env_remove("DIMCODE_UPDATE_CHECK")
             .env("DIM_TEST_RELEASE_BUILD", "1")
             .env("DIM_TEST_UPDATE_TIMEOUT_MS", "60000")
-            .env("DIM_TEST_DAEMON_START_TIMEOUT_MS", "60000")
-            .env("DIM_TEST_APP_SERVER_STARTUP_TIMEOUT_MS", "60000")
             .env("DIMCODE_NPM_PACKAGE", "dimcode-alpha")
             .env("DIMCODE_NPM_REGISTRY", &registry)
             .env("NO_PROXY", "127.0.0.1")
