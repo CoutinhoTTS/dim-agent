@@ -7329,10 +7329,13 @@ impl App {
         self.thoughts.clear();
         self.commits = CommitState::default();
         self.answered.clear();
-        if !matches!(self.prompt, Some(Prompt::Report(_))) {
-            self.prompt = None;
+        match self.prompt.take() {
+            Some(Prompt::Upgrade(dialog)) => self.upgrade = Some(dialog),
+            Some(prompt @ Prompt::Report(_)) => self.prompt = Some(prompt),
+            _ => {}
         }
         self.snapshot = None;
+        self.reopen_upgrade();
         self.runs = Runs::default();
         // Another Session's tasks are its own: this interface has reported
         // none of them.
@@ -10186,6 +10189,183 @@ mod tests {
             ));
             assert!(drawn.app.update_requested);
         }
+    }
+
+    /// `--resume` starts its update check before the Session is attached, so
+    /// the offer can arrive first; the dialog is process-wide and outlives
+    /// the switch.
+    #[test]
+    fn a_resumed_switch_keeps_the_update_offer() {
+        let offer = || crate::update::Offer {
+            current: "0.1.0-alpha.27".into(),
+            version: "0.1.0-alpha.28".into(),
+            manual: "dima update".into(),
+            direct: true,
+        };
+        for fullscreen in [false, true] {
+            let mut drawn = Drawn::new((80, 24), None, true);
+            drawn.app.fullscreen = fullscreen;
+            drawn.app.apply(Update::Upgrade(offer()));
+            assert!(matches!(drawn.app.prompt, Some(Prompt::Upgrade(_))));
+            drawn.app.apply(Update::Switched {
+                session_id: "s2".into(),
+                kind: SwitchKind::Resumed,
+                cwd: None,
+            });
+            assert!(
+                matches!(drawn.app.prompt, Some(Prompt::Upgrade(_))),
+                "fullscreen={fullscreen}: the switch dropped the offer"
+            );
+            let screen = drawn.app.frame((80, 24)).live.join("\n");
+            assert!(screen.contains(t("Update available")), "{screen}");
+        }
+    }
+
+    /// The offer waits while another panel has the screen. The panel's own
+    /// switch then clears the old Session's state, and a question stashed in
+    /// it must go with it: only the dialog comes back.
+    #[test]
+    fn a_switch_does_not_restore_the_previous_sessions_stashed_question() {
+        let mut drawn = Drawn::new((100, 30), None, true);
+        drawn.app.apply(Update::Snapshot(Box::new(ViewSnapshot {
+            session_id: "s1".into(),
+            questions: vec![questions()],
+            ..ViewSnapshot::default()
+        })));
+        assert!(matches!(drawn.app.prompt, Some(Prompt::Ask(_))));
+        drawn.app.run_command("export", "");
+        assert!(matches!(drawn.app.prompt, Some(Prompt::Export(_))));
+        drawn.app.apply(Update::Upgrade(crate::update::Offer {
+            current: "0.1.0-alpha.27".into(),
+            version: "0.1.0-alpha.28".into(),
+            manual: "dima update".into(),
+            direct: true,
+        }));
+        drawn.app.apply(Update::Switched {
+            session_id: "s2".into(),
+            kind: SwitchKind::Resumed,
+            cwd: None,
+        });
+        assert!(
+            drawn.app.question_stash.is_none(),
+            "the old Session's stashed question must not survive the switch"
+        );
+        assert!(
+            matches!(drawn.app.prompt, Some(Prompt::Upgrade(_))),
+            "the switch must put the update dialog back"
+        );
+        let screen = drawn.app.frame((100, 30)).live.join("\n");
+        assert!(screen.contains(t("Update available")), "{screen}");
+        assert!(!screen.contains("Which tall?"), "{screen}");
+    }
+
+    /// The orders that already worked keep working: the switch first, and
+    /// Home's first Session, whose switch returns before clearing prompts.
+    #[test]
+    fn the_update_offer_survives_a_switch_in_the_other_orders() {
+        let offer = || crate::update::Offer {
+            current: "0.1.0-alpha.27".into(),
+            version: "0.1.0-alpha.28".into(),
+            manual: "dima update".into(),
+            direct: true,
+        };
+        let mut switched_first = Drawn::new((80, 24), None, true);
+        switched_first.app.apply(Update::Switched {
+            session_id: "s2".into(),
+            kind: SwitchKind::Resumed,
+            cwd: None,
+        });
+        switched_first.app.apply(Update::Upgrade(offer()));
+        assert!(matches!(
+            switched_first.app.prompt,
+            Some(Prompt::Upgrade(_))
+        ));
+        let screen = switched_first.app.frame((80, 24)).live.join("\n");
+        assert!(screen.contains(t("Update available")), "{screen}");
+
+        let mut first_from_home = Drawn::new((80, 24), None, true);
+        first_from_home.app.apply(Update::Upgrade(offer()));
+        first_from_home.app.apply(Update::Switched {
+            session_id: "s1".into(),
+            kind: SwitchKind::New,
+            cwd: None,
+        });
+        assert!(matches!(
+            first_from_home.app.prompt,
+            Some(Prompt::Upgrade(_))
+        ));
+        let screen = first_from_home.app.frame((80, 24)).live.join("\n");
+        assert!(screen.contains(t("Update available")), "{screen}");
+    }
+
+    /// The offer can also arrive while the Session list is open: choosing a
+    /// row closes the list and reopens the dialog, and the switch that follows
+    /// must keep it.
+    #[test]
+    fn a_session_picked_from_the_list_keeps_the_update_offer() {
+        use crate::model::session::SessionItem;
+
+        let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut drawn = Drawn::new((100, 30), None, true);
+        drawn.app.host = Box::new(Recorder(sent.clone()));
+        drawn.app.apply(Update::Snapshot(Box::new(ViewSnapshot {
+            session_id: "s1".into(),
+            ..ViewSnapshot::default()
+        })));
+        typed(&mut drawn.app, "/resume");
+        drawn.key(KeyCode::Enter);
+        let id = sent
+            .borrow()
+            .iter()
+            .find_map(|command| match command {
+                Command::ListSessions { id, .. } => Some(id.clone()),
+                _ => None,
+            })
+            .expect("opening the list asks for its first page");
+        drawn.app.apply(Update::Sessions {
+            id,
+            paged: true,
+            result: Ok((
+                vec![SessionItem {
+                    id: "s2".into(),
+                    title: Some("old session".into()),
+                    preview: None,
+                    cwd: "/work".into(),
+                    updated_at: u64::MAX,
+                    model: "p/m".into(),
+                    origin: None,
+                    closed: false,
+                }],
+                None,
+            )),
+        });
+        drawn.app.apply(Update::Upgrade(crate::update::Offer {
+            current: "0.1.0-alpha.27".into(),
+            version: "0.1.0-alpha.28".into(),
+            manual: "dima update".into(),
+            direct: true,
+        }));
+        assert!(
+            matches!(drawn.app.prompt, Some(Prompt::Sessions(_))),
+            "the list keeps the screen while it is open"
+        );
+        drawn.key(KeyCode::Enter);
+        assert!(matches!(sent.borrow().last(), Some(Command::Resume(id)) if id == "s2"));
+        assert!(
+            matches!(drawn.app.prompt, Some(Prompt::Upgrade(_))),
+            "closing the list reopens the offer"
+        );
+        drawn.app.apply(Update::Switched {
+            session_id: "s2".into(),
+            kind: SwitchKind::Resumed,
+            cwd: None,
+        });
+        assert!(
+            matches!(drawn.app.prompt, Some(Prompt::Upgrade(_))),
+            "the switch after the resume cleared the offer"
+        );
+        let screen = drawn.app.frame((100, 30)).live.join("\n");
+        assert!(screen.contains(t("Update available")), "{screen}");
     }
 
     /// An empty composer shows the locale's placeholder; typing replaces it.
