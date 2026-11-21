@@ -682,9 +682,11 @@ line's committed cutoff, never the sequence of an ancestor's adoption, so a clie
 that line's `Configuration` events whose `sequence > through` and refreshes by calling again without
 `through`. An open line waits for the Dispatcher to reach the committed head, so an adoption
 committed just before the call is included rather than missed, and it reports the cutoff of the
-state it answers from: that is the captured head while the owner is still there, and the later
-adoption's own cutoff when the owner has already applied one, so reading at the returned cutoff
-always answers the returned configuration. An ended line reads at
+state it answers from: that is the captured head while the owner is still there, and the last
+applied source fact's sequence when the owner has already applied a later one, so reading at the
+returned cutoff always answers the returned configuration. A line whose scope is closing answers
+at its published head: a fact whose publication is still pending is not visible to any read, so
+the line does not answer past it. An ended line reads at
 its fixed head through the ancestor chain and is not reopened; an explicit `through` reads the same
 chain at that cutoff, and a value past the line's head is refused as a future sequence. An unknown
 line is an error. Old servers do not advertise the method: a client then uses the attach reply for

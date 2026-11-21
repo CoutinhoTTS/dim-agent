@@ -588,6 +588,88 @@ async fn a_closing_line_answers_its_adopted_configuration() {
     server.join().await.unwrap();
 }
 
+/// A closing line commits its interrupt before the store publishes it. The read
+/// of that line must answer at a published cutoff instead of passing it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_closing_line_answers_at_its_published_cutoff() {
+    use std::os::unix::fs::DirBuilderExt;
+    let directory = std::path::PathBuf::from("/tmp")
+        .join(format!("dim-model-get-published-{}", uuid::Uuid::new_v4()));
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&directory)
+        .unwrap();
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    builder.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(Arc::new(
+        dim_agent_runtime::MemoryTimelineStore::default(),
+    )));
+    defaults::install(&mut builder);
+    defaults::mock_model_hosts(&mut builder);
+    dim_agent_capabilities::defaults::tool_host(&mut builder, Arc::new(MockTools));
+    let server = serve(
+        builder,
+        ServerConfig {
+            database_path: Some(directory.join("dimcode.sqlite")),
+            unix_path: Some(std::path::PathBuf::from("/tmp").join(format!(
+                "dim-model-get-published-{}/server.sock",
+                uuid::Uuid::new_v4()
+            ))),
+            websocket_address: None,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let mut client = Client::new_version(&server, false, 3).await;
+    let created = client.rpc("session.create", create()).await;
+    assert_ok(&created);
+    let id = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    let session = server.agent().unwrap().get_session(&id).unwrap();
+    session.idle("main").await.unwrap();
+    adopt(&session, "main", "alpha").await;
+    let child = open_line(&mut client, &id, "main", "worker work").await;
+    session.idle(&child).await.unwrap();
+    adopt(&session, &child, "beta").await;
+
+    // The store commits the close's interrupt, then this holds its publication:
+    // the line is closing, its Prompt is still mounted, and the interrupt is a
+    // sequence no read may pass yet.
+    let mut held =
+        dim_app_server::storage::timeline_testing::hold_publication(&id, &child, "stop/interrupt");
+    let mut ending = Client::new_version(&server, false, 3).await;
+    let ending_id = id.clone();
+    let ending_child = child.clone();
+    let ending = tokio::spawn(async move {
+        let reply = ending
+            .rpc(
+                "session.branch_end",
+                json!({"sessionId":ending_id,"branchId":ending_child}),
+            )
+            .await;
+        (ending, reply)
+    });
+    held.arrived().await;
+
+    let line = read(&mut client, &id, &child, None).await;
+    assert_eq!(model_of(&line), "beta");
+    let through = through_of(&line);
+    let pinned = read(&mut client, &id, &child, Some(through)).await;
+    assert_eq!(model_of(&pinned), "beta");
+    assert_eq!(through_of(&pinned), through);
+
+    held.release();
+    let (_ending, ended) = ending.await.unwrap();
+    assert_ok(&ended);
+    let after = read(&mut client, &id, &child, None).await;
+    assert_eq!(model_of(&after), "beta");
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
 /// A reload of a line's owner is not a closing line: the read keeps the reload
 /// error instead of answering from the tree.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

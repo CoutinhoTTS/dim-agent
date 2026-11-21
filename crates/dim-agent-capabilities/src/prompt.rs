@@ -505,7 +505,7 @@ impl Prompt {
             self.publisher
                 .adopt_guide(&snapshot, configuration.as_ref())
                 .await?;
-            self.advance(self.timeline.sequence()).await
+            self.advance(self.timeline.sequence()).await.map(|_| ())
         })
         .catch_unwind()
         .await
@@ -1062,15 +1062,18 @@ impl Prompt {
     /// The configuration this line adopted, with the cutoff it is read at.
     /// The read waits for the Dispatcher to reach the committed sequence
     /// first, so a `context/configured` that committed just before the call is
-    /// included rather than missed. The cutoff it reports is the cutoff of the
-    /// state it answers from, which moves past the captured sequence when the
-    /// owner has already applied a later adoption; reading at the returned
-    /// cutoff therefore always answers the returned configuration.
+    /// included rather than missed. A line that is closing cannot wait for a
+    /// fact whose publication is still pending: it answers at the published
+    /// head, which is the cutoff an outside read can take. The cutoff it
+    /// reports is the cutoff of the state it answers from, which moves past the
+    /// captured sequence when the owner has already applied a later source
+    /// fact or when the line is closing; reading at the returned cutoff
+    /// therefore always answers the returned configuration.
     pub async fn adopted_configuration(&self) -> Result<(Option<ModelConfiguration>, u64)> {
-        let through = self.timeline.committed();
+        let captured = self.timeline.committed();
         #[cfg(feature = "testing")]
         testing::read_captured(&self.identity.session_id, &self.identity.branch_id).await;
-        self.advance(through).await?;
+        let through = self.advance(captured).await?;
         let projection = self.projection.lock().unwrap();
         let configuration = projection
             .configuration
