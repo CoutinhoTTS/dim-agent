@@ -444,6 +444,25 @@ fn session_tools(scenario: &Scenario) -> Vec<String> {
     tools
 }
 
+/// Writes the `web` Settings source a probe or a run home serves: a search
+/// service with its key, so the assembly declares `web_search` while
+/// `RUN_TOOLS` names it. The declaration reads this configuration only;
+/// nothing dials the endpoint, and no scenario calls `web_search`.
+fn configure_search(home: &Path) -> Result<()> {
+    private_directory(home)?;
+    std::fs::write(
+        home.join("web.json"),
+        serde_json::to_vec_pretty(&json!({
+            "searchService": {
+                "kind": "brave",
+                "endpoint": "http://127.0.0.1:1/search",
+                "apiKey": "scenario-eval"
+            }
+        }))?,
+    )?;
+    Ok(())
+}
+
 /// The offered tool names of a model request body, in declaration order.
 fn offered_tools(request: &str) -> Vec<String> {
     serde_json::from_str::<Value>(request)
@@ -3475,6 +3494,7 @@ async fn run_once(
         .join(&scenario.id)
         .join(format!("run-{run}"));
     private_directory(&run_home)?;
+    configure_search(&run_home)?;
     // The run's endpoint: under the output root, outside the run root. A
     // Unix socket's path is bounded (SUN_LEN), so a deep --out binds the
     // socket in a short directory and leaves the out-relative name as a
@@ -3688,6 +3708,7 @@ async fn native_probe(
         private_directory(&root.join("env").join(directory))?;
     }
     private_directory(&home)?;
+    configure_search(&home)?;
     private_directory(socket.parent().expect("a socket has a parent"))?;
     let socket = bindable_socket(&socket)?;
     let params = ChildParams {
@@ -13143,12 +13164,16 @@ mod run_tools_tests {
         let directory = app_server::scratch("run-tools").unwrap();
         let workspace = directory.join("workspace");
         private_directory(&workspace).unwrap();
+        let probe_home = directory.join("probe-home");
+        configure_search(&probe_home).unwrap();
+        let product_home = directory.join("product/home");
+        configure_search(&product_home).unwrap();
         let models = fixture_models(&directory);
         let sockets = Sockets::new().unwrap();
         let probe = RegistryProbe::default();
         let serving = probe.clone();
         let server = app_server::serve_home(
-            &directory.join("probe-home"),
+            &probe_home,
             &workspace,
             directory.join("probe-output"),
             native_probe_settings(
