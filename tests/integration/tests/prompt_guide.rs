@@ -1,10 +1,9 @@
 //! #548: the input guide composed from the entries in force
 //! ([Prompt §3.3 and §3.4](../../../docs/design/plugins/Prompt.md#33-one-composition-two-paths)).
 
-mod local_support;
+use crate::local_support;
 
-#[path = "local_support/compaction.rs"]
-mod compaction_support;
+use crate::compaction_support;
 
 use dim_agent_capabilities::{
     adapters::{DefaultPrepareModelPlugin, EchoModel},
