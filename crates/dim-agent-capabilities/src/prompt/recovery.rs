@@ -1380,12 +1380,28 @@ impl Prompt {
 }
 
 impl Prompt {
+    /// Waits until the result written at `sequence` is published. A line that
+    /// starts closing while the read waits stops waiting: its own facts still
+    /// answer at the tree, so the owner reports cancellation instead of
+    /// waiting for a publication the close itself may be holding back.
+    async fn await_written(&self, sequence: u64) -> Result<u64> {
+        tokio::select! {
+            result = self.publisher.await_published(sequence) => result,
+            _ = self.branch_phase.closing() => {
+                Err(AgentError::Cancelled("prompt adoption".into()))
+            }
+            _ = self.lifecycle.cancelled() => Err(AgentError::Closed("Prompt".into())),
+        }
+    }
+
     /// Brings the projection to `through` and answers the cutoff it reached:
     /// `through` itself while the line is active, or the published head when
     /// the line is closing. A closing line may already have committed an
     /// interrupt whose publication is pending, and no read may pass the
     /// published head; answering at that head keeps the returned cutoff and the
-    /// configuration the same pinned read.
+    /// configuration the same pinned read. A close that starts after the read
+    /// captured its cutoff ends the waits below, and the caller reads the line
+    /// from the tree instead.
     pub(super) async fn advance(&self, through: u64) -> Result<u64> {
         if self.branch_phase.phase() != BranchPhase::Active {
             let through = self.timeline.sequence().min(through);
@@ -1416,7 +1432,9 @@ impl Prompt {
             return Err(error);
         }
         let written = self.projection.lock().unwrap().written_result;
-        self.publisher.await_published(written).await?;
+        #[cfg(feature = "testing")]
+        super::testing::read_publishing(&self.identity.session_id, &self.identity.branch_id);
+        self.await_written(written).await?;
         self.projection.lock().unwrap().publish(self, written);
         Ok(through)
     }
@@ -1503,7 +1521,9 @@ impl Prompt {
             }
         }
         let written = self.projection.lock().unwrap().written_result;
-        self.publisher.await_published(written).await?;
+        #[cfg(feature = "testing")]
+        super::testing::read_publishing(&self.identity.session_id, &self.identity.branch_id);
+        self.await_written(written).await?;
         self.projection.lock().unwrap().publish(self, written);
         Ok(())
     }

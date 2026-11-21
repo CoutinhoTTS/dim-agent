@@ -1068,11 +1068,16 @@ impl Prompt {
     /// reports is the cutoff of the state it answers from, which moves past the
     /// captured sequence when the owner has already applied a later source
     /// fact or when the line is closing; reading at the returned cutoff
-    /// therefore always answers the returned configuration.
+    /// therefore always answers the returned configuration. A line that has
+    /// begun closing answers from the tree instead: this read neither replays
+    /// sources nor waits for a write the close may hold back.
     pub async fn adopted_configuration(&self) -> Result<(Option<ModelConfiguration>, u64)> {
         let captured = self.timeline.committed();
         #[cfg(feature = "testing")]
         testing::read_captured(&self.identity.session_id, &self.identity.branch_id).await;
+        if self.branch_phase.phase() >= BranchPhase::Closing {
+            return Err(AgentError::Cancelled("prompt adoption".into()));
+        }
         let through = self.advance(captured).await?;
         let projection = self.projection.lock().unwrap();
         let configuration = projection
