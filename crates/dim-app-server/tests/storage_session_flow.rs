@@ -353,7 +353,7 @@ async fn session_close_and_idle_unload_persist_finalizers_and_release_branch_par
             }
             drop(session);
             let released = released.lock().unwrap().take().expect("branch part built");
-            tokio::time::timeout(Duration::from_secs(30), released)
+            tokio::time::timeout(Duration::from_secs(10), released)
                 .await
                 .unwrap_or_else(|_| {
                     panic!(

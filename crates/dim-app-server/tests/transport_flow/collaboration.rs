@@ -1275,19 +1275,35 @@ fn business_events(events: &Value) -> Vec<Value> {
         .iter()
         .filter(|event| {
             !(event["type"] == "input"
-                && event["name"] == "message"
-                && event["data"]["user"].is_null()
-                && event["data"]["blocks"].as_array().is_some_and(|blocks| {
+                && event["mode"] == "append"
+                && event["user"].is_null()
+                && event["blocks"].as_array().is_some_and(|blocks| {
                     !blocks.is_empty()
                         && blocks.iter().all(|block| {
                             block["text"].as_str().is_some_and(|text| {
-                                text.starts_with("<dim-state source=\"dim/environment/")
+                                text.starts_with("<dim-state source=\"dim/environment/clients\"")
                             })
                         })
                 }))
         })
         .cloned()
         .collect()
+}
+
+#[test]
+fn environment_client_rows_are_ignored_but_collaboration_rows_are_not() {
+    let events = json!([
+        {"sequence":1,"type":"input","mode":"append","user":null,"blocks":
+            [{"type":"raw","text":"<dim-state source=\"dim/environment/clients\">1 client</dim-state>"}]},
+        {"sequence":2,"type":"input","mode":"queue","user":{"content":[{"type":"text","text":"follow-up"}]},"blocks":[]},
+        {"sequence":3,"type":"tool_call","callId":"same","name":"hold"},
+        {"sequence":4,"type":"tool_call","callId":"same","name":"hold"}
+    ]);
+    assert_eq!(
+        business_events(&events),
+        events.as_array().unwrap()[1..].to_vec(),
+        "only the client-presence row is removed; order and duplicates stay"
+    );
 }
 
 /// Each operation event has exactly one later `delivered`; each delivered
