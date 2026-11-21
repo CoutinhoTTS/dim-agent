@@ -26,6 +26,7 @@ jobs:
     outputs:
       rust: ${{ steps.groups.outputs.rust }}
       windows: ${{ steps.groups.outputs.windows }}
+      static: ${{ steps.groups.outputs.static }}
       xtask: ${{ steps.groups.outputs.xtask }}
       node: ${{ steps.groups.outputs.node }}
       eval: ${{ steps.groups.outputs.eval }}
@@ -74,6 +75,29 @@ jobs:
         run: cargo install --jobs 2 --locked cargo-deny --version '=0.20.2'
       - name: Check dependency advisories and licenses
         run: cargo deny --locked check advisories licenses
+  static-checks:
+    needs: changes
+    if: needs.changes.outputs.static == 'true'
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 10
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      RUSTC_WRAPPER: ""
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@c8ff772090ab9d00f7f7bd7b388f3c3032282e3b
+        with:
+          cache: false
+          build-warnings: ""
+      - name: Run pure static repository checks
+        run: |
+          cargo fmt --all -- --check --config error_on_line_overflow=true
+          cargo clippy --locked -p xtask-check --all-targets -- -D warnings
+          cargo test --locked -p xtask-check
+          cargo run --locked -p xtask-check
   windows-cli:
     needs: changes
     if: needs.changes.outputs.windows == 'true'
@@ -397,7 +421,7 @@ jobs:
           retention-days: 1
   ci-ok:
     # The one check to require: it passes when every selected job passed and skipped jobs were not needed.
-    needs: [changes, dependencies, windows-cli, web, scripts, verify, macos-native, acp-registry]
+    needs: [changes, dependencies, static-checks, windows-cli, web, scripts, verify, macos-native, acp-registry]
     if: always()
     runs-on: [self-hosted, linux, x64]
     timeout-minutes: 5

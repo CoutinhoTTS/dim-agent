@@ -1,7 +1,7 @@
 import {execFileSync,spawnSync} from 'node:child_process';
 import {appendFileSync} from 'node:fs';
 
-export const groups=['rust','windows','xtask','node','eval','execution','web','scripts','macos_scripts','dependencies'];
+export const groups=['rust','windows','static','xtask','node','eval','execution','web','scripts','macos_scripts','dependencies'];
 const everything=Object.fromEntries(groups.map(group=>[group,true]));
 const documentation=/^docs\/|^[^/]+\.md$/;
 const cargoManifest=/(?:^|\/)Cargo\.toml$/;
@@ -9,7 +9,8 @@ const cargoManifest=/(?:^|\/)Cargo\.toml$/;
 const rules=[
   [/^benchmarks\/baselines\/[^/]+\.json$/,[]],
   [/^\.agents\/|^skills\/|^\.github\/(?:ISSUE_TEMPLATE\/|pull_request_template\.md$|PULL_REQUEST_TEMPLATE\.md$)/,[]],
-  [/^docs\/architecture\/rust-agent\/(plugins|generated)\//,['xtask']],
+  [/^docs\/architecture\/rust-agent\/generated\/catalog\.md$/,['xtask']],
+  [/^docs\/architecture\/rust-agent\/(plugins|generated)\//,['static']],
   [/^docs\/design\/appserver\/native-storage-format\.md$/,['rust']],
   // scripts/tui-tmux.test.mjs reads this page and checks every scenario is documented.
   [/^docs\/architecture\/tui-e2e\.md$/,['scripts']],
@@ -19,7 +20,7 @@ const rules=[
   [documentation,[]],
   [/^deny\.toml$|^LICENSE$/,['dependencies']],
   [/^web\/src\/features\/chat\/quote-cases\.json$/,['web','rust','windows']],
-  [/^web\/src\/.*\.(ts|vue|mjs|js)$/,['web','xtask']],
+  [/^web\/src\/.*\.(ts|vue|mjs|js)$/,['web','static']],
   [/^web\//,['web']],
   [/^scripts\/run-rust-test\.mjs$/,groups],
   [/^scripts\/test-macos-native(?:\.test)?\.mjs$/,['rust','scripts']],
@@ -38,6 +39,7 @@ const rules=[
   [/^crates\/dim-agent-capabilities\/src\/(background_exec|workspace_tools\/exec|host_platform)/,['rust','node','execution']],
   [/^tests\/integration\/tests\/(local_execution|local_support|minimal_execution)/,['rust','node','execution']],
   [/^vendor\/grok-build\//,['rust','windows','node']],
+  [/^xtask\/check\//,['static','xtask']],
   [/^xtask\//,['rust','node','eval']],
   [/^(crates|tests|vendor|runtime|npm)\//,['rust','node']],
 ];

@@ -39,15 +39,17 @@ test('documentation and non-code repository metadata need no build group',()=>{
 });
 
 test('documents that code reads keep their checks',()=>{
-  assert.deepEqual(classify(['docs/architecture/rust-agent/plugins/goal.md']),only('xtask'));
+  assert.deepEqual(classify(['docs/architecture/rust-agent/plugins/goal.md']),only('static'));
+  assert.deepEqual(classify(['docs/architecture/rust-agent/generated/crates.mmd']),only('static'));
+  assert.deepEqual(classify(['docs/architecture/rust-agent/generated/catalog.md']),only('xtask'));
   assert.deepEqual(classify(['docs/design/appserver/native-storage-format.md']),only('rust'));
   assert.deepEqual(classify(['docs/architecture/tui-e2e.md']),only('scripts'));
   assert.deepEqual(classify(['docs/design/plugins/EventHub.md']),only('rust'));
 });
 
-test('Web sources that xtask reads keep its check',()=>{
+test('Web sources that static checks read avoid the heavy xtask build',()=>{
   for (const file of ['web/src/main.ts','web/src/chat-ui/WebChatTimeline.vue','web/src/rpc/protocol.ts','web/src/a.mjs','web/src/a.js'])
-    assert.deepEqual(classify([file]),only('web','xtask'),file);
+    assert.deepEqual(classify([file]),only('web','static'),file);
 });
 
 test('dependency checks follow Cargo manifests, lockfile and policy files',()=>{
@@ -87,6 +89,7 @@ test('bridge, evaluation and wall-clock flows follow their owning paths',()=>{
   assert.deepEqual(classify(['crates/dim-cli/src/ui/tui.rs']),only('rust','windows'));
   assert.deepEqual(classify(['crates/dimcode/tests/cli_flow/models.rs']),only('rust'));
   assert.deepEqual(classify(['crates/dim-agent-types/src/tool.rs']),only('rust','windows','node'));
+  assert.deepEqual(classify(['xtask/check/src/literal_main.rs']),only('static','xtask'));
   assert.deepEqual(classify(['xtask/src/scenario_eval.rs']),only('rust','node','eval'));
   assert.deepEqual(classify(['xtask/scenario-eval/case.json']),only('rust','node','eval'));
   assert.deepEqual(classify(['crates/dim-agent-capabilities/src/workspace_tools/exec.rs']),only('rust','node','execution'));
