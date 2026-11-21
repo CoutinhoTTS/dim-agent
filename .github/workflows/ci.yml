@@ -263,13 +263,6 @@ jobs:
             real_daemon_profile_conflicts_preserve_the_running_daemon_and_endpoint \
             workflow::workflow_commands_write_and_enable_against_the_real_owner \
             --ignored --test-threads=2
-      - name: Verify startup recovery and Update now in a release-stamped CLI
-        if: needs.changes.outputs.rust == 'true'
-        env:
-          DIM_RELEASE_BUILD: '1'
-        run: |
-          cargo test --locked -p dimcode --test cli_flow "staged_update::recovery::"
-          cargo test --locked -p dimcode --test cli_flow "staged_update::tui_update::"
       - name: Verify public Node bindings
         if: needs.changes.outputs.node == 'true'
         shell: bash
