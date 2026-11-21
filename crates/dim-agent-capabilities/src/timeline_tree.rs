@@ -3343,7 +3343,7 @@ impl LineView {
     }
 }
 /// `<dim-branch-line>`, written by TimelineTree at the start of every child.
-const IDENTITY_ENTRY: &str = r#"<dim-branch-line branch="C" parent="main" source="tool">: which line of this session you are, placed by the runtime at the start of a line's own history. A later block of this name replaces the earlier one; it is state about the line, not a request."#;
+const IDENTITY_ENTRY: &str = r#"<dim-branch-line branch="C" parent="main" source="tool">: which line of this session you are, placed by the runtime at the start of a line's own history. A later block of this name replaces the earlier one; a block carrying `default` is the note a move writes. Both are state about the line, not requests."#;
 
 /// `<dim-branch-lines>`, the roster BranchLine writes under [`roster_key`] on
 /// a line that opened lines.
@@ -5229,10 +5229,7 @@ impl BranchTool {
         call_id: &str,
     ) -> std::result::Result<ToolResult, HostError> {
         if own.role != LineRole::Tool {
-            return Ok(refusal(
-                "branch_cannot_end",
-                "Only a line opened with create can end itself.".into(),
-            ));
+            return Ok(refusal("branch_cannot_end", CANNOT_END_TEXT.into()));
         }
         if own.ending {
             return Ok(self.ended(&own.id));
@@ -5259,6 +5256,10 @@ impl BranchTool {
                 own.id, parent
             ))),
             Err(AgentError::BranchEnded(line)) => Ok(self.ended(&line)),
+            Err(AgentError::BranchRefused {
+                refusal: BranchRefusal::CannotEnd,
+                ..
+            }) => Ok(refusal("branch_cannot_end", CANNOT_END_TEXT.into())),
             Err(AgentError::BranchRefused {
                 refusal: kind,
                 message,
@@ -5850,6 +5851,10 @@ fn status_note(
 /// The `branch` tool's refusal of `create` on a line that is neither the root
 /// nor the default branch (design §4, §11).
 const NOT_OPENER_TEXT: &str = "Only the root and the default branch open lines. Tell one of them if more parallel work is needed.";
+/// The `branch` tool's refusal of `end` on the root, the default branch, a
+/// plugin line, a line the user opened or an ancestor of the default branch
+/// (design §10, §11).
+const CANNOT_END_TEXT: &str = "Only a line opened with create can end itself, and not while it or a line below it is the default branch.";
 /// The `branch` tool's refusal of `create` when the open would cross the
 /// Session's cap of open tool lines (design §6.1, §11).
 const LIMIT_REACHED_TEXT: &str = "This Session holds its limit of open lines. Continue on this line, or end one of its open lines first.";
