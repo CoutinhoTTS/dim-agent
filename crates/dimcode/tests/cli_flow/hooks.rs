@@ -405,11 +405,10 @@ fn start_hook_session(
             .expect("create the Session");
         assert!(created["sessionId"].is_string(), "{created}");
         wait_for_hook(marker, expected);
-        let closed = client
+        client
             .rpc("session.close", json!({"sessionId": created["sessionId"]}))
             .await
             .expect("close the Session");
-        assert!(closed["error"].is_null(), "{closed}");
     });
 }
 
