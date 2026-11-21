@@ -2057,13 +2057,18 @@ impl App {
     }
 
     /// Why `Update now` cannot leave yet, if it cannot: work in the shown
-    /// Session, or a switch whose first snapshot has not arrived. Home has no
-    /// Session snapshot to wait for.
+    /// Session, or a Session whose current state has not been reported yet.
+    /// Home has no Session state to wait for.
     fn update_blocked(&self) -> Option<Blocked> {
         if self.shell.is_some() || self.busy_reason().is_some() {
             return Some(Blocked::Busy);
         }
-        (self.snapshot.is_none() && !self.session_id.is_empty()).then_some(Blocked::Session)
+        let waiting = !self.session_id.is_empty()
+            && self
+                .snapshot
+                .as_ref()
+                .is_none_or(|snapshot| !snapshot.state_reported);
+        waiting.then_some(Blocked::Session)
     }
 
     /// Opens the prompt for the first pending approval or question, and
@@ -10228,9 +10233,30 @@ mod tests {
         }
     }
 
-    /// The switch clears the old Session's state, so `Update now` waits for
-    /// the new Session's first snapshot: a key landing in that window must not
-    /// leave on a screen that only looks idle.
+    /// The snapshot `session_host` publishes at the end of a switch, before
+    /// the daemon's first `session.state` notice: the empty projection,
+    /// stamped with the Session and its `main` line.
+    fn switched_placeholder(session_id: &str) -> ViewSnapshot {
+        let projection = crate::projection::Projection::default();
+        let mut snapshot = projection.snapshot();
+        snapshot.lines = vec![LineView {
+            id: "main".into(),
+            parent: None,
+            purpose: String::new(),
+            state: LineState::Main,
+            cut: None,
+        }];
+        snapshot.focus = "main".into();
+        snapshot.main_running = projection.running();
+        snapshot.session_id = session_id.into();
+        snapshot.task_history_loading = 1;
+        snapshot
+    }
+
+    /// The switch clears the old Session's state and publishes an empty
+    /// projection before the daemon reports the new one. Neither snapshot
+    /// may read as an idle Session: `Update now` waits for the first report,
+    /// then leaves only when that report says the Session is idle.
     #[test]
     fn update_now_waits_for_the_switched_sessions_first_snapshot() {
         let offer = || crate::update::Offer {
@@ -10257,7 +10283,17 @@ mod tests {
             assert!(matches!(drawn.app.prompt, Some(Prompt::Upgrade(_))));
             assert!(
                 matches!(enter(&mut drawn), Outcome::Continue),
-                "fullscreen={fullscreen}: Update now left before the switch's state arrived"
+                "fullscreen={fullscreen}: Update now left before any snapshot arrived"
+            );
+            assert!(!drawn.app.update_requested);
+
+            drawn
+                .app
+                .apply(Update::Snapshot(Box::new(switched_placeholder("s2"))));
+            assert!(matches!(drawn.app.prompt, Some(Prompt::Upgrade(_))));
+            assert!(
+                matches!(enter(&mut drawn), Outcome::Continue),
+                "fullscreen={fullscreen}: Update now left on the switch's empty projection"
             );
             assert!(!drawn.app.update_requested);
             let screen = drawn.app.frame((80, 24)).live.join("\n");
@@ -10268,6 +10304,7 @@ mod tests {
 
             drawn.app.apply(Update::Snapshot(Box::new(ViewSnapshot {
                 session_id: "s2".into(),
+                state_reported: true,
                 running: true,
                 ..ViewSnapshot::default()
             })));
@@ -10285,6 +10322,7 @@ mod tests {
 
             drawn.app.apply(Update::Snapshot(Box::new(ViewSnapshot {
                 session_id: "s2".into(),
+                state_reported: true,
                 ..ViewSnapshot::default()
             })));
             assert!(

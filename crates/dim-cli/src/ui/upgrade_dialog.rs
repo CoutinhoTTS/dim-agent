@@ -56,7 +56,8 @@ pub struct UpgradeDialog {
 pub enum Blocked {
     /// Work in the shown Session, or a prompt waiting for an answer.
     Busy,
-    /// A Session was just switched to; its first snapshot is not here yet.
+    /// A Session was just switched to; the daemon has not reported its state
+    /// yet.
     Session,
 }
 

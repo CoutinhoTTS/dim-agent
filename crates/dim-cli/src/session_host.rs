@@ -4925,6 +4925,10 @@ impl Worker {
         }
         snapshot.session_id = self.session_id.clone();
         snapshot.projection_id = self.projection_id;
+        snapshot.state_reported = self
+            .task_history
+            .get(&self.focus)
+            .is_some_and(|branch| branch.running.is_some());
         snapshot.history_complete = self
             .task_history
             .get(&self.focus)
@@ -5462,7 +5466,19 @@ async fn test_worker(
                 return;
             };
             if request["method"] != "hello" {
-                recorded.lock().unwrap().push(request);
+                recorded.lock().unwrap().push(request.clone());
+                if request["method"] == "session.attach" {
+                    let reply = json!({"jsonrpc":"2.0","id":request["id"],"result":{
+                        "sequence":1,"model":{"providerId":"test","modelId":"test"}
+                    }});
+                    if writer
+                        .write_all(format!("{reply}\n").as_bytes())
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
                 continue;
             }
             let reply = json!({"jsonrpc":"2.0","id":request["id"],"result":{
@@ -5550,6 +5566,51 @@ mod tests {
             transcript_mut(&mut main, &mut lines, "unknown").is_none(),
             "an unknown branch has no transcript"
         );
+    }
+
+    /// A switch publishes the empty projection at once and the daemon's
+    /// state report only later: the empty snapshot carries no state, so the
+    /// interface must not read it as an idle Session.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_switch_publishes_the_placeholder_before_the_sessions_state() {
+        use crate::model::view::ViewSnapshot;
+
+        let (mut worker, mut receiver, _sent) = test_worker(&TEST_FEATURES).await;
+        worker
+            .attach("s2".into(), SwitchKind::Resumed)
+            .await
+            .expect("the switch attaches");
+        let published = |receiver: &mut mpsc::Receiver<Update>| -> Vec<ViewSnapshot> {
+            receiver
+                .try_iter()
+                .filter_map(|update| match update {
+                    Update::Snapshot(view) => Some(*view),
+                    _ => None,
+                })
+                .collect()
+        };
+        let snapshots = published(&mut receiver);
+        let placeholder = snapshots.last().expect("the switch published a snapshot");
+        assert_eq!(placeholder.session_id, "s2");
+        assert!(placeholder.rows.is_empty(), "the projection is still empty");
+        assert!(
+            snapshots.iter().all(|view| !view.state_reported),
+            "the switch has no Session state to report yet"
+        );
+
+        worker
+            .message(Message::Notice {
+                method: "session.state".into(),
+                params: json!({"sessionId":"s2","branchId":"main","running":true}),
+            })
+            .await
+            .unwrap();
+        worker.publish();
+        let reported = published(&mut receiver);
+        let reported = reported.last().expect("the state report published a snapshot");
+        assert!(reported.state_reported, "the report is the Session's state");
+        assert!(reported.running, "the report carries the running turn");
     }
 
     #[cfg(unix)]
