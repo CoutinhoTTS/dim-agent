@@ -1,4 +1,6 @@
 mod recovery;
+#[cfg(feature = "testing")]
+pub mod testing;
 
 use crate::{
     context_block,
@@ -1063,22 +1065,24 @@ impl DynPlugin for PromptPlugin {
     }
 }
 impl Prompt {
-    /// The configuration this line adopted at its committed head, with that
-    /// cutoff. The read waits for the Dispatcher to reach the committed
-    /// sequence first, so a `context/configured` that committed just before
-    /// the call is included instead of being missed between an old snapshot
-    /// and a newer head.
+    /// The configuration this line adopted, with the cutoff it is read at.
+    /// The read waits for the Dispatcher to reach the committed sequence
+    /// first, so a `context/configured` that committed just before the call is
+    /// included rather than missed. The cutoff it reports is the cutoff of the
+    /// state it answers from, which moves past the captured sequence when the
+    /// owner has already applied a later adoption; reading at the returned
+    /// cutoff therefore always answers the returned configuration.
     pub async fn adopted_configuration(&self) -> Result<(Option<ModelConfiguration>, u64)> {
         let through = self.timeline.committed();
+        #[cfg(feature = "testing")]
+        testing::read_captured(&self.identity.session_id, &self.identity.branch_id).await;
         self.advance(through).await?;
-        let configuration = self
-            .projection
-            .lock()
-            .unwrap()
+        let projection = self.projection.lock().unwrap();
+        let configuration = projection
             .configuration
             .as_ref()
             .map(|data| (*data.settings).clone());
-        Ok((configuration, through))
+        Ok((configuration, projection.source_through.max(through)))
     }
 
     pub(crate) async fn initial_completion(&self) -> Result<()> {

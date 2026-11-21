@@ -680,12 +680,15 @@ that line's own cutoff: `{branchId, through, configuration: {model: {providerId,
 capabilitySnapshot?, modelPreferences?} | null}`. The returned `through` is always the requested
 line's committed cutoff, never the sequence of an ancestor's adoption, so a client applies only
 that line's `Configuration` events whose `sequence > through` and refreshes by calling again without
-`through`. An open line reads from its owner at the committed head, waiting for the Dispatcher, so
-an adoption committed just before the call is included rather than missed. An ended line reads at
+`through`. An open line waits for the Dispatcher to reach the committed head, so an adoption
+committed just before the call is included rather than missed, and it reports the cutoff of the
+state it answers from: that is the captured head while the owner is still there, and the later
+adoption's own cutoff when the owner has already applied one, so reading at the returned cutoff
+always answers the returned configuration. An ended line reads at
 its fixed head through the ancestor chain and is not reopened; an explicit `through` reads the same
 chain at that cutoff, and a value past the line's head is refused as a future sequence. An unknown
 line is an error. Old servers do not advertise the method: a client then uses the attach reply for
-the root or the line attach names, and does not present the root's configuration as another line's.
+the root alone and does not present the root's configuration as another line's.
 
 Three rules about `head` decide what a client may do with it:
 

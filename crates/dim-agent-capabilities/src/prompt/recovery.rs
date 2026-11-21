@@ -1386,6 +1386,8 @@ impl Prompt {
         }
         let mut progress = self.dispatcher.watch();
         while self.dispatcher.sequence() < through {
+            #[cfg(feature = "testing")]
+            super::testing::read_waiting(&self.identity.session_id, &self.identity.branch_id);
             if let Some(error) = self.dispatcher.failure() {
                 return Err(error);
             }
