@@ -1,3 +1,4 @@
+use crate::support;
 use dim_agent_capabilities::{
     adapters::{DefaultPrepareModelPlugin, EchoModel, MockTools},
     defaults,
@@ -30,7 +31,6 @@ use std::{
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
-mod support;
 
 /// How many events one page of a line reads.
 const LINE_PAGE: usize = 10_000;

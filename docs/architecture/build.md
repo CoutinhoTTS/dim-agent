@@ -319,7 +319,7 @@ build host, plus the archived copy's `sha256`.
 
 CI and `./dev check` run the format check as `cargo fmt --all -- --check --config error_on_line_overflow=true`: when one line in a block cannot fit `max_width`, rustfmt abandons the block without a diagnostic, so the option turns that otherwise-skipped line into a failure ([#1769](https://github.com/arcships/dim/issues/1769)).
 
-The PR `macos-native` job has a thirty-minute deadline. The full `verify` job has a seventy-five-minute deadline on either platform. It builds all workspace targets once, checks the architecture, then runs up to three recorded test executables at a time with up to three test threads per executable. The workspace run starts `transport_flow` and `cli_flow` first. The separate CLI profile and Node- and Python-backed Rust suites use two test threads each. The `dependencies` job allows two Cargo build jobs when installing `cargo-deny`.
+The PR `macos-native` job has a thirty-minute deadline. The full `verify` job has a seventy-five-minute deadline on either platform. It builds all workspace targets once, checks the architecture, then runs up to three recorded test executables at a time with up to three test threads per executable. The workspace run starts `transport_flow`, `cli_flow`, `cli_tui_flow`, `cli_session_flow` and `cli_daemon_flow` first. The separate CLI profile and Node- and Python-backed Rust suites use two test threads each. The `dependencies` job allows two Cargo build jobs when installing `cargo-deny`.
 
 CI sets `CARGO_TARGET_DIR` to the checkout's `target` directory so a compiler cache's managed-target collection cannot remove binaries between the build and their later execution. Each executable keeps its Cargo package working directory and streams output immediately, with target start/end markers and exit status. A target has a ten-minute default deadline (`DIM_TEST_TIMEOUT_MS` overrides it); the full workspace step sets fifteen minutes per executable for the large flow suites at three test threads. Timeout and cancellation terminate its process tree. Failures still allow the other targets to finish and fail the step. Cargo runs documentation tests separately with the same feature selection. Local `cargo test --workspace --locked` remains available without Node.
 
@@ -345,7 +345,7 @@ Each runner's OS/libc baseline must be recorded and verified before declaring th
 
 Public Node provider and MCP interoperability fixtures use development dependencies declared in `runtime/package.json`. Install them with `npm ci --prefix runtime --ignore-scripts`; distribution staging uses `--omit=dev` and does not ship those SDKs.
 
-Evaluation-tool tests are opt-in: `cargo test --locked -p xtask --features eval-tests`. CI enables them for `xtask/` changes, main pushes and manual runs. The real 30-second background handoff is also opt-in locally: `cargo test --locked -p dim-agent-integration-tests --test local_execution a_long_foreground_command_moves_to_the_background_after_30_seconds -- --ignored --exact`; CI runs it for execution-related paths, main pushes and manual runs. Ordinary workspace tests retain execution cancellation, cleanup and recovery flows.
+Evaluation-tool tests are opt-in: `cargo test --locked -p xtask --features eval-tests`. CI enables them for `xtask/` changes, main pushes and manual runs. The real 30-second background handoff is also opt-in locally: `cargo test --locked -p dim-agent-integration-tests --test integration_flow local_execution::a_long_foreground_command_moves_to_the_background_after_30_seconds -- --ignored --exact`; CI runs it for execution-related paths, main pushes and manual runs. Ordinary workspace tests retain execution cancellation, cleanup and recovery flows.
 
 `npm run build --prefix web` type-checks and bundles the frontend. Run its component and projection flows separately with `npm test --prefix web`.
 
@@ -417,12 +417,5 @@ it was. Review and commit the complete catalog after a sync. Model entries occup
 individual lines for review. Upstream responses and intermediate model lists stay in
 memory.
 
-Before a release, run `node scripts/update-provider-catalog.ts --sync` once with the Node
-version in `.node-version`, in a clean checkout of the latest `origin/main`, and read its
-summary. No diff means the release PR carries only its version commit. A diff is committed on its own branch with
-the summary in the commit message, as the release PR's first commit, and it reaches `main` through that pull request the user
-approves; a patch that no longer matches a model fails the run instead of being dropped, so
-fix the override or the policy and run again. Never sync twice for one release, and
-recovery or nightly repair skips the step because it rebuilds an existing SHA or tag. The
-[release skill](../../.agents/skills/dim-release/SKILL.md#prepare-the-release-pr)
-carries the steps.
+For release preparation, follow the
+[release skill's catalog sync checks](../../.agents/skills/dim-release/SKILL.md#verify-the-bundled-catalog-sync).
