@@ -97,6 +97,7 @@ impl Worker {
         self.tool_origins.clear();
         self.default_branch = ROOT_BRANCH_ID.into();
         self.line_configurations.clear();
+        self.unreadable_line = None;
         self.focus = DEFAULT_BRANCH_ID.into();
         self.side = None;
         self.lines.clear();
@@ -641,12 +642,11 @@ impl Worker {
         // A display transcript omits `context/configured`, and a bounded window
         // can start after it: the shown line's configuration is read through
         // `session.model.get` once its window is ready, unless a later fact
-        // already set it (design §14). A server without the read has nothing to
-        // answer, and the reply's configuration is the root's, so this refresh
-        // asks only a server that offers it.
+        // already set it (design §14). A server without the read names no
+        // configuration, and the reply's is the root's, so the line carries
+        // no model until a fact or a move supplies one.
         if window_ready
             && self.model.is_none()
-            && self.client.offers("session.model.get")
             && request.branch_id == self.default_branch
             && self.default_branch != ROOT_BRANCH_ID
         {
@@ -671,6 +671,9 @@ impl Worker {
                     );
                     self.send(Update::Ready(configuration));
                 }
+            }
+            if self.model.is_none() {
+                self.send(Update::NoModel);
             }
         }
         if window_ready {

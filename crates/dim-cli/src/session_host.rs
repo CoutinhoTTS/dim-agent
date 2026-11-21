@@ -324,6 +324,10 @@ struct Worker {
     /// sequence of the fact: the bar shows the default branch's own when the
     /// conversation moves (design §14).
     line_configurations: std::collections::HashMap<String, LineConfiguration>,
+    /// The line this entry already reported a missing configuration for: the
+    /// window that follows a move stays quiet, and a later entry reports again
+    /// (design §14).
+    unreadable_line: Option<String>,
     /// The model Home previews, which the first message's Session adopts.
     preview: Option<Configuration>,
     /// The preference Home chose for that model: the members it named, which
@@ -763,6 +767,7 @@ impl Worker {
             shell_stops: Vec::new(),
             model: None,
             line_configurations: Default::default(),
+            unreadable_line: None,
             preview: None,
             pending: None,
             mcp_attempt: None,
@@ -1010,6 +1015,7 @@ impl Worker {
         self.title_revision = attached.title_revision;
         self.session_id = session_id.clone();
         self.model_session = Some(session_id.clone());
+        self.unreadable_line = None;
         // The method table is read once per Session, before anything can ask
         // for an offer or probe the settings source: a Session that does not
         // list the methods is never asked.
@@ -1096,6 +1102,7 @@ impl Worker {
             self.send(Update::Ready(configuration));
         } else {
             self.model = None;
+            self.send(Update::NoModel);
         }
         self.send(catalog_features(None));
         self.send(Update::Skills(Vec::new()));
@@ -4982,6 +4989,7 @@ impl Worker {
         self.context_request = None;
         self.model_through = 0;
         self.model = None;
+        self.unreadable_line = None;
         let line = self.default_branch.clone();
         let mut adopted = self
             .line_configurations
@@ -5008,6 +5016,9 @@ impl Worker {
                 self.send(Update::Ready(configuration));
             }
         }
+        if self.model.is_none() {
+            self.send(Update::NoModel);
+        }
         self.focus_line(line).await;
         if self.client.supports(&permission::PRESET_METHODS) {
             let params = json!({"sessionId":self.session_id,"branchId":self.default_branch});
@@ -5029,10 +5040,16 @@ impl Worker {
         line: &str,
         through: Option<u64>,
     ) -> Option<(u64, Option<Configuration>)> {
+        // The window that follows an entry asks again; the user hears the
+        // limitation once per entry, not once per page (design §14).
+        let reported = self.unreadable_line.as_deref() == Some(line);
         if !self.client.offers("session.model.get") {
-            self.send(Update::Notice(format!(
-                "Configuration: this server cannot read line {line}"
-            )));
+            if !reported {
+                self.unreadable_line = Some(line.to_owned());
+                self.send(Update::Notice(format!(
+                    "Configuration: this server cannot read line {line}"
+                )));
+            }
             return None;
         }
         match dim_client::configuration::adopted(&mut self.client, &self.session_id, line, through)
@@ -5040,7 +5057,10 @@ impl Worker {
         {
             Ok(adopted) => Some(adopted),
             Err(error) => {
-                self.send(Update::Notice(format!("Configuration: {error}")));
+                if !reported {
+                    self.unreadable_line = Some(line.to_owned());
+                    self.send(Update::Notice(format!("Configuration: {error}")));
+                }
                 None
             }
         }

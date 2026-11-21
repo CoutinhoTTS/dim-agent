@@ -2353,6 +2353,7 @@ impl App {
             Update::Ready(configuration) => {
                 self.label = Some(ModelLabel::new(&configuration));
             }
+            Update::NoModel => self.label = None,
             Update::ModelFeatures {
                 images,
                 service_tiers,

@@ -3940,6 +3940,64 @@ impl Terminal {
             tail.find(expected).map(|index| index + expected.len())
         });
     }
+    /// The rows the interface painted from their first column since transcript
+    /// offset `from`, in the order it painted them. The live region is
+    /// repainted in place, so a row it drew before a change is still in the
+    /// transcript; a frame paints a row as one cursor move to its first column
+    /// and the row's text, and this reads those paints instead of every write
+    /// the transcript ever held.
+    fn painted_rows(&self, from: usize) -> Vec<String> {
+        let mut rows = Vec::new();
+        let mut row: Option<String> = None;
+        let mut chars = self.transcript[from..].chars();
+        while let Some(c) = chars.next() {
+            if c == '\u{1b}' {
+                match chars.next() {
+                    Some('[') => {
+                        let mut params = String::new();
+                        let final_byte = loop {
+                            match chars.next() {
+                                Some(c) if ('\u{40}'..='\u{7e}').contains(&c) => break Some(c),
+                                Some(c) => params.push(c),
+                                None => break None,
+                            }
+                        };
+                        // Styling splits a row into runs that still read as one;
+                        // anything else (an erase, a move) ends the row.
+                        if final_byte == Some('m') {
+                            continue;
+                        }
+                        rows.extend(row.take());
+                        if final_byte == Some('H') && (params.is_empty() || params.ends_with(";1"))
+                        {
+                            row = Some(String::new());
+                        }
+                    }
+                    Some(']') | Some('P') => {
+                        let mut previous = '\0';
+                        for c in chars.by_ref() {
+                            if c == '\u{07}' || (previous == '\u{1b}' && c == '\\') {
+                                break;
+                            }
+                            previous = c;
+                        }
+                    }
+                    _ => {}
+                }
+                continue;
+            }
+            if c == '\r' || c == '\n' {
+                rows.extend(row.take());
+                continue;
+            }
+            if let Some(row) = &mut row {
+                row.push(c);
+            }
+        }
+        rows.extend(row);
+        rows.retain(|row| !row.is_empty());
+        rows
+    }
     /// Waits until the text the user reads has shown `expected`. A row an
     /// attribute splits into runs, as a highlighted token is, does not hold
     /// its own text contiguously, so a wait on what the row says reads the

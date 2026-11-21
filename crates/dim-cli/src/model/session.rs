@@ -1277,6 +1277,9 @@ pub enum Update {
     /// The startup preview or Session's adopted configuration: `provider / model`
     /// and its effective reasoning effort label the status line.
     Ready(Configuration),
+    /// The shown line has no configuration this client can show, so the status
+    /// line carries no model until a fact or a move supplies one (design §14).
+    NoModel,
     /// What the session's model offers, once its catalog entry is known:
     /// image input, and the priority/default service tiers of `/fast`.
     ModelFeatures {

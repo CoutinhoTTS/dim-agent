@@ -70,6 +70,44 @@ fn history(through: u64, events: Vec<Value>) -> Value {
     json!({"events":events,"through":through,"nextAfter":through,"done":true})
 }
 
+/// A user message `text` on the line, as its Timeline records it; the line
+/// draws it as a row once [`applied`] carries its id.
+fn said(sequence: u64, text: &str) -> Value {
+    json!({"id":format!("input-{sequence}"),"sequence":sequence,"create_at":1,
+        "type":"input","name":"message",
+        "data":{"user":{"content":[{"type":"text","text":text}]},"mode":"append"}})
+}
+
+/// The line adopted the message `input_id` the event `sequence` names: the
+/// projection draws it as a transcript row from here.
+fn applied(sequence: u64, input_id: &str) -> Value {
+    json!({"id":format!("applied-{sequence}"),"sequence":sequence,"create_at":1,
+        "type":"input","name":"applied",
+        "data":{"input_id":input_id,"mode":"append"}})
+}
+
+/// The model consumed the message `input_id`.
+fn consumed(sequence: u64, input_id: &str) -> Value {
+    json!({"id":format!("consumed-{sequence}"),"sequence":sequence,"create_at":1,
+        "type":"input","name":"consumed","data":{"input_id":input_id}})
+}
+
+/// The composer's top border as the interface last painted it since
+/// transcript offset `from`: that row carries the model label, and the
+/// transcript still holds the label an earlier frame drew. A panel's border
+/// names its title right after the corner; the composer's model label sits
+/// at the right end of its own.
+fn bar_since(terminal: &Terminal, from: usize) -> Option<String> {
+    terminal
+        .painted_rows(from)
+        .into_iter()
+        .filter(|row| {
+            let row = row.trim_start();
+            row.starts_with('╭') && row.ends_with('╮') && !row.starts_with("╭─ ")
+        })
+        .last()
+}
+
 fn directory(default_branch_id: &str, lines: &[(&str, Option<&str>)]) -> Value {
     json!({
         "defaultBranchId": default_branch_id,
@@ -294,7 +332,7 @@ fn tui_a_refused_continue_is_shown_in_the_lines_panel() {
 /// The shown line resumes from the cursor its attach reply carries: a line's
 /// own sequence, and the root's `sequence` when the conversation is the root
 /// (design §14). Its model is that line's own, adopted at or below the cursor,
-/// read from the line's event history: the reply's model is the root's, and the
+/// read through `session.model.get`: the reply's model is the root's, and the
 /// production display transcript omits `context/configured`. The reply's cursor
 /// is authoritative: the directory only answers for a server that does not
 /// carry the field.
@@ -623,11 +661,7 @@ fn tui_p_shows_the_moved_lines_own_model_permission_and_usage() {
     move_seen.recv_timeout(PATIENCE).unwrap();
     terminal.write(b"\x1b");
     terminal.until("⑂ main ▸ line-1 work");
-    let shown = strip_ansi(&terminal.transcript);
-    assert!(
-        shown.contains("test / replacement · high"),
-        "the bar folds the line's adopted model: {shown}"
-    );
+    terminal.until_anywhere("test / replacement · high");
     terminal.until_anywhere("⏵⏵ Full access");
     terminal.until_anywhere("64K / 256K");
     assert_eq!(
@@ -637,6 +671,398 @@ fn tui_p_shows_the_moved_lines_own_model_permission_and_usage() {
     );
     terminal.write(b"hello\r");
     terminal.until("test / chosen · low");
+    home.kill(&terminal);
+    terminal.wait();
+    daemon.join().unwrap();
+}
+
+/// A line whose configuration this client cannot read carries no model in the
+/// bar, and moving back to the root shows the root's own again (design §14):
+/// a server without `session.model.get`, and one that answers
+/// `configuration: null`, both leave the moved line without a model.
+#[test]
+fn tui_a_line_without_a_readable_configuration_carries_no_model_and_the_root_restores_its_own() {
+    for offers in [false, true] {
+        let home = Home::new();
+        let (moved, move_seen) = std::sync::mpsc::channel();
+        let (back, back_seen) = std::sync::mpsc::channel();
+        let daemon = home.daemon(move |wire| {
+            let mut features = vec![
+                "session.methods",
+                "session.branches",
+                "session.branch.get",
+                "session.branch_set_default",
+            ];
+            if offers {
+                features.push("session.model.get");
+            }
+            wire.hello(&features);
+            let attach = wire.read("session.attach");
+            let mut record = attach_record(&attach);
+            record["defaultBranch"] = json!({"branchId":"main","sequence":8});
+            wire.reply(&attach, record);
+            let branches = next(wire);
+            assert_eq!(branches["method"], "session.branches");
+            wire.reply(
+                &branches,
+                directory("main", &[("main", None), ("line-1", Some("main"))]),
+            );
+            let root = next(wire);
+            assert_eq!(root["method"], "session.history");
+            wire.reply(&root, history(8, vec![]));
+            let mut usage = |_request: &Value| None;
+            let mut moves = 0;
+            loop {
+                let request = next_usage(wire, &mut usage);
+                let branch = request["params"]["branchId"].as_str().unwrap_or_default();
+                match request["method"].as_str().unwrap_or_default() {
+                    "session.branch_set_default" => {
+                        moves += 1;
+                        let target = if moves == 1 { "line-1" } else { "main" };
+                        assert_eq!(branch, target);
+                        wire.reply(&request, json!({"defaultBranchId":target}));
+                        if moves == 1 {
+                            moved.send(()).unwrap();
+                        } else {
+                            back.send(()).unwrap();
+                        }
+                    }
+                    "session.branch.get" => {
+                        assert_eq!(branch, "line-1");
+                        wire.reply(&request, entry("line-1", "main"));
+                    }
+                    "session.history" => {
+                        let (through, events) = if branch == "line-1" {
+                            (3, vec![said(2, "line window"), applied(3, "input-2")])
+                        } else {
+                            (8, vec![])
+                        };
+                        wire.reply(&request, history(through, events));
+                    }
+                    "session.model.get" => {
+                        assert!(offers, "a server without the read is not asked");
+                        assert_eq!(branch, "line-1");
+                        wire.reply(
+                            &request,
+                            json!({"branchId":"line-1","through":3,"configuration":null}),
+                        );
+                    }
+                    other => panic!("unexpected {other}: {request}"),
+                }
+            }
+        });
+        let mut command = home.command();
+        sized(&mut command, 100, 32);
+        let mut terminal = Terminal::resume_tui(command);
+        terminal.until("test / model");
+        terminal.write(b"/lines\r");
+        terminal.until("Main line");
+        let before_move = terminal.consumed;
+        terminal.write(b"\x1b[B");
+        terminal.write(b"p");
+        move_seen.recv_timeout(PATIENCE).unwrap();
+        terminal.write(b"\x1b");
+        terminal.until("line window");
+        terminal.write(b"probe");
+        terminal.until("probe");
+        terminal.write(b"\x7f\x7f\x7f\x7f\x7f");
+        let bar = bar_since(&terminal, before_move).expect("the bar was painted after the move");
+        assert!(
+            !bar.contains("test / model"),
+            "offers={offers}: the moved line carries no model: {bar}"
+        );
+        terminal.write(b"/lines\r");
+        terminal.until("Main line");
+        terminal.write(b"\x1b[A");
+        terminal.write(b"p");
+        back_seen.recv_timeout(PATIENCE).unwrap();
+        terminal.until("test / model");
+        home.kill(&terminal);
+        terminal.wait();
+        daemon.join().unwrap();
+    }
+}
+
+/// A resumed Session whose conversation is on a line, with a server that
+/// cannot read that line's configuration, shows no model and reports the
+/// limitation once for the whole visit: not again when the window is ready,
+/// when the user opens the line, or when `/earlier` reads another page of it
+/// (design §14).
+#[test]
+fn tui_a_resumed_line_without_a_configuration_read_reports_it_once() {
+    let home = Home::new();
+    let (switched, switch_seen) = std::sync::mpsc::channel();
+    let (window, window_done) = std::sync::mpsc::channel();
+    let (asked, earlier_seen) = std::sync::mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        wire.hello(&[
+            "session.methods",
+            "session.branches",
+            "session.branch.get",
+            "session.catalog",
+        ]);
+        fn page(through: u64, before: u64, events: Vec<Value>) -> Value {
+            json!({"events":events,"through":through,"nextAfter":through,
+                "nextBefore":before,"done":true})
+        }
+        // Answers the inventory reads that follow a window, through the line's
+        // turn read that finishes it.
+        fn inventory(wire: &mut Wire) {
+            loop {
+                let request = wire.read_any();
+                let branch = request["params"]["branchId"].as_str().unwrap_or_default();
+                let through = request["params"]["through"].clone();
+                match request["method"].as_str().unwrap_or_default() {
+                    "session.input.pending" => wire.reply(
+                        &request,
+                        json!({"branchId":branch,"through":through,"inputs":[],"next":null}),
+                    ),
+                    "session.exec.pending" => wire.reply(
+                        &request,
+                        json!({"branchId":branch,"through":through,"tasks":[],"next":null}),
+                    ),
+                    "session.branch.get" => {
+                        wire.reply(&request, entry("line-1", "main"));
+                    }
+                    "session.turn.get" => {
+                        wire.reply(
+                            &request,
+                            json!({"branchId":branch,"through":through,"turn":null,"output":null}),
+                        );
+                        if branch == "line-1" {
+                            break;
+                        }
+                    }
+                    other => panic!("unexpected {other}: {request}"),
+                }
+            }
+        }
+        let mut usage = |_request: &Value| None;
+        let mut windows = 0;
+        loop {
+            let request = next_usage(wire, &mut usage);
+            let method = request["method"].as_str().unwrap_or_default().to_owned();
+            let session = request["params"]["sessionId"].as_str().unwrap_or_default();
+            let branch = request["params"]["branchId"].as_str().unwrap_or_default();
+            match method.as_str() {
+                "session.attach" => {
+                    let mut record = attach_record(&request);
+                    if session == "on-the-line" {
+                        record["defaultBranch"] = json!({"branchId":"line-1","sequence":5});
+                        switched.send(()).unwrap();
+                    } else {
+                        record["defaultBranch"] = json!({"branchId":"main","sequence":8});
+                    }
+                    wire.reply(&request, record);
+                }
+                "session.branches" => {
+                    let default = if session == "on-the-line" {
+                        "line-1"
+                    } else {
+                        "main"
+                    };
+                    wire.reply(
+                        &request,
+                        directory(default, &[("main", None), ("line-1", Some("main"))]),
+                    );
+                }
+                "session.history" if branch != "line-1" => {
+                    wire.reply(&request, history(8, vec![]));
+                }
+                "session.history" => {
+                    let before = request["params"]
+                        .get("before")
+                        .and_then(serde_json::Value::as_u64);
+                    match before {
+                        // The resumed window, and later the line opened for
+                        // view: one page that leaves older content unread.
+                        None => {
+                            wire.reply(
+                                &request,
+                                page(
+                                    6,
+                                    3,
+                                    vec![
+                                        said(4, "resumed line"),
+                                        applied(5, "input-4"),
+                                        consumed(6, "input-4"),
+                                    ],
+                                ),
+                            );
+                            inventory(wire);
+                            windows += 1;
+                            if windows == 1 {
+                                window.send(()).unwrap();
+                            }
+                        }
+                        // `/earlier`: the page that reaches the branch start.
+                        Some(3) => {
+                            wire.reply(
+                                &request,
+                                page(6, 1, vec![said(1, "older page"), applied(2, "input-1")]),
+                            );
+                            asked.send(()).unwrap();
+                            break;
+                        }
+                        other => panic!("unexpected earlier cursor {other:?}: {request}"),
+                    }
+                }
+                "session.catalog" => wire.reply(
+                    &request,
+                    json!({"sessions":[
+                        {"sessionId":"on-the-line","cwd":"/workspace","preview":"on the line",
+                            "model":{"providerId":"test","modelId":"model"},"updatedAt":1},
+                        {"sessionId":"session","cwd":"/workspace","preview":"root work",
+                            "model":{"providerId":"test","modelId":"model"},"updatedAt":2}
+                    ]}),
+                ),
+                "session.detach" => wire.reply(&request, json!({})),
+                "session.branch.get" => wire.reply(&request, entry("line-1", "main")),
+                other => panic!("unexpected {other}: {request}"),
+            }
+        }
+        wire.hold();
+    });
+    let mut command = home.command();
+    sized(&mut command, 100, 32);
+    let mut terminal = Terminal::resume_tui(command);
+    terminal.until("test / model");
+    let before_switch = terminal.consumed;
+    terminal.write(b"/resume\r");
+    terminal.until("on the line");
+    terminal.write(b"\r");
+    switch_seen.recv_timeout(PATIENCE).unwrap();
+    terminal.until("Earlier content not loaded");
+    // A composer echo proves the interface applied what the reply queued
+    // before it, the limitation notice among it.
+    terminal.write(b"probe");
+    terminal.until("probe");
+    terminal.write(b"\x7f\x7f\x7f\x7f\x7f");
+    let bar = bar_since(&terminal, before_switch).expect("the bar was painted after the resume");
+    assert!(
+        !bar.contains("test / model"),
+        "the resumed line carries no model: {bar}"
+    );
+    let reported = |terminal: &Terminal| {
+        strip_ansi(&terminal.transcript)
+            .matches("cannot read line line-1")
+            .count()
+    };
+    assert_eq!(
+        reported(&terminal),
+        1,
+        "the resume reports the limitation once"
+    );
+    window_done.recv_timeout(PATIENCE).unwrap();
+    // Opening the line for view reads its window again, and makes its earlier
+    // pages draw; both stay within the visit the limitation was reported for.
+    terminal.write(b"/lines\r");
+    terminal.until("Main line");
+    terminal.write(b"\r");
+    terminal.until("resumed line");
+    // `/earlier` is a no-op until a window's inventory finishes; the read
+    // starts as soon as it has, and the daemon names the page it asks for.
+    terminal.write(b"/earlier\r");
+    let mut attempts = 0;
+    while earlier_seen
+        .recv_timeout(Duration::from_millis(200))
+        .is_err()
+    {
+        attempts += 1;
+        assert!(attempts < 25, "the earlier read never started");
+        terminal.write(b"/earlier\r");
+    }
+    terminal.write(b"/timeline\r");
+    terminal.until("#1  older page");
+    assert_eq!(
+        reported(&terminal),
+        1,
+        "another page of the same line does not report it again"
+    );
+    home.kill(&terminal);
+    terminal.wait();
+    daemon.join().unwrap();
+}
+
+/// Continuing on a line whose configuration this client cannot read reports
+/// the limitation once: the window that follows the move does not report it
+/// again (design §14).
+#[test]
+fn tui_continuing_on_a_line_without_a_configuration_read_reports_it_once() {
+    let home = Home::new();
+    let (moved, move_seen) = std::sync::mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        wire.hello(&[
+            "session.methods",
+            "session.branches",
+            "session.branch.get",
+            "session.branch_set_default",
+        ]);
+        let attach = wire.read("session.attach");
+        let mut record = attach_record(&attach);
+        record["defaultBranch"] = json!({"branchId":"main","sequence":8});
+        wire.reply(&attach, record);
+        let branches = next(wire);
+        assert_eq!(branches["method"], "session.branches");
+        wire.reply(
+            &branches,
+            directory("main", &[("main", None), ("line-1", Some("main"))]),
+        );
+        let root = next(wire);
+        assert_eq!(root["method"], "session.history");
+        wire.reply(&root, history(8, vec![]));
+        let mut usage = |_request: &Value| None;
+        loop {
+            let request = next_usage(wire, &mut usage);
+            let branch = request["params"]["branchId"].as_str().unwrap_or_default();
+            match request["method"].as_str().unwrap_or_default() {
+                "session.branch_set_default" => {
+                    assert_eq!(branch, "line-1");
+                    wire.reply(&request, json!({"defaultBranchId":"line-1"}));
+                    moved.send(()).unwrap();
+                }
+                "session.branch.get" => {
+                    assert_eq!(branch, "line-1");
+                    wire.reply(&request, entry("line-1", "main"));
+                }
+                "session.history" => {
+                    let (through, events) = if branch == "line-1" {
+                        (3, vec![said(2, "line window"), applied(3, "input-2")])
+                    } else {
+                        (8, vec![])
+                    };
+                    wire.reply(&request, history(through, events));
+                }
+                other => panic!("unexpected {other}: {request}"),
+            }
+        }
+    });
+    let mut command = home.command();
+    sized(&mut command, 100, 32);
+    let mut terminal = Terminal::resume_tui(command);
+    terminal.until("test / model");
+    terminal.write(b"/lines\r");
+    terminal.until("Main line");
+    let before_move = terminal.consumed;
+    terminal.write(b"\x1b[B");
+    terminal.write(b"p");
+    move_seen.recv_timeout(PATIENCE).unwrap();
+    terminal.write(b"\x1b");
+    terminal.until("line window");
+    terminal.write(b"probe");
+    terminal.until("probe");
+    let bar = bar_since(&terminal, before_move).expect("the bar was painted after the move");
+    assert!(
+        !bar.contains("test / model"),
+        "the moved line carries no model: {bar}"
+    );
+    assert_eq!(
+        strip_ansi(&terminal.transcript)
+            .matches("cannot read line line-1")
+            .count(),
+        1,
+        "the move reports the limitation once"
+    );
     home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();

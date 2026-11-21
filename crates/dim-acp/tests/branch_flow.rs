@@ -403,7 +403,7 @@ async fn a_gateway_load_folds_the_default_branchs_cursor() {
 }
 
 /// The production display transcript omits `context/configured`: a line's
-/// adopted model comes from its own event history at the cursor its attach
+/// adopted model comes from `session.model.get` at the cursor its attach
 /// reply names, and a superseded model update refreshes from the same read
 /// rather than the reply's root configuration.
 #[tokio::test]
@@ -542,7 +542,7 @@ async fn a_gateway_line_reads_its_model_when_display_omits_the_configuration() {
     assert_eq!(
         option(&loaded, "model")["currentValue"],
         json!("B"),
-        "the load shows the model the line's own history adopted, not the reply's root model"
+        "the load shows the model `session.model.get` adopted for the line, not the reply's root model"
     );
     send(&mut write,json!({"jsonrpc":"2.0","id":3,"method":"session/set_config_option","params":{"sessionId":"session","configId":"model","value":"A"}})).await;
     let refused = reply(&mut read, 3).await;
