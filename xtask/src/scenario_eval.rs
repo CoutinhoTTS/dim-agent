@@ -581,15 +581,19 @@ enum TextMember {
 }
 /// The policy texts a candidate can replace, and the factory configuration
 /// member each is put in place of in the assembly [`app_server::serve_home`]
-/// builds. The summary prompt (ContextCompaction §13.5) and the branch tool's
-/// texts (timeline branches §12.4) are the texts exposed at a Rust factory
-/// configuration today; the other owners add their entries with their own
-/// factory members: Capabilities under
-/// [#551](https://github.com/arcships/dim/issues/551), and ContextCompaction
-/// under [#554](https://github.com/arcships/dim/issues/554).
+/// builds. Every entry is a Rust part's factory configuration member: the base
+/// prompt (model-prompts §8.2, PromptSources §2), the summary prompt
+/// (ContextCompaction §13.5), the branch tool's texts (timeline branches
+/// §12.4), Goal's sentences (model-prompts §8.1), EventHub's entry and tool
+/// descriptions (EventHub design A.6 and A.4) and Scheduler's description
+/// (Scheduler design §5.1).
 /// A plugin's text is its manifest `config` member, which the plugin's row
 /// carries into its `apply`.
 const TEXTS: &[(&str, TextMember)] = &[
+    (
+        "prompt-sources/base",
+        TextMember::Rust(|overrides, text| overrides.base_prompt = Some(text)),
+    ),
     (
         "context-compaction/summary",
         TextMember::Rust(|overrides, text| overrides.summary_prompt = Some(text)),
@@ -2720,6 +2724,7 @@ fn carried_parts(configuration: &Configuration) -> Option<(Option<String>, Optio
 /// literal already does.
 fn overrides_value(overrides: &Overrides) -> Value {
     let Overrides {
+        base_prompt,
         summary_prompt,
         plugin_configs,
         branch_description,
@@ -2731,6 +2736,7 @@ fn overrides_value(overrides: &Overrides) -> Value {
         scheduler_description,
     } = overrides;
     json!({
+        "basePrompt": base_prompt.as_ref().map(ToString::to_string),
         "summaryPrompt": summary_prompt.as_ref().map(ToString::to_string),
         "eventhubEntry": eventhub_entry.as_ref().map(ToString::to_string),
         "eventhubTool": eventhub_tool.as_ref().map(ToString::to_string),
@@ -2746,6 +2752,7 @@ fn overrides_value(overrides: &Overrides) -> Value {
 fn child_overrides(value: &Value) -> Overrides {
     let text = |key: &str| value.get(key).and_then(Value::as_str).map(Arc::from);
     Overrides {
+        base_prompt: text("basePrompt"),
         summary_prompt: text("summaryPrompt"),
         eventhub_entry: text("eventhubEntry"),
         eventhub_tool: text("eventhubTool"),
@@ -7107,6 +7114,62 @@ mod tests {
         }
     }
 
+    /// The progress-updates set parses through the runner's own reader
+    /// (model-prompts §8.2): three scenarios that judge the reply text's
+    /// progress updates, each with a starting workspace, a statement to see
+    /// and a statement not to see, and no EventHub source, since the reply
+    /// text is the subject. No model runs, so CI catches a schema or layout
+    /// drift before a manual run.
+    #[test]
+    fn the_progress_updates_scenario_set_parses() {
+        let root = repository()
+            .join("xtask")
+            .join("scenario-eval")
+            .join("progress-updates");
+        let scenarios = read_scenarios(&root).unwrap();
+        let ids: Vec<_> = scenarios
+            .iter()
+            .map(|scenario| scenario.id.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                "answer-only",
+                "interactive-multi-tool",
+                "no-tool-quick-read"
+            ],
+            "the committed set is the three scenarios"
+        );
+        for scenario in &scenarios {
+            assert!(
+                scenario.directory.join("workspace").is_dir(),
+                "{}: a starting workspace",
+                scenario.id
+            );
+            assert!(
+                scenario.sources.is_empty() && scenario.events.is_empty(),
+                "{}: the reply text is the subject, not an EventHub source",
+                scenario.id
+            );
+            assert!(
+                scenario
+                    .probes
+                    .iter()
+                    .any(|probe| probe.kind == ProbeKind::MustShow),
+                "{}: a statement to see",
+                scenario.id
+            );
+            assert!(
+                scenario
+                    .probes
+                    .iter()
+                    .any(|probe| probe.kind == ProbeKind::MustNotShow),
+                "{}: a statement not to see",
+                scenario.id
+            );
+        }
+    }
+
     /// The `schedule` description is injected through the product's own
     /// factory member (Scheduler §5.1, model-prompts §8.1): `--text
     /// scheduler/description` lands on the `Overrides` field
@@ -7127,6 +7190,34 @@ mod tests {
             Some("candidate description")
         );
         assert!(overrides.branch_description.is_none());
+    }
+
+    /// The base prompt is injected through PromptSources' own factory member
+    /// (model-prompts §8.2, PromptSources §2): `--text prompt-sources/base`
+    /// lands on the `Overrides` field [`app_server::serve_home`] hands
+    /// `PromptSourcesConfig`, never on a product string patched for the
+    /// evaluation; the child carries the same field to the arm it serves.
+    #[test]
+    fn the_base_prompt_is_a_factory_member() {
+        let overrides = overrides_in(
+            TEXTS,
+            &[(
+                "prompt-sources/base".to_owned(),
+                Arc::from("candidate base prompt"),
+            )],
+        )
+        .unwrap();
+        assert_eq!(
+            overrides.base_prompt.as_deref(),
+            Some("candidate base prompt")
+        );
+        assert!(overrides.summary_prompt.is_none());
+        let carried = child_overrides(&overrides_value(&overrides));
+        assert_eq!(
+            carried.base_prompt.as_deref(),
+            Some("candidate base prompt"),
+            "the serve child receives the candidate in the arm's overrides"
+        );
     }
 
     /// The `scheduler/description` candidate survives the serve child's JSON

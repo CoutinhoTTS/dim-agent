@@ -1,0 +1,10 @@
+{
+  "description": "Two small bugs across two modules, with the operator asking for short progress updates as the work moves",
+  "message": "Two tests are failing in this project: the order total and the packing-slip label come out wrong. Fix the code under orders/ so `python3 -m unittest discover -s tests` passes. Tell me in one sentence what you are about to do before you start, and give me a short update when you move to a new step or when a finding changes your plan. Do not narrate every tool call.",
+  "budget": {"turns": 16, "seconds": 600, "window": 131072},
+  "probes": [
+    {"id": "announces-before-tools", "kind": "must_show", "text": "the run says in one sentence what it is about to do before its first substantive tool call"},
+    {"id": "phase-update", "kind": "must_show", "text": "at least one short update when a new phase starts or a finding changes the plan"},
+    {"id": "repeated-narration", "kind": "must_not_show", "text": "a progress sentence that repeats an earlier one, or one sentence per tool call"}
+  ]
+}
