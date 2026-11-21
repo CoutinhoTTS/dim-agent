@@ -1765,7 +1765,7 @@ A provider failure that carries a `failure` fact prints one line built from its 
 The public CLI flow tests exercise the real native binary and NDJSON boundary. Unix PTY checks cover default-deny approval, questions, discarded typeahead, stopping while a frame is fragmented, prompt recovery and hidden callback input:
 
 ```bash
-cargo test --locked -p dimcode --test cli_flow
+cargo test --locked -p dimcode --test cli_flow --test cli_tui_flow --test cli_session_flow --test cli_daemon_flow
 cargo clippy --locked -p dim-cli --all-targets -- -D warnings
 ```
 
@@ -1785,7 +1785,7 @@ The permission flows run against the same fixture: `exec --permission full-acces
 
 ```bash
 DIM_TEST_APP_SERVER="$PWD/target/debug/dim-app-server" \
-  cargo test --locked -p dim-cli --test cli_flow permission::real_daemon -- --ignored
+  cargo test --locked -p dimcode --test cli_flow permission::real_daemon -- --ignored
 ```
 
 The daemon-profile check rejects an already running mock or different configured daemon, verifies that its process and endpoint remain intact, then explicitly stops it through the CLI despite a changed invalid model configuration:
