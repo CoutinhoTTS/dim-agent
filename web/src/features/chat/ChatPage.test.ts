@@ -84,6 +84,7 @@ async function mountPage(defaultBranchId: string): Promise<HTMLElement> {
     questions: [],
     methods: [],
     permission: undefined,
+    permissionVersion: undefined,
     goal: undefined,
     queued: [],
     model: undefined,
