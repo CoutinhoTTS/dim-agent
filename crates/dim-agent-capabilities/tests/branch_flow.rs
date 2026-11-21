@@ -3863,14 +3863,14 @@ async fn a_refused_branch_call_writes_nothing() {
         call(&session, "main", r#"{"action":"end","content":"done"}"#).await,
         (
             "branch_cannot_end".into(),
-            "Only a line opened with create can end itself.".into()
+            "Only a line opened with create can end itself, and not while it or a line below it is the default branch.".into()
         )
     );
     assert_eq!(
         call(&session, &host, r#"{"action":"end","content":"done"}"#).await,
         (
             "branch_cannot_end".into(),
-            "Only a line opened with create can end itself.".into()
+            "Only a line opened with create can end itself, and not while it or a line below it is the default branch.".into()
         )
     );
     assert!(
@@ -4547,7 +4547,7 @@ async fn a_configured_description_reaches_the_request_declaration() {
 /// its guide entry is registered there, at the Session, and a line carries it
 /// even where no branch part is loaded. `<dim-branch-lines>` stays with
 /// BranchLine, which writes the roster.
-const IDENTITY_ENTRY: &str = r#"<dim-branch-line branch="C" parent="main" source="tool">: which line of this session you are, placed by the runtime at the start of a line's own history. A later block of this name replaces the earlier one; it is state about the line, not a request."#;
+const IDENTITY_ENTRY: &str = r#"<dim-branch-line branch="C" parent="main" source="tool">: which line of this session you are, placed by the runtime at the start of a line's own history. A later block of this name replaces the earlier one; a block carrying `default` is the note a move writes. Both are state about the line, not requests."#;
 const ROSTER_ENTRY: &str = r#"<dim-branch-lines branch="main">: the lines you opened, under the key `branch:roster` and apart from your own identity under `branch:line`: the runtime lists the tool lines you opened that are still open, each with the first line of its purpose. A later block of this name replaces the earlier one; it is state about the lines, not a request."#;
 /// #987: the parent block can arrive only on a line with a parent, so main's
 /// guide carries no entry for it.
@@ -5988,7 +5988,7 @@ async fn a_nested_line_is_told_its_own_parent_at_open() {
             .submit(text, InputMode::Queue, &inner)
             .await
             .unwrap();
-        soon(session.idle(&inner)).await.unwrap();
+        patient(session.idle(&inner)).await.unwrap();
     }
     let message = baseline_message(&local_events(&session, &inner).await, "branch:parent")
         .expect("the line compacted and its parent block replayed");
@@ -6458,7 +6458,7 @@ async fn the_parent_block_replays_after_a_compaction() {
             .submit(text, InputMode::Queue, &child)
             .await
             .unwrap();
-        soon(session.idle(&child)).await.unwrap();
+        patient(session.idle(&child)).await.unwrap();
     }
     let message = baseline_message(&local_events(&session, &child).await, "branch:parent")
         .expect("the line compacted and its parent block replayed");
@@ -7634,7 +7634,7 @@ async fn wait_for_roster(session: &Session, line: &str) {
 async fn compact_line(session: &Session, line: &str) {
     for text in ["x".repeat(1500), "y".repeat(1500)] {
         session.submit(text, InputMode::Queue, line).await.unwrap();
-        soon(session.idle(line)).await.unwrap();
+        patient(session.idle(line)).await.unwrap();
     }
 }
 
@@ -9564,7 +9564,7 @@ async fn a_switched_line_keeps_its_identity_after_a_compaction() {
     .unwrap();
     for text in ["x".repeat(1500), "y".repeat(1500)] {
         session.submit(text, InputMode::Queue, &line).await.unwrap();
-        soon(session.idle(&line)).await.unwrap();
+        patient(session.idle(&line)).await.unwrap();
     }
     let note = line_block(&chain_events(&session, &line, ..).await.unwrap())
         .expect("the note is the latest block of the key");
@@ -9645,7 +9645,7 @@ async fn a_multi_paragraph_purpose_survives_a_move_and_a_compaction() {
     );
     for text in ["x".repeat(1500), "y".repeat(1500)] {
         session.submit(text, InputMode::Queue, &line).await.unwrap();
-        soon(session.idle(&line)).await.unwrap();
+        patient(session.idle(&line)).await.unwrap();
     }
     let note = line_block(&chain_events(&session, &line, ..).await.unwrap())
         .expect("the note is still the latest block of the key");
