@@ -41,6 +41,8 @@ test('documentation and non-code repository metadata need no build group',()=>{
 test('documents that code reads keep their checks',()=>{
   assert.deepEqual(classify(['docs/architecture/rust-agent/plugins/goal.md']),only('xtask'));
   assert.deepEqual(classify(['docs/design/appserver/native-storage-format.md']),only('rust'));
+  assert.deepEqual(classify(['docs/architecture/tui-e2e.md']),only('scripts'));
+  assert.deepEqual(classify(['docs/design/plugins/EventHub.md']),only('rust'));
 });
 
 test('Web sources that xtask reads keep its check',()=>{

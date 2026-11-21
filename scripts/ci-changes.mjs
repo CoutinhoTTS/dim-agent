@@ -11,6 +11,10 @@ const rules=[
   [/^\.agents\/|^skills\/|^\.github\/(?:ISSUE_TEMPLATE\/|pull_request_template\.md$|PULL_REQUEST_TEMPLATE\.md$)/,[]],
   [/^docs\/architecture\/rust-agent\/(plugins|generated)\//,['xtask']],
   [/^docs\/design\/appserver\/native-storage-format\.md$/,['rust']],
+  // scripts/tui-tmux.test.mjs reads this page and checks every scenario is documented.
+  [/^docs\/architecture\/tui-e2e\.md$/,['scripts']],
+  // crates/dim-event-hub tests compare their strings to its appendix blocks.
+  [/^docs\/design\/plugins\/EventHub\.md$/,['rust']],
   // The ADR check runs in the changes job; docs alone need no build group.
   [documentation,[]],
   [/^deny\.toml$|^LICENSE$/,['dependencies']],
