@@ -85,12 +85,24 @@ async fn system_is_static_and_instructions_and_environment_arrive_as_inputs() {
             "You are DimAgent.",
             "Safety:",
             "Tone and communication:",
+            "skip unnecessary preamble and wrap-up",
             "Progress updates:",
-            "your thinking and most tool call details stay hidden",
+            "The user reads your reply text",
             "Before the first substantive tool call of a task",
             "<skills_instructions>",
             "SESSION-S",
         ],
+    );
+    let progress = system
+        .split_once("Progress updates:")
+        .and_then(|(_, rest)| rest.split_once("Objectivity:"))
+        .map(|(section, _)| section)
+        .expect("a Progress updates section before Objectivity");
+    assert!(
+        progress.contains(
+            "when the request asks for only a final answer, a patch or structured output"
+        ),
+        "{system}"
     );
     assert!(
         !system.contains("skip preamble") && !system.contains("several tool calls have passed"),
