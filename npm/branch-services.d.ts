@@ -853,14 +853,19 @@ export interface BranchLifecycle {
 }
 
 /**
- * Why the tree refused an operation on a line, named the way the protocol's
- * `appError` names it ([timeline branches §14](../../../docs/design/timeline-branches.md#14-clients)).
+ * Why the tree refused an operation on a line, named the way the protocol
+ * names it: the codes `session.branch_set_default` answers as its `appError`
+ * and the codes the branch tool answers as its own result
+ * ([timeline branches §11](../../../docs/design/timeline-branches.md#11-the-branch-tool),
+ * [§14](../../../docs/design/timeline-branches.md#14-clients)).
  */
 export type BranchRefusal =
   | /** The target is already the Session's default branch. */ "already_default"
   | /** The target cannot be the default branch: a plugin line, or a line a client opened before `FORMAT` 53. */ "not_selectable"
   | /** The target or an ancestor of it is ending or ended, so an end already on its way to it wins. */ "protected"
   | /** The target cannot end: the current default branch, or an ancestor of the default branch. The root's own refusal is the operation's input error, which its callers already answer. */ "cannot_end"
+  | /** The caller may not open a line: only the root, and the current default branch, open one. */ "not_opener"
+  | /** The Session holds its limit of open tool lines, counting the admitted reservations. */ "limit_reached"
 
 /** A failure reported to a Session. Framework failures carry their diagnostic text. */
 export type SessionFault =
