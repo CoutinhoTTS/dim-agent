@@ -1399,15 +1399,33 @@ impl Prompt {
     /// the line is closing. A closing line may already have committed an
     /// interrupt whose publication is pending, and no read may pass the
     /// published head; answering at that head keeps the returned cutoff and the
-    /// configuration the same pinned read. A close that starts after the read
-    /// captured its cutoff ends the waits below, and the caller reads the line
-    /// from the tree instead.
+    /// configuration the same pinned read. A close that starts while the
+    /// projection advances ends the waits below, and the caller settles the
+    /// line from its own facts.
     pub(super) async fn advance(&self, through: u64) -> Result<u64> {
         if self.branch_phase.phase() != BranchPhase::Active {
             let through = self.timeline.sequence().min(through);
             self.recover_sources(through).await?;
             return Ok(through);
         }
+        self.advance_while_active(through).await
+    }
+
+    /// [`Self::advance`] for the configuration read, which must not write: a
+    /// line that is not active answers cancellation at the same phase check
+    /// that would choose recovery, so the read never replays sources or
+    /// appends a checkpoint while its line is closing. The caller answers the
+    /// line from the tree at its published cutoff instead.
+    pub(super) async fn advance_active(&self, through: u64) -> Result<u64> {
+        if self.branch_phase.phase() != BranchPhase::Active {
+            return Err(AgentError::Cancelled("prompt adoption".into()));
+        }
+        self.advance_while_active(through).await
+    }
+
+    /// Advances an active projection to `through`, waits for the written result
+    /// to publish, and reports it.
+    async fn advance_while_active(&self, through: u64) -> Result<u64> {
         let mut progress = self.dispatcher.watch();
         while self.dispatcher.sequence() < through {
             #[cfg(feature = "testing")]

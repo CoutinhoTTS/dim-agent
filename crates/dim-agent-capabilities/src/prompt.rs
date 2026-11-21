@@ -1062,15 +1062,15 @@ impl Prompt {
     /// The configuration this line adopted, with the cutoff it is read at.
     /// The read waits for the Dispatcher to reach the committed sequence
     /// first, so a `context/configured` that committed just before the call is
-    /// included rather than missed. A line that is closing cannot wait for a
-    /// fact whose publication is still pending: it answers at the published
-    /// head, which is the cutoff an outside read can take. The cutoff it
-    /// reports is the cutoff of the state it answers from, which moves past the
-    /// captured sequence when the owner has already applied a later source
-    /// fact or when the line is closing; reading at the returned cutoff
-    /// therefore always answers the returned configuration. A line that has
-    /// begun closing answers from the tree instead: this read neither replays
-    /// sources nor waits for a write the close may hold back.
+    /// included rather than missed. The cutoff it reports is the cutoff of the
+    /// state it answers from: it moves past the captured sequence when the
+    /// owner has already applied a later source fact, so reading at the
+    /// returned cutoff always answers the returned configuration. The read
+    /// never writes: a line that is not active when it advances answers
+    /// cancellation there, at the same phase check that would choose recovery,
+    /// and the caller answers the line from the tree at its published cutoff
+    /// instead of letting this read replay sources or wait for a write the
+    /// close may hold back.
     pub async fn adopted_configuration(&self) -> Result<(Option<ModelConfiguration>, u64)> {
         let captured = self.timeline.committed();
         #[cfg(feature = "testing")]
@@ -1078,7 +1078,9 @@ impl Prompt {
         if self.branch_phase.phase() >= BranchPhase::Closing {
             return Err(AgentError::Cancelled("prompt adoption".into()));
         }
-        let through = self.advance(captured).await?;
+        #[cfg(feature = "testing")]
+        testing::read_checked(&self.identity.session_id, &self.identity.branch_id).await;
+        let through = self.advance_active(captured).await?;
         let projection = self.projection.lock().unwrap();
         let configuration = projection
             .configuration
