@@ -826,6 +826,164 @@ async fn a_swapped_task_directory_symlink_cannot_escape_the_managed_root() {
     server.join().await.unwrap();
 }
 
+fn unregistered_task(work: &Work, task_id: &str) -> PathBuf {
+    let task = work.home.join("worktrees").join(task_id);
+    std::fs::create_dir_all(&task).unwrap();
+    task
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unregistered_remove_with_an_ordinary_file_needs_force() {
+    let work = Work::new();
+    let server = host(&work).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let task = unregistered_task(&work, "aaaaaa");
+    std::fs::write(task.join("notes.txt"), "keep").unwrap();
+    let refused = client
+        .rpc("worktree.remove", json!({"taskId": "aaaaaa"}))
+        .await;
+    assert_eq!(refused["error"]["data"]["appError"], "worktree_in_use");
+    assert_eq!(
+        std::fs::read_to_string(task.join("notes.txt")).unwrap(),
+        "keep"
+    );
+    assert!(task.is_dir());
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unregistered_remove_with_force_deletes_ordinary_content() {
+    let work = Work::new();
+    let server = host(&work).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let task = unregistered_task(&work, "aaaaaa");
+    std::fs::write(task.join("notes.txt"), "keep").unwrap();
+    let removed = client
+        .rpc(
+            "worktree.remove",
+            json!({"taskId": "aaaaaa", "force": true}),
+        )
+        .await;
+    assert_ok(&removed);
+    assert_eq!(removed["result"]["removed"], true);
+    assert!(!task.exists());
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unregistered_remove_deletes_an_empty_repository_directory_without_force() {
+    let work = Work::new();
+    let server = host(&work).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let task = unregistered_task(&work, "aaaaaa");
+    std::fs::create_dir_all(task.join("repo")).unwrap();
+    let removed = client
+        .rpc("worktree.remove", json!({"taskId": "aaaaaa"}))
+        .await;
+    assert_ok(&removed);
+    assert_eq!(removed["result"]["removed"], true);
+    assert!(!task.exists());
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unregistered_remove_checks_every_child_before_deleting() {
+    let work = Work::new();
+    let server = host(&work).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let task = unregistered_task(&work, "aaaaaa");
+    std::fs::create_dir_all(task.join("empty")).unwrap();
+    std::fs::write(task.join("notes.txt"), "keep").unwrap();
+    let refused = client
+        .rpc("worktree.remove", json!({"taskId": "aaaaaa"}))
+        .await;
+    assert_eq!(refused["error"]["data"]["appError"], "worktree_in_use");
+    assert!(task.join("empty").is_dir());
+    assert_eq!(
+        std::fs::read_to_string(task.join("notes.txt")).unwrap(),
+        "keep"
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unregistered_remove_reports_a_failed_deletion() {
+    use std::os::unix::fs::PermissionsExt;
+    let work = Work::new();
+    let server = host(&work).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let task = unregistered_task(&work, "aaaaaa");
+    std::fs::write(task.join("notes.txt"), "keep").unwrap();
+    std::fs::set_permissions(&task, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let failed = client
+        .rpc(
+            "worktree.remove",
+            json!({"taskId": "aaaaaa", "force": true}),
+        )
+        .await;
+    assert_eq!(failed["error"]["data"]["appError"], "worktree_store_failed");
+    std::fs::set_permissions(&task, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(task.join("notes.txt")).unwrap(),
+        "keep"
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unregistered_remove_refuses_a_symlink_and_keeps_its_target() {
+    let work = Work::new();
+    let server = host(&work).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let task = unregistered_task(&work, "aaaaaa");
+    let target = work.home.join("outside");
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::write(target.join("secret.txt"), "secret").unwrap();
+    std::os::unix::fs::symlink(&target, task.join("linked")).unwrap();
+    let refused = client
+        .rpc("worktree.remove", json!({"taskId": "aaaaaa"}))
+        .await;
+    assert_eq!(refused["error"]["data"]["appError"], "worktree_in_use");
+    assert!(
+        task.join("linked")
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(
+        std::fs::read_to_string(target.join("secret.txt")).unwrap(),
+        "secret"
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unregistered_remove_refuses_a_git_entry_even_with_force() {
+    let work = Work::new();
+    let server = host(&work).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let task = unregistered_task(&work, "aaaaaa");
+    std::fs::write(task.join(".git"), "gitdir: elsewhere").unwrap();
+    let refused = client
+        .rpc(
+            "worktree.remove",
+            json!({"taskId": "aaaaaa", "force": true}),
+        )
+        .await;
+    assert_eq!(refused["error"]["data"]["appError"], "worktree_in_use");
+    assert!(task.join(".git").is_file());
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
 #[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn committed_shell_completion_recovers_after_notice_failure_and_host_loss() {

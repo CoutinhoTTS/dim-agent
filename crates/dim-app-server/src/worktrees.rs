@@ -807,6 +807,15 @@ impl ManagedWorktrees {
                 entry.display()
             )));
         }
+        if path_exists(&entry.join(".git"))
+            .await
+            .map_err(|error| WorktreeError::Store(error.message().to_owned()))?
+        {
+            return Err(WorktreeError::InUse(format!(
+                "{} has a .git entry; run git worktree remove on it",
+                entry.display()
+            )));
+        }
         let mut children = tokio::fs::read_dir(&entry)
             .await
             .map_err(|error| WorktreeError::Store(error.to_string()))?;
@@ -820,7 +829,13 @@ impl ManagedWorktrees {
                 .await
                 .map_err(|error| WorktreeError::Store(error.to_string()))?;
             if !metadata.is_dir() || metadata.file_type().is_symlink() {
-                continue;
+                if force {
+                    continue;
+                }
+                return Err(WorktreeError::InUse(format!(
+                    "{} is content in an unregistered directory; --force removes it",
+                    path.display()
+                )));
             }
             let resolved = canonical(path.clone()).await?;
             if resolved != path || !resolved.starts_with(root) {
@@ -865,11 +880,11 @@ impl ManagedWorktrees {
                     )));
                 }
             }
-            tokio::fs::remove_dir_all(&path)
-                .await
-                .map_err(|error| WorktreeError::Store(error.to_string()))?;
         }
-        let _ = tokio::fs::remove_dir_all(&entry).await;
+        drop(children);
+        tokio::fs::remove_dir_all(&entry)
+            .await
+            .map_err(|error| WorktreeError::Store(error.to_string()))?;
         Ok(true)
     }
 
