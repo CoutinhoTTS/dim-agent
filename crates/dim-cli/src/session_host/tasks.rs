@@ -639,38 +639,36 @@ impl Worker {
         }
         self.changed();
         // A display transcript omits `context/configured`, and a bounded window
-        // can start after it: the shown line's model is read from its own event
-        // history once its window is ready, unless a later fact already set it.
+        // can start after it: the shown line's configuration is read through
+        // `session.model.get` once its window is ready, unless a later fact
+        // already set it (design §14).
         if window_ready
             && self.model.is_none()
             && request.branch_id == self.default_branch
             && self.default_branch != ROOT_BRANCH_ID
-            && let Some(through) = self.task_history[&request.branch_id].window.through
         {
-            match dim_client::configuration::adopted(
-                &mut self.client,
-                &self.session_id,
-                &request.branch_id,
-                through,
-            )
-            .await
+            let through = self
+                .task_history
+                .get(&request.branch_id)
+                .and_then(|history| history.window.through);
+            if let Some((cutoff, configuration)) = self
+                .line_configuration(&request.branch_id, through)
+                .await
+                && request.branch_id == self.default_branch
+                && cutoff > self.model_through
             {
-                Ok(Some((sequence, configuration))) => {
-                    if request.branch_id == self.default_branch && sequence > self.model_through {
-                        self.model_through = sequence;
-                        self.model = Some(configuration.clone());
-                        self.line_configurations.insert(
-                            request.branch_id.clone(),
-                            LineConfiguration {
-                                sequence,
-                                configuration: configuration.clone(),
-                            },
-                        );
-                        self.send(Update::Ready(configuration));
-                    }
+                self.model_through = cutoff;
+                if let Some(configuration) = configuration {
+                    self.model = Some(configuration.clone());
+                    self.line_configurations.insert(
+                        request.branch_id.clone(),
+                        LineConfiguration {
+                            sequence: cutoff,
+                            configuration: configuration.clone(),
+                        },
+                    );
+                    self.send(Update::Ready(configuration));
                 }
-                Ok(None) => {}
-                Err(error) => self.send(Update::Notice(format!("Configuration: {error}"))),
             }
         }
         if window_ready {

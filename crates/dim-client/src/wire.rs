@@ -56,6 +56,38 @@ pub struct Configuration {
     #[serde(default)]
     pub model_preferences: Option<dim_agent_types::ModelPreferences>,
 }
+/// The reply to `session.model.get`: one line's adopted configuration at that
+/// line's own committed cutoff (design §14).
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdoptedConfiguration {
+    pub branch_id: String,
+    /// The requested line's committed cutoff, never an ancestor's sequence.
+    pub through: u64,
+    /// The line's configuration at that cutoff; `None` when it adopted none.
+    pub configuration: Option<AdoptedModel>,
+}
+/// The configuration `session.model.get` answers with: the values a
+/// `context/configured` event carries, under the adopted model's identity.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdoptedModel {
+    pub model: dim_agent_types::ModelId,
+    #[serde(default)]
+    pub capability_snapshot: Option<Box<dim_agent_types::ModelCapabilitySnapshot>>,
+    #[serde(default)]
+    pub model_preferences: Option<dim_agent_types::ModelPreferences>,
+}
+impl From<AdoptedModel> for Configuration {
+    fn from(adopted: AdoptedModel) -> Self {
+        Self {
+            provider_id: adopted.model.provider_id,
+            model_id: adopted.model.model_id,
+            capability_snapshot: adopted.capability_snapshot,
+            model_preferences: adopted.model_preferences,
+        }
+    }
+}
 pub enum EventContent {
     BranchCreate(BranchCreateData),
     BranchStart(BranchStartData),
@@ -425,6 +457,19 @@ pub struct Attached {
     /// The title's revision; 0 on a server that reports none.
     #[serde(default)]
     pub title_revision: u64,
+}
+impl Attached {
+    /// The reply's own configuration, which is the Session's and so the root's:
+    /// a conversation on a line reads that line's through `session.model.get`
+    /// (design §14).
+    pub fn configuration(&self) -> Option<Configuration> {
+        self.model.as_ref().map(|model| Configuration {
+            provider_id: model.provider_id.clone(),
+            model_id: model.model_id.clone(),
+            capability_snapshot: self.capability_snapshot.clone(),
+            model_preferences: self.model_preferences.clone(),
+        })
+    }
 }
 
 /// The cursor a client resumes `line` from: the attach reply's own

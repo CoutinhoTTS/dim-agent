@@ -1,46 +1,27 @@
-//! One line's adopted configuration, read from its own event history.
+//! One line's adopted configuration, read through `session.model.get`.
 use crate::{
     Client, Result,
-    wire::{Configuration, Event, EventContent, HistoryWindow},
+    wire::{AdoptedConfiguration, Configuration},
 };
 use serde_json::json;
 
-const PAGE: u64 = 256;
-
-/// The newest configuration `branch` adopted at or below `through`, with the
-/// sequence it was adopted at. A display transcript omits `context/configured`
-/// and a bounded window can begin after the adoption, so this walks the
-/// branch's own facts back to the newest one.
+/// The configuration `branch` adopted at `through`, or at its head when
+/// omitted, with that line's own committed cutoff. The cutoff is the
+/// watermark a client follows from: only that line's later
+/// `context/configured` events apply to it (design §14).
 pub async fn adopted(
     client: &mut Client,
     session_id: &str,
     branch: &str,
-    through: u64,
-) -> Result<Option<(u64, Configuration)>> {
-    let mut before = through.saturating_add(1);
-    loop {
-        let page: HistoryWindow = client
-            .typed(
-                "session.history",
-                json!({
-                    "sessionId": session_id,
-                    "branchId": branch,
-                    "through": through,
-                    "before": before,
-                    "limit": PAGE,
-                }),
-            )
-            .await?;
-        for event in page.events.iter().rev() {
-            let event: Event = serde_json::from_value(event.clone())
-                .map_err(|_| "Invalid session.history event")?;
-            if let EventContent::Configuration(configuration) = event.content {
-                return Ok(Some((event.sequence, configuration)));
-            }
-        }
-        match page.next(Some(before), Some(through))? {
-            Some(next) => before = next,
-            None => return Ok(None),
-        }
+    through: Option<u64>,
+) -> Result<(u64, Option<Configuration>)> {
+    let mut params = json!({"sessionId": session_id, "branchId": branch});
+    if let Some(through) = through {
+        params["through"] = json!(through);
     }
+    let reply: AdoptedConfiguration = client.typed("session.model.get", params).await?;
+    if reply.branch_id != branch {
+        return Err("session.model.get answered another line".into());
+    }
+    Ok((reply.through, reply.configuration.map(Configuration::from)))
 }

@@ -258,7 +258,7 @@ async fn a_gateway_load_folds_the_default_branchs_cursor() {
             let (read, mut write) = stream.into_split();
             let mut read = BufReader::new(read);
             let hello = frame(&mut read).await;
-            send(&mut write,json!({"jsonrpc":"2.0","id":hello["id"],"result":{"instanceId":"fixture","serverVersion":"fixture","protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.attach","session.attach.expectedCwd","session.branches","session.detach","session.exec.pending","session.history","session.history.latestTurn","session.input.pending","session.input_lookup","session.methods","session.model.update","session.question.pending","session.stop","session.submit","session.summaries","session.turn.get","provider.models.query"]}})).await;
+            send(&mut write,json!({"jsonrpc":"2.0","id":hello["id"],"result":{"instanceId":"fixture","serverVersion":"fixture","protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.attach","session.attach.expectedCwd","session.branches","session.detach","session.exec.pending","session.history","session.history.latestTurn","session.input.pending","session.input_lookup","session.methods","session.model.get","session.model.update","session.question.pending","session.stop","session.submit","session.summaries","session.turn.get","provider.models.query"]}})).await;
             let mut listed = 0;
             while let Some(request) = read_frame(&mut read).await {
                 let method = request["method"].as_str().unwrap_or_default().to_owned();
@@ -282,11 +282,16 @@ async fn a_gateway_load_folds_the_default_branchs_cursor() {
                     }
                     "session.history" => {
                         assert_eq!(branch, line, "the recovery reads the default branch");
-                        // A pre-cut adoption on the line itself.
-                        let events = [
-                            json!({"id":"configured-early","sequence":cursor - 1,"create_at":1,"type":"context","name":"configured","data":{"timeline":line,"revision":"r0","provider_id":"fixture","model_id":"B"}}),
-                        ];
-                        send(&mut write,json!({"jsonrpc":"2.0","id":id,"result":{"events":events,"through":cursor,"nextBefore":1,"nextAfter":cursor}})).await;
+                        assert!(
+                            request["params"].get("before").is_none(),
+                            "a line's configuration is not paged out of its history"
+                        );
+                        send(&mut write,json!({"jsonrpc":"2.0","id":id,"result":{"events":[],"through":cursor,"nextBefore":1,"nextAfter":cursor}})).await;
+                    }
+                    "session.model.get" => {
+                        assert_eq!(branch, line, "a line's configuration is its own");
+                        assert_eq!(through, cursor, "read at the line's own cursor");
+                        send(&mut write,json!({"jsonrpc":"2.0","id":id,"result":{"branchId":line,"through":cursor,"configuration":{"model":{"providerId":"fixture","modelId":"B"}}}})).await;
                     }
                     "provider.models.query" => {
                         send(&mut write,json!({"jsonrpc":"2.0","id":id,"result":{"models":[{"providerId":"fixture","model":{"id":"A","name":"A"}},{"providerId":"fixture","model":{"id":"B","name":"B"}}],"next":null}})).await;
@@ -414,7 +419,7 @@ async fn a_gateway_line_reads_its_model_when_display_omits_the_configuration() {
         let (read, mut write) = stream.into_split();
         let mut read = BufReader::new(read);
         let hello = frame(&mut read).await;
-        send(&mut write,json!({"jsonrpc":"2.0","id":hello["id"],"result":{"instanceId":"fixture","serverVersion":"fixture","protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.attach","session.attach.expectedCwd","session.branches","session.detach","session.exec.pending","session.history","session.history.display","session.history.detail","session.history.display.tail","session.history.display.transcript","session.history.latestTurn","session.input.pending","session.input_lookup","session.methods","session.model.update","session.question.pending","session.stop","session.submit","session.summaries","session.turn.get","provider.models.query"]}})).await;
+        send(&mut write,json!({"jsonrpc":"2.0","id":hello["id"],"result":{"instanceId":"fixture","serverVersion":"fixture","protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.create","session.attach","session.attach.expectedCwd","session.branches","session.detach","session.exec.pending","session.history","session.history.display","session.history.detail","session.history.display.tail","session.history.display.transcript","session.history.latestTurn","session.input.pending","session.input_lookup","session.methods","session.model.get","session.model.update","session.question.pending","session.stop","session.submit","session.summaries","session.turn.get","provider.models.query"]}})).await;
         let mut attachments = 0;
         while let Some(request) = read_frame(&mut read).await {
             let method = request["method"].as_str().unwrap_or_default().to_owned();
@@ -432,13 +437,10 @@ async fn a_gateway_line_reads_its_model_when_display_omits_the_configuration() {
                     assert_eq!(request["params"]["branchId"], json!("line-1"));
                     send(&mut write,json!({"jsonrpc":"2.0","id":id,"result":{"items":[],"through":5,"nextBefore":1,"nextAfter":5,"done":true}})).await;
                 }
-                "session.history" => {
+                "session.model.get" => {
                     assert_eq!(request["params"]["branchId"], json!("line-1"));
-                    let through = request["params"]["through"]
-                        .as_u64()
-                        .expect("a fixed cursor");
-                    assert_eq!(request["params"]["before"], json!(through + 1));
-                    send(&mut write,json!({"jsonrpc":"2.0","id":id,"result":{"events":[{"id":"configured-4","sequence":4,"create_at":1,"type":"context","name":"configured","data":{"timeline":"line-1","revision":"r0","provider_id":"fixture","model_id":"B"}}],"through":through,"nextBefore":1,"nextAfter":through,"done":true}})).await;
+                    let through = request["params"]["through"].as_u64().unwrap_or(6);
+                    send(&mut write,json!({"jsonrpc":"2.0","id":id,"result":{"branchId":"line-1","through":through,"configuration":{"model":{"providerId":"fixture","modelId":"B"}}}})).await;
                 }
                 "session.methods" => {
                     let methods: Vec<_> = [

@@ -305,6 +305,20 @@ export function readModelUpdate(value: unknown): ModelUpdateResult {
   return { model: modelId(source.model, "session.model.update.model"), outcome: str(source, "outcome", "session.model.update") }
 }
 
+/** `session.model.get`: one line's adopted configuration at that line's own committed cutoff (design §14). */
+export type AdoptedConfiguration = { branchId: string; through: number; configuration?: { model: ModelId } }
+
+export function readAdoptedConfiguration(value: unknown): AdoptedConfiguration {
+  const at = "session.model.get"
+  const source = obj(value, at)
+  const configuration = source.configuration === undefined || source.configuration === null ? undefined : obj(source.configuration, `${at}.configuration`)
+  return {
+    branchId: str(source, "branchId", at),
+    through: num(source, "through", at),
+    ...(configuration === undefined ? {} : { configuration: { model: modelId(configuration.model, `${at}.configuration.model`) } }),
+  }
+}
+
 /** A permission preset as the server names it; anything else is a protocol error. */
 function readPreset(value: unknown, at: string): PermissionPreset {
   if (value === "read-only" || value === "workspace-write" || value === "full-access") return value

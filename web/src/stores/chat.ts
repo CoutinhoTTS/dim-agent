@@ -10,7 +10,7 @@ import { readLoops as readLoopsReply, readStartedLoop, type Loop } from "../loop
 import { readUploadedImage } from "../rpc/read"
 import { ROOT_BRANCH_ID, type ApprovalDecision, type ApprovalRequest, type DraftAttachments, type FileCandidate, type ModelId, type ModelProgress, type Notification, type PendingQuestion, type PermissionPreset, type ModelRetryProgress, type PermissionPolicy, type QueuedInput, type QuestionAnswer, type SessionEvent, type SubmitMode, type UserInput, type WithdrawResult } from "../rpc/protocol"
 import { readRevision, readRules } from "../rpc/general-settings"
-import { ProtocolError, readAttached, readBranches, readBranchDetail, readDefaultBranch, readPendingInputs, readPendingQuestions, readTurn, readGoal, readTool, readAck, readAttachmentPath, readBranchCreate, readCompactResult, readConfigurationOutcome, readContextUsage, readFileCandidates, readForkedSessionId, readHistory, readDisplayHistory, readModelUpdate, readMemberApproval, readPermissionState, readPermissionVersion, readSessionMethods, readSessionSkills, readWithdrawResult } from "../rpc/read"
+import { ProtocolError, readAdoptedConfiguration, type AdoptedConfiguration, readAttached, readBranches, readBranchDetail, readDefaultBranch, readPendingInputs, readPendingQuestions, readTurn, readGoal, readTool, readAck, readAttachmentPath, readBranchCreate, readCompactResult, readConfigurationOutcome, readContextUsage, readFileCandidates, readForkedSessionId, readHistory, readDisplayHistory, readModelUpdate, readMemberApproval, readPermissionState, readPermissionVersion, readSessionMethods, readSessionSkills, readWithdrawResult } from "../rpc/read"
 import { useConnectionStore } from "./connection"
 import { useSessionsStore } from "./sessions"
 import { useUiStore } from "./ui"
@@ -95,7 +95,7 @@ type Channel = {
   branches: Map<string, BranchStream>
   lines: Lines
   states: Map<string, { running: boolean; stopping: boolean }>
-  /** The newest move `setDefaultBranch` started; a completion older than it is stale. */
+  /** The newest move the server accepted; a completion older than it is stale. */
   moves: number
   /** While `syncing`, every notification waits here so history applies first. */
   syncing: boolean
@@ -509,37 +509,24 @@ export const useChatStore = defineStore("chat", () => {
   }
 
   /**
-   * The newest configuration a line adopted at or below `through`, read from
-   * its own event history: a display transcript omits `context/configured`
-   * and a bounded window can begin after the adoption.
+   * One line's adopted configuration and its own cutoff, read through
+   * `session.model.get`. A server without that read cannot name this line's
+   * configuration, and the attach reply's is the root's, so none stands in
+   * for it (design §14).
    */
-  async function lineConfiguration(channel: Channel, branchId: string, through: number): Promise<ModelId | undefined> {
-    let before = through + 1
-    for (;;) {
-      const page = await client().call("session.history", {
-        sessionId: channel.view.sessionId,
-        branchId,
-        through,
-        before,
-        limit: 256,
-      }, readHistory)
-      if (page.through !== through) throw new ProtocolError("History snapshot changed")
-      for (let index = page.events.length - 1; index >= 0; index--) {
-        const content = page.events[index]!.content
-        if (content.kind === "context-configured") return content.model
-      }
-      const next = page.nextBefore
-      if (next === undefined || next <= 1 || next >= before) return undefined
-      before = next
-    }
+  async function lineConfiguration(channel: Channel, branchId: string, through: number): Promise<AdoptedConfiguration | undefined> {
+    if (!useConnectionStore().supports("session.model.get")) return undefined
+    const adopted = await client().call("session.model.get", { sessionId: channel.view.sessionId, branchId, through }, readAdoptedConfiguration)
+    if (adopted.branchId !== branchId) throw new ProtocolError("Configuration snapshot changed")
+    return adopted
   }
 
   /** Gives a centre the model its own line adopted when its window carried none. */
   async function adoptModel(channel: Channel, branchId: string, branch: BranchStream): Promise<void> {
     if (branch.projection.model !== undefined) return
-    const model = await lineConfiguration(channel, branchId, branch.through)
+    const adopted = await lineConfiguration(channel, branchId, branch.through)
     // A live configuration that arrived while the read was in flight is newer.
-    if (model !== undefined && branch.projection.model === undefined) branch.projection.model = model
+    if (adopted?.configuration !== undefined && branch.projection.model === undefined) branch.projection.model = adopted.configuration.model
   }
 
   async function loadHistory(channel: Channel, branchId: string): Promise<"ok" | "lost" | "failed"> {
@@ -668,7 +655,7 @@ export const useChatStore = defineStore("chat", () => {
     view.stopping = centre.stopping
     view.retry = channel.main.progress?.retry
     view.sessionRunning = anyRunning(channel)
-    view.model = channel.main.projection.model ?? useSessionsStore().byId.get(view.sessionId)?.model
+    view.model = channel.main.projection.model ?? (view.defaultBranchId === ROOT_BRANCH_ID ? useSessionsStore().byId.get(view.sessionId)?.model : undefined)
     view.lines = channel.lines.views()
     view.goal = channel.main.projection.goal
     view.queued = channel.main.projection.queued()
@@ -912,9 +899,11 @@ export const useChatStore = defineStore("chat", () => {
     const channel = channels.get(sessionId)
     if (channel === undefined) return
     const view = channel.view
-    const move = ++channel.moves
     const moved = await client().call("session.branch_set_default", { sessionId, branchId }, readDefaultBranch)
-    if (channel.moves !== move) return
+    // A move the server accepted takes the next generation; one it refused takes
+    // none, so an earlier accepted move still finishes rather than being
+    // discarded as stale (design §14).
+    const move = ++channel.moves
     if (moved !== view.defaultBranchId) {
       // The new centre's window is read before the stream changes hands: the
       // transcript on screen, its running state and every action that names

@@ -4986,37 +4986,27 @@ impl Worker {
         let mut adopted = self
             .line_configurations
             .get(&line)
-            .map(|adopted| (adopted.sequence, adopted.configuration.clone()));
-        if adopted.is_none()
-            && line != ROOT_BRANCH_ID
-            && let Some(through) = self
+            .map(|adopted| (adopted.sequence, Some(adopted.configuration.clone())));
+        if adopted.is_none() && line != ROOT_BRANCH_ID {
+            let through = self
                 .task_history
                 .get(&line)
-                .and_then(|history| history.window.through)
-        {
-            match dim_client::configuration::adopted(
-                &mut self.client,
-                &self.session_id,
-                &line,
-                through,
-            )
-            .await
-            {
-                Ok(found) => adopted = found,
-                Err(error) => self.send(Update::Notice(format!("Configuration: {error}"))),
-            }
+                .and_then(|history| history.window.through);
+            adopted = self.line_configuration(&line, through).await;
         }
-        if let Some((sequence, configuration)) = adopted {
-            self.model_through = sequence;
-            self.model = Some(configuration.clone());
-            self.line_configurations.insert(
-                line.clone(),
-                LineConfiguration {
-                    sequence,
-                    configuration: configuration.clone(),
-                },
-            );
-            self.send(Update::Ready(configuration));
+        if let Some((cutoff, configuration)) = adopted {
+            self.model_through = cutoff;
+            if let Some(configuration) = configuration {
+                self.model = Some(configuration.clone());
+                self.line_configurations.insert(
+                    line.clone(),
+                    LineConfiguration {
+                        sequence: cutoff,
+                        configuration: configuration.clone(),
+                    },
+                );
+                self.send(Update::Ready(configuration));
+            }
         }
         self.focus_line(line).await;
         if self.client.supports(&permission::PRESET_METHODS) {
@@ -5027,6 +5017,37 @@ impl Worker {
             }
         }
         self.request_context(false).await;
+    }
+
+    /// One line's adopted configuration through `session.model.get`, at
+    /// `through` or at the line's head, with the line's own cutoff. A server
+    /// without that read cannot name this line's configuration, and the attach
+    /// reply's is the root's, so none stands in for it (design §14).
+    async fn line_configuration(
+        &mut self,
+        line: &str,
+        through: Option<u64>,
+    ) -> Option<(u64, Option<Configuration>)> {
+        if !self.client.offers("session.model.get") {
+            self.send(Update::Notice(format!(
+                "Configuration: this server cannot read line {line}"
+            )));
+            return None;
+        }
+        match dim_client::configuration::adopted(
+            &mut self.client,
+            &self.session_id,
+            line,
+            through,
+        )
+        .await
+        {
+            Ok(adopted) => Some(adopted),
+            Err(error) => {
+                self.send(Update::Notice(format!("Configuration: {error}")));
+                None
+            }
+        }
     }
 
     async fn focus_line(&mut self, line: String) {

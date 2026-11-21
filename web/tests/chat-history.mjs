@@ -41,6 +41,7 @@ function session(t, history, reads = {}, display = true, transcript = false) {
       if (method === "session.methods") return ["session.input.pending", "session.question.pending", "session.turn.get", "session.goal.get"]
       if (method === "session.branches") return { branches: [{ branchId: "worker", parentBranchId: "main", branchPoint: 0, head: 0, state: "open" }], defaultBranchId: "main" }
       if (method === "session.branch.get") return { ...params, parentBranchId: "main", branchPoint: 0, head: 0, state: "open" }
+      if (method === "session.model.get") return { branchId: params.branchId, through: params.through ?? 0 }
       if (method === "session.input.pending") return { ...params, inputs: [], next: null }
       if (method === "session.question.pending") return { ...params, asks: [], next: null }
       if (method === "session.turn.get") return { ...params, turn: undefined, output: undefined }
@@ -420,23 +421,74 @@ test("indexed transcript pages use one fixed head for initial and earlier reads"
 test("a moved centre keeps the model its own timeline adopted", async t => {
   // The production display transcript omits `context/configured`, so a bounded
   // window cannot carry a line's adoption: the centre reads that line's own
-  // fact at the window's head.
+  // configuration through `session.model.get` at the window's cutoff.
+  const reads = []
   const chat = session(t, params => page([], params.branchId === "worker" ? 7 : 0), {
     "session.branches": () => ({ branches: [{ branchId: "worker", parentBranchId: "main", branchPoint: 0, head: 7, state: "open" }], defaultBranchId: "worker" }),
-    "session.history": params => {
-      assert.equal(params.branchId, "worker")
-      assert.equal(params.through, 7)
-      assert.equal(params.before, 8)
-      return { ...page([event(3, { kind: "context-configured", model: { providerId: "worker", modelId: "B" } })], 7), nextBefore: 1 }
+    "session.model.get": params => {
+      reads.push(params)
+      return { branchId: "worker", through: 7, configuration: { model: { providerId: "worker", modelId: "B" } } }
     },
+    "session.history": () => { throw new Error("a line's configuration is not paged out of its history") },
   })
   await flush()
   assert.equal(chat.views.session.defaultBranchId, "worker")
+  assert.deepEqual(reads, [{ sessionId: "session", branchId: "worker", through: 7 }], "one branch-qualified read at the window's cutoff, with no page cursor")
   assert.deepEqual(
     chat.views.session.model,
     { providerId: "worker", modelId: "B" },
     "the centre keeps the model its own line adopted instead of the attach reply's, which is the root's (design §14)",
   )
+})
+
+test("a centre on a line shows no model when the server cannot read that line's configuration", async t => {
+  const chat = session(t, params => page([], params.branchId === "worker" ? 7 : 0), {
+    "session.branches": () => ({ branches: [{ branchId: "worker", parentBranchId: "main", branchPoint: 0, head: 7, state: "open" }], defaultBranchId: "worker" }),
+  })
+  globalThis.historyStores.sessions.byId = new Map([["session", { model: { providerId: "root", modelId: "A" } }]])
+  const supports = globalThis.historyStores.connection.supports
+  globalThis.historyStores.connection.supports = name => name !== "session.model.get" && supports(name)
+  await flush()
+  assert.equal(chat.views.session.defaultBranchId, "worker")
+  assert.equal(
+    chat.views.session.model,
+    undefined,
+    "the directory's model is the root's, so it does not stand in for the centred line's (design §14)",
+  )
+})
+
+test("a refused move leaves an earlier accepted move to finish", async t => {
+  const workerPage = deferred()
+  const chat = session(t, params => params.branchId === "worker"
+    ? workerPage.promise
+    : page([input(1, "on the root")], 1), {
+    "session.branches": () => ({
+      branches: [
+        { branchId: "worker", parentBranchId: "main", branchPoint: 0, head: 7, state: "open" },
+        { branchId: "other", parentBranchId: "main", branchPoint: 0, head: 3, state: "open" },
+      ],
+      defaultBranchId: "main",
+    }),
+    "session.branch_set_default": params => {
+      if (params.branchId === "worker") return "worker"
+      throw new RpcError(-32000, "fixture: the move was refused", "branch_not_opener")
+    },
+    "session.model.get": params => ({ branchId: params.branchId, through: params.through }),
+    "session.goal.get": params => ({ branchId: params.branchId, through: 0, goal: null }),
+  })
+  await flush()
+  assert.equal(chat.views.session.defaultBranchId, "main")
+  const moved = chat.setDefaultBranch("session", "worker")
+  await flush()
+  // The refused move is the later one, and the earlier move's window is still
+  // loading: the server's default is already `worker`, so its completion must
+  // not be discarded as stale (design §14).
+  await assert.rejects(chat.setDefaultBranch("session", "other"), /the move was refused/)
+  workerPage.resolve(page([input(1, "on the line")], 7))
+  await moved
+  await flush()
+  assert.equal(chat.views.session.defaultBranchId, "worker")
+  assert.deepEqual(chat.views.session.rows.map(row => row.text), ["on the line"], "the centre is the move the server accepted")
 })
 
 test("a permission edit keeps the line whose policy it read", async t => {

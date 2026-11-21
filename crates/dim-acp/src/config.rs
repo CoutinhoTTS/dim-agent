@@ -1,7 +1,7 @@
 use crate::rpc::Rpc;
 use agent_client_protocol::{Error, schema::v1 as acp};
 use dim_agent_types::{ModelId, PermissionPolicy, PermissionPreset};
-use dim_client::wire::{Configuration, Event, EventContent};
+use dim_client::wire::{AdoptedConfiguration, Configuration, Event, EventContent};
 use serde::Deserialize;
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
@@ -97,41 +97,25 @@ pub(crate) async fn models(rpc: &Rpc) -> Result<Vec<Model>, Error> {
     Ok(choices)
 }
 
-/// The newest configuration `branch` adopted at or below `through`, with the
-/// sequence it was adopted at. A display transcript omits `context/configured`
-/// and a bounded window can start after the adoption, so this walks the line's
-/// own facts back to the newest one.
+/// The configuration `branch` adopted at `through`, or at its head when
+/// omitted, with that line's own committed cutoff. Callers ask a server that
+/// offers the read: one without it cannot name this line's configuration, and
+/// the attach reply's is the root's (design §14).
 pub(crate) async fn adopted(
     rpc: &Rpc,
     session_id: &str,
     branch: &str,
-    through: u64,
-) -> Result<Option<(u64, Configuration)>, Error> {
-    let mut before = through.saturating_add(1);
-    loop {
-        let page: dim_client::wire::HistoryWindow = rpc
-            .typed(
-                "session.history",
-                json!({"sessionId":session_id,"branchId":branch,
-                    "through":through,"before":before,"limit":256}),
-            )
-            .await?;
-        for event in page.events.iter().rev() {
-            let event: Event = serde_json::from_value(event.clone()).map_err(|_| {
-                Error::internal_error().data(json!({"code":"invalid_history_event"}))
-            })?;
-            if let EventContent::Configuration(configuration) = event.content {
-                return Ok(Some((event.sequence, configuration)));
-            }
-        }
-        let next = page
-            .next(Some(before), Some(through))
-            .map_err(|_| Error::internal_error().data(json!({"code":"invalid_history_cursor"})))?;
-        match next {
-            Some(next) => before = next,
-            None => return Ok(None),
-        }
+    through: Option<u64>,
+) -> Result<(u64, Option<Configuration>), Error> {
+    let mut params = json!({"sessionId":session_id,"branchId":branch});
+    if let Some(through) = through {
+        params["through"] = json!(through);
     }
+    let reply: AdoptedConfiguration = rpc.typed("session.model.get", params).await?;
+    if reply.branch_id != branch {
+        return Err(Error::internal_error().data(json!({"code":"model_get_answered_another_line"})));
+    }
+    Ok((reply.through, reply.configuration.map(Configuration::from)))
 }
 
 impl Config {

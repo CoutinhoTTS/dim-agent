@@ -8,9 +8,8 @@ use agent_client_protocol::{Client, ConnectionTo, Error, UntypedMessage, schema:
 use dim_agent_types::{ROOT_BRANCH_ID, TurnOutcome};
 use dim_client::window::Window;
 use dim_client::wire::{
-    Attached, Configuration, DisplayNotice, DisplayPage, Event, EventContent, EventNotice,
-    HistoryWindow, PendingDelegations, PendingInputs, PendingQuestions, PendingTasks, Progress,
-    TurnRead,
+    Attached, DisplayNotice, DisplayPage, Event, EventContent, EventNotice, HistoryWindow,
+    PendingDelegations, PendingInputs, PendingQuestions, PendingTasks, Progress, TurnRead,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -1239,7 +1238,6 @@ impl Gateway {
                 session.configuring = true;
                 let config = session.config.clone();
                 let conversation = session.projection.branch.clone();
-                let through = session.projection.through;
                 let revision = session.config_revision;
                 self.spawn(async move {
                     let result = config
@@ -1279,23 +1277,18 @@ impl Gateway {
                                     .await?;
                                 // The reply's model is the root's; the line being
                                 // configured takes its own configuration at the
-                                // reply's cursor (design §14).
-                                let model = if attached.default_branch.is_none() {
-                                    attached.model.map(|model| Configuration {
-                                        provider_id: model.provider_id,
-                                        model_id: model.model_id,
-                                        capability_snapshot: attached.capability_snapshot,
-                                        model_preferences: attached.model_preferences,
-                                    })
-                                } else {
-                                    let through = attached
-                                        .default_branch
-                                        .as_ref()
-                                        .filter(|cursor| cursor.branch_id == conversation)
-                                        .map_or(through, |cursor| cursor.sequence);
-                                    crate::config::adopted(&rpc, &id, &conversation, through)
+                                // line's head, re-read after the change it reported
+                                // (design §14).
+                                let model = if conversation == ROOT_BRANCH_ID
+                                    || attached.default_branch.is_none()
+                                {
+                                    attached.configuration()
+                                } else if rpc.supports("session.model.get") {
+                                    crate::config::adopted(&rpc, &id, &conversation, None)
                                         .await?
-                                        .map(|(_, configuration)| configuration)
+                                        .1
+                                } else {
+                                    None
                                 };
                                 Config::read(&rpc, &id, &conversation, model).await
                             }
@@ -3170,17 +3163,12 @@ async fn read_history(
         })
         .unwrap_or_else(|| ROOT_BRANCH_ID.to_owned());
     // The reply's configuration is the root's (design §14): a conversation on
-    // a line takes that line's own, from the window below. A reply that names
-    // no line comes from a server that cannot move the default branch, so its
-    // model is the Session's.
+    // a line takes that line's own, through `session.model.get` below. A reply
+    // that names no line comes from a server that cannot move the default
+    // branch, so its model is the Session's.
     let seeded = attached.default_branch.is_none() || conversation == ROOT_BRANCH_ID;
     let model = if seeded {
-        attached.model.map(|model| Configuration {
-            provider_id: model.provider_id,
-            model_id: model.model_id,
-            capability_snapshot: attached.capability_snapshot,
-            model_preferences: attached.model_preferences,
-        })
+        attached.configuration()
     } else {
         None
     };
@@ -3220,10 +3208,11 @@ async fn read_history(
         )
     };
     let mut config = Config::read(rpc, id, &conversation, model).await?;
-    // A line's configuration is the one it last adopted at or below the
-    // cursor. A display transcript omits `context/configured` and a bounded
-    // window can start after the adoption, so the line's own event history is
-    // read at that cursor (design §14).
+    // A line's configuration is the one it adopted at its own cutoff. A
+    // display transcript omits `context/configured` and a bounded window can
+    // start after the adoption, so the line's own read answers it; a server
+    // without that read cannot name this line's, and the attach reply is the
+    // root's (design §14).
     let mut model_through = if seeded {
         dim_client::wire::resume_cursor(
             attached.default_branch.as_ref(),
@@ -3234,12 +3223,10 @@ async fn read_history(
     } else {
         0
     };
-    if !seeded
-        && let Some((sequence, adopted)) =
-            crate::config::adopted(rpc, id, &conversation, through).await?
-    {
-        config.model = Some(adopted);
-        model_through = sequence;
+    if !seeded && rpc.supports("session.model.get") {
+        let (cutoff, adopted) = crate::config::adopted(rpc, id, &conversation, Some(through)).await?;
+        config.model = adopted;
+        model_through = cutoff;
     }
     let mut questions = HashMap::new();
     if config.methods.contains("session.question.pending") {

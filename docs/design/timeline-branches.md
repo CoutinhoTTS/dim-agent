@@ -664,11 +664,13 @@ idle move never leaves the row recent by the line the Session left.
 
 The reply's `model`, `modelPreferences` and `capabilitySnapshot` stay the root's adopted configuration, the watermark a
 Session on its root has always read. A client that follows the move pairs the configuration with the cursor instead of
-mixing the two: it takes the configuration of the line the cursor names, so a Session whose conversation is on a line
-shows the model that line adopted at or below its cursor, and the reply's record seeds the root alone. The line's
-configuration is read from that line's own event history at that cursor, because a display transcript omits
-`context/configured` and a bounded window can begin after the adoption; the sequence the adoption was written at is
-the watermark a later configuration must pass. A reply that
+mixing the two: it takes the configuration of the line the cursor names through
+`session.model.get {sessionId, branchId, through}`, so a Session whose conversation is on a line shows the model that
+line adopted at or below its cursor, and the reply's record seeds the root alone. The read answers the line's own
+configuration with its own committed cutoff, so it works when a display transcript omits `context/configured` and a
+bounded window begins after the adoption; that cutoff is the watermark a later configuration must pass. A server that
+cannot answer the read does not name that line's configuration, and its attach reply is the root's, so no client shows
+the root's model for a line. A reply that
 carries no `defaultBranch` names the root, because a server without the field cannot move the default branch, so
 its record is the Session's one model and every client keeps using it.
 

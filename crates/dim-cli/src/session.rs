@@ -296,7 +296,7 @@ pub async fn chat(
         params["display"] = json!(true);
     }
     let attached: Attached = client.typed("session.attach", params).await?;
-    let session_cwd = attached.cwd;
+    let session_cwd = attached.cwd.clone();
     // The attach reply names the line the conversation is on, beside the
     // root's `sequence`; a server that predates the field leaves the directory
     // as its answer (design §14).
@@ -349,12 +349,7 @@ pub async fn chat(
         // default branch, so its model is the Session's.
         let seeded = attached.default_branch.is_none() || conversation == ROOT_BRANCH_ID;
         display.model = if seeded {
-            attached.model.map(|model| crate::wire::Configuration {
-                provider_id: model.provider_id,
-                model_id: model.model_id,
-                capability_snapshot: attached.capability_snapshot,
-                model_preferences: attached.model_preferences,
-            })
+            attached.configuration()
         } else {
             None
         };
@@ -368,21 +363,26 @@ pub async fn chat(
         };
         display.cursor = window::read(client, &session_id, &conversation, &mut display).await?;
         // The display transcript omits `context/configured`, and a bounded
-        // window can start after the adoption: a line's model is read from its
-        // own event history at the cursor the reply named.
-        if !display.json
-            && !seeded
-            && display.model.is_none()
-            && let Some((sequence, configuration)) = dim_client::configuration::adopted(
-                client,
-                &session_id,
-                &conversation,
-                display.history_through,
-            )
-            .await?
-        {
-            display.model = Some(configuration);
-            display.model_through = sequence;
+        // window can start after the adoption: a line's configuration is read
+        // through `session.model.get` at the cursor the reply named. A server
+        // without that read cannot name this line's configuration, and the
+        // reply's is the root's, so none is shown (design §14).
+        if !display.json && !seeded && display.model.is_none() {
+            if client.offers("session.model.get") {
+                let (through, configuration) = dim_client::configuration::adopted(
+                    client,
+                    &session_id,
+                    &conversation,
+                    Some(display.history_through),
+                )
+                .await?;
+                display.model = configuration;
+                display.model_through = through;
+            } else {
+                display.record(&format!(
+                    "configuration: unavailable (this server cannot read line {conversation})"
+                ))?;
+            }
         }
         questions.start(client, &session_id, &conversation).await?;
         display.failed = false;

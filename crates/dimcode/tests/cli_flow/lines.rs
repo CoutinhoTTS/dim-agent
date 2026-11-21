@@ -327,6 +327,7 @@ fn tui_resumes_the_shown_line_from_the_attach_cursor() {
                 "session.history.detail",
                 "session.history.display.tail",
                 "session.history.display.transcript",
+                "session.model.get",
             ]);
             wire.2 = true;
             let attach = wire.read("session.attach");
@@ -363,14 +364,17 @@ fn tui_resumes_the_shown_line_from_the_attach_cursor() {
                         };
                         wire.reply(&request, detail);
                     }
-                    "session.history" => {
+                    "session.model.get" => {
                         assert_eq!(request["params"]["branchId"], json!(line));
                         assert_eq!(request["params"]["through"], json!(cursor));
-                        assert_eq!(request["params"]["before"], json!(cursor + 1));
+                        assert!(
+                            request["params"].get("before").is_none(),
+                            "a line's configuration is read at one cutoff, not paged out of its history"
+                        );
                         wire.reply(
                             &request,
-                            json!({"events":[configured_event(cursor - 1, "line-model", json!({}))],
-                                "through":cursor,"nextBefore":1,"nextAfter":cursor,"done":true}),
+                            json!({"branchId":line,"through":cursor,
+                                "configuration":{"model":{"providerId":"test","modelId":"line-model"}}}),
                         );
                     }
                     other => panic!("unexpected {other}: {request}"),

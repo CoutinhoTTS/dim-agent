@@ -6099,10 +6099,10 @@ fn effort_snapshot(model_id: &str, efforts: &[&str]) -> Value {
 
 /// A resumed Session folds the configuration of the line its cursor names: the
 /// attach reply's model is the root's (design §14), so a Session whose
-/// conversation is on a line shows the model that line adopted at or below its
-/// cursor, and only the root takes the reply's. The reply's cursor stays the
-/// shown line's, and the directory answers only for a server that does not
-/// carry the field.
+/// conversation is on a line shows the configuration that line adopted, read
+/// through `session.model.get` at the reply's cursor, and only the root takes
+/// the reply's. The reply's cursor stays the shown line's, and the directory
+/// answers only for a server that does not carry the field.
 #[test]
 fn a_resumed_line_mode_session_folds_the_default_branchs_cursor() {
     for (line, cursor, listed) in [
@@ -6118,6 +6118,7 @@ fn a_resumed_line_mode_session_folds_the_default_branchs_cursor() {
                 "session.history.detail",
                 "session.history.display.tail",
                 "session.history.display.transcript",
+                "session.model.get",
             ]);
             let branches = wire.read("session.branches");
             let mut entries = vec![json!({"branchId":"main","state":"open","head":8})];
@@ -6148,16 +6149,18 @@ fn a_resumed_line_mode_session_folds_the_default_branchs_cursor() {
                 json!({"items":[],"through":cursor,"nextBefore":1,"nextAfter":cursor,"done":true}),
             );
             if line != "main" {
-                let read = wire.read("session.history");
+                let read = wire.read("session.model.get");
                 assert_eq!(read["params"]["branchId"], json!(line));
                 assert_eq!(read["params"]["through"], json!(cursor));
-                assert_eq!(read["params"]["before"], json!(cursor + 1));
-                let mut event = configured_event(cursor - 1, "line-model", json!({}));
-                event["data"]["capability_snapshot"] =
-                    effort_snapshot("line-model", &["none", "minimal"]);
+                assert!(
+                    read["params"].get("before").is_none(),
+                    "a line's configuration is read at one cutoff, not paged out of its history"
+                );
                 wire.reply(
                     &read,
-                    json!({"events":[event],"through":cursor,"nextBefore":1,"nextAfter":cursor,"done":true}),
+                    json!({"branchId":line,"through":cursor,
+                        "configuration":{"model":{"providerId":"test","modelId":"line-model"},
+                            "capabilitySnapshot":effort_snapshot("line-model", &["none", "minimal"])}}),
                 );
             }
             let idle = wire.read("session.idle");
