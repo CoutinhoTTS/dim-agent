@@ -302,11 +302,14 @@ fn upgrade_tag(version: &str, release: bool) -> Option<&str> {
 }
 
 /// A newer version on the channel of `current` the user has not skipped, or
-/// `None` when there is none or the registry did not answer in time.
+/// `None` when there is none or the registry did not answer.
 pub async fn available(home: &Path, current: &str) -> Option<Offer> {
     let tag = upgrade_tag(current, dim_agent_capabilities::build::release())?;
     let package = package().ok()?;
-    let version = channel_version(&package, tag).await.ok()?;
+    let version = match channel_version(&package, tag).await {
+        Ok(version) => version,
+        Err(_) => channel_version(&package, tag).await.ok()?,
+    };
     if !newer(current, &version) || skipped(home).as_deref() == Some(version.as_str()) {
         return None;
     }
