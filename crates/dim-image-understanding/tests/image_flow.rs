@@ -164,11 +164,12 @@ async fn provider(stream: tokio::net::TcpStream, script: Arc<Script>) {
     } else {
         "stop"
     };
+    let model = request["model"].as_str().unwrap_or("gemini");
     let body = format!(
         "data: {}\n\ndata: [DONE]\n\n",
         json!({
-            "id":"answer","object":"chat.completion.chunk","created":0,"model":request["model"],
-            "choices":[{"index":0,"delta":{"content":format!("answer from {}",request["model"].as_str().unwrap())},"finish_reason":reason}]
+            "id":"answer","object":"chat.completion.chunk","created":0,"model":model,
+            "choices":[{"index":0,"delta":{"content":format!("answer from {model}")},"finish_reason":reason}]
         })
     );
     let reply = format!(
