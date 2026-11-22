@@ -630,13 +630,6 @@ impl ShellSession {
                             wait_ms: Some(100),
                             event_cursor: Some(event_cursor),
                         }) => if let Ok(page) = page {
-                            if page.reset == Some(true)
-                                || page.event_retained_from.unwrap_or(0) > event_cursor
-                            {
-                                this.stop_shell(&task_id).await;
-                                this.handle_shell_exit(generation, None).await;
-                                break;
-                            }
                             for event in page.events {
                                 event_cursor = event.cursor() + 1;
                                 this.handle_event(event).await;
