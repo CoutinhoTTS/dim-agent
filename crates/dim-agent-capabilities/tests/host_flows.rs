@@ -4715,6 +4715,138 @@ async fn stored_attachment_and_tool_images_route_by_vision_capability() {
     agent.close().await.unwrap();
 }
 
+/// A vision model within the encoded-image budget receives a stored
+/// attachment and a stored tool image as their pixels.
+#[tokio::test]
+async fn a_vision_model_receives_stored_attachment_and_tool_images_as_pixels() {
+    use base64::Engine;
+
+    let files = Arc::new(StoredImages::default());
+    let stored = |id: &str| ContentBlock::Image {
+        source: ImageSource {
+            source_type: ImageSourceType::File,
+            media_type: "image/png".into(),
+            file_id: Some(id.into()),
+            data: None,
+            url: None,
+        },
+    };
+    let attachment = stored("attachment.png");
+    let tool_image = stored("tool.png");
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let mut builder = builder(
+        Arc::new(RecordingModel(requests.clone())),
+        Arc::new(Screenshot(vec![tool_image])),
+    );
+    builder.process_value(Arc::new(SessionFiles(files.clone())));
+    let agent = MinimalHost::start(&builder).await.unwrap();
+    let session = agent
+        .create_session(SessionConfig {
+            tools: Some(vec!["shot".into()]),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(TOOL_IMAGE)
+        .unwrap();
+    for name in ["attachment.png", "tool.png"] {
+        files
+            .put(
+                session.id().into(),
+                name.into(),
+                bytes.clone(),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+    }
+    let mut model = model_with_vision("vision", true);
+    model.metadata = Some(RequestMetadata {
+        session_id: Some(session.id().into()),
+        ..Default::default()
+    });
+    session
+        .configure(
+            ConfigureUpdate {
+                model: Some(model),
+                ..Default::default()
+            },
+            "main",
+        )
+        .await
+        .unwrap();
+    session
+        .input(
+            InputMessageData {
+                user: Some(UserInput {
+                    content: vec![attachment],
+                }),
+                mode: Some(InputMode::Queue),
+                ..Default::default()
+            },
+            "main",
+        )
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    session
+        .submit("tool:shot {}".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+
+    let sent = requests.lock().unwrap().last().unwrap().clone();
+    let mut user_images = Vec::new();
+    let mut tool_images = Vec::new();
+    for message in &sent.messages {
+        let MessageContent::Parts(parts) = &message.content else {
+            continue;
+        };
+        for part in parts {
+            match part {
+                MessagePart::Image { source } => user_images.push(source.clone()),
+                MessagePart::ToolResult {
+                    content: ToolContent::Blocks(blocks),
+                    ..
+                } => tool_images.extend(blocks.iter().filter_map(|block| match block {
+                    ContentBlock::Image { source } => Some(source.clone()),
+                    _ => None,
+                })),
+                _ => {}
+            }
+        }
+    }
+    let pixels = |sources: &[ImageSource], from: &str| {
+        assert_eq!(sources.len(), 1, "{from} is sent");
+        let source = &sources[0];
+        assert_eq!(
+            source.source_type,
+            ImageSourceType::Base64,
+            "{from} is resolved to pixels: {source:?}"
+        );
+        assert_eq!(
+            source.data.as_deref(),
+            Some(TOOL_IMAGE),
+            "{from} carries its file bytes: {source:?}"
+        );
+        assert!(
+            source.file_id.is_none(),
+            "{from} carries no file id: {source:?}"
+        );
+    };
+    pixels(&user_images, "the stored attachment");
+    pixels(&tool_images, "the stored tool image");
+    let texts = sent_texts(&sent);
+    assert!(
+        !texts
+            .iter()
+            .any(|text| text.starts_with("img:") || text.starts_with("[Image omitted")),
+        "no reference or placeholder replaces a pixel: {texts:?}"
+    );
+    agent.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn replacing_a_tool_image_preserves_other_messages_and_the_stored_result() {
     for vision in [false, true] {

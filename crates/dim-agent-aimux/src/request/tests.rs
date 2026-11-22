@@ -868,7 +868,7 @@ async fn a_gif_image_reaches_gemini_as_its_reference() {
 }
 
 /// One Bedrock request whose tool result carries a PNG.
-fn bedrock_tool_image_request(model: &str) -> ModelRequest {
+fn bedrock_tool_image_request(model: &str, is_error: bool) -> ModelRequest {
     serde_json::from_value(json!({
         "providerId": "application-alias", "modelId": model,
         "messages": [
@@ -877,7 +877,7 @@ fn bedrock_tool_image_request(model: &str) -> ModelRequest {
                 {"type": "tool_use", "id": "call-1", "name": "read", "input": {}}
             ]},
             {"role": "tool_result", "content": [
-                {"type": "tool_result", "tool_use_id": "call-1", "is_error": false,
+                {"type": "tool_result", "tool_use_id": "call-1", "is_error": is_error,
                  "content": [
                     {"type": "text", "text": "caption"},
                     {"type": "image", "source": {"type": "base64", "mediaType": "image/png", "data": "aGVsbG8="}}
@@ -932,7 +932,7 @@ async fn a_bedrock_tool_image_uses_a_placement_the_model_supports() {
         "us.amazon.nova-pro-v1:0",
         "global.anthropic.claude-haiku-4-5-20251001-v1:0",
     ] {
-        let body = bedrock_capture(bedrock_tool_image_request(model), model).await;
+        let body = bedrock_capture(bedrock_tool_image_request(model, false), model).await;
         let result = bedrock_tool_result(&body);
         assert!(
             result
@@ -947,7 +947,7 @@ async fn a_bedrock_tool_image_uses_a_placement_the_model_supports() {
         "us.meta.llama4-maverick-17b-instruct-v1:0",
         "global.anthropic.claude-opus-5",
     ] {
-        let body = bedrock_capture(bedrock_tool_image_request(model), model).await;
+        let body = bedrock_capture(bedrock_tool_image_request(model, false), model).await;
         let result = bedrock_tool_result(&body);
         assert!(
             result
@@ -966,6 +966,63 @@ async fn a_bedrock_tool_image_uses_a_placement_the_model_supports() {
             "the image takes a supported placement instead: {body}"
         );
     }
+}
+
+/// A Bedrock model outside the ones that take images inside `toolResult`
+/// keeps an error result's status and sends its image in the user message
+/// after the result.
+#[tokio::test]
+async fn a_bedrock_error_tool_image_keeps_the_error_status_and_moves_the_image() {
+    let model = "test-model";
+    let request = bedrock_tool_image_request(model, true);
+    let prepared = convert(&request, &ProviderKind::Bedrock, None).unwrap();
+    let LanguageModelMessage::Tool { content, .. } = &prepared.options.prompt[2] else {
+        panic!("the third message is the tool result")
+    };
+    let [ToolPart::ToolResult(result)] = content.as_slice() else {
+        panic!("one tool result")
+    };
+    let Some(LanguageModelMessage::User { content, .. }) = prepared.options.prompt.get(3) else {
+        panic!("the image follows in a user message")
+    };
+    assert!(
+        content.iter().any(|part| matches!(part, UserPart::File(_))),
+        "the image follows in a user message: {content:?}"
+    );
+    assert!(
+        matches!(&result.output, ToolResultOutput::ErrorText { .. }),
+        "the result keeps its error status: {:?}",
+        result.output
+    );
+
+    let body = bedrock_capture(request, model).await;
+    let messages = body["messages"].as_array().unwrap();
+    let index = messages
+        .iter()
+        .position(|message| {
+            message["content"]
+                .as_array()
+                .is_some_and(|parts| parts.iter().any(|part| part.get("toolResult").is_some()))
+        })
+        .expect("the request carries a tool result");
+    let content = messages[index]["content"].as_array().unwrap();
+    let tool = content
+        .iter()
+        .position(|part| part.get("toolResult").is_some())
+        .unwrap();
+    let result = &content[tool]["toolResult"];
+    assert_eq!(result["status"], json!("error"), "{body}");
+    assert_eq!(
+        result["content"],
+        json!([{"text": format!("caption{TOOL_IMAGE_MARKER}")}]),
+        "the image leaves the error result: {body}"
+    );
+    assert!(
+        content[tool + 1..]
+            .iter()
+            .any(|part| part.get("image").is_some()),
+        "the image follows the result in a user message: {body}"
+    );
 }
 
 /// A stored reply, the only varying input of #1038's switch table.
