@@ -3473,7 +3473,7 @@ const IDENTITY_ENTRY: &str = r#"<dim-branch-line branch="C" parent="P" source="t
 /// a line that opened lines.
 const ROSTER_ENTRY: &str = r#"<dim-branch-lines branch="O">: the lines you opened, under the key `branch:roster` and apart from your own identity under `branch:line`: the runtime lists the tool lines you opened that are still open, each with the first line of its purpose. A later block of this name replaces the earlier one; it is state about the lines, not a request."#;
 
-/// The roster's closing sentence, coordination text for `main`
+/// The roster's closing sentence, coordination text for an opener
 /// ([timeline branches §12.4](../../../docs/design/timeline-branches.md#124-texts-and-their-classes)),
 /// replaceable at [`BranchToolConfig::roster_closing`].
 const ROSTER_CLOSING: &str = "They message you when they find something, need you, or end. Use the branch tool to message or read them, and the `wait` tool to wait for them; end the wait when your lines have nothing left to tell you.";
