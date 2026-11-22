@@ -189,6 +189,17 @@ export type HostPlatformError =
   | "closed"
   | { failed: string }
 
+/** A request to compose the PATH a child process gets. */
+export type ChildPathRequest = {
+  directories: string[]
+  base: string
+}
+
+/** A request to remove a persistent-shell output directory. */
+export type RemoveOutputDirectoryRequest = {
+  path: string
+}
+
 /** A request to run one configured command with stdin. */
 export type SpawnWithStdinRequest = {
   command: string
@@ -352,6 +363,13 @@ export interface HostPlatform {
    * @throws {HostPlatformErrorThrown}
    */
   spawnConfined(request: ConfinedRequest, cancelled: () => void | Promise<void>): Promise<ConfinedReply>
+  /** Composes the PATH a child process gets, as data. */
+  childPath(request: ChildPathRequest): Promise<string | null>
+  /**
+   * Removes a persistent-shell output directory below `execRoot`.
+   * @throws {HostPlatformErrorThrown}
+   */
+  removeOutputDirectory(request: RemoveOutputDirectoryRequest): Promise<void>
   /**
    * Runs one configured command with stdin and returns its bounded result.
    * @throws {HostPlatformErrorThrown}

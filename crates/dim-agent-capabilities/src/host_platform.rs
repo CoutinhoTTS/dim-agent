@@ -466,6 +466,21 @@ pub struct ConfinedReply {
     pub stderr_truncated: bool,
 }
 
+/// A request to compose the PATH a child process gets.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ChildPathRequest {
+    pub directories: Vec<String>,
+    pub base: String,
+}
+
+/// A request to remove a persistent-shell output directory.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RemoveOutputDirectoryRequest {
+    pub path: PathBuf,
+}
+
 /// A request to run one configured command with stdin.
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -717,6 +732,30 @@ impl HostPlatform {
             stdout_truncated: false,
             stderr_truncated: false,
         })
+    }
+
+    /// Composes the PATH a child process gets, as data.
+    pub fn child_path(&self, request: ChildPathRequest) -> Option<String> {
+        self.child_path_process(&request.directories, OsStr::new(&request.base))
+            .and_then(|path| path.to_str().map(str::to_owned))
+    }
+
+    /// Removes a persistent-shell output directory below `execRoot`.
+    pub async fn remove_output_directory(
+        &self,
+        request: RemoveOutputDirectoryRequest,
+    ) -> Result<(), HostPlatformError> {
+        let platform = self.clone();
+        tokio::task::spawn_blocking(move || platform.remove_exec_directory(&request.path))
+            .await
+            .map_err(|error| HostPlatformError::Failed(error.to_string()))?
+            .map_err(|error| {
+                if error.kind() == io::ErrorKind::InvalidInput {
+                    HostPlatformError::Invalid(error.to_string())
+                } else {
+                    HostPlatformError::Failed(error.to_string())
+                }
+            })
     }
 
     /// Runs one configured command with stdin and returns its bounded result.
@@ -1220,7 +1259,7 @@ impl HostPlatform {
     /// appended, so the caller leaves the child's PATH as it is. `base` may be
     /// a login shell's literal `$PATH`, which is only expanded when the
     /// command runs.
-    pub fn child_path(&self, directories: &[String], base: &OsStr) -> Option<OsString> {
+    pub fn child_path_process(&self, directories: &[String], base: &OsStr) -> Option<OsString> {
         let windows = self.os == Os::Windows;
         let bins: Vec<PathBuf> = self
             .installed_toolchains()
@@ -3647,7 +3686,7 @@ mod tests {
         );
         let base = joined(&["/base/a", "/base/b"]);
         let composed = platform
-            .child_path(&["/host/bin".into()], OsStr::new(&base))
+            .child_path_process(&["/host/bin".into()], OsStr::new(&base))
             .unwrap();
         assert_eq!(
             composed.to_str().unwrap(),
@@ -3668,7 +3707,7 @@ mod tests {
             Some(vec![toolchain("/base/a"), toolchain("/runtimes/node/bin")]),
         );
         let base = joined(&["/base/a", "/base/b"]);
-        let composed = platform.child_path(&[], OsStr::new(&base)).unwrap();
+        let composed = platform.child_path_process(&[], OsStr::new(&base)).unwrap();
         assert_eq!(
             composed.to_str().unwrap(),
             joined(&["/base/a", "/base/b", "/runtimes/node/bin"])
@@ -3676,7 +3715,7 @@ mod tests {
         let base = joined(&["/base", "/runtimes/node/bin"]);
         let installed = host_with(&[], Some(vec![toolchain("/runtimes/node/bin")]));
         assert!(
-            installed.child_path(&[], OsStr::new(&base)).is_none(),
+            installed.child_path_process(&[], OsStr::new(&base)).is_none(),
             "a runtime already on the PATH changes nothing"
         );
     }
@@ -3685,12 +3724,12 @@ mod tests {
     fn a_platform_without_the_port_leaves_the_path_as_it_is() {
         assert!(
             host_with(&[], None)
-                .child_path(&[], OsStr::new("/base"))
+                .child_path_process(&[], OsStr::new("/base"))
                 .is_none()
         );
         assert!(
             host_with(&[], Some(vec![]))
-                .child_path(&[], OsStr::new("/base"))
+                .child_path_process(&[], OsStr::new("/base"))
                 .is_none()
         );
     }

@@ -1498,3 +1498,67 @@ async fn the_host_platform_service_runs_a_confined_helper() {
     assert_eq!(reply.stderr, "ZXJy");
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[tokio::test]
+async fn the_host_platform_service_removes_output_and_composes_a_path() {
+    let dir = std::env::temp_dir().join(unique("dim-host-remove"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let root = rutis::Ctx::root_with(tokio::runtime::Handle::current());
+    let catalog = dim_agent_capabilities::catalog();
+    let build = Default::default();
+    let names = dim_agent_runtime::Names::copy(&catalog, &build);
+    let _execution = root
+        .provide(ExecutionSettingsHost::fixed(Default::default()))
+        .unwrap();
+    let _toolchain = root.provide(ToolchainSourceHost::fixed(vec![])).unwrap();
+    let plugin = root.plugin(
+        HostPlatformPlugin::new(
+            &names,
+            HostPlatformConfig {
+                execution: names.key().unwrap(),
+                toolchain: names.key().unwrap(),
+                exec_shell_file: None,
+                command_files: None,
+                home: Some(dir.clone()),
+            },
+        )
+        .unwrap(),
+    );
+    (&plugin).await.unwrap();
+    let platform = root.get::<HostPlatform>().unwrap();
+    let output = dir.join(".dim/exec/session/branch");
+    std::fs::create_dir_all(&output).unwrap();
+    std::fs::write(output.join("command.log"), b"output").unwrap();
+    platform
+        .remove_output_directory(RemoveOutputDirectoryRequest {
+            path: output.clone(),
+        })
+        .await
+        .unwrap();
+    assert!(!output.exists());
+    let bin = dir.join("runtimes/bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let with_toolchain = toolchain_platform(
+        &[("PATH", "/bin")],
+        vec![InstalledToolchain {
+            bin,
+            root: dir.join("runtimes"),
+        }],
+    );
+    let path = with_toolchain
+        .child_path(ChildPathRequest {
+            directories: vec!["/opt/dim".into()],
+            base: "/bin".into(),
+        })
+        .unwrap();
+    assert!(path.contains("/opt/dim"));
+    assert!(path.contains("/bin"));
+    let refused = platform
+        .remove_output_directory(RemoveOutputDirectoryRequest {
+            path: dir.join(".dim/exec"),
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(refused, HostPlatformError::Invalid(_)));
+    std::fs::remove_dir_all(dir).unwrap();
+}
