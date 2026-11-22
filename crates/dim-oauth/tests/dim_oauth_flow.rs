@@ -6,7 +6,7 @@
 mod oauth;
 
 use dim_agent_capabilities::{
-    file_storage::{FileStorage, FileStoragePlugin},
+    file_storage::{FileStorage, FileStorageError, FileStoragePlugin},
     host::{
         HostError, HostFuture, ModalityConnectionHost, ModalityTarget, ModelConnection,
         ModelDriver, ModelHost, ModelProtocol, ModelStream, ProviderConnectionResolver,
@@ -19,7 +19,7 @@ use dim_agent_types::{
 };
 use dim_app_server::{
     managed_provider::{
-        AccountSnapshot, ManagedModel, ManagedProviderBinding, ManagedProviders,
+        AccountSnapshot, ManagedModel, ManagedProvider, ManagedProviderBinding, ManagedProviders,
         ManagedProvidersPlugin,
         management::{
             BrowserLoginBegin, LoginBegin, LoginState, ManagedBrowserLoginComplete,
@@ -602,6 +602,139 @@ async fn a_completed_login_attempt_does_not_reenable_search_after_logout() {
     assert!(
         !providers.usable(),
         "polling a completed attempt must not re-enable the account"
+    );
+    root.shutdown().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// A signed-in `auth.json`, as a completed login in another process leaves
+/// it.
+async fn signed_in_record(fixture: &oauth::Fixture) -> Vec<u8> {
+    let source = home();
+    let Process { root, providers } = process(&source).await;
+    login(&providers, &fixture.base).await;
+    let bytes = std::fs::read(source.join("auth.json")).unwrap();
+    root.shutdown().await.unwrap();
+    std::fs::remove_dir_all(source).unwrap();
+    bytes
+}
+
+/// A signed-out `auth.json` a host without Dim's writer may leave.
+fn signed_out_record() -> Vec<u8> {
+    serde_json::to_vec_pretty(&json!({
+        "dimAccountState": {
+            "schemaVersion": 1,
+            "credentialEpoch": uuid::Uuid::new_v4().to_string(),
+            "generation": 1,
+            "credentialRevision": 1,
+            "state": "signed_out",
+        }
+    }))
+    .unwrap()
+}
+
+/// Another process's login and logout reach this process's published account
+/// at its next account read, in both directions.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn account_reads_follow_another_process_writes() {
+    let fixture = oauth::start().await;
+    let home = home();
+    let first = process(&home).await;
+    let second = process(&home).await;
+    let service = second.root.get::<dyn ManagedProvider>().unwrap();
+    let mut account = service.subscribe_account().unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while *account.borrow_and_update() != Some(false) {
+            account.changed().await.unwrap();
+        }
+    })
+    .await
+    .expect("the empty account file was not initialized");
+    assert!(!second.providers.usable());
+
+    login(&first.providers, &fixture.base).await;
+    assert!(
+        !second.providers.usable(),
+        "another process's login must not move this watch by itself"
+    );
+    second.providers.status(PROVIDER, &cancel()).await.unwrap();
+    await_usable(&second.providers, true).await;
+
+    first.providers.logout(PROVIDER, &cancel()).await.unwrap();
+    assert!(
+        second.providers.usable(),
+        "another process's logout must not move this watch by itself"
+    );
+    second.providers.status(PROVIDER, &cancel()).await.unwrap();
+    await_usable(&second.providers, false).await;
+
+    first.root.shutdown().await.unwrap();
+    second.root.shutdown().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// An account read that waits for the account lease must publish what the
+/// store holds when it reads: a logout that commits meanwhile is not reopened
+/// by the observation it saw first.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_read_waiting_for_the_store_does_not_reopen_search_after_a_logout() {
+    let fixture = oauth::start().await;
+    let record = signed_in_record(&fixture).await;
+    let home = home();
+    std::fs::write(home.join("auth.json"), b"{").unwrap();
+    let Process { root, providers } = process(&home).await;
+    std::fs::write(home.join("auth.json"), record.clone()).unwrap();
+    providers.status(PROVIDER, &cancel()).await.unwrap();
+    await_usable(&providers, true).await;
+    providers.logout(PROVIDER, &cancel()).await.unwrap();
+    await_usable(&providers, false).await;
+
+    // Another process signs in while this store's watch stays withdrawn.
+    std::fs::write(home.join("auth.json"), record).unwrap();
+    assert!(!providers.usable());
+    let files = root.get::<FileStorage>().unwrap();
+    let path = files.path(0, "auth.json").unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let held = loop {
+        match files.lock(&path, &cancel()).await {
+            Ok(lease) => break lease,
+            Err(FileStorageError::Locked) => {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "the account lease stayed held"
+                );
+                tokio::task::yield_now().await;
+            }
+            Err(error) => panic!("the account lease failed: {error}"),
+        }
+    };
+    let reading = tokio::spawn({
+        let providers = providers.clone();
+        async move { providers.status(PROVIDER, &cancel()).await }
+    });
+    // The read reaches the store while the lease is held; it must wait for the
+    // lease before answering, not return the snapshot it read first.
+    for _ in 0..1_000 {
+        if reading.is_finished() {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        !reading.is_finished(),
+        "a status read must wait for the account lease before answering"
+    );
+    // The logout lands while the read waits for the account lease.
+    std::fs::write(home.join("auth.json"), signed_out_record()).unwrap();
+    drop(held);
+    let status = reading.await.unwrap().unwrap();
+    assert!(
+        status.account.is_none(),
+        "the read must answer from the store it read under the lease"
+    );
+    assert!(
+        !providers.usable(),
+        "an earlier read must not reopen search after a logout"
     );
     root.shutdown().await.unwrap();
     std::fs::remove_dir_all(home).unwrap();

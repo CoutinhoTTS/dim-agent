@@ -334,8 +334,8 @@ fn document(bytes: &[u8]) -> Result<Doc> {
 struct AuthFile {
     lease: FileLease,
     /// The owner's read of whether the file stores a signed-in account, moved
-    /// after every write of this file. `None` until an observation initializes
-    /// it.
+    /// by every observation made under this lease: a write, or a status read
+    /// of the file. `None` until an observation initializes it.
     account: watch::Sender<Option<bool>>,
 }
 impl AuthFile {
@@ -356,10 +356,17 @@ impl AuthFile {
             .replace(bytes, private_permissions(), &CancellationToken::new())
             .await
             .map_err(file_error)?;
+        self.publish(doc);
+        Ok(())
+    }
+    /// Publishes the signed-in state of a document this lease read or wrote.
+    /// The publication and the read share the lease, so a write that waits
+    /// for it publishes after this observation and one that held it earlier
+    /// is what the read saw.
+    fn publish(&self, doc: &Doc) {
         if let Some(signed_in) = signed_in(doc) {
             self.account.send_replace(Some(signed_in));
         }
-        Ok(())
     }
     /// Drops a stored client secret and moves a legacy `dimcode.cn` grant to
     /// `dimagent.cn`, advancing the revision when the grant changes.
@@ -473,9 +480,7 @@ impl Store {
             doc.insert(STATE.into(), signed_out(None, false)?);
             file.write(&doc).await?;
         }
-        if let Some(signed_in) = signed_in(&doc) {
-            self.account.send_replace(Some(signed_in));
-        }
+        file.publish(&doc);
         Ok(())
     }
     /// Stops lock acquisition. A transaction that holds the lock still
@@ -569,11 +574,37 @@ impl Store {
         }))
     }
 
+    /// The `account.status` read. A read that changes the published
+    /// observation takes the account lease, so a newer write or logout
+    /// publishes after it and an uninitialized watch is recovered from the
+    /// store it reads.
     pub async fn status(&self) -> Result<AccountSnapshot> {
+        if let Some(status) = self.current_status().await {
+            let status = status?;
+            if *self.account.borrow() == Some(status.account.is_some()) {
+                return Ok(status);
+            }
+        }
+        let mut file = self.open(None).await?;
+        self.status_in(&mut file).await
+    }
+
+    /// The stored account for internal readers. A record that needs no rewrite
+    /// answers from the lease-free read, so a fresh credential lookup is not
+    /// held up by another process's account lease; a rewrite still takes the
+    /// lease and publishes that observation.
+    pub(super) async fn read_status(&self) -> Result<AccountSnapshot> {
         if let Some(status) = self.current_status().await {
             return status;
         }
         let mut file = self.open(None).await?;
+        self.status_in(&mut file).await
+    }
+
+    /// Reads the account under `file`'s lease, normalizing or writing a
+    /// signed-out record, and publishes the observation before the lease is
+    /// released.
+    async fn status_in(&self, file: &mut AuthFile) -> Result<AccountSnapshot> {
         let (mut doc, _) = file.read().await?;
         file.normalize(&mut doc).await?;
         // No Dim record at all, even beside other owners' records, is signed
@@ -582,7 +613,9 @@ impl Store {
             doc.insert(STATE.into(), signed_out(None, false)?);
             file.write(&doc).await?;
         }
-        snapshot(&doc)
+        let status = snapshot(&doc)?;
+        file.publish(&doc);
+        Ok(status)
     }
 
     pub async fn login_revision(&self) -> Result<Revision> {
@@ -819,5 +852,70 @@ impl Store {
         doc.insert(STATE.into(), state);
         file.write(&doc).await?;
         snapshot(&doc)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dim_agent_capabilities::file_storage::FileStoragePlugin;
+    use rutis::Ctx;
+    use rutis::host::CtxHost;
+    use std::path::Path;
+
+    async fn storage(home: &Path) -> (Ctx, Arc<FileStorage>) {
+        let root = Ctx::root().unwrap();
+        let view = root.plugin(FileStoragePlugin::new(vec![home.to_path_buf()]));
+        view.running(Duration::from_secs(10)).await.unwrap();
+        let files = root.get::<FileStorage>().unwrap();
+        (root, files)
+    }
+
+    fn signed_in_document() -> Value {
+        let identity = Identity {
+            issuer: "https://accounts.example".into(),
+            subject: "subject".into(),
+            email: None,
+            name: None,
+        };
+        let tokens = validate_tokens(&json!({
+            "type": "oauth",
+            "access": "access",
+            "refresh": "refresh",
+            "clientId": "client",
+            "issuer": identity.issuer,
+            "tokenEndpoint": "https://accounts.example/token",
+            "relayBaseUrl": "https://relay.example",
+            "expires": now() + 3_600_000,
+        }))
+        .unwrap();
+        let state = authenticated(Uuid::new_v4().to_string(), 1, 1, &identity, &tokens).unwrap();
+        json!({"nextApiOauth": Value::Object(tokens.0), "dimAccountState": state})
+    }
+
+    /// A store whose initializer never read the file still publishes its first
+    /// successful account read, so a failed assembly read does not hide a
+    /// signed-in account until the next write.
+    #[tokio::test]
+    async fn a_status_read_publishes_an_uninitialized_account_watch() {
+        let home = std::env::temp_dir().join(format!("do-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&home).unwrap();
+        let home = home.canonicalize().unwrap();
+        std::fs::write(
+            home.join("auth.json"),
+            serde_json::to_vec_pretty(&signed_in_document()).unwrap(),
+        )
+        .unwrap();
+        let (root, files) = storage(&home).await;
+        let store = Store::new(files, 0, Client::new());
+        assert_eq!(*store.account.borrow(), None);
+        assert!(store.status().await.unwrap().account.is_some());
+        assert_eq!(
+            *store.account.borrow(),
+            Some(true),
+            "the status read must publish the account it read"
+        );
+        root.shutdown().await.unwrap();
+        std::fs::remove_dir_all(home).unwrap();
     }
 }

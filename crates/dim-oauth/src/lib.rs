@@ -800,7 +800,7 @@ impl Inner {
         if cancel.is_cancelled() {
             return Err(ManagedError::Cancelled);
         }
-        let account = self.store.status().await?;
+        let account = self.store.read_status().await?;
         let (waiter, mut receiver) = {
             let closed = self.closed.lock().unwrap();
             if *closed {
@@ -884,7 +884,7 @@ impl Inner {
             return Err(rejected(status, &body));
         }
         let models = models::project_models(&body, self.bundled())?;
-        let account = self.store.status().await?;
+        let account = self.store.read_status().await?;
         if !same_account(&grant.account, &account) {
             return Err(ManagedError::AccountChanged);
         }
