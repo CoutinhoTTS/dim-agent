@@ -19,12 +19,12 @@ type SessionCommands = {
   compact?: () => Promise<void>
   usage?: () => Promise<void>
   fork?: () => Promise<void>
-  /** Receives the words after `/goal`; empty shows the goal. */
-  goal?: (words: string) => Promise<void>
-  /** Receives the words after `/loop`; empty lists the line's loops. */
-  loop?: (words: string) => Promise<void>
-  /** Receives the words after `/effort`; empty lists the choices. */
-  effort?: (words: string) => Promise<void>
+  /** Receives the words after `/goal` and the line the draft was written on; empty shows the goal. */
+  goal?: (words: string, branchId: string) => Promise<void>
+  /** Receives the words after `/loop` and the line the draft was written on; empty lists the line's loops. */
+  loop?: (words: string, branchId: string) => Promise<void>
+  /** Receives the words after `/effort` and the line the draft was written on; empty lists the choices. */
+  effort?: (words: string, branchId: string) => Promise<void>
 }
 
 /**
@@ -40,6 +40,12 @@ const props = withDefaults(defineProps<{
   stopping?: boolean
   /** The line this composer writes to; the send-now gesture belongs to it from start to finish. */
   branchId?: string
+  /**
+   * The centre as it is now, read at dispatch: a prompt that took the composer's
+   * place caches it, so its props keep the line it was hidden on while the page
+   * knows the live one.
+   */
+  centre?: () => string
   model: ModelId | undefined
   /**
    * The new Session's model resolution: the state the menu shows and the two
@@ -445,6 +451,15 @@ async function submit(sendMode: SubmitMode = primaryMode.value): Promise<void> {
     error.value = t("composer.stillStopping")
     return
   }
+  // Every branch-scoped submit — a message, a recalled draft, a `/goal`,
+  // `/loop` or `/effort` — belongs to the line it was written on. A prompt can
+  // cache this composer while the centre moves, so the live centre is asked
+  // once here, before a command parses or a draft is cleared; a refusal keeps
+  // the draft whole (design §14).
+  if (props.centre !== undefined && props.branchId !== undefined && props.centre() !== props.branchId) {
+    error.value = t("composer.sendNowMoved")
+    return
+  }
   if (commandMode.value) {
     const row = menuRows.value[activeIndex.value]
     if (row?.kind === "skill") completeSkill(row.name.slice(SKILL_TOKEN_PREFIX.length))
@@ -468,7 +483,7 @@ async function submit(sendMode: SubmitMode = primaryMode.value): Promise<void> {
     text.value = ""
     await nextTick()
     resize()
-    await goal(goalCommand[1]?.trim() ?? "")
+    await goal(goalCommand[1]?.trim() ?? "", line ?? "")
     return
   }
   const loop = props.sessionCommands?.loop
@@ -477,7 +492,7 @@ async function submit(sendMode: SubmitMode = primaryMode.value): Promise<void> {
     text.value = ""
     await nextTick()
     resize()
-    await loop(loopCommand[1]?.trim() ?? "")
+    await loop(loopCommand[1]?.trim() ?? "", line ?? "")
     return
   }
   const effort = props.sessionCommands?.effort
@@ -486,7 +501,7 @@ async function submit(sendMode: SubmitMode = primaryMode.value): Promise<void> {
     text.value = ""
     await nextTick()
     resize()
-    await effort(effortCommand[1]?.trim() ?? "")
+    await effort(effortCommand[1]?.trim() ?? "", line ?? "")
     return
   }
   sending.value = true

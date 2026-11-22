@@ -1360,6 +1360,74 @@ describe("chat store moves", () => {
     expect(chat.views["s-1"]!.defaultBranchId).toBe("worker")
   })
 
+  it("does not let a live permission event undo a newer write on the same line", async () => {
+    const pinia = stores(LINE_FEATURES, null)
+    serveChat({
+      "session.permission.get": () => permission("read-only", 6),
+      "session.permission.update": () => ({ version: 8 }),
+    })
+    const chat = useChatStore(pinia)
+    chat.open("s-1")
+    await vi.waitFor(() => expect(chat.views["s-1"]?.status).toBe("ready"))
+    expect(chat.views["s-1"]!.permission?.preset).toBe("read-only")
+    expect(chat.views["s-1"]!.permissionVersion).toBe(6)
+
+    await expect(chat.setPermission("s-1", "full-access")).resolves.toBe("updated")
+    expect(chat.views["s-1"]!.permission?.preset).toBe("full-access")
+    expect(chat.views["s-1"]!.permissionVersion).toBe(8)
+
+    // The event was queued before the write and reaches the store after it.
+    chat.receive(readNotification("session.event", {
+      sessionId: "s-1",
+      branchId: "main",
+      event: { id: "e6", sequence: 6, create_at: 1, type: "permission", name: "changed", data: { policy: { preset: "read-only", allowedTools: [], disallowedTools: [] } } },
+    })!)
+    await settle()
+    expect(chat.views["s-1"]!.permission?.preset).toBe("full-access")
+    expect(chat.views["s-1"]!.permissionVersion).toBe(8)
+  })
+
+  it("keeps a failed goal refresh on the line that issued it", async () => {
+    const pinia = stores(LINE_FEATURES, null)
+    const held: Record<string, { resolve: (value: unknown) => void; reject: (cause: unknown) => void }> = {}
+    let mainReads = 0
+    serveChat({
+      "session.methods": () => ({ methods: [...SESSION_METHODS, "session.goal.get"].map(name => ({ name })) }),
+      "session.goal.set": () => ({ reply: {} }),
+      "session.goal.get": (params) => {
+        if (params.branchId === "worker") return new Promise<unknown>((resolve, reject) => { held.worker = { resolve, reject } })
+        mainReads += 1
+        // The centre's first read finishes the attach; the write's reread is
+        // the one that fails after the centre has moved.
+        return mainReads === 1
+          ? { branchId: params.branchId, through: 5, goal: null }
+          : new Promise<unknown>((resolve, reject) => { held.main = { resolve, reject } })
+      },
+    })
+    const chat = useChatStore(pinia)
+    chat.open("s-1")
+    await vi.waitFor(() => expect(chat.views["s-1"]?.status).toBe("ready"))
+
+    const written = chat.writeGoal("s-1", "set", "root work", "main")
+    await vi.waitFor(() => expect(held.main !== undefined).toBe(true))
+    const moved = chat.setDefaultBranch("s-1", "worker")
+    await moved
+    expect(chat.views["s-1"]!.defaultBranchId).toBe("worker")
+
+    // The outgoing line's read fails only after the centre has moved on; the
+    // refresh the new centre asked for is still pending.
+    held.main!.reject(new Error("the goal read failed"))
+    await vi.waitFor(() => expect(held.worker !== undefined).toBe(true))
+    held.worker!.resolve({ branchId: "worker", through: 5, goal: { objective: "worker work", status: { kind: "active" }, evaluator: false } })
+    await written
+
+    const view = chat.views["s-1"]!
+    expect(view.defaultBranchId).toBe("worker")
+    expect(view.status).toBe("ready")
+    expect(view.error).toBe("")
+    await vi.waitFor(() => expect(view.goal?.objective).toBe("worker work"))
+  })
+
   it("publishes a model update only to the line that issued it", async () => {
     const pinia = stores(LINE_FEATURES, null)
     const held: { resolve?: (value: unknown) => void } = {}

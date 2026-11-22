@@ -61,6 +61,8 @@ const permissionControl = computed(() => {
 })
 const approvalKeyboard = computed(() => ui.approvalKeyboard(props.sessionId, centred.value, centred.value, view.value?.approvals ?? []))
 const composer = ref<InstanceType<typeof ComposerPanel>>()
+/** The centre as it is now, read by a composer a prompt has cached: its props keep the line it was hidden on. */
+const liveCentre = () => centred.value
 const lineCount = computed(() => view.value?.lines.filter((line) => line.id !== ROOT_BRANCH_ID).length ?? 0)
 const linesBusy = computed(() => {
   const approvals = view.value?.approvals ?? []
@@ -190,7 +192,7 @@ function showGoal(current: Goal | undefined): void {
   })
 }
 
-async function goal(words: string): Promise<void> {
+async function goal(words: string, branchId: string): Promise<void> {
   const request = parseGoalRequest(words)
   if (request === undefined) {
     toast.push({ tone: "info", title: t("goal.usage") })
@@ -203,7 +205,7 @@ async function goal(words: string): Promise<void> {
     return
   }
   try {
-    await chat.writeGoal(props.sessionId, call, goalObjective(request))
+    await chat.writeGoal(props.sessionId, call, goalObjective(request), branchId)
     toast.push({ tone: "success", title: t("goal.sent", { action: t(`goal.action.${call}`) }) })
   } catch (cause) {
     failure(cause)
@@ -211,7 +213,7 @@ async function goal(words: string): Promise<void> {
 }
 
 /** `/loop` shows the line's loops, starts one, or stops one, the same forms the terminal client takes. */
-async function loop(words: string): Promise<void> {
+async function loop(words: string, branchId: string): Promise<void> {
   const request = parseLoopRequest(words)
   if (request === undefined) {
     toast.push({ tone: "info", title: t("loop.usage") })
@@ -219,18 +221,18 @@ async function loop(words: string): Promise<void> {
   }
   try {
     if (request.form === "show") {
-      const loops = await chat.readLoops(props.sessionId)
+      const loops = await chat.readLoops(props.sessionId, branchId)
       toast.push({ tone: "info", title: loops.length === 0 ? t("loop.none") : t("loop.listed", { count: loops.length }), description: loopReport(loops).join("\n") })
       return
     }
     if (request.form === "start") {
-      const id = await chat.startLoop(props.sessionId, request.prompt, request.interval === undefined ? undefined : intervalSeconds(request.interval))
+      const id = await chat.startLoop(props.sessionId, request.prompt, request.interval === undefined ? undefined : intervalSeconds(request.interval), branchId)
       toast.push({ tone: "success", title: t("loop.started", { id }) })
       return
     }
     let loopId = request.loopId
     if (loopId === undefined) {
-      const live = (await chat.readLoops(props.sessionId)).filter((entry) => !["stopped", "expired"].includes(entry.state))
+      const live = (await chat.readLoops(props.sessionId, branchId)).filter((entry) => !["stopped", "expired"].includes(entry.state))
       if (live.length !== 1) {
         toast.push({ tone: "info", title: t("loop.noSingle") })
         return
@@ -244,8 +246,8 @@ async function loop(words: string): Promise<void> {
   }
 }
 
-/** `/effort` with no words lists the choices; `/effort VALUE` sets the default branch's reasoning effort. */
-async function effort(words: string): Promise<void> {
+/** `/effort` with no words lists the choices; `/effort VALUE` sets the named line's reasoning effort. */
+async function effort(words: string, branchId: string): Promise<void> {
   const choices = effortChoices.value
   const value = words.trim()
   if (choices === undefined) {
@@ -265,7 +267,7 @@ async function effort(words: string): Promise<void> {
     return
   }
   try {
-    const outcome = await chat.setEffort(props.sessionId, value)
+    const outcome = await chat.setEffort(props.sessionId, value, branchId)
     toast.push({ tone: "success", title: t("command.effortSet", { outcome, value }) })
   } catch (cause) {
     failure(cause)
@@ -420,6 +422,7 @@ async function fork(): Promise<void> {
         :open-lines="branchable ? () => ui.openLines(sessionId) : undefined"
         :session-commands="sessionCommands"
         :skills="skills"
+        :centre="liveCentre"
       />
     </KeepAlive>
   </section>

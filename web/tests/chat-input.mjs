@@ -94,6 +94,7 @@ function mount(t, branchId, questions = [], component, stores = {}, props = {}, 
   globalThis.chatInputNavigations = []
   globalThis.chatInputStops = []
   globalThis.chatInputWithdrawals = []
+  globalThis.chatInputCommands = []
   const view = sharedView ?? reactive({
     status: "ready", rows: [], running: true, stopping: false, sessionRunning: true,
     approvals: [], questions, methods: ["attachment.put", "session.files.search"], queued: [],
@@ -194,7 +195,7 @@ test("permission changes refresh live presets and conflicts without retrying or 
   const initial = { preset: "read-only", allowedTools: [], disallowedTools: ["exec"] }
   const { chat, server, option } = await permissionSession(t, initial)
   const remote = { ...initial, preset: "full-access" }
-  chat.receive(readNotification("session.event", { sessionId: "session", branchId: "main", event: { id: "remote", sequence: 1, create_at: 1, type: "permission", name: "changed", data: { policy: remote } } }))
+  chat.receive(readNotification("session.event", { sessionId: "session", branchId: "main", event: { id: "remote", sequence: 4, create_at: 1, type: "permission", name: "changed", data: { policy: remote } } }))
   await new Promise((resolve) => setTimeout(resolve, 20)); await flush()
   assert.deepEqual(chat.views.session.permission, remote)
   assert.equal(option("composer.permission.preset.full-access").props["aria-pressed"], true)
@@ -836,6 +837,49 @@ test("interrupt and send now keeps its draft when the centre moves while a promp
   assert.equal(back.value, "carry on", "the whole draft is kept")
   assert.match(text(root), /composer\.sendNowMoved/, "the composer says why nothing was sent")
 })
+
+for (const [draft, action] of [["/goal carry on", "writeGoal"], ["/loop carry on", "startLoop"], ["/effort low", "setEffort"]]) {
+  test(`${draft}: a branch command drafted before a move is cancelled and its draft kept`, async (t) => {
+    let releaseStop
+    const stopGate = new Promise((resolve) => { releaseStop = resolve })
+    const { root, view, submissions } = mount(t, "main")
+    const chat = globalThis.chatInputStores.chat
+    view.defaultBranchId = "main"
+    view.methods = [...view.methods, "session.goal.set", "session.loop.start"]
+    view.model = { providerId: "test", modelId: "model" }
+    chat[action] = async (...args) => { globalThis.chatInputCommands.push([action, ...args]) }
+    globalThis.chatInputStores.models.available = true
+    globalThis.chatInputStores.models.providers = [{ providerId: "test", models: [{ id: "model", reasoningEfforts: ["low", "high"] }] }]
+    chat.stop = async (sessionId, branch) => {
+      globalThis.chatInputStops.push({ sessionId, branch })
+      await stopGate
+    }
+    await flush()
+    const field = all(root).find((element) => element.type === "textarea")
+    field.props.onFocus()
+    field.props["onUpdate:modelValue"](draft)
+    await flush()
+
+    const gesture = click(button(root, "composer.sendNowHint"))
+    await flush()
+    assert.deepEqual(globalThis.chatInputStops, [{ sessionId: "session", branch: "main" }], "the stop belongs to the line the gesture started on")
+
+    view.defaultBranchId = "worker"
+    const prompts = promptTakes.approval(view, "worker")
+    await prompts.take()
+    assert.equal(all(root).some((element) => element.type === "textarea"), false, "the approval takes the composer's place")
+    releaseStop()
+    await gesture
+    await flush()
+
+    assert.deepEqual(globalThis.chatInputCommands, [], `the command is not dispatched on the line the centre moved to`)
+    assert.deepEqual(submissions, [], "the draft is not sent to the line the centre moved to")
+    await prompts.clear()
+    const back = all(root).find((element) => element.type === "textarea")
+    assert.equal(back.value, draft, "the whole draft is kept")
+    assert.match(text(root), /composer\.sendNowMoved/, "the composer says why nothing ran")
+  })
+}
 
 for (const [branchId, kind] of [["main", "question"], ["main", "approval"], ["worker", "question"], ["worker", "approval"]]) {
   test(`${kind} on ${branchId}: a prompt that takes the composer's place keeps a withdrawn draft through a failed stop`, async (t) => {

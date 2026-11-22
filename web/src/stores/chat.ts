@@ -106,6 +106,8 @@ type Channel = {
   historyRunning: boolean
   goalRefreshing: boolean
   goalDirty: boolean
+  /** The centre whose goal a pending refresh reads; a read in flight belongs to an earlier line. */
+  goalLine: string
   publishTimer: ReturnType<typeof setTimeout> | undefined
 }
 
@@ -173,7 +175,7 @@ export const useChatStore = defineStore("chat", () => {
       queued: [],
       historyQueue: [],
       historyRunning: false,
-      goalRefreshing: false, goalDirty: false,
+      goalRefreshing: false, goalDirty: false, goalLine: ROOT_BRANCH_ID,
       publishTimer: undefined,
     }
     channel.main.opened = true
@@ -378,8 +380,7 @@ export const useChatStore = defineStore("chat", () => {
     if (applied.kind === "turn-end" || ((applied.kind === "model-end" || applied.kind === "tool-use-start" || applied.kind === "tool-use") && applied.requestId === stream.progress?.requestId)) stream.progress = undefined
     if (event.content.kind === "branch-create") ensureBranch(channel, event.content.branchId)
     if (branchId === channel.view.defaultBranchId && event.content.kind === "permission-changed") {
-      channel.view.permission = event.content.policy
-      channel.view.permissionVersion = event.sequence
+      showPermission(channel.view, branchId, { policy: event.content.policy, version: event.sequence })
     }
     if (branchId === channel.view.defaultBranchId && (applied.kind === "input-deleted" || ((applied.kind === "input" || applied.kind === "source-input") && applied.blocks.some(block => block.key?.startsWith("goal:"))))) void refreshGoal(channel)
     changed(channel)
@@ -482,20 +483,34 @@ export const useChatStore = defineStore("chat", () => {
     if (!channel.states.has(branchId)) channel.states.set(branchId, { running: turn.turn !== undefined && !turn.turn.ended, stopping: false })
   }
 
-  async function refreshGoal(channel: Channel): Promise<void> {
+  /**
+   * Reads `branchId`'s goal, which defaults to the centre at the call. The read
+   * belongs to the line it names, and a failure belongs to it too: a line that
+   * left the centre publishes nothing, and the centre that replaced it keeps
+   * the refresh it already asked for.
+   */
+  async function refreshGoal(channel: Channel, branchId = channel.view.defaultBranchId): Promise<void> {
     if (!channel.view.methods.includes("session.goal.get")) return
     channel.goalDirty = true
+    channel.goalLine = branchId
     if (channel.goalRefreshing) return
     channel.goalRefreshing = true
     try {
       while (channel.goalDirty) {
         channel.goalDirty = false
-        channel.main.projection.goal = await client().call("session.goal.get", { sessionId: channel.view.sessionId, branchId: channel.view.defaultBranchId }, readGoal)
-        changed(channel)
+        const line = channel.goalLine
+        try {
+          const goal = await client().call("session.goal.get", { sessionId: channel.view.sessionId, branchId: line }, readGoal)
+          if (channel.view.defaultBranchId !== line) continue
+          channel.main.projection.goal = goal
+          changed(channel)
+        } catch (error) {
+          if (channel.view.defaultBranchId !== line) continue
+          channel.view.status = "failed"
+          channel.view.error = error instanceof Error ? error.message : String(error)
+          return
+        }
       }
-    } catch (error) {
-      channel.view.status = "failed"
-      channel.view.error = error instanceof Error ? error.message : String(error)
     } finally {
       channel.goalRefreshing = false
     }
@@ -865,29 +880,29 @@ export const useChatStore = defineStore("chat", () => {
     return client().call("session.context.compact", { sessionId, branchId: defaultBranch(sessionId) }, readCompactResult)
   }
 
-  /** Writes the centred line's goal through `session.goal.<call>`; the goal changes when its events arrive. */
-  async function writeGoal(sessionId: string, call: GoalCall, objective: string | undefined): Promise<void> {
-    await client().call(`session.goal.${call}`, { sessionId, branchId: defaultBranch(sessionId), ...(objective === undefined ? {} : { objective }) }, readAck)
+  /** Writes `branchId`'s goal through `session.goal.<call>`; the goal changes when its events arrive. */
+  async function writeGoal(sessionId: string, call: GoalCall, objective: string | undefined, branchId = defaultBranch(sessionId)): Promise<void> {
+    await client().call(`session.goal.${call}`, { sessionId, branchId, ...(objective === undefined ? {} : { objective }) }, readAck)
     const channel = channels.get(sessionId)
     if (channel !== undefined) {
-      await refreshGoal(channel)
-      if (channel.view.status === "failed") throw new Error(channel.view.error)
+      await refreshGoal(channel, branchId)
+      if (channel.view.defaultBranchId === branchId && channel.view.status === "failed") throw new Error(channel.view.error)
     }
   }
 
-  /** Starts a loop on the centred line and returns its id. */
-  async function startLoop(sessionId: string, prompt: string, everySeconds: number | undefined): Promise<string> {
+  /** Starts a loop on `branchId` and returns its id. */
+  async function startLoop(sessionId: string, prompt: string, everySeconds: number | undefined, branchId = defaultBranch(sessionId)): Promise<string> {
     return await client().call("session.loop.start", {
       sessionId,
-      branchId: defaultBranch(sessionId),
+      branchId,
       prompt,
       ...(everySeconds === undefined ? {} : { everySeconds }),
     }, readStartedLoop)
   }
 
-  /** The centred line's loops, newest first. */
-  async function readLoops(sessionId: string): Promise<Loop[]> {
-    return [...await client().call("session.loop.list", { sessionId, branchId: defaultBranch(sessionId) }, readLoopsReply)]
+  /** `branchId`'s loops, newest first. */
+  async function readLoops(sessionId: string, branchId = defaultBranch(sessionId)): Promise<Loop[]> {
+    return [...await client().call("session.loop.list", { sessionId, branchId }, readLoopsReply)]
   }
 
   /** Stops one loop of the default branch. */
@@ -1039,8 +1054,8 @@ export const useChatStore = defineStore("chat", () => {
     return "updated"
   }
 
-  async function setEffort(sessionId: string, effort: string): Promise<string> {
-    return client().call("session.model.update", { sessionId, branchId: defaultBranch(sessionId), modelPreferences: { reasoningEffort: effort } }, readConfigurationOutcome)
+  async function setEffort(sessionId: string, effort: string, branchId = defaultBranch(sessionId)): Promise<string> {
+    return client().call("session.model.update", { sessionId, branchId, modelPreferences: { reasoningEffort: effort } }, readConfigurationOutcome)
   }
 
   async function setModel(sessionId: string, model: ModelId): Promise<void> {
