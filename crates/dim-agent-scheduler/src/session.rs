@@ -354,9 +354,18 @@ fn loop_listing(records: &[loops::Loop]) -> String {
 
 /// A loop as the model reads it: the wire record with the prompt bounded and
 /// `prompt_truncated` saying so, the way `job_preview` bounds a job's; the wire
-/// itself carries the whole prompt.
-fn loop_preview(record: &loops::Loop) -> Value {
+/// itself carries the whole prompt. `next` and `stop` reach a record by its
+/// Session-wide id, so a loop of another branch answers with its state and
+/// timing only: the prompt belongs to the branch that owns the loop.
+fn loop_preview(record: &loops::Loop, caller: &str) -> Value {
     let mut value = wire_loop(record);
+    if record.branch_id != caller {
+        value
+            .as_object_mut()
+            .expect("wire_loop returns a record")
+            .remove("prompt");
+        return value;
+    }
     let prompt = truncate(&record.prompt, PROMPT_PREVIEW_BYTES);
     value["prompt_truncated"] = json!(prompt.len() < record.prompt.len());
     value["prompt"] = json!(prompt);
@@ -867,7 +876,7 @@ impl ToolHandler for LoopTool {
                         .map(|record| {
                             format!(
                                 "loop: started\n{}\nThe first round is due at {}, in {delay} seconds. It is not delivered now: work that is due now belongs to this turn.",
-                                loop_preview(&record),
+                                loop_preview(&record, &branch_id),
                                 record.next_at.as_deref().unwrap_or_default(),
                             )
                         })
@@ -882,7 +891,7 @@ impl ToolHandler for LoopTool {
                     self.loops
                         .next(&self.session_id, &loop_id, delay)
                         .await
-                        .map(|record| format!("loop: next\n{}", loop_preview(&record)))
+                        .map(|record| format!("loop: next\n{}", loop_preview(&record, &branch_id)))
                         .map_err(|error| format!("loop: {}\n{}", error.code, error.message))
                 }
                 "stop" => {
@@ -893,7 +902,7 @@ impl ToolHandler for LoopTool {
                     self.loops
                         .stop(&self.session_id, &loop_id)
                         .await
-                        .map(|(record, _)| format!("loop: stopped\n{}", loop_preview(&record)))
+                        .map(|(record, _)| format!("loop: stopped\n{}", loop_preview(&record, &branch_id)))
                         .map_err(|error| format!("loop: {}\n{}", error.code, error.message))
                 }
                 "list" => self

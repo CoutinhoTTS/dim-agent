@@ -624,6 +624,8 @@ A fixed cadence needs no such rule: its window is in the record, and a busy bran
 
 The tool and the methods refuse a non-interactive Session and a Collaboration member, as `schedule` and `wakeup` do. `session.loop.start` and `session.loop.list` act on the branch named; one that omits `branchId` reaches the Session's default branch, as does a `loops` or `wakeups` face request that names a Session but no branch (timeline branches §20.22), each read once per request. A round's tools are admitted under the target branch's own Permission state; a loop carries no policy and pre-approves nothing. The record is Scheduler's own business store, and the tool and the methods both reach it through the same typed service: the Session part declares `loops` with `names.key()` and calls the native `Loops` binding directly, while other languages reach the same owner operations through the `loops` data face. The delivery pass, recovery and `settle_delivering` are not on that face.
 
+The model tool's `start`, `next` and `stop` replies carry a UTF-8 prompt preview of at most 4 KiB with an explicit `prompt_truncated` flag, and `list` bounds the prompt it shows. `next` and `stop` reach a loop by its Session-wide id, so a result for another branch's loop carries its state and timing only: the prompt belongs to the branch that owns the loop, while the wire record keeps the whole prompt for clients.
+
 `/loop` reads: `/loop` prints usage and the branch's loops, `/loop <prompt>` starts a self-paced loop, `/loop <interval> <prompt>` starts a fixed one, and `/loop stop [id]` stops one. The interval counts only as the first token and only when it parses; otherwise the whole line is the prompt.
 
 ### 12.7 Rule check
