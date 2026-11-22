@@ -1,6 +1,6 @@
 //! Shared image preparation and content references.
 use base64::Engine;
-use dim_agent_types::{ImageSource, ImageSourceType};
+use dim_agent_types::{ImageSource, ImageSourceType, ModelProtocol};
 use image::{
     AnimationDecoder, DynamicImage, GenericImageView, ImageDecoder, ImageFormat, ImageReader, Rgb,
     RgbImage, codecs::jpeg::JpegEncoder, imageops::FilterType, metadata::Orientation,
@@ -11,6 +11,24 @@ use std::io::{BufRead, Cursor, Read, Seek, SeekFrom};
 /// The placeholder an image the request cannot carry becomes when it has no
 /// content reference.
 const UNSENDABLE: &str = "[Image omitted: the image cannot be sent to this model.]";
+
+/// The image formats Gemini accepts as pixels: its image understanding and
+/// generate-content guides list PNG, JPEG, WebP, HEIC and HEIF, and not GIF.
+const GEMINI_IMAGE_FORMATS: [&str; 5] = [
+    "image/png",
+    "image/jpeg",
+    "image/webp",
+    "image/heic",
+    "image/heif",
+];
+
+/// Whether a destination takes this image format as pixels. Gemini takes the
+/// formats its guides list; every other destination takes every format a
+/// request may carry, and a destination whose protocol is unknown takes them
+/// too (Attachments A.1).
+pub fn takes_image_format(protocol: Option<ModelProtocol>, media_type: &str) -> bool {
+    protocol != Some(ModelProtocol::Gemini) || GEMINI_IMAGE_FORMATS.contains(&media_type)
+}
 
 /// Returns `img:` and the first 16 lowercase SHA-256 hex digits of the
 /// base64-decoded image file bytes, without scaling or re-encoding them.

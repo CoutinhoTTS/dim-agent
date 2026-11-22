@@ -9,11 +9,15 @@
 //! Session parts ([AuxiliaryModel §4.3](../../../docs/design/appserver/auxiliary-model.md#43-named-binding)).
 use crate::host::{
     AuxiliaryError, AuxiliaryErrorCode, AuxiliaryModel, AuxiliaryReply, AuxiliaryRequest,
-    CompleteAuxiliary, HostError, ModelChunk, ModelHost, ModelStopReason, ModelStream,
-    ResolveModelConnection,
+    CompleteAuxiliary, HostError, ModelChunk, ModelConnection, ModelHost, ModelStopReason,
+    ModelStream, ResolveModelConnection,
 };
+use crate::images::takes_image_format;
 use crate::model_provider::invoke_with_recovery;
-use dim_agent_types::{ModelCapabilitySnapshot, ModelConfig, ModelId, ModelRequest, SystemPrompt};
+use dim_agent_types::{
+    ContentBlock, ImageSource, MessageContent, MessagePart, ModelCapabilitySnapshot, ModelConfig,
+    ModelId, ModelProtocol, ModelRequest, SystemPrompt, ToolContent,
+};
 use futures_util::StreamExt;
 use rutis::Ctx;
 use rutis::host::CtxHost;
@@ -81,6 +85,7 @@ pub async fn complete(
     let resolved = connection
         .resolve(model_request.clone(), cancel.clone())
         .await?;
+    require_sendable_images(&model_request, &resolved.connection)?;
     invoke_with_recovery(
         host,
         &model_request,
@@ -92,6 +97,55 @@ pub async fn complete(
     )
     .await
     .map_err(AuxiliaryError::from)
+}
+
+/// A standalone call has no conversation a content reference could resolve
+/// against, so an image the destination does not take as pixels fails the
+/// call instead of becoming a reference the model cannot read.
+fn require_sendable_images(
+    request: &ModelRequest,
+    connection: &ModelConnection,
+) -> Result<(), AuxiliaryError> {
+    let protocol = match connection {
+        ModelConnection::Http(connection) => Some(connection.protocol),
+        ModelConnection::Bedrock(_) => Some(ModelProtocol::Bedrock),
+        ModelConnection::Local => None,
+    };
+    for message in &request.messages {
+        let MessageContent::Parts(parts) = &message.content else {
+            continue;
+        };
+        for part in parts {
+            match part {
+                MessagePart::Image { source } => require_sendable_image(protocol, source)?,
+                MessagePart::ToolResult {
+                    content: ToolContent::Blocks(blocks),
+                    ..
+                } => {
+                    for block in blocks {
+                        if let ContentBlock::Image { source } = block {
+                            require_sendable_image(protocol, source)?;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(())
+}
+
+fn require_sendable_image(
+    protocol: Option<ModelProtocol>,
+    source: &ImageSource,
+) -> Result<(), AuxiliaryError> {
+    if takes_image_format(protocol, &source.media_type) {
+        return Ok(());
+    }
+    Err(AuxiliaryError {
+        code: AuxiliaryErrorCode::InvalidRequest,
+        message: format!("The image model does not accept {}", source.media_type),
+    })
 }
 
 /// Records one finished call under `auxiliary.complete`: provider, model,

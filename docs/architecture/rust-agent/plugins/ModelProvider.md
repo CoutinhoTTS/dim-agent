@@ -9,36 +9,45 @@ settlement and bounded retry/recovery.
 ## Image handling
 
 Every conversational request routes image blocks in user content and tool
-results by the model's vision capability. A vision-capable model, or a request
-whose capability is unknown, receives a sendable image as an image block; a
-model without image input, or an image that cannot be sent, receives a content
-reference or omission placeholder. The routing, reference and placeholder
-rules are owned by
+results by the model's vision capability and the resolved destination's format
+support. A vision-capable model, or a request whose capability is unknown,
+receives a sendable image as an image block when the destination takes its
+format; a model without image input, an image that cannot be sent, or an image
+in a format the destination does not take receives a content reference or
+omission placeholder. The routing, reference and placeholder rules are owned by
 [Attachments A.1](../../../design/plugins/Attachments.md#a1-image-handling-cli-checks-and-modelprovider),
 implemented by [images.rs](../../../../crates/dim-agent-capabilities/src/model_provider/images.rs)
 using the shared `images::image_reference` helper. The transformation changes
 the request only; adopted input, the Timeline and stored tool results never change.
-Auxiliary calls do not pass through ModelProvider, so their image pixels stay intact.
+Auxiliary calls do not pass through ModelProvider, so their image pixels stay
+intact; a target that does not take an image's format fails the call instead of
+turning it into a reference
+([ImageUnderstanding §3](../../../design/plugins/ImageUnderstanding.md#3-references)).
 
-The provider request encoder applies the destination's format and
-message-placement support on top of that rule: Gemini takes no GIF, and a
-Bedrock model outside the ones that support images in `toolResult` receives the
-tool image in the user message after the result. Both decisions stay in the
-encoder; no catalog field states them.
+The destination's format support belongs to that rule: Gemini takes no GIF, so
+a GIF becomes its reference before the encoder and adds nothing to the budget.
+The provider request encoder applies the destination's message-placement
+support: a Bedrock model outside the ones that support images in `toolResult`
+receives the tool image in the user message after the result, and the same
+families are the only ones AWS supports for `toolResult.status`; the other
+Bedrock models carry the outcome in the result text without the field. All of
+these decisions stay in the routing rule and the encoder; no catalog field
+states them.
 
 The adapter selects replacements before copying content. An unchanged request
 keeps its Arc without cloning text, thinking, tool arguments or result blocks.
 When images change, only those messages are copied; other messages stay shared.
 
-Each kept image joins the request's 32 MiB encoded-image aggregate as it is
-added, so an over-budget request fails during adaptation before the remaining
-files are read. The final Aimux boundary reads immutable accepted bytes without
-decoding or rescaling them again and checks the aggregate again. A request
-permits at most 32 MiB of encoded image data, including user and tool-result
-images, and 64 MiB of final HTTP body. Exceeding these limits fails before
-sending the request. Each Aimux generation admits four concurrent request
-preparations and sends; waiting is cancellable and owner shutdown releases the
-waiters. Provider-specific limits still apply.
+Each image the request sends as pixels joins its 32 MiB encoded-image aggregate
+as it is added, so an over-budget request fails during adaptation before the
+remaining files are read. An image that becomes a reference after its file is
+resolved adds no bytes. The final Aimux boundary reads immutable accepted bytes
+without decoding or rescaling them again and checks the aggregate again. A
+request permits at most 32 MiB of encoded image data, including user and
+tool-result images, and 64 MiB of final HTTP body. Exceeding these limits fails
+before sending the request. Each Aimux generation admits four concurrent
+request preparations and sends; waiting is cancellable and owner shutdown
+releases the waiters. Provider-specific limits still apply.
 
 ## Dependencies
 
@@ -183,14 +192,15 @@ load. It does not gate or create a reload relation. A missing file service,
 Session identity or stored image fails a request that needs file bytes, rather
 than inventing a reference or silently omitting it. Cancellation propagates to
 bounded reads with the existing per-file storage limit. The aggregate image-data
-budget applies during adaptation, as each kept image joins the request: a
-reference route carries no image data, so retained images totaling more than
-32 MiB do not block text calls, while a vision request that carries them fails
-during adaptation before the remaining files are read. Aimux's image-consuming
-boundary checks the materialized request again.
+budget applies during adaptation, as each image the request sends as pixels
+joins the request: a reference route carries no image data, so retained images
+totaling more than 32 MiB do not block text calls, while a vision request that
+carries them as pixels fails during adaptation before the remaining files are
+read. Aimux's image-consuming boundary checks the materialized request again.
 
 SessionStore provides `sessionFiles` in the process, under both its shared
 dispatch name and the native binding. The native-storage profile also gates
 Aimux on that owner, so it is available before ModelProvider's required model
 host. Aimux retains its final materialization boundary for direct and auxiliary
-image requests; those requests are not converted to conversational references.
+image requests; those requests are not converted to conversational references,
+and an auxiliary image the target does not take fails the call.

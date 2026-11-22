@@ -28,6 +28,9 @@ const PNG: &str =
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jD1sAAAAASUVORK5CYII=";
 const REFERENCE: &str = "img:12c5f2d047c10416";
 const PROVIDER: &str = "176ea61e-7705-491f-b005-e2085d52b431";
+const GEMINI_PROVIDER: &str = "b5f2c4b6-31d6-4a9a-9f0b-7a3f0c1a2d64";
+/// A 1x1 GIF: a format Gemini does not take.
+const GIF: &str = "R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
 
 fn image() -> ImageSource {
     ImageSource {
@@ -390,6 +393,13 @@ impl Fixture {
                 {"modelId":"text","displayName":"text","status":"active","capabilities":CatalogCapabilities::with_limits(128_000, 1024)}
             ]
         })).await;
+        fixture.rpc("provider.create", json!({
+            "providerId":GEMINI_PROVIDER, "displayName":"Gemini fixture", "enabled":true,
+            "connection":{"driverKind":"gemini","baseUrl":endpoint,"auth":{"type":"anonymous"}},
+            "models":[
+                {"modelId":"gemini-alpha","displayName":"gemini-alpha","status":"active","capabilities":vision}
+            ]
+        })).await;
         fixture
     }
     async fn rpc(&self, name: &str, params: Value) -> Value {
@@ -406,8 +416,11 @@ impl Fixture {
             .unwrap()
     }
     async fn configure(&self, model: Option<&str>) {
+        self.configure_to(PROVIDER, model).await;
+    }
+    async fn configure_to(&self, provider: &str, model: Option<&str>) {
         let revision = self.rpc("modality.capabilities", json!({})).await["revision"].clone();
-        self.rpc("modality.configure", json!({"expectedRevision":revision,"category":"image","operation":"understand","model":model.map(|id| json!({"providerId":PROVIDER,"modelId":id}))})).await;
+        self.rpc("modality.configure", json!({"expectedRevision":revision,"category":"image","operation":"understand","model":model.map(|id| json!({"providerId":provider,"modelId":id}))})).await;
     }
     async fn session(&self) -> Session {
         self.server
@@ -470,21 +483,59 @@ async fn turn(session: &Session, text: &str) {
     idle(session, "main").await;
 }
 async fn attach(fixture: &Fixture, session: &Session, branch: &str) {
-    attach_with(
+    attach_image(
         fixture,
         session,
         branch,
-        ModelSelection {
-            metadata: Some(RequestMetadata {
-                session_id: Some(session.id().into()),
-                ..Default::default()
-            }),
-            ..SessionConfig::default().model
-        },
+        session_model(session),
+        "attached.png",
+        PNG,
+        "image/png",
     )
     .await;
 }
+async fn attach_gif(fixture: &Fixture, session: &Session, branch: &str) {
+    attach_image(
+        fixture,
+        session,
+        branch,
+        session_model(session),
+        "attached.gif",
+        GIF,
+        "image/gif",
+    )
+    .await;
+}
+fn session_model(session: &Session) -> ModelSelection {
+    ModelSelection {
+        metadata: Some(RequestMetadata {
+            session_id: Some(session.id().into()),
+            ..Default::default()
+        }),
+        ..SessionConfig::default().model
+    }
+}
 async fn attach_with(fixture: &Fixture, session: &Session, branch: &str, model: ModelSelection) {
+    attach_image(
+        fixture,
+        session,
+        branch,
+        model,
+        "attached.png",
+        PNG,
+        "image/png",
+    )
+    .await;
+}
+async fn attach_image(
+    fixture: &Fixture,
+    session: &Session,
+    branch: &str,
+    model: ModelSelection,
+    name: &str,
+    data: &str,
+    media_type: &str,
+) {
     use base64::Engine;
     let stored = fixture
         .server
@@ -493,9 +544,9 @@ async fn attach_with(fixture: &Fixture, session: &Session, branch: &str, model: 
         .0
         .put(
             session.id().into(),
-            "attached.png".into(),
+            name.into(),
             base64::engine::general_purpose::STANDARD
-                .decode(PNG)
+                .decode(data)
                 .unwrap(),
             CancellationToken::new(),
         )
@@ -515,6 +566,7 @@ async fn attach_with(fixture: &Fixture, session: &Session, branch: &str, model: 
         source_type: ImageSourceType::File,
         file_id: Some(stored.file_id),
         data: None,
+        media_type: media_type.into(),
         ..image()
     };
     session
@@ -570,6 +622,16 @@ async fn configure_model(session: &Session, branch: &str, model_id: &str, vision
 fn question() -> Value {
     json!({"image":REFERENCE, "question":"What is visible?"})
 }
+fn gif_reference() -> String {
+    dim_agent_capabilities::images::image_reference(&ImageSource {
+        source_type: ImageSourceType::Base64,
+        media_type: "image/gif".into(),
+        data: Some(GIF.into()),
+        url: None,
+        file_id: None,
+    })
+    .expect("the GIF fixture has a content reference")
+}
 fn text(result: &ToolResult) -> &str {
     let ToolContent::Text(text) = &result.content else {
         panic!("text answer")
@@ -619,6 +681,37 @@ fn request_texts(request: &ModelRequest) -> Vec<String> {
         }
     }
     texts
+}
+
+/// A standalone image question has no history a content reference could
+/// resolve against, so a target that does not take the image's format fails
+/// the call instead of answering without seeing the image.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_image_the_target_cannot_take_fails_without_an_answer() {
+    let fixture = Fixture::new().await;
+    let session = fixture.session().await;
+    attach_gif(&fixture, &session, "main").await;
+    fixture
+        .configure_to(GEMINI_PROVIDER, Some("gemini-alpha"))
+        .await;
+    let result = fixture
+        .ask(
+            &session,
+            "main",
+            "gif",
+            json!({"image":gif_reference(),"question":"What is visible?"}),
+        )
+        .await;
+    assert_eq!(result.is_error, Some(true), "{result:?}");
+    assert!(
+        text(&result).starts_with("image_understand_failed:"),
+        "{result:?}"
+    );
+    assert!(
+        fixture.script.auxiliary.lock().unwrap().is_empty(),
+        "the target never receives a request without the image"
+    );
+    fixture.close().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

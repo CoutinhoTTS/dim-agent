@@ -18,34 +18,31 @@ use aimux_core::{
     tool::{FunctionTool, Tool},
 };
 use dim_agent_capabilities::host::{HostError, HostErrorKind};
-use dim_agent_capabilities::images::image_reference_or_placeholder;
+use dim_agent_capabilities::images::{image_reference_or_placeholder, takes_image_format};
 use dim_agent_types::{
     ContentBlock, ContentMetadata, ImageSource, ImageSourceType, MessageContent, MessagePart,
     ModelRequest, Role, SystemPrompt, SystemPromptPart, ToolContent,
 };
 use serde_json::{Value, json};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 pub(crate) struct PreparedRequest {
     pub options: CallOptions,
     pub tool_names: ToolNames,
     pub recording: Option<crate::recording::Capture>,
+    /// The provider's rewrite of the serialized request body, applied once
+    /// before the body is signed.
+    pub transform_request_body: Option<BodyRewrite>,
 }
+
+/// A rewrite of the provider's serialized JSON request body.
+pub(crate) type BodyRewrite = Arc<dyn Fn(Value) -> Value + Send + Sync>;
 
 /// The tool result's text where an image moved to the following user message.
 const TOOL_IMAGE_MARKER: &str = "[Image: sent in the following user message as tool output.]";
 /// Names the tool call an image came from, before that image.
 const TOOL_IMAGE_LABEL: &str = "Tool output from tool call";
-
-/// The image formats Gemini accepts: its image understanding and generate
-/// content guides list PNG, JPEG, WebP, HEIC and HEIF, and not GIF.
-const GEMINI_IMAGE_FORMATS: [&str; 5] = [
-    "image/png",
-    "image/jpeg",
-    "image/webp",
-    "image/heic",
-    "image/heif",
-];
 
 /// Anthropic's limit on cache breakpoints in one request.
 const ANTHROPIC_CACHE_BREAKPOINTS: usize = 4;
@@ -57,28 +54,54 @@ fn cache_breakpoint() -> SharedProviderOptions {
         .expect("a cache breakpoint is an object")
 }
 
-/// Whether the destination takes this image format (Attachments A.1). The
-/// other protocols take every format a request may carry.
-fn image_format_supported(kind: &ProviderKind, media_type: &str) -> bool {
-    *kind != ProviderKind::Gemini || GEMINI_IMAGE_FORMATS.contains(&media_type)
+/// Whether a Bedrock model takes the optional `toolResult` members AWS
+/// restricts to Amazon Nova and Anthropic Claude 3 and 4: the `status` field
+/// and a nested image block.
+/// https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_ToolResultBlock.html
+fn bedrock_tool_result_fields(model_id: &str) -> bool {
+    model_id.contains("amazon.nova")
+        || model_id.contains("claude-3")
+        || ["claude-sonnet-4", "claude-opus-4", "claude-haiku-4"]
+            .iter()
+            .any(|family| model_id.contains(family))
 }
 
 /// Whether the destination takes an image inside a `toolResult` block.
-/// Bedrock supports that block only on Amazon Nova and Anthropic Claude 3 and
-/// 4; every other model takes the image in the user message after the result.
+/// Bedrock supports that block only on the models
+/// [`bedrock_tool_result_fields`] names; every other model takes the image in
+/// the user message after the result.
 /// https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_ToolResultContentBlock.html
 fn tool_result_images(kind: &ProviderKind, model_id: &str) -> bool {
     match kind {
         ProviderKind::Anthropic => true,
-        ProviderKind::Bedrock => {
-            model_id.contains("amazon.nova")
-                || model_id.contains("claude-3")
-                || ["claude-sonnet-4", "claude-opus-4", "claude-haiku-4"]
-                    .iter()
-                    .any(|family| model_id.contains(family))
-        }
+        ProviderKind::Bedrock => bedrock_tool_result_fields(model_id),
         _ => false,
     }
+}
+
+/// The body rewrite that drops `toolResult.status` for a Bedrock model AWS
+/// does not list for that optional field. The result text keeps the same
+/// meaning, and the families that support the field keep it.
+fn tool_result_status_rewrite(kind: &ProviderKind, model_id: &str) -> Option<BodyRewrite> {
+    if *kind != ProviderKind::Bedrock || bedrock_tool_result_fields(model_id) {
+        return None;
+    }
+    Some(Arc::new(|mut body: Value| {
+        if let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) {
+            for message in messages {
+                let Some(parts) = message.get_mut("content").and_then(Value::as_array_mut) else {
+                    continue;
+                };
+                for part in parts {
+                    if let Some(result) = part.get_mut("toolResult").and_then(Value::as_object_mut)
+                    {
+                        result.remove("status");
+                    }
+                }
+            }
+        }
+        body
+    }))
 }
 
 pub(crate) fn convert(
@@ -375,6 +398,7 @@ pub(crate) fn convert(
         options,
         tool_names,
         recording,
+        transform_request_body: tool_result_status_rewrite(kind, &request.model_id),
     })
 }
 
@@ -643,7 +667,7 @@ fn image_part(
     path: &str,
     source: &ImageSource,
 ) -> Result<UserPart, HostError> {
-    if !image_format_supported(kind, &source.media_type) {
+    if !takes_image_format(Some(*kind), &source.media_type) {
         return Ok(UserPart::Text(TextPart {
             text: image_reference_or_placeholder(source),
             provider_options: None,
@@ -758,8 +782,16 @@ fn tool_result(
                 continue;
             }
             ContentBlock::Image { source } => {
-                if !image_format_supported(kind, &source.media_type) {
-                    text.push_str(&image_reference_or_placeholder(source));
+                if !takes_image_format(Some(*kind), &source.media_type) {
+                    let reference = image_reference_or_placeholder(source);
+                    if inside {
+                        result.push(ToolResultContent::Text(TextPart {
+                            text: reference,
+                            provider_options: None,
+                        }));
+                    } else {
+                        text.push_str(&reference);
+                    }
                     continue;
                 }
                 match (inside, base64_data(source)) {

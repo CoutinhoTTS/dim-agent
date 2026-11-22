@@ -1,9 +1,10 @@
 //! Image blocks in a request the model cannot take become content references
 //! per request (Attachments A.1). The rule covers user content and tool
-//! results alike. A vision-capable model receives a sendable image as it is.
-//! The adopted input and the history are never changed.
+//! results alike. A vision-capable model receives a sendable image as it is
+//! when the destination takes its format. The adopted input and the history
+//! are never changed.
 use crate::host::{HostError, SessionFiles};
-use crate::images::{image_reference, image_reference_or_placeholder};
+use crate::images::{image_reference, image_reference_or_placeholder, takes_image_format};
 use crate::session_files::check_image_budget;
 use base64::Engine;
 use dim_agent_types::*;
@@ -28,12 +29,14 @@ enum Routed {
 
 /// Returns the request to send: the same request when every image is sent as
 /// is, otherwise a copy whose images a model cannot take become references or
-/// placeholders. Messages without images stay shared. Each image the copy keeps
-/// joins the encoded-image budget, so a request over it fails before the rest
-/// of the images are read.
+/// placeholders. Messages without images stay shared. `protocol` is the
+/// resolved destination's protocol, `None` when it is not a provider protocol.
+/// Each image the copy sends as pixels joins the encoded-image budget, so a
+/// request over it fails before the rest of the images are read.
 pub(super) async fn adapt(
     request: &Arc<ModelRequest>,
     files: Option<&SessionFiles>,
+    protocol: Option<ModelProtocol>,
     cancel: &CancellationToken,
 ) -> Result<Arc<ModelRequest>, HostError> {
     // Unknown capability: the image is sent and the provider decides (A4).
@@ -44,8 +47,16 @@ pub(super) async fn adapt(
     let mut encoded = 0;
     let mut replacements = Vec::new();
     for (index, message) in request.messages.iter().enumerate() {
-        if let Some(message) =
-            replace_images(message, request, files, vision, cancel, &mut encoded).await?
+        if let Some(message) = replace_images(
+            message,
+            request,
+            files,
+            vision,
+            protocol,
+            cancel,
+            &mut encoded,
+        )
+        .await?
         {
             replacements.push((index, Arc::new(message)));
         }
@@ -72,6 +83,7 @@ async fn replace_images(
     request: &ModelRequest,
     files: Option<&SessionFiles>,
     vision: bool,
+    protocol: Option<ModelProtocol>,
     cancel: &CancellationToken,
     encoded: &mut usize,
 ) -> Result<Option<Message>, HostError> {
@@ -82,7 +94,7 @@ async fn replace_images(
     for (index, part) in parts.iter().enumerate() {
         let replacement = match part {
             MessagePart::Image { source } => {
-                match route(source, request, files, vision, cancel, encoded).await? {
+                match route(source, request, files, vision, protocol, cancel, encoded).await? {
                     Routed::Keep => None,
                     Routed::Resolved(source) => Some(MessagePart::Image { source }),
                     Routed::Text(text) => Some(MessagePart::Text {
@@ -104,7 +116,7 @@ async fn replace_images(
                     let ContentBlock::Image { source } = block else {
                         continue;
                     };
-                    match route(source, request, files, vision, cancel, encoded).await? {
+                    match route(source, request, files, vision, protocol, cancel, encoded).await? {
                         Routed::Keep => {}
                         Routed::Resolved(source) => {
                             replacements.push((index, ContentBlock::Image { source }));
@@ -149,21 +161,23 @@ fn replace_selected<T: Clone>(values: &[T], replacements: Vec<(usize, T)>) -> Ve
 }
 
 /// The form one image takes for this model: sent as it is when the model
-/// takes images and the image is sendable, else its reference or placeholder.
-/// A file-backed source is validated after it is resolved too: an empty owned
-/// file is not an image even though it has an id and a supported format.
+/// takes images, the image is sendable and the destination takes its format;
+/// else its reference or placeholder. A file-backed source is validated after
+/// it is resolved too: an empty owned file is not an image even though it has
+/// an id and a supported format.
 async fn route(
     source: &ImageSource,
     request: &ModelRequest,
     files: Option<&SessionFiles>,
     vision: bool,
+    protocol: Option<ModelProtocol>,
     cancel: &CancellationToken,
     encoded: &mut usize,
 ) -> Result<Routed, HostError> {
     crate::context_policy::check_cancel(cancel)?;
     if source.source_type == ImageSourceType::File && sendable(source) {
         let resolved = crate::session_files::resolve(request, files, source, cancel).await?;
-        if vision && sendable(&resolved) {
+        if vision && sendable(&resolved) && takes_image_format(protocol, &resolved.media_type) {
             add_encoded_image(encoded, &resolved)?;
             return Ok(Routed::Resolved(resolved));
         }
@@ -173,7 +187,7 @@ async fn route(
             image_reference(&resolved).unwrap_or_else(|| NO_IMAGE_INPUT.into())
         }));
     }
-    if vision && sendable(source) {
+    if vision && sendable(source) && takes_image_format(protocol, &source.media_type) {
         add_encoded_image(encoded, source)?;
         return Ok(Routed::Keep);
     }
@@ -184,8 +198,8 @@ async fn route(
     }))
 }
 
-/// Adds one image the request keeps to the encoded-image budget and fails when
-/// the request would exceed it.
+/// Adds one image the request sends as pixels to the encoded-image budget and
+/// fails when the request would exceed it.
 fn add_encoded_image(encoded: &mut usize, source: &ImageSource) -> Result<(), HostError> {
     *encoded += source.data.as_ref().map_or(0, String::len);
     check_image_budget(*encoded)
@@ -314,9 +328,14 @@ mod tests {
             session_id: Some("owner".into()),
             ..Default::default()
         });
-        let error = adapt(&Arc::new(request), Some(&files), &CancellationToken::new())
-            .await
-            .expect_err("the first image exceeds the encoded-image budget");
+        let error = adapt(
+            &Arc::new(request),
+            Some(&files),
+            None,
+            &CancellationToken::new(),
+        )
+        .await
+        .expect_err("the first image exceeds the encoded-image budget");
         assert!(
             error.to_string().contains("Model request images exceed"),
             "the failure names the budget: {error}"

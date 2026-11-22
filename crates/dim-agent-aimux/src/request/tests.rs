@@ -891,6 +891,7 @@ fn bedrock_tool_image_request(model: &str, is_error: bool) -> ModelRequest {
 
 /// A Bedrock body for `request` as it reaches the wire.
 async fn bedrock_capture(request: ModelRequest, model: &'static str) -> Value {
+    let prepared = convert(&request, &ProviderKind::Bedrock, None).unwrap();
     capture(
         move |url| {
             Arc::new(
@@ -900,15 +901,14 @@ async fn bedrock_capture(request: ModelRequest, model: &'static str) -> Value {
                     access_key_id: Some("access-key".into()),
                     secret_access_key: Some("secret-key".into()),
                     base_url: Some(url),
+                    transform_request_body: prepared.transform_request_body,
                     ..AmazonBedrockProviderSettings::default()
                 })
                 .unwrap()
                 .chat(model),
             )
         },
-        convert(&request, &ProviderKind::Bedrock, None)
-            .unwrap()
-            .options,
+        prepared.options,
     )
     .await
 }
@@ -968,11 +968,64 @@ async fn a_bedrock_tool_image_uses_a_placement_the_model_supports() {
     }
 }
 
-/// A Bedrock model outside the ones that take images inside `toolResult`
-/// keeps an error result's status and sends its image in the user message
-/// after the result.
+/// Bedrock's optional `status` field is supported only on Amazon Nova and
+/// Anthropic Claude 3 and 4. The other models keep the result text and the
+/// image placement without the field, for either result status.
 #[tokio::test]
-async fn a_bedrock_error_tool_image_keeps_the_error_status_and_moves_the_image() {
+async fn a_bedrock_tool_status_reaches_only_the_models_that_support_it() {
+    for (model, supports_status) in [
+        ("us.amazon.nova-pro-v1:0", true),
+        ("us.meta.llama4-maverick-17b-instruct-v1:0", false),
+    ] {
+        for is_error in [false, true] {
+            let body = bedrock_capture(bedrock_tool_image_request(model, is_error), model).await;
+            let messages = body["messages"].as_array().unwrap();
+            let index = messages
+                .iter()
+                .position(|message| {
+                    message["content"].as_array().is_some_and(|parts| {
+                        parts.iter().any(|part| part.get("toolResult").is_some())
+                    })
+                })
+                .expect("the request carries a tool result");
+            let content = messages[index]["content"].as_array().unwrap();
+            let tool = content
+                .iter()
+                .position(|part| part.get("toolResult").is_some())
+                .unwrap();
+            let result = &content[tool]["toolResult"];
+            if supports_status {
+                let status = if is_error { "error" } else { "success" };
+                assert_eq!(
+                    result["status"],
+                    json!(status),
+                    "{model} {is_error}: {body}"
+                );
+            } else {
+                assert!(
+                    result.get("status").is_none(),
+                    "{model} does not support the status field: {body}"
+                );
+                assert_eq!(
+                    result["content"],
+                    json!([{"text": format!("caption{TOOL_IMAGE_MARKER}")}]),
+                    "the image leaves the result and its text stays: {body}"
+                );
+                assert!(
+                    content[tool + 1..]
+                        .iter()
+                        .any(|part| part.get("image").is_some()),
+                    "the image follows the result in a user message: {body}"
+                );
+            }
+        }
+    }
+}
+
+/// The in-memory form backs the wire assertion above: an unsupported model
+/// keeps an error result's text as an error and moves its image out.
+#[tokio::test]
+async fn a_bedrock_error_tool_image_keeps_the_error_text_and_moves_the_image() {
     let model = "test-model";
     let request = bedrock_tool_image_request(model, true);
     let prepared = convert(&request, &ProviderKind::Bedrock, None).unwrap();
@@ -991,37 +1044,12 @@ async fn a_bedrock_error_tool_image_keeps_the_error_status_and_moves_the_image()
     );
     assert!(
         matches!(&result.output, ToolResultOutput::ErrorText { .. }),
-        "the result keeps its error status: {:?}",
+        "the result keeps its error text: {:?}",
         result.output
     );
-
-    let body = bedrock_capture(request, model).await;
-    let messages = body["messages"].as_array().unwrap();
-    let index = messages
-        .iter()
-        .position(|message| {
-            message["content"]
-                .as_array()
-                .is_some_and(|parts| parts.iter().any(|part| part.get("toolResult").is_some()))
-        })
-        .expect("the request carries a tool result");
-    let content = messages[index]["content"].as_array().unwrap();
-    let tool = content
-        .iter()
-        .position(|part| part.get("toolResult").is_some())
-        .unwrap();
-    let result = &content[tool]["toolResult"];
-    assert_eq!(result["status"], json!("error"), "{body}");
-    assert_eq!(
-        result["content"],
-        json!([{"text": format!("caption{TOOL_IMAGE_MARKER}")}]),
-        "the image leaves the error result: {body}"
-    );
     assert!(
-        content[tool + 1..]
-            .iter()
-            .any(|part| part.get("image").is_some()),
-        "the image follows the result in a user message: {body}"
+        prepared.transform_request_body.is_some(),
+        "the unsupported model rewrites its serialized body"
     );
 }
 

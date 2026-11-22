@@ -7,7 +7,9 @@ conversational model, or a request whose model capability is unknown, receives a
 sendable image as pixels where the destination takes its format; a model without
 image input, or an image that cannot be sent, sees an `img:` reference or
 placeholder and can ask `image_understand {image, question}` for a one-shot answer.
-The tool is risk `session`; unknown input fields are rejected.
+A standalone request cannot resolve a reference, so a target that does not take
+the image's format fails the call without an answer. The tool is risk `session`;
+unknown input fields are rejected.
 
 ## Dependencies
 
@@ -54,5 +56,6 @@ a fixture HTTP provider. Its compaction case consumes a completed compaction fac
 then rebuilds the reference index after restore; it does not run a summarizer.
 Request adaptation and immutable file-backed history are covered
 by `dim-agent-capabilities`'s `host_flows`; routing by the conversational model's
-vision capability is covered by `image_flow` and `read_image_flow`; published
-inheritance and ended/restored queries are covered by `branch_flow`.
+vision capability is covered by `image_flow` and `read_image_flow`; a standalone
+call whose target cannot take the image's format is covered by `image_flow`;
+published inheritance and ended/restored queries are covered by `branch_flow`.

@@ -353,6 +353,7 @@ fn build_model(
     model_id: &str,
     identity: &ModelIdentity,
     fetch: FetchFunction,
+    transform_request_body: Option<request::BodyRewrite>,
 ) -> Result<Arc<dyn LanguageModel>, AiMuxError> {
     if matches!(connection, ModelConnection::Local) {
         return Err(AiMuxError::invalid_argument(
@@ -505,6 +506,7 @@ fn build_model(
                 base_url: Some(base_url.clone()),
                 headers: Some(identity_headers(None)),
                 fetch: Some(fetch),
+                transform_request_body,
                 ..AmazonBedrockProviderSettings::default()
             })?;
             Ok(Arc::new(provider.chat(model_id)))
@@ -658,6 +660,7 @@ impl ModelDriver for AimuxDriver {
                 mut options,
                 tool_names,
                 recording,
+                transform_request_body,
             } = request::convert(&request, &protocol, preset)?;
             if preset == Some(OPENAI_CODEX_PRESET) {
                 options.max_output_tokens = None;
@@ -708,6 +711,7 @@ impl ModelDriver for AimuxDriver {
                 &request.model_id,
                 &self.identity,
                 fetch,
+                transform_request_body,
             ) {
                 Ok(model) => model,
                 Err(error) => {

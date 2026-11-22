@@ -4715,6 +4715,137 @@ async fn stored_attachment_and_tool_images_route_by_vision_capability() {
     agent.close().await.unwrap();
 }
 
+/// The Gemini connection every request resolves to in the budget test below.
+struct GeminiConnection;
+impl ResolveModelConnection for GeminiConnection {
+    fn resolve(
+        &self,
+        _: Arc<ModelRequest>,
+        _: CancellationToken,
+    ) -> HostFuture<'_, ResolvedModelConnection> {
+        Box::pin(async {
+            Ok(ResolvedModelConnection {
+                connection: ModelConnection::Http(HttpModelConnection {
+                    protocol: ModelProtocol::Gemini,
+                    base_url: "http://gemini.invalid/v1beta".into(),
+                    network: Default::default(),
+                    headers: Default::default(),
+                    bearer: None,
+                    api_key: None,
+                    preset: None,
+                }),
+                failure_policy: None,
+                recovery: None,
+            })
+        })
+    }
+}
+
+/// Gemini turns a GIF into its reference, so the GIF never becomes pixels and
+/// never consumes the encoded-image budget; the PNGs in the same request stay
+/// pixels even when the three images together exceed the budget.
+#[tokio::test]
+async fn a_gemini_request_does_not_charge_a_gif_against_the_encoded_image_budget() {
+    use base64::Engine;
+
+    let files = Arc::new(StoredImages::default());
+    let file_image = |media_type: &str, id: &str| ContentBlock::Image {
+        source: ImageSource {
+            source_type: ImageSourceType::File,
+            media_type: media_type.into(),
+            file_id: Some(id.into()),
+            data: None,
+            url: None,
+        },
+    };
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    builder
+        .session_value(Arc::new(ToolHost(Arc::new(MockTools))))
+        .session_value(Arc::new(
+            dim_agent_capabilities::history::HistoryRenderer::default(),
+        ))
+        .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
+        .session_value(Arc::new(ContextModelHost(None)))
+        .session_value(Arc::new(CompactionStrategyHost(None)))
+        .require_feature(
+            Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
+                Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
+            }),
+        );
+    builder.process_value(Arc::new(SessionFiles(files.clone())));
+    defaults::install_with_process_model(&mut builder);
+    let model = Arc::new(RecordingModel(requests.clone()));
+    let agent = MinimalHost::start_with(&builder, move |root, _| {
+        root.provide(ModelHost(model))?;
+        root.provide(ProviderConnectionResolver(Arc::new(GeminiConnection)))?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let session = agent
+        .create_session(SessionConfig {
+            model: model_with_vision("gemini", true),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(TOOL_IMAGE)
+        .unwrap();
+    let mut large = bytes;
+    large.resize(9 * 1024 * 1024, 0);
+    assert!(2 * dim_agent_capabilities::images::base64_len(large.len() as u64) <= 32 * 1024 * 1024);
+    assert!(3 * dim_agent_capabilities::images::base64_len(large.len() as u64) > 32 * 1024 * 1024);
+    for name in ["frame.gif", "one.png", "two.png"] {
+        files
+            .put(
+                session.id().into(),
+                name.into(),
+                large.clone(),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+    }
+    session
+        .input(
+            InputMessageData {
+                user: Some(UserInput {
+                    content: vec![
+                        file_image("image/gif", "frame.gif"),
+                        file_image("image/png", "one.png"),
+                        file_image("image/png", "two.png"),
+                    ],
+                }),
+                mode: Some(InputMode::Queue),
+                ..Default::default()
+            },
+            "main",
+        )
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let requests = requests.lock().unwrap();
+    let sent = requests.last().expect("the request reaches the model host");
+    let images = sent_image_sources(sent);
+    assert_eq!(images.len(), 2, "the two PNGs stay pixels: {sent:?}");
+    assert!(
+        images.iter().all(|image| image.media_type == "image/png"),
+        "no GIF remains a pixel: {sent:?}"
+    );
+    assert_eq!(
+        sent_texts(sent)
+            .iter()
+            .filter(|text| text.starts_with("img:"))
+            .count(),
+        1,
+        "the GIF becomes its reference: {sent:?}"
+    );
+    drop(requests);
+    agent.close().await.unwrap();
+}
+
 /// A vision model within the encoded-image budget receives a stored
 /// attachment and a stored tool image as their pixels.
 #[tokio::test]

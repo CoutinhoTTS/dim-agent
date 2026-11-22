@@ -4023,7 +4023,7 @@ async fn a_model_without_image_input_gets_references_and_unreferenceable_image_p
 
 /// The request the two inside-form protocols get in the test below: one
 /// assistant tool call and one error tool result that carries an image.
-fn error_tool_result_request() -> ModelRequest {
+fn error_tool_result_request(is_error: bool) -> ModelRequest {
     let mut input = serde_json::Map::new();
     input.insert("text".into(), json!("result text"));
     let mut request = ModelRequest::new(
@@ -4060,7 +4060,7 @@ fn error_tool_result_request() -> ModelRequest {
                         },
                     ]),
                     structured_content: None,
-                    is_error: Some(true),
+                    is_error: Some(is_error),
                 }]),
             },
         ],
@@ -4099,7 +4099,7 @@ async fn an_error_tool_result_image_keeps_the_flag_and_the_image() {
     let mut stream = host
         .0
         .invoke(
-            Arc::new(error_tool_result_request()),
+            Arc::new(error_tool_result_request(true)),
             ModelConnection::Http(HttpModelConnection {
                 protocol: ModelProtocol::Anthropic,
                 base_url: server.uri(),
@@ -4165,7 +4165,7 @@ async fn an_error_tool_result_image_keeps_the_flag_and_the_image() {
     let mut stream = host
         .0
         .invoke(
-            Arc::new(error_tool_result_request()),
+            Arc::new(error_tool_result_request(true)),
             ModelConnection::Bedrock(BedrockModelConnection {
                 base_url: server.uri(),
                 network: Default::default(),
@@ -4198,6 +4198,81 @@ async fn an_error_tool_result_image_keeps_the_flag_and_the_image() {
     );
     assert_eq!(result["toolResult"]["status"], "error", "{body}");
 
+    root.shutdown().await.unwrap();
+}
+
+/// AWS supports Bedrock's optional `toolResult.status` field only on Amazon
+/// Nova and Anthropic Claude 3 and 4. Another model receives no status for
+/// either result status, and its result text keeps the outcome.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_bedrock_model_outside_the_status_families_receives_no_tool_result_status() {
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+
+    let root = rutis::Ctx::root().unwrap();
+    root.plugin(AimuxPlugin::default()).await.unwrap();
+    let host = root.get::<ModelHost>().unwrap();
+    for is_error in [false, true] {
+        let server = MockServer::start().await;
+        let body = [
+            bedrock_frame("messageStart", json!({"role":"assistant"})),
+            bedrock_frame(
+                "contentBlockDelta",
+                json!({"contentBlockIndex":0,"delta":{"text":"ok"}}),
+            ),
+            bedrock_frame("contentBlockStop", json!({"contentBlockIndex":0})),
+            bedrock_frame("messageStop", json!({"stopReason":"end_turn"})),
+            bedrock_frame(
+                "metadata",
+                json!({"usage":{"inputTokens":1,"outputTokens":1}}),
+            ),
+        ]
+        .concat();
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/vnd.amazon.eventstream")
+                    .set_body_bytes(body),
+            )
+            .mount(&server)
+            .await;
+        let mut request = error_tool_result_request(is_error);
+        request.model_id = "us.meta.llama4-maverick-17b-instruct-v1:0".into();
+        let mut stream = host
+            .0
+            .invoke(
+                Arc::new(request),
+                ModelConnection::Bedrock(BedrockModelConnection {
+                    base_url: server.uri(),
+                    network: Default::default(),
+                    headers: Default::default(),
+                    auth: BedrockAuth::Bearer("native-secret".into()),
+                }),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        while let Some(chunk) = stream.next().await {
+            chunk.unwrap();
+        }
+        let sent = server.received_requests().await.unwrap();
+        let body: Value = serde_json::from_slice(&sent[0].body).unwrap();
+        let result = body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|message| message["content"].as_array().into_iter().flatten())
+            .find(|part| part.get("toolResult").is_some())
+            .unwrap();
+        assert!(
+            result["toolResult"].get("status").is_none(),
+            "is_error={is_error}: the status field is unsupported: {body}"
+        );
+        let text = result["toolResult"]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.starts_with("result text") && text.contains("following user message"),
+            "is_error={is_error}: the result text keeps the outcome: {body}"
+        );
+    }
     root.shutdown().await.unwrap();
 }
 

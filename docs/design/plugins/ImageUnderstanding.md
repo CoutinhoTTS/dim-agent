@@ -58,6 +58,7 @@ image_understand {image, question}
   v
 Modality: the modality.image.understand target
   |-- configured default unavailable -------------------------> image_model_unavailable (owner's reason)
+  |-- target does not take the image's format ----------------> image_understand_failed (no stamp)
   |-- execution through auxiliaryModel -> answer -------------> result text
   '-- provider, account or connection failure ----------------> image_understand_failed
 ```
@@ -122,6 +123,12 @@ cannot be sent, receives the reference or placeholder.
 `image_understand` is therefore an optional tool: a vision model needs no call to see the
 image, and the tool stays one-shot for a text-only model, a focused question, or a reference
 the model must inspect again.
+
+A conversational request may replace an image its model cannot take with a reference because
+the branch history can resolve it. A standalone `image_understand` request carries no history,
+so a target that does not take the image's format fails the call with
+`image_understand_failed`: the tool sends no request, returns no answer and writes no reuse
+stamp. It never asks a model about an image the request does not carry.
 
 ## 4. Model choice and execution
 

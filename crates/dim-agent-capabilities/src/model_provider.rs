@@ -482,18 +482,29 @@ impl ModelProvider {
         } else {
             let result = AssertUnwindSafe(async {
                 crate::context_policy::check_cancel(&cancel)?;
-                let request = images::adapt(&call.request, self.files.as_deref(), &cancel).await?;
-                self.context
-                    .validate(&call.request_id, request.clone(), cancel.clone())
-                    .await?;
                 let resolved = match &self.resolver {
-                    Some(resolver) => resolver.0.resolve(request.clone(), cancel.clone()).await?,
+                    Some(resolver) => {
+                        resolver
+                            .0
+                            .resolve(call.request.clone(), cancel.clone())
+                            .await?
+                    }
                     None => ResolvedModelConnection {
                         connection: ModelConnection::Local,
                         failure_policy: None,
                         recovery: None,
                     },
                 };
+                let protocol = match &resolved.connection {
+                    ModelConnection::Http(connection) => Some(connection.protocol),
+                    ModelConnection::Bedrock(_) => Some(ModelProtocol::Bedrock),
+                    ModelConnection::Local => None,
+                };
+                let request =
+                    images::adapt(&call.request, self.files.as_deref(), protocol, &cancel).await?;
+                self.context
+                    .validate(&call.request_id, request.clone(), cancel.clone())
+                    .await?;
                 recovery::invoke(
                     &self.host,
                     &request,
