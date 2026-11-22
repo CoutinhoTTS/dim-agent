@@ -881,6 +881,7 @@ async fn pooled(options: &Options, observe: impl Fn(&mut AgentBuilder)) -> Resul
         directories.push((source, read.len()));
         records.extend(read);
     }
+    one_texts_per_arm(&records)?;
     let cancel = CancellationToken::new();
     let server = served(options, observe).await?;
     let resolved = async {
@@ -974,6 +975,30 @@ fn read_pooled_runs(source: &Path, scenarios: &[Scenario]) -> Result<Vec<RunReco
         .into_iter()
         .map(|run| pooled_record(source, run, scenarios))
         .collect()
+}
+
+/// A report states one set of texts for each arm, so a pool's runs of one arm
+/// must have recorded the same one: evaluations that were given different
+/// texts are refused rather than stated as one.
+fn one_texts_per_arm(records: &[RunRecord]) -> Result<()> {
+    for arm in ["current", "candidate"] {
+        let mut recorded: Option<&[EmittedText]> = None;
+        for record in records
+            .iter()
+            .filter(|record| record.arm == arm && !record.texts.is_empty())
+        {
+            if recorded.is_some_and(|texts| texts != record.texts.as_slice()) {
+                return Err(format!(
+                    "--pool: the {arm} runs recorded different texts; a report states one set per \
+                     arm, so pool evaluations that were given the same texts or report them \
+                     separately"
+                )
+                .into());
+            }
+            recorded.get_or_insert(record.texts.as_slice());
+        }
+    }
+    Ok(())
 }
 
 /// One pooled run as the report reads it: each probe keeps the kind its
@@ -2376,7 +2401,7 @@ impl RunRecord {
 /// One text an arm emitted: the id naming the text it replaced, the text's
 /// length in bytes, and a fingerprint of its bytes, so a report states which
 /// text each arm ran without carrying the text itself.
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct EmittedText {
     id: String,
@@ -7629,9 +7654,9 @@ fn report(instrument: &Instrument, scenarios: &[Scenario], records: &[RunRecord]
         )
     });
     let mut text = String::from("| | |\n| --- | --- |\n");
-    // A report built from saved runs names its sources instead: the ids an
-    // evaluation was given are not saved with a record, and the arm rows below
-    // state the texts each arm emitted.
+    // A report built from saved runs names its sources instead: a pool or a
+    // re-judge is given no --text, and the arm rows below state the texts the
+    // saved records carry.
     if instrument.sources.is_none() {
         let texts: Vec<String> = instrument
             .texts
@@ -7640,8 +7665,9 @@ fn report(instrument: &Instrument, scenarios: &[Scenario], records: &[RunRecord]
             .collect();
         text += &format!("| text | {} |\n", texts.join(", "));
     }
-    // Every run of an arm carries the same texts, so the first one that names
-    // them states what the arm emitted.
+    // Each evaluation's runs carry the texts it was given, and a pool refuses
+    // runs of one arm that recorded different ones, so the first record that
+    // names them states what the arm emitted.
     let emitted = |arm: &str| {
         records
             .iter()
@@ -10991,6 +11017,76 @@ mod tests {
             "every run of both sources is kept: {records:?}"
         );
         assert!(out.join("scenario.md").exists());
+    }
+
+    /// A pool states the texts its runs recorded, and refuses an arm whose
+    /// runs recorded different ones: a report that stated one set for runs
+    /// that compared several would be wrong.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_pool_refuses_runs_that_recorded_different_texts() {
+        const BASELINE: &str = "BASELINE BRANCH TOOL DESCRIPTION";
+        const CANDIDATE: &str = "CANDIDATE BRANCH TOOL DESCRIPTION";
+        const OTHER: &str = "OTHER BASELINE BRANCH TOOL DESCRIPTION";
+        let fixture = Fixture::start(
+            "pool-texts",
+            judged,
+            json!({
+                "message": "Say hello.",
+                "budget": {"turns": 4, "seconds": 120, "window": 24000},
+                "probes": [{"id": "ran", "kind": "must_show", "text": "the run has a transcript"}]
+            }),
+            &[],
+        )
+        .await;
+        let source = |name: &str, baseline: &str| {
+            let directory = fixture.directory.join(name);
+            std::fs::create_dir_all(&directory).unwrap();
+            let texts = |text: &str| {
+                json!([{"id": "timeline-tree/branch-description", "bytes": text.len(),
+                        "fingerprint": fingerprint(text)}])
+            };
+            let runs = [
+                json!({"arm": "current", "scenario": "case", "run": 0, "session": null,
+                       "stop": "idle", "turns": 2, "window": 24000.0, "durationMs": 1.0,
+                       "failed": false, "judgeOutcome": "judged", "error": null,
+                       "judgeError": null, "judgeReasks": 0, "texts": texts(baseline),
+                       "probes": [{"id": "ran", "kind": "must_show",
+                                   "verdict": "present", "quote": null}]}),
+                json!({"arm": "candidate", "scenario": "case", "run": 0, "session": null,
+                       "stop": "idle", "turns": 2, "window": 24000.0, "durationMs": 1.0,
+                       "failed": false, "judgeOutcome": "judged", "error": null,
+                       "judgeError": null, "judgeReasks": 0, "texts": texts(CANDIDATE),
+                       "probes": [{"id": "ran", "kind": "must_show",
+                                   "verdict": "present", "quote": null}]}),
+            ];
+            let jsonl: String = runs.iter().map(|record| format!("{record}\n")).collect();
+            std::fs::write(directory.join("runs.jsonl"), &jsonl).unwrap();
+            directory
+        };
+        let (first, second) = (source("first", BASELINE), source("second", BASELINE));
+        let mut options = fixture.options(fixture.directory.join("pooled"));
+        options.pool = vec![first.clone(), second];
+        let report = fixture.pooled(&options).await.unwrap();
+        for (arm, text) in [("current", BASELINE), ("candidate", CANDIDATE)] {
+            assert!(
+                report.contains(&format!(
+                    "| {arm} texts | `timeline-tree/branch-description`: {} bytes, \
+                     fingerprint {} |",
+                    text.len(),
+                    fingerprint(text)
+                )),
+                "{arm}: a pool states the texts its runs recorded: {report}"
+            );
+        }
+        let other = source("other", OTHER);
+        let mut options = fixture.options(fixture.directory.join("pooled-again"));
+        options.pool = vec![first, other];
+        let error = fixture.pooled(&options).await.unwrap_err().to_string();
+        assert!(
+            error.contains("the current runs recorded different texts"),
+            "{error}"
+        );
+        assert!(error.contains("report them separately"), "{error}");
     }
 
     /// A report over saved runs counts the declines their records carry and
