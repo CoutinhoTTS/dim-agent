@@ -356,6 +356,36 @@ impl Drop for TemporaryDirectory {
     }
 }
 
+/// How a command task ended.
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WaitStatus {
+    Exited,
+    Signaled,
+    TimedOut,
+    Cancelled,
+    Failed,
+}
+
+/// A command task's terminal record.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WaitReply {
+    pub status: WaitStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signal: Option<String>,
+    pub duration_ms: u64,
+    pub output_path: PathBuf,
+    pub output_bytes: u64,
+    pub output_truncated: bool,
+    pub preview: String,
+    pub preview_truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure_note: Option<String>,
+}
+
 /// A request to start a command on this execution node.
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -701,7 +731,7 @@ impl HostPlatform {
     }
 
     /// Waits for a task's terminal record; `timeoutMs` bounds the wait.
-    pub async fn wait(&self, request: WaitRequest) -> Result<serde_json::Value, HostPlatformError> {
+    pub async fn wait(&self, request: WaitRequest) -> Result<WaitReply, HostPlatformError> {
         let task = self.command_task(&request.task_id)?;
         Ok(task.wait(request.timeout_ms).await)
     }

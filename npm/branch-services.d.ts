@@ -214,6 +214,23 @@ export type WaitRequest = {
   timeoutMs?: number | bigint | null
 }
 
+/** How a command task ended. */
+export type WaitStatus = "exited" | "signaled" | "timed_out" | "cancelled" | "failed"
+
+/** A command task's terminal record. */
+export type WaitReply = {
+  status: WaitStatus
+  exitCode?: number | null
+  signal?: string | null
+  durationMs: number | bigint
+  outputPath: string
+  outputBytes: number | bigint
+  outputTruncated: boolean
+  preview: string
+  previewTruncated: boolean
+  failureNote?: string | null
+}
+
 export type TaskRequest = {
   taskId: string
 }
@@ -282,7 +299,7 @@ export interface HostPlatform {
    * Waits for a task's terminal record; `timeoutMs` bounds the wait.
    * @throws {HostPlatformErrorThrown}
    */
-  wait(request: WaitRequest): Promise<import('./plugin.js').BridgeJsonValue>
+  wait(request: WaitRequest): Promise<WaitReply>
   /**
    * Kills a task's process tree.
    * @throws {HostPlatformErrorThrown}

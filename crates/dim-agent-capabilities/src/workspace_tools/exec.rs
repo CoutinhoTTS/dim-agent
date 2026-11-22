@@ -12,7 +12,7 @@ use crate::{
     host_platform::{
         EXEC_SHELL_CONFIG_INVALID, EXEC_SHELL_UNAVAILABLE, HostPlatform, ISOLATION_SUMMARY,
         Isolation, Os, ProcessSpec, ProcessSpecError, ProcessTree, ShellEdition, ShellKind,
-        signal_name,
+        WaitReply, WaitStatus, signal_name,
     },
     tool_registry::definition,
 };
@@ -2311,7 +2311,7 @@ impl CommandTask {
             .unwrap()
             .clone()
     }
-    pub(crate) async fn wait(&self, timeout_ms: Option<u64>) -> serde_json::Value {
+    pub(crate) async fn wait(&self, timeout_ms: Option<u64>) -> WaitReply {
         let done = if let Some(ms) = timeout_ms {
             tokio::select! {
                 biased;
@@ -2329,27 +2329,35 @@ impl CommandTask {
             _ => None,
         };
         let status = match &done.observed {
-            _ if done.termination_error.is_some() || done.output.failure.is_some() => "failed",
-            Ok(Observed::Exited(status)) if signal_name(*status).is_some() => "signaled",
-            Ok(Observed::Exited(_)) => "exited",
-            Ok(Observed::TimedOut) => "timed_out",
-            Ok(Observed::Cancelled) => "cancelled",
-            _ => "failed",
+            _ if done.termination_error.is_some() || done.output.failure.is_some() => {
+                WaitStatus::Failed
+            }
+            Ok(Observed::Exited(status)) if signal_name(*status).is_some() => WaitStatus::Signaled,
+            Ok(Observed::Exited(_)) => WaitStatus::Exited,
+            Ok(Observed::TimedOut) => WaitStatus::TimedOut,
+            Ok(Observed::Cancelled) => WaitStatus::Cancelled,
+            _ => WaitStatus::Failed,
         };
-        let mut reply = object(
-            json!({"status":status, "durationMs":done.duration_ms, "outputPath":self.path,
-            "outputBytes":done.output.output_bytes,"outputTruncated":done.output.truncated,
-            "preview":done.output.preview,"previewTruncated":done.output.preview_truncated}),
-        );
-        insert_exit(&mut reply, exit);
-        if exit.is_some_and(|status| !status.success())
-            && let Some(note) = self
+        let exit_code = exit.and_then(|status| status.code());
+        let signal = exit.and_then(signal_name);
+        let failure_note = match exit {
+            Some(status) if !status.success() => self
                 .isolation
-                .and_then(|i| i.failure_hint(done.output.shown()))
-        {
-            reply.insert("failureNote".into(), note.into());
+                .and_then(|i| i.failure_hint(done.output.shown())),
+            _ => None,
+        };
+        WaitReply {
+            status,
+            exit_code,
+            signal,
+            duration_ms: done.duration_ms,
+            output_path: self.path.clone(),
+            output_bytes: done.output.output_bytes,
+            output_truncated: done.output.truncated,
+            preview: done.output.preview.clone(),
+            preview_truncated: done.output.preview_truncated,
+            failure_note,
         }
-        Value::Object(reply)
     }
     pub(crate) async fn terminate(&self) -> io::Result<()> {
         self.kill.cancel();
