@@ -631,6 +631,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "Ctrl+Enter 中断并立即发送：草稿与所有暂存消息合成一条发出"
         }
         "Send now failed: {error}; the draft was kept" => "立即发送失败：{error}；草稿已保留",
+        "Send now failed: {error}" => "立即发送失败：{error}",
         "Send now cancelled; the draft was kept" => "已取消立即发送；草稿保留",
         "Send now is still stopping the run; the draft was kept" => {
             "立即发送仍在停止运行；草稿已保留"

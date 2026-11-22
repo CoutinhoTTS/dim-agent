@@ -601,6 +601,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Send now failed: {error}; the draft was kept" => {
             "Kirim sekarang gagal: {error}; draf dipertahankan"
         }
+        "Send now failed: {error}" => "Kirim sekarang gagal: {error}",
         "Send now cancelled; the draft was kept" => "Kirim sekarang dibatalkan; draf dipertahankan",
         "Send now is still stopping the run; the draft was kept" => {
             "Kirim sekarang masih menghentikan proses; draf dipertahankan"

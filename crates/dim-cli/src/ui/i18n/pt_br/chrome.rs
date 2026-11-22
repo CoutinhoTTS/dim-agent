@@ -609,6 +609,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Send now failed: {error}; the draft was kept" => {
             "Enviar já falhou: {error}; o rascunho foi mantido"
         }
+        "Send now failed: {error}" => "Enviar já falhou: {error}",
         "Send now cancelled; the draft was kept" => "Enviar já cancelado; o rascunho foi mantido",
         "Send now is still stopping the run; the draft was kept" => {
             "O envio imediato ainda está parando a execução; o rascunho foi mantido"

@@ -583,6 +583,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Send now failed: {error}; the draft was kept" => {
             "即時送信に失敗しました: {error}。下書きは残しました"
         }
+        "Send now failed: {error}" => "即時送信に失敗しました: {error}",
         "Send now cancelled; the draft was kept" => "即時送信を取り消しました。下書きは残しました",
         "Send now is still stopping the run; the draft was kept" => {
             "送信即時はまだ実行を停止中です。下書きは保持されました"

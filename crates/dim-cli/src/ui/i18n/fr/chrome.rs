@@ -607,6 +607,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Send now failed: {error}; the draft was kept" => {
             "Échec de l’envoi immédiat : {error} ; le brouillon est conservé"
         }
+        "Send now failed: {error}" => "Échec de l’envoi immédiat : {error}",
         "Send now cancelled; the draft was kept" => {
             "Envoi immédiat annulé ; le brouillon est conservé"
         }

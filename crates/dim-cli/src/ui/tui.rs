@@ -1512,6 +1512,9 @@ struct SendNow {
     /// Esc called off the submit. The stop still settles, and its reply
     /// releases the gesture without submitting anything.
     submit_cancelled: bool,
+    /// A Session switch cleared the composer before the stop settled, so the
+    /// reply must not claim the draft was kept.
+    draft_lost: bool,
     /// Where the next recalled message goes: past the ones already recalled,
     /// so they keep queue order ahead of the draft that was typed.
     at: usize,
@@ -2050,6 +2053,7 @@ impl App {
             line: self.target_line(),
             session: self.target_session(),
             submit_cancelled: false,
+            draft_lost: false,
             at: 0,
         });
         self.recall_all_queued();
@@ -2381,13 +2385,21 @@ impl App {
                     }
                     return;
                 }
-                // The stop failed, so the combined draft stays in the
-                // composer with the reason: nothing typed is lost.
+                // A stop that failed for the Session still shown leaves the
+                // combined draft in the composer with the reason: nothing
+                // typed is lost. A switch already cleared it, so that notice
+                // does not claim the draft was kept.
                 if let Some(error) = error {
-                    self.notices.push(tf(
-                        "Send now failed: {error}; the draft was kept",
-                        &[("error", &crate::sanitize::safe_line(&error))],
-                    ));
+                    let error = crate::sanitize::safe_line(&error);
+                    let text = if pending.draft_lost {
+                        tf("Send now failed: {error}", &[("error", &error)])
+                    } else {
+                        tf(
+                            "Send now failed: {error}; the draft was kept",
+                            &[("error", &error)],
+                        )
+                    };
+                    self.notices.push(text);
                     return;
                 }
                 // No read can start while the gesture is pending, so nothing
@@ -7497,6 +7509,9 @@ impl App {
             kind => Some(kind),
         };
         self.composer.clear();
+        if let Some(pending) = &mut self.send_now {
+            pending.draft_lost = true;
+        }
         self.line_draft = None;
         self.suggestion = None;
         if let Some(text) = self.fork_draft.take()

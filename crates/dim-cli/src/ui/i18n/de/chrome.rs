@@ -617,6 +617,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Send now failed: {error}; the draft was kept" => {
             "Sofort senden fehlgeschlagen: {error}; der Entwurf bleibt erhalten"
         }
+        "Send now failed: {error}" => "Sofort senden fehlgeschlagen: {error}",
         "Send now cancelled; the draft was kept" => {
             "Sofort senden abgebrochen; der Entwurf bleibt erhalten"
         }

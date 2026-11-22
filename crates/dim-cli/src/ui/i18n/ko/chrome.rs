@@ -565,6 +565,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Send now failed: {error}; the draft was kept" => {
             "즉시 전송 실패: {error}. 초안은 유지되었습니다"
         }
+        "Send now failed: {error}" => "즉시 전송 실패: {error}",
         "Send now cancelled; the draft was kept" => {
             "즉시 전송이 취소되었습니다. 초안은 유지되었습니다"
         }

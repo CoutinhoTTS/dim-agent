@@ -2400,6 +2400,7 @@ fn tui_a_send_now_typed_before_a_session_handoff_does_not_stop_the_new_session()
     terminal.write(b"\x1b[13;5u");
     terminal.write(b"x");
     terminal.until("carry onx");
+    let painted_from = terminal.transcript.len();
     release_fork.send(()).unwrap();
     terminal.until("after the fork");
     // The permission change the probe starts flushes every command queued
@@ -2413,6 +2414,12 @@ fn tui_a_send_now_typed_before_a_session_handoff_does_not_stop_the_new_session()
     );
     terminal.until("Send now failed: The session moved before the send ran");
     terminal.until("esc interrupt");
+    let notice = strip_ansi(&terminal.transcript[painted_from..]);
+    assert!(
+        !notice
+            .contains("Send now failed: The session moved before the send ran; the draft was kept"),
+        "the handoff cleared the composer, so the notice must not claim the draft was kept"
+    );
     terminal.write(b"again");
     terminal.until("again");
     terminal.write(b"\x1b[13;5u");
