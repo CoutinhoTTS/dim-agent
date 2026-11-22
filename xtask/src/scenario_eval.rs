@@ -5158,20 +5158,28 @@ async fn drive(
         } else {
             Some(usage.await)
         };
-        match usage {
-            Some(Ok(usage)) => {
+        if driven.timed_out {
+            // The read belongs to the timed-out run's cleanup: what it returns
+            // cannot replace the ending the run reached (model-prompts §8.1).
+            if let Some(Ok(usage)) = usage {
                 driven.window = usage["contextWindow"].as_f64();
-                driven.error = window_mismatch(driven.window, scenario.budget.window);
             }
-            Some(Err(error))
-                if dim_client::app_error(&error) == Some("context_usage_unavailable") => {}
-            Some(Err(error)) => {
-                driven.error = Some(format!("Context window check failed: {error}"))
+        } else {
+            match usage {
+                Some(Ok(usage)) => {
+                    driven.window = usage["contextWindow"].as_f64();
+                    driven.error = window_mismatch(driven.window, scenario.budget.window);
+                }
+                Some(Err(error))
+                    if dim_client::app_error(&error) == Some("context_usage_unavailable") => {}
+                Some(Err(error)) => {
+                    driven.error = Some(format!("Context window check failed: {error}"))
+                }
+                None => {}
             }
-            None => {}
-        }
-        if driven.error.is_some() {
-            driven.stop = "error";
+            if driven.error.is_some() {
+                driven.stop = "error";
+            }
         }
     }
     if let Some(pending) = &switch {
@@ -11619,6 +11627,10 @@ mod tests {
         /// that stopped on its wall clock must still return, with cleanup
         /// bounded.
         SwitchMoveAndCloseStall,
+        /// The setup's context window read answers `context_usage_unavailable`,
+        /// so the check is deferred, and the deferred read answers
+        /// `session_reloading`: a failure that is not the deferral itself.
+        DeferredUsageFails,
     }
 
     /// What a scripted peer read: the `requestId` of every decline, in order,
@@ -11631,6 +11643,7 @@ mod tests {
         declines: Mutex<Vec<String>>,
         settled_at: AtomicUsize,
         idles: AtomicUsize,
+        usages: AtomicUsize,
         attached: tokio::sync::Notify,
         closes: AtomicUsize,
     }
@@ -11896,6 +11909,7 @@ mod tests {
                         PeerScript::SwitchMoveStalls
                         | PeerScript::SwitchSubmitStalls
                         | PeerScript::SwitchMoveAndCloseStall => None,
+                        PeerScript::DeferredUsageFails => None,
                     };
                     if let Some((request, sequence)) = closed {
                         if recorded.settled_at.load(Ordering::SeqCst) == 0 {
@@ -11933,7 +11947,18 @@ mod tests {
                         "daemonProfile": {"kind": "mock"},
                     }}),
                     "session.create" => json!({"result": {"sessionId": "peer"}}),
-                    "session.context.usage" => json!({"result": {"contextWindow": window}}),
+                    "session.context.usage" => {
+                        let read = recorded.usages.fetch_add(1, Ordering::SeqCst) + 1;
+                        match (matches!(script, PeerScript::DeferredUsageFails), read) {
+                            (true, 1) => json!({"error": {"code": -32000,
+                                "message": "the context window is not known yet",
+                                "data": {"appError": "context_usage_unavailable"}}}),
+                            (true, _) => json!({"error": {"code": -32000,
+                                "message": "the Session is reloading",
+                                "data": {"appError": "session_reloading"}}}),
+                            _ => json!({"result": {"contextWindow": window}}),
+                        }
+                    }
                     "session.idle" => json!({"result": {"sequence": PEER_SEQUENCE}}),
                     "session.branch_set_default"
                         if matches!(script, PeerScript::SwitchMoveRetries) =>
@@ -11954,8 +11979,16 @@ mod tests {
                     // The held line asks nothing: the run's only work is the
                     // turn the peer holds open. A switch that never fires
                     // likewise asks nothing: its turn starts and ends.
-                    if matches!(script, PeerScript::HeldIdle | PeerScript::SwitchNeverFires) {
-                        if matches!(script, PeerScript::SwitchNeverFires) {
+                    if matches!(
+                        script,
+                        PeerScript::HeldIdle
+                            | PeerScript::SwitchNeverFires
+                            | PeerScript::DeferredUsageFails
+                    ) {
+                        if matches!(
+                            script,
+                            PeerScript::SwitchNeverFires | PeerScript::DeferredUsageFails
+                        ) {
                             write
                                 .write_all(&notice(json!({"type": "turn", "name": "end",
                                                            "sequence": 2, "data": {}})))
@@ -12355,6 +12388,43 @@ mod tests {
         server.shutdown();
         let _ = server.join().await;
         let _ = std::fs::remove_dir_all(directory);
+    }
+
+    /// A run that stopped on its wall clock keeps that outcome when the
+    /// context window read it deferred fails afterwards: the read is
+    /// cleanup, and what it returns cannot replace `seconds`
+    /// (model-prompts §8.1).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_timed_out_run_keeps_its_outcome_when_the_deferred_window_read_fails() {
+        let directory = std::env::temp_dir().join(format!(
+            "dim-scenario-eval-window-after-timeout-{}",
+            std::process::id()
+        ));
+        let (socket, reads) =
+            scripted_peer(&directory, 8_000, PeerScript::DeferredUsageFails).await;
+        let mut client = driver_client(socket).await;
+        let mut scenario = scenario(Vec::new());
+        // The run is past its wall clock as soon as it submits: the timeout
+        // needs no clock of its own.
+        scenario.budget.seconds = 0.;
+        let workspace = std::env::temp_dir();
+        let model = peer_model();
+        let producer = ProducerState::default();
+        let driven = drive(&mut client, &scenario, &workspace, &model, &producer, None).await;
+        let _ = std::fs::remove_dir_all(directory);
+        assert_eq!(driven.stop, "seconds", "{:?}", driven.error);
+        assert!(driven.timed_out, "the run stopped on its wall clock");
+        assert_eq!(
+            reads.usages.load(Ordering::SeqCst),
+            2,
+            "the deferred read ran once after the timeout"
+        );
+        assert!(
+            driven.error.is_none(),
+            "the deferred read's failure is not the timeout's error: {:?}",
+            driven.error
+        );
     }
 
     /// A busy line does not multiply the declines: the peer refuses the first
