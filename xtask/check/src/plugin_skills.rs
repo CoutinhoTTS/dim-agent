@@ -239,6 +239,20 @@ mod tests {
     }
 
     #[test]
+    fn an_example_that_pins_another_exact_version_is_named() {
+        let error = error_for(
+            "stale-example",
+            &skill("Install @arcships/rutis 0.23.0 today.\n", "0.17.1"),
+        );
+        assert!(
+            error.contains(
+                "the json example gives @arcships/rutis 0.17.1; runtime/package.json declares 0.23.0"
+            ),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn an_example_that_does_not_give_the_dependency_is_refused() {
         for (text, expected) in [
             (
