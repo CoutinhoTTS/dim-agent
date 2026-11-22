@@ -1546,6 +1546,191 @@ fn headless_streams_unicode_once_and_waits_for_the_delivery_barrier() {
 }
 
 #[test]
+fn exec_writes_only_the_final_reply_to_stdout() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.start(false);
+        let submit = wire.read("session.submit");
+        wire.notice("session.model.progress",json!({"sessionId":"session","branchId":"main","requestId":"model-request","textOffset":0,"text":"I will read the config.","thinking":"","thinkingOffset":0}));
+        wire.reply(&submit, json!({"event":{}}));
+        let idle = wire.read("session.idle");
+        wire.event(12,"text",json!({"turn_id":"turn","request_id":"model-request","delta":"I will read the config."}));
+        wire.event(14,"tool-use",json!({"turn_id":"turn","request_id":"model-request","call":{"id":"call","name":"read","input":{"path":"config/service.toml"}}}));
+        wire.event(16,"tool-result",json!({"turn_id":"turn","request_id":"model-request","results":[{"call_id":"call","result":{"content":"port = 8080"}}]}));
+        wire.event(18,"model-output-end",json!({"turn_id":"turn","request_id":"model-request","status":"completed","finish_reason":"tool_use"}));
+        wire.event(20,"text",json!({"turn_id":"turn","request_id":"final-request","delta":"The service listens on port 8080."}));
+        wire.event(22,"model-output-end",json!({"turn_id":"turn","request_id":"final-request","status":"completed","finish_reason":"end_turn"}));
+        wire.end(json!({"turn_id":"turn","status":"completed","reason":"done"}));
+        wire.reply(&idle, json!({"sequence":30}));
+        wire.detach();
+    });
+    let output = wait(
+        home.command()
+            .args(["exec", "-p", "Which port does the service use?"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    daemon.join().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "status {:?} stdout {stdout:?} stderr {stderr:?}",
+        output.status.code()
+    );
+    assert_eq!(
+        stdout, "The service listens on port 8080.\n",
+        "stdout carries the run's final reply alone; stderr was {stderr:?}"
+    );
+    assert!(
+        stderr.contains("I will read the config."),
+        "the words before the tool call go to stderr: {stderr:?}"
+    );
+}
+
+#[test]
+fn exec_keeps_words_between_tool_calls_on_stderr() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.start(false);
+        let submit = wire.read("session.submit");
+        wire.reply(&submit, json!({"event":{}}));
+        let idle = wire.read("session.idle");
+        wire.event(10,"text",json!({"turn_id":"turn","request_id":"first-request","delta":"I will read the config."}));
+        wire.event(11,"tool-use",json!({"turn_id":"turn","request_id":"first-request","call":{"id":"config","name":"read","input":{"path":"config/service.toml"}}}));
+        wire.event(12,"tool-result",json!({"turn_id":"turn","request_id":"first-request","results":[{"call_id":"config","result":{"content":"port = 8080"}}]}));
+        wire.event(13,"model-output-end",json!({"turn_id":"turn","request_id":"first-request","status":"completed","finish_reason":"tool_use"}));
+        wire.event(14,"text",json!({"turn_id":"turn","request_id":"second-request","delta":"The port is fixed; I will read the deploy script."}));
+        wire.event(15,"tool-use",json!({"turn_id":"turn","request_id":"second-request","call":{"id":"deploy","name":"read","input":{"path":"scripts/deploy.sh"}}}));
+        wire.event(16,"tool-result",json!({"turn_id":"turn","request_id":"second-request","results":[{"call_id":"deploy","result":{"content":"export PORT=8080"}}]}));
+        wire.event(17,"model-output-end",json!({"turn_id":"turn","request_id":"second-request","status":"completed","finish_reason":"tool_use"}));
+        wire.event(18,"text",json!({"turn_id":"turn","request_id":"final-request","delta":"The service listens on port 8080."}));
+        wire.event(19,"model-output-end",json!({"turn_id":"turn","request_id":"final-request","status":"completed","finish_reason":"end_turn"}));
+        wire.end(json!({"turn_id":"turn","status":"completed","reason":"done"}));
+        wire.reply(&idle, json!({"sequence":30}));
+        wire.detach();
+    });
+    let output = wait(
+        home.command()
+            .args(["exec", "-p", "Which port does the service use?"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    daemon.join().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "status {:?} stdout {stdout:?} stderr {stderr:?}",
+        output.status.code()
+    );
+    assert_eq!(
+        stdout, "The service listens on port 8080.\n",
+        "stdout carries the run's final reply alone; stderr was {stderr:?}"
+    );
+    assert!(
+        stderr.contains("I will read the config."),
+        "the words before the first tool call go to stderr: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("The port is fixed; I will read the deploy script."),
+        "the words between the tool calls go to stderr: {stderr:?}"
+    );
+}
+
+#[test]
+fn exec_writes_a_reply_without_tools_to_stdout() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.start(false);
+        let submit = wire.read("session.submit");
+        wire.reply(&submit, json!({"event":{}}));
+        let idle = wire.read("session.idle");
+        wire.notice("session.model.progress",json!({"sessionId":"session","branchId":"main","requestId":"request","textOffset":0,"text":"The service listens on port 8080.","thinking":"","thinkingOffset":0}));
+        wire.event(12,"text",json!({"turn_id":"turn","request_id":"request","delta":"The service listens on port 8080."}));
+        wire.event(14,"model-output-end",json!({"turn_id":"turn","request_id":"request","status":"completed","finish_reason":"end_turn"}));
+        wire.end(json!({"turn_id":"turn","status":"completed","reason":"done"}));
+        wire.reply(&idle, json!({"sequence":30}));
+        wire.detach();
+    });
+    let output = wait(
+        home.command()
+            .args(["exec", "-p", "Which port does the service use?"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    daemon.join().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "status {:?} stdout {stdout:?} stderr {stderr:?}",
+        output.status.code()
+    );
+    assert_eq!(
+        stdout, "The service listens on port 8080.\n",
+        "a turn with no tool call keeps its reply on stdout; stderr was {stderr:?}"
+    );
+    assert!(
+        !stderr.contains("The service listens on port 8080."),
+        "the reply appears once, on stdout: {stderr:?}"
+    );
+}
+
+#[test]
+fn exec_leaves_no_partial_text_on_stdout_after_an_interrupt() {
+    let home = Home::new();
+    let (rendered, wait_rendered) = std::sync::mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        wire.start(false);
+        let submit = wire.read("session.submit");
+        wire.reply(&submit, json!({"event":{}}));
+        let idle = wire.read("session.idle");
+        wire.notice("session.model.progress",json!({"sessionId":"session","branchId":"main","requestId":"request","textOffset":0,"text":"I will read the config.","thinking":"","thinkingOffset":0}));
+        wire.event(12,"text",json!({"turn_id":"turn","request_id":"request","delta":"I will read the config."}));
+        rendered.send(()).unwrap();
+        let stop = wire.read("session.stop");
+        wire.event(14,"model-output-end",json!({"turn_id":"turn","request_id":"request","status":"cancelled","reason":"interrupted"}));
+        wire.end(json!({"turn_id":"turn","status":"cancelled","reason":"interrupted"}));
+        wire.reply(&stop, json!({"sequence":30}));
+        wire.reply(&idle, json!({"sequence":30}));
+        wire.detach();
+    });
+    let child = home
+        .command()
+        .args(["exec", "-p", "Which port does the service use?"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    wait_rendered.recv_timeout(PATIENCE).unwrap();
+    assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
+    let output = wait(child);
+    daemon.join().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(130),
+        "stdout {stdout:?} stderr {stderr:?}"
+    );
+    assert!(
+        stdout.is_empty(),
+        "stdout holds no partial text after an interrupt; stdout was {stdout:?}"
+    );
+    assert!(
+        stderr.contains("I will read the config."),
+        "the interrupted request's words go to stderr: {stderr:?}"
+    );
+}
+
+#[test]
 fn exec_scales_a_large_photo_and_reports_both_sizes() {
     let home = Home::new();
     // Quality-100 noise over the raw bytes that fit the base64 limit, while a

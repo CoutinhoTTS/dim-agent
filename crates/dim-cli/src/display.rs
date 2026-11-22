@@ -12,6 +12,24 @@ struct TextPosition {
     printed: u64,
 }
 
+/// Where a request's text goes in `exec`'s text mode ([`Display::final_reply_only`]).
+#[derive(Clone, Copy, PartialEq)]
+enum TextRoute {
+    /// The turn's final reply.
+    Reply,
+    /// Words before or between tool calls, or a request that failed or was
+    /// cancelled: diagnostics, not the reply.
+    Progress,
+}
+
+/// The current request's text while `exec` waits to learn whether it is the
+/// turn's final reply.
+struct HeldText {
+    request: String,
+    text: String,
+    route: Option<TextRoute>,
+}
+
 pub struct Display {
     pub mcp_auth_required: HashSet<String>,
     pub model: Option<Configuration>,
@@ -40,6 +58,12 @@ pub struct Display {
     pub retries: bool,
     /// The last attempt a retry line reported, by request id.
     retry_seen: HashMap<String, u8>,
+    /// `exec`'s text mode: a request's text waits for the request's terminal,
+    /// so stdout carries the turn's final reply alone.
+    pub final_reply_only: bool,
+    held: Option<HeldText>,
+    /// A diagnostic text line is open on stderr.
+    progress_text_open: bool,
 }
 impl Display {
     pub fn new(interactive: bool, json: bool) -> Self {
@@ -64,6 +88,9 @@ impl Display {
             shown_failure: None,
             retries: true,
             retry_seen: HashMap::new(),
+            final_reply_only: false,
+            held: None,
+            progress_text_open: false,
         }
     }
     pub fn record(&mut self, message: &str) -> Result<()> {
@@ -85,6 +112,10 @@ impl Display {
         Ok(())
     }
     pub fn finish_text(&mut self) -> Result<()> {
+        if self.final_reply_only {
+            self.route_text(TextRoute::Progress)?;
+            self.finish_progress()?;
+        }
         if self.text_open {
             println!();
             self.text_open = false;
@@ -92,10 +123,7 @@ impl Display {
         io::stdout().flush()?;
         Ok(())
     }
-    fn text(&mut self, text: &str) -> Result<()> {
-        if text.is_empty() || self.muted || self.json {
-            return Ok(());
-        }
+    fn show_text(&mut self, text: &str) -> Result<()> {
         if !self.text_open && self.interactive {
             println!("Assistant:");
         }
@@ -103,6 +131,71 @@ impl Display {
         io::stdout().flush()?;
         self.text_open = true;
         Ok(())
+    }
+    fn show_progress(&mut self, text: &str) -> Result<()> {
+        eprint!("{}", safe(text));
+        io::stderr().flush()?;
+        self.progress_text_open = true;
+        Ok(())
+    }
+    fn finish_progress(&mut self) -> Result<()> {
+        if self.progress_text_open {
+            eprintln!();
+            self.progress_text_open = false;
+        }
+        io::stderr().flush()?;
+        Ok(())
+    }
+    /// Routes the text held for the current request. A request keeps the route
+    /// once it is decided.
+    fn route_text(&mut self, route: TextRoute) -> Result<()> {
+        let Some(mut held) = self.held.take() else {
+            return Ok(());
+        };
+        held.route = Some(held.route.unwrap_or(route));
+        if !held.text.is_empty() {
+            let text = std::mem::take(&mut held.text);
+            match held.route {
+                Some(TextRoute::Reply) => self.show_text(&text)?,
+                _ => self.show_progress(&text)?,
+            }
+        }
+        self.held = Some(held);
+        Ok(())
+    }
+    fn text(&mut self, request: &str, text: &str) -> Result<()> {
+        if text.is_empty() || self.muted || self.json {
+            return Ok(());
+        }
+        if !self.final_reply_only {
+            return self.show_text(text);
+        }
+        if self
+            .held
+            .as_ref()
+            .is_some_and(|held| held.request != request)
+        {
+            self.route_text(TextRoute::Progress)?;
+            self.held = None;
+        }
+        let route = self
+            .held
+            .as_ref()
+            .filter(|held| held.request == request)
+            .and_then(|held| held.route);
+        match route {
+            Some(TextRoute::Reply) => self.show_text(text),
+            Some(TextRoute::Progress) => self.show_progress(text),
+            None => {
+                let held = self.held.get_or_insert_with(|| HeldText {
+                    request: request.to_owned(),
+                    text: String::new(),
+                    route: None,
+                });
+                held.text.push_str(text);
+                Ok(())
+            }
+        }
     }
     pub fn progress(&mut self, progress: Progress) -> Result<()> {
         let Some(request) = progress.request_id else {
@@ -153,6 +246,7 @@ impl Display {
         position.printed = progress.text_offset + count;
         self.showed.insert(request.clone());
         self.text(
+            &request,
             &progress
                 .text
                 .chars()
@@ -185,7 +279,8 @@ impl Display {
             }
             EventContent::Text(data) => {
                 self.showed.insert(data.request_id.clone());
-                let position = self.requests.entry(data.request_id).or_default();
+                let request = data.request_id;
+                let position = self.requests.entry(request.clone()).or_default();
                 let count = data.delta.chars().count() as u64;
                 let skip = position
                     .printed
@@ -193,7 +288,10 @@ impl Display {
                     .min(count);
                 position.committed += count;
                 position.printed = position.printed.max(position.committed);
-                self.text(&data.delta.chars().skip(skip as usize).collect::<String>())?;
+                self.text(
+                    &request,
+                    &data.delta.chars().skip(skip as usize).collect::<String>(),
+                )?;
             }
             EventContent::ToolUse(data) => {
                 self.tools.insert(
@@ -215,6 +313,17 @@ impl Display {
                 self.finished.insert(data.request_id.clone());
                 let incomplete = self.showed.remove(&data.request_id);
                 self.retry_seen.remove(&data.request_id);
+                if self.final_reply_only {
+                    let route = match &data.outcome {
+                        ModelOutputOutcome::Completed {
+                            finish_reason: FinishReason::ToolUse,
+                        } => TextRoute::Progress,
+                        ModelOutputOutcome::Completed { .. } => TextRoute::Reply,
+                        ModelOutputOutcome::Failed { .. }
+                        | ModelOutputOutcome::Cancelled { .. } => TextRoute::Progress,
+                    };
+                    self.route_text(route)?;
+                }
                 self.finish_text()?;
                 if let ModelOutputOutcome::Failed {
                     error,
@@ -263,6 +372,16 @@ impl Display {
                 })?;
             }
             EventContent::TurnEnd(data) => {
+                if self.final_reply_only {
+                    let route = match &data.outcome {
+                        TurnOutcome::Completed { .. } => TextRoute::Reply,
+                        TurnOutcome::Failed { .. } | TurnOutcome::Cancelled { .. } => {
+                            TextRoute::Progress
+                        }
+                    };
+                    self.route_text(route)?;
+                    self.held = None;
+                }
                 self.finish_text()?;
                 let presented = self.shown_failure.take();
                 match data.outcome {
