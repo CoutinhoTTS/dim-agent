@@ -15,9 +15,11 @@ use crate::{
     exec_stop::{ExecStop, TaskError},
     host::{HostError, SessionFiles},
     host_platform::{
-        HostPlatform, OutputRequest, PtySize, ShellEdition, kill_job, shell::ShellTask, stop_job,
+        HostPlatform, OutputRequest, ShellEdition, ShellRequest, ShellStatus, ShellWrite,
+        TaskRequest, WaitReply, WaitRequest,
     },
 };
+use base64::{Engine, engine::general_purpose::STANDARD};
 use dim_agent_runtime::{Dispatcher, Names, Timeline};
 use dim_agent_types::{
     EventKind, ExecEndedData, ExecStartedData, ExecStatus, JsonObject, ToolContent, ToolEffect,
@@ -50,7 +52,6 @@ const INIT_TIMEOUT: Duration = Duration::from_secs(10);
 const STOP_WAIT: Duration = Duration::from_secs(2);
 const PID_WAIT: Duration = Duration::from_secs(2);
 const PWSH_FILE_POLL: Duration = Duration::from_millis(200);
-const SHELL_EXIT_POLL: Duration = Duration::from_millis(100);
 
 /// Hex digits in each half of a marker; `marker_pair` splits a uuid into
 /// four of these runs.
@@ -256,12 +257,11 @@ struct BackgroundTask {
     task_id: String,
     output_path: PathBuf,
     end_marker: String,
-    pid: std::io::Result<u32>,
     kind: BackgroundKind,
 }
 
 struct Inner {
-    pty: Option<NativeShell>,
+    shell: Option<String>,
     /// Counts spawned shells; a consumer loop serves only its own shell.
     generation: u64,
     dialect: ShellDialect,
@@ -284,45 +284,10 @@ struct Inner {
     occupy_exit: Option<String>,
 }
 
-enum Liveness {
-    Alive,
-    Dead(Option<portable_pty::ExitStatus>),
-    /// A newer shell owns the session state.
-    Replaced,
-}
-
 /// A terminal produced by the reader and its waiting caller.
 struct Settlement {
     data: ExecEndedData,
     ended: Option<Arc<Notify>>,
-}
-
-/// The persistent shell of one branch.
-struct NativeShell {
-    task: Arc<ShellTask>,
-    host: Arc<HostPlatform>,
-    id: String,
-}
-impl std::ops::Deref for NativeShell {
-    type Target = ShellTask;
-    fn deref(&self) -> &Self::Target {
-        &self.task
-    }
-}
-impl Drop for NativeShell {
-    fn drop(&mut self) {
-        if self.task.exit().is_some() {
-            self.host.settle_shell(&self.id, &self.task);
-            return;
-        }
-        let host = self.host.clone();
-        let task = self.task.clone();
-        let id = self.id.clone();
-        self.host.command_workers.spawn(async move {
-            let _ = task.terminate().await;
-            host.settle_shell(&id, &task);
-        });
-    }
 }
 
 pub struct ShellSession {
@@ -357,7 +322,7 @@ impl ShellSession {
         Self {
             facts: None,
             inner: tokio::sync::Mutex::new(Inner {
-                pty: None,
+                shell: None,
                 generation: 0,
                 dialect: ShellDialect::Posix,
                 shell_exe: None,
@@ -528,6 +493,35 @@ impl ShellSession {
         Some(Ok(ToolResult::text(text)))
     }
 
+    async fn write_shell(&self, bytes: &[u8]) -> Result<(), HostError> {
+        let inner = self.inner.lock().await;
+        let Some(task_id) = inner.shell.clone() else {
+            return Err(HostError::failed("Shell is not running"));
+        };
+        self.host
+            .write(ShellWrite {
+                task_id,
+                data: STANDARD.encode(bytes),
+            })
+            .await
+            .map_err(|error| HostError::failed(format!("Shell write failed: {error}")))
+    }
+
+    async fn stop_shell(&self, task_id: &str) {
+        let _ = self
+            .host
+            .kill(TaskRequest {
+                task_id: task_id.to_owned(),
+            })
+            .await;
+        let _ = self
+            .host
+            .settle(TaskRequest {
+                task_id: task_id.to_owned(),
+            })
+            .await;
+    }
+
     /// Spawns the shell on first use or after a death. Returns the reset
     /// note when this spawn replaces a dead shell.
     async fn ensure_shell(self: &Arc<Self>) -> Result<Option<String>, HostError> {
@@ -539,7 +533,7 @@ impl ShellSession {
             if self.lifecycle.is_cancelled() {
                 return Err(HostError::Cancelled("shell session closed".into()));
             }
-            if inner.pty.is_some() {
+            if inner.shell.is_some() {
                 return Ok(None);
             }
             inner.generation
@@ -560,36 +554,37 @@ impl ShellSession {
             }
             None => vec![self.config.cwd.clone()],
         };
+        let runtime = match self.host.persistent_shell().await {
+            ShellStatus::Available(shell) => shell,
+            ShellStatus::Unavailable { code, reason } => {
+                return Err(HostError::failed(format!("{code}: {reason}")));
+            }
+        };
         let id = format!("shell-{}", uuid::Uuid::new_v4());
-        let (task, runtime) = self
+        let reply = self
             .host
-            .start_shell(
-                &id,
-                &self.config.cwd,
-                &roots,
-                &self.config.output_dir,
-                PtySize {
-                    cols: 500,
-                    rows: 50,
-                },
-            )
+            .shell(ShellRequest {
+                task_id: id.clone(),
+                cwd: self.config.cwd.clone(),
+                workspace: self.config.cwd.clone(),
+                roots,
+                output_dir: self.config.output_dir.clone(),
+                cols: 500,
+                rows: 50,
+            })
             .await
-            .map_err(|error| HostError::failed(error.reason))?;
+            .map_err(|error| HostError::failed(error.to_string()))?;
         let dialect = match runtime.edition {
             ShellEdition::Pwsh | ShellEdition::WindowsPowershell => ShellDialect::Pwsh,
             _ => ShellDialect::Posix,
         };
         let exe = runtime.executable_path;
-        let task_id = id.clone();
-        let pty = NativeShell {
-            task,
-            host: self.host.clone(),
-            id,
-        };
+        let task_id = reply.task_id;
         let generation = {
             let mut inner = self.inner.lock().await;
             if self.lifecycle.is_cancelled() {
-                let _ = pty.terminate().await;
+                drop(inner);
+                self.stop_shell(&task_id).await;
                 return Err(HostError::Cancelled("shell session closed".into()));
             }
             inner.generation += 1;
@@ -599,7 +594,7 @@ impl ShellSession {
             inner.had_reset = false;
             inner.occupy_tail = None;
             inner.occupy_exit = None;
-            inner.pty = Some(pty);
+            inner.shell = Some(task_id.clone());
             inner.generation
         };
         let this = self.clone();
@@ -607,8 +602,23 @@ impl ShellSession {
         {
             let tasks = self.tasks.lock().await;
             tasks.spawn(async move {
-                let mut poll = tokio::time::interval(SHELL_EXIT_POLL);
                 let mut event_cursor = 0u64;
+                let wait_cancel = lifecycle.clone();
+                let cancelled: crate::host::CancelledFn = std::sync::Arc::new(move || {
+                    let cancel = wait_cancel.clone();
+                    Box::pin(async move {
+                        cancel.cancelled().await;
+                        Ok(())
+                    })
+                });
+                let wait = this.host.wait(
+                    WaitRequest {
+                        task_id: task_id.clone(),
+                        timeout_ms: None,
+                    },
+                    cancelled,
+                );
+                tokio::pin!(wait);
                 loop {
                     tokio::select! {
                         biased;
@@ -623,9 +633,7 @@ impl ShellSession {
                             if page.reset == Some(true)
                                 || page.event_retained_from.unwrap_or(0) > event_cursor
                             {
-                                if let Some(shell) = this.host.shell_task(&task_id) {
-                                    let _ = shell.terminate().await;
-                                }
+                                this.stop_shell(&task_id).await;
                                 this.handle_shell_exit(generation, None).await;
                                 break;
                             }
@@ -637,13 +645,30 @@ impl ShellSession {
                                 event_cursor = next;
                             }
                         },
-                        _ = poll.tick() => match this.liveness(generation).await {
-                            Liveness::Alive => {}
-                            Liveness::Replaced => break,
-                            Liveness::Dead(status) => {
-                                this.handle_shell_exit(generation, status).await;
-                                break;
+                        result = &mut wait => {
+                            let end = result.ok();
+                            loop {
+                                let page = this.host.output(OutputRequest {
+                                    task_id: task_id.clone(),
+                                    cursor: None,
+                                    limit: Some(64 * 1024),
+                                    wait_ms: Some(0),
+                                    event_cursor: Some(event_cursor),
+                                }).await;
+                                let Ok(page) = page else { break };
+                                if page.events.is_empty() {
+                                    break;
+                                }
+                                for event in page.events {
+                                    this.handle_output(&event.output).await;
+                                    event_cursor = event.cursor + 1;
+                                }
+                                if let Some(next) = page.next_event_cursor {
+                                    event_cursor = next;
+                                }
                             }
+                            this.handle_shell_exit(generation, end).await;
+                            break;
                         },
                     }
                 }
@@ -699,17 +724,19 @@ impl ShellSession {
                 if inner.retained.contains(&end_marker) {
                     return Ok(());
                 }
-                if inner.pty.is_none() {
+                if inner.shell.is_none() {
                     return Err("shell exited during initialization".into());
                 }
             }
             if tokio::time::Instant::now() >= deadline {
                 let mut inner = self.inner.lock().await;
-                if let Some(pty) = inner.pty.take() {
-                    let _ = pty.terminate().await;
-                }
+                let task_id = inner.shell.take();
                 let captured = inner.retained.clone();
                 inner.had_reset = true;
+                drop(inner);
+                if let Some(task_id) = task_id {
+                    self.stop_shell(&task_id).await;
+                }
                 return Err(format!(
                     "shell did not initialize; captured output: {captured}"
                 ));
@@ -728,10 +755,14 @@ impl ShellSession {
     ) -> Result<(), HostError> {
         let mut inner = self.inner.lock().await;
         let line = format!("{wrapped}\n");
-        let Some(pty) = inner.pty.as_mut() else {
+        let Some(task_id) = inner.shell.clone() else {
             return Err(HostError::failed("Shell is not running"));
         };
-        pty.write(line.as_bytes())
+        self.host
+            .write(ShellWrite {
+                task_id,
+                data: STANDARD.encode(line.as_bytes()),
+            })
             .await
             .map_err(|e| HostError::failed(format!("Shell write failed: {e}")))?;
         inner.capture = Some(capture);
@@ -786,6 +817,12 @@ impl ShellSession {
             settled.extend(advance_occupying(&mut inner));
         }
         for settlement in settled {
+            let _ = self
+                .host
+                .settle(TaskRequest {
+                    task_id: settlement.data.task_id.clone(),
+                })
+                .await;
             self.settle(settlement.data);
             if let Some(notify) = settlement.ended {
                 notify.notify_waiters();
@@ -793,42 +830,30 @@ impl ShellSession {
         }
     }
 
-    /// Whether the shell of `generation` still runs. A shell the session
-    /// terminated itself (its PTY taken) counts as dead.
-    async fn liveness(&self, generation: u64) -> Liveness {
-        let mut inner = self.inner.lock().await;
-        if inner.generation != generation {
-            return Liveness::Replaced;
-        }
-        match inner.pty.as_mut() {
-            None => Liveness::Dead(None),
-            Some(pty) => match pty.exit() {
-                None => Liveness::Alive,
-                Some(end) => Liveness::Dead(end.exit),
-            },
-        }
-    }
-
     /// The shell of `generation` died: note the exit, settle the occupying
     /// task and the POSIX background jobs as failed, and mark the reset for
     /// the next call.
-    async fn handle_shell_exit(
-        self: &Arc<Self>,
-        generation: u64,
-        status: Option<portable_pty::ExitStatus>,
-    ) {
+    async fn handle_shell_exit(self: &Arc<Self>, generation: u64, end: Option<WaitReply>) {
         let mut settled: Vec<Settlement> = Vec::new();
         let mut orphans: Vec<BackgroundTask> = Vec::new();
+        #[allow(
+            unused_assignments,
+            reason = "the early generation return leaves the initial value unread"
+        )]
+        let mut shell_task = None;
         {
             let mut inner = self.inner.lock().await;
             if inner.generation != generation {
                 return;
             }
-            if inner.pty.take().is_some() {
-                let note = match status {
-                    Some(status) => match status.signal() {
-                        Some(signal) => format!("[shell killed by signal: {signal}]"),
-                        None => format!("[shell exited: code {}]", status.exit_code()),
+            let task_id = inner.shell.take();
+            shell_task = task_id.clone();
+            if task_id.is_some() {
+                let note = match end {
+                    Some(reply) => match (reply.signal.as_deref(), reply.exit_code) {
+                        (Some(signal), _) => format!("[shell killed by signal: {signal}]"),
+                        (_, Some(code)) => format!("[shell exited: code {code}]"),
+                        _ => "[shell exited]".to_owned(),
                     },
                     None => "[shell exited]".to_owned(),
                 };
@@ -857,10 +882,21 @@ impl ShellSession {
             }
         }
         for task in orphans {
-            let killed = match task.pid {
-                Ok(pid) => kill_job(pid).await,
-                Err(error) => Err(error),
-            };
+            let killed = self
+                .host
+                .kill(TaskRequest {
+                    task_id: task.task_id.clone(),
+                })
+                .await
+                .map_err(|error| std::io::Error::other(error.to_string()));
+            if killed.is_ok() {
+                let _ = self
+                    .host
+                    .settle(TaskRequest {
+                        task_id: task.task_id.clone(),
+                    })
+                    .await;
+            }
             let preview = file_tail(&task.output_path, OUTPUT_LIMIT);
             let mut result = reset_result(&task.task_id, &task.output_path, &preview);
             if let Err(error) = killed {
@@ -879,6 +915,9 @@ impl ShellSession {
                 },
                 ended: None,
             });
+        }
+        if let Some(task_id) = shell_task {
+            self.stop_shell(&task_id).await;
         }
         for settlement in settled {
             self.settle(settlement.data);
@@ -921,7 +960,7 @@ impl ShellSession {
         loop {
             {
                 let mut inner = self.inner.lock().await;
-                if inner.pty.is_none() {
+                if inner.shell.is_none() {
                     let note = inner
                         .shell_exit
                         .clone()
@@ -986,16 +1025,17 @@ impl ShellSession {
     /// the marker the shell tree is terminated and the session resets.
     async fn interrupt(self: &Arc<Self>) -> Result<ToolResult, String> {
         {
-            let mut inner = self.inner.lock().await;
-            if let Some(pty) = inner.pty.as_mut() {
-                let _ = pty.write(b"\x03").await;
+            let inner = self.inner.lock().await;
+            if inner.shell.is_some() {
+                drop(inner);
+                let _ = self.write_shell(b"\x03").await;
             }
         }
         let deadline = tokio::time::Instant::now() + STOP_WAIT;
         loop {
             {
                 let mut inner = self.inner.lock().await;
-                if inner.pty.is_none() {
+                if inner.shell.is_none() {
                     inner.capture = None;
                     return Ok(ToolResult::error(
                         "[Command interrupted; the shell exited and will be reset]",
@@ -1019,11 +1059,13 @@ impl ShellSession {
             if tokio::time::Instant::now() >= deadline {
                 let mut inner = self.inner.lock().await;
                 inner.capture = None;
-                if let Some(pty) = inner.pty.take() {
-                    let _ = pty.terminate().await;
-                }
+                let task_id = inner.shell.take();
                 inner.shell_exit = Some("[shell was terminated]".into());
                 inner.had_reset = true;
+                drop(inner);
+                if let Some(task_id) = task_id {
+                    self.stop_shell(&task_id).await;
+                }
                 return Ok(ToolResult::error(
                     "[Command interrupted; the shell was terminated and reset]",
                 ));
@@ -1200,7 +1242,6 @@ impl ShellSession {
                     task_id: task_id.clone(),
                     output_path: output_path.clone(),
                     end_marker: completion.full(),
-                    pid: Err(std::io::Error::other("the job pid was not reported")),
                     kind,
                 },
             );
@@ -1221,23 +1262,9 @@ impl ShellSession {
         while tokio::time::Instant::now() < deadline {
             let found = {
                 let inner = self.inner.lock().await;
-                marker_code(&inner.retained, &pid_marker_full)
+                marker_code(&inner.retained, &pid_marker_full).is_some()
             };
-            if let Some(code) = found {
-                let mut inner = self.inner.lock().await;
-                let Inner {
-                    pty, background, ..
-                } = &mut *inner;
-                if let Some(task) = background.get_mut(&task_id) {
-                    task.pid = match (code.parse::<u32>(), pty.as_ref()) {
-                        (Ok(pid), Some(shell)) => shell.job_pid(pid).await,
-                        (Ok(_), None) => Err(std::io::Error::other("shell exited")),
-                        (Err(_), _) => Err(std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            "Invalid job pid",
-                        )),
-                    };
-                }
+            if found {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -1317,8 +1344,9 @@ impl ShellSession {
                 if let Some(capture) = inner.capture.as_mut() {
                     capture.settle(capture.pending.len());
                 }
-                if let Some(pty) = inner.pty.as_mut() {
-                    let _ = pty.write(b"\x03").await;
+                if inner.shell.is_some() {
+                    drop(inner);
+                    let _ = self.write_shell(b"\x03").await;
                 }
             }
             let deadline = tokio::time::Instant::now() + STOP_WAIT;
@@ -1327,7 +1355,7 @@ impl ShellSession {
                 let state = {
                     let inner = self.inner.lock().await;
                     (
-                        inner.pty.is_none(),
+                        inner.shell.is_none(),
                         inner
                             .capture
                             .as_ref()
@@ -1349,11 +1377,15 @@ impl ShellSession {
                     inner.occupy_tail = Some(capture.output);
                 }
                 if !found {
-                    if let Some(pty) = inner.pty.take() {
-                        let _ = pty.terminate().await;
-                    }
+                    let task_id = inner.shell.take();
                     inner.shell_exit = Some("[shell was terminated]".into());
                     inner.had_reset = true;
+                    drop(inner);
+                    if let Some(task_id) = task_id {
+                        self.stop_shell(&task_id).await;
+                    }
+                } else {
+                    drop(inner);
                 }
             }
             let data = ExecEndedData {
@@ -1370,10 +1402,21 @@ impl ShellSession {
             inner.background.remove(task_id)
         };
         if let Some(task) = task {
-            let terminated = match task.pid {
-                Ok(pid) => stop_job(pid).await,
-                Err(error) => Err(error),
-            };
+            let terminated = self
+                .host
+                .kill(TaskRequest {
+                    task_id: task.task_id.clone(),
+                })
+                .await
+                .map_err(|error| std::io::Error::other(error.to_string()));
+            if terminated.is_ok() {
+                let _ = self
+                    .host
+                    .settle(TaskRequest {
+                        task_id: task.task_id.clone(),
+                    })
+                    .await;
+            }
             let data = match terminated {
                 Ok(()) => ExecEndedData {
                     task_id: task_id.to_owned(),
@@ -1404,13 +1447,7 @@ impl ShellSession {
     }
 
     async fn write_line(&self, line: &str) -> Result<(), HostError> {
-        let mut inner = self.inner.lock().await;
-        let Some(pty) = inner.pty.as_mut() else {
-            return Err(HostError::failed("Shell is not running"));
-        };
-        pty.write(format!("{line}\n").as_bytes())
-            .await
-            .map_err(|e| HostError::failed(format!("Shell write failed: {e}")))
+        self.write_shell(format!("{line}\n").as_bytes()).await
     }
 }
 
@@ -1532,11 +1569,13 @@ impl DynPlugin for ShellSessionPlugin {
                 service.lifecycle.cancel();
                 {
                     let mut inner = service.inner.lock().await;
-                    if let Some(pty) = inner.pty.take() {
-                        let _ = pty.terminate().await;
-                    }
+                    let task_id = inner.shell.take();
                     for queued in inner.queue.drain(..) {
                         let _ = queued.done.send(Err("shell session closed".into()));
+                    }
+                    drop(inner);
+                    if let Some(task_id) = task_id {
+                        service.stop_shell(&task_id).await;
                     }
                 }
                 let tasks = service.tasks.lock().await.clone();
@@ -1819,14 +1858,19 @@ fn posix_background(
     completion: &MarkerPair,
     pid: &MarkerPair,
 ) -> String {
+    let task_id = output_path
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
     format!(
-        "{{ {{ eval $'{}'; }} > '{}' 2>&1; printf '%s%s%d\\n' '{}' '{}' \"$?\"; }} & disown\nprintf '%s%s%d\\n' '{}' '{}' \"$!\"",
+        "{{ {{ eval $'{}'; }} > '{}' 2>&1; printf '%s%s%d\\n' '{}' '{}' \"$?\"; }} & disown\nprintf '%s%s%d %s\\n' '{}' '{}' \"$!\" '{}'",
         posix_escape(command),
         output_path.display(),
         completion.first(),
         completion.second(),
         pid.first(),
         pid.second(),
+        task_id,
     )
 }
 
@@ -1854,6 +1898,10 @@ fn pwsh_background(
     completion: &MarkerPair,
     pid: &MarkerPair,
 ) -> String {
+    let task_id = output_path
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
     let encoded = base64_encode(command);
     let mut out = String::new();
     out.push_str("$__dim_p = Start-Process -FilePath '");
@@ -1879,7 +1927,9 @@ fn pwsh_background(
     out.push_str(pid.first());
     out.push_str("' + '");
     out.push_str(pid.second());
-    out.push_str("' + $__dim_p.Id)");
+    out.push_str("' + $__dim_p.Id + ' ' + '");
+    out.push_str(task_id);
+    out.push_str("')");
     out
 }
 

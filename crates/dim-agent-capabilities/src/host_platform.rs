@@ -231,6 +231,7 @@ const ENVIRONMENT: &[&str] = &[
 pub(crate) enum ExecutionTask {
     Command(Arc<crate::workspace_tools::exec::CommandTask>),
     Shell(Arc<shell::ShellTask>),
+    Job(Arc<shell::ShellJob>),
 }
 
 #[derive(Clone)]
@@ -1103,6 +1104,18 @@ impl HostPlatform {
                 .await
                 .map_err(|error| HostPlatformError::Failed(error.to_string()));
         }
+        if let Some(job) = self.job_task(&request.task_id) {
+            let shell = self
+                .shell_task(&job.shell_id)
+                .ok_or(HostPlatformError::TaskUnknown)?;
+            let pid = shell
+                .job_pid(job.pid)
+                .await
+                .map_err(|error| HostPlatformError::Failed(error.to_string()))?;
+            return kill_job(pid)
+                .await
+                .map_err(|error| HostPlatformError::Failed(error.to_string()));
+        }
         let task = self.command_task(&request.task_id)?;
         task.terminate()
             .await
@@ -1117,6 +1130,10 @@ impl HostPlatform {
                 return Ok(());
             }
             return Err(HostPlatformError::TaskRunning);
+        }
+        if self.job_task(&request.task_id).is_some() {
+            self.commands.lock().unwrap().remove(&request.task_id);
+            return Ok(());
         }
         let task = self.command_task(&request.task_id)?;
         if !task.ended() {
@@ -2961,19 +2978,6 @@ pub fn terminate_job(pid: u32) -> io::Result<()> {
     native::terminate_tree(pid)
 }
 
-pub(crate) async fn stop_job(pid: u32) -> io::Result<()> {
-    terminate_job(pid)?;
-    #[cfg(unix)]
-    {
-        match wait_job_exit(pid).await {
-            Err(error) if error.kind() == io::ErrorKind::TimedOut => kill_job(pid).await,
-            result => result,
-        }
-    }
-    #[cfg(windows)]
-    Ok(())
-}
-
 /// Kills a background job that outlived its shell and confirms it is gone:
 /// the process group it leads on POSIX, the process tree under it on
 /// Windows.
@@ -3276,6 +3280,11 @@ pub(crate) mod shell {
         started: Instant,
     }
 
+    pub(crate) struct ShellJob {
+        pub(crate) pid: u32,
+        pub(crate) shell_id: String,
+    }
+
     #[derive(Clone)]
     pub(crate) struct ShellExit {
         pub(crate) exit: Option<portable_pty::ExitStatus>,
@@ -3285,6 +3294,19 @@ pub(crate) mod shell {
     }
 
     const EVENT_RETAIN_CHARS: usize = 1024 * 1024;
+
+    fn parse_shell_job(line: &str) -> Option<(String, u32)> {
+        let start = line.find("__DIM_START_")?;
+        let rest = &line[start..];
+        let close = rest[2..].find("__")? + 2;
+        let after = rest.get(close + 2..)?;
+        let mut parts = after.split_whitespace();
+        let pid = parts.next()?.parse().ok()?;
+        let task_id = parts.next()?;
+        task_id
+            .starts_with("exec-")
+            .then(|| (task_id.to_owned(), pid))
+    }
 
     #[derive(Default)]
     struct ShellEvents {
@@ -3440,11 +3462,15 @@ pub(crate) mod shell {
                 started: Instant::now(),
             });
             commands.insert(id.into(), super::ExecutionTask::Shell(shell.clone()));
+            drop(commands);
+            let jobs = self.commands.clone();
+            let shell_id = id.to_string();
             let pump = Arc::downgrade(&shell);
             let (drained, reader_finished) = tokio::sync::oneshot::channel();
             std::thread::spawn(move || {
                 let mut bytes = [0; 4096];
                 let mut written = 0usize;
+                let mut pending = String::new();
                 while let Ok(n) = reader.read(&mut bytes) {
                     if n == 0 {
                         break;
@@ -3453,6 +3479,19 @@ pub(crate) mod shell {
                         break;
                     };
                     let chunk = crate::shell_session::regularize_output(&bytes[..n]);
+                    pending.push_str(&chunk);
+                    while let Some(newline) = pending.find('\n') {
+                        let line: String = pending.drain(..=newline).collect();
+                        if let Some((task_id, pid)) = parse_shell_job(&line) {
+                            jobs.lock().unwrap().insert(
+                                task_id,
+                                super::ExecutionTask::Job(Arc::new(ShellJob {
+                                    pid,
+                                    shell_id: shell_id.clone(),
+                                })),
+                            );
+                        }
+                    }
                     let mut capture = pump.capture.lock().unwrap();
                     if pump.exit().is_some() {
                         break;
@@ -3537,6 +3576,13 @@ pub(crate) mod shell {
         pub(crate) fn shell_task(&self, id: &str) -> Option<Arc<ShellTask>> {
             match self.commands.lock().unwrap().get(id) {
                 Some(super::ExecutionTask::Shell(shell)) => Some(shell.clone()),
+                _ => None,
+            }
+        }
+
+        pub(crate) fn job_task(&self, id: &str) -> Option<Arc<ShellJob>> {
+            match self.commands.lock().unwrap().get(id) {
+                Some(super::ExecutionTask::Job(job)) => Some(job.clone()),
                 _ => None,
             }
         }
