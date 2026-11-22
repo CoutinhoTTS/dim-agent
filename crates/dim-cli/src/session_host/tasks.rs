@@ -1579,6 +1579,145 @@ mod tests {
         assert!(snapshot.history_complete, "the surviving line is settled");
     }
 
+    /// A creation that fails while the line's first window is still loading
+    /// returns to the line it was cut from when the directory knows that
+    /// line, not to `main`: the parent's window starts over and is read again.
+    #[tokio::test]
+    async fn a_create_failure_returns_to_a_parent_the_directory_knows() {
+        let (mut worker, mut receiver, _sent) =
+            crate::session_host::test_worker(&crate::session_host::TEST_FEATURES).await;
+        worker.session_id = "s1".into();
+        worker.focus = "main".into();
+        worker.discover_branch("b-7c");
+        {
+            let history = worker.task_history.get_mut("b-7c").unwrap();
+            history.done = true;
+            history.window_complete = true;
+            history.window.through = Some(2);
+        }
+        worker.task_history_queue.clear();
+        let create: Event = serde_json::from_value(json!({
+            "id": "create-child", "sequence": 2, "create_at": 1000, "type": "branch", "name": "create",
+            "data": {
+                "at": {"kind": "sequence", "sequence": 1}, "branch": "b-7d", "prompt": "Narrow the parser",
+                "source": {"kind": "host", "operation_id": "op"}
+            }
+        }))
+        .expect("a branch create event");
+        worker.apply("b-7c", create);
+        assert!(
+            worker
+                .projection
+                .line_views()
+                .iter()
+                .any(|line| line.id == "b-7d" && line.parent.as_deref() == Some("b-7c")),
+            "the directory knows the line it was cut from"
+        );
+        assert!(
+            !worker.lines.contains_key("b-7c"),
+            "the parent's window is not open in the view"
+        );
+        worker
+            .command(crate::model::session::Command::FocusLine("b-7d".into()))
+            .await
+            .unwrap();
+        worker.poll_task_history().await.unwrap();
+        assert_eq!(
+            worker
+                .task_history_request
+                .as_ref()
+                .map(|read| read.branch_id.as_str()),
+            Some("b-7d"),
+            "the line's first window is in flight"
+        );
+
+        worker.task_event("b-7c", create_failed(400, "b-7d"));
+
+        assert_eq!(
+            worker.focus, "b-7c",
+            "a line whose creation failed returns to the line it was cut from"
+        );
+        let parent = &worker.task_history["b-7c"];
+        assert_eq!(
+            parent.window.through, None,
+            "the returned-to window starts over"
+        );
+        assert!(
+            !parent.window_complete,
+            "the returned-to window is armed for a new read"
+        );
+        assert!(
+            worker.task_history_queue.contains(&"b-7c".to_owned()),
+            "the returned-to line is queued"
+        );
+        assert!(
+            !worker.task_history_queue.contains(&"b-7d".to_owned()),
+            "the failed line is not read again on its own"
+        );
+
+        fail(&mut worker, "the failed line's first window").await;
+        worker.poll_task_history().await.unwrap();
+        assert_eq!(
+            worker
+                .task_history_request
+                .as_ref()
+                .map(|read| read.branch_id.as_str()),
+            Some("b-7c"),
+            "the returned-to line reads its window"
+        );
+        worker.task_history.get_mut("b-7c").unwrap().ended = true;
+        answer(
+            &mut worker,
+            json!({"events":[text(300, "r-parent", "the parent's answer")], "through": 300, "nextBefore": 300, "nextAfter": 300}),
+        )
+        .await;
+        worker.poll_task_history().await.unwrap();
+
+        assert_eq!(
+            worker.task_history["b-7c"].window.through,
+            Some(300),
+            "the returned-to window loaded its page"
+        );
+        assert!(
+            worker.task_history["b-7c"].done,
+            "the returned-to window finished"
+        );
+        let rows = worker.lines["b-7c"].projection.rows();
+        assert_eq!(rows.len(), 1, "the page drew the parent's conversation");
+        assert_eq!(rows[0].text, "the parent's answer");
+
+        worker
+            .command(crate::model::session::Command::FocusLine("b-7d".into()))
+            .await
+            .unwrap();
+        assert_eq!(
+            worker.focus, "b-7c",
+            "the terminal line cannot be shown again"
+        );
+        let notices: Vec<String> = receiver
+            .try_iter()
+            .filter_map(|update| match update {
+                Update::Notice(text) => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            notices
+                .iter()
+                .any(|notice| notice == "Line creation failed: b-7d"),
+            "the refusal names the failed creation: {notices:?}"
+        );
+
+        worker.publish();
+        let snapshot = published(&mut receiver);
+        assert_eq!(snapshot.focus, "b-7c", "the shown line survives");
+        assert!(
+            snapshot.history_complete,
+            "the returned-to line's window loaded"
+        );
+        assert!(snapshot.window_error.is_none());
+    }
+
     fn published(receiver: &mut std::sync::mpsc::Receiver<Update>) -> ViewSnapshot {
         let mut snapshot = None;
         while let Ok(update) = receiver.try_recv() {
