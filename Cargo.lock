@@ -1487,6 +1487,7 @@ dependencies = [
  "dim-agent-runtime",
  "dim-agent-types",
  "dim-app-server",
+ "dim-client",
  "dim-session-title",
  "getrandom 0.3.4",
  "regex",

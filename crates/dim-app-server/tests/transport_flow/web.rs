@@ -69,6 +69,20 @@ impl ManagedProvider for SearchProvider {
     fn subscribe_account(&self) -> Option<watch::Receiver<Option<bool>>> {
         self.watched.then(|| self.signed_in.subscribe())
     }
+    fn observe_account(&self, _: &str) -> ManagedFuture<()> {
+        let fail = self.fail_status.load(Ordering::SeqCst);
+        let signed_in = self.signed_in.clone();
+        Box::pin(async move {
+            if fail {
+                return Err(ManagedError::Transient);
+            }
+            let current = *signed_in.borrow();
+            if let Some(usable) = current {
+                signed_in.send_replace(Some(usable));
+            }
+            Ok(())
+        })
+    }
     fn recover(&self, _: &str) -> ManagedFuture<AccountSnapshot> {
         unused()
     }
@@ -168,6 +182,10 @@ impl SearchProviderPlugin {
             fail_status,
         }
     }
+    fn with_failure(mut self, fail_status: Arc<AtomicBool>) -> Self {
+        self.fail_status = fail_status;
+        self
+    }
 }
 impl Plugin for SearchProviderPlugin {
     type Deps = ();
@@ -192,6 +210,7 @@ struct ProviderRow {
     slot: Arc<OnceLock<(Ctx, FiberView, FiberView)>>,
     signed_in: watch::Sender<Option<bool>>,
     reads: Arc<AtomicUsize>,
+    fail: Arc<AtomicBool>,
 }
 impl DynPlugin for ProviderRow {
     fn name(&self) -> &str {
@@ -199,10 +218,10 @@ impl DynPlugin for ProviderRow {
     }
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
-            let provider = ctx.plugin(SearchProviderPlugin::new(
-                self.signed_in.clone(),
-                self.reads.clone(),
-            ));
+            let provider = ctx.plugin(
+                SearchProviderPlugin::new(self.signed_in.clone(), self.reads.clone())
+                    .with_failure(self.fail.clone()),
+            );
             let binding = ctx.plugin(ManagedProviderBinding);
             let _ = self.slot.set((ctx.clone(), provider, binding));
             Ok(Effect::Done)
@@ -1058,6 +1077,7 @@ async fn web_search_is_declared_after_a_signed_in_binding_replaces_a_signed_out_
                     slot: row.clone(),
                     signed_in: start.clone(),
                     reads: first_reads.clone(),
+                    fail: Arc::new(AtomicBool::new(false)),
                 }))
             });
         },
@@ -1101,6 +1121,254 @@ async fn web_search_is_declared_after_a_signed_in_binding_replaces_a_signed_out_
     server.shutdown();
     server.join().await.unwrap();
     std::fs::remove_dir_all(home).unwrap();
+}
+
+/// Replacing the bound provider with one that has not read its account yet
+/// withdraws the declaration the retired binding published, and only the new
+/// binding's own watch decides the declaration afterwards.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn web_search_is_withdrawn_when_a_replacement_binding_has_not_observed_its_account() {
+    disable_system_proxy();
+    let home = std::fs::canonicalize("/tmp")
+        .unwrap()
+        .join(format!("dwx-{}", uuid::Uuid::new_v4()));
+    let signed_in = watch::Sender::new(Some(true));
+    let reads = Arc::new(AtomicUsize::new(0));
+    let slot = Arc::new(OnceLock::new());
+    let row = slot.clone();
+    let start = signed_in.clone();
+    let first_reads = reads.clone();
+    let (server, mut requests, _) = super::session_typescript::start_with(
+        ServerConfig {
+            product_home: Some(home.clone()),
+            target_home: Some(home.join("rust")),
+            ..Default::default()
+        },
+        move |builder| {
+            builder.plugin(move |_| {
+                Ok(Box::new(ProviderRow {
+                    slot: row.clone(),
+                    signed_in: start.clone(),
+                    reads: first_reads.clone(),
+                    fail: Arc::new(AtomicBool::new(false)),
+                }))
+            });
+        },
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let id = provider_session(&mut client).await;
+    let session = server.agent().unwrap().get_session(&id).unwrap();
+    let names = text_turn(&mut client, &id, &mut requests, "hello").await;
+    assert!(names.iter().any(|name| name == "web_search"), "{names:?}");
+
+    let (ctx, _provider, _binding) = slot.get().expect("the provider row was not installed");
+    signed_in.send_replace(None);
+    ctx.plugin(ManagedProviderBinding);
+
+    await_web_source(&session, false).await;
+    let names = text_turn(&mut client, &id, &mut requests, "after the replacement").await;
+    assert!(!names.iter().any(|name| name == "web_search"), "{names:?}");
+
+    let second = create_with_tools(&mut client, Some(json!(["web_search", "web_fetch"]))).await;
+    let second_session = server.agent().unwrap().get_session(&second).unwrap();
+    let names = text_turn(&mut client, &second, &mut requests, "another Session").await;
+    assert!(
+        !names.iter().any(|name| name == "web_search"),
+        "an unobserved binding must not inherit the retired one's account: {names:?}"
+    );
+
+    signed_in.send_replace(Some(true));
+    await_web_source(&session, true).await;
+    await_web_source(&second_session, true).await;
+    let names = text_turn(&mut client, &id, &mut requests, "the new binding signed in").await;
+    assert!(names.iter().any(|name| name == "web_search"), "{names:?}");
+
+    signed_in.send_replace(Some(false));
+    await_web_source(&session, false).await;
+    await_web_source(&second_session, false).await;
+    let names = text_turn(
+        &mut client,
+        &second,
+        &mut requests,
+        "the new binding signed out",
+    )
+    .await;
+    assert!(!names.iter().any(|name| name == "web_search"), "{names:?}");
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// A replacement binding whose first account observation fails still does not
+/// inherit the retired binding's signed-in state; its own watch alone decides
+/// the declaration afterwards.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failed_initial_account_observation_does_not_inherit_the_previous_binding() {
+    disable_system_proxy();
+    let home = std::fs::canonicalize("/tmp")
+        .unwrap()
+        .join(format!("dwy-{}", uuid::Uuid::new_v4()));
+    let signed_in = watch::Sender::new(Some(true));
+    let reads = Arc::new(AtomicUsize::new(0));
+    let slot = Arc::new(OnceLock::new());
+    let row = slot.clone();
+    let start = signed_in.clone();
+    let first_reads = reads.clone();
+    let (server, mut requests, _) = super::session_typescript::start_with(
+        ServerConfig {
+            product_home: Some(home.clone()),
+            target_home: Some(home.join("rust")),
+            ..Default::default()
+        },
+        move |builder| {
+            builder.plugin(move |_| {
+                Ok(Box::new(ProviderRow {
+                    slot: row.clone(),
+                    signed_in: start.clone(),
+                    reads: first_reads.clone(),
+                    fail: Arc::new(AtomicBool::new(true)),
+                }))
+            });
+        },
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let id = provider_session(&mut client).await;
+    let session = server.agent().unwrap().get_session(&id).unwrap();
+    let names = text_turn(&mut client, &id, &mut requests, "hello").await;
+    assert!(names.iter().any(|name| name == "web_search"), "{names:?}");
+
+    let (ctx, _provider, _binding) = slot.get().expect("the provider row was not installed");
+    signed_in.send_replace(None);
+    ctx.plugin(ManagedProviderBinding);
+
+    await_web_source(&session, false).await;
+    let second = create_with_tools(&mut client, Some(json!(["web_search", "web_fetch"]))).await;
+    let second_session = server.agent().unwrap().get_session(&second).unwrap();
+    let names = text_turn(
+        &mut client,
+        &second,
+        &mut requests,
+        "a failed first observation",
+    )
+    .await;
+    assert!(
+        !names.iter().any(|name| name == "web_search"),
+        "a failed observation must not inherit the retired account: {names:?}"
+    );
+
+    signed_in.send_replace(Some(true));
+    await_web_source(&session, true).await;
+    await_web_source(&second_session, true).await;
+    let names = text_turn(
+        &mut client,
+        &second,
+        &mut requests,
+        "the binding published its state",
+    )
+    .await;
+    assert!(names.iter().any(|name| name == "web_search"), "{names:?}");
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// An open Session that switches from an explicit adapter to the default
+/// managed search observes the account once, so a signed-in account keeps the
+/// declaration instead of being hidden until another Session reads it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn switching_an_open_session_to_managed_search_observes_the_account() {
+    disable_system_proxy();
+    let home = std::fs::canonicalize("/tmp")
+        .unwrap()
+        .join(format!("dwz-{}", uuid::Uuid::new_v4()));
+    let signed_in = watch::Sender::new(Some(true));
+    let reads = Arc::new(AtomicUsize::new(0));
+    let fail = Arc::new(AtomicBool::new(false));
+    let signed_row = signed_in.clone();
+    let reads_row = reads.clone();
+    let fail_row = fail.clone();
+    let config = ServerConfig {
+        product_home: Some(home.clone()),
+        target_home: Some(home.join("rust")),
+        managed_provider: Some(ManagedProviderRow(Arc::new(move |builtins, _| {
+            let (signed_in, reads, fail) =
+                (signed_row.clone(), reads_row.clone(), fail_row.clone());
+            builtins
+                .builtins
+                .register::<Value, _, _>("SearchProviderFixture", move |_| {
+                    Ok(SearchProviderPlugin::unwatched(
+                        signed_in.clone(),
+                        reads.clone(),
+                        fail.clone(),
+                    ))
+                });
+            "SearchProviderFixture".to_owned()
+        }))),
+        ..Default::default()
+    };
+    let (server, mut requests, _) = super::session_typescript::start(config).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    provider_ready(&mut client).await;
+    configure(
+        &mut client,
+        json!({"searchService":{"kind":"brave","endpoint":"http://127.0.0.1:1/search","apiKey":"scenario-eval"}}),
+    )
+    .await;
+    let id = create_with_tools(&mut client, Some(json!(["web_search", "web_fetch"]))).await;
+    let names = text_turn(&mut client, &id, &mut requests, "the explicit adapter").await;
+    assert!(names.iter().any(|name| name == "web_search"), "{names:?}");
+    assert_eq!(
+        reads.load(Ordering::SeqCst),
+        0,
+        "an explicit adapter answers without an account read"
+    );
+
+    configure(&mut client, json!({})).await;
+    await_reads(&reads, 1).await;
+    let names = text_turn(&mut client, &id, &mut requests, "the default service").await;
+    assert!(
+        names.iter().any(|name| name == "web_search"),
+        "switching to managed search must observe the signed-in account: {names:?}"
+    );
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+async fn await_web_source(session: &dim_agent_runtime::Session, present: bool) {
+    use dim_agent_capabilities::tool_registry::ToolSourcesView;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let has = session
+                .session_service::<ToolSourcesView>()
+                .map(|view| view.get().0.contains_key("web"))
+                .unwrap_or(false);
+            if has == present {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("the web source did not become {present}"));
+}
+
+async fn await_reads(reads: &AtomicUsize, expected: usize) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while reads.load(Ordering::SeqCst) < expected {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the account was not read");
 }
 
 /// A Session's assembly reads the account only when its declaration depends on

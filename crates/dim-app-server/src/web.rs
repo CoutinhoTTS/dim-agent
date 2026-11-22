@@ -26,7 +26,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     collections::{HashMap, VecDeque},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::watch;
@@ -281,7 +284,8 @@ impl DynPlugin for WebSessionPlugin {
             let mut settings_wake = wake.subscribe();
             let mut usable_changes = managed.subscribe_usable();
             let document = state.document(&cancel).await;
-            let signed_in = if mounted && document.as_ref().is_ok_and(managed_search_needed) {
+            let needed = mounted && document.as_ref().is_ok_and(managed_search_needed);
+            let signed_in = if needed {
                 managed.refresh_usable(&cancel).await
             } else {
                 false
@@ -291,7 +295,7 @@ impl DynPlugin for WebSessionPlugin {
                     Ok(document) => search_configured(document, signed_in),
                     Err(_) => false,
                 };
-            let source = SearchSource::new(state.clone());
+            let source = SearchSource::new(state.clone(), needed);
             source.set_available(available);
             tools.register_source(ctx, SOURCE, source.clone())?;
             let task_cancel = cancel;
@@ -336,10 +340,14 @@ struct SearchSource {
     state: Arc<SessionState>,
     tool: Arc<ToolContribution>,
     set: Mutex<Option<Arc<ToolSourceSet>>>,
+    /// Whether the Session's current managed-search need already asked the
+    /// owner for its one observation. Cleared when the configuration stops
+    /// needing the managed account, so a later switch observes again.
+    observed: AtomicBool,
 }
 
 impl SearchSource {
-    fn new(state: Arc<SessionState>) -> Arc<Self> {
+    fn new(state: Arc<SessionState>, observed: bool) -> Arc<Self> {
         let tool = Arc::new(ToolContribution {
             definition: definition(
                 SEARCH_TOOL,
@@ -355,6 +363,7 @@ impl SearchSource {
             state,
             tool,
             set: Mutex::new(None),
+            observed: AtomicBool::new(observed),
         })
     }
 
@@ -377,13 +386,25 @@ impl SearchSource {
     }
 
     /// Re-evaluates the declaration from configuration and the managed
-    /// account, announcing the source when the offered set changed.
+    /// account, announcing the source when the offered set changed. The first
+    /// evaluation that needs the managed account observes it once through the
+    /// owner, so another process's login or logout is visible without an
+    /// account RPC; afterwards that provider's watch is the source.
     async fn reconcile(&self, cancel: &CancellationToken, session: InstanceId, ctx: &Ctx) {
         let Ok(document) = self.state.document(cancel).await else {
             return;
         };
-        let available =
-            self.state.mounted && search_configured(&document, self.state.managed.usable());
+        let needed = self.state.mounted && managed_search_needed(&document);
+        let observe = needed && !self.observed.swap(true, Ordering::SeqCst);
+        if !needed {
+            self.observed.store(false, Ordering::SeqCst);
+        }
+        let signed_in = if observe {
+            self.state.managed.refresh_usable(cancel).await
+        } else {
+            self.state.managed.usable()
+        };
+        let available = self.state.mounted && search_configured(&document, signed_in);
         if self.set_available(available)
             && let Err(error) = ctx.emit(ToolProviderChanged {
                 name: tool_provider_changes(session),

@@ -6,18 +6,22 @@
 mod oauth;
 
 use dim_agent_capabilities::{
+    adapters::EchoModel,
+    defaults,
     file_storage::{FileStorage, FileStorageError, FileStoragePlugin},
+    history::HistoryRenderer,
     host::{
         HostError, HostFuture, ModalityConnectionHost, ModalityTarget, ModelConnection,
         ModelDriver, ModelHost, ModelProtocol, ModelStream, ProviderConnectionResolver,
         SelectableModelsHost,
     },
 };
-use dim_agent_runtime::Names;
+use dim_agent_runtime::{AgentBuilder, AgentConfig, Names};
 use dim_agent_types::{
     Message, ModelCapabilities, ModelCapabilitySnapshot, ModelId, ModelRequest, Role,
 };
 use dim_app_server::{
+    RunningServer, ServerConfig,
     managed_provider::{
         AccountSnapshot, ManagedModel, ManagedProvider, ManagedProviderBinding, ManagedProviders,
         ManagedProvidersPlugin,
@@ -29,8 +33,10 @@ use dim_app_server::{
     },
     model_catalog::{BundledCatalog, ProviderProjection, raw_kind},
     provider::{ProviderError, ProviderPlugin, ProviderService},
+    serve,
     storage::SqliteStoragePlugin,
 };
+use dim_client::{Client, ConnectionConfig, Server};
 use dim_oauth::{ClientIds, DimOAuthPlugin};
 use rutis::Ctx;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, FiberState, TypeKey};
@@ -671,6 +677,220 @@ async fn account_reads_follow_another_process_writes() {
     first.root.shutdown().await.unwrap();
     second.root.shutdown().await.unwrap();
     std::fs::remove_dir_all(home).unwrap();
+}
+
+/// A new Session on one server observes a sign-in or sign-out another server
+/// wrote to the shared product home, without an `account.status` call.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_new_session_sees_an_account_change_another_server_wrote() {
+    let fixture = oauth::start().await;
+    let home = home();
+    let first_home = home.join("first");
+    let second_home = home.join("second");
+    let first_capture = Arc::new(OnceLock::new());
+    let second_capture = Arc::new(OnceLock::new());
+    let ids = || ClientIds {
+        global: "global-client".into(),
+        cn: "cn-client".into(),
+    };
+
+    // Start the observing server first and let it write the signed-out record
+    // under the account lease, so its watch holds that observation before the
+    // other server signs in.
+    let (model, mut requests) = tokio::sync::mpsc::unbounded_channel();
+    let model = Arc::new(RecordingModel(model));
+    let mut second_builder = AgentBuilder::new(AgentConfig::default());
+    defaults::install(&mut second_builder);
+    defaults::mock_hosts_with_model(&mut second_builder, HistoryRenderer::default(), model);
+    let capture = second_capture.clone();
+    second_builder.plugin(move |_| Ok(Box::new(Capture(capture.clone())) as Box<dyn DynPlugin>));
+    let second = serve(
+        second_builder,
+        ServerConfig {
+            product_home: Some(home.clone()),
+            database_path: Some(second_home.join("dimcode.sqlite")),
+            unix_path: Some(second_home.join("second.sock")),
+            managed_provider: Some(dim_oauth::row(ids())),
+            startup_timeout: Duration::from_secs(60),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !home.join("auth.json").exists() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the signed-out account record was not written");
+
+    let mut first_builder = AgentBuilder::new(AgentConfig::default());
+    defaults::install(&mut first_builder);
+    defaults::mock_hosts(&mut first_builder);
+    let capture = first_capture.clone();
+    first_builder.plugin(move |_| Ok(Box::new(Capture(capture.clone())) as Box<dyn DynPlugin>));
+    let first = serve(
+        first_builder,
+        ServerConfig {
+            product_home: Some(home.clone()),
+            database_path: Some(first_home.join("dimcode.sqlite")),
+            unix_path: Some(first_home.join("first.sock")),
+            managed_provider: Some(dim_oauth::row(ids())),
+            startup_timeout: Duration::from_secs(60),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    let first_providers = first_capture
+        .get()
+        .expect("the first server's managed provider owner was not captured")
+        .clone();
+    assert!(
+        !second_capture
+            .get()
+            .expect("the second server's managed provider owner was not captured")
+            .usable(),
+        "the observing server starts signed out"
+    );
+    login(&first_providers, &fixture.base).await;
+    assert!(
+        !second_capture.get().unwrap().usable(),
+        "another server's login must not move this server's watch by itself"
+    );
+
+    let mut client = client_for(&second).await;
+    select_model(&mut client).await;
+    let id = create_web_session(&mut client, &home).await;
+    let tools = submit_and_record(&mut client, &id, "signed in elsewhere", &mut requests).await;
+    assert!(
+        tools.iter().any(|name| name == "web_search"),
+        "a new Session must observe the other server's sign-in: {tools:?}"
+    );
+    assert!(second_capture.get().unwrap().usable());
+
+    first_providers.logout(PROVIDER, &cancel()).await.unwrap();
+    let id = create_web_session(&mut client, &home).await;
+    let tools = submit_and_record(&mut client, &id, "signed out elsewhere", &mut requests).await;
+    assert!(
+        !tools.iter().any(|name| name == "web_search"),
+        "a new Session must observe the other server's sign-out: {tools:?}"
+    );
+
+    drop(client);
+    first.shutdown();
+    second.shutdown();
+    first.join().await.unwrap();
+    second.join().await.unwrap();
+    drop(fixture);
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// Records the tool names of every model request and answers like the mock
+/// model.
+struct RecordingModel(tokio::sync::mpsc::UnboundedSender<Vec<String>>);
+impl ModelDriver for RecordingModel {
+    fn invoke(
+        &self,
+        request: Arc<ModelRequest>,
+        connection: ModelConnection,
+        cancel: CancellationToken,
+    ) -> HostFuture<'_, ModelStream> {
+        let tools = request
+            .tools
+            .as_deref()
+            .into_iter()
+            .flatten()
+            .map(|tool| tool.name.clone())
+            .collect();
+        let _ = self.0.send(tools);
+        EchoModel.invoke(request, connection, cancel)
+    }
+}
+
+async fn client_for(server: &RunningServer) -> Client {
+    Client::connect(&ConnectionConfig {
+        endpoint: server.unix_path.clone().unwrap(),
+        server: Server {
+            program: std::env::current_exe().unwrap(),
+            embedded: false,
+        },
+        profile: None,
+        client_kind: "cli",
+        client_name: "dim-oauth-shared-home-test",
+        protocol_version: 4,
+    })
+    .await
+    .unwrap()
+}
+
+async fn select_model(client: &mut Client) {
+    let created = client
+        .rpc(
+            "provider.create",
+            json!({"providerId":"018ec73f-0000-7000-8000-000000000031","displayName":"Fixture",
+                "connection":{"driverKind":"openai-compatible","baseUrl":"http://localhost/v1","auth":{"type":"anonymous"}},
+                "models":[{"modelId":"fixture","displayName":"fixture","status":"active",
+                    "capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000, 16_384)}],
+                "enabled":true}),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("provider.create: {error}"));
+    assert!(created.get("error").is_none(), "{created}");
+    let selected = client
+        .rpc(
+            "provider.select",
+            json!({"providerId":"018ec73f-0000-7000-8000-000000000031","modelId":"fixture"}),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("provider.select: {error}"));
+    assert!(selected.get("error").is_none(), "{selected}");
+}
+
+async fn create_web_session(client: &mut Client, home: &Path) -> String {
+    let created = client
+        .rpc(
+            "session.create",
+            json!({"cwd":home,"tools":["web_search","web_fetch"],"interactive":false,
+                "permissionPolicy":{"preset":"full-access","allowedTools":[],"disallowedTools":[]}}),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("session.create: {error}"));
+    created["sessionId"].as_str().unwrap().to_owned()
+}
+
+async fn submit_and_record(
+    client: &mut Client,
+    id: &str,
+    text: &str,
+    requests: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<String>>,
+) -> Vec<String> {
+    let submitted = client
+        .rpc(
+            "session.submit",
+            json!({"sessionId":id,"branchId":"main","text":text}),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("session.submit: {error}"));
+    assert!(submitted.get("error").is_none(), "{submitted}");
+    let tools = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let tools = requests.recv().await.expect("the model host stopped");
+            if tools.iter().any(|name| name == "web_fetch") {
+                return tools;
+            }
+        }
+    })
+    .await
+    .expect("the Session did not reach the model");
+    let idle = client
+        .rpc("session.idle", json!({"sessionId":id,"branchId":"main"}))
+        .await
+        .unwrap_or_else(|error| panic!("session.idle: {error}"));
+    assert!(idle.get("error").is_none(), "{idle}");
+    tools
 }
 
 /// An account read that waits for the account lease must publish what the

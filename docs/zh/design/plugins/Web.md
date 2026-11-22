@@ -2,7 +2,7 @@
 
 状态：已实现为 `dim-app-server` 内置 Rust 插件。总体设计：[overview](../overview.md)（Web）。阶段：P2。语言：Rust。作用域：[ADR 002](../../adr/002-plugin-scope.md)（Session）。
 
-Web 是一个 Session 插件，向模型提供两个工具。部件 Active 时 `web_fetch` 始终被声明；`web_search` 由部件注册到本 Session `toolRegistry` 的动态工具来源提供，且只在搜索服务可用时提供（[工具贡献 §7](../../../architecture/rust-agent/tool-contributions.md#7-动态工具来源)；[session-boundary A.5](../contracts/session-boundary.md#a5-工具贡献)，[ADR 002 D5](../../adr/002-plugin-scope.md)）。搜索交给已配置的内置搜索适配器；抓取下载一个公开页面并返回有界文本。Web 不持有跨 Session 共享的状态，不写任何 Timeline 事件（每次调用与结果本身已是工具调用事实），并在使用时从自己的 Settings 来源 `web` 读取业务配置，因此编辑配置不会重载任何东西（[ADR 002 D4](../../adr/002-plugin-scope.md)）。提供的 `web_search` 集合跟随该来源的已提交写入与托管账号的登录状态；分支把它采用为工具部分，请求的声明在请求构造时固定，因此变化在采用之后构造的第一个请求生效（A3）。
+Web 是一个 Session 插件，向模型提供两个工具。部件 Active 时 `web_fetch` 始终被声明；`web_search` 由部件注册到本 Session `toolRegistry` 的动态工具来源提供，且只在搜索服务可用时提供（[工具贡献 §7](../../../architecture/rust-agent/tool-contributions.md#7-动态工具来源)；[session-boundary A.5](../contracts/session-boundary.md#a5-工具贡献)，[ADR 002 D5](../../adr/002-plugin-scope.md)）。搜索交给已配置的内置搜索适配器；抓取下载一个公开页面并返回有界文本。Web 不持有跨 Session 共享的状态，不写任何 Timeline 事件（每次调用与结果本身已是工具调用事实），并在使用时从自己的 Settings 来源 `web` 读取业务配置，因此编辑配置不会重载任何东西（[ADR 002 D4](../../adr/002-plugin-scope.md)）。提供的 `web_search` 集合跟随该来源的已提交写入与托管账号的登录状态；托管搜索第一次对一个 Session 变成需要时，Web 向账号所有者请求一次由 provider 自己完成的存储观察，因此另一个进程写入的登录或登出无需账号 RPC 即可见。分支把它采用为工具部分，请求的声明在请求构造时固定，因此变化在采用之后构造的第一个请求生效（A3）。
 
 ## 1. 结构
 
@@ -34,7 +34,7 @@ flowchart LR
 
 **依赖的契约：** 已实现的 [C4 工具绑定](../../../design/session-typescript.md)、[Settings 具名服务与 row 来源声明](../appserver/settings-service.md)、[托管 Provider 契约](../../../../crates/dim-app-server/README.md#managed-provider-contract)及 Permission 既有的 `network` 风险。#150 提供工具，#166/#175 提供 Settings，#177 提供 Settings 事件。Web 消费 `web` 来源的变更事件与托管账号的可用性，不消费 Session 广播，不等待 #168。**本文定义的契约：** 两个工具、结果格式和 `web` 业务文档。
 
-Web 是 App Server 的内置进程 row。该 row 登记 Settings 来源 `web` 与 Session 部件，不增加 Web 专属注册表或宿主端口。当 `searchService` 缺省（默认）或为 `{"kind": "dim-oauth"}` 时，`web_search` 通过 `managedSearch` 发起带认证的 relay 查询，使 OAuth 令牌留在 Rust 托管 Provider 内；当 `searchService` 显式配置为 `brave` 等适配器时，Web 直接请求该适配器。工具按调用读取 Settings。部件还会在首次读取之前订阅 `web` 来源的已提交写入与托管账号的可用性，并在任一变化后重新评估 `web_search` 来源，使声明无需重载即跟随变化：分支把提供的集合采用为工具部分，请求声明的是它构造时分支已采用的集合（A3，[工具贡献 §7](../../../architecture/rust-agent/tool-contributions.md#7-动态工具来源)）。非致命配置诊断放入既有 `ToolResult.structuredContent`。
+Web 是 App Server 的内置进程 row。该 row 登记 Settings 来源 `web` 与 Session 部件，不增加 Web 专属注册表或宿主端口。当 `searchService` 缺省（默认）或为 `{"kind": "dim-oauth"}` 时，`web_search` 通过 `managedSearch` 发起带认证的 relay 查询，使 OAuth 令牌留在 Rust 托管 Provider 内；当 `searchService` 显式配置为 `brave` 等适配器时，Web 直接请求该适配器。工具按调用读取 Settings。部件还会在首次读取之前订阅 `web` 来源的已提交写入与托管账号的可用性，并在任一变化后重新评估 `web_search` 来源，使声明无需重载即跟随变化：分支把提供的集合采用为工具部分，请求声明的是它构造时分支已采用的集合（A3，[工具贡献 §7](../../../architecture/rust-agent/tool-contributions.md#7-动态工具来源)）。托管搜索第一次对一个 Session 变成需要时——Session 装配，或 Settings 从显式适配器改为默认——部件在决定声明之前向账号所有者请求一次由 provider 自己完成的存储观察，因此另一个进程写入的登录或登出能到达新建或切换后的 Session，无需账号 RPC；之后以 provider 的 watch 为准。非致命配置诊断放入既有 `ToolResult.structuredContent`。
 
 搜索 API 密钥是 `searchService.apiKey`，Web Settings 来源中的仅用户字段（[settings-service §1.2](../appserver/settings-service.md#12-决定密钥归其所有者)）。Unix 上的文件存储 profile 以 0600 权限写用户文档。原生 profile 将其作为 `user/web` 存入 SQLite；权限边界是产品 home，Unix 新建目录使用 0700，Windows 继承父目录 DACL；已有目录权限保持不变，数据库没有独立的 0600 保证。`userOnly` 限制写入，不屏蔽本地读取：该字段只经客户端方法 `settings.update` 写入，Web 从不写；本地客户端可经 `settings.read` 读回，远程与配对客户端不能。Web 每次调用随文档读取密钥，从不保留，也不把它放入声明、结果、`structuredContent`、诊断、错误或日志。
 
@@ -188,7 +188,7 @@ Web 不写标记、不贡献 guide 条目；它的声明没有 policy 文本。
 
 ### 6.1 注册与来源
 
-home 存在时，App Server 登记进程 row `web`。其 apply 向 `partRegistry` 登记 Settings 来源 `web`（用户文件 `web.json`，无项目文件）和 Session 部件 `Web`。每个 Session 挂载该部件。部件注入 `settings`、`toolRegistry` 与 `managedSearch`，并读取 Session 的配置（挂载列表）与生命周期。其 apply 登记资源清理、`web_fetch` 与 `web_search` 来源；装配来源时读取一次配置与账号可用性，之后在每次该来源的已提交写入与账号变化时重新评估。Rust 形式见附录 G。
+home 存在时，App Server 登记进程 row `web`。其 apply 向 `partRegistry` 登记 Settings 来源 `web`（用户文件 `web.json`，无项目文件）和 Session 部件 `Web`。每个 Session 挂载该部件。部件注入 `settings`、`toolRegistry` 与 `managedSearch`，并读取 Session 的配置（挂载列表）与生命周期。其 apply 登记资源清理、`web_fetch` 与 `web_search` 来源；在配置需要托管账号时，装配来源时向所有者请求一次由 provider 自己完成的账号存储观察；之后在每次配置的已提交写入与账号变化时重新评估来源，并在后续配置开始需要托管账号时再观察一次。Rust 形式见附录 G。
 
 该 row 登记的来源 schema，`userOnly` 路径为 `/searchService`、`/allowPrivateHosts`、`/blockPrivateAddresses` 与 `/proxyDns`（`proxy` 是 `writeOnly`，不是仅用户）：
 
@@ -471,5 +471,5 @@ Fake-IP DNS 答案就是普通地址。经代理且 `proxyDns: true` 时它根�
 | --- | --- |
 | 为 `web_fetch` 调用 `toolRegistry.register` | Session 部件注入 `Keyed<ToolRegistry>`，在 `apply` 中调用 `tools.register(ctx, ToolContribution {definition, handler})`；部件卸载时注册撤回 |
 | `web_search` 的动态来源 | 部件调用 `tools.registerSource(ctx, "web", provider)`；provider 的 `sets()` 在服务可用时返回一个 `ToolSourceSet`（键 `web`，每个集合新 UUID 版本），否则不返回；变更后它用自己的上下文在 `tool_provider_changes(session)` 下发出 `ToolProviderChanged` |
-| 账号可用性 | `ManagedSearch` 在进程内回答所有者当前的登录可用性及其变化；Web 在首次读取前订阅，并在装配时读取一次 |
+| 账号可用性 | `ManagedSearch` 在进程内回答所有者当前的登录可用性及其变化；Web 在首次读取前订阅，并在托管搜索第一次对本 Session 变成需要时、决定声明之前，向所有者请求一次由 provider 自己完成的账号存储观察；之后以 provider 的 watch 为准 |
 | 声明 / `execute` | `ToolDefinition` / 带 `CancellationToken` 的 handler；disposer 中止在途请求（[工具贡献 §4](../../../architecture/rust-agent/tool-contributions.md)） |
