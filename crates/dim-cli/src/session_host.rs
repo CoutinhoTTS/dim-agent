@@ -1403,51 +1403,103 @@ impl Worker {
         self.report_failure(result);
     }
 
-    /// A command typed for a line only runs while it still names that line:
-    /// the shown line for a submit, a draft, a goal, a loop, a configuration,
-    /// a compaction or an earlier read, and the Session's default branch for
-    /// `/usage`, which reports that line. A move the key could not see cancels
-    /// the command and returns what it carried to the draft, instead of
-    /// writing it into another line. The stop gestures are not cancelled; each
-    /// names the line it was pressed on (design §14).
+    /// A command typed for a Session and line only runs while it still names
+    /// that pair: the shown line for a submit, a draft, a goal, a loop, a
+    /// configuration, a compaction or an earlier read, and the Session's
+    /// default branch for `/usage` and a permission change, which act on it. A
+    /// move or a Session handoff the key could not see cancels the command and
+    /// returns what it carried to the draft, instead of writing it into
+    /// another line or Session. A gesture made before any Session names none
+    /// and keeps the startup path it belongs to. The stop gestures are not
+    /// cancelled; each names the line it was pressed on (design §14).
     fn typed_command(&mut self, command: Command) -> Option<Command> {
         const KEPT: &str = "The centre moved before the command ran; the draft was kept";
-        let (line, draft, cancelled) = match &command {
-            Command::Submit { text, line, .. } => {
-                (line, Some(vec![DraftPart::Text(text.clone())]), KEPT)
-            }
-            Command::SubmitDraft { parts, line, .. } => (line, Some(parts.clone()), KEPT),
-            Command::Goal { line, draft, .. } => {
-                (line, Some(vec![DraftPart::Text(draft.clone())]), KEPT)
-            }
-            Command::Loop { line, draft, .. } => {
-                (line, Some(vec![DraftPart::Text(draft.clone())]), KEPT)
-            }
-            Command::Configure { text, line } => {
-                (line, Some(vec![DraftPart::Text(text.clone())]), KEPT)
-            }
-            Command::Compact { line } => (
+        let (session, line, draft, cancelled) = match &command {
+            Command::Submit {
+                text,
+                line,
+                session,
+                ..
+            } => (
+                session,
+                line,
+                Some(vec![DraftPart::Text(text.clone())]),
+                KEPT,
+            ),
+            Command::SubmitDraft {
+                parts,
+                line,
+                session,
+                ..
+            } => (session, line, Some(parts.clone()), KEPT),
+            Command::Goal {
+                line,
+                session,
+                draft,
+                ..
+            } => (
+                session,
+                line,
+                Some(vec![DraftPart::Text(draft.clone())]),
+                KEPT,
+            ),
+            Command::Loop {
+                line,
+                session,
+                draft,
+                ..
+            } => (
+                session,
+                line,
+                Some(vec![DraftPart::Text(draft.clone())]),
+                KEPT,
+            ),
+            Command::Configure {
+                text,
+                line,
+                session,
+            } => (
+                session,
+                line,
+                Some(vec![DraftPart::Text(text.clone())]),
+                KEPT,
+            ),
+            Command::Compact { line, session } => (
+                session,
                 line,
                 None,
                 "The centre moved before /compact ran; nothing was compacted",
             ),
-            Command::Usage { line } => (
+            Command::Usage { line, session } => (
+                session,
                 line,
                 None,
                 "The centre moved before /usage ran; no report was printed",
             ),
-            Command::Earlier { line } => (
+            Command::Earlier { line, session } => (
+                session,
                 line,
                 None,
                 "The centre moved before /earlier ran; nothing was loaded",
             ),
+            Command::SetPermission {
+                session, line, ..
+            } if !session.is_empty() => (
+                session,
+                line,
+                None,
+                "The session or line moved before the permission change ran; nothing was changed",
+            ),
             _ => return Some(command),
         };
         let now = match &command {
-            Command::Usage { .. } => &self.default_branch,
+            Command::Usage { .. } | Command::SetPermission { .. } => &self.default_branch,
             _ => &self.focus,
         };
-        if line.is_empty() || line == now {
+        if session.is_empty()
+            || line.is_empty()
+            || (session == &self.session_id && line == now)
+        {
             return Some(command);
         }
         match draft {
@@ -1796,7 +1848,7 @@ impl Worker {
                 }
             }
             Command::CloseSessions => self.cancel_catalog().await?,
-            Command::Usage { line } => {
+            Command::Usage { line, .. } => {
                 self.request_context(true, &line).await;
                 if self
                     .model
@@ -1807,7 +1859,7 @@ impl Worker {
                     self.send(Update::UsageReport(usage));
                 }
             }
-            Command::Compact { line } => self.compact(&line).await,
+            Command::Compact { line, .. } => self.compact(&line).await,
             Command::Report(request) => self.report_request(request).await,
             Command::Export(format) => {
                 let extension = match format {
@@ -1830,7 +1882,7 @@ impl Worker {
                 }
             }
             Command::Rename(title) => self.rename(title).await,
-            Command::Earlier { line } => self.earlier(&line),
+            Command::Earlier { line, .. } => self.earlier(&line),
             Command::Goal { request, .. } => self.goal(request).await,
             Command::Loop { request, .. } => self.loop_command(request).await,
             Command::CheckUpdate => {
@@ -2138,7 +2190,7 @@ impl Worker {
                     Err(error) => error.to_string(),
                 }));
             }
-            Command::SetPermission(change) => {
+            Command::SetPermission { change, .. } => {
                 let result = if self.session_id.is_empty() {
                     Ok(dim_agent_types::PermissionPolicy {
                         preset: change.resolve(

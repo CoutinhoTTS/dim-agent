@@ -1506,6 +1506,9 @@ struct SendNow {
     /// The line the gesture started on: its stop and the draft it settles
     /// belong to that line, not to the centre a queued move may install.
     line: String,
+    /// The Session the gesture started in: a handoff it could not see keeps
+    /// the draft out of the Session that replaced it.
+    session: String,
     /// Esc called off the submit. The stop still settles, and its reply
     /// releases the gesture without submitting anything.
     submit_cancelled: bool,
@@ -1989,9 +1992,27 @@ impl App {
     /// Submits the draft a settled stop made ready, as a new message: the run
     /// is idle now, so the submit starts its own turn and takes whatever
     /// withdrawn messages joined the draft in the meantime.
-    fn submit_send_now(&mut self, line: String) {
+    fn submit_send_now(&mut self, line: String, session: String) {
         let outcome = self.composer.submit();
-        self.dispatch_composer(outcome, SubmitMode::Queue, line);
+        self.dispatch_composer(outcome, SubmitMode::Queue, line, session);
+    }
+
+    /// The Session as this interface last saw it: the attachment a key's
+    /// command belongs to. Empty before the first Snapshot, when a command
+    /// can only be the invocation's first message (design §14).
+    fn target_session(&self) -> String {
+        self.session_id.clone()
+    }
+
+    /// A permission change and the Session and default line the gesture saw:
+    /// a move or handoff before it runs cancels it instead of changing the
+    /// policy of the new centre (design §14).
+    fn permission_change(&self, change: crate::permission::PresetSelection) -> Command {
+        Command::SetPermission {
+            change,
+            session: self.target_session(),
+            line: self.default_line(),
+        }
     }
 
     /// The centre as this interface last saw it: the line a key's command
@@ -2027,6 +2048,7 @@ impl App {
         }
         self.send_now = Some(SendNow {
             line: self.target_line(),
+            session: self.target_session(),
             submit_cancelled: false,
             at: 0,
         });
@@ -2379,7 +2401,7 @@ impl App {
                     self.set_notice(t("Send now is waiting for the insertion before sending"));
                     return;
                 }
-                self.submit_send_now(pending.line);
+                self.submit_send_now(pending.line, pending.session);
             }
             Update::Exported { format, path } => self.notices.push(tf(
                 "Exported {format}: {path}",
@@ -3481,7 +3503,7 @@ impl App {
                     && (key.mods == Modifiers::SHIFT
                         || (key.code == KeyCode::BackTab && key.mods == Modifiers::NONE)) =>
             {
-                self.host.send(Command::SetPermission(
+                self.host.send(self.permission_change(
                     crate::permission::PresetSelection::Next,
                 ));
                 return Outcome::Continue;
@@ -3573,7 +3595,12 @@ impl App {
         match self.composer.handle_key(key) {
             ComposerOutcome::Command { name, args } => return self.run_command(&name, &args),
             outcome => {
-                self.dispatch_composer(outcome, mode, self.target_line());
+                self.dispatch_composer(
+                    outcome,
+                    mode,
+                    self.target_line(),
+                    self.target_session(),
+                );
             }
         }
         if self.suggestion.is_some() && !self.composer.is_empty() {
@@ -3613,6 +3640,7 @@ impl App {
         outcome: ComposerOutcome,
         mode: SubmitMode,
         line: String,
+        session: String,
     ) -> Outcome {
         // Every send key is refused before the composer acts (see
         // `settling_key_refused`), so an outcome that already cleared the draft
@@ -3654,7 +3682,7 @@ impl App {
                 if mode == SubmitMode::Queue && self.running() {
                     self.set_notice(t("Message queued"));
                 }
-                self.host.submit(text, mode, line);
+                self.host.submit(text, mode, line, session);
             }
             ComposerOutcome::SubmitDraft { text, parts } => {
                 let text = text.trim().to_owned();
@@ -3664,7 +3692,12 @@ impl App {
                 if mode == SubmitMode::Queue && self.running() {
                     self.set_notice(t("Message queued"));
                 }
-                self.host.send(Command::SubmitDraft { parts, mode, line });
+                self.host.send(Command::SubmitDraft {
+                    parts,
+                    mode,
+                    line,
+                    session,
+                });
             }
             ComposerOutcome::Shell { command, shell } => {
                 let entry = format!("{}{command}", shell.prefix());
@@ -3712,7 +3745,12 @@ impl App {
         if submitted && self.session_id.is_empty() {
             self.unsent = Some(initial);
         }
-        self.dispatch_composer(outcome, SubmitMode::Queue, self.target_line())
+        self.dispatch_composer(
+            outcome,
+            SubmitMode::Queue,
+            self.target_line(),
+            self.target_session(),
+        )
     }
 
     /// Puts a first message no Session took back into the draft, unless the
@@ -4410,7 +4448,7 @@ impl App {
             }
             Effect::SetPermission(preset) => {
                 self.prompt = None;
-                self.host.send(Command::SetPermission(
+                self.host.send(self.permission_change(
                     crate::permission::PresetSelection::Preset(preset),
                 ));
             }
@@ -4514,6 +4552,7 @@ impl App {
                     self.host.send(Command::Configure {
                         text: format!("/effort {value}"),
                         line: self.target_line(),
+                        session: self.target_session(),
                     });
                 } else {
                     self.set_notice(t(
@@ -5519,12 +5558,14 @@ impl App {
             "usage" => {
                 self.host.send(Command::Usage {
                     line: self.default_line(),
+                    session: self.target_session(),
                 });
                 Outcome::Continue
             }
             "compact" => {
                 self.host.send(Command::Compact {
                     line: self.target_line(),
+                    session: self.target_session(),
                 });
                 Outcome::Continue
             }
@@ -5534,6 +5575,7 @@ impl App {
                 } else {
                     self.host.send(Command::Earlier {
                         line: self.target_line(),
+                        session: self.target_session(),
                     });
                 }
                 Outcome::Continue
@@ -5573,6 +5615,7 @@ impl App {
                     Some(request) => self.host.send(Command::Goal {
                         request,
                         line: self.target_line(),
+                        session: self.target_session(),
                         draft: if args.trim().is_empty() {
                             "/goal".to_owned()
                         } else {
@@ -5591,6 +5634,7 @@ impl App {
                     Some(request) => self.host.send(Command::Loop {
                         request,
                         line: self.target_line(),
+                        session: self.target_session(),
                         draft: if args.trim().is_empty() {
                             "/loop".to_owned()
                         } else {
@@ -5622,6 +5666,7 @@ impl App {
                 self.host.send(Command::Configure {
                     text: text.trim_end().to_owned(),
                     line: self.target_line(),
+                    session: self.target_session(),
                 });
                 Outcome::Continue
             }
@@ -7567,6 +7612,7 @@ impl App {
             Earlier::Unread => {
                 self.host.send(Command::Earlier {
                     line: self.target_line(),
+                    session: self.target_session(),
                 });
                 self.reveal_pending = true;
             }
@@ -13591,7 +13637,7 @@ mod tests {
                     }
                     assert!(!sent.borrow().iter().any(|command| matches!(
                         command,
-                        Command::SetPermission(_) | Command::SaveIsolation { .. }
+                        Command::SetPermission { .. } | Command::SaveIsolation { .. }
                     )));
                 }
             }
@@ -13641,9 +13687,12 @@ mod tests {
         app.handle_input(key(KeyCode::Enter));
         assert!(matches!(
             sent.borrow().last(),
-            Some(Command::SetPermission(
-                crate::permission::PresetSelection::Preset(PermissionPreset::WorkspaceWrite)
-            ))
+            Some(Command::SetPermission {
+                change: crate::permission::PresetSelection::Preset(
+                    PermissionPreset::WorkspaceWrite
+                ),
+                ..
+            })
         ));
         app.apply(Update::PermissionSelected(PermissionPreset::WorkspaceWrite));
         let saved: serde_json::Value = serde_json::from_str(

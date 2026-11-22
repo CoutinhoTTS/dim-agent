@@ -1990,3 +1990,223 @@ fn tui_earlier_typed_before_a_queued_move_loads_no_new_centre() {
         daemon.join().unwrap();
     }
 }
+
+/// A permission change typed before a queued move reaches the centre changes
+/// nothing: the gesture names the default line it saw, and the change is
+/// cancelled once that line has moved (design §14).
+#[test]
+fn tui_a_permission_change_typed_before_a_queued_move_changes_nothing() {
+    let home = Home::new();
+    let (move_seen, moved) = std::sync::mpsc::channel();
+    let (release_move, release) = std::sync::mpsc::channel::<()>();
+    let (changed, updates) = std::sync::mpsc::channel::<Value>();
+    let daemon = home.daemon(move |wire| {
+        wire.hello(&[
+            "session.methods",
+            "session.branches",
+            "session.branch.get",
+            "session.branch_set_default",
+            "session.permission.get",
+            "session.permission.update",
+        ]);
+        let attach = wire.read("session.attach");
+        let mut record = attach_record(&attach);
+        record["defaultBranch"] = json!({"branchId":"main","sequence":8});
+        wire.reply(&attach, record);
+        let branches = next(wire);
+        assert_eq!(branches["method"], "session.branches");
+        wire.reply(
+            &branches,
+            directory("main", &[("main", None), ("line-1", Some("main"))]),
+        );
+        loop {
+            let request = next(wire);
+            match request["method"].as_str().unwrap_or_default() {
+                "session.branches" => wire.reply(
+                    &request,
+                    directory("main", &[("main", None), ("line-1", Some("main"))]),
+                ),
+                "session.history" => {
+                    wire.reply(&request, history(8, vec![]));
+                    break;
+                }
+                other => panic!("unexpected opening request: {other}: {request}"),
+            }
+        }
+        let mut usage = |_request: &Value| None;
+        loop {
+            let request = next_usage(wire, &mut usage);
+            let branch = request["params"]["branchId"].as_str().unwrap_or_default();
+            match request["method"].as_str().unwrap_or_default() {
+                "session.permission.get" => wire.reply(
+                    &request,
+                    json!({"version":1,"policy":policy(if branch == "line-1" {
+                        "full-access"
+                    } else {
+                        "workspace-write"
+                    })}),
+                ),
+                "session.permission.update" => {
+                    changed.send(request["params"].clone()).unwrap();
+                    wire.reply(&request, json!({"version":2}));
+                }
+                "session.branch_set_default" => {
+                    assert_eq!(branch, "line-1");
+                    move_seen.send(()).unwrap();
+                    release.recv_timeout(PATIENCE).unwrap();
+                    wire.reply(&request, json!({"defaultBranchId":"line-1"}));
+                }
+                "session.branches" => wire.reply(
+                    &request,
+                    directory("main", &[("main", None), ("line-1", Some("main"))]),
+                ),
+                "session.branch.get" => wire.reply(&request, entry("line-1", "main")),
+                "session.history" => {
+                    let through = if branch == "line-1" { 3 } else { 8 };
+                    wire.reply(&request, history(through, vec![]));
+                }
+                other => panic!("unexpected {other}: {request}"),
+            }
+        }
+    });
+    let mut command = home.command();
+    command.arg("--scrollback");
+    sized(&mut command, 120, 36);
+    let mut terminal = Terminal::resume_tui(command);
+    terminal.until("test / model");
+    terminal.until("⏵⏵ Workspace write");
+    terminal.write(b"/lines\r");
+    terminal.until("Main line");
+    terminal.write(b"\x1b[B");
+    terminal.write(b"p");
+    moved.recv_timeout(PATIENCE).unwrap();
+    // The panel closes before the move replies, so the keys that follow act on
+    // the view that still shows the outgoing default line.
+    terminal.write(b"\x1b[27u");
+    terminal.write(b"\x1b[Z");
+    release_move.send(()).unwrap();
+    terminal.until("The session or line moved before the permission change ran");
+    assert!(
+        updates.try_recv().is_err(),
+        "the permission change typed on the outgoing default line writes nothing"
+    );
+    // A second gesture names the line the centre moved to; its update is the
+    // only one the daemon sees.
+    terminal.write(b"\x1b[Z");
+    let written = updates.recv_timeout(PATIENCE).unwrap();
+    assert_eq!(written["branchId"], "line-1");
+    assert!(
+        updates.try_recv().is_err(),
+        "the cancelled change and the later gesture do not both write"
+    );
+    home.kill(&terminal);
+    terminal.wait();
+    daemon.join().unwrap();
+}
+
+/// A draft submitted before a Session handoff replies is not written into the
+/// Session that replaces it, even when both call their line `main`: it is
+/// kept, reported, and a second Enter sends it to the Session on screen
+/// (design §14).
+#[test]
+fn tui_a_draft_typed_before_a_session_handoff_does_not_go_to_the_new_session() {
+    let home = Home::new();
+    let (attached, attach_seen) = std::sync::mpsc::channel();
+    let (release_attach, release) = std::sync::mpsc::channel::<()>();
+    let (probe, probed) = std::sync::mpsc::channel::<Vec<Value>>();
+    let (submit, submit_seen) = std::sync::mpsc::channel::<Value>();
+    let daemon = home.daemon(move |wire| {
+        wire.hello(&[
+            "session.methods",
+            "session.catalog",
+            "session.branches",
+            "session.permission.get",
+            "session.permission.update",
+        ]);
+        let attach = wire.read("session.attach");
+        let mut record = attach_record(&attach);
+        record["defaultBranch"] = json!({"branchId":"main","sequence":8});
+        wire.reply(&attach, record);
+        let branches = next(wire);
+        assert_eq!(branches["method"], "session.branches");
+        wire.reply(&branches, directory("main", &[("main", None)]));
+        let history_read = next(wire);
+        assert_eq!(history_read["method"], "session.history");
+        wire.reply(&history_read, history(8, vec![]));
+        let mut usage = |_request: &Value| None;
+        let mut submits: Vec<Value> = Vec::new();
+        loop {
+            let request = next_usage(wire, &mut usage);
+            let session = request["params"]["sessionId"].as_str().unwrap_or_default();
+            match request["method"].as_str().unwrap_or_default() {
+                "session.catalog" => wire.reply(
+                    &request,
+                    json!({"sessions":[{"sessionId":"other","cwd":"/workspace",
+                        "preview":"second conversation",
+                        "model":{"providerId":"test","modelId":"model"},"updatedAt":9}]}),
+                ),
+                "session.detach" => wire.reply(&request, json!({})),
+                "session.attach" => {
+                    let mut record = attach_record(&request);
+                    record["defaultBranch"] = json!({"branchId":"main","sequence":8});
+                    if session == "other" {
+                        attached.send(()).unwrap();
+                        release.recv_timeout(PATIENCE).unwrap();
+                    }
+                    wire.reply(&request, record);
+                }
+                "session.branches" => {
+                    wire.reply(&request, directory("main", &[("main", None)]))
+                }
+                "session.history" => wire.reply(&request, history(8, vec![])),
+                "session.permission.get" => wire.reply(
+                    &request,
+                    json!({"version":1,"policy":policy("workspace-write")}),
+                ),
+                "session.permission.update" => {
+                    probe.send(submits.clone()).unwrap();
+                    wire.reply(&request, json!({"version":2}));
+                }
+                "session.submit" => {
+                    submits.push(request["params"].clone());
+                    wire.reply(&request, json!({"event":{}}));
+                    submit.send(request["params"].clone()).unwrap();
+                }
+                other => panic!("unexpected {other}: {request}"),
+            }
+        }
+    });
+    let mut command = home.command();
+    command.arg("--scrollback");
+    sized(&mut command, 120, 36);
+    let mut terminal = Terminal::resume_tui(command);
+    terminal.until("test / model");
+    terminal.until("⏵⏵ Workspace write");
+    terminal.write(b"/resume\r");
+    terminal.until("second conversation");
+    terminal.write(b"\r");
+    attach_seen.recv_timeout(PATIENCE).unwrap();
+    // The new attachment has not replied, so the interface still shows the
+    // outgoing Session: this draft belongs to that Session's view.
+    terminal.write(b"hello");
+    terminal.until("hello");
+    terminal.write(b"\r");
+    release_attach.send(()).unwrap();
+    terminal.until("The centre moved before the command ran");
+    // The permission read the probe starts flushes every command queued ahead
+    // of it; no submit may come out before that.
+    terminal.write(b"\x1b[Z");
+    let before = probed.recv_timeout(PATIENCE).unwrap();
+    assert!(
+        before.is_empty(),
+        "a draft typed in the outgoing Session is not submitted to the new one"
+    );
+    terminal.write(b"\r");
+    let sent = submit_seen.recv_timeout(PATIENCE).unwrap();
+    assert_eq!(sent["sessionId"], "other");
+    assert_eq!(sent["branchId"], "main");
+    assert_eq!(sent["text"], "hello", "the kept draft is whole");
+    home.kill(&terminal);
+    terminal.wait();
+    daemon.join().unwrap();
+}

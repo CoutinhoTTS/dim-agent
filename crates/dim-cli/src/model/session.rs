@@ -177,18 +177,21 @@ pub enum Command {
         projection_id: u64,
         targets: std::collections::BTreeSet<crate::model::view::CompactionTarget>,
     },
-    /// A message and the line its draft was typed on; a submit whose line is
-    /// no longer the centre is cancelled and its draft kept (design §14).
+    /// A message and the Session and line its draft was typed on; a submit
+    /// whose Session or line is no longer the centre is cancelled and its
+    /// draft kept (design §14).
     Submit {
         text: String,
         mode: SubmitMode,
         line: String,
+        session: String,
     },
     /// A draft with pastes to store or content blocks to send.
     SubmitDraft {
         parts: Vec<DraftPart>,
         mode: SubmitMode,
         line: String,
+        session: String,
     },
     /// Interrupt the run on the line the key was pressed on.
     Stop {
@@ -381,17 +384,20 @@ pub enum Command {
     /// when the command was typed; a report whose line has moved is cancelled.
     Usage {
         line: String,
+        session: String,
     },
     /// Load what is before the drawn top of the line the command was typed on;
     /// a read whose line has moved is cancelled.
     Earlier {
         line: String,
+        session: String,
     },
     Export(crate::export::Format),
     /// `/compact`: ask the line the command was typed on to compact its
     /// context; a command whose line has moved is cancelled.
     Compact {
         line: String,
+        session: String,
     },
     /// `/rename`: set the shown Session's manual title, or clear it when
     /// `title` is `None`; an empty text is refused, and only `--clear`
@@ -402,6 +408,7 @@ pub enum Command {
     Goal {
         request: crate::goal::Request,
         line: String,
+        session: String,
         draft: String,
     },
     /// `/loop`: show, start or stop a loop on the line the command was typed
@@ -409,9 +416,16 @@ pub enum Command {
     Loop {
         request: crate::loop_view::Request,
         line: String,
+        session: String,
         draft: String,
     },
-    SetPermission(crate::permission::PresetSelection),
+    /// Change the Session's permission preset on the default branch the
+    /// gesture saw; a gesture made before any Session names none.
+    SetPermission {
+        change: crate::permission::PresetSelection,
+        session: String,
+        line: String,
+    },
     /// List the providers of the `/connect` panel.
     ListProviders,
     /// Change one provider.
@@ -472,6 +486,7 @@ pub enum Command {
     Configure {
         text: String,
         line: String,
+        session: String,
     },
     /// Make `(provider, model)` the default and the active session's model.
     /// `reasoning_effort` is set when the picker cycled that model's effort;
@@ -1543,8 +1558,13 @@ pub trait SessionPort {
     fn drain(&self) -> Vec<Update>;
     /// Closes the connection and gives the worker a moment to wind down.
     fn shutdown(self: Box<Self>);
-    fn submit(&self, text: String, mode: SubmitMode, line: String) {
-        self.send(Command::Submit { text, mode, line });
+    fn submit(&self, text: String, mode: SubmitMode, line: String, session: String) {
+        self.send(Command::Submit {
+            text,
+            mode,
+            line,
+            session,
+        });
     }
     fn stop(&self, line: String) {
         self.send(Command::Stop { line });
