@@ -1800,22 +1800,39 @@ impl SessionStore {
     /// ownership lock is held from the final workspace check through
     /// `remove`, so a Session created after the check fails this call and a
     /// creation after the removal re-checks its missing workspace. The
+    /// check and the removal run in their own task, so dropping the caller
+    /// does not release the lock while the removal is still running. The
+    /// path is a store path, absolute without relative components, and the
     /// directory must have no stored Session workspace at or under it;
-    /// `remove` performs the deletion.
+    /// `remove` performs the deletion. Returns whether the directory was
+    /// still present when the lock was acquired; `false` means another
+    /// removal already finished.
     pub async fn remove_unregistered_directory(
         &self,
         path: PathBuf,
-        remove: impl FnOnce(PathBuf) -> BoxFuture<'static, Result<()>>,
-    ) -> Result<()> {
-        let _ownership = self.ownership.lock().await;
-        let sessions = self.sessions_under_workspace(&path).await?;
-        if let Some(session) = sessions.first() {
-            return Err(AgentError::InvalidInput(format!(
-                "Session {session} uses {}",
-                path.display()
-            )));
-        }
-        remove(path).await
+        remove: impl FnOnce(PathBuf) -> BoxFuture<'static, Result<()>> + Send + 'static,
+    ) -> Result<bool> {
+        stored_worktree_path(&path)?;
+        let store = self.clone();
+        tokio::spawn(async move {
+            let _ownership = store.ownership.lock().await;
+            match tokio::fs::symlink_metadata(&path).await {
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+                Err(_) => {}
+            }
+            let sessions = store.sessions_under_workspace(&path).await?;
+            if let Some(session) = sessions.first() {
+                return Err(AgentError::InvalidInput(format!(
+                    "Session {session} uses {}",
+                    path.display()
+                )));
+            }
+            remove(path).await?;
+            Ok(true)
+        })
+        .await
+        .map_err(|error| AgentError::Storage(format!("the removal task failed: {error}")))?
     }
 
     /// Lists the Session associations of a recorded directory. An unknown

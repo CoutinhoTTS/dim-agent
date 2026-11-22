@@ -1161,6 +1161,150 @@ async fn session_creation_after_an_unregistered_removal_fails_its_workspace_chec
     server.join().await.unwrap();
 }
 
+/// The store face is public to trusted plugins: a relative path or one with
+/// `..` compares lexically against stored workspaces while the filesystem
+/// resolves it, so the owner must refuse it before the removal runs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unregistered_removal_refuses_a_path_that_is_not_absolute_and_normal() {
+    let work = Work::new();
+    let server = host(&work).await;
+    let store = server.service::<SessionStore>().unwrap();
+    let task = unregistered_task(&work, "aaaaaa");
+    std::fs::write(task.join("notes.txt"), "keep").unwrap();
+    for path in [
+        PathBuf::from("relative/task"),
+        task.join("..").join("aaaaaa"),
+    ] {
+        let error = store
+            .remove_unregistered_directory(path, |path| {
+                Box::pin(async move {
+                    Err(AgentError::Storage(format!(
+                        "the refused path reached removal: {}",
+                        path.display()
+                    )))
+                })
+            })
+            .await
+            .expect_err("a path outside the store's absolute-normal form must be refused");
+        assert!(
+            error
+                .to_string()
+                .contains("absolute without relative components"),
+            "{error}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(task.join("notes.txt")).unwrap(),
+            "keep"
+        );
+    }
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// A removal that passed its content check but enters the ownership lock
+/// after another removal deleted the directory reports not found.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unregistered_remove_reports_not_found_when_another_removal_won() {
+    let work = Work::new();
+    let server = host(&work).await;
+    let task = unregistered_task(&work, "aaaaaa");
+    std::fs::write(task.join("notes.txt"), "keep").unwrap();
+    let hold = server
+        .hold_next_unregistered_removal()
+        .expect("the ManagedWorktrees part exists");
+    let mut parked = Client::new_version(&server, false, 3).await;
+    let parked_removal = tokio::spawn(async move {
+        parked
+            .rpc("worktree.remove", json!({"taskId":"aaaaaa","force":true}))
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(30), hold.reached.notified())
+        .await
+        .expect("the parked removal reaches the end of its content check");
+    let mut winner = Client::new_version(&server, false, 3).await;
+    assert_ok(
+        &winner
+            .rpc("worktree.remove", json!({"taskId":"aaaaaa","force":true}))
+            .await,
+    );
+    assert!(!task.exists());
+    hold.release.notify_one();
+    let late = parked_removal.await.unwrap();
+    assert_eq!(late["error"]["data"]["appError"], "worktree_not_found");
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// Dropping the caller of an unregistered removal must not release the
+/// ownership lock while the deletion is still running.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dropping_the_caller_keeps_the_removal_lock_until_the_deletion_finishes() {
+    let work = Work::new();
+    let server = host(&work).await;
+    let store = server.service::<SessionStore>().unwrap();
+    let task = unregistered_task(&work, "aaaaaa");
+    std::fs::create_dir_all(task.join("repo")).unwrap();
+    let mut client = Client::new_version(&server, false, 3).await;
+    let listed = client.rpc("agent.list", json!({})).await;
+    assert_ok(&listed);
+    let agent_id = listed["result"][0]["agentId"].as_str().unwrap().to_owned();
+    let reached = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let removal = tokio::spawn({
+        let store = store.clone();
+        let task = task.clone();
+        let reached = reached.clone();
+        let release = release.clone();
+        async move {
+            store
+                .remove_unregistered_directory(task, move |path| {
+                    Box::pin(async move {
+                        reached.notify_one();
+                        release.notified().await;
+                        tokio::fs::remove_dir_all(&path)
+                            .await
+                            .map_err(|error| AgentError::Storage(error.to_string()))
+                    })
+                })
+                .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(30), reached.notified())
+        .await
+        .expect("the removal holds the ownership lock");
+    removal.abort();
+    assert!(removal.await.unwrap_err().is_cancelled());
+    let config = SessionConfig {
+        cwd: task.to_string_lossy().into_owned(),
+        ..Default::default()
+    };
+    let creation = tokio::spawn({
+        let store = store.clone();
+        async move {
+            store
+                .create_owned_session(
+                    "dropped-caller-session",
+                    &config,
+                    &agent_id,
+                    4,
+                    None,
+                    SessionOrigin::Client,
+                    None,
+                )
+                .await
+        }
+    });
+    release.notify_one();
+    let error = creation
+        .await
+        .unwrap()
+        .expect_err("the removed workspace fails the creation check");
+    assert!(error.to_string().contains("no longer exists"), "{error}");
+    assert!(!task.exists());
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
 #[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn committed_shell_completion_recovers_after_notice_failure_and_host_loss() {

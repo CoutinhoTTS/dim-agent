@@ -157,8 +157,8 @@ impl Store {
     pub fn remove_unregistered_directory(
         &self,
         path: PathBuf,
-        remove: impl FnOnce(PathBuf) -> BoxFuture<'static, Result<()>>,
-    ) -> impl Future<Output = Result<()>> {
+        remove: impl FnOnce(PathBuf) -> BoxFuture<'static, Result<()>> + Send + 'static,
+    ) -> impl Future<Output = Result<bool>> {
         self.0.remove_unregistered_directory(path, remove)
     }
 }
@@ -337,12 +337,15 @@ impl HostDispatch for Store {
         }
         if method == "removeUnregisteredDirectory" {
             let mut args = args.list()?.into_iter();
-            let path = args
+            let root = args
                 .next()
                 .ok_or_else(|| Error::value("missing directory"))?
                 .json()?;
-            let path: String =
-                serde_json::from_value(path).map_err(|error| Error::value(error.to_string()))?;
+            if !root.is_object() {
+                return Err(Error::value("store request must be an object"));
+            }
+            let root: Root =
+                serde_json::from_value(root).map_err(|error| Error::value(error.to_string()))?;
             let remove = args
                 .next()
                 .ok_or_else(|| Error::value("missing removal callback"))?
@@ -355,11 +358,11 @@ impl HostDispatch for Store {
             let remove = removal(remove);
             let owner = self.clone();
             return Ok(Value::future(async move {
-                owner
-                    .remove_unregistered_directory(path.into(), remove)
+                let removed = owner
+                    .remove_unregistered_directory(root.root.into(), remove)
                     .await
                     .map_err(failure)?;
-                Ok(json!({}).into())
+                Ok(json!({"removed":removed}).into())
             }));
         }
         let [request]: [serde_json::Value; 1] = serde_json::from_value(args.json()?)

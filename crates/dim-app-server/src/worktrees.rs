@@ -911,7 +911,8 @@ impl ManagedWorktrees {
         drop(children);
         #[cfg(feature = "testing")]
         self.wait_for_unregistered_removal_hold().await;
-        self.sessions
+        let removed = self
+            .sessions
             .remove_unregistered_directory(entry, move |entry| {
                 Box::pin(async move {
                     remove_checked_entry(&entry, &empty_children, force)
@@ -924,6 +925,11 @@ impl ManagedWorktrees {
             })
             .await
             .map_err(WorktreeError::from)?;
+        if !removed {
+            return Err(WorktreeError::NotFound(format!(
+                "no managed worktree has task id {task_id}"
+            )));
+        }
         Ok(true)
     }
 
