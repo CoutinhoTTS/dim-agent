@@ -2918,9 +2918,11 @@ held until then: a request that ends in a tool call, fails (including at its
 output limit) or is cancelled writes its text to stderr; a request that ends
 normally stays the candidate reply, and a turn that completes successfully
 writes it to stdout while a later request in the same turn, or a turn that
-fails or is cancelled, writes it to stderr. A diagnostic line does not by
-itself decide where held text goes. An interrupted run leaves no partial text
-on stdout; a turn whose final reply is empty writes nothing there.
+fails or is cancelled, writes it to stderr. `exec resume` first settles a turn
+an earlier invocation left running, and that turn's text goes to stderr: only
+the submitted prompt's turn can write a reply to stdout. A diagnostic line does
+not by itself decide where held text goes. An interrupted run leaves no partial
+text on stdout; a turn whose final reply is empty writes nothing there.
 `exec --json` and a one-shot `dimcode --prompt` run keep their existing routing.
 
 In JSON mode, stdout contains one compact JSON-RPC notification per line using

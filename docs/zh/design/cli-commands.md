@@ -1719,9 +1719,10 @@ Session 保留 Approval 现有的所有者侧策略（#98 D10）。`--permission
 写到 stderr，与 `[tool]`、`[done]`、`[failed]` 行同在。一段文字是否属于最终回复，要等这一回合结束
 才知道，因此文字先保留到回合终态：以工具调用结束、失败（包括撞到输出上限）或被取消的请求把文字写到
 stderr；正常结束的请求成为候选回复，成功完成的回合把它写到 stdout，而同一回合里又开始的请求、失败
-或被取消的回合把它写到 stderr。诊断行本身不决定保留文字的走向。被中断的运行不会在 stdout 留下半截
-文字；最终回复为空的回合不在 stdout 写任何内容。`exec --json` 和非 exec 的一次性 `dimcode --prompt`
-运行保持现有的路由。
+或被取消的回合把它写到 stderr。`exec resume` 先收尾上一次调用留下的运行中回合，再提交提示词；那个
+回合的文字写到 stderr，只有提交的提示词所在回合能把回复写到 stdout。诊断行本身不决定保留文字的走向。
+被中断的运行不会在 stdout 留下半截文字；最终回复为空的回合不在 stdout 写任何内容。`exec --json` 和
+非 exec 的一次性 `dimcode --prompt` 运行保持现有的路由。
 
 JSON 模式下，stdout 每行一条紧凑的 JSON-RPC 通知，使用守护进程现有的 `method` 和 `params`。只输出
 所选 Session 的通知。协议握手、RPC 回复和其他 Session 不进入这个流。Session 句柄和给人看的诊断

@@ -61,6 +61,10 @@ pub struct Display {
     /// `exec`'s text mode: a request's text waits for the turn to end, so
     /// stdout carries the turn's final reply alone.
     pub final_reply_only: bool,
+    /// Whether a turn that completes may release its reply to stdout. `exec
+    /// resume` first settles a turn an earlier invocation left running, and
+    /// that turn's reply is not this run's answer.
+    pub reply_stream: bool,
     held: Option<HeldText>,
     /// A diagnostic text line is open on stderr.
     progress_text_open: bool,
@@ -89,6 +93,7 @@ impl Display {
             retries: true,
             retry_seen: HashMap::new(),
             final_reply_only: false,
+            reply_stream: false,
             held: None,
             progress_text_open: false,
         }
@@ -201,6 +206,9 @@ impl Display {
         }
         if !self.final_reply_only {
             return self.show_text(text);
+        }
+        if !self.reply_stream {
+            return self.show_progress(text);
         }
         self.begin_request(request)?;
         match self.held.as_ref().and_then(|held| held.route) {
@@ -403,10 +411,10 @@ impl Display {
             EventContent::TurnEnd(data) => {
                 if self.final_reply_only {
                     let route = match &data.outcome {
-                        TurnOutcome::Completed { .. } => TextRoute::Reply,
-                        TurnOutcome::Failed { .. } | TurnOutcome::Cancelled { .. } => {
-                            TextRoute::Progress
-                        }
+                        TurnOutcome::Completed { .. } if self.reply_stream => TextRoute::Reply,
+                        TurnOutcome::Completed { .. }
+                        | TurnOutcome::Failed { .. }
+                        | TurnOutcome::Cancelled { .. } => TextRoute::Progress,
                     };
                     self.route_text(route)?;
                     self.held = None;

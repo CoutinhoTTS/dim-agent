@@ -341,6 +341,7 @@ pub async fn chat(
         if code != 0 || interactive && input.is_none() {
             return Ok(code);
         }
+        display.reply_stream = true;
         if options.prompt.is_some() || !images.is_empty() {
             let content = options
                 .prompt

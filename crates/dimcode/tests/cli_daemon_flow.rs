@@ -1822,6 +1822,57 @@ fn exec_keeps_a_reply_on_stdout_past_a_notice_between_its_chunks() {
     );
 }
 
+/// `exec resume` settles a turn an earlier invocation left running before it
+/// submits its prompt; that turn's reply is not this run's answer.
+#[test]
+fn exec_resume_keeps_the_running_turns_reply_off_stdout() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&[]);
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, attach_record(&attach));
+        let history = wire.read("session.history");
+        wire.reply(&history, json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+        wire.no_pending_questions(8);
+        let idle = wire.read("session.idle");
+        wire.event(10,"text",json!({"turn_id":"old-turn","request_id":"old-request","delta":"The earlier answer."}));
+        wire.event(11,"model-output-end",json!({"turn_id":"old-turn","request_id":"old-request","status":"completed","finish_reason":"end_turn"}));
+        wire.notice("session.event",json!({"sessionId":"session","branchId":"main","event":{"id":"old-end","sequence":12,"create_at":1,"type":"turn","name":"end","data":{"turn_id":"old-turn","status":"completed","reason":"done"}}}));
+        wire.reply(&idle, json!({"sequence":12}));
+        let submit = wire.read("session.submit");
+        wire.reply(&submit, json!({"event":{}}));
+        let idle = wire.read("session.idle");
+        wire.event(14,"text",json!({"turn_id":"new-turn","request_id":"new-request","delta":"The new answer."}));
+        wire.notice("session.event",json!({"sessionId":"session","branchId":"main","event":{"id":"new-end","sequence":16,"create_at":1,"type":"turn","name":"end","data":{"turn_id":"new-turn","status":"completed","reason":"done"}}}));
+        wire.reply(&idle, json!({"sequence":16}));
+        wire.detach();
+    });
+    let output = wait(
+        home.command()
+            .args(["exec", "resume", "session", "-p", "continue"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    daemon.join().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "status {:?} stdout {stdout:?} stderr {stderr:?}",
+        output.status.code()
+    );
+    assert_eq!(
+        stdout, "The new answer.\n",
+        "only the submitted prompt's turn writes the reply; stderr was {stderr:?}"
+    );
+    assert!(
+        stderr.contains("The earlier answer."),
+        "the settled turn's words go to stderr: {stderr:?}"
+    );
+}
+
 #[test]
 fn exec_leaves_no_partial_text_on_stdout_after_an_interrupt() {
     let home = Home::new();
