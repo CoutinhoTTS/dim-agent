@@ -1216,8 +1216,8 @@ struct App {
     /// drawn: `(row id, pick it)`.
     landing: Option<(String, bool)>,
     /// The Session the invocation asked to resume, until the interface shows
-    /// it: a command typed before the first attachment reply names that
-    /// Session, not Home.
+    /// it: the invocation's first message names that Session, while no key
+    /// typed before the attachment does.
     startup_session: Option<String>,
     /// A session was just switched; the next snapshot decides the window.
     awaiting_window: bool,
@@ -2006,17 +2006,16 @@ impl App {
         self.dispatch_composer(outcome, SubmitMode::Queue, line, session);
     }
 
-    /// The origin a key's command belongs to: the Session shown, the one the
-    /// invocation asked to resume before its first attachment arrives, or
-    /// Home. Home and a Session are told apart, so a command typed on one is
-    /// never taken for the other (design §14).
+    /// The origin a key's command belongs to: the Session shown, or Home.
+    /// `--resume` is not a key's origin: while the first attachment is still
+    /// in flight the interface shows Home, and a key typed there is Home's,
+    /// so no attachment can turn it into a command on the Session it brings
+    /// in (design §14).
     fn target_session(&self) -> Origin {
-        if !self.session_id.is_empty() {
-            return Origin::Session(self.session_id.clone());
-        }
-        match &self.startup_session {
-            Some(session) => Origin::Session(session.clone()),
-            None => Origin::Home,
+        if self.session_id.is_empty() {
+            Origin::Home
+        } else {
+            Origin::Session(self.session_id.clone())
         }
     }
 
@@ -3768,12 +3767,20 @@ impl App {
         if submitted && self.session_id.is_empty() {
             self.unsent = Some(initial);
         }
-        self.dispatch_composer(
-            outcome,
-            SubmitMode::Queue,
-            self.target_line(),
-            self.target_session(),
-        )
+        // The invocation's first message belongs to the Session it asked to
+        // resume, not to the Home screen the first frame may still show. Its
+        // line is unknown here: the first frame may carry the line the first
+        // attachment invalidated, while the worker resolves an empty line to
+        // the line it shows when the message runs (design §14).
+        let session = if self.session_id.is_empty() {
+            match &self.startup_session {
+                Some(session) => Origin::Session(session.clone()),
+                None => Origin::Home,
+            }
+        } else {
+            Origin::Session(self.session_id.clone())
+        };
+        self.dispatch_composer(outcome, SubmitMode::Queue, String::new(), session)
     }
 
     /// Puts a first message no Session took back into the draft, unless the

@@ -2540,8 +2540,10 @@ fn tui_a_home_send_and_permission_change_do_not_reach_the_resumed_session() {
             submit_seen.try_recv().is_err(),
             "a message typed on Home is not submitted to the resumed Session"
         );
-        terminal.until("the draft was kept");
-        terminal.until("nothing was changed");
+        // The two notices may have been painted in the frame that carried
+        // the resumed view, before the title echo this flow waited on.
+        terminal.until_anywhere("the draft was kept");
+        terminal.until_anywhere("nothing was changed");
         home.kill(&terminal);
         terminal.wait();
         daemon.join().unwrap();
@@ -2660,5 +2662,187 @@ fn tui_a_stale_send_behind_new_does_not_start_a_session() {
         home.kill(&terminal);
         terminal.wait();
         daemon.join().unwrap();
+    }
+}
+
+/// The invocation's first message on a resumed Session is submitted on the
+/// line the attach reply names, even when the first frame still shows the
+/// line the attachment invalidated and the reply has not arrived (design §14).
+#[test]
+fn tui_the_first_prompt_of_a_resumed_session_follows_the_line_its_attach_names() {
+    for fullscreen in [false, true] {
+        let home = Home::new();
+        let (attaching, attach_seen) = std::sync::mpsc::channel();
+        let (release_attach, release) = std::sync::mpsc::channel::<()>();
+        let (submitted, submit_seen) = std::sync::mpsc::channel::<Value>();
+        let daemon = home.daemon(move |wire| {
+            wire.hello(&[]);
+            let attach = wire.read("session.attach");
+            assert_eq!(attach["params"]["sessionId"], "session");
+            let mut record = attach_record(&attach);
+            record["defaultBranch"] = json!({"branchId":"line-1","sequence":3});
+            record["sequence"] = json!(3);
+            attaching.send(()).unwrap();
+            release.recv_timeout(PATIENCE).unwrap();
+            wire.reply(&attach, record);
+            let mut usage = |_request: &Value| None;
+            loop {
+                let request = next_usage(wire, &mut usage);
+                match request["method"].as_str().unwrap_or_default() {
+                    "session.history" => wire.reply(&request, history(3, vec![])),
+                    "session.submit" => {
+                        submitted.send(request["params"].clone()).unwrap();
+                        wire.reply(&request, json!({"event":{}}));
+                    }
+                    other => panic!("unexpected {other}: {request}"),
+                }
+            }
+        });
+        let mut command = home.command();
+        command.args([
+            "tui",
+            if fullscreen {
+                "--fullscreen"
+            } else {
+                "--scrollback"
+            },
+            "--resume",
+            "session",
+            "-p",
+            "continue",
+        ]);
+        sized(&mut command, 120, 36);
+        let mut terminal = Terminal::launch_tui(command);
+        attach_seen.recv_timeout(PATIENCE).unwrap();
+        // The reply is held, so the first frame drains the invalidated
+        // projection: the invocation's first message reads that frame's line,
+        // not the line the attachment is about to name.
+        terminal.until("Welcome to DIM");
+        release_attach.send(()).unwrap();
+        let sent = submit_seen.recv_timeout(PATIENCE).unwrap();
+        assert_eq!(sent["sessionId"], "session");
+        assert_eq!(
+            sent["branchId"], "line-1",
+            "the first message follows the attach reply's line"
+        );
+        assert_eq!(sent["text"], "continue");
+        home.kill(&terminal);
+        terminal.wait();
+        daemon.join().unwrap();
+    }
+}
+
+/// A permission change typed on the Home screen `--resume` shows before its
+/// attachment replies is Home's: no line of the resumed Session is written
+/// (design §14). The `/compact` that follows the attachment arrives after
+/// that gesture is decided, and the gesture typed on the attached Session is
+/// the one whose write the daemon sees.
+#[test]
+fn tui_a_launch_home_permission_change_does_not_reach_the_resumed_session() {
+    for fullscreen in [false, true] {
+        for default in ["main", "line-1"] {
+            let home = Home::new();
+            let (attaching, attach_seen) = std::sync::mpsc::channel();
+            let (release_attach, release) = std::sync::mpsc::channel::<()>();
+            let (updated, update_seen) = std::sync::mpsc::channel::<Value>();
+            let (compacting, compact_seen) = std::sync::mpsc::channel::<()>();
+            let daemon = home.daemon(move |wire| {
+                wire.hello(&[
+                    "session.branches",
+                    "session.permission.get",
+                    "session.permission.update",
+                ]);
+                let mut usage = |_request: &Value| None;
+                let mut version = 1;
+                loop {
+                    let request = next_usage(wire, &mut usage);
+                    let session = request["params"]["sessionId"].as_str().unwrap_or_default();
+                    match request["method"].as_str().unwrap_or_default() {
+                        "session.attach" => {
+                            assert_eq!(session, "session");
+                            let mut record = attach_record(&request);
+                            record["defaultBranch"] = json!({"branchId":default,"sequence":8});
+                            attaching.send(()).unwrap();
+                            release.recv_timeout(PATIENCE).unwrap();
+                            wire.reply(&request, record);
+                        }
+                        "session.branches" => wire.reply(
+                            &request,
+                            directory(default, &[("main", None), ("line-1", Some("main"))]),
+                        ),
+                        "session.history" => wire.reply(
+                            &request,
+                            history(
+                                8,
+                                vec![said(3, "resumed conversation"), applied(4, "input-3")],
+                            ),
+                        ),
+                        "session.permission.get" => wire.reply(
+                            &request,
+                            json!({"version":version,"policy":policy("read-only")}),
+                        ),
+                        "session.permission.update" => {
+                            updated.send(request["params"].clone()).unwrap();
+                            version += 1;
+                            wire.reply(&request, json!({"version":version}));
+                        }
+                        "session.submit" => {
+                            panic!("a Home message reached the resumed Session: {request}")
+                        }
+                        "session.context.compact" => {
+                            assert_eq!(request["params"]["branchId"], default);
+                            compacting.send(()).unwrap();
+                            wire.reply(&request, json!({"status":"completed"}));
+                        }
+                        other => panic!("unexpected {other}: {request}"),
+                    }
+                }
+            });
+            let mut command = home.command();
+            command.args([
+                "tui",
+                if fullscreen {
+                    "--fullscreen"
+                } else {
+                    "--scrollback"
+                },
+                "--resume",
+                "session",
+            ]);
+            sized(&mut command, 120, 36);
+            let mut terminal = Terminal::launch_tui(command);
+            attach_seen.recv_timeout(PATIENCE).unwrap();
+            // The screen is Home until the reply lands; the gesture read its
+            // text, so it is decided before the attachment is released.
+            terminal.until("Welcome to DIM");
+            terminal.write(b"\x1b[Z");
+            terminal.write(b"qzx");
+            terminal.until("qzx");
+            release_attach.send(()).unwrap();
+            // The boundary row is out once the attachment's own projection is
+            // applied, so the commands below name the resumed Session.
+            terminal.until("resumed session");
+            terminal.write(b"/compact\r");
+            compact_seen.recv_timeout(PATIENCE).unwrap();
+            assert!(
+                update_seen.try_recv().is_err(),
+                "the launch Home gesture writes no resumed line"
+            );
+            // A gesture typed after the attachment names its line: its write
+            // is the only one, against the version the opening read reported.
+            terminal.write(b"\x1b[Z");
+            let changed = update_seen.recv_timeout(PATIENCE).unwrap();
+            assert_eq!(changed["sessionId"], "session");
+            assert_eq!(changed["branchId"], default);
+            assert_eq!(changed["expectedVersion"], 1);
+            assert!(
+                update_seen.try_recv().is_err(),
+                "the launch Home gesture writes no resumed line of its own"
+            );
+            terminal.until("nothing was changed");
+            home.kill(&terminal);
+            terminal.wait();
+            daemon.join().unwrap();
+        }
     }
 }
