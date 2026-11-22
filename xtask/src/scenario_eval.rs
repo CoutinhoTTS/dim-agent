@@ -83,8 +83,8 @@
 //!   "providers": [
 //!     {"id": "run", "kind": "openai-chat", "apiKeyEnv": "MODEL_KEY",
 //!      "baseUrl": "https://example.invalid/v1",
-//!      "models": [{"id": "model-a", "contextWindow": 16000,
-//!                  "maxOutputTokens": 1024, "config": {"maxTokens": 1024}}]},
+//!      "models": [{"id": "model-a", "contextWindow": 29000,
+//!                  "maxOutputTokens": 8192, "config": {"maxTokens": 8192}}]},
 //!     {"id": "judge", "kind": "openai-chat", "apiKeyEnv": "MODEL_KEY",
 //!      "baseUrl": "https://example.invalid/v1",
 //!      "models": [{"id": "model-a", "contextWindow": 1048576,
@@ -93,7 +93,7 @@
 //! }
 //! ```
 //!
-//! The run model above is declared for the scenarios' 16,000-token window and
+//! The run model above is declared for the scenarios' 29,000-token window and
 //! the same upstream model judges with its own 1,048,576-token window, so
 //! `--judge judge/model-a` reads a view of that size in one call.
 //!
@@ -7706,7 +7706,7 @@ mod tests {
         }
         assert_eq!(
             find(&compact, "identity-after-compaction").budget.window,
-            16_000,
+            29_000,
             "the compact scenario declares the window that compacts it"
         );
         for scenario in &branches {
