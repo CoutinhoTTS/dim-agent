@@ -6080,7 +6080,7 @@ mod tests {
 
         let (mut worker, mut receiver, _sent) = test_worker(&TEST_FEATURES).await;
         worker
-            .attach("s2".into(), SwitchKind::Resumed)
+            .attach("s2".into(), SwitchKind::Resumed, true)
             .await
             .expect("the switch attaches");
         let published = |receiver: &mut mpsc::Receiver<Update>| -> Vec<ViewSnapshot> {
@@ -6129,7 +6129,7 @@ mod tests {
     async fn a_stale_fork_ends_with_a_notice_and_fork_failed() {
         let (mut worker, receiver, _sent) = test_worker(&TEST_FEATURES).await;
         worker
-            .attach("s2".into(), SwitchKind::Resumed)
+            .attach("s2".into(), SwitchKind::Resumed, true)
             .await
             .expect("the switch attaches");
         receiver.try_iter().for_each(drop);
@@ -6167,7 +6167,7 @@ mod tests {
     async fn a_refused_fork_ends_with_fork_failed() {
         let (mut worker, receiver, _sent) = test_worker_answering(&TEST_FEATURES, true, None).await;
         worker
-            .attach("s2".into(), SwitchKind::Resumed)
+            .attach("s2".into(), SwitchKind::Resumed, true)
             .await
             .expect("the switch attaches");
         receiver.try_iter().for_each(drop);
@@ -6205,7 +6205,7 @@ mod tests {
         let (mut worker, receiver, _sent) =
             test_worker_answering(&features, false, Some("refused")).await;
         worker
-            .attach("s1".into(), SwitchKind::Resumed)
+            .attach("s1".into(), SwitchKind::Resumed, true)
             .await
             .expect("the switch attaches");
         receiver.try_iter().for_each(drop);
@@ -6245,7 +6245,7 @@ mod tests {
         );
 
         worker
-            .attach("s1".into(), SwitchKind::Resumed)
+            .attach("s1".into(), SwitchKind::Resumed, true)
             .await
             .expect("the switch attaches");
         receiver.try_iter().for_each(drop);
@@ -6284,7 +6284,7 @@ mod tests {
 
         let (mut worker, mut receiver, _sent) = test_worker(&TEST_FEATURES).await;
         worker
-            .attach("s2".into(), SwitchKind::Resumed)
+            .attach("s2".into(), SwitchKind::Resumed, true)
             .await
             .expect("the switch attaches");
         let published = |receiver: &mut mpsc::Receiver<Update>| -> ViewSnapshot {
@@ -6339,7 +6339,7 @@ mod tests {
     async fn every_live_line_carries_its_own_state_report() {
         let (mut worker, mut receiver, _sent) = test_worker(&TEST_FEATURES).await;
         worker
-            .attach("s2".into(), SwitchKind::Resumed)
+            .attach("s2".into(), SwitchKind::Resumed, true)
             .await
             .expect("the switch attaches");
         let lines = |receiver: &mut mpsc::Receiver<Update>| {
@@ -6408,7 +6408,7 @@ mod tests {
     async fn an_ended_line_is_listed_without_a_state_report() {
         let (mut worker, receiver, _sent) = test_worker(&TEST_FEATURES).await;
         worker
-            .attach("s2".into(), SwitchKind::Resumed)
+            .attach("s2".into(), SwitchKind::Resumed, true)
             .await
             .expect("the switch attaches");
         let create = json!({
