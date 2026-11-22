@@ -664,6 +664,57 @@ async fn a_new_file_takes_the_creation_mode_on_the_named_fallback() {
     }
 }
 
+/// A new file is created in a parent that is writable and searchable but not
+/// readable; only the parent sync reports the unreadable directory, as it does
+/// for the staging path this change keeps. The file keeps 0600 because its mode
+/// cannot be checked: the parent cannot be read, and on macOS a library caller
+/// records no process umask.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_new_file_in_a_write_only_parent_is_created() {
+    new_file_in_write_only_parent(false).await;
+    #[cfg(target_os = "linux")]
+    new_file_in_write_only_parent(true).await;
+}
+
+/// `named` forces the named staging fallback on Linux; every other platform
+/// always stages a named sibling.
+#[cfg(unix)]
+async fn new_file_in_write_only_parent(named: bool) {
+    use std::os::unix::fs::PermissionsExt;
+    let workspace = Workspace::new();
+    let parent = workspace.path("write-only");
+    fs::create_dir(&parent).unwrap();
+    fs::set_permissions(&parent, fs::Permissions::from_mode(0o300)).unwrap();
+    #[cfg(target_os = "linux")]
+    let _forced = named.then(|| ForcedNamedStaging::new(&parent));
+    #[cfg(not(target_os = "linux"))]
+    let _ = named;
+    let result = workspace
+        .call(
+            &branch(),
+            "write",
+            json!({"path": "write-only/new", "content": "text\n"}),
+        )
+        .await;
+    assert_eq!(
+        result.is_error,
+        Some(true),
+        "the unreadable parent fails the sync that follows publication"
+    );
+    let structured = result.structured_content.unwrap();
+    assert_eq!(structured["code"], "permission_denied");
+    assert_eq!(structured["mayHaveModified"], true);
+    assert_eq!(fs::read(parent.join("new")).unwrap(), b"text\n");
+    assert_eq!(mode_of(&parent.join("new")), 0o600);
+    fs::set_permissions(&parent, fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(
+        entry_names(&parent),
+        ["new".to_owned()],
+        "the write leaves no staging entry behind"
+    );
+}
+
 /// The umask a child run of [`a_new_file_takes_the_parents_acl_on_macos`] uses.
 #[cfg(target_os = "macos")]
 const CHILD_ACL_UMASK: &str = "DIM_TEST_NEW_FILE_ACL_UMASK";

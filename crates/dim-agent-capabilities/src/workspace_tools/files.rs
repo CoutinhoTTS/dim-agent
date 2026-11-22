@@ -891,7 +891,9 @@ impl Target {
     }
 
     /// The target's parent directory: the held handle when bounded, or the
-    /// parent path opened for the call otherwise.
+    /// parent path opened `O_PATH` for the call otherwise. Creating and
+    /// publishing an entry needs write and search permission on the directory,
+    /// not read, so the handle must not open it for reading.
     #[cfg(target_os = "linux")]
     fn parent_directory(&self) -> Result<std::fs::File, TargetError> {
         match self {
@@ -901,10 +903,36 @@ impl Target {
                 })?;
                 let mut options = std::fs::OpenOptions::new();
                 options.read(true);
-                std::os::unix::fs::OpenOptionsExt::custom_flags(&mut options, libc::O_DIRECTORY);
+                std::os::unix::fs::OpenOptionsExt::custom_flags(
+                    &mut options,
+                    libc::O_PATH | libc::O_DIRECTORY,
+                );
                 options.open(parent).map_err(TargetError::Io)
             }
             Self::Handle(parent) => parent.dir.try_clone().map_err(TargetError::Io),
+        }
+    }
+
+    /// The target's parent opened for reading, which the ACL probe needs.
+    /// `None` when the directory's mode denies reading it while write and
+    /// search still admit a new file: the probe has no answer.
+    #[cfg(target_os = "linux")]
+    fn readable_parent(&self) -> Result<Option<std::fs::File>, TargetError> {
+        match self {
+            Self::Path(path) => {
+                let parent = path.parent().ok_or_else(|| {
+                    TargetError::Io(std::io::Error::from(std::io::ErrorKind::InvalidInput))
+                })?;
+                let mut options = std::fs::OpenOptions::new();
+                options.read(true);
+                std::os::unix::fs::OpenOptionsExt::custom_flags(&mut options, libc::O_DIRECTORY);
+                match options.open(parent) {
+                    Ok(directory) => Ok(Some(directory)),
+                    Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => Ok(None),
+                    Err(error) => Err(TargetError::Io(error)),
+                }
+            }
+            Self::Handle(parent) => parent.dir.try_clone().map(Some).map_err(TargetError::Io),
         }
     }
 
@@ -956,35 +984,33 @@ impl Target {
         // SAFETY: `fd` is non-negative (checked above) and was just returned
         // by `openat`, so this takes ownership of a fresh descriptor no other
         // owner holds.
-        Ok(Some(unsafe { std::fs::File::from_raw_fd(fd) }))
+        let file = unsafe { std::fs::File::from_raw_fd(fd) };
+        #[cfg(any(test, feature = "testing"))]
+        if testing::tmpfile_umask_leak(self.path()) {
+            // The inode a kernel before 4.19 left at `0o666` in `vfs_tmpfile`
+            // because `ac6800e279a2` was not backported.
+            // SAFETY: `file` owns an open descriptor for the call.
+            if unsafe { libc::fchmod(fd, 0o666) } != 0 {
+                return Err(TargetError::Io(std::io::Error::last_os_error()));
+            }
+        }
+        Ok(Some(file))
     }
 
-    /// Applies the umask strip a pre-4.19 kernel omitted in `vfs_tmpfile` on a
-    /// filesystem without POSIX ACL support (`ac6800e279a2`). The parent's
-    /// `system.posix_acl_default` reports `EOPNOTSUPP` exactly when the
-    /// filesystem has no ACL support; the kernel then left the mode at `0o666`.
+    /// Gives an anonymous `O_TMPFILE` inode the mode a direct creation would
+    /// have. The kernel settles that mode unless it is older than 4.19, where
+    /// `vfs_tmpfile` omitted the umask strip on a filesystem without POSIX ACL
+    /// support (`ac6800e279a2`). A parent with a default ACL already merged
+    /// it; a parent or umask that cannot be read keeps the inode at `0o600`
+    /// rather than publishing the kernel's `0o666` unchecked.
     #[cfg(target_os = "linux")]
     pub(crate) fn strip_tmpfile_umask(&self, file: &std::fs::File) -> Result<(), TargetError> {
+        let mode = match self.parent_default_acl()? {
+            Some(true) => return Ok(()),
+            Some(false) => self.new_file_umask().map_or(0o600, |umask| 0o666 & !umask),
+            None => 0o600,
+        };
         use std::os::fd::AsRawFd;
-        let parent = self.parent_directory()?;
-        // SAFETY: `parent` is an open directory handle and the name is a live
-        // NUL-terminated string for the call.
-        let default_acl = unsafe {
-            libc::fgetxattr(
-                parent.as_raw_fd(),
-                c"system.posix_acl_default".as_ptr(),
-                std::ptr::null_mut(),
-                0,
-            )
-        };
-        if default_acl >= 0
-            || std::io::Error::last_os_error().raw_os_error() != Some(libc::EOPNOTSUPP)
-        {
-            return Ok(());
-        }
-        let Some(mode) = creation_umask().map(|umask| 0o666 & !umask) else {
-            return Ok(());
-        };
         // SAFETY: `file` is an open descriptor owned for the call.
         if unsafe { libc::fchmod(file.as_raw_fd(), mode as libc::mode_t) } != 0 {
             return Err(TargetError::Io(std::io::Error::last_os_error()));
@@ -1023,15 +1049,17 @@ impl Target {
 
     /// Gives a named staged new file the mode a direct creation would have,
     /// immediately before publication. `None` keeps the 0600 staging mode: on
-    /// Linux when the parent carries a POSIX default ACL, which an existing
-    /// inode cannot merge, and on macOS when no process umask was recorded.
+    /// Linux when the parent's ACL cannot be ruled out (it has a default ACL,
+    /// or it cannot be read) or the umask cannot be read, and on macOS when no
+    /// process umask was recorded.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(crate) fn prepare_new_file(&self, file: &std::fs::File) -> Result<(), TargetError> {
         #[cfg(target_os = "linux")]
-        if self.parent_has_default_acl()? {
-            return Ok(());
+        match self.parent_default_acl()? {
+            Some(false) => {}
+            Some(true) | None => return Ok(()),
         }
-        let Some(mode) = creation_umask().map(|umask| 0o666 & !umask) else {
+        let Some(mode) = self.new_file_umask().map(|umask| 0o666 & !umask) else {
             return Ok(());
         };
         use std::os::fd::AsRawFd;
@@ -1042,13 +1070,33 @@ impl Target {
         Ok(())
     }
 
-    /// Whether the parent directory carries a POSIX default ACL. An unreadable
-    /// answer counts as yes, keeping the staged file at 0600 rather than risking
-    /// a wider mode than the directory's policy.
+    /// The umask for a new file under this target: Linux reads the process
+    /// status, macOS reports the value captured at startup. `None` means no
+    /// value is available, and a new file keeps its 0600 staging mode.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn new_file_umask(&self) -> Option<u32> {
+        #[cfg(all(target_os = "linux", any(test, feature = "testing")))]
+        if testing::tmpfile_umask_leak(self.path()) {
+            return None;
+        }
+        creation_umask()
+    }
+
+    /// Whether the parent directory carries a POSIX default ACL: `Some(true)`
+    /// when it does, `Some(false)` when there is none or the filesystem has no
+    /// ACL support, and `None` when the directory cannot be read for the
+    /// probe. Callers treat `None` as a default ACL and keep the staged file
+    /// at 0600.
     #[cfg(target_os = "linux")]
-    fn parent_has_default_acl(&self) -> Result<bool, TargetError> {
+    fn parent_default_acl(&self) -> Result<Option<bool>, TargetError> {
+        #[cfg(any(test, feature = "testing"))]
+        if testing::tmpfile_umask_leak(self.path()) {
+            return Ok(Some(false));
+        }
+        let Some(parent) = self.readable_parent()? else {
+            return Ok(None);
+        };
         use std::os::fd::AsRawFd;
-        let parent = self.parent_directory()?;
         // SAFETY: `parent` is an open directory handle and the name is a live
         // NUL-terminated string for the call.
         let result = unsafe {
@@ -1060,12 +1108,12 @@ impl Target {
             )
         };
         if result >= 0 {
-            return Ok(true);
+            return Ok(Some(true));
         }
-        Ok(!matches!(
-            std::io::Error::last_os_error().raw_os_error(),
-            Some(libc::ENODATA | libc::EOPNOTSUPP)
-        ))
+        Ok(match std::io::Error::last_os_error().raw_os_error() {
+            Some(libc::ENODATA | libc::EOPNOTSUPP) => Some(false),
+            _ => None,
+        })
     }
 
     /// The target of a read: with a boundary, the parent walk must already
@@ -1287,6 +1335,9 @@ pub mod testing {
 
     static NAMED_STAGING: LazyLock<Mutex<Vec<PathBuf>>> = LazyLock::new(Mutex::default);
 
+    /// The parents whose new files simulate the pre-4.19 `O_TMPFILE` leak.
+    static TMPFILE_UMASK_LEAK: LazyLock<Mutex<Vec<PathBuf>>> = LazyLock::new(Mutex::default);
+
     /// Stages new files under `parent` as named siblings, the fallback a
     /// filesystem without `O_TMPFILE` takes. [`allow_anonymous_staging`]
     /// releases the override.
@@ -1304,6 +1355,28 @@ pub mod testing {
 
     pub(crate) fn named_staging_forced(path: &Path) -> bool {
         let forced = NAMED_STAGING.lock().unwrap();
+        path.parent()
+            .is_some_and(|parent| forced.iter().any(|entry| entry == parent))
+    }
+
+    /// Simulates the `O_TMPFILE` mode leak a kernel before 4.19 left on a
+    /// filesystem without POSIX ACL support: the new inode starts at `0o666`,
+    /// the directory reports no ACL, and the umask cannot be read.
+    /// [`release_tmpfile_umask_leak`] releases the override.
+    pub fn force_tmpfile_umask_leak(parent: &Path) {
+        TMPFILE_UMASK_LEAK.lock().unwrap().push(parent.to_owned());
+    }
+
+    /// Releases [`force_tmpfile_umask_leak`] for `parent`.
+    pub fn release_tmpfile_umask_leak(parent: &Path) {
+        TMPFILE_UMASK_LEAK
+            .lock()
+            .unwrap()
+            .retain(|forced| forced != parent);
+    }
+
+    pub(crate) fn tmpfile_umask_leak(path: &Path) -> bool {
+        let forced = TMPFILE_UMASK_LEAK.lock().unwrap();
         path.parent()
             .is_some_and(|parent| forced.iter().any(|entry| entry == parent))
     }
@@ -1563,6 +1636,61 @@ mod mutation_tests {
         }
     }
 
+    /// Restores the umask-leak override when it drops, a panic included.
+    #[cfg(target_os = "linux")]
+    struct ForcedTmpfileUmaskLeak(PathBuf);
+    #[cfg(target_os = "linux")]
+    impl ForcedTmpfileUmaskLeak {
+        fn new(parent: &Path) -> Self {
+            testing::force_tmpfile_umask_leak(parent);
+            Self(parent.to_owned())
+        }
+    }
+    #[cfg(target_os = "linux")]
+    impl Drop for ForcedTmpfileUmaskLeak {
+        fn drop(&mut self) {
+            testing::release_tmpfile_umask_leak(&self.0);
+        }
+    }
+
+    /// Fails with the reason when `parent` cannot hold an `O_TMPFILE` inode,
+    /// so a test that needs the anonymous path never passes on the named
+    /// fallback.
+    #[cfg(target_os = "linux")]
+    fn require_anonymous_staging(parent: &Path) {
+        use std::os::fd::{AsRawFd, FromRawFd};
+        assert!(
+            Path::new("/proc/self/fd").is_dir(),
+            "this test needs /proc/self/fd to publish an O_TMPFILE inode"
+        );
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true);
+        std::os::unix::fs::OpenOptionsExt::custom_flags(
+            &mut options,
+            libc::O_PATH | libc::O_DIRECTORY,
+        );
+        let directory = options.open(parent).unwrap();
+        // SAFETY: `directory` is an open directory handle and the path is a
+        // live NUL-terminated string for the call.
+        let fd = unsafe {
+            libc::openat(
+                directory.as_raw_fd(),
+                c".".as_ptr(),
+                libc::O_TMPFILE | libc::O_WRONLY | libc::O_CLOEXEC,
+                0o600,
+            )
+        };
+        if fd < 0 {
+            panic!(
+                "this test needs a filesystem with O_TMPFILE: {}",
+                std::io::Error::last_os_error()
+            );
+        }
+        // SAFETY: `fd` is non-negative (checked above) and was just returned
+        // by `openat`, so this closes a fresh descriptor no other owner holds.
+        drop(unsafe { std::fs::File::from_raw_fd(fd) });
+    }
+
     /// A new file staged in a named sibling (the fallback a filesystem without
     /// `O_TMPFILE` takes) stays 0600 while it is prepared and takes the
     /// creation mode when it is published.
@@ -1664,6 +1792,47 @@ mod mutation_tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    /// A new file whose umask cannot be read keeps the 0600 staging mode
+    /// instead of publishing the `0o666` an `O_TMPFILE` inode kept in a
+    /// `vfs_tmpfile` that omitted the umask strip (`ac6800e279a2`).
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn an_unread_umask_keeps_an_anonymous_new_file_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("dim-new-file-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        require_anonymous_staging(&root);
+        let tools = FileTools::new(root.clone(), root.clone(), root.join("out"));
+        let _leak = ForcedTmpfileUmaskLeak::new(&root);
+        let result = call(
+            &tools,
+            &branch(),
+            "write",
+            json!({"path": "new", "content": "text\n"}),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.is_error, None);
+        assert_eq!(std::fs::read(root.join("new")).unwrap(), b"text\n");
+        assert_eq!(
+            std::fs::metadata(root.join("new"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600,
+            "an unread umask publishes an anonymous new file as 0600"
+        );
+        assert_eq!(
+            std::fs::read_dir(&root).unwrap().count(),
+            1,
+            "a successful anonymous write leaves no staging entry"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     /// An `O_TMPFILE` new file has no directory entry while it is prepared, and
     /// its publication does not replace a name created in that window.
     #[cfg(target_os = "linux")]
@@ -1672,6 +1841,7 @@ mod mutation_tests {
         let root = std::env::temp_dir().join(format!("dim-new-file-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&root).unwrap();
         let root = root.canonicalize().unwrap();
+        require_anonymous_staging(&root);
         let mut tools = FileTools::new(root.clone(), root.clone(), root.join("out"));
         let prepared = root.clone();
         tools.before_commit = Some(Arc::new(move |path| {
