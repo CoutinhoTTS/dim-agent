@@ -12,6 +12,7 @@ use dim_agent_capabilities::{
     },
     timeline_tree::{BranchToolConfig, TreeCommands},
     tool_registry::ToolRegistry,
+    wait::Wait,
     workspace_tools::{file_reads::FileReads, files::FileTools},
 };
 use dim_agent_runtime::testing::MinimalHost;
@@ -7659,7 +7660,9 @@ async fn an_idle_line_wakes_the_wait_of_the_main_that_opened_it() {
         .await
         .unwrap();
     patient(gates.line_entered.notified()).await;
+    let mut subscribed = session.service::<Wait>("main").unwrap().subscription();
     let (call, at) = start_wait(&session).await;
+    patient(subscribed.subscribed()).await;
     gates.line_release.notify_one();
     assert_eq!(wait_ended(&session, &call).await, "wait ended: steer");
     let notice = notice_in_a_request(&session, at, "<dim-branch-idle").await;
@@ -7683,7 +7686,9 @@ async fn an_ended_line_wakes_the_wait_of_the_main_that_opened_it() {
         .unwrap();
     let child = open_line(&session, "watch the tests").await;
     soon(session.idle("main")).await.unwrap();
+    let mut subscribed = session.service::<Wait>("main").unwrap().subscription();
     let (call, at) = start_wait(&session).await;
+    soon(subscribed.subscribed()).await;
     soon(session.end_branch(
         &child,
         BranchSource::Host {
@@ -7712,7 +7717,9 @@ async fn a_steer_message_from_a_line_wakes_the_wait_of_the_main_that_opened_it()
         .unwrap();
     let child = open_line(&session, "watch the tests").await;
     soon(session.idle("main")).await.unwrap();
+    let mut subscribed = session.service::<Wait>("main").unwrap().subscription();
     let (call, at) = start_wait(&session).await;
+    soon(subscribed.subscribed()).await;
     let sent = tool_call(
         &session,
         &child,
