@@ -2,8 +2,8 @@
 //!
 //! The Skill teaches an author to install the SDK into the plugin's own package,
 //! and rutis refuses a peer that speaks another session protocol at the
-//! handshake (ADR 025), so the version the Skill writes for `@arcships/rutis` is
-//! the one `runtime/package.json` declares.
+//! handshake (ADR 025), so the spec the Skill's `package.json` example gives for
+//! `@arcships/rutis` is the one `runtime/package.json` declares.
 
 use std::path::Path;
 
@@ -11,6 +11,51 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 const SKILL: &str = "runtime/plugins/plugin-authoring/skills/plugin-authoring/SKILL.md";
 const SDK: &str = "@arcships/rutis";
+
+/// The objects in `text`'s fenced `json` blocks, in order.
+fn json_examples(text: &str) -> Result<Vec<serde_json::Value>> {
+    let mut examples = Vec::new();
+    let mut lines = text.lines();
+    while let Some(line) = lines.next() {
+        if line.trim() != "```json" {
+            continue;
+        }
+        let mut block = String::new();
+        for line in lines.by_ref() {
+            if line.trim() == "```" {
+                break;
+            }
+            block.push_str(line);
+            block.push('\n');
+        }
+        examples.push(
+            serde_json::from_str(&block).map_err(|error| {
+                format!("{SKILL}: a fenced json example does not parse: {error}")
+            })?,
+        );
+    }
+    Ok(examples)
+}
+
+/// The whole spec every JSON example gives the SDK, such as `0.23.0`.
+fn example_specs(examples: &[serde_json::Value]) -> Result<Vec<&str>> {
+    let mut specs = Vec::new();
+    for example in examples {
+        let Some(dependencies) = example["dependencies"].as_object() else {
+            continue;
+        };
+        let Some(spec) = dependencies.get(SDK) else {
+            continue;
+        };
+        let spec = spec.as_str().ok_or_else(|| {
+            format!(
+                "{SKILL}: a fenced json example gives {SDK} a spec that is not a string: {spec}"
+            )
+        })?;
+        specs.push(spec);
+    }
+    Ok(specs)
+}
 
 /// Every version `text` gives the SDK, such as `0.23.0`.
 fn versions(text: &str) -> Vec<&str> {
@@ -21,8 +66,12 @@ fn versions(text: &str) -> Vec<&str> {
             continue;
         }
         let rest = after.trim_start_matches(|c: char| {
-            matches!(c, '"' | '\'' | '`' | ':' | '=' | '@' | ' ' | '\t')
+            matches!(
+                c,
+                '"' | '\'' | '`' | ':' | '=' | '@' | '|' | '^' | '~' | ' ' | '\t'
+            )
         });
+        let rest = rest.strip_prefix('v').unwrap_or(rest);
         if let Some(version) = version_at(rest)
             && !named.contains(&version)
         {
@@ -76,14 +125,31 @@ pub fn check(root: &Path) -> Result<()> {
         .into());
     }
     let skill = std::fs::read_to_string(root.join(SKILL))?;
-    let named = versions(&skill);
-    if named.is_empty() {
-        return Err(
-            format!("{SKILL}: names no version; runtime/package.json declares {expected}").into(),
-        );
+
+    let examples = json_examples(&skill)?;
+    let specs = example_specs(&examples)?;
+    if specs.is_empty() {
+        return Err(format!(
+            "{SKILL}: no fenced json example declares {SDK}; runtime/package.json declares {expected}"
+        )
+        .into());
     }
+    let mut unpinned: Vec<&str> = Vec::new();
+    for spec in specs {
+        if spec != expected && !unpinned.contains(&spec) {
+            unpinned.push(spec);
+        }
+    }
+    if !unpinned.is_empty() {
+        return Err(format!(
+            "{SKILL}: the json example gives {SDK} {}; runtime/package.json declares {expected}",
+            unpinned.join(", ")
+        )
+        .into());
+    }
+
     let mut stale: Vec<&str> = Vec::new();
-    for version in named {
+    for version in versions(&skill) {
         if version != expected && !stale.contains(&version) {
             stale.push(version);
         }
@@ -119,17 +185,94 @@ mod tests {
         root
     }
 
-    #[test]
-    fn a_version_the_runtime_does_not_declare_is_named() {
-        let root = tree(
-            "stale",
-            concat!(
-                "the SDK version must be exactly the one Dim runs, 0.17.1:\n\n",
-                "```json\n{ \"dependencies\": { \"@arcships/rutis\": \"0.17.1\" } }\n```\n",
-            ),
-        );
+    /// A Skill whose `package.json` example gives `spec`, after `prose`.
+    fn skill(prose: &str, spec: &str) -> String {
+        format!(
+            "{prose}\n```json\n{{ \"dependencies\": {{ \"@arcships/rutis\": \"{spec}\" }} }}\n```\n"
+        )
+    }
+
+    /// The error `check` gives for a tree whose Skill is `skill`.
+    fn error_for(name: &str, skill: &str) -> String {
+        let root = tree(name, skill);
         let error = check(&root).unwrap_err().to_string();
         std::fs::remove_dir_all(root).unwrap();
+        error
+    }
+
+    /// Asserts that `check` accepts a tree whose Skill is `skill`.
+    fn passes(name: &str, skill: &str) {
+        let root = tree(name, skill);
+        check(&root).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn the_runtime_version_passes() {
+        passes(
+            "current",
+            &skill(
+                concat!(
+                    "The SDK version must be exactly the one Dim runs: ",
+                    "@arcships/rutis 0.23.0.\n\n",
+                    "```ts\nimport { definePlugin } from '@arcships/rutis'\n```\n",
+                ),
+                "0.23.0",
+            ),
+        );
+    }
+
+    #[test]
+    fn a_spec_the_example_does_not_pin_is_named() {
+        for spec in ["0.23.0-rc.1", "0.23.0 || 0.24.0", "^0.23.0"] {
+            let error = error_for(
+                "unpinned",
+                &skill("The SDK version must be exactly the one Dim runs.\n", spec),
+            );
+            assert!(
+                error.contains(&format!(
+                    "the json example gives @arcships/rutis {spec}; runtime/package.json declares 0.23.0"
+                )),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_example_that_does_not_give_the_dependency_is_refused() {
+        for (text, expected) in [
+            (
+                "Install @arcships/rutis 0.23.0.\n",
+                "no fenced json example declares",
+            ),
+            (
+                "```json\n{ \"name\": \"echo-plugin\" }\n```\n",
+                "no fenced json example declares",
+            ),
+            (
+                "```json\n{ \"dependencies\": { \"zod\": \"4.6.7\" } }\n```\n",
+                "no fenced json example declares",
+            ),
+            (
+                "```json\n{ \"dependencies\": { \"@arcships/rutis\": \"0.23.0\" }\n```\n",
+                "does not parse",
+            ),
+            (
+                "```json\n{ \"dependencies\": { \"@arcships/rutis\": { \"version\": \"0.23.0\" } } }\n```\n",
+                "not a string",
+            ),
+        ] {
+            let error = error_for("no-example", text);
+            assert!(error.contains(expected), "{error}");
+        }
+    }
+
+    #[test]
+    fn a_version_the_prose_gives_is_named() {
+        let error = error_for(
+            "prose-stale",
+            &skill("Install @arcships/rutis 0.17.1 today.\n", "0.23.0"),
+        );
         assert!(
             error.contains("names 0.17.1; runtime/package.json declares 0.23.0"),
             "{error}"
@@ -137,42 +280,35 @@ mod tests {
     }
 
     #[test]
-    fn a_skill_that_names_no_version_is_refused() {
-        let root = tree(
-            "no-version",
-            "```json\n{ \"dependencies\": { \"@arcships/rutis\": \"latest\" } }\n```\n",
-        );
-        let error = check(&root).unwrap_err().to_string();
-        std::fs::remove_dir_all(root).unwrap();
-        assert!(error.contains("names no version"), "{error}");
-    }
-
-    #[test]
-    fn the_runtime_version_passes() {
-        let root = tree(
-            "current",
-            "```json\n{ \"dependencies\": { \"@arcships/rutis\": \"0.23.0\" } }\n```\n",
-        );
-        check(&root).unwrap();
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
     fn a_version_that_ends_a_sentence_is_named() {
-        let root = tree(
+        let error = error_for(
             "sentence",
-            "the SDK version must be exactly the one Dim runs: @arcships/rutis 0.17.1.\n",
+            &skill(
+                "The SDK version must be exactly the one Dim runs: @arcships/rutis 0.17.1.\n",
+                "0.23.0",
+            ),
         );
-        let error = check(&root).unwrap_err().to_string();
-        std::fs::remove_dir_all(root).unwrap();
         assert!(error.contains("names 0.17.1;"), "{error}");
     }
 
     #[test]
+    fn a_prose_version_next_to_the_name_is_named() {
+        for prose in [
+            "| @arcships/rutis | 0.17.1 |\n",
+            "Install @arcships/rutis@^0.17.1.\n",
+            "Install @arcships/rutis v0.17.1.\n",
+        ] {
+            let error = error_for("prose-forms", &skill(prose, "0.23.0"));
+            assert!(error.contains("names 0.17.1;"), "{prose}: {error}");
+        }
+    }
+
+    #[test]
     fn versions_given_for_other_packages_are_ignored() {
-        let root = tree(
+        passes(
             "other-packages",
             concat!(
+                "```json\n",
                 "{ \"name\": \"echo-plugin\", \"version\": \"1.0.0\",\n",
                 "  \"engines\": { \"node\": \">=20.19.0\" },\n",
                 "  \"dependencies\": {\n",
@@ -181,10 +317,9 @@ mod tests {
                 "    \"@modelcontextprotocol/sdk\": \"1.31.0\",\n",
                 "    \"zod\": \"4.6.7\"\n",
                 "  } }\n",
+                "```\n",
             ),
         );
-        check(&root).unwrap();
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
