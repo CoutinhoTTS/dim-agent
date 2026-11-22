@@ -2433,3 +2433,232 @@ fn tui_a_send_now_typed_before_a_session_handoff_does_not_stop_the_new_session()
     terminal.wait();
     daemon.join().unwrap();
 }
+
+/// A message and a permission change typed on Home while a `/resume` is still
+/// attaching belong to Home: neither is submitted to nor written on the
+/// Session that attachment brings in (design §14).
+#[test]
+fn tui_a_home_send_and_permission_change_do_not_reach_the_resumed_session() {
+    for fullscreen in [false, true] {
+        let home = Home::new();
+        let (attaching, attach_seen) = std::sync::mpsc::channel();
+        let (release_attach, release) = std::sync::mpsc::channel::<()>();
+        let (submitted, submit_seen) = std::sync::mpsc::channel::<Value>();
+        let (updated, update_seen) = std::sync::mpsc::channel::<Value>();
+        let daemon = home.daemon(move |wire| {
+            wire.hello(&[
+                "session.catalog",
+                "session.branches",
+                "session.permission.get",
+                "session.permission.update",
+            ]);
+            let mut usage = |_request: &Value| None;
+            let mut version = 1;
+            loop {
+                let request = next_usage(wire, &mut usage);
+                let session = request["params"]["sessionId"].as_str().unwrap_or_default();
+                match request["method"].as_str().unwrap_or_default() {
+                    "session.catalog" => wire.reply(
+                        &request,
+                        json!({"sessions":[{"sessionId":"other","cwd":"/workspace",
+                            "preview":"second conversation","model":{"providerId":"test","modelId":"model"},
+                            "updatedAt":9}]}),
+                    ),
+                    "session.attach" => {
+                        assert_eq!(request["params"]["sessionId"], "other");
+                        attaching.send(()).unwrap();
+                        release.recv_timeout(PATIENCE).unwrap();
+                        let mut record = attach_record(&request);
+                        record["defaultBranch"] = json!({"branchId":"main","sequence":8});
+                        wire.reply(&request, record);
+                    }
+                    "session.branches" => {
+                        wire.reply(&request, directory("main", &[("main", None)]))
+                    }
+                    "session.history" => wire.reply(
+                        &request,
+                        history(
+                            8,
+                            vec![said(3, "resumed conversation"), applied(4, "input-3")],
+                        ),
+                    ),
+                    "session.permission.get" => {
+                        let preset = if version == 1 { "read-only" } else { "workspace-write" };
+                        wire.reply(
+                            &request,
+                            json!({"version":version,"policy":policy(preset)}),
+                        );
+                    }
+                    "session.permission.update" => {
+                        assert_eq!(session, "other");
+                        updated.send(request["params"].clone()).unwrap();
+                        version += 1;
+                        wire.reply(&request, json!({"version":version}));
+                    }
+                    "session.submit" => {
+                        submitted.send(request["params"].clone()).unwrap();
+                        wire.reply(&request, json!({"event":{}}));
+                    }
+                    other => panic!("unexpected {other}: {request}"),
+                }
+            }
+        });
+        let mut command = home.command();
+        command.arg(if fullscreen {
+            "--fullscreen"
+        } else {
+            "--scrollback"
+        });
+        sized(&mut command, 120, 36);
+        let mut terminal = Terminal::launch_tui(command);
+        terminal.until("Ask anything");
+        terminal.write(b"/resume\r");
+        terminal.until("second conversation");
+        terminal.write(b"\r");
+        attach_seen.recv_timeout(PATIENCE).unwrap();
+        // The attachment has not replied, so the interface still shows Home:
+        // this message and Shift-Tab belong to it, not to the Session coming.
+        terminal.write(b"hello\r");
+        terminal.write(b"\x1b[Z");
+        // Typed after the gestures, so reading it proves the interface has
+        // taken both before the attachment is released.
+        terminal.write(b"qzx");
+        terminal.until("qzx");
+        release_attach.send(()).unwrap();
+        terminal.until("resumed conversation");
+        // The permission change the probe starts flushes every command queued
+        // ahead of it: the Home send and Shift-Tab must be decided by then.
+        terminal.write(b"\x1b[Z");
+        let changed = update_seen.recv_timeout(PATIENCE).unwrap();
+        assert_eq!(changed["sessionId"], "other");
+        assert_eq!(changed["branchId"], "main");
+        assert_eq!(
+            changed["expectedVersion"], 1,
+            "the Home gesture must not have written the resumed line first"
+        );
+        assert!(
+            submit_seen.try_recv().is_err(),
+            "a message typed on Home is not submitted to the resumed Session"
+        );
+        terminal.until("the draft was kept");
+        terminal.until("nothing was changed");
+        home.kill(&terminal);
+        terminal.wait();
+        daemon.join().unwrap();
+    }
+}
+
+/// A send left over from the Session `/new` left does not start a Session at
+/// Home, and is not submitted there: the command names the Session it was
+/// typed in, not Home (design §14).
+#[test]
+fn tui_a_stale_send_behind_new_does_not_start_a_session() {
+    for fullscreen in [false, true] {
+        let home = Home::new();
+        let (forking, fork_seen) = std::sync::mpsc::channel();
+        let (release_fork, release) = std::sync::mpsc::channel::<()>();
+        let (created, create_seen) = std::sync::mpsc::channel::<Value>();
+        let (submitted, submit_seen) = std::sync::mpsc::channel::<Value>();
+        let daemon = home.daemon(move |wire| {
+            wire.hello(&[
+                "session.branches",
+                "session.fork",
+                "session.permission.get",
+                "session.permission.update",
+            ]);
+            let mut usage = |_request: &Value| None;
+            let attach = wire.read("session.attach");
+            let mut record = attach_record(&attach);
+            record["defaultBranch"] = json!({"branchId":"main","sequence":8});
+            wire.reply(&attach, record);
+            loop {
+                let request = next_usage(wire, &mut usage);
+                match request["method"].as_str().unwrap_or_default() {
+                    "session.branches" => {
+                        wire.reply(&request, directory("main", &[("main", None)]))
+                    }
+                    "session.history" => wire.reply(
+                        &request,
+                        history(
+                            8,
+                            vec![
+                                said(3, "the first turn"),
+                                applied(4, "input-3"),
+                                json!({"id":"end-5","sequence":5,"create_at":1,"type":"turn",
+                                    "name":"end","data":{"turn_id":"turn","status":"completed",
+                                    "reason":"done"}}),
+                            ],
+                        ),
+                    ),
+                    "session.permission.get" => wire.reply(
+                        &request,
+                        json!({"version":1,"policy":policy("workspace-write")}),
+                    ),
+                    "session.permission.update" => wire.reply(&request, json!({"version":2})),
+                    "session.fork" => {
+                        forking.send(()).unwrap();
+                        release.recv_timeout(PATIENCE).unwrap();
+                        wire.reply(&request, json!({"sessionId":"forked"}));
+                    }
+                    "session.attach" => {
+                        let mut record = attach_record(&request);
+                        record["defaultBranch"] = json!({"branchId":"main","sequence":8});
+                        wire.reply(&request, record);
+                    }
+                    "session.detach" => wire.reply(&request, json!({})),
+                    "session.create" => {
+                        created.send(request["params"].clone()).unwrap();
+                        wire.reply(
+                            &request,
+                            json!({"sessionId":"unexpected",
+                                "model":{"providerId":"test","modelId":"model"}}),
+                        );
+                    }
+                    "session.submit" => {
+                        submitted.send(request["params"].clone()).unwrap();
+                        wire.reply(&request, json!({"event":{}}));
+                    }
+                    other => panic!("unexpected {other}: {request}"),
+                }
+            }
+        });
+        let mut command = home.command();
+        command.arg(if fullscreen {
+            "--fullscreen"
+        } else {
+            "--scrollback"
+        });
+        sized(&mut command, 120, 36);
+        let mut terminal = Terminal::resume_tui(command);
+        terminal.until("the first turn");
+        terminal.until("test / model");
+        terminal.write(b"/fork\r");
+        terminal.until("Fork the session");
+        terminal.write(b"y");
+        fork_seen.recv_timeout(PATIENCE).unwrap();
+        // The fork's reply is held, so the interface still shows the Session
+        // `/new` is about to leave: this draft belongs to that Session.
+        terminal.write(b"/new\r");
+        terminal.write(b"stale");
+        terminal.until("stale");
+        terminal.write(b"\r");
+        // Typed after the send, so reading it proves the interface has taken
+        // the send before the fork is released.
+        terminal.write(b"qzx");
+        terminal.until("qzx");
+        release_fork.send(()).unwrap();
+        terminal.until("The centre moved before the command ran");
+        assert!(
+            create_seen.try_recv().is_err(),
+            "a send from the Session `/new` left does not start a Session"
+        );
+        assert!(
+            submit_seen.try_recv().is_err(),
+            "a send from the Session `/new` left is not submitted at Home"
+        );
+        terminal.until("the draft was kept");
+        home.kill(&terminal);
+        terminal.wait();
+        daemon.join().unwrap();
+    }
+}

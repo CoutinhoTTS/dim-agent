@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use crate::management::{self, editor};
 use crate::model::session::{
     Area, Command, CompactReply, ContextReading, DIM_OAUTH_ID, DeleteOutcome, DeleteReply,
-    DraftPart, ManagementAction, ManagementRefusal, ManagementRequest, ManagementResult,
+    DraftPart, ManagementAction, ManagementRefusal, ManagementRequest, ManagementResult, Origin,
     PromptField, PromptSetting, RenameReply, SessionPort, SubmitMode, SuggestionSetting,
     SwitchKind, Update,
 };
@@ -310,7 +310,8 @@ fn run_terminal(
     );
     app.fullscreen = full.is_some();
     app.initial = surroundings.initial;
-    app.awaiting_window = surroundings.resume;
+    app.awaiting_window = surroundings.resume.is_some();
+    app.startup_session = surroundings.resume;
     app.terminal_clipboard =
         terminal.clipboard_protocol() && crate::clipboard::terminal::native_unreachable();
     app.host.send(Command::LoginStatus(DIM_OAUTH_ID.into()));
@@ -1214,6 +1215,10 @@ struct App {
     /// The user message a `/timeline` jump or a loaded page lands on, once
     /// drawn: `(row id, pick it)`.
     landing: Option<(String, bool)>,
+    /// The Session the invocation asked to resume, until the interface shows
+    /// it: a command typed before the first attachment reply names that
+    /// Session, not Home.
+    startup_session: Option<String>,
     /// A session was just switched; the next snapshot decides the window.
     awaiting_window: bool,
     /// What to write once the switched-to history is out.
@@ -1508,7 +1513,7 @@ struct SendNow {
     line: String,
     /// The Session the gesture started in: a handoff it could not see keeps
     /// the draft out of the Session that replaced it.
-    session: String,
+    session: Origin,
     /// Esc called off the submit. The stop still settles, and its reply
     /// releases the gesture without submitting anything.
     submit_cancelled: bool,
@@ -1650,6 +1655,7 @@ impl App {
             load_more: false,
             reveal_pending: false,
             landing: None,
+            startup_session: None,
             awaiting_window: false,
             pending_boundary: None,
             pending_line: None,
@@ -1995,16 +2001,23 @@ impl App {
     /// Submits the draft a settled stop made ready, as a new message: the run
     /// is idle now, so the submit starts its own turn and takes whatever
     /// withdrawn messages joined the draft in the meantime.
-    fn submit_send_now(&mut self, line: String, session: String) {
+    fn submit_send_now(&mut self, line: String, session: Origin) {
         let outcome = self.composer.submit();
         self.dispatch_composer(outcome, SubmitMode::Queue, line, session);
     }
 
-    /// The Session as this interface last saw it: the attachment a key's
-    /// command belongs to. Empty before the first Snapshot, when a command
-    /// can only be the invocation's first message (design §14).
-    fn target_session(&self) -> String {
-        self.session_id.clone()
+    /// The origin a key's command belongs to: the Session shown, the one the
+    /// invocation asked to resume before its first attachment arrives, or
+    /// Home. Home and a Session are told apart, so a command typed on one is
+    /// never taken for the other (design §14).
+    fn target_session(&self) -> Origin {
+        if !self.session_id.is_empty() {
+            return Origin::Session(self.session_id.clone());
+        }
+        match &self.startup_session {
+            Some(session) => Origin::Session(session.clone()),
+            None => Origin::Home,
+        }
     }
 
     /// A permission change and the Session and default line the gesture saw:
@@ -3230,6 +3243,9 @@ impl App {
                 self.prompt = None;
                 self.failure = Some(message);
                 self.failure_resumable = resumable;
+                // The resumed Session does not exist: a command typed now is
+                // Home's, not the invocation's resume.
+                self.startup_session = None;
                 // A first message the invocation supplied has no Session
                 // to take it: keep it in the draft and stay, rather than
                 // exiting nonzero with nothing sent.
@@ -3647,7 +3663,7 @@ impl App {
         outcome: ComposerOutcome,
         mode: SubmitMode,
         line: String,
-        session: String,
+        session: Origin,
     ) -> Outcome {
         // Every send key is refused before the composer acts (see
         // `settling_key_refused`), so an outcome that already cleared the draft
@@ -7461,6 +7477,9 @@ impl App {
     fn switch_session(&mut self, session_id: String, kind: SwitchKind) {
         self.report_error = None;
         self.release_compaction_details();
+        // The startup attachment has arrived: its Session is the centre, so
+        // later Home commands are Home's, not the invocation's resume.
+        self.startup_session = None;
         let first = self.session_id.is_empty();
         // Home's first message started this Session: nothing shown to clear.
         if first

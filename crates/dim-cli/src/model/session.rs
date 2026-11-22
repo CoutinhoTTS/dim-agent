@@ -164,6 +164,17 @@ pub enum SessionsScope {
     All,
 }
 
+/// Where a key's command was typed: on Home, before any Session, or in the
+/// Session shown then. A command acts only on the origin it names, so a
+/// command that waited while an attachment changed is cancelled instead of
+/// reaching the new centre. Home keeps the startup path: its commands create
+/// a Session or change the preference the next one starts with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Origin {
+    Home,
+    Session(String),
+}
+
 pub enum Command {
     ToolOrigin {
         session_id: String,
@@ -177,27 +188,27 @@ pub enum Command {
         projection_id: u64,
         targets: std::collections::BTreeSet<crate::model::view::CompactionTarget>,
     },
-    /// A message and the Session and line its draft was typed on; a submit
-    /// whose Session or line is no longer the centre is cancelled and its
+    /// A message and the origin and line its draft was typed on; a submit
+    /// whose origin or line is no longer the centre is cancelled and its
     /// draft kept (design §14).
     Submit {
         text: String,
         mode: SubmitMode,
         line: String,
-        session: String,
+        session: Origin,
     },
     /// A draft with pastes to store or content blocks to send.
     SubmitDraft {
         parts: Vec<DraftPart>,
         mode: SubmitMode,
         line: String,
-        session: String,
+        session: Origin,
     },
     /// Interrupt the run on the line the key was pressed on, unless the
     /// Session has changed since (design §14).
     Stop {
         line: String,
-        session: String,
+        session: Origin,
     },
     /// Answer an approval request.
     Approval {
@@ -236,7 +247,7 @@ pub enum Command {
     /// (Ctrl+Enter); a Session handoff cancels it (design §14).
     SubmitNow {
         line: String,
-        session: String,
+        session: Origin,
     },
     /// Stop a background command on its originating branch (`/tasks`).
     StopTask {
@@ -387,20 +398,20 @@ pub enum Command {
     /// when the command was typed; a report whose line has moved is cancelled.
     Usage {
         line: String,
-        session: String,
+        session: Origin,
     },
     /// Load what is before the drawn top of the line the command was typed on;
     /// a read whose line has moved is cancelled.
     Earlier {
         line: String,
-        session: String,
+        session: Origin,
     },
     Export(crate::export::Format),
     /// `/compact`: ask the line the command was typed on to compact its
     /// context; a command whose line has moved is cancelled.
     Compact {
         line: String,
-        session: String,
+        session: Origin,
     },
     /// `/rename`: set the shown Session's manual title, or clear it when
     /// `title` is `None`; an empty text is refused, and only `--clear`
@@ -411,7 +422,7 @@ pub enum Command {
     Goal {
         request: crate::goal::Request,
         line: String,
-        session: String,
+        session: Origin,
         draft: String,
     },
     /// `/loop`: show, start or stop a loop on the line the command was typed
@@ -419,14 +430,15 @@ pub enum Command {
     Loop {
         request: crate::loop_view::Request,
         line: String,
-        session: String,
+        session: Origin,
         draft: String,
     },
-    /// Change the Session's permission preset on the default branch the
-    /// gesture saw; a gesture made before any Session names none.
+    /// Change the permission preset on the default branch the gesture saw;
+    /// a gesture made on Home changes the preset the next Session starts
+    /// with instead.
     SetPermission {
         change: crate::permission::PresetSelection,
-        session: String,
+        session: Origin,
         line: String,
     },
     /// List the providers of the `/connect` panel.
@@ -489,7 +501,7 @@ pub enum Command {
     Configure {
         text: String,
         line: String,
-        session: String,
+        session: Origin,
     },
     /// Make `(provider, model)` the default and the active session's model.
     /// `reasoning_effort` is set when the picker cycled that model's effort;
@@ -1561,7 +1573,7 @@ pub trait SessionPort {
     fn drain(&self) -> Vec<Update>;
     /// Closes the connection and gives the worker a moment to wind down.
     fn shutdown(self: Box<Self>);
-    fn submit(&self, text: String, mode: SubmitMode, line: String, session: String) {
+    fn submit(&self, text: String, mode: SubmitMode, line: String, session: Origin) {
         self.send(Command::Submit {
             text,
             mode,
@@ -1569,7 +1581,7 @@ pub trait SessionPort {
             session,
         });
     }
-    fn stop(&self, line: String, session: String) {
+    fn stop(&self, line: String, session: Origin) {
         self.send(Command::Stop { line, session });
     }
 }

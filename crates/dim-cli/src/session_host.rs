@@ -27,7 +27,7 @@ use crate::model::session::{
     ACCOUNT_NAMESPACE, Account, AccountDescriptor, Command, CompactReply, ContextReading,
     DIM_OAUTH_ID, DeleteOutcome, DeleteReply, DraftPart, EmptyProvider, EmptyReason,
     ExecutionSnapshot, ManagementReply, ModelItem, ModelList, ModelOutcome, ModelPolicyUpdate,
-    NeedsLimitsProvider, OauthEvent, OauthStart, PluginItem, PluginReply, PromptField,
+    NeedsLimitsProvider, OauthEvent, OauthStart, Origin, PluginItem, PluginReply, PromptField,
     PromptSetting, ProviderAction, ProviderEntry, RuntimeAction, RuntimeItem, RuntimesError,
     SandboxBackend, SessionItem, SessionPort, SessionsScope, SubagentModelPolicy,
     SuggestionSetting, SwitchKind, Update, Usage, stored_title,
@@ -509,6 +509,10 @@ async fn run(
         tokio::select! {
             command = commands.recv() => {
                 let Some(command) = command else { break };
+                // The command is judged against the centre it was typed on
+                // before Home can start a Session: a send left over from a
+                // Session a handoff replaced starts nothing.
+                let Some(command) = worker.typed_command(command) else { continue };
                 if worker.session_id.is_empty()
                     && matches!(
                         command,
@@ -1432,14 +1436,14 @@ impl Worker {
     /// default branch for `/usage` and a permission change, which act on it. A
     /// move or a Session handoff the key could not see cancels the command and
     /// returns what it carried to the draft, instead of writing it into
-    /// another line or Session. A gesture made before any Session names none
-    /// and keeps the startup path it belongs to. The stop gestures name the
-    /// Session and line they were pressed on: a handoff cancels them, while a
-    /// move within the same Session still stops the line the key saw (design
-    /// §14).
+    /// another line or Session. Home is its own origin: a command typed there
+    /// keeps the startup path it belongs to and never reaches a Session that
+    /// an attachment brought in. The stop gestures name the Session and line
+    /// they were pressed on: a handoff cancels them, while a move within the
+    /// same Session still stops the line the key saw (design §14).
     fn typed_command(&mut self, command: Command) -> Option<Command> {
         const KEPT: &str = "The centre moved before the command ran; the draft was kept";
-        let (session, line, draft, cancelled) = match &command {
+        let (origin, line, draft, cancelled) = match &command {
             Command::Submit {
                 text,
                 line,
@@ -1507,7 +1511,7 @@ impl Worker {
                 None,
                 "The centre moved before /earlier ran; nothing was loaded",
             ),
-            Command::SetPermission { session, line, .. } if !session.is_empty() => (
+            Command::SetPermission { session, line, .. } => (
                 session,
                 Some(line),
                 None,
@@ -1528,10 +1532,7 @@ impl Worker {
             Command::Usage { .. } | Command::SetPermission { .. } => &self.default_branch,
             _ => &self.focus,
         };
-        if session.is_empty()
-            || line.is_some_and(|line| line.is_empty())
-            || (session == &self.session_id && line.is_none_or(|line| line == now))
-        {
+        if self.typed_at(origin) && line.is_none_or(|line| line.is_empty() || line == now) {
             return Some(command);
         }
         match &command {
@@ -1549,10 +1550,17 @@ impl Worker {
         None
     }
 
+    /// Whether `origin` is the centre this worker shows: Home while it has no
+    /// Session, else that Session. A command read at another origin has been
+    /// overtaken by a handoff and is cancelled.
+    fn typed_at(&self, origin: &Origin) -> bool {
+        match origin {
+            Origin::Home => self.session_id.is_empty(),
+            Origin::Session(session) => session == &self.session_id,
+        }
+    }
+
     async fn command(&mut self, command: Command) -> crate::Result<()> {
-        let Some(command) = self.typed_command(command) else {
-            return Ok(());
-        };
         match command {
             Command::Submit { text, mode, .. } => self.submit(text, mode.as_str()).await,
             Command::SubmitDraft { parts, mode, .. } => {

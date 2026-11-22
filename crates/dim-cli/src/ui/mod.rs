@@ -24,8 +24,10 @@ pub struct Env {
     pub workspace: String,
     /// Start in the fullscreen interface instead of scrollback.
     pub fullscreen: bool,
-    /// A requested resume whose initial window has not loaded yet.
-    pub resume: bool,
+    /// The Session the invocation asked to resume: its first attachment has
+    /// not loaded yet, and a command typed before it does names this Session
+    /// rather than Home.
+    pub resume: Option<String>,
     /// The first message to submit once the first frame is drawn.
     pub initial: Option<Initial>,
 }
