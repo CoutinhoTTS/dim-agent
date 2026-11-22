@@ -352,7 +352,9 @@ impl Wait {
 #[cfg(feature = "testing")]
 impl Wait {
     /// Arms the readiness signal of the next wait. A wait that ends on its
-    /// first take never signals; the next call arms again.
+    /// first take never signals; the next call arms again. A signal still
+    /// armed but unused is replaced by the next arm: its sender is dropped,
+    /// so `subscribed()` on it returns at once instead of waiting.
     pub fn subscription(&self) -> testing::Subscription {
         let (signal, subscribed) = tokio::sync::mpsc::unbounded_channel();
         *self.subscribed.lock().unwrap() = Some(signal);
