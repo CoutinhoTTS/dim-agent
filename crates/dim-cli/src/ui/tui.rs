@@ -2004,6 +2004,15 @@ impl App {
             .unwrap_or_default()
     }
 
+    /// The Session's default branch as this interface last saw it, the line
+    /// `/usage` reports (design §14).
+    fn default_line(&self) -> String {
+        self.snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.default_branch_id.clone())
+            .unwrap_or_default()
+    }
+
     /// Ctrl+Enter: withdraws every held message into the draft, stops the run
     /// and submits the combined draft once the stop's reply says the turn has
     /// settled. Withdrawals reach the worker before the stop in the same
@@ -5508,18 +5517,24 @@ impl App {
                 Outcome::Continue
             }
             "usage" => {
-                self.host.send(Command::Usage);
+                self.host.send(Command::Usage {
+                    line: self.default_line(),
+                });
                 Outcome::Continue
             }
             "compact" => {
-                self.host.send(Command::Compact);
+                self.host.send(Command::Compact {
+                    line: self.target_line(),
+                });
                 Outcome::Continue
             }
             "earlier" => {
                 if self.fullscreen {
                     self.show_earlier();
                 } else {
-                    self.host.send(Command::Earlier);
+                    self.host.send(Command::Earlier {
+                        line: self.target_line(),
+                    });
                 }
                 Outcome::Continue
             }
@@ -7550,7 +7565,9 @@ impl App {
         };
         match snapshot.earlier {
             Earlier::Unread => {
-                self.host.send(Command::Earlier);
+                self.host.send(Command::Earlier {
+                    line: self.target_line(),
+                });
                 self.reveal_pending = true;
             }
             Earlier::Reading => self.reveal_pending = true,
@@ -19663,7 +19680,7 @@ mod tests {
         );
         press(&mut app, KeyCode::Enter);
         assert!(
-            matches!(sent.borrow().last(), Some(Command::Usage)),
+            matches!(sent.borrow().last(), Some(Command::Usage { .. })),
             "the palette ran /usage"
         );
         assert_eq!(
@@ -21896,7 +21913,7 @@ mod tests {
         let before = drawn.transcript();
         drawn.app.show_earlier();
         assert_eq!(sent.borrow().len(), 1, "an unread prefix is requested");
-        assert!(matches!(sent.borrow()[0], Command::Earlier));
+        assert!(matches!(sent.borrow()[0], Command::Earlier { .. }));
         drawn.draw();
         assert_eq!(drawn.transcript(), before, "the request draws nothing");
         let mut rows = window_rows(HISTORY_WINDOW);

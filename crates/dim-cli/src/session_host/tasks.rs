@@ -244,11 +244,11 @@ impl Worker {
         self.changed();
     }
 
-    pub(super) fn earlier(&mut self) {
+    pub(super) fn earlier(&mut self, line: &str) {
         if self.earlier_member() {
             return;
         }
-        let Some(history) = self.task_history.get_mut(&self.focus) else {
+        let Some(history) = self.task_history.get_mut(line) else {
             return;
         };
         if !history.done || history.earlier == EarlierRead::Reading {
@@ -261,7 +261,7 @@ impl Worker {
         history.earlier = EarlierRead::Reading;
         history.window_complete = false;
         history.error = None;
-        self.task_history_queue.push_back(self.focus.clone());
+        self.task_history_queue.push_back(line.to_owned());
     }
 
     /// Whether the view `earlier()` would act on has older history to read.
@@ -950,7 +950,7 @@ mod tests {
             "the loaded window has older history"
         );
 
-        worker.earlier();
+        worker.earlier("main");
         assert_eq!(
             worker.earlier_view(),
             Earlier::Reading,
@@ -964,7 +964,7 @@ mod tests {
             Earlier::Unread,
             "a failed earlier read leaves the older history to read"
         );
-        worker.earlier();
+        worker.earlier("main");
         assert_eq!(
             worker.task_history["main"].earlier,
             EarlierRead::Reading,
@@ -999,7 +999,7 @@ mod tests {
         }
         worker.apply("b-7c", event(300, "r-loaded", "the answer loaded first"));
 
-        worker.earlier();
+        worker.earlier("b-7c");
         worker.poll_task_history().await.unwrap();
         fail(&mut worker, "the earlier read").await;
 
@@ -1075,7 +1075,7 @@ mod tests {
             history.window.before = Some(200);
             history.window.through = Some(300);
         }
-        worker.earlier();
+        worker.earlier("b-7c");
         worker.poll_task_history().await.unwrap();
         {
             let history = worker.task_history.get_mut("b-7c").unwrap();
@@ -1153,7 +1153,7 @@ mod tests {
             history.window.before = Some(7);
             history.window.through = Some(9);
         }
-        worker.earlier();
+        worker.earlier("main");
         worker.poll_task_history().await.unwrap();
         fail(&mut worker, "the earlier read").await;
 
@@ -1169,7 +1169,7 @@ mod tests {
             "the retried read is the earlier read the window still holds"
         );
         worker.task_history_queue.clear();
-        worker.earlier();
+        worker.earlier("main");
         assert!(
             worker.task_history_queue.is_empty(),
             "a press during the retried read queues nothing"

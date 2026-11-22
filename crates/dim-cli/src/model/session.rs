@@ -377,12 +377,22 @@ pub enum Command {
         model_id: String,
         expected_version: u32,
     },
-    /// Produce the `/usage` report.
-    Usage,
-    Earlier,
+    /// Produce the `/usage` report for the Session's default branch as it was
+    /// when the command was typed; a report whose line has moved is cancelled.
+    Usage {
+        line: String,
+    },
+    /// Load what is before the drawn top of the line the command was typed on;
+    /// a read whose line has moved is cancelled.
+    Earlier {
+        line: String,
+    },
     Export(crate::export::Format),
-    /// `/compact`: ask the shown line to compact its context.
-    Compact,
+    /// `/compact`: ask the line the command was typed on to compact its
+    /// context; a command whose line has moved is cancelled.
+    Compact {
+        line: String,
+    },
     /// `/rename`: set the shown Session's manual title, or clear it when
     /// `title` is `None`; an empty text is refused, and only `--clear`
     /// clears. Nothing here reaches the model.

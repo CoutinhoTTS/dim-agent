@@ -1666,3 +1666,338 @@ fn tui_resuming_into_a_refused_policy_read_shows_no_outgoing_preset() {
     terminal.wait();
     daemon.join().unwrap();
 }
+
+/// `/compact` typed before a queued move reaches the centre compacts nothing:
+/// the command carries the line it was typed on and is cancelled once that
+/// line has moved, instead of compacting the new centre (design §14).
+#[test]
+fn tui_compact_typed_before_a_queued_move_compacts_nothing() {
+    for fullscreen in [false, true] {
+        let home = Home::new();
+        let (move_seen, moved) = std::sync::mpsc::channel();
+        let (release_move, release) = std::sync::mpsc::channel::<()>();
+        let (compact, compact_seen) = std::sync::mpsc::channel::<Value>();
+        let daemon = home.daemon(move |wire| {
+            wire.hello(&[
+                "session.methods",
+                "session.branches",
+                "session.branch.get",
+                "session.branch_set_default",
+                "session.permission.get",
+            ]);
+            let attach = wire.read("session.attach");
+            let mut record = attach_record(&attach);
+            record["defaultBranch"] = json!({"branchId":"main","sequence":8});
+            wire.reply(&attach, record);
+            let branches = next(wire);
+            assert_eq!(branches["method"], "session.branches");
+            wire.reply(
+                &branches,
+                directory("main", &[("main", None), ("line-1", Some("main"))]),
+            );
+            loop {
+                let request = next(wire);
+                match request["method"].as_str().unwrap_or_default() {
+                    "session.branches" => wire.reply(
+                        &request,
+                        directory("main", &[("main", None), ("line-1", Some("main"))]),
+                    ),
+                    "session.history" => {
+                        wire.reply(&request, history(8, vec![]));
+                        break;
+                    }
+                    other => panic!("unexpected opening request: {other}: {request}"),
+                }
+            }
+            let mut usage = |_request: &Value| None;
+            loop {
+                let request = next_usage(wire, &mut usage);
+                let branch = request["params"]["branchId"].as_str().unwrap_or_default();
+                match request["method"].as_str().unwrap_or_default() {
+                    "session.permission.get" => wire.reply(
+                        &request,
+                        json!({"version":1,"policy":policy(if branch == "line-1" {
+                            "full-access"
+                        } else {
+                            "workspace-write"
+                        })}),
+                    ),
+                    "session.branch_set_default" => {
+                        assert_eq!(branch, "line-1");
+                        move_seen.send(()).unwrap();
+                        release.recv_timeout(PATIENCE).unwrap();
+                        wire.reply(&request, json!({"defaultBranchId":"line-1"}));
+                    }
+                    "session.branches" => wire.reply(
+                        &request,
+                        directory("main", &[("main", None), ("line-1", Some("main"))]),
+                    ),
+                    "session.branch.get" => wire.reply(&request, entry("line-1", "main")),
+                    "session.history" => {
+                        let through = if branch == "line-1" { 3 } else { 8 };
+                        wire.reply(&request, history(through, vec![]));
+                    }
+                    "session.context.compact" => {
+                        compact.send(request["params"].clone()).unwrap();
+                        wire.reply(&request, json!({"status":"completed"}));
+                    }
+                    other => panic!("unexpected {other}: {request}"),
+                }
+            }
+        });
+        let mut command = home.command();
+        command.arg(if fullscreen {
+            "--fullscreen"
+        } else {
+            "--scrollback"
+        });
+        sized(&mut command, 120, 36);
+        let mut terminal = Terminal::resume_tui(command);
+        terminal.until("test / model");
+        terminal.until("⏵⏵ Workspace write");
+        terminal.write(b"/lines\r");
+        terminal.until("Main line");
+        terminal.write(b"\x1b[B");
+        terminal.write(b"p");
+        moved.recv_timeout(PATIENCE).unwrap();
+        // The panel closes while the move is still in flight, so the command
+        // is typed and submitted before the centre changes.
+        terminal.write(b"\x1b[27u");
+        terminal.write(b"/compact");
+        terminal.until("/compact");
+        terminal.write(b"\r");
+        // The echo of a later key proves the interface handled Enter and sent
+        // the command while the centre was still the line it showed; the move
+        // replies only after that.
+        terminal.write(b"probe");
+        terminal.until("probe");
+        release_move.send(()).unwrap();
+        terminal.until("The centre moved before /compact ran");
+        assert!(
+            compact_seen.try_recv().is_err(),
+            "the line the centre moved to is not compacted"
+        );
+        home.kill(&terminal);
+        terminal.wait();
+        daemon.join().unwrap();
+    }
+}
+
+/// `/usage` typed before a queued move reaches the centre reports nothing: the
+/// command carries the default branch it was typed on and is cancelled once
+/// that line has moved, instead of reading the new centre's usage (design §14).
+#[test]
+fn tui_usage_typed_before_a_queued_move_reads_no_new_centre() {
+    for fullscreen in [false, true] {
+        let home = Home::new();
+        let (move_seen, moved) = std::sync::mpsc::channel();
+        let (release_move, release) = std::sync::mpsc::channel::<()>();
+        let daemon = home.daemon(move |wire| {
+            wire.hello(&[
+                "session.methods",
+                "session.branches",
+                "session.branch.get",
+                "session.branch_set_default",
+                "session.permission.get",
+            ]);
+            let attach = wire.read("session.attach");
+            let mut record = attach_record(&attach);
+            record["defaultBranch"] = json!({"branchId":"main","sequence":8});
+            wire.reply(&attach, record);
+            let branches = next(wire);
+            assert_eq!(branches["method"], "session.branches");
+            wire.reply(
+                &branches,
+                directory("main", &[("main", None), ("line-1", Some("main"))]),
+            );
+            loop {
+                let request = next(wire);
+                match request["method"].as_str().unwrap_or_default() {
+                    "session.branches" => wire.reply(
+                        &request,
+                        directory("main", &[("main", None), ("line-1", Some("main"))]),
+                    ),
+                    "session.history" => {
+                        wire.reply(&request, history(8, vec![]));
+                        break;
+                    }
+                    other => panic!("unexpected opening request: {other}: {request}"),
+                }
+            }
+            let mut usage = |_request: &Value| Some(reading(1849.0));
+            loop {
+                let request = next_usage(wire, &mut usage);
+                let branch = request["params"]["branchId"].as_str().unwrap_or_default();
+                match request["method"].as_str().unwrap_or_default() {
+                    "session.permission.get" => wire.reply(
+                        &request,
+                        json!({"version":1,"policy":policy(if branch == "line-1" {
+                            "full-access"
+                        } else {
+                            "workspace-write"
+                        })}),
+                    ),
+                    "session.branch_set_default" => {
+                        assert_eq!(branch, "line-1");
+                        move_seen.send(()).unwrap();
+                        release.recv_timeout(PATIENCE).unwrap();
+                        wire.reply(&request, json!({"defaultBranchId":"line-1"}));
+                    }
+                    "session.branches" => wire.reply(
+                        &request,
+                        directory("main", &[("main", None), ("line-1", Some("main"))]),
+                    ),
+                    "session.branch.get" => wire.reply(&request, entry("line-1", "main")),
+                    "session.history" => {
+                        let through = if branch == "line-1" { 3 } else { 8 };
+                        wire.reply(&request, history(through, vec![]));
+                    }
+                    other => panic!("unexpected {other}: {request}"),
+                }
+            }
+        });
+        let mut command = home.command();
+        command.arg(if fullscreen {
+            "--fullscreen"
+        } else {
+            "--scrollback"
+        });
+        sized(&mut command, 120, 36);
+        let mut terminal = Terminal::resume_tui(command);
+        terminal.until("test / model");
+        terminal.until("⏵⏵ Workspace write");
+        terminal.write(b"/lines\r");
+        terminal.until("Main line");
+        terminal.write(b"\x1b[B");
+        terminal.write(b"p");
+        moved.recv_timeout(PATIENCE).unwrap();
+        // The panel closes while the move is still in flight, so the command
+        // is typed and submitted before the centre changes.
+        terminal.write(b"\x1b[27u");
+        terminal.write(b"/usage");
+        terminal.until("/usage");
+        terminal.write(b"\r");
+        // The echo of a later key proves the interface handled Enter and sent
+        // the command while the centre was still the line it showed; the move
+        // replies only after that.
+        terminal.write(b"probe");
+        terminal.until("probe");
+        release_move.send(()).unwrap();
+        terminal.until("The centre moved before /usage ran");
+        let shown = strip_ansi(&terminal.transcript);
+        assert!(
+            !shown.contains("Context:"),
+            "the cancelled command prints no usage report: {shown}"
+        );
+        home.kill(&terminal);
+        terminal.wait();
+        daemon.join().unwrap();
+    }
+}
+
+/// `/earlier` typed before a queued move reaches the centre loads nothing from
+/// the new centre: the command carries the line it was typed on and is
+/// cancelled once that line has moved (design §14).
+#[test]
+fn tui_earlier_typed_before_a_queued_move_loads_no_new_centre() {
+    for fullscreen in [false, true] {
+        let home = Home::new();
+        let (move_seen, moved) = std::sync::mpsc::channel();
+        let (release_move, release) = std::sync::mpsc::channel::<()>();
+        let (earlier, earlier_seen) = std::sync::mpsc::channel::<Value>();
+        let daemon = home.daemon(move |wire| {
+            wire.hello(&[
+                "session.methods",
+                "session.branches",
+                "session.branch.get",
+                "session.branch_set_default",
+                "session.permission.get",
+            ]);
+            let attach = wire.read("session.attach");
+            let mut record = attach_record(&attach);
+            record["defaultBranch"] = json!({"branchId":"main","sequence":8});
+            wire.reply(&attach, record);
+            let branches = next(wire);
+            assert_eq!(branches["method"], "session.branches");
+            wire.reply(
+                &branches,
+                directory("main", &[("main", None), ("line-1", Some("main"))]),
+            );
+            let root = next(wire);
+            assert_eq!(root["method"], "session.history");
+            // The drawn top holds an older page, so both TUI modes ask for it.
+            let mut page = history(8, vec![said(2, "root window")]);
+            page["nextBefore"] = json!(2);
+            wire.reply(&root, page);
+            let mut usage = |_request: &Value| None;
+            loop {
+                let request = next_usage(wire, &mut usage);
+                let branch = request["params"]["branchId"].as_str().unwrap_or_default();
+                match request["method"].as_str().unwrap_or_default() {
+                    "session.permission.get" => wire.reply(
+                        &request,
+                        json!({"version":1,"policy":policy(if branch == "line-1" {
+                            "full-access"
+                        } else {
+                            "workspace-write"
+                        })}),
+                    ),
+                    "session.branch_set_default" => {
+                        assert_eq!(branch, "line-1");
+                        move_seen.send(()).unwrap();
+                        release.recv_timeout(PATIENCE).unwrap();
+                        wire.reply(&request, json!({"defaultBranchId":"line-1"}));
+                    }
+                    "session.branches" => wire.reply(
+                        &request,
+                        directory("main", &[("main", None), ("line-1", Some("main"))]),
+                    ),
+                    "session.branch.get" => wire.reply(&request, entry("line-1", "main")),
+                    "session.history" => {
+                        let through = if branch == "line-1" { 3 } else { 8 };
+                        if request["params"].get("before").is_some() {
+                            earlier.send(request["params"].clone()).unwrap();
+                        }
+                        wire.reply(&request, history(through, vec![]));
+                    }
+                    other => panic!("unexpected {other}: {request}"),
+                }
+            }
+        });
+        let mut command = home.command();
+        command.arg(if fullscreen {
+            "--fullscreen"
+        } else {
+            "--scrollback"
+        });
+        sized(&mut command, 120, 36);
+        let mut terminal = Terminal::resume_tui(command);
+        terminal.until("test / model");
+        terminal.until("⏵⏵ Workspace write");
+        terminal.write(b"/lines\r");
+        terminal.until("Main line");
+        terminal.write(b"\x1b[B");
+        terminal.write(b"p");
+        moved.recv_timeout(PATIENCE).unwrap();
+        // The panel closes while the move is still in flight, so the command
+        // is typed and submitted before the centre changes.
+        terminal.write(b"\x1b[27u");
+        terminal.write(b"/earlier");
+        terminal.until("/earlier");
+        terminal.write(b"\r");
+        // The echo of a later key proves the interface handled Enter and sent
+        // the command while the centre was still the line it showed; the move
+        // replies only after that.
+        terminal.write(b"probe");
+        terminal.until("probe");
+        release_move.send(()).unwrap();
+        terminal.until("The centre moved before /earlier ran");
+        assert!(
+            earlier_seen.try_recv().is_err(),
+            "the line the centre moved to loads no earlier page"
+        );
+        home.kill(&terminal);
+        terminal.wait();
+        daemon.join().unwrap();
+    }
+}

@@ -1403,27 +1403,60 @@ impl Worker {
         self.report_failure(result);
     }
 
-    /// A command typed for a line only runs while that line is still the
-    /// centre: a move the key could not see cancels it and returns what it
-    /// carried to the draft, instead of writing it into the new centre. The
-    /// stop gestures are not cancelled; each names the line it was pressed on
-    /// (design §14).
+    /// A command typed for a line only runs while it still names that line:
+    /// the shown line for a submit, a draft, a goal, a loop, a configuration,
+    /// a compaction or an earlier read, and the Session's default branch for
+    /// `/usage`, which reports that line. A move the key could not see cancels
+    /// the command and returns what it carried to the draft, instead of
+    /// writing it into another line. The stop gestures are not cancelled; each
+    /// names the line it was pressed on (design §14).
     fn typed_command(&mut self, command: Command) -> Option<Command> {
-        let (line, draft) = match &command {
-            Command::Submit { text, line, .. } => (line, vec![DraftPart::Text(text.clone())]),
-            Command::SubmitDraft { parts, line, .. } => (line, parts.clone()),
-            Command::Goal { line, draft, .. } => (line, vec![DraftPart::Text(draft.clone())]),
-            Command::Loop { line, draft, .. } => (line, vec![DraftPart::Text(draft.clone())]),
-            Command::Configure { text, line } => (line, vec![DraftPart::Text(text.clone())]),
+        const KEPT: &str = "The centre moved before the command ran; the draft was kept";
+        let (line, draft, cancelled) = match &command {
+            Command::Submit { text, line, .. } => {
+                (line, Some(vec![DraftPart::Text(text.clone())]), KEPT)
+            }
+            Command::SubmitDraft { parts, line, .. } => (line, Some(parts.clone()), KEPT),
+            Command::Goal { line, draft, .. } => {
+                (line, Some(vec![DraftPart::Text(draft.clone())]), KEPT)
+            }
+            Command::Loop { line, draft, .. } => {
+                (line, Some(vec![DraftPart::Text(draft.clone())]), KEPT)
+            }
+            Command::Configure { text, line } => {
+                (line, Some(vec![DraftPart::Text(text.clone())]), KEPT)
+            }
+            Command::Compact { line } => (
+                line,
+                None,
+                "The centre moved before /compact ran; nothing was compacted",
+            ),
+            Command::Usage { line } => (
+                line,
+                None,
+                "The centre moved before /usage ran; no report was printed",
+            ),
+            Command::Earlier { line } => (
+                line,
+                None,
+                "The centre moved before /earlier ran; nothing was loaded",
+            ),
             _ => return Some(command),
         };
-        if line.is_empty() || line == &self.focus {
+        let now = match &command {
+            Command::Usage { .. } => &self.default_branch,
+            _ => &self.focus,
+        };
+        if line.is_empty() || line == now {
             return Some(command);
         }
-        self.send(Update::DraftNotSent {
-            parts: draft,
-            message: "The centre moved before the command ran; the draft was kept".into(),
-        });
+        match draft {
+            Some(parts) => self.send(Update::DraftNotSent {
+                parts,
+                message: cancelled.into(),
+            }),
+            None => self.send(Update::Notice(cancelled.into())),
+        };
         None
     }
 
@@ -1763,8 +1796,8 @@ impl Worker {
                 }
             }
             Command::CloseSessions => self.cancel_catalog().await?,
-            Command::Usage => {
-                self.request_context(true).await;
+            Command::Usage { line } => {
+                self.request_context(true, &line).await;
                 if self
                     .model
                     .as_ref()
@@ -1774,7 +1807,7 @@ impl Worker {
                     self.send(Update::UsageReport(usage));
                 }
             }
-            Command::Compact => self.compact().await,
+            Command::Compact { line } => self.compact(&line).await,
             Command::Report(request) => self.report_request(request).await,
             Command::Export(format) => {
                 let extension = match format {
@@ -1797,7 +1830,7 @@ impl Worker {
                 }
             }
             Command::Rename(title) => self.rename(title).await,
-            Command::Earlier => self.earlier(),
+            Command::Earlier { line } => self.earlier(&line),
             Command::Goal { request, .. } => self.goal(request).await,
             Command::Loop { request, .. } => self.loop_command(request).await,
             Command::CheckUpdate => {
@@ -2531,7 +2564,9 @@ impl Worker {
             )
     }
 
-    async fn request_context(&mut self, report: bool) {
+    /// The context reading of `line`, the Session's default branch; `report`
+    /// also prints it as `/usage`'s report.
+    async fn request_context(&mut self, report: bool, line: &str) {
         if let Some((_, requested_report)) = &mut self.context_request {
             *requested_report |= report;
             return;
@@ -2541,7 +2576,7 @@ impl Worker {
             .client
             .send(
                 "session.context.usage",
-                json!({"sessionId": self.session_id, "branchId": self.default_branch.clone()}),
+                json!({"sessionId": self.session_id, "branchId": line}),
             )
             .await
         {
@@ -2559,13 +2594,14 @@ impl Worker {
     /// whose usage is unknown shows none.
     async fn poll_context(&mut self) {
         if self.context_stale && !self.session_id.is_empty() && self.context_request.is_none() {
-            self.request_context(false).await;
+            let line = self.default_branch.clone();
+            self.request_context(false, &line).await;
         }
     }
 
-    /// Asks the shown line to compact; committed outcomes reach its transcript.
-    async fn compact(&mut self) {
-        let params = json!({"sessionId": self.session_id, "branchId": self.focus});
+    /// Asks `line` to compact; committed outcomes reach its transcript.
+    async fn compact(&mut self, line: &str) {
+        let params = json!({"sessionId": self.session_id, "branchId": line});
         match self.client.send("session.context.compact", params).await {
             Ok(request) => self.compact_requests.push(request),
             Err(error) => self.send(Update::Compacted(CompactReply::Failed(error.to_string()))),
@@ -5100,7 +5136,8 @@ impl Worker {
                 Err(error) => self.send(Update::Notice(format!("permission: {error}"))),
             }
         }
-        self.request_context(false).await;
+        let line = self.default_branch.clone();
+        self.request_context(false, &line).await;
     }
 
     /// One line's adopted configuration through `session.model.get`, at
