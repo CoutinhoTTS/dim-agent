@@ -332,6 +332,12 @@ const SETTLE_BOUND: Duration = Duration::from_secs(30);
 /// under it, so the cleanup is bounded as a whole rather than step by step
 /// (model-prompts §8.1).
 const CLEANUP_BUDGET: Duration = Duration::from_secs(30);
+/// The longest a judge's own retries may wait before its call fails: one
+/// request's wait budget in the product's failure policy. A run that did not
+/// stop on its wall clock is not under [`CLEANUP_BUDGET`], so the parent's hard
+/// bound on its child covers the judge's own budget instead when that is
+/// longer.
+const JUDGE_BUDGET: Duration = dim_agent_capabilities::model_provider::WAIT_BUDGET;
 /// How long a run's serve child may take before the parent kills its process
 /// group: the child's startup before its wall clock starts — its server, its
 /// connect, the plugin wait (60 s), the model and judge selections, the
@@ -4349,9 +4355,10 @@ async fn spawn_child(
 }
 
 /// The parent's hard bound on one run's serve child: the run's wall clock, the
-/// startup before it ([`STARTUP_BOUND`]), the cleanup budget after it and the
-/// grace to read the output the child may print. A child stuck in blocking
-/// work may never reach its own cleanup, so this bound is what ends it.
+/// startup before it ([`STARTUP_BOUND`]), the cleanup budget after it — or the
+/// judge's own retry budget when that is longer — and the grace to read the
+/// output the child may print. A child stuck in blocking work may never reach
+/// its own cleanup, so this bound is what ends it.
 fn child_hard_bound(options: &Options, params: &ChildParams, wall_clock: Duration) -> Duration {
     options
         .hard_bound_ms
@@ -4359,7 +4366,7 @@ fn child_hard_bound(options: &Options, params: &ChildParams, wall_clock: Duratio
         .unwrap_or_else(|| {
             wall_clock
                 + STARTUP_BOUND
-                + cleanup_budget(params.stall_cleanup, params.cleanup_budget_ms)
+                + cleanup_budget(params.stall_cleanup, params.cleanup_budget_ms).max(JUDGE_BUDGET)
                 + settle_bound(params.stall_cleanup)
         })
 }
