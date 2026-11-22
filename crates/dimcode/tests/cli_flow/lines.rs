@@ -1188,3 +1188,107 @@ fn tui_a_late_policy_reply_from_an_earlier_line_does_not_replace_the_centres() {
     terminal.wait();
     daemon.join().unwrap();
 }
+
+/// A move whose new centre's policy read is refused shows that line's policy as
+/// unavailable: the outgoing line's preset is not left in the status line or in
+/// the Permissions panel (design §14).
+#[test]
+fn tui_a_moved_line_with_a_refused_policy_read_shows_no_outgoing_preset() {
+    let home = Home::new();
+    let (moved, move_seen) = std::sync::mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        wire.hello(&[
+            "session.methods",
+            "session.branches",
+            "session.branch.get",
+            "session.branch_set_default",
+            "session.permission.get",
+            "session.permission.update",
+            "session.context.usage",
+        ]);
+        let attach = wire.read("session.attach");
+        let mut record = attach_record(&attach);
+        record["defaultBranch"] = json!({"branchId":"main","sequence":8});
+        wire.reply(&attach, record);
+        let branches = next(wire);
+        assert_eq!(branches["method"], "session.branches");
+        wire.reply(
+            &branches,
+            directory("main", &[("main", None), ("line-1", Some("main"))]),
+        );
+        let root = next(wire);
+        assert_eq!(root["method"], "session.history");
+        wire.reply(&root, history(8, vec![]));
+        let mut usage = |_request: &Value| None;
+        loop {
+            let request = next_usage(wire, &mut usage);
+            let branch = request["params"]["branchId"].as_str().unwrap_or_default();
+            match request["method"].as_str().unwrap_or_default() {
+                "session.permission.get" => match branch {
+                    "main" => wire.reply(
+                        &request,
+                        json!({"version":1,"policy":policy("workspace-write")}),
+                    ),
+                    "line-1" => {
+                        wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+                            "code":-32000,"message":"fixture denied",
+                            "data":{"appError":"denied"}}}));
+                        moved.send(()).unwrap();
+                        break;
+                    }
+                    other => panic!("permission read on {other}"),
+                },
+                "session.branch_set_default" => {
+                    assert_eq!(branch, "line-1");
+                    wire.reply(&request, json!({"defaultBranchId":"line-1"}));
+                }
+                "session.branch.get" => wire.reply(&request, entry("line-1", "main")),
+                "session.history" => {
+                    let through = if branch == "line-1" { 3 } else { 8 };
+                    wire.reply(&request, history(through, vec![]));
+                }
+                other => panic!("unexpected {other}: {request}"),
+            }
+        }
+        wire.hold();
+    });
+    let mut command = home.command();
+    sized(&mut command, 110, 34);
+    let mut terminal = Terminal::resume_tui(command);
+    terminal.until("test / model");
+    terminal.until("⏵⏵ Workspace write");
+
+    terminal.write(b"/lines\r");
+    terminal.until("Main line");
+    terminal.write(b"\x1b[B");
+    terminal.write(b"p");
+    move_seen.recv_timeout(PATIENCE).unwrap();
+    // The panel keeps its selection across the move; Esc returns the keyboard
+    // to the composer.
+    terminal.write(b"\x1b");
+    terminal.until("permission: unavailable");
+    // A keystroke repaints every row from the state the failed read left.
+    terminal.write(b"probe");
+    terminal.until("probe");
+    terminal.write(b"\x7f\x7f\x7f\x7f\x7f");
+
+    let shown = strip_ansi(&terminal.transcript);
+    let footer = shown.rsplit("⏵⏵").next().expect("the footer was painted");
+    assert!(
+        footer.trim_start().starts_with("Permission unavailable"),
+        "the moved line's policy is unknown, not the outgoing preset: {footer}"
+    );
+
+    terminal.write(b"/permissions\r");
+    terminal.until("Permission mode");
+    let shown = strip_ansi(&terminal.transcript);
+    let panel = &shown[shown.rfind("Permission mode").expect("the panel opened")..];
+    assert!(
+        !panel.contains("(*)"),
+        "the panel marks no outgoing preset as current: {panel}"
+    );
+
+    home.kill(&terminal);
+    terminal.wait();
+    daemon.join().unwrap();
+}

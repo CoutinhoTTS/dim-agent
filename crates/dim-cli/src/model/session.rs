@@ -1402,6 +1402,11 @@ pub enum Update {
     /// A transient status-line message.
     Toast(String),
     Permissions(Result<dim_agent_types::PermissionPolicy, String>),
+    /// The shown line's policy is not known: the new centre's read is out, or
+    /// the line has one this client cannot read. The status line, Settings and
+    /// Permissions show no preset until a read or a fact supplies one (design
+    /// §14).
+    PermissionsUnknown,
     PermissionSelected(dim_agent_types::PermissionPreset),
     Providers(Result<Vec<ProviderEntry>, String>),
     /// What a provider change came to.

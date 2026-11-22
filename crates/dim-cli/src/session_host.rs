@@ -5039,6 +5039,11 @@ impl Worker {
         if self.model.is_none() {
             self.send(Update::NoModel);
         }
+        // The policy shown belonged to the line that is no longer the centre;
+        // this line's own read publishes its own, and a refused or failed read
+        // leaves it unknown rather than showing the outgoing preset (design
+        // §14).
+        self.send(Update::PermissionsUnknown);
         self.focus_line(line).await;
         if self.client.supports(&permission::PRESET_METHODS) {
             let params = json!({"sessionId":self.session_id,"branchId":self.default_branch});

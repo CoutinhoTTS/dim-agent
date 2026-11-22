@@ -1191,7 +1191,7 @@ struct App {
     /// A submitted first message no Session has taken yet: a refusal puts
     /// it back into the draft.
     unsent: Option<Initial>,
-    permission_policy: dim_agent_types::PermissionPolicy,
+    permission_policy: Option<dim_agent_types::PermissionPolicy>,
     /// The main branch's context use.
     context: Option<ContextReading>,
     /// The first attempt tag of the next `/login` panel, so a closed panel's
@@ -1628,10 +1628,10 @@ impl App {
             initial: None,
             unsent: None,
             send_now: None,
-            permission_policy: dim_agent_types::PermissionPolicy {
+            permission_policy: Some(dim_agent_types::PermissionPolicy {
                 preset: dim_agent_types::PermissionPreset::WorkspaceWrite,
                 ..Default::default()
-            },
+            }),
             context: None,
             login_attempts: 0,
             theme_context: None,
@@ -2599,15 +2599,24 @@ impl App {
             Update::Permissions(policy) => match policy {
                 Ok(policy) => {
                     if let Some(Prompt::Approvals(panel)) = &mut self.prompt {
-                        panel.set_policy(&policy);
+                        panel.set_policy(Some(&policy));
                     }
-                    self.permission_policy = policy;
+                    self.permission_policy = Some(policy);
                     if let Some(Prompt::Settings(panel)) = &self.prompt {
                         self.open_settings(panel.selected());
                     }
                 }
                 Err(error) => self.notices.push(error),
             },
+            Update::PermissionsUnknown => {
+                if let Some(Prompt::Approvals(panel)) = &mut self.prompt {
+                    panel.set_policy(None);
+                }
+                self.permission_policy = None;
+                if let Some(Prompt::Settings(panel)) = &self.prompt {
+                    self.open_settings(panel.selected());
+                }
+            }
             Update::PermissionSelected(preset) => {
                 let label = format!("Permission: {}", crate::permission::name(preset));
                 let message = crate::ui::config::write(
@@ -4204,7 +4213,7 @@ impl App {
             },
             Effect::OpenPermissions => {
                 self.open_prompt(Prompt::Approvals(ApprovalsPanel::new(
-                    &self.permission_policy,
+                    self.permission_policy.as_ref(),
                 )));
             }
             Effect::OpenArea { area, note } => {
@@ -4494,7 +4503,7 @@ impl App {
         if self.prompt.is_none()
             && let Some(mut panel) = self.permissions_return.take()
         {
-            panel.set_policy(&self.permission_policy);
+            panel.set_policy(self.permission_policy.as_ref());
             self.open_prompt(Prompt::Approvals(panel));
         }
         if self.prompt.is_none()
@@ -4923,7 +4932,10 @@ impl App {
                 .as_ref()
                 .map(|setting| setting.document.enabled),
             prompts: self.prompt_origins(),
-            permission: crate::permission::name(self.permission_policy.preset).to_owned(),
+            permission: self.permission_policy.as_ref().map_or_else(
+                || "Unavailable".to_owned(),
+                |policy| crate::permission::name(policy.preset).to_owned(),
+            ),
         };
         self.open_prompt(Prompt::Settings(SettingsPanel::new(&values, select)));
     }
@@ -4955,7 +4967,7 @@ impl App {
                 self.settings_return = None;
             }
             Setting::Permission => {
-                let panel = ApprovalsPanel::new(&self.permission_policy);
+                let panel = ApprovalsPanel::new(self.permission_policy.as_ref());
                 self.open_prompt(Prompt::Approvals(panel));
             }
             Setting::Isolation => {
@@ -5651,7 +5663,7 @@ impl App {
                 // which opens holding where they work instead of ignoring
                 // them, and says it until the user's first key there.
                 if args.trim().is_empty() {
-                    let panel = ApprovalsPanel::new(&self.permission_policy);
+                    let panel = ApprovalsPanel::new(self.permission_policy.as_ref());
                     self.open_prompt(Prompt::Approvals(panel));
                 } else {
                     self.open_management(
@@ -8466,13 +8478,19 @@ impl App {
     fn status_line(&self, cols: usize) -> String {
         use dim_agent_types::PermissionPreset;
         let p = &self.palette;
-        let preset = self.permission_policy.preset;
-        let color = match preset {
-            PermissionPreset::ReadOnly => &p.permission_read,
-            PermissionPreset::WorkspaceWrite => &p.permission_write,
-            PermissionPreset::FullAccess => &p.permission_full,
+        let permission = match &self.permission_policy {
+            Some(policy) => {
+                let color = match policy.preset {
+                    PermissionPreset::ReadOnly => &p.permission_read,
+                    PermissionPreset::WorkspaceWrite => &p.permission_write,
+                    PermissionPreset::FullAccess => &p.permission_full,
+                };
+                fg(&format!("⏵⏵ {}", permission_label(policy.preset)), color)
+            }
+            // The line's policy is unknown until its own read or a fact
+            // arrives; the outgoing centre's preset is not shown for it.
+            None => fg("⏵⏵ Permission unavailable", &p.muted),
         };
-        let permission = fg(&format!("⏵⏵ {}", permission_label(preset)), color);
         let hint = fg(t("(shift+tab to cycle)"), &p.muted);
         let total = cols.saturating_sub(2);
         let prefix = format!("{}{permission}", " ".repeat(MARGIN));
@@ -13566,7 +13584,36 @@ mod tests {
         )
         .unwrap();
         assert_eq!(saved, serde_json::json!({"permission":"workspace-write"}));
-        assert_eq!(app.permission_policy.disallowed_tools, ["blocked"]);
+        assert_eq!(
+            app.permission_policy
+                .as_ref()
+                .expect("the read policy is shown")
+                .disallowed_tools,
+            ["blocked"]
+        );
+    }
+
+    #[test]
+    fn an_unknown_policy_hides_the_outgoing_preset() {
+        use dim_agent_types::{PermissionPolicy, PermissionPreset};
+
+        let (mut app, _home) = status_app("local", "fixture-model", None);
+        app.apply(Update::Permissions(Ok(PermissionPolicy {
+            preset: PermissionPreset::ReadOnly,
+            ..Default::default()
+        })));
+        let (_, _, footer) = composer_chrome(&mut app, 100);
+        assert!(footer.contains("⏵⏵ Read only"), "{footer}");
+
+        app.apply(Update::PermissionsUnknown);
+        let (_, _, footer) = composer_chrome(&mut app, 100);
+        assert!(footer.contains("⏵⏵ Permission unavailable"), "{footer}");
+
+        app.apply(Update::Permissions(Err(
+            "permission: unavailable (denied)".into()
+        )));
+        let (_, _, footer) = composer_chrome(&mut app, 100);
+        assert!(footer.contains("⏵⏵ Permission unavailable"), "{footer}");
     }
 
     #[test]
