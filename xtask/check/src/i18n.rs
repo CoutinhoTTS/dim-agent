@@ -11,9 +11,11 @@
 //! Both sides are parsed, not matched by hand: a table arm whose pattern is
 //! neither a string nor the catch-all is a failure, so a new shape cannot pass
 //! by being skipped. A `#[cfg(test)]` item is a fixture rather than text the
-//! interface draws, so the scan skips it. A key argument that reduces to no
-//! literal is reported rather than failed: the ones left name a parameter, a
-//! field or a constant of another file, which the check does not follow.
+//! interface draws, so the scan skips it.
+//!
+//! A key argument that reduces to no literal is counted rather than failed: the
+//! ones left name a parameter, a field or a constant of another file, which the
+//! check does not follow.
 use std::{
     collections::{BTreeMap, BTreeSet},
     error::Error,
@@ -72,9 +74,6 @@ pub fn check(root: &Path) -> Result<()> {
             calls.keys.len(),
             calls.unreadable.len()
         );
-        for site in &calls.unreadable {
-            println!("  {site}: no literal key");
-        }
         Ok(())
     } else {
         Err(errors.join("\n").into())
@@ -175,11 +174,7 @@ impl CallKeys {
                 self.keys.push(key);
             }
         }
-        for site in other.unreadable {
-            if !self.unreadable.contains(&site) {
-                self.unreadable.push(site);
-            }
-        }
+        self.unreadable.extend(other.unreadable);
     }
 }
 
@@ -192,6 +187,7 @@ fn call_keys(text: &str, site: &str) -> Result<CallKeys> {
     let mut visitor = Calls {
         site: site.to_owned(),
         consts: consts.0,
+        counted: BTreeSet::new(),
         found: CallKeys::default(),
     };
     visitor.visit_file(&file);
@@ -309,6 +305,8 @@ impl<'ast> Visit<'ast> for Consts {
 struct Calls {
     site: String,
     consts: BTreeMap<String, String>,
+    /// The arguments already counted, so one reached twice counts once.
+    counted: BTreeSet<(usize, usize)>,
     found: CallKeys,
 }
 
@@ -388,11 +386,15 @@ impl Calls {
         self.consts.get(&name.to_string()).cloned()
     }
 
+    /// Counts `span` as one key argument the check cannot read.
     fn unreadable(&mut self, span: proc_macro2::Span) {
-        let site = format!("{}:{}", self.site, span.start().line);
-        if !self.found.unreadable.contains(&site) {
-            self.found.unreadable.push(site);
+        let start = span.start();
+        if !self.counted.insert((start.line, start.column)) {
+            return;
         }
+        self.found
+            .unreadable
+            .push(format!("{}:{}", self.site, start.line));
     }
 }
 
