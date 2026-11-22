@@ -4,18 +4,21 @@
 //! the English text itself (`crates/dim-cli/src/ui/i18n/mod.rs`), so a table is
 //! a `lookup` function whose match arms are string literals, and a call site is
 //! a key argument that reduces to string literals: one literal, the text of a
-//! constant of the same file, or the branches of an `if`, `match` or block.
-//! `ListPanel` keeps its title, loading text, empty text and no-match text
-//! English until it draws, so those arguments are keys too.
+//! constant in scope, the branches of an `if`, `match` or block, or the
+//! expressions a macro argument separates by commas. `ListPanel` keeps its
+//! title, loading text, empty text and no-match text English until it draws, so
+//! those arguments are keys too.
 //!
 //! Both sides are parsed, not matched by hand: a table arm whose pattern is
 //! neither a string nor the catch-all is a failure, so a new shape cannot pass
 //! by being skipped. A `#[cfg(test)]` item is a fixture rather than text the
 //! interface draws, so the scan skips it.
 //!
-//! A key argument that reduces to no literal is counted rather than failed: the
-//! ones left name a parameter, a field or a constant of another file, which the
-//! check does not follow.
+//! A constant is read only where its name still means it: a parameter, a local
+//! or a constant an inner scope declares hides an outer one, and a name no
+//! scope settles is counted instead. A key argument that reduces to no literal
+//! is counted for the same reason: it names a parameter, a field, the result of
+//! a call or a constant of another file.
 use std::{
     collections::{BTreeMap, BTreeSet},
     error::Error,
@@ -23,8 +26,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use proc_macro2::{Delimiter, TokenStream, TokenTree};
 use syn::{
     Attribute, Block, Expr, ExprLit, ImplItem, Item, Lit, Meta, Pat, Stmt, Token,
+    parse::Parser,
     punctuated::Punctuated,
     spanned::Spanned,
     visit::{self, Visit},
@@ -182,16 +187,14 @@ impl CallKeys {
 /// passed on.
 fn call_keys(text: &str, site: &str) -> Result<CallKeys> {
     let file: syn::File = syn::parse_file(text)?;
-    let mut consts = Consts::default();
-    consts.visit_file(&file);
-    let mut visitor = Calls {
+    let mut calls = Calls {
         site: site.to_owned(),
-        consts: consts.0,
+        scopes: Vec::new(),
         counted: BTreeSet::new(),
         found: CallKeys::default(),
     };
-    visitor.visit_file(&file);
-    Ok(visitor.found)
+    calls.visit_file(&file);
+    Ok(calls.found)
 }
 
 /// Whether `attributes` holds `#[cfg(test)]`, so the item is a fixture rather
@@ -215,6 +218,7 @@ fn test_item(item: &Item) -> bool {
         Item::Const(item) => test_only(&item.attrs),
         Item::Fn(item) => test_only(&item.attrs),
         Item::Impl(item) => test_only(&item.attrs),
+        Item::Macro(item) => test_only(&item.attrs),
         Item::Mod(item) => test_only(&item.attrs),
         Item::Static(item) => test_only(&item.attrs),
         Item::Trait(item) => test_only(&item.attrs),
@@ -272,39 +276,83 @@ fn constant_value(ty: &syn::Type, value: &Expr) -> Option<String> {
     }
 }
 
-/// The `&str` constants of one file, by name.
-#[derive(Default)]
-struct Consts(BTreeMap<String, String>);
-
-impl<'ast> Visit<'ast> for Consts {
-    fn visit_item(&mut self, node: &'ast Item) {
-        if test_item(node) {
-            return;
+/// The names `pattern` binds.
+fn bindings(pattern: &Pat, names: &mut BTreeSet<String>) {
+    match pattern {
+        Pat::Ident(ident) => {
+            names.insert(ident.ident.to_string());
         }
-        if let Item::Const(item) = node
-            && let Some(text) = constant_value(&item.ty, &item.expr)
-        {
-            self.0.insert(item.ident.to_string(), text);
-        }
-        visit::visit_item(self, node);
+        Pat::Or(or) => or.cases.iter().for_each(|case| bindings(case, names)),
+        Pat::Paren(paren) => bindings(&paren.pat, names),
+        Pat::Reference(reference) => bindings(&reference.pat, names),
+        Pat::Slice(slice) => slice.elems.iter().for_each(|elem| bindings(elem, names)),
+        Pat::Struct(structure) => structure
+            .fields
+            .iter()
+            .for_each(|field| bindings(&field.pat, names)),
+        Pat::Tuple(tuple) => tuple.elems.iter().for_each(|elem| bindings(elem, names)),
+        Pat::TupleStruct(tuple) => tuple.elems.iter().for_each(|elem| bindings(elem, names)),
+        Pat::Type(typed) => bindings(&typed.pat, names),
+        _ => {}
     }
+}
 
-    fn visit_impl_item(&mut self, node: &'ast ImplItem) {
-        if test_impl_item(node) {
-            return;
+/// The constants `items` declare, for the scope they open: an item is in scope
+/// whole, so a call before the declaration reads it too.
+fn constants<'a>(items: impl IntoIterator<Item = &'a Item>) -> BTreeMap<String, Option<String>> {
+    let mut constants = BTreeMap::new();
+    for item in items {
+        if test_item(item) {
+            continue;
         }
-        if let ImplItem::Const(item) = node
-            && let Some(text) = constant_value(&item.ty, &item.expr)
-        {
-            self.0.insert(item.ident.to_string(), text);
+        if let Item::Const(item) = item {
+            constants.insert(item.ident.to_string(), constant_value(&item.ty, &item.expr));
         }
-        visit::visit_impl_item(self, node);
     }
+    constants
+}
+
+/// The scope a signature opens: its parameters hide a constant of the same
+/// name.
+fn parameters(signature: &syn::Signature) -> BTreeMap<String, Option<String>> {
+    let mut names = BTreeSet::new();
+    for input in &signature.inputs {
+        if let syn::FnArg::Typed(typed) = input {
+            bindings(&typed.pat, &mut names);
+        }
+    }
+    names.into_iter().map(|name| (name, None)).collect()
+}
+
+/// Whether `tokens` holds a call to a translation function that is named
+/// directly rather than built from an expression.
+fn mentions_translation_call(tokens: &TokenStream) -> bool {
+    let mut tokens = tokens.clone().into_iter().peekable();
+    while let Some(token) = tokens.next() {
+        match token {
+            TokenTree::Ident(name)
+                if matches!(name.to_string().as_str(), "t" | "tf" | "t_in" | "tf_in")
+                    && matches!(
+                        tokens.peek(),
+                        Some(TokenTree::Group(group))
+                            if group.delimiter() == Delimiter::Parenthesis
+                    ) =>
+            {
+                return true;
+            }
+            TokenTree::Group(group) if mentions_translation_call(&group.stream()) => return true,
+            _ => {}
+        }
+    }
+    false
 }
 
 struct Calls {
     site: String,
-    consts: BTreeMap<String, String>,
+    /// The names each enclosing scope declares, innermost last: the text of a
+    /// constant, or `None` for a parameter, a local or a constant the scan
+    /// cannot read.
+    scopes: Vec<BTreeMap<String, Option<String>>>,
     /// The arguments already counted, so one reached twice counts once.
     counted: BTreeSet<(usize, usize)>,
     found: CallKeys,
@@ -380,10 +428,16 @@ impl Calls {
         }
     }
 
-    /// The text of the constant `path` names, when it is one of this file's.
+    /// The text of the constant the bare path names, when the innermost scope
+    /// that declares the name declares a `&str` constant.
     fn constant(&self, path: &syn::Path) -> Option<String> {
-        let name = path.get_ident()?;
-        self.consts.get(&name.to_string()).cloned()
+        let name = path.get_ident()?.to_string();
+        for scope in self.scopes.iter().rev() {
+            if let Some(value) = scope.get(&name) {
+                return value.clone();
+            }
+        }
+        None
     }
 
     /// Counts `span` as one key argument the check cannot read.
@@ -396,12 +450,62 @@ impl Calls {
             .unreadable
             .push(format!("{}:{}", self.site, start.line));
     }
+
+    /// Declares the names `pattern` introduces in the innermost scope.
+    fn bind(&mut self, pattern: &Pat) {
+        let mut names = BTreeSet::new();
+        bindings(pattern, &mut names);
+        if let Some(scope) = self.scopes.last_mut() {
+            for name in names {
+                scope.insert(name, None);
+            }
+        }
+    }
+
+    /// Runs `visit` inside a scope whose declared names hide an outer one's.
+    fn scoped(&mut self, scope: BTreeMap<String, Option<String>>, visit: impl FnOnce(&mut Self)) {
+        self.scopes.push(scope);
+        visit(self);
+        self.scopes.pop();
+    }
+
+    /// Reads a macro's tokens as the expressions its commas separate, and
+    /// counts the macro as one argument the scan cannot read when they do not
+    /// parse but hold a translation call.
+    fn macro_tokens(&mut self, tokens: &TokenStream) {
+        match Punctuated::<Expr, Token![,]>::parse_terminated.parse2(tokens.clone()) {
+            Ok(expressions) => {
+                for expression in &expressions {
+                    self.visit_expr(expression);
+                }
+            }
+            Err(_) if mentions_translation_call(tokens) => self.unreadable(tokens.span()),
+            Err(_) => {}
+        }
+    }
 }
 
 impl<'ast> Visit<'ast> for Calls {
+    fn visit_file(&mut self, node: &'ast syn::File) {
+        self.scoped(constants(&node.items), |calls| {
+            visit::visit_file(calls, node)
+        });
+    }
+
     fn visit_item(&mut self, node: &'ast Item) {
-        if !test_item(node) {
-            visit::visit_item(self, node);
+        if test_item(node) {
+            return;
+        }
+        match node {
+            Item::Mod(item) if item.content.is_some() => {
+                let scope = constants(item.content.iter().flat_map(|(_, items)| items.iter()));
+                self.scoped(scope, |calls| visit::visit_item(calls, node));
+            }
+            Item::Macro(item) if !item.mac.path.is_ident("macro_rules") => {
+                self.macro_tokens(&item.mac.tokens);
+                visit::visit_item(self, node);
+            }
+            _ => visit::visit_item(self, node),
         }
     }
 
@@ -409,6 +513,62 @@ impl<'ast> Visit<'ast> for Calls {
         if !test_impl_item(node) {
             visit::visit_impl_item(self, node);
         }
+    }
+
+    fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
+        self.scoped(parameters(&node.sig), |calls| {
+            visit::visit_item_fn(calls, node)
+        });
+    }
+
+    fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
+        self.scoped(parameters(&node.sig), |calls| {
+            visit::visit_impl_item_fn(calls, node)
+        });
+    }
+
+    fn visit_trait_item_fn(&mut self, node: &'ast syn::TraitItemFn) {
+        self.scoped(parameters(&node.sig), |calls| {
+            visit::visit_trait_item_fn(calls, node)
+        });
+    }
+
+    fn visit_block(&mut self, node: &'ast Block) {
+        let scope = constants(node.stmts.iter().filter_map(|statement| match statement {
+            Stmt::Item(item) => Some(item),
+            _ => None,
+        }));
+        self.scoped(scope, |calls| {
+            for statement in &node.stmts {
+                calls.visit_stmt(statement);
+                if let Stmt::Local(local) = statement {
+                    calls.bind(&local.pat);
+                }
+            }
+        });
+    }
+
+    fn visit_expr_closure(&mut self, node: &'ast syn::ExprClosure) {
+        self.scopes.push(BTreeMap::new());
+        for input in &node.inputs {
+            self.bind(input);
+        }
+        visit::visit_expr_closure(self, node);
+        self.scopes.pop();
+    }
+
+    fn visit_expr_for_loop(&mut self, node: &'ast syn::ExprForLoop) {
+        self.scopes.push(BTreeMap::new());
+        self.bind(&node.pat);
+        visit::visit_expr_for_loop(self, node);
+        self.scopes.pop();
+    }
+
+    fn visit_arm(&mut self, node: &'ast syn::Arm) {
+        self.scopes.push(BTreeMap::new());
+        self.bind(&node.pat);
+        visit::visit_arm(self, node);
+        self.scopes.pop();
     }
 
     fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
@@ -429,6 +589,16 @@ impl<'ast> Visit<'ast> for Calls {
             self.literals(argument);
         }
         visit::visit_expr_method_call(self, node);
+    }
+
+    fn visit_expr_macro(&mut self, node: &'ast syn::ExprMacro) {
+        self.macro_tokens(&node.mac.tokens);
+        visit::visit_expr_macro(self, node);
+    }
+
+    fn visit_stmt_macro(&mut self, node: &'ast syn::StmtMacro) {
+        self.macro_tokens(&node.mac.tokens);
+        visit::visit_stmt_macro(self, node);
     }
 }
 
@@ -663,7 +833,8 @@ mod tests {
     /// key rather than the constant's text.
     #[test]
     fn a_parameter_that_hides_a_constant_is_not_read_as_its_key() {
-        let text = "const HINT: &str = \"Kept\";\n\nfn footer(HINT: &str) {\n    let a = t(HINT);\n}\n";
+        let text =
+            "const HINT: &str = \"Kept\";\n\nfn footer(HINT: &str) {\n    let a = t(HINT);\n}\n";
         let keys = call_keys(text, "src.rs").unwrap();
         assert_eq!(keys.keys, Vec::new(), "a parameter is not the constant");
         assert_eq!(keys.unreadable, vec!["src.rs:4".to_owned()]);
