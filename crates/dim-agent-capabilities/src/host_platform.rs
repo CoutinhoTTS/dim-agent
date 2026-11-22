@@ -1172,7 +1172,6 @@ impl HostPlatform {
                     cols: request.cols,
                     rows: request.rows,
                 },
-                None,
             )
             .await
             .map_err(|error| {
@@ -3365,7 +3364,6 @@ pub(crate) mod shell {
             roots: &[PathBuf],
             directory: &Path,
             size: PtySize,
-            output: Option<tokio::sync::mpsc::UnboundedSender<String>>,
         ) -> Result<(Arc<ShellTask>, ExecShellRuntime), ProcessSpecError> {
             let runtime = match self.persistent_shell().await {
                 ShellStatus::Available(shell) => shell,
@@ -3477,12 +3475,9 @@ pub(crate) mod shell {
                     drop(capture);
                     {
                         let mut events = pump.events.lock().unwrap();
-                        events.push(chunk.clone());
+                        events.push(chunk);
                     }
                     pump.event_notify.notify_waiters();
-                    if let Some(sender) = &output {
-                        let _ = sender.send(chunk);
-                    }
                 }
                 let _ = drained.send(());
             });

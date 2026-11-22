@@ -572,7 +572,6 @@ impl ShellSession {
                     cols: 500,
                     rows: 50,
                 },
-                None,
             )
             .await
             .map_err(|error| HostError::failed(error.reason))?;
