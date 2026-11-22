@@ -3452,6 +3452,9 @@ pub(crate) mod shell {
                 rest = &rest[position + self.start_marker.len()..];
             }
             let Some(position) = rest.find(&self.end_marker) else {
+                if last_full_marker(rest).is_some() {
+                    return;
+                }
                 append_command_output(&mut state, rest);
                 return;
             };

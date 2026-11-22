@@ -1898,7 +1898,7 @@ async fn a_shell_command_capture_is_owned_by_the_host() {
     platform
         .write(ShellWrite {
             task_id: "capture-shell".into(),
-            data: "cHJpbnRmICclcyVzXG4nICdfX0RJTV9TVEFSVF9hYWFhYmJiYl8nICdjY2NjZGRkZF9fJzsgcHJpbnRmIGhpOyBwcmludGYgJyVzJXMlZFxuJyAnX19ESU1fRU5EX2VlZWVmZmZmXycgJzAwMDAxMTExX18nICIkPyIK".into(),
+            data: "cHJpbnRmICclcyVzXG4nICdfX0RJTV9TVEFSVF9hYWFhYmJiYl8nICdjY2NjZGRkZF9fJzsgcHJpbnRmICclcyVzJWRcbicgJ19fRElNX0VORF8xMTExMjIyMl8nICczMzMzNDQ0NF9fJyAwOyBwcmludGYgaGk7IHByaW50ZiAnJXMlcyVkXG4nICdfX0RJTV9FTkRfZWVlZWZmZmZfJyAnMDAwMDExMTFfXycgMAo=".into(),
             command: Some(ShellCommandStart {
                 task_id: "owner-command".into(),
                 start_marker: "__DIM_START_aaaabbbb_ccccdddd__".into(),
@@ -1929,6 +1929,7 @@ async fn a_shell_command_capture_is_owned_by_the_host() {
         .await
         .unwrap();
     assert!(page.text.contains("hi"), "{:?}", page.text);
+    assert!(!page.text.contains("11112222"), "{:?}", page.text);
     platform
         .settle(TaskRequest {
             task_id: "owner-command".into(),
