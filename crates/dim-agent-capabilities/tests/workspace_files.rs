@@ -294,6 +294,539 @@ async fn replacement_preserves_permissions_and_open_original() {
     assert_eq!(fs::read_dir(&workspace.root).unwrap().count(), 1);
 }
 
+/// The umask a child run of [`a_new_file_takes_the_process_umask`] uses, in
+/// octal. The runner's own umask is unknown, so a child process fixes it.
+#[cfg(unix)]
+const CHILD_UMASK: &str = "DIM_TEST_NEW_FILE_UMASK";
+
+/// A workspace whose directories are created one level at a time and set to
+/// 0700 by name, so a umask that masks owner bits cannot stop the setup.
+#[cfg(unix)]
+fn private_workspace() -> Workspace {
+    use std::os::unix::fs::PermissionsExt;
+    let base = std::env::temp_dir().join(format!("dim-workspace-files-{}", uuid::Uuid::new_v4()));
+    fs::create_dir(&base).unwrap();
+    fs::set_permissions(&base, fs::Permissions::from_mode(0o700)).unwrap();
+    let root = base.join("work");
+    fs::create_dir(&root).unwrap();
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+    let tools = FileTools::new(root.clone(), base.clone(), base.join("outputs"));
+    Workspace { root, tools }
+}
+
+/// The permission bits of `path`.
+#[cfg(unix)]
+fn mode_of(path: &Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    fs::metadata(path).unwrap().permissions().mode() & 0o777
+}
+
+/// The names of the entries in `directory`.
+#[cfg(unix)]
+fn entry_names(directory: &Path) -> Vec<String> {
+    fs::read_dir(directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect()
+}
+
+/// Runs `test` in a child of this test binary under `umask`, with `variable`
+/// set so the body takes the child branch, and returns the child's output.
+#[cfg(unix)]
+fn run_under_umask(test: &str, umask: &str, variable: &str) -> String {
+    let binary = std::env::current_exe().unwrap();
+    let script = format!(r#"umask "$1" && exec "$0" {test} --nocapture"#);
+    let child = std::process::Command::new("sh")
+        .args(["-c", &script])
+        .arg(&binary)
+        .arg(umask)
+        .env(variable, umask)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&child.stdout).into_owned();
+    assert!(
+        child.status.success(),
+        "{test} under umask {umask}: {stdout}{}",
+        String::from_utf8_lossy(&child.stderr)
+    );
+    assert!(
+        stdout.contains("test result: ok. 1 passed"),
+        "{test} under umask {umask} ran the child: {stdout}"
+    );
+    stdout
+}
+
+#[cfg(target_os = "linux")]
+fn setfacl(path: &Path, spec: &str) {
+    let status = std::process::Command::new("setfacl")
+        .args(["-m", spec])
+        .arg(path)
+        .status()
+        .unwrap_or_else(|error| panic!("setfacl is required for this manual test: {error}"));
+    assert!(status.success(), "setfacl -m {spec} on {path:?}");
+}
+
+#[cfg(target_os = "linux")]
+fn acl_text(path: &Path) -> Vec<String> {
+    let output = std::process::Command::new("getfacl")
+        .arg("-cp")
+        .arg(path)
+        .output()
+        .unwrap_or_else(|error| panic!("getfacl is required for this manual test: {error}"));
+    assert!(output.status.success(), "getfacl -cp {path:?}");
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// A new file takes the mode a direct creation in the same directory and umask
+/// takes: Linux through `O_TMPFILE`, macOS through the staging file published
+/// with that mode.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_new_file_takes_the_process_umask() {
+    if let Some(umask) = std::env::var_os(CHILD_UMASK) {
+        let umask = u32::from_str_radix(umask.to_str().unwrap(), 8).unwrap();
+        #[cfg(target_os = "macos")]
+        dim_agent_capabilities::workspace_tools::files::install_process_umask();
+        let workspace = private_workspace();
+        let reads = branch();
+        ok(&workspace
+            .call(&reads, "write", json!({"path": "new", "content": "text\n"}))
+            .await);
+        if umask & 0o400 == 0 {
+            assert_eq!(workspace.bytes("new"), b"text\n");
+        }
+        assert_eq!(
+            entry_names(&workspace.root),
+            ["new".to_owned()],
+            "a successful write leaves no staging entry"
+        );
+        let control = workspace.root.join("control");
+        fs::File::create(&control).unwrap();
+        let (mode, control_mode) = (mode_of(&workspace.path("new")), mode_of(&control));
+        println!("new file mode {mode:03o} control {control_mode:03o}");
+        assert_eq!(
+            mode, control_mode,
+            "a new file takes the mode of a direct creation under umask {umask:03o}"
+        );
+        assert_eq!(mode, 0o666 & !umask, "under umask {umask:03o}");
+        return;
+    }
+    for umask in ["022", "002", "300", "700"] {
+        let stdout = run_under_umask("a_new_file_takes_the_process_umask", umask, CHILD_UMASK);
+        let expected = 0o666 & !u32::from_str_radix(umask, 8).unwrap();
+        assert!(
+            stdout.contains(&format!(
+                "new file mode {expected:03o} control {expected:03o}"
+            )),
+            "umask {umask}: {stdout}"
+        );
+    }
+}
+
+/// The umask a child run of
+/// [`a_new_file_takes_the_creation_mode_on_the_named_fallback`] uses, in octal.
+#[cfg(target_os = "linux")]
+const CHILD_FALLBACK_UMASK: &str = "DIM_TEST_NEW_FILE_FALLBACK_UMASK";
+
+/// Restores anonymous staging when it drops, a panic included.
+#[cfg(target_os = "linux")]
+struct ForcedNamedStaging(PathBuf);
+#[cfg(target_os = "linux")]
+impl ForcedNamedStaging {
+    fn new(parent: &Path) -> Self {
+        dim_agent_capabilities::workspace_tools::files::testing::force_named_staging(parent);
+        Self(parent.to_owned())
+    }
+}
+#[cfg(target_os = "linux")]
+impl Drop for ForcedNamedStaging {
+    fn drop(&mut self) {
+        dim_agent_capabilities::workspace_tools::files::testing::allow_anonymous_staging(&self.0);
+    }
+}
+
+/// When `O_TMPFILE` is unavailable, the named fallback publishes the mode a
+/// direct creation takes and leaves no staging entry behind.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_new_file_takes_the_creation_mode_on_the_named_fallback() {
+    if let Some(umask) = std::env::var_os(CHILD_FALLBACK_UMASK) {
+        let umask = u32::from_str_radix(umask.to_str().unwrap(), 8).unwrap();
+        let workspace = private_workspace();
+        let _forced = ForcedNamedStaging::new(&workspace.root);
+        let reads = branch();
+        ok(&workspace
+            .call(&reads, "write", json!({"path": "new", "content": "text\n"}))
+            .await);
+        if umask & 0o400 == 0 {
+            assert_eq!(workspace.bytes("new"), b"text\n");
+        }
+        assert_eq!(
+            entry_names(&workspace.root),
+            ["new".to_owned()],
+            "a successful fallback write leaves no staging entry"
+        );
+        let control = workspace.root.join("control");
+        fs::File::create(&control).unwrap();
+        let (mode, control_mode) = (mode_of(&workspace.path("new")), mode_of(&control));
+        println!("fallback mode {mode:03o} control {control_mode:03o}");
+        assert_eq!(
+            mode, control_mode,
+            "the fallback takes the mode of a direct creation under umask {umask:03o}"
+        );
+        assert_eq!(mode, 0o666 & !umask, "under umask {umask:03o}");
+        return;
+    }
+    for umask in ["022", "002", "300", "700"] {
+        let stdout = run_under_umask(
+            "a_new_file_takes_the_creation_mode_on_the_named_fallback",
+            umask,
+            CHILD_FALLBACK_UMASK,
+        );
+        let expected = 0o666 & !u32::from_str_radix(umask, 8).unwrap();
+        assert!(
+            stdout.contains(&format!(
+                "fallback mode {expected:03o} control {expected:03o}"
+            )),
+            "umask {umask}: {stdout}"
+        );
+    }
+}
+
+/// The umask a child run of [`a_new_file_takes_the_parents_acl_on_macos`] uses.
+#[cfg(target_os = "macos")]
+const CHILD_ACL_UMASK: &str = "DIM_TEST_NEW_FILE_ACL_UMASK";
+
+#[cfg(unix)]
+fn current_group() -> String {
+    let output = std::process::Command::new("id")
+        .arg("-gn")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+#[cfg(target_os = "macos")]
+fn set_acl(path: &Path, acl: &str) {
+    let status = std::process::Command::new("chmod")
+        .arg("+a")
+        .arg(acl)
+        .arg(path)
+        .status()
+        .unwrap();
+    assert!(status.success(), "chmod +a {acl} on {path:?}");
+}
+
+#[cfg(target_os = "macos")]
+fn clear_acl(path: &Path) {
+    let _ = std::process::Command::new("chmod")
+        .arg("-N")
+        .arg(path)
+        .status();
+}
+
+#[cfg(target_os = "macos")]
+fn acl_entries(path: &Path) -> Vec<String> {
+    let output = std::process::Command::new("ls")
+        .arg("-le")
+        .arg(path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "ls -le {path:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|line| line.trim_start().starts_with(|c: char| c.is_ascii_digit()))
+        .map(|line| line.trim().to_owned())
+        .collect()
+}
+
+/// A new file matches a direct creation in the same parent: inherited extended
+/// ACL, mode and group, for every inheritable ACL shape and every umask.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn a_new_file_takes_the_parents_acl_on_macos() {
+    use std::os::unix::fs::MetadataExt;
+    if let Some(umask) = std::env::var_os(CHILD_ACL_UMASK) {
+        let umask = u32::from_str_radix(umask.to_str().unwrap(), 8).unwrap();
+        dim_agent_capabilities::workspace_tools::files::install_process_umask();
+        let group = current_group();
+        let shapes = [
+            (
+                "file-and-directory",
+                format!(
+                    "group:{group} allow list,search,add_file,delete_child,file_inherit,directory_inherit"
+                ),
+            ),
+            (
+                "file-only",
+                format!("group:{group} allow read,write,file_inherit"),
+            ),
+            (
+                "directory-only",
+                format!("group:{group} allow list,search,directory_inherit"),
+            ),
+            (
+                "only-inherit",
+                format!("group:{group} allow read,only_inherit"),
+            ),
+            ("deny", format!("group:{group} deny append,file_inherit")),
+        ];
+        for (shape, acl) in shapes {
+            let workspace = private_workspace();
+            set_acl(&workspace.root, &acl);
+            let reads = branch();
+            ok(&workspace
+                .call(&reads, "write", json!({"path": "new", "content": "text\n"}))
+                .await);
+            let control = workspace.root.join("control");
+            let mut options = fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o666);
+            options.open(&control).unwrap();
+            let new = workspace.path("new");
+            let (mode, control_mode) = (mode_of(&new), mode_of(&control));
+            let (gid, control_gid) = (
+                fs::metadata(&new).unwrap().gid(),
+                fs::metadata(&control).unwrap().gid(),
+            );
+            let (entries, control_entries) = (acl_entries(&new), acl_entries(&control));
+            println!("acl {shape}: mode {mode:03o} control {control_mode:03o}");
+            assert_eq!(mode, control_mode, "{shape} under umask {umask:03o}");
+            assert_eq!(mode, 0o666 & !umask, "{shape} under umask {umask:03o}");
+            assert_eq!(gid, control_gid, "{shape} under umask {umask:03o}");
+            assert_eq!(entries, control_entries, "{shape} under umask {umask:03o}");
+            clear_acl(&new);
+            clear_acl(&control);
+            clear_acl(&workspace.root);
+        }
+        return;
+    }
+    for umask in ["022", "002", "300", "700"] {
+        let stdout = run_under_umask(
+            "a_new_file_takes_the_parents_acl_on_macos",
+            umask,
+            CHILD_ACL_UMASK,
+        );
+        assert_eq!(stdout.matches("acl ").count(), 5, "umask {umask}: {stdout}");
+    }
+}
+
+/// An inheritable ACE that denies delete refuses the staging entry's removal,
+/// so the entry stays behind after a successful publication. A direct creation
+/// under the same parent shows the same protection.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn a_new_file_under_a_deny_delete_acl_keeps_its_staging_entry() {
+    let workspace = private_workspace();
+    let group = current_group();
+    set_acl(
+        &workspace.root,
+        &format!("group:{group} deny delete,file_inherit,only_inherit"),
+    );
+    let reads = branch();
+    ok(&workspace
+        .call(&reads, "write", json!({"path": "new", "content": "text\n"}))
+        .await);
+    assert_eq!(workspace.bytes("new"), b"text\n");
+    let names = entry_names(&workspace.root);
+    let staging = names
+        .iter()
+        .find(|name| name.starts_with(".dim-write-"))
+        .unwrap_or_else(|| panic!("the denied delete leaves the staging entry: {names:?}"));
+    clear_acl(&workspace.path("new"));
+    clear_acl(&workspace.root.join(staging));
+    clear_acl(&workspace.root);
+}
+
+/// A parent with a POSIX default ACL keeps its policy on the new file: the
+/// kernel merges the default ACL during the `O_TMPFILE` creation, exactly as a
+/// direct creation does.
+///
+/// Manual: needs `setfacl` and a filesystem with ACL support. Run with
+/// `cargo test --locked -p dim-agent-capabilities --test capabilities_flow -- --ignored a_new_file_takes_a_posix_default_acl_on_linux`.
+#[cfg(target_os = "linux")]
+#[ignore = "needs setfacl on an ACL-enabled filesystem"]
+#[tokio::test]
+async fn a_new_file_takes_a_posix_default_acl_on_linux() {
+    use std::os::unix::fs::MetadataExt;
+    let workspace = Workspace::new();
+    let group = current_group();
+    setfacl(&workspace.root, &format!("d:g:{group}:rwx"));
+    setfacl(&workspace.root, &format!("g:{group}:rwx"));
+    let reads = branch();
+    ok(&workspace
+        .call(&reads, "write", json!({"path": "new", "content": "text\n"}))
+        .await);
+    let control = workspace.root.join("control");
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o666);
+    options.open(&control).unwrap();
+    let new = workspace.path("new");
+    assert_eq!(mode_of(&new), mode_of(&control));
+    assert_eq!(
+        fs::metadata(&new).unwrap().gid(),
+        fs::metadata(&control).unwrap().gid()
+    );
+    assert_eq!(acl_text(&new), acl_text(&control));
+}
+
+/// The named fallback cannot merge a parent's default ACL into an inode that
+/// already exists, so it keeps the 0600 staging mode rather than widening it.
+///
+/// Manual: needs `setfacl` and a filesystem with ACL support. Run with
+/// `cargo test --locked -p dim-agent-capabilities --test capabilities_flow -- --ignored a_named_staging_new_file_keeps_0600_under_a_posix_default_acl`.
+#[cfg(target_os = "linux")]
+#[ignore = "needs setfacl on an ACL-enabled filesystem"]
+#[tokio::test]
+async fn a_named_staging_new_file_keeps_0600_under_a_posix_default_acl() {
+    let workspace = Workspace::new();
+    let group = current_group();
+    setfacl(&workspace.root, &format!("d:g:{group}:rwx"));
+    setfacl(&workspace.root, &format!("g:{group}:rwx"));
+    let _forced = ForcedNamedStaging::new(&workspace.root);
+    let reads = branch();
+    ok(&workspace
+        .call(&reads, "write", json!({"path": "new", "content": "text\n"}))
+        .await);
+    assert_eq!(
+        mode_of(&workspace.path("new")) & 0o077,
+        0,
+        "the fallback keeps the new file private under a default ACL"
+    );
+}
+
+/// A new file takes the group of a setgid parent even when the caller is not a
+/// member of that group: `O_TMPFILE` lets the kernel assign it, exactly as a
+/// direct creation does.
+///
+/// Manual: as root create the parent, `install -d -o "$(id -u)" -g nogroup -m 2770 /tmp/dim-setgid`,
+/// then `DIM_TEST_SETGID_PARENT=/tmp/dim-setgid cargo test --locked -p dim-agent-capabilities --test capabilities_flow -- --ignored a_new_file_takes_the_group_of_an_out_of_group_setgid_parent`.
+#[cfg(target_os = "linux")]
+#[ignore = "needs a setgid directory owned by a group the caller is not in"]
+#[tokio::test]
+async fn a_new_file_takes_the_group_of_an_out_of_group_setgid_parent() {
+    use std::os::unix::fs::MetadataExt;
+    let parent = PathBuf::from(
+        std::env::var_os("DIM_TEST_SETGID_PARENT")
+            .expect("set DIM_TEST_SETGID_PARENT to the prepared setgid directory"),
+    );
+    let metadata = fs::metadata(&parent).unwrap();
+    assert_ne!(metadata.mode() & 0o2000, 0, "the parent must be setgid");
+    // SAFETY: `getegid` has no preconditions.
+    assert_ne!(
+        metadata.gid(),
+        unsafe { libc::getegid() },
+        "the parent must belong to another group"
+    );
+    let tools = FileTools::new(parent.clone(), parent.clone(), parent.join("outputs"));
+    let reads = branch();
+    let call = ToolCall {
+        id: "manual".into(),
+        name: "write".into(),
+        input: json!({"path": "new", "content": "text\n"})
+            .as_object()
+            .unwrap()
+            .clone(),
+    };
+    ok(&tools
+        .execute(&call, &reads, CancellationToken::new())
+        .await
+        .unwrap());
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o666);
+    options.open(parent.join("control")).unwrap();
+    let new = parent.join("new");
+    let control = parent.join("control");
+    assert_eq!(mode_of(&new), mode_of(&control));
+    assert_eq!(
+        fs::metadata(&new).unwrap().gid(),
+        fs::metadata(&control).unwrap().gid()
+    );
+    fs::remove_file(&new).unwrap();
+    fs::remove_file(&control).unwrap();
+}
+
+/// On a filesystem without `O_TMPFILE` (an overlayfs mount from before Linux
+/// 6.10, NFS, some FUSE mounts) the named fallback still publishes the mode a
+/// direct creation takes and leaves no staging entry.
+///
+/// Manual: point `DIM_TEST_NO_TMPFILE_PARENT` at a directory there, for
+/// example a container mount: `DIM_TEST_NO_TMPFILE_PARENT=/mnt/overlay cargo test --locked -p dim-agent-capabilities --test capabilities_flow -- --ignored a_new_file_falls_back_where_tmpfile_is_unsupported`.
+#[cfg(target_os = "linux")]
+#[ignore = "needs a filesystem where O_TMPFILE is unsupported"]
+#[tokio::test]
+async fn a_new_file_falls_back_where_tmpfile_is_unsupported() {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    let parent = PathBuf::from(
+        std::env::var_os("DIM_TEST_NO_TMPFILE_PARENT")
+            .expect("set DIM_TEST_NO_TMPFILE_PARENT to a directory without O_TMPFILE"),
+    );
+    let directory = fs::File::open(&parent).unwrap();
+    // SAFETY: `directory` is an open directory handle and the path is a live
+    // NUL-terminated string for the call.
+    let fd = unsafe {
+        libc::openat(
+            directory.as_raw_fd(),
+            c".".as_ptr(),
+            libc::O_TMPFILE | libc::O_WRONLY | libc::O_CLOEXEC,
+            0o600,
+        )
+    };
+    if fd >= 0 {
+        // SAFETY: `fd` is non-negative and owned by this call.
+        drop(unsafe { std::fs::File::from_raw_fd(fd) });
+        panic!("the filesystem supports O_TMPFILE, so it cannot exercise the fallback");
+    }
+    let error = std::io::Error::last_os_error().raw_os_error();
+    assert!(
+        matches!(
+            error,
+            Some(libc::EOPNOTSUPP | libc::EISDIR | libc::EINVAL | libc::ENOENT)
+        ),
+        "O_TMPFILE failed with an unexpected error: {error:?}"
+    );
+    let tools = FileTools::new(parent.clone(), parent.clone(), parent.join("outputs"));
+    let reads = branch();
+    let call = ToolCall {
+        id: "manual".into(),
+        name: "write".into(),
+        input: json!({"path": "new", "content": "text\n"})
+            .as_object()
+            .unwrap()
+            .clone(),
+    };
+    ok(&tools
+        .execute(&call, &reads, CancellationToken::new())
+        .await
+        .unwrap());
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o666);
+    options.open(parent.join("control")).unwrap();
+    let new = parent.join("new");
+    let control = parent.join("control");
+    assert_eq!(mode_of(&new), mode_of(&control));
+    assert!(
+        entry_names(&parent)
+            .iter()
+            .all(|name| !name.starts_with(".dim-write-")),
+        "the fallback leaves no staging entry"
+    );
+    fs::remove_file(&new).unwrap();
+    fs::remove_file(&control).unwrap();
+}
+
 #[test]
 fn definitions_match_the_ts_tool_contracts() {
     let definitions = FileTools::definitions();

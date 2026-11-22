@@ -31,6 +31,47 @@ use tokio_util::sync::CancellationToken;
 const TOOL_NAMES: [&str; 5] = ["read", "write", "edit", "glob", "grep"];
 const CANCELLED: &str = "Tool execution cancelled.";
 
+/// The process umask as the last [`install_process_umask`] read it.
+#[cfg(target_os = "macos")]
+static PROCESS_UMASK: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+
+/// Records the process umask for the new files `write` creates.
+///
+/// macOS has no `getumask` on the supported baseline, so each product entry
+/// calls this once from `main`, before its runtime starts any thread: the
+/// read-modify-write below touches one process-wide value. A test or library
+/// caller that does not call it keeps the 0600 staging mode for new files. The
+/// first call wins; Linux reads `/proc/self/status` instead.
+#[cfg(target_os = "macos")]
+pub fn install_process_umask() {
+    // SAFETY: `umask` has no preconditions; the value is restored immediately.
+    let umask = unsafe {
+        let current = libc::umask(0o077);
+        libc::umask(current);
+        current
+    };
+    let _ = PROCESS_UMASK.set(umask.into());
+}
+
+/// The umask a direct creation would apply. Linux reads it from the process
+/// status; macOS reports the value captured at startup. `None` means no value
+/// is available, and a new file keeps its 0600 staging mode.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn creation_umask() -> Option<u32> {
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read_to_string("/proc/self/status")
+            .ok()?
+            .lines()
+            .find_map(|line| line.strip_prefix("Umask:"))
+            .and_then(|value| u32::from_str_radix(value.trim(), 8).ok())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        PROCESS_UMASK.get().copied()
+    }
+}
+
 /// Session-level executor of the file tools. Bindings belong to the calling
 /// branch and are passed per call. Product Sessions share a process-owned
 /// coordinator; standalone callers may use an isolated coordinator.
@@ -849,6 +890,184 @@ impl Target {
         }
     }
 
+    /// The target's parent directory: the held handle when bounded, or the
+    /// parent path opened for the call otherwise.
+    #[cfg(target_os = "linux")]
+    fn parent_directory(&self) -> Result<std::fs::File, TargetError> {
+        match self {
+            Self::Path(path) => {
+                let parent = path.parent().ok_or_else(|| {
+                    TargetError::Io(std::io::Error::from(std::io::ErrorKind::InvalidInput))
+                })?;
+                let mut options = std::fs::OpenOptions::new();
+                options.read(true);
+                std::os::unix::fs::OpenOptionsExt::custom_flags(&mut options, libc::O_DIRECTORY);
+                options.open(parent).map_err(TargetError::Io)
+            }
+            Self::Handle(parent) => parent.dir.try_clone().map_err(TargetError::Io),
+        }
+    }
+
+    /// The target's final name inside its parent.
+    #[cfg(target_os = "linux")]
+    fn name(&self) -> Result<&std::ffi::OsStr, TargetError> {
+        match self {
+            Self::Path(path) => path.file_name().ok_or_else(|| {
+                TargetError::Io(std::io::Error::from(std::io::ErrorKind::InvalidInput))
+            }),
+            Self::Handle(parent) => Ok(&parent.name),
+        }
+    }
+
+    /// Creates an anonymous `O_TMPFILE` inode in the target's parent for a new
+    /// file, or `None` when the filesystem or the process cannot publish one
+    /// through `/proc/self/fd`: the caller then stages a named sibling. `0o666`
+    /// lets the kernel settle the mode, the parent's POSIX default ACL and the
+    /// `setgid` group exactly as a direct creation, with no directory entry
+    /// until publication.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn create_anonymous_staged(&self) -> Result<Option<std::fs::File>, TargetError> {
+        use std::os::fd::{AsRawFd, FromRawFd};
+        #[cfg(any(test, feature = "testing"))]
+        if testing::named_staging_forced(self.path()) {
+            return Ok(None);
+        }
+        if !Path::new("/proc/self/fd").is_dir() {
+            return Ok(None);
+        }
+        let parent = self.parent_directory()?;
+        // SAFETY: `parent` is an open directory handle and the path is a live
+        // NUL-terminated string for the call.
+        let fd = unsafe {
+            libc::openat(
+                parent.as_raw_fd(),
+                c".".as_ptr(),
+                libc::O_TMPFILE | libc::O_WRONLY | libc::O_CLOEXEC,
+                0o666,
+            )
+        };
+        if fd < 0 {
+            let error = std::io::Error::last_os_error();
+            return match error.raw_os_error() {
+                Some(libc::EOPNOTSUPP | libc::EISDIR | libc::EINVAL | libc::ENOENT) => Ok(None),
+                _ => Err(TargetError::Io(error)),
+            };
+        }
+        // SAFETY: `fd` is non-negative (checked above) and was just returned
+        // by `openat`, so this takes ownership of a fresh descriptor no other
+        // owner holds.
+        Ok(Some(unsafe { std::fs::File::from_raw_fd(fd) }))
+    }
+
+    /// Applies the umask strip a pre-4.19 kernel omitted in `vfs_tmpfile` on a
+    /// filesystem without POSIX ACL support (`ac6800e279a2`). The parent's
+    /// `system.posix_acl_default` reports `EOPNOTSUPP` exactly when the
+    /// filesystem has no ACL support; the kernel then left the mode at `0o666`.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn strip_tmpfile_umask(&self, file: &std::fs::File) -> Result<(), TargetError> {
+        use std::os::fd::AsRawFd;
+        let parent = self.parent_directory()?;
+        // SAFETY: `parent` is an open directory handle and the name is a live
+        // NUL-terminated string for the call.
+        let default_acl = unsafe {
+            libc::fgetxattr(
+                parent.as_raw_fd(),
+                c"system.posix_acl_default".as_ptr(),
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if default_acl >= 0
+            || std::io::Error::last_os_error().raw_os_error() != Some(libc::EOPNOTSUPP)
+        {
+            return Ok(());
+        }
+        let Some(mode) = creation_umask().map(|umask| 0o666 & !umask) else {
+            return Ok(());
+        };
+        // SAFETY: `file` is an open descriptor owned for the call.
+        if unsafe { libc::fchmod(file.as_raw_fd(), mode as libc::mode_t) } != 0 {
+            return Err(TargetError::Io(std::io::Error::last_os_error()));
+        }
+        Ok(())
+    }
+
+    /// Publishes an anonymous staged inode under the target's name without
+    /// replacing an existing entry, through the standard unprivileged
+    /// `linkat("/proc/self/fd/<fd>", AT_SYMLINK_FOLLOW)` form. `EEXIST` leaves
+    /// the concurrent entry in place for the caller's usual refusal.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn publish_anonymous(&self, file: &std::fs::File) -> Result<(), TargetError> {
+        use std::os::fd::AsRawFd;
+        let parent = self.parent_directory()?;
+        let name = c_name(self.name()?)?;
+        let source = std::ffi::CString::new(format!("/proc/self/fd/{}", file.as_raw_fd()))
+            .map_err(|_| TargetError::Io(std::io::Error::other("an anonymous file has an fd")))?;
+        // SAFETY: both names are live NUL-terminated strings, `parent` is an
+        // open directory handle and `file` owns its descriptor for the call.
+        let result = unsafe {
+            libc::linkat(
+                libc::AT_FDCWD,
+                source.as_ptr(),
+                parent.as_raw_fd(),
+                name.as_ptr(),
+                libc::AT_SYMLINK_FOLLOW,
+            )
+        };
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(TargetError::Io(std::io::Error::last_os_error()))
+        }
+    }
+
+    /// Gives a named staged new file the mode a direct creation would have,
+    /// immediately before publication. `None` keeps the 0600 staging mode: on
+    /// Linux when the parent carries a POSIX default ACL, which an existing
+    /// inode cannot merge, and on macOS when no process umask was recorded.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(crate) fn prepare_new_file(&self, file: &std::fs::File) -> Result<(), TargetError> {
+        #[cfg(target_os = "linux")]
+        if self.parent_has_default_acl()? {
+            return Ok(());
+        }
+        let Some(mode) = creation_umask().map(|umask| 0o666 & !umask) else {
+            return Ok(());
+        };
+        use std::os::fd::AsRawFd;
+        // SAFETY: `file` is an open descriptor owned for the call.
+        if unsafe { libc::fchmod(file.as_raw_fd(), mode as libc::mode_t) } != 0 {
+            return Err(TargetError::Io(std::io::Error::last_os_error()));
+        }
+        Ok(())
+    }
+
+    /// Whether the parent directory carries a POSIX default ACL. An unreadable
+    /// answer counts as yes, keeping the staged file at 0600 rather than risking
+    /// a wider mode than the directory's policy.
+    #[cfg(target_os = "linux")]
+    fn parent_has_default_acl(&self) -> Result<bool, TargetError> {
+        use std::os::fd::AsRawFd;
+        let parent = self.parent_directory()?;
+        // SAFETY: `parent` is an open directory handle and the name is a live
+        // NUL-terminated string for the call.
+        let result = unsafe {
+            libc::fgetxattr(
+                parent.as_raw_fd(),
+                c"system.posix_acl_default".as_ptr(),
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if result >= 0 {
+            return Ok(true);
+        }
+        Ok(!matches!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ENODATA | libc::EOPNOTSUPP)
+        ))
+    }
+
     /// The target of a read: with a boundary, the parent walk must already
     /// exist; a missing component reads as "not found".
     pub(crate) fn for_read(path: &Path, bounded: bool) -> Result<Self, TargetError> {
@@ -1055,6 +1274,38 @@ impl Target {
             #[cfg(unix)]
             Self::Handle(parent) => parent.final_regular(),
         }
+    }
+}
+
+/// Test-only controls over how a new file is staged.
+#[cfg(all(target_os = "linux", any(test, feature = "testing")))]
+pub mod testing {
+    use std::{
+        path::{Path, PathBuf},
+        sync::{LazyLock, Mutex},
+    };
+
+    static NAMED_STAGING: LazyLock<Mutex<Vec<PathBuf>>> = LazyLock::new(Mutex::default);
+
+    /// Stages new files under `parent` as named siblings, the fallback a
+    /// filesystem without `O_TMPFILE` takes. [`allow_anonymous_staging`]
+    /// releases the override.
+    pub fn force_named_staging(parent: &Path) {
+        NAMED_STAGING.lock().unwrap().push(parent.to_owned());
+    }
+
+    /// Releases [`force_named_staging`] for `parent`.
+    pub fn allow_anonymous_staging(parent: &Path) {
+        NAMED_STAGING
+            .lock()
+            .unwrap()
+            .retain(|forced| forced != parent);
+    }
+
+    pub(crate) fn named_staging_forced(path: &Path) -> bool {
+        let forced = NAMED_STAGING.lock().unwrap();
+        path.parent()
+            .is_some_and(|parent| forced.iter().any(|entry| entry == parent))
     }
 }
 
@@ -1293,6 +1544,161 @@ mod mutation_tests {
                 std::fs::remove_dir_all(root).unwrap();
             }
         }
+    }
+
+    /// Restores anonymous staging when it drops, a panic included.
+    #[cfg(target_os = "linux")]
+    struct ForcedNamedStaging(PathBuf);
+    #[cfg(target_os = "linux")]
+    impl ForcedNamedStaging {
+        fn new(parent: &Path) -> Self {
+            testing::force_named_staging(parent);
+            Self(parent.to_owned())
+        }
+    }
+    #[cfg(target_os = "linux")]
+    impl Drop for ForcedNamedStaging {
+        fn drop(&mut self) {
+            testing::allow_anonymous_staging(&self.0);
+        }
+    }
+
+    /// A new file staged in a named sibling (the fallback a filesystem without
+    /// `O_TMPFILE` takes) stays 0600 while it is prepared and takes the
+    /// creation mode when it is published.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_named_staging_new_file_is_private_until_publication() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("dim-new-file-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        let mut tools = FileTools::new(root.clone(), root.clone(), root.join("out"));
+        let prepared = root.clone();
+        tools.before_commit = Some(Arc::new(move |path| {
+            let staged: Vec<_> = std::fs::read_dir(&prepared)
+                .unwrap()
+                .map(Result::unwrap)
+                .filter(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".dim-write-")
+                })
+                .collect();
+            assert_eq!(staged.len(), 1, "the fallback stages one named sibling");
+            assert_eq!(
+                staged[0].metadata().unwrap().permissions().mode() & 0o777,
+                0o600,
+                "the staged new file stays private"
+            );
+            assert!(!path.exists(), "preparation does not create the target");
+        }));
+        let _forced = ForcedNamedStaging::new(&root);
+        let result = call(
+            &tools,
+            &branch(),
+            "write",
+            json!({"path": "new", "content": "text\n"}),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.is_error, None);
+        assert_eq!(std::fs::read(root.join("new")).unwrap(), b"text\n");
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o666);
+        options.open(root.join("control")).unwrap();
+        let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode(&root.join("new")),
+            mode(&root.join("control")),
+            "the fallback publishes the creation mode"
+        );
+        let leftovers: Vec<_> = std::fs::read_dir(&root)
+            .unwrap()
+            .map(Result::unwrap)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".dim-write-")
+            })
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "a successful fallback write leaves no staging entry: {leftovers:?}"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A cancelled new file staged in a named sibling leaves no target and no
+    /// staging entry.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_cancelled_named_staging_new_file_leaves_no_entry() {
+        let root = std::env::temp_dir().join(format!("dim-new-file-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        let mut tools = FileTools::new(root.clone(), root.clone(), root.join("out"));
+        let cancel = CancellationToken::new();
+        let cancellation = cancel.clone();
+        tools.before_commit = Some(Arc::new(move |_| cancellation.cancel()));
+        let _forced = ForcedNamedStaging::new(&root);
+        let result = call(
+            &tools,
+            &branch(),
+            "write",
+            json!({"path": "new", "content": "text\n"}),
+            cancel,
+        )
+        .await;
+        assert!(matches!(result, Err(HostError::Cancelled(_))));
+        assert!(!root.join("new").exists());
+        assert_eq!(
+            std::fs::read_dir(&root).unwrap().count(),
+            0,
+            "cancellation removes the staging entry"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// An `O_TMPFILE` new file has no directory entry while it is prepared, and
+    /// its publication does not replace a name created in that window.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn an_anonymous_new_file_has_no_entry_and_does_not_overwrite() {
+        let root = std::env::temp_dir().join(format!("dim-new-file-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        let mut tools = FileTools::new(root.clone(), root.clone(), root.join("out"));
+        let prepared = root.clone();
+        tools.before_commit = Some(Arc::new(move |path| {
+            assert_eq!(
+                std::fs::read_dir(&prepared).unwrap().count(),
+                0,
+                "an O_TMPFILE inode has no directory entry during preparation"
+            );
+            std::fs::write(path, b"external").unwrap();
+        }));
+        let result = call(
+            &tools,
+            &branch(),
+            "write",
+            json!({"path": "new", "content": "text\n"}),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.is_error, Some(true));
+        assert_eq!(
+            result.structured_content.unwrap()["code"],
+            "text_binding_required"
+        );
+        assert_eq!(std::fs::read(root.join("new")).unwrap(), b"external");
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(unix)]

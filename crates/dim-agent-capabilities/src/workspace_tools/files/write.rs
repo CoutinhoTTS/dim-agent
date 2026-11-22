@@ -284,6 +284,27 @@ fn validated_bytes(
     }
 }
 
+/// A named staged sibling. Its drop removes the name only while it still
+/// resolves to this file, so it never deletes an entry another writer created.
+struct Temporary<'a> {
+    target: &'a Target,
+    name: std::ffi::OsString,
+    file: std::fs::File,
+}
+impl Drop for Temporary<'_> {
+    fn drop(&mut self) {
+        if self.target.staged_owned(&self.name, &self.file) {
+            #[cfg(windows)]
+            if let Ok(metadata) = self.file.metadata() {
+                let mut permissions = metadata.permissions();
+                permissions.set_readonly(false);
+                let _ = self.file.set_permissions(permissions);
+            }
+            self.target.remove_staged(&self.name);
+        }
+    }
+}
+
 /// Stages complete bytes before touching the destination. Verification is not
 /// portable CAS: uncoordinated path/parent renames or metadata changes can still
 /// race the final syscall. Windows installs the owned handle, not a temp name.
@@ -302,6 +323,17 @@ pub(super) fn write_target(
     cancel: &CancellationToken,
     #[cfg(test)] hook: Option<super::CommitHook>,
 ) -> Result<Result<(), ToolResult>, Cancelled> {
+    #[cfg(unix)]
+    if original.is_none() {
+        return write_new_file(
+            target,
+            bytes,
+            display,
+            cancel,
+            #[cfg(test)]
+            hook,
+        );
+    }
     let path = target.path();
     if let Some(original) = original {
         let writable = match target.open_writable() {
@@ -327,24 +359,6 @@ pub(super) fn write_target(
             display,
             false,
         )));
-    }
-    struct Temporary<'a> {
-        target: &'a Target,
-        name: std::ffi::OsString,
-        file: std::fs::File,
-    }
-    impl Drop for Temporary<'_> {
-        fn drop(&mut self) {
-            if self.target.staged_owned(&self.name, &self.file) {
-                #[cfg(windows)]
-                if let Ok(metadata) = self.file.metadata() {
-                    let mut permissions = metadata.permissions();
-                    permissions.set_readonly(false);
-                    let _ = self.file.set_permissions(permissions);
-                }
-                self.target.remove_staged(&self.name);
-            }
-        }
     }
     let staged = std::ffi::OsString::from(format!(".dim-write-{}", uuid::Uuid::new_v4()));
     let file = match target.create_staged(&staged) {
@@ -446,6 +460,163 @@ pub(super) fn write_target(
     }
     drop(temporary);
     #[cfg(unix)]
+    if let Err(error) = target.sync_parent() {
+        return Ok(Err(match error {
+            TargetError::Refused => refused(path),
+            TargetError::Io(error) => write_failure(&error, display, true),
+        }));
+    }
+    Ok(Ok(()))
+}
+
+/// Publishes a new file. Linux stages it as an unnamed `O_TMPFILE` inode and
+/// links it into place, so preparation has no directory entry; the fallback,
+/// and every other Unix platform, stages a named 0600 sibling and gives it the
+/// creation mode immediately before publication.
+#[cfg(unix)]
+fn write_new_file(
+    target: &Target,
+    bytes: &[u8],
+    display: &str,
+    cancel: &CancellationToken,
+    #[cfg(test)] hook: Option<super::CommitHook>,
+) -> Result<Result<(), ToolResult>, Cancelled> {
+    #[cfg(target_os = "linux")]
+    match target.create_anonymous_staged() {
+        Ok(Some(file)) => {
+            return publish_anonymous_new(
+                target,
+                file,
+                bytes,
+                display,
+                cancel,
+                #[cfg(test)]
+                hook,
+            );
+        }
+        Ok(None) => {}
+        Err(TargetError::Refused) => return Ok(Err(refused(target.path()))),
+        Err(TargetError::Io(error)) => return Ok(Err(write_failure(&error, display, false))),
+    }
+    publish_named_new(
+        target,
+        bytes,
+        display,
+        cancel,
+        #[cfg(test)]
+        hook,
+    )
+}
+
+/// Publishes a new file from an anonymous inode: write, sync, then link the
+/// inode under the target's name. The link never replaces an entry, and the
+/// inode disappears with its descriptor if the call fails or is cancelled.
+#[cfg(target_os = "linux")]
+fn publish_anonymous_new(
+    target: &Target,
+    mut file: std::fs::File,
+    bytes: &[u8],
+    display: &str,
+    cancel: &CancellationToken,
+    #[cfg(test)] hook: Option<super::CommitHook>,
+) -> Result<Result<(), ToolResult>, Cancelled> {
+    let path = target.path();
+    if let Err(error) = file.write_all(bytes).and_then(|()| file.sync_all()) {
+        return Ok(Err(write_failure(&error, display, false)));
+    }
+    #[cfg(test)]
+    if let Some(hook) = hook {
+        hook(path);
+    }
+    Cancelled::check(cancel)?;
+    if let Err(error) = target.strip_tmpfile_umask(&file) {
+        return Ok(Err(match error {
+            TargetError::Refused => refused(path),
+            TargetError::Io(error) => write_failure(&error, display, false),
+        }));
+    }
+    if let Err(error) = target.publish_anonymous(&file) {
+        return Ok(Err(match error {
+            TargetError::Refused => refused(path),
+            TargetError::Io(error) if error.kind() == ErrorKind::AlreadyExists => failed(
+                "Read the existing file before overwriting it.",
+                json!({"code": "text_binding_required"}),
+            ),
+            TargetError::Io(error) => write_failure(&error, display, false),
+        }));
+    }
+    sync_parent(target, path, display)
+}
+
+/// Publishes a new file from a named 0600 sibling, the form every platform
+/// shares when no anonymous inode is available.
+#[cfg(unix)]
+fn publish_named_new(
+    target: &Target,
+    bytes: &[u8],
+    display: &str,
+    cancel: &CancellationToken,
+    #[cfg(test)] hook: Option<super::CommitHook>,
+) -> Result<Result<(), ToolResult>, Cancelled> {
+    let path = target.path();
+    let staged = std::ffi::OsString::from(format!(".dim-write-{}", uuid::Uuid::new_v4()));
+    let file = match target.create_staged(&staged) {
+        Ok(file) => file,
+        Err(TargetError::Refused) => return Ok(Err(refused(path))),
+        Err(TargetError::Io(error)) => return Ok(Err(write_failure(&error, display, false))),
+    };
+    let mut temporary = Temporary {
+        target,
+        name: staged.clone(),
+        file,
+    };
+    if let Err(error) = temporary
+        .file
+        .write_all(bytes)
+        .and_then(|()| temporary.file.sync_all())
+    {
+        return Ok(Err(write_failure(&error, display, false)));
+    }
+    #[cfg(test)]
+    if let Some(hook) = hook {
+        hook(path);
+    }
+    Cancelled::check(cancel)?;
+    if !target.staged_owned(&staged, &temporary.file) {
+        return Ok(Err(failed(
+            "Staged file was replaced during preparation.",
+            json!({"code": "write_error"}),
+        )));
+    }
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if let Err(error) = target.prepare_new_file(&temporary.file) {
+        return Ok(Err(match error {
+            TargetError::Refused => refused(path),
+            TargetError::Io(error) => write_failure(&error, display, false),
+        }));
+    }
+    if let Err(error) = target.install(&staged, &temporary.file, false) {
+        return Ok(Err(match error {
+            TargetError::Refused => refused(path),
+            TargetError::Io(error) if error.kind() == ErrorKind::AlreadyExists => failed(
+                "Read the existing file before overwriting it.",
+                json!({"code": "text_binding_required"}),
+            ),
+            TargetError::Io(error) => write_failure(&error, display, false),
+        }));
+    }
+    drop(temporary);
+    sync_parent(target, path, display)
+}
+
+/// Flushes the published directory entry. A failure here warns that the file
+/// may have been partially written, as the replacement path does.
+#[cfg(unix)]
+fn sync_parent(
+    target: &Target,
+    path: &Path,
+    display: &str,
+) -> Result<Result<(), ToolResult>, Cancelled> {
     if let Err(error) = target.sync_parent() {
         return Ok(Err(match error {
             TargetError::Refused => refused(path),
