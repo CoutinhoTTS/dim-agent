@@ -4853,16 +4853,86 @@ impl BranchLine {
             _ => String::new(),
         };
         let idle_notice = self.view.lock().unwrap().idle_notice;
-        Ok(Some(status_note(
-            &self.own,
+        Ok(Some(self.status_note(
             parent,
             &source,
             &purpose,
             idle_notice,
             is_default,
             other,
-            &self.config,
         )))
+    }
+    /// The status note a move writes on this line: the line's birth identity
+    /// under the same key, restated byte for byte, then the sentences the move
+    /// changes and the guidance block a candidate replaces (design §5,
+    /// §12.1). A line the user opened and a tool line get their own rule.
+    fn status_note(
+        &self,
+        parent: &str,
+        source: &BranchSource,
+        purpose: &str,
+        idle_notice: IdleNotice,
+        default: bool,
+        other: &str,
+    ) -> String {
+        let line = self.own.as_str();
+        let (kind, birth) = match source {
+            BranchSource::Tool { .. } => ("tool", tool_line_body(line, parent, purpose)),
+            _ => ("user", user_line_body(line, parent)),
+        };
+        let (change, block) = if default {
+            match kind {
+                "tool" => (
+                    format!(
+                        "This line is now the session's default branch, switched from line {other}. While this block is your latest one: answer the user here; you can open lines with create; you send no automatic idle notice to {parent}; you cannot call end on yourself. Line {other} stays open and keeps the lines it opened."
+                    ),
+                    self.config.default_note.as_deref().unwrap_or(DEFAULT_NOTE),
+                ),
+                _ => (
+                    format!(
+                        "The user has now made this line the session's default branch, switched from line {other}. While this block is your latest one: answer the user here; you can open lines with create; you cannot call end on yourself; the user ends this line. Line {other} stays open and keeps the lines it opened."
+                    ),
+                    self.config
+                        .user_default_note
+                        .as_deref()
+                        .unwrap_or(USER_DEFAULT_NOTE),
+                ),
+            }
+        } else if kind == "tool" {
+            (
+                format!(
+                    "The session's default branch moved from this line to line {other}. This line stays open, reports to {parent} as before and keeps coordinating the lines it opened; it can no longer open lines with create, and the rest of the rules above hold again. {CANNOT_END_TEXT} If end is refused when your purpose is done, message {parent} with what you found, did, changed and left undone and keep working."
+                ),
+                self.config
+                    .former_default_note
+                    .as_deref()
+                    .unwrap_or(FORMER_DEFAULT_NOTE),
+            )
+        } else {
+            (
+                format!(
+                    "The session's default branch moved from this line to line {other}. This line stays open and keeps coordinating the lines it opened; it can no longer open lines with create, and the rest of the rules above hold again. {CANNOT_END_TEXT}"
+                ),
+                self.config
+                    .former_default_note
+                    .as_deref()
+                    .unwrap_or(FORMER_DEFAULT_NOTE),
+            )
+        };
+        let body = format!(
+            "{birth}\n\n{change}\n\nHow you work here:\n{}",
+            block.replace("{parent}", parent).replace("{other}", other)
+        );
+        let mut attrs = vec![
+            ("branch", line),
+            ("parent", parent),
+            ("source", kind),
+            ("default", if default { "true" } else { "false" }),
+        ];
+        if idle_notice == IdleNotice::None {
+            attrs.push((QUIET_IDLE_ATTRIBUTE, "none"));
+        }
+        crate::context_block::element("dim-branch-line", &attrs, &body)
     }
     /// Records `block` as this line's latest `branch:line` block and answers
     /// the role it states, where a missing `default` attribute means not
@@ -5931,79 +6001,6 @@ fn user_line_body(line: &str, parent: &str) -> String {
     format!(
         "You are line {line} of this session, opened by the user from line {parent} at this point of its history. You are the same agent as {parent}: everything above is your own history, and you continue from here on your own line, in parallel with {parent}. You can read {parent}'s work after this point. Unless the user makes this line the default branch, you cannot call end on yourself. Messages above that were addressed to {parent} are {parent}'s, not yours. The message after this one is from the user for this line."
     )
-}
-
-/// The status note a move writes on a conversation line: the line's birth
-/// identity under the same key, restated byte for byte, then the sentences the
-/// move changes and the guidance block a candidate replaces (design §5,
-/// §12.1). A line the user opened and a tool line get their own rule.
-fn status_note(
-    line: &str,
-    parent: &str,
-    source: &BranchSource,
-    purpose: &str,
-    idle_notice: IdleNotice,
-    default: bool,
-    other: &str,
-    config: &BranchToolConfig,
-) -> String {
-    let (kind, birth) = match source {
-        BranchSource::Tool { .. } => ("tool", tool_line_body(line, parent, purpose)),
-        _ => ("user", user_line_body(line, parent)),
-    };
-    let (change, block) = if default {
-        match kind {
-            "tool" => (
-                format!(
-                    "This line is now the session's default branch, switched from line {other}. While this block is your latest one: answer the user here; you can open lines with create; you send no automatic idle notice to {parent}; you cannot call end on yourself. Line {other} stays open and keeps the lines it opened."
-                ),
-                config.default_note.as_deref().unwrap_or(DEFAULT_NOTE),
-            ),
-            _ => (
-                format!(
-                    "The user has now made this line the session's default branch, switched from line {other}. While this block is your latest one: answer the user here; you can open lines with create; you cannot call end on yourself; the user ends this line. Line {other} stays open and keeps the lines it opened."
-                ),
-                config
-                    .user_default_note
-                    .as_deref()
-                    .unwrap_or(USER_DEFAULT_NOTE),
-            ),
-        }
-    } else if kind == "tool" {
-        (
-            format!(
-                "The session's default branch moved from this line to line {other}. This line stays open, reports to {parent} as before and keeps coordinating the lines it opened; it can no longer open lines with create, and the rest of the rules above hold again. {CANNOT_END_TEXT} If end is refused when your purpose is done, message {parent} with what you found, did, changed and left undone and keep working."
-            ),
-            config
-                .former_default_note
-                .as_deref()
-                .unwrap_or(FORMER_DEFAULT_NOTE),
-        )
-    } else {
-        (
-            format!(
-                "The session's default branch moved from this line to line {other}. This line stays open and keeps coordinating the lines it opened; it can no longer open lines with create, and the rest of the rules above hold again. {CANNOT_END_TEXT}"
-            ),
-            config
-                .former_default_note
-                .as_deref()
-                .unwrap_or(FORMER_DEFAULT_NOTE),
-        )
-    };
-    let body = format!(
-        "{birth}\n\n{change}\n\nHow you work here:\n{}",
-        block.replace("{parent}", parent).replace("{other}", other)
-    );
-    let mut attrs = vec![
-        ("branch", line),
-        ("parent", parent),
-        ("source", kind),
-        ("default", if default { "true" } else { "false" }),
-    ];
-    if idle_notice == IdleNotice::None {
-        attrs.push((QUIET_IDLE_ATTRIBUTE, "none"));
-    }
-    crate::context_block::element("dim-branch-line", &attrs, &body)
 }
 
 /// The `branch` tool's refusal of `create` on a line that is neither the root
