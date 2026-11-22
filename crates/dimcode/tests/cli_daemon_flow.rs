@@ -1730,6 +1730,49 @@ fn exec_leaves_no_partial_text_on_stdout_after_an_interrupt() {
     );
 }
 
+/// A one-shot `--prompt` run is not `exec`, so an interruption that finds no
+/// text open keeps the blank line it has always written to stdout.
+#[test]
+fn a_one_shot_prompt_interrupt_keeps_its_blank_stdout_line() {
+    let home = Home::new();
+    let (submitted, wait_submitted) = std::sync::mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        wire.start(false);
+        let submit = wire.read("session.submit");
+        wire.reply(&submit, json!({"event":{}}));
+        let idle = wire.read("session.idle");
+        submitted.send(()).unwrap();
+        let stop = wire.read("session.stop");
+        wire.end(json!({"turn_id":"turn","status":"cancelled","reason":"interrupted"}));
+        wire.reply(&stop, json!({"sequence":30}));
+        wire.reply(&idle, json!({"sequence":30}));
+        wire.detach();
+    });
+    let child = home
+        .command()
+        .args(["--prompt", "Which port does the service use?"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    wait_submitted.recv_timeout(PATIENCE).unwrap();
+    assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
+    let output = wait(child);
+    daemon.join().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(130),
+        "stdout {stdout:?} stderr {stderr:?}"
+    );
+    assert_eq!(
+        stdout, "\n",
+        "an interruption with no text open keeps the run's blank stdout line; stderr was {stderr:?}"
+    );
+}
+
 #[test]
 fn exec_scales_a_large_photo_and_reports_both_sizes() {
     let home = Home::new();

@@ -123,6 +123,18 @@ impl Display {
         io::stdout().flush()?;
         Ok(())
     }
+    /// Ends the line an interruption leaves open. `exec` releases its held text
+    /// to stderr; another mode writes the newline it has always written, even
+    /// when no text is open.
+    pub fn finish_interrupt(&mut self) -> Result<()> {
+        if self.final_reply_only {
+            return self.finish_text();
+        }
+        if !self.json {
+            println!();
+        }
+        Ok(())
+    }
     fn show_text(&mut self, text: &str) -> Result<()> {
         if !self.text_open && self.interactive {
             println!("Assistant:");

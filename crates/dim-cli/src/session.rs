@@ -899,7 +899,7 @@ async fn wait_turn(
             tokio::select! {
                 _ = interrupts.recv() => {
                     if settled.is_some() && stop.is_none() && questions.asking() {
-                        display.finish_text()?;
+                        display.finish_interrupt()?;
                         questions.interrupt(client, session_id).await?;
                         code = 130;
                         continue;
@@ -908,7 +908,7 @@ async fn wait_turn(
                         display.record("[stopping] Still waiting for resource settlement")?;
                         continue;
                     }
-                    display.finish_text()?;
+                    display.finish_interrupt()?;
                     if let Some(run) = shell
                         .as_mut()
                         .filter(|run| !prompted && !questions.asking() && !run.stopping)
