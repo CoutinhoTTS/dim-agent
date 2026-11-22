@@ -137,33 +137,38 @@ impl Projection {
                     .unwrap_or_default()
                     .trim()
                     .to_owned();
-                if !self.lines.iter().any(|line| line.id == data.branch) {
-                    let sequence = match data.at {
-                        BranchCreateAt::Sequence { sequence } => sequence,
-                        BranchCreateAt::Create {} => event.sequence,
-                    };
-                    let inherited = self
-                        .lines
+                let sequence = match data.at {
+                    BranchCreateAt::Sequence { sequence } => sequence,
+                    BranchCreateAt::Create {} => event.sequence,
+                };
+                let inherited = self
+                    .lines
+                    .iter()
+                    .find(|line| line.id == parent)
+                    .and_then(|line| line.cut)
+                    .map_or(0, |cut| cut.messages);
+                let own = self.messages.get(parent).map_or(0, |messages| {
+                    messages
                         .iter()
-                        .find(|line| line.id == parent)
-                        .and_then(|line| line.cut)
-                        .map_or(0, |cut| cut.messages);
-                    let own = self.messages.get(parent).map_or(0, |messages| {
-                        messages
-                            .iter()
-                            .take_while(|(_, at)| *at <= sequence)
-                            .count()
-                    });
+                        .take_while(|(_, at)| *at <= sequence)
+                        .count()
+                });
+                let cut = LineCut {
+                    sequence,
+                    messages: inherited + own,
+                };
+                if let Some(line) = self.lines.iter_mut().find(|line| line.id == data.branch) {
+                    // The directory lists a line before its parent's history
+                    // arrives; the creation fold supplies the count then.
+                    line.cut = line.cut.or(Some(cut));
+                } else {
                     self.lines.push(LineView {
                         id: data.branch.clone(),
                         parent: Some(parent.to_owned()),
                         purpose,
                         state: LineState::Waiting,
                         running: None,
-                        cut: Some(LineCut {
-                            sequence,
-                            messages: inherited + own,
-                        }),
+                        cut: Some(cut),
                     });
                 }
             }
@@ -1358,15 +1363,17 @@ impl Projection {
                 LineState::Waiting
             },
             running: None,
-            cut: entry
-                .branch_point
-                .zip(entry.cut_messages)
-                .map(|(sequence, messages)| LineCut {
+            // The server does not calculate the count; the creation fold owns
+            // it, and a row with no count of its own must not drop it.
+            cut: match entry.cut_messages {
+                Some(messages) => entry.branch_point.map(|sequence| LineCut {
                     sequence,
                     messages: messages
                         .try_into()
                         .expect("message count fits the client address space"),
                 }),
+                None => previous.and_then(|index| self.lines[index].cut),
+            },
         };
         if let Some(index) = previous {
             self.lines[index] = view;
@@ -2755,6 +2762,97 @@ mod tests {
             "name": name,
             "data": data,
         })
+    }
+
+    fn user_says(sequence: u64, text: &str) -> serde_json::Value {
+        serde_json::json!({
+            "id": format!("in-{sequence}"), "sequence": sequence, "create_at": sequence * 1000,
+            "type": "input", "name": "message",
+            "data": {"user": {"content": [{"type": "text", "text": text}]}},
+        })
+    }
+
+    fn line_created(sequence: u64, branch: &str, at: u64) -> serde_json::Value {
+        line_event(
+            sequence,
+            "create",
+            serde_json::json!({
+                "at": {"kind": "sequence", "sequence": at},
+                "source": {"kind": "tool", "turn_id": "t1", "request_id": "r1", "call_id": "c1"},
+                "branch": branch,
+                "prompt": "parser race",
+            }),
+        )
+    }
+
+    #[test]
+    fn opening_a_line_keeps_the_cut_folded_from_its_creation() {
+        let mut main = Projection::default();
+        apply(
+            &mut main,
+            &[
+                user_says(1, "find the leak"),
+                user_says(2, "try the parser"),
+                line_created(3, "b-7c", 2),
+            ],
+        );
+        assert_eq!(
+            main.line_views()[0].cut,
+            Some(LineCut {
+                sequence: 2,
+                messages: 2,
+            })
+        );
+        main.directory(&dim_client::wire::BranchEntry {
+            purpose: Some("parser race".into()),
+            cut_messages: None,
+            end: None,
+            branch_id: "b-7c".into(),
+            parent_branch_id: Some("main".into()),
+            branch_point: Some(2),
+            state: "open".into(),
+            head: 3,
+        });
+        assert_eq!(
+            main.line_views()[0].cut,
+            Some(LineCut {
+                sequence: 2,
+                messages: 2,
+            }),
+            "a detail row with no count does not drop the folded one"
+        );
+    }
+
+    #[test]
+    fn a_directory_row_gains_the_cut_when_the_parent_history_arrives() {
+        let mut main = Projection::default();
+        main.directory(&dim_client::wire::BranchEntry {
+            purpose: None,
+            cut_messages: None,
+            end: None,
+            branch_id: "b-7c".into(),
+            parent_branch_id: Some("main".into()),
+            branch_point: Some(2),
+            state: "open".into(),
+            head: 3,
+        });
+        assert_eq!(main.line_views()[0].cut, None);
+        for event in [
+            user_says(1, "find the leak"),
+            user_says(2, "try the parser"),
+            line_created(3, "b-7c", 2),
+        ] {
+            let event: Event = serde_json::from_value(event).unwrap();
+            main.replay("main", &event);
+        }
+        assert_eq!(
+            main.line_views()[0].cut,
+            Some(LineCut {
+                sequence: 2,
+                messages: 2,
+            }),
+            "attach counts the parent's messages at the line's creation"
+        );
     }
 
     #[test]
