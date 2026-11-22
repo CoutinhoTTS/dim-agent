@@ -463,7 +463,7 @@ mod tests {
                 "To update, exit DimCode and run: {command}",
                 "Finish or stop the current work first (a running turn, shell command, or pending prompt).",
                 "Waiting for this Session's state after the switch.",
-                "Waiting for the resumed Session to load.",
+                "Waiting for the Session switch to finish.",
                 "Checking for updates…",
                 "DimCode {version} is up to date.",
             ] {

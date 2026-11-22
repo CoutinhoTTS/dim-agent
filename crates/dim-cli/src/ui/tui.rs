@@ -311,7 +311,9 @@ fn run_terminal(
     app.fullscreen = full.is_some();
     app.initial = surroundings.initial;
     app.awaiting_window = surroundings.resume;
-    app.switch_pending = surroundings.resume;
+    if surroundings.resume {
+        app.begin_switch(SwitchKind::Resumed);
+    }
     app.terminal_clipboard =
         terminal.clipboard_protocol() && crate::clipboard::terminal::native_unreachable();
     app.host.send(Command::LoginStatus(DIM_OAUTH_ID.into()));
@@ -1089,6 +1091,55 @@ struct DisplayedExcerpt {
     at: Instant,
 }
 
+/// The Session switches this interface started whose outcome has not arrived.
+/// An ending update clears only the switch it belongs to, so two switches that
+/// overlap keep `Update now` blocked until the last one ends.
+#[derive(Debug, Default)]
+struct PendingSwitches {
+    resumes: usize,
+    forks: usize,
+    new_session: bool,
+    deletes: Vec<String>,
+}
+
+impl PendingSwitches {
+    fn begin(&mut self, kind: SwitchKind) {
+        match kind {
+            SwitchKind::Resumed => self.resumes += 1,
+            SwitchKind::Forked => self.forks += 1,
+            SwitchKind::New => self.new_session = true,
+        }
+    }
+
+    fn end(&mut self, kind: SwitchKind) {
+        match kind {
+            SwitchKind::Resumed => self.resumes = self.resumes.saturating_sub(1),
+            SwitchKind::Forked => self.forks = self.forks.saturating_sub(1),
+            // Home and a new Session's first attach both end every `/new`
+            // this wait covers, so one report settles them all.
+            SwitchKind::New => self.new_session = false,
+        }
+    }
+
+    fn begin_delete(&mut self, session_id: &str) {
+        self.deletes.push(session_id.to_owned());
+    }
+
+    fn end_delete(&mut self, session_id: &str) {
+        if let Some(index) = self.deletes.iter().position(|id| id == session_id) {
+            self.deletes.remove(index);
+        }
+    }
+
+    fn any(&self) -> bool {
+        self.resumes > 0 || self.forks > 0 || self.new_session || !self.deletes.is_empty()
+    }
+
+    fn clear(&mut self) {
+        *self = Self::default();
+    }
+}
+
 struct App {
     host: Box<dyn SessionPort>,
     composer: Composer,
@@ -1222,6 +1273,9 @@ struct App {
     /// view still shows the old Session, so what it reports says nothing
     /// about where the interface is about to be.
     switch_pending: bool,
+    /// The switches behind `switch_pending`, one entry per request, so an
+    /// ending update cannot release a switch it does not belong to.
+    switches: PendingSwitches,
     /// What to write once the switched-to history is out.
     pending_boundary: Option<SwitchKind>,
     /// The line the transcript switched to, until its boundary row is out.
@@ -1649,6 +1703,7 @@ impl App {
             landing: None,
             awaiting_window: false,
             switch_pending: false,
+            switches: PendingSwitches::default(),
             pending_boundary: None,
             pending_line: None,
             window_info: (0, 0),
@@ -2086,6 +2141,26 @@ impl App {
                     })
             });
         waiting.then_some(Blocked::Session)
+    }
+
+    fn begin_switch(&mut self, kind: SwitchKind) {
+        self.switches.begin(kind);
+        self.switch_pending = true;
+    }
+
+    fn begin_delete(&mut self, session_id: &str) {
+        self.switches.begin_delete(session_id);
+        self.switch_pending = true;
+    }
+
+    fn end_switch(&mut self, kind: SwitchKind) {
+        self.switches.end(kind);
+        self.switch_pending = self.switches.any();
+    }
+
+    fn end_delete(&mut self, session_id: &str) {
+        self.switches.end_delete(session_id);
+        self.switch_pending = self.switches.any();
     }
 
     /// Opens the prompt for the first pending approval or question, and
@@ -2913,9 +2988,7 @@ impl App {
                 } = reply;
                 // A shown Session whose removal failed stays attached, so
                 // this reply is the delete's only ending.
-                if session_id == self.session_id {
-                    self.switch_pending = false;
-                }
+                self.end_delete(&session_id);
                 let (text, tone) = match &outcome {
                     DeleteOutcome::Deleted => {
                         (tf("Deleted {name}.", &[("name", &name)]), Tone::Muted)
@@ -2942,7 +3015,7 @@ impl App {
                 }
                 self.reports.push(Block::Status { text, tone });
             }
-            Update::ForkFailed => self.switch_pending = false,
+            Update::ForkFailed => self.end_switch(SwitchKind::Forked),
             Update::Oauth { attempt, event } => {
                 let effect = match &mut self.prompt {
                     Some(Prompt::Providers(panel)) => panel.oauth_event(attempt, event),
@@ -3160,6 +3233,7 @@ impl App {
                     report.disconnected(&message);
                 }
                 self.switch_pending = false;
+                self.switches.clear();
                 self.restore_unsent();
                 self.failure = Some(message);
                 self.run_started = None;
@@ -3175,6 +3249,7 @@ impl App {
             Update::StartupFailed { message, resumable } => {
                 self.prompt = None;
                 self.switch_pending = false;
+                self.switches.clear();
                 self.failure = Some(message);
                 self.failure_resumable = resumable;
                 // A first message the invocation supplied has no Session
@@ -4062,7 +4137,7 @@ impl App {
             projection_id: snapshot.projection_id,
             at,
         });
-        self.switch_pending = true;
+        self.begin_switch(SwitchKind::Forked);
         self.fork_draft = Some(text);
     }
 
@@ -4199,7 +4274,7 @@ impl App {
                 });
             }
             Effect::Resume(id) => {
-                self.switch_pending = true;
+                self.begin_switch(SwitchKind::Resumed);
                 self.host.send(Command::CloseSessions);
                 self.prompt = None;
                 self.composer.clear();
@@ -4207,7 +4282,7 @@ impl App {
             }
             Effect::DeleteSession { session_id, name } => {
                 if session_id == self.session_id {
-                    self.switch_pending = true;
+                    self.begin_delete(&session_id);
                 }
                 self.host.send(Command::DeleteSession { session_id, name });
             }
@@ -5597,7 +5672,7 @@ impl App {
                 // Home has no Session to leave: its host stays put and sends
                 // no switch, so waiting here would never end.
                 if !self.session_id.is_empty() {
-                    self.switch_pending = true;
+                    self.begin_switch(SwitchKind::New);
                 }
                 self.host.send(Command::NewSession);
                 Outcome::Continue
@@ -7349,7 +7424,7 @@ impl App {
     }
 
     fn switch_session(&mut self, session_id: String, kind: SwitchKind) {
-        self.switch_pending = false;
+        self.end_switch(kind);
         self.report_error = None;
         self.release_compaction_details();
         let first = self.session_id.is_empty();
@@ -10536,7 +10611,7 @@ mod tests {
             assert!(!drawn.app.update_requested);
             let screen = drawn.app.frame((80, 24)).live.join("\n");
             assert!(
-                screen.contains(t("Waiting for the resumed Session to load.")),
+                screen.contains(t("Waiting for the Session switch to finish.")),
                 "fullscreen={fullscreen}: {screen}"
             );
 
@@ -10769,7 +10844,7 @@ mod tests {
             assert!(!drawn.app.update_requested);
             let screen = drawn.app.frame((100, 30)).live.join("\n");
             assert!(
-                screen.contains(t("Waiting for the resumed Session to load.")),
+                screen.contains(t("Waiting for the Session switch to finish.")),
                 "fullscreen={fullscreen}: {screen}"
             );
             drawn.app.apply(Update::Switched {
@@ -10901,6 +10976,115 @@ mod tests {
                 "fullscreen={fullscreen}: the forked Session reported idle"
             );
             assert!(forked.app.update_requested);
+        }
+    }
+
+    /// Two forks can overlap when the first reply is still out. Each ending
+    /// update clears only its own fork, so the first fork's failure cannot
+    /// release `Update now` while the second is still in flight.
+    #[test]
+    fn update_now_waits_for_a_second_fork_after_the_first_fails() {
+        for fullscreen in [false, true] {
+            let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+            let mut drawn = Drawn::new((100, 30), None, true);
+            drawn.app.fullscreen = fullscreen;
+            drawn.app.host = Box::new(Recorder(sent.clone()));
+            shown_at_rest(&mut drawn);
+            for _ in 0..2 {
+                drawn.app.run_command("fork", "");
+                assert!(matches!(drawn.app.prompt, Some(Prompt::Fork(_))));
+                drawn.key(KeyCode::Char('y'));
+                assert!(
+                    matches!(sent.borrow().last(), Some(Command::Fork { .. })),
+                    "fullscreen={fullscreen}: the confirmed fork is sent"
+                );
+            }
+
+            drawn.app.apply(Update::Upgrade(update_offer()));
+            assert!(
+                matches!(enter(&mut drawn), Outcome::Continue),
+                "fullscreen={fullscreen}: Update now left while a fork was in flight"
+            );
+
+            drawn.app.apply(Update::ForkFailed);
+            assert!(
+                matches!(enter(&mut drawn), Outcome::Continue),
+                "fullscreen={fullscreen}: the first fork's failure released the second"
+            );
+            assert!(!drawn.app.update_requested);
+
+            drawn.app.apply(Update::Switched {
+                session_id: "s2".into(),
+                kind: SwitchKind::Forked,
+                cwd: None,
+            });
+            drawn.app.apply(Update::Snapshot(Box::new(session_snapshot(
+                "main",
+                vec![line_view("main", LineState::Main, Some(false))],
+            ))));
+            assert!(
+                matches!(enter(&mut drawn), Outcome::Exit(0)),
+                "fullscreen={fullscreen}: the second fork ended in an idle Session"
+            );
+            assert!(drawn.app.update_requested);
+        }
+    }
+
+    /// A delete of the shown Session and a fork sent while it is out end on
+    /// their own updates. The delete's failure clears only the delete, so the
+    /// fork still holds `Update now` until it attaches.
+    #[test]
+    fn update_now_waits_for_a_fork_after_a_delete_fails() {
+        for fullscreen in [false, true] {
+            let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+            let mut drawn = Drawn::new((100, 30), None, true);
+            drawn.app.fullscreen = fullscreen;
+            drawn.app.host = Box::new(Recorder(sent.clone()));
+            shown_at_rest(&mut drawn);
+            drawn.app.apply_effect(Effect::DeleteSession {
+                session_id: "s1".into(),
+                name: "s1".into(),
+            });
+            assert!(
+                matches!(
+                    sent.borrow().last(),
+                    Some(Command::DeleteSession { session_id, .. }) if session_id == "s1"
+                ),
+                "fullscreen={fullscreen}: the shown Session's delete is sent"
+            );
+            drawn.app.run_command("fork", "");
+            drawn.key(KeyCode::Char('y'));
+
+            drawn.app.apply(Update::Upgrade(update_offer()));
+            assert!(
+                matches!(enter(&mut drawn), Outcome::Continue),
+                "fullscreen={fullscreen}: Update now left while the delete and fork were in flight"
+            );
+            drawn.app.apply(Update::Deleted(DeleteReply {
+                session_id: "s1".into(),
+                name: "s1".into(),
+                outcome: DeleteOutcome::Failed("the store is locked".into()),
+            }));
+            assert!(
+                matches!(enter(&mut drawn), Outcome::Continue),
+                "fullscreen={fullscreen}: the failed delete released the fork"
+            );
+            assert!(!drawn.app.update_requested);
+
+            drawn.app.apply(Update::Switched {
+                session_id: "s2".into(),
+                kind: SwitchKind::Forked,
+                cwd: None,
+            });
+            drawn.app.apply(Update::Snapshot(Box::new(session_snapshot(
+                "main",
+                vec![line_view("main", LineState::Main, Some(false))],
+            ))));
+            assert!(
+                matches!(enter(&mut drawn), Outcome::Exit(0)),
+                "fullscreen={fullscreen}: the forked Session reported idle"
+            );
+            assert!(drawn.app.update_requested);
         }
     }
 

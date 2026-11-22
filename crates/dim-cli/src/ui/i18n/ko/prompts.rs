@@ -39,7 +39,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Waiting for this Session's state after the switch." => {
             "전환된 세션의 상태를 기다리는 중입니다."
         }
-        "Waiting for the resumed Session to load." => "재개된 세션을 불러오는 중입니다.",
+        "Waiting for the Session switch to finish." => "세션 전환이 끝나기를 기다리는 중입니다.",
         "Checking for updates…" => "업데이트 확인 중…",
         "DimCode {version} is up to date." => "DimCode {version}은(는) 최신 버전입니다.",
         "Skip this version" => "이 버전 건너뛰기",

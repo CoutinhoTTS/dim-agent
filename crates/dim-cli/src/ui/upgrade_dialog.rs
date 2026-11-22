@@ -131,7 +131,7 @@ impl UpgradeDialog {
                     Blocked::Session => {
                         t("Waiting for this Session's state after the switch.")
                     }
-                    Blocked::Switch => t("Waiting for the resumed Session to load."),
+                    Blocked::Switch => t("Waiting for the Session switch to finish."),
                 }
                 .to_owned(),
             );

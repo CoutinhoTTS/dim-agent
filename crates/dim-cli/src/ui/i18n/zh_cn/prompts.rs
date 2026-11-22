@@ -31,7 +31,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "请先完成或停止当前工作（运行中的回合、Shell 命令或待处理的提问）。"
         }
         "Waiting for this Session's state after the switch." => "切换后正在等待此会话的状态。",
-        "Waiting for the resumed Session to load." => "正在等待恢复的会话加载。",
+        "Waiting for the Session switch to finish." => "正在等待会话切换完成。",
         "Checking for updates…" => "正在检查更新…",
         "DimCode {version} is up to date." => "DimCode {version} 已是最新版本。",
         "Skip this version" => "跳过此版本",

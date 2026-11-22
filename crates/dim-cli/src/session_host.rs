@@ -5420,12 +5420,27 @@ const TEST_FEATURES: [&str; 4] = [
     "session.input.pending.blockPresence",
 ];
 
-/// A worker on a daemon that advertises `features` and answers nothing: the
-/// test supplies each reply itself, through `Worker::message`. Every request
-/// the worker sends is recorded, in order, for the tests that assert on one.
+/// A worker on a daemon that advertises `features` and answers only
+/// `session.attach`: the test supplies every other reply itself, through
+/// `Worker::message`. Every request the worker sends is recorded, in order,
+/// for the tests that assert on one.
 #[cfg(all(test, unix))]
 async fn test_worker(
     features: &[&str],
+) -> (
+    Worker,
+    mpsc::Receiver<Update>,
+    std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+) {
+    test_worker_answering(features, false).await
+}
+
+/// [`test_worker`] with a daemon that also refuses `session.fork` with an RPC
+/// error when `fail_fork` is set.
+#[cfg(all(test, unix))]
+async fn test_worker_answering(
+    features: &[&str],
+    fail_fork: bool,
 ) -> (
     Worker,
     mpsc::Receiver<Update>,
@@ -5461,6 +5476,18 @@ async fn test_worker(
             };
             if request["method"] != "hello" {
                 recorded.lock().unwrap().push(request.clone());
+                if request["method"] == "session.fork" && fail_fork {
+                    let reply = json!({"jsonrpc":"2.0","id":request["id"],"error":{
+                        "code":-32603,"message":"the test daemon refuses the fork"
+                    }});
+                    if writer
+                        .write_all(format!("{reply}\n").as_bytes())
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
                 if request["method"] == "session.attach" {
                     let reply = json!({"jsonrpc":"2.0","id":request["id"],"result":{
                         "sequence":1,"model":{"providerId":"test","modelId":"test"}
@@ -5612,6 +5639,78 @@ mod tests {
             "the report is the Session's state"
         );
         assert!(reported.running, "the report carries the running turn");
+    }
+
+    /// A fork sent with an attachment that has moved on opens no Session, so
+    /// the notice and `ForkFailed` are its only ending.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_stale_fork_ends_with_a_notice_and_fork_failed() {
+        let (mut worker, receiver, _sent) = test_worker(&TEST_FEATURES).await;
+        worker
+            .attach("s2".into(), SwitchKind::Resumed)
+            .await
+            .expect("the switch attaches");
+        receiver.try_iter().for_each(drop);
+        worker
+            .command(Command::Fork {
+                session_id: "s1".into(),
+                projection_id: 0,
+                at: 1,
+            })
+            .await
+            .expect("the stale fork is handled");
+        let mut notices = Vec::new();
+        let mut failed = false;
+        for update in receiver.try_iter() {
+            match update {
+                Update::Notice(message) => notices.push(message),
+                Update::ForkFailed => failed = true,
+                _ => {}
+            }
+        }
+        assert!(
+            notices
+                .iter()
+                .any(|message| message == "Session attachment changed; pick the message again"),
+            "the stale fork says why: {notices:?}"
+        );
+        assert!(failed, "the stale fork ends the wait");
+    }
+
+    /// A fork the daemon refuses with an RPC error ends with `ForkFailed`, so
+    /// the interface stops waiting without a `Switched` for a Session that
+    /// was never opened.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_refused_fork_ends_with_fork_failed() {
+        let (mut worker, receiver, _sent) = test_worker_answering(&TEST_FEATURES, true).await;
+        worker
+            .attach("s2".into(), SwitchKind::Resumed)
+            .await
+            .expect("the switch attaches");
+        receiver.try_iter().for_each(drop);
+        let session_id = worker.session_id.clone();
+        let projection_id = worker.projection_id;
+        worker
+            .command(Command::Fork {
+                session_id,
+                projection_id,
+                at: 1,
+            })
+            .await
+            .expect("the refused fork is handled");
+        let mut notices = Vec::new();
+        let mut failed = false;
+        for update in receiver.try_iter() {
+            match update {
+                Update::Notice(message) => notices.push(message),
+                Update::ForkFailed => failed = true,
+                _ => {}
+            }
+        }
+        assert!(failed, "the refused fork ends the wait");
+        assert!(!notices.is_empty(), "the refused fork says why");
     }
 
     /// A turn read answers what the recorded turn looks like, and a turn that

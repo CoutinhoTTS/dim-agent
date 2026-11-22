@@ -39,8 +39,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Waiting for this Session's state after the switch." => {
             "Warte auf den Zustand dieser Sitzung nach dem Wechsel."
         }
-        "Waiting for the resumed Session to load." => {
-            "Warte auf das Laden der fortgesetzten Sitzung."
+        "Waiting for the Session switch to finish." => {
+            "Warte auf den Abschluss des Sitzungswechsels."
         }
         "Checking for updates…" => "Suche nach Updates…",
         "DimCode {version} is up to date." => "DimCode {version} ist aktuell.",
