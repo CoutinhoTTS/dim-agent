@@ -11231,6 +11231,105 @@ mod tests {
         );
     }
 
+    /// A re-judge refuses saved runs of one arm whose texts only some of them
+    /// recorded, before any judge call: a re-judged record written before the
+    /// runner recorded texts would otherwise be counted and labeled as one
+    /// comparison with a recorded run.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_rejudge_refuses_mixed_text_provenance() {
+        const TEXT: &str = "BASELINE BRANCH TOOL DESCRIPTION";
+        let fixture = Fixture::start(
+            "rejudge-mixed",
+            judged,
+            json!({
+                "message": "Say hello.",
+                "budget": {"turns": 4, "seconds": 120, "window": 24000},
+                "probes": [{"id": "ran", "kind": "must_show", "text": "the run has a transcript"}]
+            }),
+            &[],
+        )
+        .await;
+        let recorded = || {
+            json!([{"id": "timeline-tree/branch-description", "bytes": TEXT.len(),
+                    "fingerprint": fingerprint(TEXT)}])
+        };
+        let run = |arm: &str, run: usize, texts: Option<Value>| {
+            let mut record = json!({"arm": arm, "scenario": "case", "run": run,
+                   "session": null, "stop": "idle", "turns": 2, "window": 24000.0,
+                   "durationMs": 1.0, "failed": false, "judgeOutcome": "judged",
+                   "error": null, "judgeError": null, "judgeReasks": 0,
+                   "probes": [{"id": "ran", "kind": "must_show",
+                               "verdict": "present", "quote": null}]});
+            if let Some(texts) = texts {
+                record["texts"] = texts;
+            }
+            record
+        };
+        let source = |name: &str, runs: &[Value]| {
+            let directory = fixture.directory.join(name);
+            for arm in ["current", "candidate"] {
+                let views = directory.join("outputs").join(arm).join("case");
+                std::fs::create_dir_all(&views).unwrap();
+                for run in 0..2 {
+                    std::fs::write(
+                        views.join(format!("run-{run}.judge-view.jsonl")),
+                        "SAVED VIEW",
+                    )
+                    .unwrap();
+                }
+            }
+            let jsonl: String = runs.iter().map(|record| format!("{record}\n")).collect();
+            std::fs::write(directory.join("runs.jsonl"), &jsonl).unwrap();
+            directory
+        };
+        let mixed_current = source(
+            "mixed-current",
+            &[
+                run("current", 0, None),
+                run("current", 1, Some(recorded())),
+                run("candidate", 0, Some(recorded())),
+                run("candidate", 1, Some(recorded())),
+            ],
+        );
+        let mut options = fixture.options(fixture.directory.join("rejudged-current"));
+        options.rejudge = Some(mixed_current);
+        let error = fixture.rejudge(&options).await.unwrap_err().to_string();
+        assert!(
+            error.contains(
+                "--rejudge: the current runs mix records that name their configured texts"
+            ),
+            "{error}"
+        );
+        assert!(
+            error.contains("report the runs that name their texts and the older runs separately"),
+            "{error}"
+        );
+        // The candidate arm is checked on its own: its runs mix while the
+        // current arm recorded none.
+        let mixed_candidate = source(
+            "mixed-candidate",
+            &[
+                run("current", 0, None),
+                run("current", 1, None),
+                run("candidate", 0, None),
+                run("candidate", 1, Some(recorded())),
+            ],
+        );
+        let mut options = fixture.options(fixture.directory.join("rejudged-candidate"));
+        options.rejudge = Some(mixed_candidate);
+        let error = fixture.rejudge(&options).await.unwrap_err().to_string();
+        assert!(
+            error.contains(
+                "--rejudge: the candidate runs mix records that name their configured texts"
+            ),
+            "{error}"
+        );
+        assert!(
+            fixture.judge().is_empty(),
+            "a mixed set is refused before any judge call"
+        );
+    }
+
     /// A report over saved runs counts the declines their records carry and
     /// says how many records carry none: a record written before the runner
     /// counted them is not read as no declines.
