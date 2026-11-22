@@ -1973,7 +1973,9 @@ the store. A failed startup exits 1 unless it enters the recovery below.
 While a store format upgrade runs, the daemon writes the same note as a progress
 kind, `dimcode-startup-progress v1 pid=<pid>` with
 `store-upgrade from=<from> to=<to> progress=<n>`, at most once a second and
-after each upgrade step. From the moment the store opens until the listeners
+after each upgrade step, including the steps that follow the upgrade's own:
+the derived indexes, the reference check, the commit and each pragma the open
+sets. From the moment the store opens until the listeners
 open, the daemon owns the note as an assembly kind, `assembly progress=<n>`:
 `<n>` rises whenever the opening records progress (a row's first activation or
 an `OpeningAdvanced` report), the first progress after the store removes its own
