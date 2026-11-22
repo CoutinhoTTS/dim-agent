@@ -451,10 +451,13 @@ impl Processes {
     }
 }
 
+const INACTIVE_ROW_LIMIT: usize = 8;
+
 /// The message for a process assembly that stopped making progress while its
-/// required rows are Active: it names every row that is not Active.
+/// required rows are Active: it names every row that is not Active, up to
+/// [`INACTIVE_ROW_LIMIT`], and counts the rest.
 fn timed_out_message(root: &Ctx) -> String {
-    let inactive: Vec<_> = root
+    let mut inactive: Vec<_> = root
         .diagnostics()
         .plugins
         .into_iter()
@@ -471,6 +474,11 @@ fn timed_out_message(root: &Ctx) -> String {
             format!("{} {:?} [{}]", plugin.name, plugin.state, unmet.join(", "))
         })
         .collect();
+    if inactive.len() > INACTIVE_ROW_LIMIT {
+        let hidden = inactive.len() - INACTIVE_ROW_LIMIT;
+        inactive.truncate(INACTIVE_ROW_LIMIT);
+        inactive.push(format!("and {hidden} more"));
+    }
     if inactive.is_empty() {
         "process assembly timed out".to_owned()
     } else {
