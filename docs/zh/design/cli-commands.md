@@ -381,7 +381,7 @@ Goal cleared on main.
 否则整行都是 prompt，因此 `/loop check the deploy` 与 `/loop 5m check the deploy` 是同一命令的两种形式。
 
 行模式打印用法与 loop；两种终端 UI 模式选中时只填入 `/loop `，提交才分发，与 `/goal` 相同。回复给出 loop、
-状态、轮次，以及已安排时的下次到期时刻：
+状态、轮次、prompt，以及已安排时的下次到期时刻：
 
 ```text
 palette: loop + Enter -> /loop |          (completion only)
