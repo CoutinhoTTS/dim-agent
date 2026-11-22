@@ -4826,23 +4826,24 @@ async fn a_gemini_request_does_not_charge_a_gif_against_the_encoded_image_budget
         .await
         .unwrap();
     session.idle("main").await.unwrap();
-    let requests = requests.lock().unwrap();
-    let sent = requests.last().expect("the request reaches the model host");
-    let images = sent_image_sources(sent);
-    assert_eq!(images.len(), 2, "the two PNGs stay pixels: {sent:?}");
-    assert!(
-        images.iter().all(|image| image.media_type == "image/png"),
-        "no GIF remains a pixel: {sent:?}"
-    );
-    assert_eq!(
-        sent_texts(sent)
-            .iter()
-            .filter(|text| text.starts_with("img:"))
-            .count(),
-        1,
-        "the GIF becomes its reference: {sent:?}"
-    );
-    drop(requests);
+    {
+        let requests = requests.lock().unwrap();
+        let sent = requests.last().expect("the request reaches the model host");
+        let images = sent_image_sources(sent);
+        assert_eq!(images.len(), 2, "the two PNGs stay pixels: {sent:?}");
+        assert!(
+            images.iter().all(|image| image.media_type == "image/png"),
+            "no GIF remains a pixel: {sent:?}"
+        );
+        assert_eq!(
+            sent_texts(sent)
+                .iter()
+                .filter(|text| text.starts_with("img:"))
+                .count(),
+            1,
+            "the GIF becomes its reference: {sent:?}"
+        );
+    }
     agent.close().await.unwrap();
 }
 
