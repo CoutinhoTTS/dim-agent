@@ -1181,12 +1181,15 @@ async fn web_search_is_withdrawn_when_a_replacement_binding_has_not_observed_its
     signed_in.send_replace(Some(true));
     await_web_source(&session, true).await;
     await_web_source(&second_session, true).await;
+    await_search_declared(&session, true).await;
+    await_search_declared(&second_session, true).await;
     let names = text_turn(&mut client, &id, &mut requests, "the new binding signed in").await;
     assert!(names.iter().any(|name| name == "web_search"), "{names:?}");
 
     signed_in.send_replace(Some(false));
     await_web_source(&session, false).await;
     await_web_source(&second_session, false).await;
+    await_search_declared(&second_session, false).await;
     let names = text_turn(
         &mut client,
         &second,
@@ -1263,6 +1266,7 @@ async fn a_failed_initial_account_observation_does_not_inherit_the_previous_bind
     signed_in.send_replace(Some(true));
     await_web_source(&session, true).await;
     await_web_source(&second_session, true).await;
+    await_search_declared(&second_session, true).await;
     let names = text_turn(
         &mut client,
         &second,
