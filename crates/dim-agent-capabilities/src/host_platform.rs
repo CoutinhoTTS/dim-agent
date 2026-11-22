@@ -15,7 +15,7 @@ use std::{
     collections::BTreeMap,
     ffi::{OsStr, OsString},
     io,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     process::{ExitStatus, Stdio},
     sync::Arc,
     time::{Duration, Instant},
@@ -361,7 +361,7 @@ impl Drop for TemporaryDirectory {
     }
 }
 
-/// How a command task ended.
+/// How a wait reply ended, or that it is still running.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WaitStatus {
@@ -373,7 +373,7 @@ pub enum WaitStatus {
     Failed,
 }
 
-/// A command task's terminal record.
+/// A wait reply; terminal when the task ended, `running` when the wait deadline elapsed.
 #[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WaitReply {
@@ -601,8 +601,8 @@ pub struct OutputPathReply {
 pub enum HostPlatformError {
     #[error("invalid request: {0}")]
     Invalid(String),
-    #[error("invalid path: {path}")]
-    InvalidPath { path: String },
+    #[error("invalid path {path}: {reason}")]
+    InvalidPath { path: String, reason: String },
     #[error("unknown execution task")]
     TaskUnknown,
     #[error("execution task already exists")]
@@ -752,8 +752,11 @@ impl HostPlatform {
         let result = self.spawn_confined_process(spec, confinement, cancel).await;
         waiter.abort();
         let output = result.map_err(|error| match error {
-            confined::ConfinedError::InvalidPath { .. } => {
-                HostPlatformError::Invalid(error.to_string())
+            confined::ConfinedError::InvalidPath { path, reason } => {
+                HostPlatformError::InvalidPath {
+                    path: path.to_string_lossy().into_owned(),
+                    reason,
+                }
             }
             confined::ConfinedError::Cancelled => HostPlatformError::Cancelled,
             _ => HostPlatformError::Failed(error.to_string()),
@@ -966,8 +969,7 @@ impl HostPlatform {
         resolved.status.clone()
     }
 
-    /// The sandbox backend a new process would use. Preparation reads the same
-    /// backend, so this report and the next process start cannot disagree.
+    /// The sandbox backend a new process would use.
     #[cfg(windows)]
     pub fn sandbox_backend(&self) -> SandboxBackend {
         SandboxBackend::Unavailable {
@@ -975,15 +977,13 @@ impl HostPlatform {
         }
     }
 
-    /// The sandbox backend a new process would use. macOS always has
-    /// `sandbox-exec`.
+    /// The sandbox backend a new process would use.
     #[cfg(target_os = "macos")]
     pub fn sandbox_backend(&self) -> SandboxBackend {
         SandboxBackend::Available
     }
 
-    /// The sandbox backend a new process would use: the same bubblewrap
-    /// preparation resolves from the captured `PATH`.
+    /// The sandbox backend a new process would use.
     #[cfg(all(unix, not(target_os = "macos")))]
     pub fn sandbox_backend(&self) -> SandboxBackend {
         match isolation::bubblewrap(&self.env) {
@@ -1016,6 +1016,17 @@ impl HostPlatform {
 
     fn arc(&self) -> Result<Arc<Self>, HostPlatformError> {
         self.mounted.upgrade().ok_or(HostPlatformError::Closed)
+    }
+
+    fn process_error(error: ProcessSpecError) -> HostPlatformError {
+        match error.code {
+            "task_exists" => HostPlatformError::TaskExists,
+            "cancelled" => HostPlatformError::Cancelled,
+            "invalid_request" | "exec_invalid_request" => {
+                HostPlatformError::Invalid(format!("{}: {}", error.code, error.reason))
+            }
+            _ => HostPlatformError::Failed(format!("{}: {}", error.code, error.reason)),
+        }
     }
 
     /// Starts a command on this node and returns the task id and output path.
@@ -1053,9 +1064,7 @@ impl HostPlatform {
         let (spec, _) = self
             .build_process_spec(&request.command, &request.cwd)
             .await
-            .map_err(|error| {
-                HostPlatformError::Failed(format!("{}: {}", error.code, error.reason))
-            })?;
+            .map_err(Self::process_error)?;
         let owner = self.arc()?;
         let process = owner
             .start_command(
@@ -1066,9 +1075,7 @@ impl HostPlatform {
                 request.timeout_ms,
             )
             .await
-            .map_err(|error| {
-                HostPlatformError::Failed(format!("{}: {}", error.code, error.reason))
-            })?;
+            .map_err(Self::process_error)?;
         Ok(SpawnReply {
             task_id: request.task_id,
             output_path: process.retain_task(),
@@ -1107,14 +1114,7 @@ impl HostPlatform {
                 .map_err(|error| HostPlatformError::Failed(error.to_string()));
         }
         if let Some(job) = self.job_task(&request.task_id) {
-            let shell = self
-                .shell_task(&job.shell_id)
-                .ok_or(HostPlatformError::TaskUnknown)?;
-            let pid = shell
-                .job_pid(job.pid)
-                .await
-                .map_err(|error| HostPlatformError::Failed(error.to_string()))?;
-            return kill_job(pid)
+            return kill_job(job.pid)
                 .await
                 .map_err(|error| HostPlatformError::Failed(error.to_string()));
         }
@@ -1180,8 +1180,7 @@ impl HostPlatform {
         tokio::fs::create_dir_all(&request.output_dir)
             .await
             .map_err(|error| HostPlatformError::Failed(error.to_string()))?;
-        let owner = self.arc()?;
-        let (shell, _) = owner
+        let (shell, _) = self
             .start_shell(
                 &request.task_id,
                 &request.cwd,
@@ -1193,9 +1192,7 @@ impl HostPlatform {
                 },
             )
             .await
-            .map_err(|error| {
-                HostPlatformError::Failed(format!("{}: {}", error.code, error.reason))
-            })?;
+            .map_err(Self::process_error)?;
         Ok(SpawnReply {
             task_id: request.task_id,
             output_path: shell.output_path().to_owned(),
@@ -3104,23 +3101,66 @@ impl HostPlatform {
     /// directory counts as removed. The caller has decided with the
     /// ownership rows that no Session still needs it (ADR 013 D4).
     pub fn remove_exec_directory(&self, path: &Path) -> io::Result<()> {
-        let root = self.exec_root();
-        if path == root || !path.starts_with(&root) {
+        if !path.is_absolute()
+            || path
+                .components()
+                .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
+        {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "not a persistent shell output directory",
             ));
         }
-        match std::fs::remove_dir_all(path) {
+        let root = std::fs::canonicalize(self.exec_root()).unwrap_or_else(|_| self.exec_root());
+        let target = canonicalize_existing_prefix(path)?;
+        if target == root || !target.starts_with(&root) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "not a persistent shell output directory",
+            ));
+        }
+        if std::fs::symlink_metadata(path)
+            .map(|metadata| metadata.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "not a persistent shell output directory",
+            ));
+        }
+        match std::fs::remove_dir_all(&target) {
             Ok(()) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(error),
         }
         #[cfg(unix)]
-        if let Some(parent) = path.parent() {
+        if let Some(parent) = target.parent() {
             std::fs::File::open(parent)?.sync_all()?;
         }
         Ok(())
+    }
+}
+
+fn canonicalize_existing_prefix(path: &Path) -> io::Result<PathBuf> {
+    let mut missing = Vec::new();
+    let mut current = path;
+    loop {
+        match std::fs::canonicalize(current) {
+            Ok(mut base) => {
+                for part in missing.iter().rev() {
+                    base.push(part);
+                }
+                return Ok(base);
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                let Some(name) = current.file_name() else {
+                    return Err(error);
+                };
+                missing.push(name.to_owned());
+                current = current.parent().ok_or(error)?;
+            }
+            Err(error) => return Err(error),
+        }
     }
 }
 
@@ -3282,9 +3322,14 @@ pub(crate) mod shell {
         started: Instant,
     }
 
+    impl Drop for ShellTask {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+
     pub(crate) struct ShellJob {
         pub(crate) pid: u32,
-        pub(crate) shell_id: String,
     }
 
     #[derive(Clone)]
@@ -3298,7 +3343,7 @@ pub(crate) mod shell {
     const EVENT_RETAIN_CHARS: usize = 1024 * 1024;
 
     fn parse_shell_job(line: &str) -> Option<(String, u32)> {
-        let start = line.find("__DIM_START_")?;
+        let start = line.find("__DIM_END_")?;
         let rest = &line[start..];
         let close = rest[2..].find("__")? + 2;
         let after = rest.get(close + 2..)?;
@@ -3438,14 +3483,21 @@ pub(crate) mod shell {
                 reason: error.to_string(),
             })?;
             let path = directory.join(format!("{id}.log"));
-            let mut file = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&path)
-                .map_err(|error| ProcessSpecError {
-                    code: "io",
-                    reason: error.to_string(),
-                })?;
+            let mut options = std::fs::OpenOptions::new();
+            options.create_new(true).append(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let mut file = options.open(&path).map_err(|error| ProcessSpecError {
+                code: if error.kind() == io::ErrorKind::AlreadyExists {
+                    "task_exists"
+                } else {
+                    "io"
+                },
+                reason: error.to_string(),
+            })?;
             let mut pty = self.spawn_pty(spec, size).map_err(|e| ProcessSpecError {
                 code: "failed",
                 reason: e.to_string(),
@@ -3466,7 +3518,6 @@ pub(crate) mod shell {
             commands.insert(id.into(), super::ExecutionTask::Shell(shell.clone()));
             drop(commands);
             let jobs = self.commands.clone();
-            let shell_id = id.to_string();
             let pump = Arc::downgrade(&shell);
             let (drained, reader_finished) = tokio::sync::oneshot::channel();
             std::thread::spawn(move || {
@@ -3484,14 +3535,18 @@ pub(crate) mod shell {
                     pending.push_str(&chunk);
                     while let Some(newline) = pending.find('\n') {
                         let line: String = pending.drain(..=newline).collect();
-                        if let Some((task_id, pid)) = parse_shell_job(&line) {
-                            jobs.lock().unwrap().insert(
-                                task_id,
-                                super::ExecutionTask::Job(Arc::new(ShellJob {
-                                    pid,
-                                    shell_id: shell_id.clone(),
-                                })),
-                            );
+                        if let Some((task_id, reported)) = parse_shell_job(&line) {
+                            let pid = pump
+                                .pty
+                                .blocking_lock()
+                                .as_ref()
+                                .and_then(|pty| pty.job_pid(reported).ok());
+                            if let Some(pid) = pid {
+                                let mut jobs = jobs.lock().unwrap();
+                                jobs.entry(task_id).or_insert_with(|| {
+                                    super::ExecutionTask::Job(Arc::new(ShellJob { pid }))
+                                });
+                            }
                         }
                     }
                     let mut capture = pump.capture.lock().unwrap();
@@ -3652,14 +3707,6 @@ pub(crate) mod shell {
                 .as_mut()
                 .ok_or_else(|| io::Error::other("Shell is not running"))?
                 .write(data)
-        }
-        pub(crate) async fn job_pid(&self, pid: u32) -> io::Result<u32> {
-            self.pty
-                .lock()
-                .await
-                .as_ref()
-                .ok_or_else(|| io::Error::other("Shell is not running"))?
-                .job_pid(pid)
         }
         pub(crate) async fn resize(&self, size: PtySize) -> io::Result<()> {
             self.pty

@@ -1951,6 +1951,10 @@ impl Output {
     pub(super) async fn total(&self) -> u64 {
         self.capture.lock().await.output_bytes
     }
+    pub(super) async fn preview_truncated(&self) -> bool {
+        let capture = self.capture.lock().await;
+        truncate_preview(&capture.preview).len() < capture.preview.len()
+    }
 }
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1977,6 +1981,18 @@ impl HostPlatform {
         output_dir: &Path,
         timeout: Option<u64>,
     ) -> Result<ExecProcess, ProcessSpecError> {
+        if tokio::fs::create_dir_all(output_dir).await.is_err() {
+            return Err(ProcessSpecError {
+                code: "invalid_request",
+                reason: "output directory is not usable".into(),
+            });
+        }
+        if output_dir.join(format!("{task_id}.log")).exists() {
+            return Err(ProcessSpecError {
+                code: "task_exists",
+                reason: "Execution task already exists".into(),
+            });
+        }
         let (spec, temporary, isolation) = self.prepare_isolated_process(spec, roots, None).await?;
         let mut commands = self.commands.lock().unwrap();
         if self.command_shutdown.is_cancelled() {
@@ -2334,7 +2350,7 @@ impl CommandTask {
                 output_bytes: self.output.total().await,
                 output_truncated: self.output.truncated().await,
                 preview: self.output.preview().await,
-                preview_truncated: false,
+                preview_truncated: self.output.preview_truncated().await,
                 failure_note: None,
             };
         };

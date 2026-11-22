@@ -16,7 +16,7 @@ use super::{SqliteStorage, sqlite::error};
 use dim_agent_capabilities::{
     file_storage::{FileStorage, FileStorageError},
     host::{SessionFileError, SessionFileErrorCode, SessionFilesService, StoredSessionFile},
-    host_platform::{HostPlatform, RemoveOutputDirectoryRequest},
+    host_platform::{HostPlatform, HostPlatformError, RemoveOutputDirectoryRequest},
 };
 use rusqlite::{Connection, TransactionBehavior, params};
 use rutis::Ctx;
@@ -364,16 +364,17 @@ impl SessionFiles {
             .ok_or_else(|| error("the Session's resource node storage is unavailable"))?;
         let host = self.0.ctx.get::<HostPlatform>();
         for candidate in candidates {
-            if let Some(host) = host
-                .as_ref()
-                .filter(|host| candidate.starts_with(host.exec_root()))
-            {
-                host.remove_output_directory(RemoveOutputDirectoryRequest {
-                    path: candidate.clone(),
-                })
-                .await
-                .map_err(error)?;
-                continue;
+            if let Some(host) = host.as_ref() {
+                match host
+                    .remove_output_directory(RemoveOutputDirectoryRequest {
+                        path: candidate.clone(),
+                    })
+                    .await
+                {
+                    Ok(()) => continue,
+                    Err(HostPlatformError::Invalid(_) | HostPlatformError::InvalidPath { .. }) => {}
+                    Err(failure) => return Err(error(failure.to_string())),
+                }
             }
             let relative = candidate
                 .strip_prefix(storage.root_path(self.0.root).map_err(error)?)

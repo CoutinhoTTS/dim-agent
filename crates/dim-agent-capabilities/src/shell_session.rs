@@ -889,14 +889,12 @@ impl ShellSession {
                 })
                 .await
                 .map_err(|error| std::io::Error::other(error.to_string()));
-            if killed.is_ok() {
-                let _ = self
-                    .host
-                    .settle(TaskRequest {
-                        task_id: task.task_id.clone(),
-                    })
-                    .await;
-            }
+            let _ = self
+                .host
+                .settle(TaskRequest {
+                    task_id: task.task_id.clone(),
+                })
+                .await;
             let preview = file_tail(&task.output_path, OUTPUT_LIMIT);
             let mut result = reset_result(&task.task_id, &task.output_path, &preview);
             if let Err(error) = killed {
@@ -1409,14 +1407,12 @@ impl ShellSession {
                 })
                 .await
                 .map_err(|error| std::io::Error::other(error.to_string()));
-            if terminated.is_ok() {
-                let _ = self
-                    .host
-                    .settle(TaskRequest {
-                        task_id: task.task_id.clone(),
-                    })
-                    .await;
-            }
+            let _ = self
+                .host
+                .settle(TaskRequest {
+                    task_id: task.task_id.clone(),
+                })
+                .await;
             let data = match terminated {
                 Ok(()) => ExecEndedData {
                     task_id: task_id.to_owned(),

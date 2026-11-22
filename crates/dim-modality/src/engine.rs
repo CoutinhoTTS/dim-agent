@@ -2340,7 +2340,7 @@ impl Shared {
                 // A path the description names that no longer exists is the
                 // copy becoming unreadable, not a request error (A.2.1).
                 let (code, message) = match &error {
-                    HostPlatformError::InvalidPath { path }
+                    HostPlatformError::InvalidPath { path, .. }
                         if plugin_target && Path::new(path) != input.path =>
                     {
                         (

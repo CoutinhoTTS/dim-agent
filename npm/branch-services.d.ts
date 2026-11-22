@@ -183,7 +183,7 @@ export type ConfinedReply = {
 
 export type HostPlatformError =
   | { invalid: string }
-  | { invalid_path: { path: string } }
+  | { invalid_path: { path: string; reason: string } }
   | "task_unknown"
   | "task_exists"
   | "task_running"
@@ -294,10 +294,10 @@ export type WaitRequest = {
   timeoutMs?: number | bigint | null
 }
 
-/** How a command task ended. */
+/** How a wait reply ended, or that it is still running. */
 export type WaitStatus = "running" | "exited" | "signaled" | "timed_out" | "cancelled" | "failed"
 
-/** A command task's terminal record. */
+/** A wait reply; terminal when the task ended, `running` when the wait deadline elapsed. */
 export type WaitReply = {
   status: WaitStatus
   exitCode?: number | null
@@ -406,10 +406,7 @@ export interface HostPlatform {
    * the plugin. Explicitly constructed platforms keep their supplied shell.
    */
   execShell(): Promise<ShellStatus>
-  /**
-   * The sandbox backend a new process would use: the same bubblewrap
-   * preparation resolves from the captured `PATH`.
-   */
+  /** The sandbox backend a new process would use. */
   sandboxBackend(): Promise<SandboxBackend>
   /** The directory the persistent shell owns: `<home>/.dim/exec`. */
   execRoot(): Promise<string>

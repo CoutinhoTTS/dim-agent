@@ -1402,6 +1402,18 @@ async fn the_host_platform_service_serves_a_shell() {
             .unwrap()
             .contains("hi")
     );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&terminal.output_path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
     let page = invoke(
         "output",
         serde_json::json!({"taskId": "service-shell", "limit": 4096}),
@@ -1420,6 +1432,7 @@ async fn the_host_platform_service_serves_a_shell() {
     invoke("settle", serde_json::json!({"taskId": "service-shell"}))
         .await
         .unwrap();
+    assert!(!terminal.output_path.exists());
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -1678,5 +1691,71 @@ async fn a_wait_timeout_leaves_the_command_running() {
         .await
         .unwrap();
     let _ = path;
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn output_removal_refuses_traversal_and_links() {
+    let dir = std::env::temp_dir().join(unique("dim-host-remove-safety"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let root = rutis::Ctx::root_with(tokio::runtime::Handle::current());
+    let catalog = dim_agent_capabilities::catalog();
+    let build = Default::default();
+    let names = dim_agent_runtime::Names::copy(&catalog, &build);
+    let _execution = root
+        .provide(ExecutionSettingsHost::fixed(Default::default()))
+        .unwrap();
+    let _toolchain = root.provide(ToolchainSourceHost::fixed(vec![])).unwrap();
+    let plugin = root.plugin(
+        HostPlatformPlugin::new(
+            &names,
+            HostPlatformConfig {
+                execution: names.key().unwrap(),
+                toolchain: names.key().unwrap(),
+                exec_shell_file: None,
+                command_files: None,
+                home: Some(dir.clone()),
+            },
+        )
+        .unwrap(),
+    );
+    (&plugin).await.unwrap();
+    let platform = root.get::<HostPlatform>().unwrap();
+    let exec_root = dir.join(".dim/exec");
+    let outside = dir.join("outside");
+    std::fs::create_dir_all(exec_root.join("session/branch")).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("keep"), b"keep").unwrap();
+    let traversal = exec_root.join("session/branch/../../outside");
+    let error = platform
+        .remove_output_directory(RemoveOutputDirectoryRequest { path: traversal })
+        .await
+        .unwrap_err();
+    assert!(matches!(error, HostPlatformError::Invalid(_)));
+    assert!(outside.join("keep").exists());
+    let root_error = platform
+        .remove_output_directory(RemoveOutputDirectoryRequest {
+            path: exec_root.clone(),
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(root_error, HostPlatformError::Invalid(_)));
+    #[cfg(unix)]
+    {
+        let link = exec_root.join("session/link");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        let link_error = platform
+            .remove_output_directory(RemoveOutputDirectoryRequest { path: link })
+            .await
+            .unwrap_err();
+        assert!(matches!(link_error, HostPlatformError::Invalid(_)));
+        assert!(outside.join("keep").exists());
+    }
+    platform
+        .remove_output_directory(RemoveOutputDirectoryRequest {
+            path: exec_root.join("session/absent"),
+        })
+        .await
+        .unwrap();
     std::fs::remove_dir_all(dir).unwrap();
 }
