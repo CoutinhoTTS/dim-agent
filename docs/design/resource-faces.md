@@ -782,11 +782,12 @@ candidate cleanup, with its existing association checks.
 It is the unregistered removal of
 [worktree management §5](worktree-management.md#5-列出删除与清理): the root is absolute
 without relative components, and the operation holds the owner exclusion from its
-workspace check through the callback, so a Session created after the check fails the
-call and a creation after the removal re-checks its missing workspace. The callback
-receives the checked root and is awaited; a callback failure is `invalid`, `cancelled`
-or `storage` as above, and it must not await any operation in the list above. Dropping
-the caller does not release the lock while the callback runs. The lock has no time
+directory-record and workspace checks through the callback, so a Session created or
+a directory recorded after the check fails the call and a creation after the removal
+re-checks its missing workspace. The callback receives the checked root and is awaited;
+it re-checks the unregistered filesystem facts before it deletes anything. A callback
+failure is `invalid`, `cancelled` or `storage` as above, and it must not await any
+operation in the list above. Dropping the caller does not release the lock while the callback runs. The lock has no time
 limit: it covers a recursive `--force` deletion of any size, and Session creation,
 fork, deletion and worktree association or removal wait for it.
 

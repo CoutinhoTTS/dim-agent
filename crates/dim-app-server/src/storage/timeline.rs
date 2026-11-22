@@ -1797,16 +1797,17 @@ impl SessionStore {
     }
 
     /// Removes an unregistered directory under the store's exclusion: the
-    /// ownership lock is held from the final workspace check through
-    /// `remove`, so a Session created after the check fails this call and a
-    /// creation after the removal re-checks its missing workspace. The
-    /// check and the removal run in their own task, so dropping the caller
-    /// does not release the lock while the removal is still running. The
-    /// path is a store path, absolute without relative components, and the
-    /// directory must have no stored Session workspace at or under it;
-    /// `remove` performs the deletion. Returns whether the directory was
-    /// still present when the lock was acquired; `false` means another
-    /// removal already finished.
+    /// ownership lock is held from the final record and workspace checks
+    /// through `remove`, so a Session created or a directory recorded after
+    /// the check fails this call and a creation after the removal re-checks
+    /// its missing workspace. The checks and the removal run in their own
+    /// task, so dropping the caller does not release the lock while the
+    /// removal is still running. The path is a store path, absolute without
+    /// relative components, and neither a recorded worktree directory nor a
+    /// stored Session workspace may be at or under it; `remove` re-checks the
+    /// unregistered facts and performs the deletion. Returns whether the
+    /// directory was still present when the lock was acquired; `false` means
+    /// another removal already finished.
     pub async fn remove_unregistered_directory(
         &self,
         path: PathBuf,
@@ -1820,6 +1821,16 @@ impl SessionStore {
                 Ok(_) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
                 Err(_) => {}
+            }
+            let directories = store.worktree_directories().await?;
+            if let Some(record) = directories
+                .iter()
+                .find(|record| record.directory.root.starts_with(&path))
+            {
+                return Err(AgentError::InvalidInput(format!(
+                    "{} is a recorded worktree directory; remove it by task id",
+                    record.directory.root.display()
+                )));
             }
             let sessions = store.sessions_under_workspace(&path).await?;
             if let Some(session) = sessions.first() {
