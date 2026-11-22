@@ -1477,7 +1477,7 @@ impl<'a> NewFile<'a> {
 /// The mode an inode with an unknown creation policy may publish: the owner
 /// bits it already has, never a `0o666` an older kernel may have left on an
 /// `O_TMPFILE` inode and never an owner bit it lacks.
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", all(test, unix)))]
 fn owner_bits(observed: u32) -> u32 {
     observed & 0o600
 }
