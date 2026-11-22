@@ -5668,11 +5668,9 @@ impl App {
             "exit" => Outcome::Exit(0),
             "tui" => Outcome::SwitchMode,
             "new" => {
-                // Home has no Session to leave and nothing to change there, so
-                // there is no wait to start; the host still ends the command.
-                if !self.session_id.is_empty() {
-                    self.begin_switch(SwitchKind::New);
-                }
+                // Every `/new` is one command, Home or not: the host answers
+                // each with its own `NewSessionDone`, and only that ends it.
+                self.begin_switch(SwitchKind::New);
                 self.host.send(Command::NewSession);
                 Outcome::Continue
             }
@@ -10980,6 +10978,110 @@ mod tests {
         }
     }
 
+    /// A `/new` sent while Home is shown is still one command: the resume
+    /// attaching behind it may bring a Session on screen, but `Update now`
+    /// must wait for that `/new`'s own completion and then restart on Home.
+    #[test]
+    fn update_now_waits_for_new_sent_from_home_until_its_completion() {
+        for fullscreen in [false, true] {
+            use crate::model::session::SessionItem;
+
+            let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+            let mut drawn = Drawn::new((100, 30), None, true);
+            drawn.app.fullscreen = fullscreen;
+            drawn.app.host = Box::new(Recorder(sent.clone()));
+
+            typed(&mut drawn.app, "/resume");
+            drawn.key(KeyCode::Enter);
+            let id = sent
+                .borrow()
+                .iter()
+                .find_map(|command| match command {
+                    Command::ListSessions { id, .. } => Some(id.clone()),
+                    _ => None,
+                })
+                .expect("opening the list asks for its first page");
+            drawn.app.apply(Update::Sessions {
+                id,
+                paged: true,
+                result: Ok((
+                    vec![SessionItem {
+                        id: "s2".into(),
+                        title: Some("resumed session".into()),
+                        preview: None,
+                        cwd: "/work".into(),
+                        updated_at: u64::MAX,
+                        model: "p/m".into(),
+                        origin: None,
+                        closed: false,
+                    }],
+                    None,
+                )),
+            });
+            drawn.key(KeyCode::Enter);
+            assert!(matches!(sent.borrow().last(), Some(Command::Resume(id)) if id == "s2"));
+            assert!(drawn.app.session_id.is_empty(), "Home is still shown");
+
+            drawn.app.run_command("new", "");
+            assert!(matches!(sent.borrow().last(), Some(Command::NewSession)));
+
+            drawn.app.apply(Update::Switched {
+                session_id: "s2".into(),
+                kind: SwitchKind::Resumed,
+                cwd: None,
+            });
+            assert!(
+                drawn.app.switch_pending,
+                "fullscreen={fullscreen}: the resume ended the queued /new"
+            );
+            drawn.app.apply(Update::Snapshot(Box::new(ViewSnapshot {
+                session_id: "s2".into(),
+                focus: "main".into(),
+                lines: vec![line_view("main", LineState::Main, Some(false))],
+                ..ViewSnapshot::default()
+            })));
+
+            drawn.app.apply(Update::Upgrade(update_offer()));
+            assert!(matches!(drawn.app.prompt, Some(Prompt::Upgrade(_))));
+            assert!(
+                matches!(enter(&mut drawn), Outcome::Continue),
+                "fullscreen={fullscreen}: Update now left before /new ended"
+            );
+            assert!(!drawn.app.update_requested);
+
+            drawn.app.apply(Update::Switched {
+                session_id: String::new(),
+                kind: SwitchKind::New,
+                cwd: None,
+            });
+            assert!(
+                drawn.app.session_id.is_empty(),
+                "the /new came back to Home"
+            );
+            assert!(matches!(drawn.app.prompt, Some(Prompt::Upgrade(_))));
+            assert!(
+                drawn.app.switch_pending,
+                "fullscreen={fullscreen}: the Home switch ended /new before its completion"
+            );
+            assert!(
+                matches!(enter(&mut drawn), Outcome::Continue),
+                "fullscreen={fullscreen}: Update now left before NewSessionDone"
+            );
+
+            drawn.app.apply(Update::NewSessionDone);
+            assert!(!drawn.app.switch_pending);
+            assert!(
+                matches!(enter(&mut drawn), Outcome::Exit(0)),
+                "fullscreen={fullscreen}: Home did not let Update now leave"
+            );
+            assert!(drawn.app.update_requested);
+            assert!(
+                drawn.app.session_id.is_empty(),
+                "fullscreen={fullscreen}: the restart target is not Home"
+            );
+        }
+    }
+
     /// Session `s1`, shown and idle, with one finished turn a fork can cut
     /// at.
     fn shown_at_rest(drawn: &mut Drawn) {
@@ -11279,11 +11381,11 @@ mod tests {
         }
     }
 
-    /// `/new` leaves the shown Session for Home. That command gates `Update
-    /// now` until the host reports it done; on Home it changes nothing, so no
-    /// wait starts there, but the host still ends that command.
+    /// `/new` leaves the shown Session for Home, and on Home it changes
+    /// nothing. Either way the host ends the command with `NewSessionDone`,
+    /// and `Update now` waits for that.
     #[test]
-    fn update_now_waits_for_new_from_a_session_but_not_from_home() {
+    fn update_now_waits_for_new_from_a_session_and_from_home() {
         for fullscreen in [false, true] {
             let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
             let mut drawn = Drawn::new((100, 30), None, true);
@@ -11322,6 +11424,13 @@ mod tests {
             home.app.fullscreen = fullscreen;
             home.app.run_command("new", "");
             home.app.apply(Update::Upgrade(update_offer()));
+            assert!(
+                matches!(enter(&mut home), Outcome::Continue),
+                "fullscreen={fullscreen}: Update now left before the Home /new ended"
+            );
+            assert!(!home.app.update_requested);
+
+            home.app.apply(Update::NewSessionDone);
             assert!(
                 matches!(enter(&mut home), Outcome::Exit(0)),
                 "fullscreen={fullscreen}: /new on Home held Update now"
