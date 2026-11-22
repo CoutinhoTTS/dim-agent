@@ -495,6 +495,47 @@ mod tests {
         );
     }
 
+    /// A `const` of the same file is read as its literal; a path to another
+    /// file and a parameter are not.
+    #[test]
+    fn a_constant_of_the_same_file_is_read_and_a_parameter_is_not() {
+        let text = "const HINT: &str = \"Kept\";\n\nfn footer(hint: &str) {\n    let a = t(HINT);\n    let b = t(crate::report::HINT);\n    let c = t(hint);\n}\n";
+        let keys = call_keys(text, "src.rs").unwrap();
+        assert_eq!(keys.keys, vec![("Kept".to_owned(), "src.rs:4".to_owned())]);
+        assert_eq!(
+            keys.unreadable,
+            vec!["src.rs:5".to_owned(), "src.rs:6".to_owned()]
+        );
+    }
+
+    #[test]
+    fn a_key_missing_from_a_constant_is_refused_by_name() {
+        let root = root(
+            "constant-key",
+            TABLE,
+            "const HINT: &str = \"Missing from a constant\";\n\nfn footer() {\n    let hint = t(HINT);\n}\n",
+        );
+        let error = refusal(&root);
+        assert!(
+            error.contains(
+                "crates/dim-cli/src/ui/panel.rs:4: \"Missing from a constant\" is not in zh_cn"
+            ),
+            "{error}"
+        );
+    }
+
+    /// A `#[cfg(test)]` item holds a fixture the interface never draws, so the
+    /// check reads no key from it.
+    #[test]
+    fn a_text_under_cfg_test_is_not_a_key() {
+        let root = root(
+            "cfg-test",
+            TABLE,
+            "fn panel() {\n    let list = ListPanel::new(\"Kept\", \"h\", \"\", \"\", \"\", false);\n    drop(list);\n}\n\n#[cfg(test)]\nfn fixture() {\n    let list = ListPanel::new(\"T\", \"h\", \"loading\", \"empty\", \"none\", false);\n    drop(list);\n}\n\n#[cfg(test)]\nmod tests {\n    fn draws() {\n        let list = ListPanel::new(\"U\", \"h\", \"waiting\", \"blank\", \"other\", false);\n        drop(list);\n    }\n}\n",
+        );
+        assert_eq!(refusal(&root), "", "a fixture text is not a key");
+    }
+
     #[test]
     fn a_panel_text_missing_from_the_base_table_is_refused_by_name() {
         let root = root(
