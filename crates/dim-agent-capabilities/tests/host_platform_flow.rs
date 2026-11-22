@@ -1803,6 +1803,7 @@ async fn a_shell_burst_is_backpressured_instead_of_reset() {
         .write(ShellWrite {
             task_id: "burst-shell".into(),
             data: "c2VxIDEgNDAwMDAwCg==".into(),
+            command: None,
         })
         .await
         .unwrap();
@@ -1849,6 +1850,100 @@ async fn a_shell_burst_is_backpressured_instead_of_reset() {
     platform
         .settle(TaskRequest {
             task_id: "burst-shell".into(),
+        })
+        .await
+        .unwrap();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn a_shell_command_capture_is_owned_by_the_host() {
+    let dir = std::env::temp_dir().join(unique("dim-host-command-capture"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let root = rutis::Ctx::root_with(tokio::runtime::Handle::current());
+    let catalog = dim_agent_capabilities::catalog();
+    let build = Default::default();
+    let names = dim_agent_runtime::Names::copy(&catalog, &build);
+    let _execution = root
+        .provide(ExecutionSettingsHost::fixed(Default::default()))
+        .unwrap();
+    let _toolchain = root.provide(ToolchainSourceHost::fixed(vec![])).unwrap();
+    let plugin = root.plugin(
+        HostPlatformPlugin::new(
+            &names,
+            HostPlatformConfig {
+                execution: names.key().unwrap(),
+                toolchain: names.key().unwrap(),
+                exec_shell_file: None,
+                command_files: None,
+                home: Some(dir.clone()),
+            },
+        )
+        .unwrap(),
+    );
+    (&plugin).await.unwrap();
+    let platform = root.get::<HostPlatform>().unwrap();
+    platform
+        .shell(ShellRequest {
+            task_id: "capture-shell".into(),
+            cwd: dir.clone(),
+            workspace: dir.clone(),
+            roots: Vec::new(),
+            output_dir: dir.clone(),
+            cols: 80,
+            rows: 24,
+        })
+        .await
+        .unwrap();
+    platform
+        .write(ShellWrite {
+            task_id: "capture-shell".into(),
+            data: "cHJpbnRmICclcyVzXG4nICdfX0RJTV9TVEFSVF9hYWFhYmJiYl8nICdjY2NjZGRkZF9fJzsgcHJpbnRmIGhpOyBwcmludGYgJyVzJXMlZFxuJyAnX19ESU1fRU5EX2VlZWVmZmZmXycgJzAwMDAxMTExX18nICIkPyIK".into(),
+            command: Some(ShellCommandStart {
+                task_id: "owner-command".into(),
+                start_marker: "__DIM_START_aaaabbbb_ccccdddd__".into(),
+                end_marker: "__DIM_END_eeeeffff_00001111__".into(),
+            }),
+        })
+        .await
+        .unwrap();
+    let finished = platform
+        .wait(
+            WaitRequest {
+                task_id: "owner-command".into(),
+                timeout_ms: Some(10_000),
+            },
+            never_cancelled(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(finished.status, WaitStatus::Exited);
+    let page = platform
+        .output(OutputRequest {
+            task_id: "owner-command".into(),
+            cursor: None,
+            limit: Some(4096),
+            wait_ms: None,
+            event_cursor: None,
+        })
+        .await
+        .unwrap();
+    assert!(page.text.contains("hi"), "{:?}", page.text);
+    platform
+        .settle(TaskRequest {
+            task_id: "owner-command".into(),
+        })
+        .await
+        .unwrap();
+    platform
+        .kill(TaskRequest {
+            task_id: "capture-shell".into(),
+        })
+        .await
+        .unwrap();
+    platform
+        .settle(TaskRequest {
+            task_id: "capture-shell".into(),
         })
         .await
         .unwrap();

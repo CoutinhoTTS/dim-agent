@@ -232,6 +232,7 @@ pub(crate) enum ExecutionTask {
     Command(Arc<crate::workspace_tools::exec::CommandTask>),
     Shell(Arc<shell::ShellTask>),
     Job(Arc<shell::ShellJob>),
+    ShellCommand(Arc<shell::ShellCommand>),
 }
 
 #[derive(Clone)]
@@ -456,6 +457,16 @@ pub struct ShellRequest {
 pub struct ShellWrite {
     pub task_id: String,
     pub data: String,
+    #[serde(default)]
+    pub command: Option<ShellCommandStart>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ShellCommandStart {
+    pub task_id: String,
+    pub start_marker: String,
+    pub end_marker: String,
 }
 
 #[derive(serde::Deserialize)]
@@ -1105,6 +1116,13 @@ impl HostPlatform {
                 value = shell.wait(request.timeout_ms) => Ok(value),
             };
         }
+        if let Some(command) = self.shell_command(&request.task_id) {
+            return tokio::select! {
+                biased;
+                _ = cancelled() => Err(HostPlatformError::Cancelled),
+                value = command.wait(request.timeout_ms) => Ok(value),
+            };
+        }
         let task = self.command_task(&request.task_id)?;
         tokio::select! {
             biased;
@@ -1126,6 +1144,9 @@ impl HostPlatform {
                 .await
                 .map_err(|error| HostPlatformError::Failed(error.to_string()));
         }
+        if self.shell_command(&request.task_id).is_some() {
+            return Err(HostPlatformError::TaskUnknown);
+        }
         let task = self.command_task(&request.task_id)?;
         task.terminate()
             .await
@@ -1142,6 +1163,13 @@ impl HostPlatform {
             return Err(HostPlatformError::TaskRunning);
         }
         if self.job_task(&request.task_id).is_some() {
+            self.commands.lock().unwrap().remove(&request.task_id);
+            return Ok(());
+        }
+        if let Some(command) = self.shell_command(&request.task_id) {
+            if !command.ended() {
+                return Err(HostPlatformError::TaskRunning);
+            }
             self.commands.lock().unwrap().remove(&request.task_id);
             return Ok(());
         }
@@ -1212,13 +1240,50 @@ impl HostPlatform {
         let shell = self
             .shell_task(&request.task_id)
             .ok_or(HostPlatformError::TaskUnknown)?;
+        let command = if let Some(start) = request.command {
+            if start.task_id.is_empty()
+                || start.task_id.contains(['/', '\\', '\0', ':'])
+                || matches!(start.task_id.as_str(), "." | "..")
+            {
+                return Err(HostPlatformError::Invalid(
+                    "command taskId must be a single filename component".into(),
+                ));
+            }
+            let directory = shell
+                .output_path()
+                .parent()
+                .unwrap_or_else(|| Path::new("."));
+            let command = Arc::new(shell::ShellCommand::new(
+                start.start_marker,
+                start.end_marker,
+                directory.join(format!("{}.log", start.task_id)),
+            ));
+            {
+                let mut commands = self.commands.lock().unwrap();
+                if commands.contains_key(&start.task_id) {
+                    return Err(HostPlatformError::TaskExists);
+                }
+                commands.insert(
+                    start.task_id.clone(),
+                    ExecutionTask::ShellCommand(command.clone()),
+                );
+            }
+            shell.set_active_command(Some(command.clone()));
+            Some((start.task_id, command))
+        } else {
+            None
+        };
         let bytes = STANDARD
             .decode(request.data)
             .map_err(|error| HostPlatformError::Invalid(error.to_string()))?;
-        shell
-            .write(&bytes)
-            .await
-            .map_err(|error| HostPlatformError::Failed(error.to_string()))
+        if let Err(error) = shell.write(&bytes).await {
+            if let Some((id, _)) = &command {
+                self.commands.lock().unwrap().remove(id);
+            }
+            shell.set_active_command(None);
+            return Err(HostPlatformError::Failed(error.to_string()));
+        }
+        Ok(())
     }
 
     /// Resizes a shell task's PTY.
@@ -1262,6 +1327,9 @@ impl HostPlatform {
                 .map_err(HostPlatformError::from)?;
             page.state = Some(shell.state());
             return Ok(page);
+        }
+        if let Some(command) = self.shell_command(&request.task_id) {
+            return Ok(command.page(request.cursor.unwrap_or(0), limit));
         }
         let task = self.command_task(&request.task_id)?;
         let page = task
@@ -3322,6 +3390,7 @@ pub(crate) mod shell {
         pty: AsyncMutex<Option<PtyProcessTree>>,
         capture: Mutex<Capture>,
         events: Mutex<ShellEvents>,
+        active_command: Mutex<Option<Arc<ShellCommand>>>,
         event_space: Condvar,
         event_notify: Arc<Notify>,
         terminal: watch::Sender<Option<ShellExit>>,
@@ -3334,6 +3403,152 @@ pub(crate) mod shell {
     impl Drop for ShellTask {
         fn drop(&mut self) {
             let _ = std::fs::remove_file(&self.path);
+        }
+    }
+
+    pub(crate) struct ShellCommand {
+        start_marker: String,
+        end_marker: String,
+        path: PathBuf,
+        state: Mutex<ShellCommandState>,
+        notify: Notify,
+    }
+
+    struct ShellCommandState {
+        started: bool,
+        ended: bool,
+        code: Option<String>,
+        output: String,
+        bytes: u64,
+        omitted: usize,
+    }
+
+    impl ShellCommand {
+        pub(crate) fn new(start_marker: String, end_marker: String, path: PathBuf) -> Self {
+            Self {
+                start_marker,
+                end_marker,
+                path,
+                state: Mutex::new(ShellCommandState {
+                    started: false,
+                    ended: false,
+                    code: None,
+                    output: String::new(),
+                    bytes: 0,
+                    omitted: 0,
+                }),
+                notify: Notify::new(),
+            }
+        }
+
+        fn feed(&self, line: &str) {
+            let mut state = self.state.lock().unwrap();
+            let mut rest = line;
+            if !state.started {
+                let Some(position) = rest.find(&self.start_marker) else {
+                    return;
+                };
+                state.started = true;
+                rest = &rest[position + self.start_marker.len()..];
+            }
+            let Some(position) = rest.find(&self.end_marker) else {
+                append_command_output(&mut state, rest);
+                return;
+            };
+            append_command_output(&mut state, &rest[..position]);
+            let code = rest[position + self.end_marker.len()..].trim();
+            state.code = Some(code.to_owned());
+            state.ended = true;
+            drop(state);
+            self.notify.notify_waiters();
+        }
+
+        pub(crate) fn ended(&self) -> bool {
+            self.state.lock().unwrap().ended
+        }
+
+        pub(crate) fn page(&self, cursor: u64, limit: usize) -> super::OutputPageReply {
+            let state = self.state.lock().unwrap();
+            let start = (cursor as usize).min(state.output.len());
+            let end = (start + limit).min(state.output.len());
+            super::OutputPageReply {
+                text: state.output[start..end].to_owned(),
+                bytes: state.bytes,
+                next_cursor: Some(end as u64),
+                truncated: state.omitted > 0,
+                retained_from: 0,
+                reset: None,
+                events: Vec::new(),
+                next_event_cursor: None,
+                event_retained_from: None,
+                state: None,
+            }
+        }
+
+        pub(crate) async fn wait(&self, timeout_ms: Option<u64>) -> super::WaitReply {
+            let deadline = timeout_ms.map(|ms| Instant::now() + Duration::from_millis(ms));
+            loop {
+                {
+                    let state = self.state.lock().unwrap();
+                    if state.ended {
+                        return super::WaitReply {
+                            status: match state.code.as_deref() {
+                                Some("0") => super::WaitStatus::Exited,
+                                Some("failed") => super::WaitStatus::Failed,
+                                Some(_) => super::WaitStatus::Failed,
+                                None => super::WaitStatus::Exited,
+                            },
+                            exit_code: state.code.as_ref().and_then(|code| code.parse().ok()),
+                            signal: None,
+                            duration_ms: 0,
+                            output_path: self.path.clone(),
+                            output_bytes: state.bytes,
+                            output_truncated: state.omitted > 0,
+                            preview: tail_bytes(&state.output, 16_000).to_owned(),
+                            preview_truncated: state.omitted > 0,
+                            failure_note: None,
+                        };
+                    }
+                }
+                let Some(deadline) = deadline else {
+                    self.notify.notified().await;
+                    continue;
+                };
+                if Instant::now() >= deadline {
+                    let state = self.state.lock().unwrap();
+                    return super::WaitReply {
+                        status: super::WaitStatus::Running,
+                        exit_code: None,
+                        signal: None,
+                        duration_ms: 0,
+                        output_path: self.path.clone(),
+                        output_bytes: state.bytes,
+                        output_truncated: state.omitted > 0,
+                        preview: tail_bytes(&state.output, 16_000).to_owned(),
+                        preview_truncated: state.omitted > 0,
+                        failure_note: None,
+                    };
+                }
+                let _ = tokio::time::timeout_at(
+                    tokio::time::Instant::from_std(deadline),
+                    self.notify.notified(),
+                )
+                .await;
+            }
+        }
+    }
+
+    fn append_command_output(state: &mut ShellCommandState, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        state.bytes += text.len() as u64;
+        let room = (64 * 1024usize).saturating_sub(state.output.len());
+        if text.len() <= room {
+            state.output.push_str(text);
+        } else {
+            state.output.push_str(&text[..room]);
+            state.omitted += text.len() - room;
         }
     }
 
@@ -3570,6 +3785,7 @@ pub(crate) mod shell {
                 pty: AsyncMutex::new(Some(pty)),
                 capture: Mutex::default(),
                 events: Mutex::default(),
+                active_command: Mutex::new(None),
                 event_space: Condvar::new(),
                 event_notify: Arc::new(Notify::new()),
                 terminal: watch::channel(None).0,
@@ -3598,6 +3814,12 @@ pub(crate) mod shell {
                     pending.push_str(&chunk);
                     while let Some(newline) = pending.find('\n') {
                         let line: String = pending.drain(..=newline).collect();
+                        if let Some(command) = pump.active_command.lock().unwrap().clone() {
+                            command.feed(&line);
+                            if command.ended() {
+                                *pump.active_command.lock().unwrap() = None;
+                            }
+                        }
                         if let Some((task_id, reported)) = parse_shell_job(&line) {
                             let pid = pump
                                 .pty
@@ -3709,6 +3931,13 @@ pub(crate) mod shell {
             }
         }
 
+        pub(crate) fn shell_command(&self, id: &str) -> Option<Arc<ShellCommand>> {
+            match self.commands.lock().unwrap().get(id) {
+                Some(super::ExecutionTask::ShellCommand(command)) => Some(command.clone()),
+                _ => None,
+            }
+        }
+
         pub(crate) fn job_task(&self, id: &str) -> Option<Arc<ShellJob>> {
             match self.commands.lock().unwrap().get(id) {
                 Some(super::ExecutionTask::Job(job)) => Some(job.clone()),
@@ -3727,6 +3956,10 @@ pub(crate) mod shell {
     impl ShellTask {
         pub(crate) fn output_path(&self) -> &Path {
             &self.path
+        }
+
+        pub(crate) fn set_active_command(&self, command: Option<Arc<ShellCommand>>) {
+            *self.active_command.lock().unwrap() = command;
         }
 
         pub(crate) fn state(&self) -> super::ShellState {

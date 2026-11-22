@@ -326,9 +326,16 @@ export type ShellRequest = {
   rows: number
 }
 
+export type ShellCommandStart = {
+  taskId: string
+  startMarker: string
+  endMarker: string
+}
+
 export type ShellWrite = {
   taskId: string
   data: string
+  command?: ShellCommandStart | null
 }
 
 export type ShellResize = {
