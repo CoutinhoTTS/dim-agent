@@ -12,9 +12,35 @@ and tree-supervision primitives to local tools.
 | `P:ToolchainSourceHost` | The downloaded runtimes installed under the plan in effect, each with the bin directory appended to a started child's `PATH` and the archive directory granted to a confined one. Required; an assembly that installs no runtimes provides `ToolchainSourceHost::fixed(vec![])`. |
 | `P:FileStorage` | Read the configured exec shell; enabled only when `exec_shell_file` is configured. |
 
+
+## Data face
+
+`hostPlatform` is a process-scope data face. Its public methods are `info`, `execShell`,
+`persistentShell`, `sandboxBackend`, `execRoot`, the command task operations `spawn`, `wait`,
+`kill`, `settle`, `output`, `retainOutput` and `tail`, the persistent shell operations `shell`,
+`write` and `resize`, and `spawnWithStdin`, `spawnConfined`, `removeOutputDirectory` and
+`childPath`. `spawn_tree`, `spawn_with_stdin_process`, `spawn_pty`, `build_process_spec` and
+`child_path_process` remain `#[service(skip)]`: they carry process handles and cannot cross.
+
+A task id is reserved by the owner before a command or background job starts. `spawn` and the job
+part of `shell.write` answer `task_exists` for an id already in the table, an unusable output
+directory, or an existing output log. `wait` reports the terminal record and never removes it; a
+timeout stops the wait and answers `running`. `settle` releases only an ended task or an exited
+shell and answers `task_running` otherwise; `kill` is the explicit stop. Output logs stay under
+`execRoot` and are registered by the branch when the model is given their path.
+`removeOutputDirectory` accepts only a persistent-shell output directory below the canonical
+`execRoot` and refuses traversal and symlink components.
+
+`output` serves either a text page or, with `eventCursor`, ordered `ShellEvent` lines
+(`output` or full `marker`) and `ShellState`; `waitMs` bounds an empty read, `limit` bounds both
+the text and event page. A shell command capture is read by its command id and records the bounded
+output, tail and task log. The command/task and shell settlement rules are in
+[resource faces §3.2](../../../design/resource-faces.md#32-settlement-and-retained-task-records).
+
 ## Events and lifetime
 
-No Timeline events or plugin background tasks. `apply` captures the process
+No Timeline events. The owner keeps command supervisors, pipe pumps, the shell reader and the
+shell worker until kill, settle or owner shutdown; `apply` captures the process
 environment, reads the initial shell snapshot, retains the configured
 FileStorage source and requires the execution-settings port. `exec_shell()`
 rereads that source on every invocation.

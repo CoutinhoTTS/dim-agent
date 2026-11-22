@@ -107,11 +107,11 @@ The process operations are split by their owners:
 
 `hostPlatform`'s handle methods (`spawn_tree`, `spawn_with_stdin_process`, `spawn_pty`,
 `build_process_spec`, `child_path_process`) stay `#[service(skip)]`; they carry process handles and
-cannot cross. Stage 1 serves the command task operations on `hostPlatform`: `spawn` returns a task id and
+cannot cross. The service serves the command task operations on `hostPlatform`: `spawn` returns a task id and
 the process/output state stays with the owner; `wait`, `kill`, `settle`, `output`, `retainOutput`
 and `tail` work by that id. `WorkspaceTools` and `backgroundExec` use the task id; the branch keeps
-the task record and the facts. `shell`/`write`/`resize` are served by the same owner; `ShellSession` runs its marker protocol
-over the owner's shell task. `spawnWithStdin` and `spawnConfined` are the existing methods
+the task record and the facts. `shell`/`write`/`resize` are served by the same owner; the owner
+records the command capture and `ShellSession` keeps only queue, timeout and occupancy policy. `spawnWithStdin` and `spawnConfined` are the existing methods
 Hooks and OCR call, now with data requests and replies. `removeOutputDirectory` and `childPath`
 are the existing cleanup and PATH helpers, now data methods; SessionStore and MCP call them. The
 in-process cores stay as the shared implementation, not a second public operation.
@@ -147,6 +147,26 @@ error, so its reply carries no truncation flags. Cancellation is the existing
 the platform's execution root. `execShell`, `sandboxBackend` and `execRoot` remain available as
 individual methods for a caller that needs one fact; `info` is the one call for a caller that
 needs several.
+
+### 3.2 Settlement and retained task records
+
+A task id is reserved by the owner before the command or job starts. `spawn` and the `job` part of
+`shell.write` reject an id already in the live table with `task_exists`; a completed command keeps
+its output log, so reusing its id is refused until the log is removed. `spawn` also refuses an
+unusable output directory before the process starts.
+
+`wait` reports the terminal record but never removes it; a timeout answers `running` and only
+stops waiting. The caller decides when the record is no longer needed and calls `settle`. `settle`
+accepts only a terminal task or a shell that exited; a running command, shell or background job
+answers `task_running`. `kill` is the explicit stop; when it ends a background job the owner marks
+that job ended so it can be settled. A caller that never settles keeps the record and its log until
+the owner unloads.
+
+Output logs live below `execRoot`. The branch registers the logs it gives the model (foreground,
+occupying, background and shell); Session deletion removes the registered candidates. The owner
+removes the shell's own PTY log when the shell task drops. `removeOutputDirectory` accepts only a
+persistent-shell output directory below the canonical `execRoot`, refusing traversal and symlink
+components.
 
 ## 4. `fsHost`
 
@@ -636,7 +656,7 @@ original path argument and ownership exclusion.
 
 | Old name | Face | What the name is now |
 | --- | --- | --- |
-| `hostPlatform` | `hostPlatform` | The process service and its Rust binding; its public data methods are `info`, `exec_shell`, `sandbox_backend` and `exec_root`. `ProcessTree`, `PtyProcessTree`, temporary directories, shell preparation and the spawn methods are internals (`#[service(skip)]`) |
+| `hostPlatform` | `hostPlatform` | The process service and its Rust binding; its public data methods serve `info`, the command task operations, the persistent shell, the configured/confined helpers, removal and child path (the list is in §3). `ProcessTree`, `PtyProcessTree`, temporary directories, shell preparation and the `_process` cores are internals (`#[service(skip)]`) |
 | `fileStorage` | `fsHost` | The provider and its binding: roots, leases, generations and one validated path component per open are its internals |
 | `sqliteStorage` | `sqliteStorage.storageReport({})` | SQLite file, WAL and reclaimable bytes ([native storage](appserver/native-storage-format.md)). Session repository operations belong to `store`. |
 | `timelineStore` | `timelineStore` | Session-scoped Timeline operations; the `TimelineStore` trait is its native binding |
@@ -733,9 +753,9 @@ No other requirement is raised:
    to the same state owner (#1298); the naming split changes neither placement nor ordering.
 7. **Root identity form.** The Session passes the opaque `rootIdentity` back to the provider.
    The provider owns its platform form and comparison.
-8. **Retained task records.** Settlement is explicit (§3.8). If a long-lived local provider wants a
+8. **Retained task records.** Settlement is explicit (§3.2). If a long-lived local provider wants a
    bound instead, it must give the control side time to record the terminal fact and refuse a
-   repeated `start` until expiry. Registered file retention follows Session ownership (§3.8).
+   repeated `start` until expiry. Registered file retention follows Session ownership (§3.2).
 
 ## 10. Ablation
 
