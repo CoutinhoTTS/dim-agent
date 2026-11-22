@@ -349,6 +349,15 @@ const STARTUP_BOUND: Duration = Duration::from_secs(120);
 /// short enough for a test to reach the bound without a real wait, and
 /// unsignalled by the product.
 const STALLED_CLEANUP_GRACE: Duration = Duration::from_millis(200);
+/// The outer hang guard of the tests that run a real serve child through the
+/// supervisor: a wait that never ends fails the guard instead of holding the
+/// suite.
+const SUBPROCESS_EVAL_GUARD: Duration = Duration::from_secs(60);
+/// How long a test hook's provider holds an answer, and how long the
+/// stdout-holder member keeps the write end open: past the guard, so a flow
+/// that waits on either fails its guard instead of passing.
+const HELD_PAST_GUARD: Duration = Duration::from_secs(90);
+const _: () = assert!(HELD_PAST_GUARD.as_secs() > SUBPROCESS_EVAL_GUARD.as_secs());
 
 /// The cleanup grace of a run's close, its server's shutdown and the parent's
 /// read of its child's output: [`SETTLE_BOUND`], or the test hook's shorter
@@ -2621,7 +2630,7 @@ pub(crate) async fn serve_entry(params_path: Option<String>) -> Result<()> {
         // appended beside the marker for the test to check the group is gone.
         let mut member = std::process::Command::new("sleep");
         member
-            .arg("90")
+            .arg(HELD_PAST_GUARD.as_secs().to_string())
             .stdin(Stdio::null())
             .stderr(Stdio::null())
             .stdout(if *holds_stdout {
@@ -14805,8 +14814,7 @@ mod tests {
         /// Holds the candidate arm's model calls until the failure cancels
         /// it; the current arm's child never reaches a model call.
         fn hold_the_candidate(text: &str) -> Option<Duration> {
-            text.contains("/candidate/")
-                .then(|| Duration::from_secs(60))
+            text.contains("/candidate/").then_some(HELD_PAST_GUARD)
         }
         let fixture = Fixture::holding(
             "failed-sibling",
@@ -14845,7 +14853,9 @@ mod tests {
             })
         };
         options.fail_child = Some(("current".into(), marker));
-        let settled = fixture.evaluate(&options).await;
+        let settled = tokio::time::timeout(SUBPROCESS_EVAL_GUARD, fixture.evaluate(&options))
+            .await
+            .expect("the evaluation returns after its failed run settles the sibling");
         let error = settled
             .expect_err("the failing run fails the evaluation")
             .to_string();
@@ -14885,7 +14895,7 @@ mod tests {
             (text.contains("Run the stalled probes.")
                 || (text.contains("You check statements")
                     && !text.contains("Finish the next scenario.")))
-            .then(|| Duration::from_secs(60))
+            .then_some(HELD_PAST_GUARD)
         }
         let fixture = Fixture::holding(
             "stalled-cleanup",
@@ -14921,7 +14931,7 @@ mod tests {
         let mut options = fixture.options(out.clone());
         options.jobs = 1;
         options.stall_cleanup = true;
-        let report = tokio::time::timeout(Duration::from_secs(30), fixture.evaluate(&options))
+        let report = tokio::time::timeout(SUBPROCESS_EVAL_GUARD, fixture.evaluate(&options))
             .await
             .expect("the evaluation returns although the first scenario's cleanup never settles")
             .expect("the evaluation records both scenarios");
@@ -14932,6 +14942,10 @@ mod tests {
             assert_eq!(record["failed"], true, "{record}");
             assert_eq!(record["judgeOutcome"], "not_asked", "{record}");
             assert_eq!(record["error"], Value::Null, "{record}");
+            assert!(
+                record["durationMs"].as_f64().unwrap_or_default() < 20_000.0,
+                "the run ends within its cleanup bound, not at a longer one: {record}"
+            );
             let error = record["judgeError"].as_str().unwrap_or_default();
             assert!(
                 error.contains("did not close within the cleanup grace"),
@@ -15029,7 +15043,7 @@ mod tests {
     async fn a_timed_out_run_whose_judge_never_answers_frees_its_worker() {
         fn hold_the_first_judge(text: &str) -> Option<Duration> {
             (text.contains("You check statements") && text.contains("Run the quick probe."))
-                .then(|| Duration::from_secs(60))
+                .then_some(HELD_PAST_GUARD)
         }
         let fixture = Fixture::holding(
             "timed-out-judge",
@@ -15067,7 +15081,7 @@ mod tests {
         let mut options = fixture.options(out.clone());
         options.jobs = 1;
         options.cleanup_budget_ms = Some(1_000);
-        let report = tokio::time::timeout(Duration::from_secs(60), fixture.evaluate(&options))
+        let report = tokio::time::timeout(SUBPROCESS_EVAL_GUARD, fixture.evaluate(&options))
             .await
             .expect("the evaluation returns though the first scenario's judge never answers")
             .expect("the evaluation records both scenarios");
@@ -15078,6 +15092,10 @@ mod tests {
             assert_eq!(record["failed"], true, "{record}");
             assert_eq!(record["judgeOutcome"], "call_failed", "{record}");
             assert_eq!(record["error"], Value::Null, "{record}");
+            assert!(
+                record["durationMs"].as_f64().unwrap_or_default() < 20_000.0,
+                "the run ends within its cleanup bound, not at a longer one: {record}"
+            );
             let error = record["judgeError"].as_str().unwrap_or_default();
             assert!(
                 error.contains("did not finish within the cleanup grace"),
@@ -15150,7 +15168,7 @@ mod tests {
         // Long enough for the close to settle on a loaded host; the export is
         // the step that never finishes.
         options.cleanup_budget_ms = Some(1_000);
-        let report = tokio::time::timeout(Duration::from_secs(30), fixture.evaluate(&options))
+        let report = tokio::time::timeout(SUBPROCESS_EVAL_GUARD, fixture.evaluate(&options))
             .await
             .expect("the evaluation returns though the first scenario's export never finishes")
             .expect("the evaluation records both scenarios");
@@ -15161,6 +15179,10 @@ mod tests {
             assert_eq!(record["failed"], true, "{record}");
             assert_eq!(record["judgeOutcome"], "not_asked", "{record}");
             assert_eq!(record["error"], Value::Null, "{record}");
+            assert!(
+                record["durationMs"].as_f64().unwrap_or_default() < 20_000.0,
+                "the run ends within its cleanup bound, not at a longer one: {record}"
+            );
             let error = record["judgeError"].as_str().unwrap_or_default();
             assert!(
                 error.contains("export did not finish within the cleanup grace"),
@@ -15227,7 +15249,7 @@ mod tests {
         // The bound under test is the parent's two seconds per child; the
         // guard only turns a hang into a failed assertion.
         options.hard_bound_ms = Some(2_000);
-        let report = tokio::time::timeout(Duration::from_secs(30), fixture.evaluate(&options))
+        let report = tokio::time::timeout(SUBPROCESS_EVAL_GUARD, fixture.evaluate(&options))
             .await
             .expect("the evaluation returns though each child blocks after its wall clock")
             .expect("the evaluation records both arms");
@@ -15387,7 +15409,7 @@ mod tests {
         // guard only turns a hang into a failed assertion, and the member
         // holds its stdout for 90 seconds. The bound under test is the test
         // hook's 200 ms read grace.
-        let report = tokio::time::timeout(Duration::from_secs(60), fixture.evaluate(&options))
+        let report = tokio::time::timeout(SUBPROCESS_EVAL_GUARD, fixture.evaluate(&options))
             .await
             .expect("the evaluation returns though a child left its stdout open")
             .expect("the evaluation records both arms");
@@ -15424,7 +15446,7 @@ mod tests {
         let mut options = fixture.judge_options(out.clone());
         let marker = fixture.directory.join("leave.marker");
         options.leave_member = Some((false, marker.clone()));
-        let report = tokio::time::timeout(Duration::from_secs(30), fixture.evaluate(&options))
+        let report = tokio::time::timeout(SUBPROCESS_EVAL_GUARD, fixture.evaluate(&options))
             .await
             .expect("the evaluation returns")
             .expect("the evaluation records both arms");
