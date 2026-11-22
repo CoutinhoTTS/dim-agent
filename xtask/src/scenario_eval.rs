@@ -14777,7 +14777,11 @@ mod tests {
         options.stall_cleanup = true;
         let marker = fixture.directory.join("leave.marker");
         options.leave_member = Some((true, marker.clone()));
-        let report = tokio::time::timeout(Duration::from_secs(30), fixture.evaluate(&options))
+        // Four runs, each starting its own child and served Session: the
+        // guard only turns a hang into a failed assertion, so it is wide
+        // enough for a loaded machine. The bound under test is the test
+        // hook's 200 ms read grace.
+        let report = tokio::time::timeout(Duration::from_secs(120), fixture.evaluate(&options))
             .await
             .expect("the evaluation returns though a child left its stdout open")
             .expect("the evaluation records both scenarios");
