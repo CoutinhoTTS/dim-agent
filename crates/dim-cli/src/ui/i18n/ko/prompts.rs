@@ -133,6 +133,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "editing" => "편집 중",
         "changed" => "변경함",
         "changing" => "변경 중",
+        "Ran code" => "코드 실행함",
+        "Running code" => "코드 실행 중",
         "checked on" => "확인함",
         "checking on" => "확인 중",
         "Explored" => "탐색함",

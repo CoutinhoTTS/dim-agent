@@ -125,6 +125,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "editing" => "正在編輯",
         "changed" => "變更了",
         "changing" => "正在變更",
+        "Ran code" => "執行了程式碼",
+        "Running code" => "正在執行程式碼",
         "checked on" => "查看了",
         "checking on" => "正在查看",
         "Explored" => "瀏覽了",

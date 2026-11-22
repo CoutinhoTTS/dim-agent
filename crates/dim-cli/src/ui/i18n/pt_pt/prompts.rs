@@ -141,6 +141,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "editing" => "a editar",
         "changed" => "alterou",
         "changing" => "a alterar",
+        "Ran code" => "executou código",
+        "Running code" => "a executar código",
         "checked on" => "verificou",
         "checking on" => "a verificar",
         "Explored" => "Explorou",
