@@ -1245,7 +1245,7 @@ impl<'a> NewFile<'a> {
             // An inode the kernel already left narrower than 0600 while the
             // policy probes report nothing: the clamp must not add owner bits.
             // SAFETY: `file` owns an open descriptor for the call.
-            if unsafe { libc::fchmod(fd, 0o040) } != 0 {
+            if unsafe { libc::fchmod(fd, 0o400) } != 0 {
                 return Err(TargetError::Io(std::io::Error::last_os_error()));
             }
         }
@@ -1474,19 +1474,24 @@ impl<'a> NewFile<'a> {
     }
 }
 
-/// The private staging mode for an inode whose creation policy is unknown:
-/// owner bits already present, never `0o666` that an older kernel may have
-/// left on an `O_TMPFILE` inode.
+/// The mode an inode with an unknown creation policy may publish: the owner
+/// bits it already has, never a `0o666` an older kernel may have left on an
+/// `O_TMPFILE` inode and never an owner bit it lacks.
+#[cfg(any(target_os = "linux", test))]
+fn owner_bits(observed: u32) -> u32 {
+    observed & 0o600
+}
+
+/// The private staging mode for an inode whose creation policy is unknown.
 #[cfg(target_os = "linux")]
 fn private_mode(file: &std::fs::File) -> Result<u32, TargetError> {
     use std::os::unix::fs::PermissionsExt;
-    let observed = file
-        .metadata()
-        .map_err(TargetError::Io)?
-        .permissions()
-        .mode()
-        & 0o600;
-    Ok(observed)
+    Ok(owner_bits(
+        file.metadata()
+            .map_err(TargetError::Io)?
+            .permissions()
+            .mode(),
+    ))
 }
 
 /// Test-only controls over how a new file is staged.
@@ -2237,6 +2242,16 @@ mod mutation_tests {
         assert_eq!(std::fs::read(existing).unwrap(), b"external");
         assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The unknown-policy clamp keeps an inode's observed owner bits and drops
+    /// every group and other bit, so a narrower inode never gains access.
+    #[test]
+    fn an_unknown_policy_keeps_only_the_observed_owner_bits() {
+        assert_eq!(owner_bits(0o644), 0o600);
+        assert_eq!(owner_bits(0o400), 0o400);
+        assert_eq!(owner_bits(0o040), 0);
+        assert_eq!(owner_bits(0o600), 0o600);
     }
 
     /// An unknown creation policy clamps an anonymous inode's observed mode: an
