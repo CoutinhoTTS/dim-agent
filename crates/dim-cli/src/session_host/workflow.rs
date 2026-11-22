@@ -186,7 +186,12 @@ impl Worker {
 
     pub(super) async fn poll_workflow(&mut self) {
         if !self.workflow_ready() {
-            self.workflow.next_at = None;
+            // A read in flight is a busy slot, not a stopped reader: a
+            // replacement attachment's deadline waits for it and the timer
+            // shares this eligibility check, so the busy slot cannot spin it.
+            if self.workflow.request.is_none() {
+                self.workflow.next_at = None;
+            }
             return;
         }
         let run_id = if self.workflow.discovery {
@@ -548,6 +553,70 @@ mod tests {
         assert!(
             worker.workflow.next_at.is_none(),
             "a connection without workflow.status leaves no wake armed"
+        );
+    }
+
+    /// A replacement attachment relays its run facts while the old attachment's
+    /// read is still in flight. That reply frees the slot, and the deadline the
+    /// replay armed reads the replayed run without reopening the panel.
+    #[tokio::test]
+    async fn a_replaced_attachments_replayed_run_is_read_once_the_old_reply_lands() {
+        let mut features = crate::session_host::TEST_FEATURES.to_vec();
+        features.push("workflow.status");
+        let (mut worker, _receiver, _sent) = crate::session_host::test_worker(&features).await;
+        worker.session_id = "s1".into();
+        worker.discover_workflow("main", &call(1, "wf-call"));
+        worker.discover_workflow("main", &completed(2, "wf-call", "run-a"));
+        worker.poll_workflow().await;
+        let old = worker
+            .workflow
+            .request
+            .as_ref()
+            .expect("the old attachment's read is in flight")
+            .id;
+
+        worker.session_id = worker.invalidate_projection();
+        assert!(
+            worker.workflow.next_at.is_none(),
+            "a replacement starts with no deadline"
+        );
+        worker.replay("main", call(3, "wf-call-2"));
+        worker.replay("main", completed(4, "wf-call-2", "run-b"));
+        assert!(
+            worker.workflow.next_at.is_some(),
+            "the replayed run asks for a read"
+        );
+
+        worker.poll_workflow().await;
+        assert_eq!(
+            worker.workflow.request.as_ref().map(|request| request.id),
+            Some(old),
+            "the replayed run waits for the read in flight"
+        );
+        assert!(
+            worker.workflow.next_at.is_some(),
+            "a busy read keeps the replacement's deadline"
+        );
+
+        reply(&mut worker, Ok(json!({"run_id": "run-a"}))).await;
+        assert!(
+            worker.workflow.request.is_none(),
+            "the old reply frees the slot"
+        );
+        assert!(
+            worker.workflow.next_at.is_some(),
+            "the old reply leaves the replacement's deadline armed"
+        );
+
+        worker.poll_workflow().await;
+        assert_eq!(
+            worker
+                .workflow
+                .request
+                .as_ref()
+                .and_then(|request| request.run_id.as_deref()),
+            Some("run-b"),
+            "the replacement's replayed run is read without reopening the panel"
         );
     }
 }
