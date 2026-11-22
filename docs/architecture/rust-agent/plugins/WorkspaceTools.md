@@ -370,9 +370,15 @@ original owner, group, mode and extended attributes before the rename.
 - **macOS.** The named 0600 sibling is created in the target's parent, so XNU
   assigns the parent's group and the inheritable file ACL at creation; an
   `fchmod(fd, 0o666 & ~umask)` immediately before the link sets the mode without
-  changing that ACL. Each product entry captures the umask once in `main`,
-  before any thread starts, because the supported baseline has no `getumask`; a
-  library or test caller that does not capture it keeps the 0600 staging mode.
+  changing that ACL. Each product entry, [dimcode](../../../../crates/dimcode/src/main.rs)
+  and [dim-app-server](../../../../crates/dim-app-server/src/main.rs), calls
+  `install_process_umask()` from `main` before any thread starts, because the
+  supported baseline has no `getumask`. The mode a new file gets therefore
+  depends on the process having started through one of those entries: a library
+  or test caller that reaches `write` without capturing the umask publishes new
+  files as 0600 on macOS, unlike Linux, where `write` reads the umask from
+  `/proc/self/status` for every caller. That is the documented contract, and
+  `write` neither captures nor enforces a process umask itself.
 - **Windows.** Unchanged: the private handle is installed with a hard link.
 
 A new file's success belongs to a path that names the file actually written.
