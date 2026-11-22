@@ -1872,6 +1872,183 @@ mod tests {
         );
     }
 
+    /// A live failure the parent's page has not projected a `branch/create`
+    /// for, with the parent's inventory still in flight: the child row is
+    /// projected terminal, `/lines` refuses it for the whole gap, and neither
+    /// the refusal nor the parent's finished window resets or queues it.
+    #[tokio::test]
+    async fn a_create_failure_before_its_create_is_projected_is_terminal() {
+        let (mut worker, mut receiver, _sent) =
+            crate::session_host::test_worker(&crate::session_host::TEST_FEATURES).await;
+        worker.session_id = "s1".into();
+        worker.focus = "main".into();
+        worker.discover_branch("b-7c");
+        worker
+            .command(Command::FocusLine("b-7c".into()))
+            .await
+            .unwrap();
+        worker.poll_task_history().await.unwrap();
+        assert_eq!(
+            worker
+                .task_history_request
+                .as_ref()
+                .map(|read| read.branch_id.as_str()),
+            Some("b-7c"),
+            "the parent's first window is in flight"
+        );
+
+        worker.task_event("b-7c", create_failed(400, "b-7d"));
+        answer(
+            &mut worker,
+            json!({"events":[{
+                "id": "create-child", "sequence": 2, "create_at": 1000, "type": "branch", "name": "create",
+                "data": {
+                    "at": {"kind": "sequence", "sequence": 1}, "branch": "b-7d", "prompt": "Narrow the parser",
+                    "source": {"kind": "host", "operation_id": "op"}
+                }
+            }], "through": 300, "nextBefore": 1, "nextAfter": 300}),
+        )
+        .await;
+
+        worker.methods.insert("session.input.pending".into());
+        worker.methods.insert("session.turn.get".into());
+        worker.poll_task_history().await.unwrap();
+        assert!(
+            matches!(
+                worker.task_history_request.as_ref().map(|read| &read.stage),
+                Some(ReadStage::Inventory("session.input.pending"))
+            ),
+            "the parent's inventory is gated"
+        );
+
+        let child = worker
+            .projection
+            .line_views()
+            .iter()
+            .find(|line| line.id == "b-7d")
+            .expect("the parent's page projected the child");
+        assert_eq!(
+            child.state,
+            LineState::CreationFailed,
+            "the projected child is terminal, not waiting"
+        );
+        worker
+            .command(Command::FocusLine("b-7d".into()))
+            .await
+            .unwrap();
+        assert_eq!(
+            worker.focus, "b-7c",
+            "the child is refused while its parent's inventory is in flight"
+        );
+        assert!(
+            worker.task_history["b-7d"].done,
+            "the refused child was not reset for a read"
+        );
+        assert!(
+            !worker.task_history_queue.contains(&"b-7d".to_owned()),
+            "the refused child is not queued for a read"
+        );
+        assert!(
+            !worker.lines.contains_key("b-7d"),
+            "the refused child has no transcript"
+        );
+        let failed_notice = |receiver: &mut std::sync::mpsc::Receiver<Update>| -> usize {
+            receiver
+                .try_iter()
+                .filter_map(|update| match update {
+                    Update::Notice(text) => Some(text),
+                    _ => None,
+                })
+                .filter(|notice| notice == "Branch b-7d: creation refused")
+                .count()
+        };
+        assert_eq!(
+            failed_notice(&mut receiver),
+            1,
+            "the failure is announced once"
+        );
+
+        answer(
+            &mut worker,
+            json!({"branchId":"b-7c","through":300,"inputs":[],"next":null}),
+        )
+        .await;
+        worker.poll_task_history().await.unwrap();
+        answer(
+            &mut worker,
+            json!({"branchId":"b-7c","through":300,"turn":null,"output":null}),
+        )
+        .await;
+        worker.poll_task_history().await.unwrap();
+        assert!(
+            worker.task_history["b-7c"].done,
+            "the parent's window finished"
+        );
+        assert!(
+            worker.task_history["b-7d"].done,
+            "the parent's window did not reset the child"
+        );
+        assert!(
+            !worker.task_history_queue.contains(&"b-7d".to_owned()),
+            "the parent's window did not queue the child"
+        );
+        assert_eq!(
+            failed_notice(&mut receiver),
+            0,
+            "the drained failure is not announced again"
+        );
+
+        worker
+            .command(Command::TaskHistory {
+                projection_id: worker.projection_id,
+            })
+            .await
+            .unwrap();
+        assert!(
+            !worker.task_history_queue.contains(&"b-7d".to_owned()),
+            "reopening /tasks does not queue the child"
+        );
+        worker
+            .command(Command::FocusLine("b-7d".into()))
+            .await
+            .unwrap();
+        assert_eq!(worker.focus, "b-7c", "the child stays refused");
+
+        receiver.try_iter().for_each(drop);
+        worker.invalidate_projection();
+        assert!(
+            worker.projection.line_views().is_empty(),
+            "a new Session's projection holds no line from the old one"
+        );
+        worker
+            .command(Command::FocusLine("b-7d".into()))
+            .await
+            .unwrap();
+        let notices: Vec<String> = receiver
+            .try_iter()
+            .filter_map(|update| match update {
+                Update::Notice(text) => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            notices
+                .iter()
+                .any(|notice| notice == "No line b-7d in this session"),
+            "a re-attached Session does not know the failed line: {notices:?}"
+        );
+        assert!(
+            !notices
+                .iter()
+                .any(|notice| notice == "Line creation failed: b-7d"),
+            "the old Session's failure did not cross over: {notices:?}"
+        );
+        assert_eq!(
+            worker.focus, "main",
+            "a re-attached Session does not know the failed line"
+        );
+    }
+
     fn published(receiver: &mut std::sync::mpsc::Receiver<Update>) -> ViewSnapshot {
         let mut snapshot = None;
         while let Ok(update) = receiver.try_recv() {
