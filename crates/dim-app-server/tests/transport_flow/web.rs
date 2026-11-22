@@ -5,14 +5,16 @@ use dim_agent_runtime::Names;
 use dim_agent_runtime::testing::{branch_events, chain_events};
 use dim_app_server::managed_provider::{
     AccountSnapshot, CredentialLease, ManagedCatalog, ManagedError, ManagedFuture, ManagedProvider,
-    ManagedProviderRow, ProviderDescriptor, WebSearchHit, WebSearchRequest, WebSearchResponse,
+    ManagedProviderBinding, ManagedProviderRow, ProviderDescriptor, WebSearchHit, WebSearchRequest,
+    WebSearchResponse,
     management::{
         BrowserLogin, BrowserLoginBegin, DeviceLogin, LoginBegin, LoginState,
         ManagedBrowserLoginComplete, ManagedLoginAttempt, Usage,
     },
 };
-use rutis::host::{BoxFuture, DynPlugin, Effect, Key, TypeKey};
+use rutis::host::{BoxFuture, DynPlugin, Effect, FiberView, Key, TypeKey};
 use rutis::{Ctx, Plugin};
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicUsize};
 use tokio::io::AsyncReadExt;
 use tokio::sync::watch;
@@ -180,6 +182,31 @@ impl Plugin for SearchProviderPlugin {
             fail_status: self.fail_status.clone(),
         }))?;
         Ok(())
+    }
+}
+
+/// A process row that installs a managed provider and its binding, as the
+/// product profile does, and exposes both so a test can replace the binding
+/// with one that already stores a signed-in account.
+struct ProviderRow {
+    slot: Arc<OnceLock<(Ctx, FiberView, FiberView)>>,
+    signed_in: watch::Sender<Option<bool>>,
+    reads: Arc<AtomicUsize>,
+}
+impl DynPlugin for ProviderRow {
+    fn name(&self) -> &str {
+        "test.managed-provider-row"
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
+        Box::pin(async move {
+            let provider = ctx.plugin(SearchProviderPlugin::new(
+                self.signed_in.clone(),
+                self.reads.clone(),
+            ));
+            let binding = ctx.plugin(ManagedProviderBinding);
+            let _ = self.slot.set((ctx.clone(), provider, binding));
+            Ok(Effect::Done)
+        })
     }
 }
 
@@ -995,6 +1022,79 @@ async fn web_search_follows_an_owner_account_transition_without_an_account_read(
         reads.load(Ordering::SeqCst),
         observed,
         "an account transition must be published from the change, not read back"
+    );
+
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// Replacing the bound provider with one that already stores a signed-in
+/// account publishes that account at install: an open Session's next adopted
+/// request declares and calls `web_search`, with no account read.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn web_search_is_declared_after_a_signed_in_binding_replaces_a_signed_out_one() {
+    disable_system_proxy();
+    let home = std::fs::canonicalize("/tmp")
+        .unwrap()
+        .join(format!("dwv-{}", uuid::Uuid::new_v4()));
+    let signed_out = watch::Sender::new(Some(false));
+    let signed_in = watch::Sender::new(Some(true));
+    let reads = Arc::new(AtomicUsize::new(0));
+    let slot = Arc::new(OnceLock::new());
+    let row = slot.clone();
+    let start = signed_out.clone();
+    let first_reads = reads.clone();
+    let (server, mut requests, _) = super::session_typescript::start_with(
+        ServerConfig {
+            product_home: Some(home.clone()),
+            target_home: Some(home.join("rust")),
+            ..Default::default()
+        },
+        move |builder| {
+            builder.plugin(move |_| {
+                Ok(Box::new(ProviderRow {
+                    slot: row.clone(),
+                    signed_in: start.clone(),
+                    reads: first_reads.clone(),
+                }))
+            });
+        },
+    )
+    .await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let id = provider_session(&mut client).await;
+    let session = server.agent().unwrap().get_session(&id).unwrap();
+    let names = text_turn(&mut client, &id, &mut requests, "hello").await;
+    assert!(!names.iter().any(|name| name == "web_search"), "{names:?}");
+    assert_eq!(
+        reads.load(Ordering::SeqCst),
+        0,
+        "a watched provider answers without an account read"
+    );
+
+    let (ctx, provider, _binding) = slot.get().expect("the provider row was not installed");
+    provider.shutdown().await.unwrap();
+    ctx.plugin(SearchProviderPlugin::new(signed_in.clone(), reads.clone()));
+    await_search_declared(&session, true).await;
+
+    let (names, managed) = tool_turn(
+        &mut client,
+        &session,
+        &id,
+        &mut requests,
+        "web_search",
+        json!({"query":"managed"}),
+    )
+    .await;
+    assert!(names.iter().any(|name| name == "web_search"), "{names:?}");
+    assert_ne!(managed.is_error, Some(true), "{managed:?}");
+    assert!(text(&managed).contains("https://managed.example.com/hit"));
+    assert_eq!(
+        reads.load(Ordering::SeqCst),
+        0,
+        "installing the binding must publish its initialized account"
     );
 
     drop(client);
