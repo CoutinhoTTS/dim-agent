@@ -1102,6 +1102,10 @@ impl Owner {
             self.stepped.send_replace(sequence);
             return Ok(());
         }
+        #[cfg(feature = "testing")]
+        if live && let EventKind::TurnStart(_) = &event.kind {
+            crate::testing::fold_turn_start(&self.session_id, &self.branch_id, sequence);
+        }
         let turn_start = {
             let mut state = self.state.lock().unwrap();
             let turn_start = state.fold.turn_start;
@@ -1179,22 +1183,21 @@ impl Owner {
         Ok(())
     }
 
-    /// Takes what a cancelled background end released, once the branch is idle
-    /// and no task is open (A.4, Pursuit §5): a conclusion the wait deferred,
-    /// or the turn-end decision. The cancelled status is read from the fact,
-    /// so this cannot race a `completed` end's wake.
+    /// Takes what a cancelled background end or a withdrawn input released,
+    /// once the branch is idle and no driving input is pending (A.4, Pursuit
+    /// §5): a conclusion the wait deferred, once no task is open, or the
+    /// turn-end decision, which the evaluator creation takes even with a task
+    /// open. The cancelled status is read from the fact, so this cannot race a
+    /// `completed` end's wake.
     fn settle_deferred(self: &Arc<Self>) {
         let pending = {
             let state = self.state.lock().unwrap();
             let fold = &state.fold;
-            if !(fold.running()
-                && !fold.open_tasks()
-                && !fold.turn_open()
-                && !fold.pending_driving())
-            {
+            if !(fold.running() && !fold.turn_open() && !fold.pending_driving()) {
                 return;
             }
             fold.pending_conclusion()
+                .filter(|_| !fold.open_tasks())
                 .map(|(sequence, conclusion)| (sequence, conclusion.clone()))
         };
         match pending {
@@ -1497,22 +1500,58 @@ impl Owner {
     /// The turn-end decision (A.4, Pursuit §4.1): an evaluator creation when
     /// the judge asks for one, otherwise the continuation limit.
     async fn do_turn_end(self: &Arc<Self>, after: u64) -> Result<(), AgentError> {
+        let result = self.do_turn_end_inner(after).await;
+        #[cfg(feature = "testing")]
+        crate::testing::stage_held(
+            &self.session_id,
+            &self.branch_id,
+            crate::testing::Stage::Done,
+            after,
+        )
+        .await;
+        result
+    }
+
+    async fn do_turn_end_inner(self: &Arc<Self>, after: u64) -> Result<(), AgentError> {
+        #[cfg(feature = "testing")]
+        crate::testing::stage_held(
+            &self.session_id,
+            &self.branch_id,
+            crate::testing::Stage::Decision,
+            after,
+        )
+        .await;
         let (request, evaluation, objective) = {
-            let state = self.state.lock().unwrap();
-            let fold = &state.fold;
+            let mut state = self.state.lock().unwrap();
+            let fold = &mut state.fold;
             if fold.turn_end.as_ref().map(|end| end.sequence) != Some(after) {
                 return Ok(());
             }
+            let request = fold
+                .pending_request()
+                .filter(|request| request.sequence < after)
+                .map(|request| request.summary.clone());
+            let evaluation = fold::decide_evaluation(fold, after);
+            if evaluation {
+                fold.start_evaluation(after);
+            }
             (
-                fold.request_in_turn(after)
-                    .map(|request| request.summary.clone()),
-                fold::decide_evaluation(fold, after),
+                request,
+                evaluation,
                 fold.objective.clone().unwrap_or_default(),
             )
         };
         if let Some(summary) = request
             && evaluation
         {
+            #[cfg(feature = "testing")]
+            crate::testing::stage_held(
+                &self.session_id,
+                &self.branch_id,
+                crate::testing::Stage::Create,
+                after,
+            )
+            .await;
             let cancel = self.stop.clone();
             let cancelled: Arc<
                 dyn Fn() -> BoxFuture<'static, Result<(), rutis::Error>> + Send + Sync,
