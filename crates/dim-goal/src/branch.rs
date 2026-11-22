@@ -1103,8 +1103,16 @@ impl Owner {
             return Ok(());
         }
         #[cfg(feature = "testing")]
-        if live && let EventKind::TurnStart(_) = &event.kind {
-            crate::testing::fold_turn_start(&self.session_id, &self.branch_id, sequence);
+        if live {
+            match &event.kind {
+                EventKind::TurnStart(_) => {
+                    crate::testing::fold_turn_start(&self.session_id, &self.branch_id, sequence)
+                }
+                EventKind::InputMessage(_) => {
+                    crate::testing::fold_input(&self.session_id, &self.branch_id, sequence)
+                }
+                _ => {}
+            }
         }
         let turn_start = {
             let mut state = self.state.lock().unwrap();
@@ -1521,79 +1529,85 @@ impl Owner {
             after,
         )
         .await;
-        let (request, evaluation, objective) = {
-            let mut state = self.state.lock().unwrap();
-            let fold = &mut state.fold;
-            if fold.turn_end.as_ref().map(|end| end.sequence) != Some(after) {
+        let evaluation = {
+            let state = self.state.lock().unwrap();
+            if state.fold.turn_end.as_ref().map(|end| end.sequence) != Some(after) {
                 return Ok(());
             }
-            let request = fold
-                .pending_request()
-                .filter(|request| request.sequence < after)
-                .map(|request| request.summary.clone());
-            let evaluation = fold::decide_evaluation(fold, after);
-            if evaluation {
-                fold.start_evaluation(after);
-            }
-            (
-                request,
-                evaluation,
-                fold.objective.clone().unwrap_or_default(),
-            )
+            fold::decide_evaluation(&state.fold, after)
         };
-        if let Some(summary) = request
-            && evaluation
-        {
-            #[cfg(feature = "testing")]
-            crate::testing::stage_held(
-                &self.session_id,
-                &self.branch_id,
-                crate::testing::Stage::Create,
-                after,
-            )
-            .await;
-            let cancel = self.stop.clone();
-            let cancelled: Arc<
-                dyn Fn() -> BoxFuture<'static, Result<(), rutis::Error>> + Send + Sync,
-            > = Arc::new(move || {
-                let cancel = cancel.clone();
-                Box::pin(async move {
-                    cancel.cancelled().await;
-                    Ok(())
-                })
-            });
-            let options = BranchOptions {
-                prompt: text::evaluator_prompt(
-                    &self.branch_id,
-                    &after.to_string(),
-                    &objective,
-                    &summary,
-                ),
-                source: BranchSource::Host {
-                    operation_id: fold::evaluation_operation(after),
-                },
+        if evaluation {
+            // A driving input or a goal change can commit after this turn end
+            // and still be waiting to fold. The claim reads the fold through
+            // every committed fact and rechecks the end, the pending request
+            // and the driving input there (C4, C5, Pursuit §4.1).
+            self.await_dispatched().await?;
+            let claim = {
+                let mut state = self.state.lock().unwrap();
+                let fold = &mut state.fold;
+                if fold::decide_evaluation(fold, after) {
+                    let summary = fold
+                        .pending_request()
+                        .map(|request| request.summary.clone())
+                        .expect("an evaluation decision names a pending request");
+                    fold.start_evaluation(after);
+                    Some((summary, fold.objective.clone().unwrap_or_default()))
+                } else {
+                    None
+                }
             };
-            let created = self
-                .tree
-                .create(self.branch_id.clone(), after, options, cancelled)
-                .await;
-            if let Err(error) = &created {
-                tracing::warn!(branch_id = %self.branch_id, evaluation = after, %error, "Goal evaluator creation failed");
-            }
-            if created.is_err()
-                && !self.stopped()
-                && !self.created(after).await?
-                && self.state.lock().unwrap().fold.is_current(after)
-            {
-                self.record(
+            if let Some((summary, objective)) = claim {
+                #[cfg(feature = "testing")]
+                crate::testing::stage_held(
+                    &self.session_id,
+                    &self.branch_id,
+                    crate::testing::Stage::Create,
                     after,
-                    Some(text::State::Paused("evaluation_failed".to_owned())),
-                    false,
                 )
-                .await?;
+                .await;
+                let cancel = self.stop.clone();
+                let cancelled: Arc<
+                    dyn Fn() -> BoxFuture<'static, Result<(), rutis::Error>> + Send + Sync,
+                > = Arc::new(move || {
+                    let cancel = cancel.clone();
+                    Box::pin(async move {
+                        cancel.cancelled().await;
+                        Ok(())
+                    })
+                });
+                let options = BranchOptions {
+                    prompt: text::evaluator_prompt(
+                        &self.branch_id,
+                        &after.to_string(),
+                        &objective,
+                        &summary,
+                    ),
+                    source: BranchSource::Host {
+                        operation_id: fold::evaluation_operation(after),
+                    },
+                };
+                let created = self
+                    .tree
+                    .create(self.branch_id.clone(), after, options, cancelled)
+                    .await;
+                if let Err(error) = &created {
+                    tracing::warn!(branch_id = %self.branch_id, evaluation = after, %error, "Goal evaluator creation failed");
+                }
+                if created.is_err()
+                    && !self.stopped()
+                    && !self.created(after).await?
+                    && self.state.lock().unwrap().fold.is_current(after)
+                {
+                    self.record(
+                        after,
+                        Some(text::State::Paused("evaluation_failed".to_owned())),
+                        false,
+                    )
+                    .await?;
+                }
+                self.settle();
+                return Ok(());
             }
-            self.settle();
-            return Ok(());
         }
         let Ok(limit) = self.limit().await else {
             return Ok(());

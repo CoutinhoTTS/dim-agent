@@ -194,9 +194,16 @@ pub(crate) async fn stage_held(session_id: &str, branch_id: &str, stage: Stage, 
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Folded {
+    TurnStart,
+    Input,
+}
+
 type FoldHold = (
     String,
     String,
+    Folded,
     u64,
     mpsc::UnboundedSender<u64>,
     Arc<(Mutex<bool>, Condvar)>,
@@ -238,11 +245,22 @@ impl Drop for HeldFold {
 /// Holds the next `turn/start` of `branch_id` in `session_id` at or after
 /// `min`, before Goal folds it.
 pub fn hold_turn_start(session_id: &str, branch_id: &str, min: u64) -> HeldFold {
+    hold_fold(session_id, branch_id, Folded::TurnStart, min)
+}
+
+/// Holds the next `input/message` of `branch_id` in `session_id` at or after
+/// `min`, before Goal folds it.
+pub fn hold_input(session_id: &str, branch_id: &str, min: u64) -> HeldFold {
+    hold_fold(session_id, branch_id, Folded::Input, min)
+}
+
+fn hold_fold(session_id: &str, branch_id: &str, folded: Folded, min: u64) -> HeldFold {
     let (arrived, wait) = mpsc::unbounded_channel();
     let release = Arc::new((Mutex::new(false), Condvar::new()));
     FOLD_HOLDS.lock().unwrap().push((
         session_id.to_owned(),
         branch_id.to_owned(),
+        folded,
         min,
         arrived,
         release.clone(),
@@ -256,16 +274,23 @@ pub fn hold_turn_start(session_id: &str, branch_id: &str, min: u64) -> HeldFold 
 }
 
 pub(crate) fn fold_turn_start(session_id: &str, branch_id: &str, sequence: u64) {
+    fold_held(session_id, branch_id, Folded::TurnStart, sequence);
+}
+
+pub(crate) fn fold_input(session_id: &str, branch_id: &str, sequence: u64) {
+    fold_held(session_id, branch_id, Folded::Input, sequence);
+}
+
+fn fold_held(session_id: &str, branch_id: &str, folded: Folded, sequence: u64) {
     let held = {
         let mut holds = FOLD_HOLDS.lock().unwrap();
-        let Some(index) = holds
-            .iter()
-            .position(|hold| hold.0 == session_id && hold.1 == branch_id && sequence >= hold.2)
-        else {
+        let Some(index) = holds.iter().position(|hold| {
+            hold.0 == session_id && hold.1 == branch_id && hold.2 == folded && sequence >= hold.3
+        }) else {
             return;
         };
         let hold = holds.remove(index);
-        (hold.3, hold.4)
+        (hold.4, hold.5)
     };
     let (arrived, release) = held;
     let _ = arrived.send(sequence);

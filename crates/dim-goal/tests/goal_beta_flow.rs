@@ -197,8 +197,9 @@ impl Harness {
         branch_creates(&self.session, "main")
             .await
             .into_iter()
-            .filter(|(_, data)| {
-                matches!(&data.source, BranchSource::Host { operation_id } if *operation_id == operation)
+            .filter(|(_, data)| match &data.source {
+                BranchSource::Host { operation_id } => *operation_id == operation,
+                _ => false,
             })
             .collect()
     }
@@ -801,6 +802,72 @@ async fn beta_9_a_later_turn_end_creates_nothing_for_a_started_request() {
         BranchSource::Host {
             operation_id: format!("goal:evaluate:{report_end}")
         }
+    );
+    harness.close().await;
+}
+
+/// The admission boundary: an input committed after the report turn end and
+/// not yet folded still keeps the evaluator from starting at that turn end.
+/// The creation waits for the fold to catch up, rechecks, and the queue's
+/// turn end creates the evaluator (Pursuit §4.1, C4, C5).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn beta_10_an_input_committed_behind_the_fold_defers_the_creation() {
+    let model = Arc::new(ScriptedModel::default());
+    model.halt(Halt::AfterTool);
+    let harness = evaluator_harness(model.clone()).await;
+    harness.report().await;
+    model.entered().await;
+    let min = harness.session.sequence("main").unwrap();
+    let mut decision = dim_goal::testing::hold_stage(
+        &harness.id,
+        "main",
+        dim_goal::testing::Stage::Decision,
+        min,
+        None,
+    );
+    model.release();
+    let report_end = decision.arrived().await;
+
+    // The queue commits after the report turn end, and Goal's fold is held
+    // before it, so the decision reads a fold the input has not reached.
+    let mut input_gate = dim_goal::testing::hold_input(&harness.id, "main", report_end);
+    let queued = harness.submit("keep going", InputMode::Queue).await;
+    let held = input_gate.arrived().await;
+    assert!(
+        queued.sequence == held && held > report_end,
+        "the queued input at {} waits to fold at {held} after the report turn end {report_end}",
+        queued.sequence
+    );
+    let mut early = dim_goal::testing::hold_stage(
+        &harness.id,
+        "main",
+        dim_goal::testing::Stage::Create,
+        report_end,
+        Some(report_end),
+    );
+    decision.release();
+    let created = tokio::time::timeout(NEGATIVE, early.arrived()).await;
+    assert!(
+        created.is_err(),
+        "the report turn end creates no evaluator while a committed input is not folded"
+    );
+    input_gate.release();
+
+    wait_event(&harness.session, "main", |kind| {
+        matches!(kind, EventKind::BranchCreate(_))
+    })
+    .await;
+    assert!(
+        harness.create_for(report_end).await.is_empty(),
+        "the report turn end creates no evaluator"
+    );
+    let ends = harness.turn_ends(report_end).await;
+    let queue_end = ends[0];
+    let creates = harness.create_for(queue_end).await;
+    assert_eq!(
+        creates.len(),
+        1,
+        "the queue drain turn end creates the evaluator: {creates:#?}"
     );
     harness.close().await;
 }
