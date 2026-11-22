@@ -12,7 +12,8 @@ use tokio_util::sync::CancellationToken;
 
 const NO_IMAGE_INPUT: &str = "[Image omitted: the current model does not accept images.]";
 
-/// Image formats every adapter accepts (feature list).
+/// Image formats a request may send as pixels (feature list); a provider
+/// encoder turns one its destination does not take into a reference.
 const FORMATS: [&str; 4] = ["image/png", "image/jpeg", "image/webp", "image/gif"];
 
 /// What one image becomes in the request copy.
