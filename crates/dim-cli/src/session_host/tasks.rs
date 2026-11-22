@@ -1718,6 +1718,157 @@ mod tests {
         assert!(snapshot.window_error.is_none());
     }
 
+    /// A line cut from a line the directory knows, focused with its first
+    /// read in flight, whose creation then fails: the parent's window starts
+    /// over and the parent's read follows the failed line's last reply.
+    async fn a_failed_creation_with_the_parent_window_reading()
+    -> (Worker, std::sync::mpsc::Receiver<Update>) {
+        let (mut worker, receiver, _sent) =
+            crate::session_host::test_worker(&crate::session_host::TEST_FEATURES).await;
+        worker.session_id = "s1".into();
+        worker.focus = "main".into();
+        worker.discover_branch("b-7c");
+        {
+            let history = worker.task_history.get_mut("b-7c").unwrap();
+            history.done = true;
+            history.window_complete = true;
+            history.window.through = Some(2);
+        }
+        worker.task_history_queue.clear();
+        let create: Event = serde_json::from_value(json!({
+            "id": "create-child", "sequence": 2, "create_at": 1000, "type": "branch", "name": "create",
+            "data": {
+                "at": {"kind": "sequence", "sequence": 1}, "branch": "b-7d", "prompt": "Narrow the parser",
+                "source": {"kind": "host", "operation_id": "op"}
+            }
+        }))
+        .expect("a branch create event");
+        worker.apply("b-7c", create);
+        worker
+            .command(crate::model::session::Command::FocusLine("b-7d".into()))
+            .await
+            .unwrap();
+        worker.poll_task_history().await.unwrap();
+        assert_eq!(
+            worker
+                .task_history_request
+                .as_ref()
+                .map(|read| read.branch_id.as_str()),
+            Some("b-7d"),
+            "the line's first window is in flight"
+        );
+
+        worker.task_event("b-7c", create_failed(400, "b-7d"));
+        assert_eq!(
+            worker.focus, "b-7c",
+            "a failed creation returns to the line it was cut from"
+        );
+        fail(&mut worker, "the failed line's first window").await;
+        worker.poll_task_history().await.unwrap();
+        assert_eq!(
+            worker
+                .task_history_request
+                .as_ref()
+                .map(|read| read.branch_id.as_str()),
+            Some("b-7c"),
+            "the parent's window is reading"
+        );
+        assert!(
+            !worker.task_history["b-7c"].done,
+            "the parent's window has not finished"
+        );
+        (worker, receiver)
+    }
+
+    /// A creation that fails while the line it was cut from is still reading
+    /// its window is terminal for `/lines` at once: the directory records the
+    /// failure when the fact arrives, not when the parent's window replays
+    /// `live`.
+    #[tokio::test]
+    async fn a_create_failure_is_refused_before_the_parent_window_loads() {
+        let (mut worker, receiver) = a_failed_creation_with_the_parent_window_reading().await;
+
+        worker
+            .command(crate::model::session::Command::FocusLine("b-7d".into()))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            worker.focus, "b-7c",
+            "the failed line is refused while its parent's window is still reading"
+        );
+        assert!(
+            worker.task_history["b-7d"].done,
+            "the refused line was not reset for a read"
+        );
+        assert!(
+            !worker.task_history_queue.contains(&"b-7d".to_owned()),
+            "the refused line is not read again on its own"
+        );
+        let notices: Vec<String> = receiver
+            .try_iter()
+            .filter_map(|update| match update {
+                Update::Notice(text) => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            notices
+                .iter()
+                .any(|notice| notice == "Line creation failed: b-7d"),
+            "the refusal names the failed creation: {notices:?}"
+        );
+    }
+
+    /// A parent's window that fails to read does not leave its failed creation
+    /// selectable: the failure is a directory fact from the moment it arrives.
+    #[tokio::test]
+    async fn a_create_failure_is_still_refused_after_the_parent_window_fails() {
+        let (mut worker, receiver) = a_failed_creation_with_the_parent_window_reading().await;
+
+        fail(&mut worker, "the parent's window").await;
+        worker.poll_task_history().await.unwrap();
+        assert!(
+            worker.task_history["b-7c"].window_error.is_some(),
+            "the parent's window failed"
+        );
+        assert!(
+            !worker.task_history["b-7c"].done,
+            "the parent's window did not load"
+        );
+
+        worker
+            .command(crate::model::session::Command::FocusLine("b-7d".into()))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            worker.focus, "b-7c",
+            "the failed line is refused after its parent's window failed"
+        );
+        assert!(
+            worker.task_history["b-7d"].done,
+            "the refused line was not reset for a read"
+        );
+        assert!(
+            !worker.task_history_queue.contains(&"b-7d".to_owned()),
+            "the refused line is not read again on its own"
+        );
+        let notices: Vec<String> = receiver
+            .try_iter()
+            .filter_map(|update| match update {
+                Update::Notice(text) => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            notices
+                .iter()
+                .any(|notice| notice == "Line creation failed: b-7d"),
+            "the refusal names the failed creation: {notices:?}"
+        );
+    }
+
     fn published(receiver: &mut std::sync::mpsc::Receiver<Update>) -> ViewSnapshot {
         let mut snapshot = None;
         while let Ok(update) = receiver.try_recv() {
