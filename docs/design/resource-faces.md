@@ -116,14 +116,14 @@ Hooks and OCR call, now with data requests and replies. `removeOutputDirectory` 
 are the existing cleanup and PATH helpers, now data methods; SessionStore and MCP call them. The
 in-process cores stay as the shared implementation, not a second public operation.
 
-The command process, output file and PTY are owned by `HostPlatform`; the branch keeps the task
-record and writes the facts. `shell` writes its bounded capture to `outputPath`, so the path is
-real for both task and file reads. `ShellSession` keeps its marker/occupancy policy but calls the owner's data operations (`shell`,
-`write`, `resize`, `output`, `wait`, `kill`, `settle`); it can run on the control side. The owner
+The command process, output file, PTY and command capture are owned by `HostPlatform`; the branch
+keeps the task record and writes the facts. `shell` writes its bounded capture to `outputPath`, so the path is
+real for both task and file reads. `ShellSession` creates the command id and marker pair, sends them
+with `write`, and keeps only the queue, timeout and occupancy policy; foreground output, the exit
+code and the task log are read back by command id through `output`, `wait` and `settle`. The owner
 records the stream as ordered `ShellEvent` lines (`output` or full `marker`) with a cursor and `ShellState`, and `output` takes
 `eventCursor` and `waitMs` for that read. Background shell jobs are registered in the owner under
-the branch task id; the control side never sees a host pid. Moving the remaining marker parser into
-the owner is optional. `wait` takes the existing cancellation callback; a timeout stops the wait and answers `running`,
+the branch task id; the control side never sees a host pid. `wait` takes the existing cancellation callback; a timeout stops the wait and answers `running`,
 and neither a timeout nor a cancelled call kills the task. A command's own `spawn.timeoutMs` still
 terminates it at that deadline; stopping a task is an explicit `kill`. `spawnConfined` success means the helper stayed within its limits; an output limit is an
 error, so its reply carries no truncation flags. Cancellation is the existing
@@ -721,10 +721,9 @@ No other requirement is raised:
 3. **`owned` on the control side.** The fact is a row lookup, so it is answered by `sessionFiles`
    with the node's resolved path rather than on the node. If review wants it computed with the
    other three, the rows would have to move, which is #1298's kind of decision.
-4. **Where the persistent-shell protocol runs.** `write`/`resize`/`output` are enough for a
-   control-side marker and occupancy protocol that pages its output; running the protocol on the
-   node would make it `start`/`wait` instead. #1295 decides when it wires PTY, after foreground
-   and background.
+4. **Where the persistent-shell protocol runs.** The owner records the command capture, markers
+   and `ShellState`; the control side keeps the queue, timeout and occupancy policy and reads the
+   command by id. #1295 wires the PTY and the foreground/occupancy path.
 5. **Result text ownership.** File operations return their tool result from the provider because
    the text is the file operation's own (line numbers, previews, image blocks). A command returns
    records, and the control side composes the tool result, because the task identity, the

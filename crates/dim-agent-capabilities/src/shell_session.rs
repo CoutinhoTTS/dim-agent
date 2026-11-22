@@ -15,8 +15,9 @@ use crate::{
     exec_stop::{ExecStop, TaskError},
     host::{HostError, SessionFiles},
     host_platform::{
-        HostPlatform, OutputRequest, ShellEdition, ShellEvent, ShellRequest, ShellStatus,
-        ShellWrite, TaskRequest, WaitReply, WaitRequest,
+        HostPlatform, HostPlatformError, OutputRequest, ShellCommandStart, ShellEdition,
+        ShellEvent, ShellRequest, ShellStatus, ShellWrite, TaskRequest, WaitReply, WaitRequest,
+        WaitStatus,
     },
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -30,7 +31,6 @@ use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use serde_json::json;
 use std::{
     collections::{HashMap, VecDeque},
-    io::Write as _,
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -98,148 +98,12 @@ struct QueuedCommand {
     done: oneshot::Sender<Result<ToolResult, String>>,
 }
 
-/// One command's output, owned from the moment its line is written.
-///
-/// The PTY stream is shared by every command, so a command cannot recover
-/// its output from a common buffer: another command's burst can push the
-/// start marker out of it before the marker is looked for. Each command
-/// holds its own capture instead, fed every chunk while it holds the shell,
-/// and finds its own start marker in that stream.
-struct Capture {
-    start_marker: String,
-    end_marker: String,
-    /// Bytes seen before the start marker, trimmed to the tail that could
-    /// still be a start marker split across chunks. The shell echoes the
-    /// wrapper line, and the marker is written in two quoted halves, so no
-    /// full marker appears there.
-    ahead: String,
-    /// Set once the start marker arrived.
-    started: bool,
-    /// The earliest `OUTPUT_LIMIT` bytes of the output.
-    output: String,
-    /// Bytes dropped after `output` filled.
-    omitted: usize,
-    /// Bytes after the start marker not yet settled: the end marker line may
-    /// be complete or partial there.
-    pending: String,
-    /// The end marker's exit token once its line is complete.
-    code: Option<String>,
-    /// Where settled bytes also go: the task log once the call occupies.
-    file: Option<std::fs::File>,
-    /// How much of `output` a waiting caller has already been given.
-    delivered: usize,
-}
-
-impl Capture {
-    fn new(start_marker: String, end_marker: String) -> Self {
-        Self {
-            start_marker,
-            end_marker,
-            ahead: String::new(),
-            started: false,
-            output: String::new(),
-            omitted: 0,
-            pending: String::new(),
-            code: None,
-            file: None,
-            delivered: 0,
-        }
-    }
-
-    /// Takes one chunk of the stream. Nothing is settled here: a
-    /// background job's completion marker has to leave the chunk first.
-    fn append(&mut self, text: &str) {
-        if self.started {
-            self.pending.push_str(text);
-            return;
-        }
-        self.ahead.push_str(text);
-        let Some(pos) = self.ahead.find(&self.start_marker) else {
-            let keep = self.start_marker.len() - 1;
-            self.ahead = tail_bytes(&self.ahead, keep).to_owned();
-            return;
-        };
-        let rest = self.ahead[pos + self.start_marker.len()..].to_owned();
-        self.ahead.clear();
-        self.started = true;
-        self.pending.push_str(&rest);
-    }
-
-    /// Removes a completion marker line of another command.
-    fn strip(&mut self, marker: &str) {
-        strip_marker(&mut self.ahead, marker);
-        strip_marker(&mut self.pending, marker);
-    }
-
-    /// Settles everything that cannot be part of the end marker. Once the
-    /// end marker line is complete, its token is `code` and the line itself
-    /// is dropped: it is not output.
-    fn drain(&mut self) {
-        if !self.started || self.code.is_some() {
-            return;
-        }
-        if let Some(code) = marker_code(&self.pending, &self.end_marker) {
-            let end = self.pending.find(&self.end_marker).expect("marker present");
-            self.settle(end);
-            self.pending.clear();
-            self.code = Some(code);
-            return;
-        }
-        self.settle(marker_hold(&self.pending));
-    }
-
-    /// Settles `pending[..upto]`: the task log gets every byte, while
-    /// `output` keeps the earliest `OUTPUT_LIMIT` bytes for the result and
-    /// counts the rest as omitted.
-    fn settle(&mut self, upto: usize) {
-        let text: String = self.pending.drain(..upto).collect();
-        if let Some(file) = self.file.as_mut() {
-            let _ = file.write_all(text.as_bytes());
-        }
-        let room = OUTPUT_LIMIT.saturating_sub(self.output.len());
-        let mut end = room.min(text.len());
-        while !text.is_char_boundary(end) {
-            end -= 1;
-        }
-        self.output.push_str(&text[..end]);
-        self.omitted += text.len() - end;
-    }
-
-    /// Makes the task log receive everything settled from now on, starting
-    /// with the output already held and the bytes already dropped. The file
-    /// stays open for the task's life: the burst arrives in thousands of
-    /// chunks, and opening it once per chunk costs more than the read that
-    /// produced them.
-    fn bind(&mut self, path: &Path) {
-        let Ok(mut file) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-        else {
-            return;
-        };
-        let _ = file.write_all(self.output.as_bytes());
-        if let Some(omitted) = self.omitted() {
-            let mut note = String::new();
-            if !self.output.is_empty() && !self.output.ends_with('\n') {
-                note.push('\n');
-            }
-            note.push_str(&format!("[Output truncated: {omitted} bytes omitted]\n"));
-            let _ = file.write_all(note.as_bytes());
-        }
-        self.file = Some(file);
-    }
-
-    fn omitted(&self) -> Option<usize> {
-        (self.omitted > 0).then_some(self.omitted)
-    }
-}
-
 /// The foreground call that outlived its timeout; the shell is occupied
 /// until its end marker arrives.
 struct OccupyingTask {
     task_id: String,
     output_path: PathBuf,
+    delivered: usize,
     ended: Arc<Notify>,
 }
 
@@ -271,8 +135,6 @@ struct Inner {
     /// Raw stream tail, for the markers of commands that own no capture:
     /// initialization, background jobs and their pids.
     retained: String,
-    /// The command holding the shell; its capture is fed every chunk.
-    capture: Option<Capture>,
     occupying: Option<OccupyingTask>,
     background: HashMap<String, BackgroundTask>,
     /// Note for the call that was running when the shell exited.
@@ -329,7 +191,6 @@ impl ShellSession {
                 queue: VecDeque::new(),
                 queue_running: false,
                 retained: String::new(),
-                capture: None,
                 occupying: None,
                 background: HashMap::new(),
                 shell_exit: None,
@@ -444,16 +305,21 @@ impl ShellSession {
         self: &Arc<Self>,
         queued: &QueuedCommand,
     ) -> Option<Result<ToolResult, String>> {
-        let notify = {
+        let (notify, task_id, output_path) = {
             let inner = self.inner.lock().await;
-            inner.occupying.as_ref().map(|task| task.ended.clone())?
+            let task = inner.occupying.as_ref()?;
+            (
+                task.ended.clone(),
+                task.task_id.clone(),
+                task.output_path.clone(),
+            )
         };
         let deadline = tokio::time::Instant::now() + Duration::from_millis(queued.timeout_ms);
         let ended = tokio::select! {
             _ = notify.notified() => true,
             _ = tokio::time::sleep_until(deadline) => false,
         };
-        let mut inner = self.inner.lock().await;
+        let inner = self.inner.lock().await;
         if ended || inner.occupying.is_none() {
             let tail = inner.occupy_tail.clone().unwrap_or_default();
             let exit = inner.occupy_exit.clone().unwrap_or_default();
@@ -471,24 +337,41 @@ impl ShellSession {
             text.push_str("The command was not executed: the shell was occupied. Resend it now.");
             return Some(Ok(ToolResult::text(text)));
         }
+        let delivered = inner.occupying.as_ref().expect("checked above").delivered;
+        drop(inner);
+        let page = self
+            .host
+            .output(OutputRequest {
+                task_id: task_id.clone(),
+                cursor: Some(delivered as u64),
+                limit: Some(OUTPUT_LIMIT as u64),
+                wait_ms: None,
+                event_cursor: None,
+            })
+            .await
+            .ok();
         let mut text = String::new();
-        if let Some(capture) = inner.capture.as_mut() {
-            let delivered = capture.delivered.min(capture.output.len());
-            let fresh = capture.output[delivered..].to_owned();
-            capture.delivered = capture.output.len();
-            if !fresh.is_empty() {
-                text.push_str(&fresh);
-                if !fresh.ends_with('\n') {
+        if let Some(page) = page {
+            if !page.text.is_empty() {
+                text.push_str(&page.text);
+                if !page.text.ends_with('\n') {
                     text.push('\n');
                 }
             }
+            let mut inner = self.inner.lock().await;
+            if let Some(task) = inner
+                .occupying
+                .as_mut()
+                .filter(|task| task.task_id == task_id)
+            {
+                task.delivered = page.next_cursor.unwrap_or(task.delivered as u64) as usize;
+            }
         }
-        let task = inner.occupying.as_mut().expect("checked above");
         text.push_str(&format!(
             "Task {} still occupies the shell. The command was not executed; resend it after the task ends.\nTask ID: {}\nOutput: {}",
-            task.task_id,
-            task.task_id,
-            task.output_path.display()
+            task_id,
+            task_id,
+            output_path.display()
         ));
         Some(Ok(ToolResult::text(text)))
     }
@@ -739,28 +622,31 @@ impl ShellSession {
         }
     }
 
-    /// Starts a command: installs its capture and writes the wrapped line
-    /// under the same lock, so no chunk of its own output can arrive before
-    /// the capture that owns it exists.
+    /// Writes a wrapped command and starts its owner-side capture.
     async fn start_command(
-        self: &Arc<Self>,
-        capture: Capture,
+        &self,
+        command_id: &str,
+        start_marker: &str,
+        end_marker: &str,
         wrapped: &str,
     ) -> Result<(), HostError> {
-        let mut inner = self.inner.lock().await;
-        let line = format!("{wrapped}\n");
+        let inner = self.inner.lock().await;
         let Some(task_id) = inner.shell.clone() else {
             return Err(HostError::failed("Shell is not running"));
         };
+        let line = format!("{wrapped}\n");
         self.host
             .write(ShellWrite {
                 task_id,
                 data: STANDARD.encode(line.as_bytes()),
-                command: None,
+                command: Some(ShellCommandStart {
+                    task_id: command_id.to_owned(),
+                    start_marker: start_marker.to_owned(),
+                    end_marker: end_marker.to_owned(),
+                }),
             })
             .await
             .map_err(|e| HostError::failed(format!("Shell write failed: {e}")))?;
-        inner.capture = Some(capture);
         Ok(())
     }
 
@@ -782,9 +668,6 @@ impl ShellSession {
         {
             let mut inner = self.inner.lock().await;
             inner.retained.push_str(text);
-            if let Some(capture) = inner.capture.as_mut() {
-                capture.append(text);
-            }
             let tail = tail_bytes(&inner.retained, text.len() + MARKER_LINE_LIMIT);
             let matched: Vec<(String, String)> = inner
                 .background
@@ -799,9 +682,6 @@ impl ShellSession {
                     continue;
                 };
                 strip_marker(&mut inner.retained, &task.end_marker);
-                if let Some(capture) = inner.capture.as_mut() {
-                    capture.strip(&task.end_marker);
-                }
                 let preview = file_tail(&task.output_path, OUTPUT_LIMIT);
                 let data = ExecEndedData {
                     task_id: task.task_id.clone(),
@@ -813,10 +693,6 @@ impl ShellSession {
             if inner.retained.len() > RETAINED_BUFFER_TRIM {
                 inner.retained = tail_bytes(&inner.retained, RETAINED_BUFFER_LIMIT).to_owned();
             }
-            if let Some(capture) = inner.capture.as_mut() {
-                capture.drain();
-            }
-            settled.extend(advance_occupying(&mut inner));
         }
         for settlement in settled {
             let _ = self
@@ -838,6 +714,7 @@ impl ShellSession {
     async fn handle_shell_exit(self: &Arc<Self>, generation: u64, end: Option<WaitReply>) {
         let mut settled: Vec<Settlement> = Vec::new();
         let mut orphans: Vec<BackgroundTask> = Vec::new();
+        let occupying;
         #[allow(
             unused_assignments,
             reason = "the early generation return leaves the initial value unread"
@@ -862,26 +739,44 @@ impl ShellSession {
                 inner.shell_exit = Some(note);
             }
             inner.had_reset = true;
-            if let Some(occ) = inner.occupying.take() {
-                if let Some(mut capture) = inner.capture.take() {
-                    capture.settle(capture.pending.len());
-                    inner.occupy_tail = Some(capture.output);
-                }
-                let preview = file_tail(&occ.output_path, OUTPUT_LIMIT);
-                let data = ExecEndedData {
-                    task_id: occ.task_id.clone(),
-                    status: ExecStatus::Failed,
-                    result: reset_result(&occ.task_id, &occ.output_path, &preview),
-                };
-                inner.occupy_exit = None;
-                settled.push(Settlement {
-                    data,
-                    ended: Some(occ.ended),
-                });
-            }
+            occupying = inner.occupying.take();
             if inner.dialect == ShellDialect::Posix {
                 orphans = inner.background.drain().map(|(_, task)| task).collect();
             }
+        }
+        if let Some(occ) = occupying {
+            let page = self
+                .host
+                .output(OutputRequest {
+                    task_id: occ.task_id.clone(),
+                    cursor: None,
+                    limit: Some(OUTPUT_LIMIT as u64),
+                    wait_ms: None,
+                    event_cursor: None,
+                })
+                .await
+                .ok();
+            let preview = page.map(|page| page.text).unwrap_or_default();
+            let data = ExecEndedData {
+                task_id: occ.task_id.clone(),
+                status: ExecStatus::Failed,
+                result: reset_result(&occ.task_id, &occ.output_path, &preview),
+            };
+            {
+                let mut inner = self.inner.lock().await;
+                inner.occupy_tail = Some(preview);
+                inner.occupy_exit = None;
+            }
+            let _ = self
+                .host
+                .settle(TaskRequest {
+                    task_id: occ.task_id.clone(),
+                })
+                .await;
+            settled.push(Settlement {
+                data,
+                ended: Some(occ.ended),
+            });
         }
         for task in orphans {
             let killed = self
@@ -931,9 +826,8 @@ impl ShellSession {
         let _ = self.timeline.append(EventKind::ExecEnded(data).into());
     }
 
-    /// One foreground call: install its capture, send the wrapped command,
-    /// poll the capture for its end marker, convert to an occupying task on
-    /// timeout.
+    /// One foreground call: start its owner-side capture, wait for the
+    /// terminal record, and convert a timeout into an occupying task.
     async fn run_foreground(
         self: &Arc<Self>,
         command: &str,
@@ -952,78 +846,125 @@ impl ShellSession {
             ShellDialect::Posix => posix_command(command, &start, &end),
             ShellDialect::Pwsh => pwsh_command(command, &start, &end),
         };
-        let capture = Capture::new(start_marker, end_marker);
-        self.start_command(capture, &wrapped)
+        let command_id = format!("exec-{}", uuid::Uuid::new_v4().simple());
+        let output_path = self.config.output_dir.join(format!("{command_id}.log"));
+        self.start_command(&command_id, &start_marker, &end_marker, &wrapped)
             .await
             .map_err(|e| e.to_string())?;
         let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
+        let cancel_token = cancel.clone();
+        let cancelled: crate::host::CancelledFn = Arc::new(move || {
+            let cancel = cancel_token.clone();
+            Box::pin(async move {
+                cancel.cancelled().await;
+                Ok(())
+            })
+        });
         loop {
-            {
-                let mut inner = self.inner.lock().await;
-                if inner.shell.is_none() {
-                    let note = inner
-                        .shell_exit
-                        .clone()
-                        .unwrap_or_else(|| "[shell exited]".into());
-                    let mut text = String::new();
-                    if let Some(mut capture) = inner.capture.take() {
-                        capture.settle(capture.pending.len());
-                        push_output(&mut text, &capture.output);
-                        if let Some(omitted) = capture.omitted() {
-                            text.push_str(&format!(
-                                "\n[Output truncated: {omitted} bytes omitted]"
-                            ));
-                        }
-                    }
-                    text.push_str(&note);
-                    let mut result = ToolResult::text(text);
-                    result.is_error = Some(true);
-                    return Ok(ran(result, command, None));
-                }
-                if let Some(code) = inner
-                    .capture
-                    .as_ref()
-                    .and_then(|capture| capture.code.clone())
-                {
-                    let capture = inner.capture.take().expect("capture present");
-                    let mut text = String::new();
-                    push_output(&mut text, &capture.output);
-                    text.push_str(&exit_line(&code));
-                    if let Some(omitted) = capture.omitted() {
-                        text.push_str(&format!("\n[Output truncated: {omitted} bytes omitted]"));
-                    }
-                    let mut result = ToolResult::text(text);
-                    result.is_error = (code != "0").then_some(true);
-                    return Ok(ran(result, command, code.parse().ok()));
-                }
+            if self.inner.lock().await.shell.is_none() {
+                let note = self
+                    .inner
+                    .lock()
+                    .await
+                    .shell_exit
+                    .clone()
+                    .unwrap_or_else(|| "[shell exited]".into());
+                let mut result = ToolResult::text(note);
+                result.is_error = Some(true);
+                let _ = self
+                    .host
+                    .settle(TaskRequest {
+                        task_id: command_id.clone(),
+                    })
+                    .await;
+                return Ok(ran(result, command, None));
             }
             if tokio::time::Instant::now() >= deadline {
                 if self.config.member {
                     return self
-                        .interrupt()
+                        .interrupt(&command_id)
                         .await
                         .map(|result| ran(result, command, None));
                 }
                 return self
-                    .occupy_current(command, context)
+                    .occupy_current(command, &command_id, &output_path, context)
                     .await
                     .map(|result| ran(result, command, None));
             }
-            tokio::select! {
-                _ = cancel.cancelled() => {
+            let waited = self
+                .host
+                .wait(
+                    WaitRequest {
+                        task_id: command_id.clone(),
+                        timeout_ms: Some(10),
+                    },
+                    cancelled.clone(),
+                )
+                .await;
+            match waited {
+                Ok(reply) if reply.status != WaitStatus::Running => {
+                    let text = self.command_result_text(&command_id, &reply).await;
+                    let mut result = ToolResult::text(text);
+                    result.is_error = (reply.exit_code != Some(0)).then_some(true);
+                    let _ = self
+                        .host
+                        .settle(TaskRequest {
+                            task_id: command_id.clone(),
+                        })
+                        .await;
+                    return Ok(ran(result, command, reply.exit_code));
+                }
+                Ok(_) => {}
+                Err(HostPlatformError::Cancelled) => {
                     return self
-                        .interrupt()
+                        .interrupt(&command_id)
                         .await
                         .map(|result| ran(result, command, None));
                 }
-                _ = tokio::time::sleep(Duration::from_millis(10)) => {}
+                Err(_) => {}
             }
         }
     }
 
-    /// Turn stop and member timeout: Ctrl+C, bounded marker wait; without
-    /// the marker the shell tree is terminated and the session resets.
-    async fn interrupt(self: &Arc<Self>) -> Result<ToolResult, String> {
+    async fn command_result_text(&self, command_id: &str, reply: &WaitReply) -> String {
+        let mut text = String::new();
+        if let Ok(page) = self
+            .host
+            .output(OutputRequest {
+                task_id: command_id.to_owned(),
+                cursor: None,
+                limit: Some(OUTPUT_LIMIT as u64),
+                wait_ms: None,
+                event_cursor: None,
+            })
+            .await
+        {
+            push_output(&mut text, &page.text);
+        }
+        if let Some(signal) = &reply.signal {
+            text.push_str(&format!("[Command terminated by signal {signal}]"));
+        } else {
+            text.push_str(&exit_line(
+                &reply
+                    .exit_code
+                    .map(|code| code.to_string())
+                    .unwrap_or_else(|| "unknown".into()),
+            ));
+        }
+        if reply.output_truncated {
+            text.push_str(&format!(
+                "\n[Output truncated: {} bytes omitted]",
+                reply
+                    .output_bytes
+                    .saturating_sub((OUTPUT_LIMIT as u64).min(reply.output_bytes))
+            ));
+        }
+        text
+    }
+
+    /// Turn stop and member timeout: Ctrl+C, bounded wait; without the
+    /// terminal record the shell tree is terminated and the session resets.
+    async fn interrupt(self: &Arc<Self>, command_id: &str) -> Result<ToolResult, String> {
         {
             let inner = self.inner.lock().await;
             if inner.shell.is_some() {
@@ -1032,33 +973,66 @@ impl ShellSession {
             }
         }
         let deadline = tokio::time::Instant::now() + STOP_WAIT;
+        let never = CancellationToken::new();
+        let cancelled: crate::host::CancelledFn = Arc::new(move || {
+            let never = never.clone();
+            Box::pin(async move {
+                never.cancelled().await;
+                Ok(())
+            })
+        });
         loop {
+            if self.inner.lock().await.shell.is_none() {
+                let _ = self
+                    .host
+                    .settle(TaskRequest {
+                        task_id: command_id.to_owned(),
+                    })
+                    .await;
+                return Ok(ToolResult::error(
+                    "[Command interrupted; the shell exited and will be reset]",
+                ));
+            }
+            match self
+                .host
+                .wait(
+                    WaitRequest {
+                        task_id: command_id.to_owned(),
+                        timeout_ms: Some(10),
+                    },
+                    cancelled.clone(),
+                )
+                .await
             {
-                let mut inner = self.inner.lock().await;
-                if inner.shell.is_none() {
-                    inner.capture = None;
-                    return Ok(ToolResult::error(
-                        "[Command interrupted; the shell exited and will be reset]",
-                    ));
-                }
-                if inner
-                    .capture
-                    .as_ref()
-                    .is_some_and(|capture| capture.code.is_some())
-                {
-                    let capture = inner.capture.take().expect("capture present");
+                Ok(reply) if reply.status != WaitStatus::Running => {
                     let mut text = String::new();
-                    push_output(&mut text, &capture.output);
-                    text.push_str("[Command interrupted]");
-                    if let Some(omitted) = capture.omitted() {
-                        text.push_str(&format!("\n[Output truncated: {omitted} bytes omitted]"));
+                    if let Ok(page) = self
+                        .host
+                        .output(OutputRequest {
+                            task_id: command_id.to_owned(),
+                            cursor: None,
+                            limit: Some(OUTPUT_LIMIT as u64),
+                            wait_ms: None,
+                            event_cursor: None,
+                        })
+                        .await
+                    {
+                        push_output(&mut text, &page.text);
                     }
+                    text.push_str("[Command interrupted]");
+                    let _ = self
+                        .host
+                        .settle(TaskRequest {
+                            task_id: command_id.to_owned(),
+                        })
+                        .await;
                     return Ok(ToolResult::error(text));
                 }
+                Ok(_) => {}
+                Err(_) => {}
             }
             if tokio::time::Instant::now() >= deadline {
                 let mut inner = self.inner.lock().await;
-                inner.capture = None;
                 let task_id = inner.shell.take();
                 inner.shell_exit = Some("[shell was terminated]".into());
                 inner.had_reset = true;
@@ -1066,11 +1040,16 @@ impl ShellSession {
                 if let Some(task_id) = task_id {
                     self.stop_shell(&task_id).await;
                 }
+                let _ = self
+                    .host
+                    .settle(TaskRequest {
+                        task_id: command_id.to_owned(),
+                    })
+                    .await;
                 return Ok(ToolResult::error(
                     "[Command interrupted; the shell was terminated and reset]",
                 ));
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
 
@@ -1095,19 +1074,52 @@ impl ShellSession {
     }
 
     /// Registers the running command as the occupying task and reports it.
-    /// The capture becomes the task's output as it stands: a start marker
-    /// that arrives later is still dropped, and a settled end marker still
-    /// settles the task.
     async fn occupy_current(
         self: &Arc<Self>,
         command: &str,
+        command_id: &str,
+        output_path: &Path,
         context: &CallContext,
     ) -> Result<ToolResult, String> {
-        let task_id = format!("exec-{}", uuid::Uuid::new_v4().simple());
-        let output_path = self.config.output_dir.join(format!("{task_id}.log"));
-        self.register_output(&output_path).await?;
+        self.register_output(output_path).await?;
         let description = describe(command);
-        let (preview, omitted, settled) = {
+        let never = CancellationToken::new();
+        let cancelled: crate::host::CancelledFn = Arc::new(move || {
+            let never = never.clone();
+            Box::pin(async move {
+                never.cancelled().await;
+                Ok(())
+            })
+        });
+        let reply = self
+            .host
+            .wait(
+                WaitRequest {
+                    task_id: command_id.to_owned(),
+                    timeout_ms: Some(0),
+                },
+                cancelled,
+            )
+            .await
+            .ok();
+        let page = self
+            .host
+            .output(OutputRequest {
+                task_id: command_id.to_owned(),
+                cursor: None,
+                limit: Some(OUTPUT_LIMIT as u64),
+                wait_ms: None,
+                event_cursor: None,
+            })
+            .await
+            .ok();
+        let preview = page
+            .as_ref()
+            .map(|page| page.text.clone())
+            .unwrap_or_default();
+        let omitted = reply.as_ref().is_some_and(|reply| reply.output_truncated)
+            || page.as_ref().is_some_and(|page| page.truncated);
+        {
             let mut inner = self.inner.lock().await;
             if self.lifecycle.is_cancelled() {
                 return Err("shell session closed".into());
@@ -1118,47 +1130,100 @@ impl ShellSession {
                         turn_id: context.turn_id.clone(),
                         request_id: context.request_id.clone(),
                         call_id: context.call_id.clone(),
-                        task_id: task_id.clone(),
-                        description: description.clone(),
+                        task_id: command_id.to_owned(),
+                        description,
                         title: None,
                         output_path: output_path.to_string_lossy().into_owned(),
                     })
                     .into(),
                 )
                 .map_err(|error| error.to_string())?;
-            let (preview, omitted) = match inner.capture.as_mut() {
-                Some(capture) => {
-                    capture.bind(&output_path);
-                    capture.delivered = capture.output.len();
-                    (capture.output.clone(), capture.omitted())
-                }
-                None => (String::new(), None),
-            };
             inner.occupy_tail = None;
             inner.occupy_exit = None;
             inner.occupying = Some(OccupyingTask {
-                task_id: task_id.clone(),
-                output_path: output_path.clone(),
+                task_id: command_id.to_owned(),
+                output_path: output_path.to_path_buf(),
+                delivered: preview.len(),
                 ended: Arc::new(Notify::new()),
             });
-            (preview, omitted, advance_occupying(&mut inner))
-        };
-        if let Some(settled) = settled {
-            self.settle(settled.data);
         }
+        let ended = {
+            let inner = self.inner.lock().await;
+            inner
+                .occupying
+                .as_ref()
+                .expect("just installed")
+                .ended
+                .clone()
+        };
+        let this = self.clone();
+        let id = command_id.to_owned();
+        let path = output_path.to_path_buf();
+        let lifecycle = self.lifecycle.clone();
+        let tasks = self.tasks.lock().await;
+        tasks.spawn(async move {
+            let cancelled: crate::host::CancelledFn = Arc::new(move || {
+                let lifecycle = lifecycle.clone();
+                Box::pin(async move {
+                    lifecycle.cancelled().await;
+                    Ok(())
+                })
+            });
+            let reply = this
+                .host
+                .wait(
+                    WaitRequest {
+                        task_id: id.clone(),
+                        timeout_ms: None,
+                    },
+                    cancelled,
+                )
+                .await;
+            let Ok(reply) = reply else {
+                return;
+            };
+            let code = wait_code(&reply);
+            let preview = reply.preview.clone();
+            let result = ended_result(&id, &path, &preview, &code);
+            let published = {
+                let mut inner = this.inner.lock().await;
+                if inner
+                    .occupying
+                    .as_ref()
+                    .is_some_and(|task| task.task_id == id)
+                {
+                    inner.occupy_tail = Some(preview);
+                    inner.occupy_exit = Some(exit_line(&code));
+                    inner.occupying = None;
+                    true
+                } else {
+                    false
+                }
+            };
+            if !published {
+                return;
+            }
+            this.settle(ExecEndedData {
+                task_id: id.clone(),
+                status: exit_status(&code),
+                result,
+            });
+            let _ = this.host.settle(TaskRequest { task_id: id }).await;
+            ended.notify_waiters();
+        });
         let mut text = String::new();
         push_output(&mut text, &preview);
-        if let Some(omitted) = omitted {
-            text.push_str(&format!("[Output truncated: {omitted} bytes omitted]\n"));
+        if omitted {
+            text.push_str("[Output truncated]\n");
         }
         text.push_str(&format!(
-            "Command is still running and occupies the shell.\nTask ID: {task_id}\nOutput: {}",
+            "Command is still running and occupies the shell.\nTask ID: {command_id}\nOutput: {}",
             output_path.display()
         ));
         let mut result = ToolResult::text(text);
         result.structured_content = Some(structured(json!({
             "type": "started",
-            "taskId": task_id,
+            "taskId": command_id,
             "outputPath": output_path.to_string_lossy(),
         })));
         Ok(result)
@@ -1340,54 +1405,66 @@ impl ShellSession {
         };
         if let Some(occ) = occupying {
             {
-                let mut inner = self.inner.lock().await;
-                if let Some(capture) = inner.capture.as_mut() {
-                    capture.settle(capture.pending.len());
-                }
+                let inner = self.inner.lock().await;
                 if inner.shell.is_some() {
                     drop(inner);
                     let _ = self.write_shell(b"\x03").await;
                 }
             }
-            let deadline = tokio::time::Instant::now() + STOP_WAIT;
-            let mut found = false;
-            loop {
-                let state = {
-                    let inner = self.inner.lock().await;
-                    (
-                        inner.shell.is_none(),
-                        inner
-                            .capture
-                            .as_ref()
-                            .is_some_and(|capture| capture.code.is_some()),
-                    )
-                };
-                if state.0 || state.1 {
-                    found = state.1;
-                    break;
-                }
-                if tokio::time::Instant::now() >= deadline {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
+            let never = CancellationToken::new();
+            let cancelled: crate::host::CancelledFn = Arc::new(move || {
+                let never = never.clone();
+                Box::pin(async move {
+                    never.cancelled().await;
+                    Ok(())
+                })
+            });
+            let reply = self
+                .host
+                .wait(
+                    WaitRequest {
+                        task_id: task_id.to_owned(),
+                        timeout_ms: Some(STOP_WAIT.as_millis() as u64),
+                    },
+                    cancelled,
+                )
+                .await
+                .ok();
+            let found = reply
+                .as_ref()
+                .is_some_and(|reply| reply.status != WaitStatus::Running);
+            let page = self
+                .host
+                .output(OutputRequest {
+                    task_id: task_id.to_owned(),
+                    cursor: None,
+                    limit: Some(OUTPUT_LIMIT as u64),
+                    wait_ms: None,
+                    event_cursor: None,
+                })
+                .await
+                .ok();
+            let preview = page.map(|page| page.text).unwrap_or_default();
             {
                 let mut inner = self.inner.lock().await;
-                if let Some(capture) = inner.capture.take() {
-                    inner.occupy_tail = Some(capture.output);
-                }
+                inner.occupy_tail = Some(preview);
+                inner.occupy_exit = None;
                 if !found {
-                    let task_id = inner.shell.take();
+                    let shell = inner.shell.take();
                     inner.shell_exit = Some("[shell was terminated]".into());
                     inner.had_reset = true;
                     drop(inner);
-                    if let Some(task_id) = task_id {
-                        self.stop_shell(&task_id).await;
+                    if let Some(shell) = shell {
+                        self.stop_shell(&shell).await;
                     }
-                } else {
-                    drop(inner);
                 }
             }
+            let _ = self
+                .host
+                .settle(TaskRequest {
+                    task_id: task_id.to_owned(),
+                })
+                .await;
             let data = ExecEndedData {
                 task_id: task_id.to_owned(),
                 status: ExecStatus::Cancelled,
@@ -1460,25 +1537,6 @@ impl ExecStop for ShellSession {
 
 /// Settles the occupying task once its capture saw a complete end marker
 /// line, taking the capture with it.
-fn advance_occupying(inner: &mut Inner) -> Option<Settlement> {
-    let code = inner.capture.as_ref()?.code.clone()?;
-    let occ = inner.occupying.take()?;
-    let capture = inner.capture.take();
-    let preview = file_tail(&occ.output_path, OUTPUT_LIMIT);
-    if let Some(capture) = &capture {
-        inner.occupy_tail = Some(capture.output.clone());
-    }
-    inner.occupy_exit = Some(exit_line(&code));
-    Some(Settlement {
-        data: ExecEndedData {
-            task_id: occ.task_id.clone(),
-            status: exit_status(&code),
-            result: ended_result(&occ.task_id, &occ.output_path, &preview, &code),
-        },
-        ended: Some(occ.ended),
-    })
-}
-
 /// The plugin.
 pub struct ShellSessionPlugin {
     recovery: Key<BackgroundExec>,
@@ -1664,6 +1722,14 @@ fn exit_status(code: &str) -> ExecStatus {
     }
 }
 
+fn wait_code(reply: &WaitReply) -> String {
+    reply
+        .exit_code
+        .map(|code| code.to_string())
+        .or_else(|| reply.signal.clone())
+        .unwrap_or_else(|| "failed".to_owned())
+}
+
 fn exit_line(code: &str) -> String {
     match code {
         "failed" => "[Command failed]".to_owned(),
@@ -1721,28 +1787,6 @@ fn strip_marker(text: &mut String, marker: &str) {
             .map_or(text.len(), |offset| pos + offset + 1);
         text.replace_range(pos..end, "");
     }
-}
-
-/// Where the pending tail that may still become a marker starts.
-///
-/// A tail is held only while it is still short enough to become one, so
-/// output that merely starts with `__DIM_` cannot keep the rest of an
-/// arbitrarily long line out of the log.
-fn marker_hold(text: &str) -> usize {
-    const PREFIX: &str = "__DIM_";
-    if let Some(pos) = text.rfind(PREFIX)
-        && !text[pos..].contains('\n')
-    {
-        return if text.len() - pos <= MARKER_LINE_LIMIT {
-            pos
-        } else {
-            text.len()
-        };
-    }
-    (1..PREFIX.len())
-        .rev()
-        .find(|len| text.ends_with(&PREFIX[..*len]))
-        .map_or(text.len(), |len| text.len() - len)
 }
 
 pub(crate) fn regularize_output(bytes: &[u8]) -> String {
@@ -1934,156 +1978,4 @@ fn pwsh_background(
 fn base64_encode(data: &str) -> String {
     use base64::Engine;
     base64::engine::general_purpose::STANDARD.encode(data.as_bytes())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    const START: &str = "__DIM_START_aaaabbbb_ccccdddd__";
-    const END: &str = "__DIM_END_eeeeffff_00001111__";
-
-    fn capture() -> Capture {
-        Capture::new(START.into(), END.into())
-    }
-
-    /// Feeds a chunk and settles it the way the reader does.
-    fn feed(capture: &mut Capture, text: &str) {
-        capture.append(text);
-        capture.drain();
-    }
-
-    #[test]
-    fn a_start_marker_split_across_chunks_is_found_and_the_echo_dropped() {
-        let mut capture = capture();
-        feed(
-            &mut capture,
-            "$ printf '%s%s' '__DIM_START_aaaabbbb_' 'ccccdddd__'; eval\n",
-        );
-        feed(&mut capture, "echo hi\nhi\n");
-        // The marker arrives in two chunks; neither half carries it alone.
-        feed(&mut capture, "__DIM_START_aaaabbbb_");
-        feed(&mut capture, "ccccdddd__");
-        feed(&mut capture, "line one\nline two\n");
-        feed(&mut capture, &format!("{END}0\n"));
-        assert_eq!(capture.code.as_deref(), Some("0"));
-        assert_eq!(capture.output, "line one\nline two\n");
-        assert_eq!(capture.omitted(), None);
-    }
-
-    #[test]
-    fn a_start_marker_and_echo_after_conversion_stay_out_of_the_result() {
-        let mut capture = capture();
-        feed(
-            &mut capture,
-            "$ printf '%s%s' '__DIM_START_aaaabbbb_' 'ccccdddd__'\n",
-        );
-        feed(&mut capture, START);
-        feed(&mut capture, "output\n");
-        feed(&mut capture, &format!("{END}3\n"));
-        assert_eq!(capture.code.as_deref(), Some("3"));
-        assert_eq!(capture.output, "output\n");
-        assert!(!capture.output.contains("__DIM_"));
-    }
-
-    #[test]
-    fn a_capture_converted_after_the_limit_reports_the_omission_and_keeps_the_rest() {
-        let mut capture = capture();
-        feed(&mut capture, START);
-        let burst = "y".repeat(OUTPUT_LIMIT * 2);
-        feed(&mut capture, &burst);
-        let path = std::env::temp_dir().join(format!("capture-bind-{}", uuid::Uuid::new_v4()));
-        capture.bind(&path);
-        feed(&mut capture, "after\n");
-        feed(&mut capture, &format!("{END}0\n"));
-        assert_eq!(capture.code.as_deref(), Some("0"));
-        let file = std::fs::read_to_string(&path).unwrap();
-        let _ = std::fs::remove_file(&path);
-        assert!(
-            file.starts_with(&burst[..100]),
-            "the earliest bytes are kept"
-        );
-        assert!(
-            file.contains(&format!(
-                "[Output truncated: {} bytes omitted]",
-                OUTPUT_LIMIT
-            )),
-            "{file}"
-        );
-        assert!(file.ends_with("after\n"), "{}", &file[file.len() - 40..]);
-        assert!(!file.contains("__DIM_"));
-    }
-
-    #[test]
-    fn an_end_marker_arriving_after_the_output_passed_the_limit_still_settles() {
-        let mut capture = capture();
-        feed(&mut capture, START);
-        feed(&mut capture, &"x".repeat(OUTPUT_LIMIT * 2));
-        assert!(capture.code.is_none());
-        feed(&mut capture, &format!("\n{END}0\n"));
-        assert_eq!(capture.code.as_deref(), Some("0"));
-        assert_eq!(capture.output.len(), OUTPUT_LIMIT);
-        assert_eq!(capture.omitted(), Some(OUTPUT_LIMIT + 1));
-    }
-
-    #[test]
-    fn a_burst_past_the_limit_keeps_the_earliest_bytes() {
-        let mut capture = capture();
-        feed(&mut capture, START);
-        let mut expected = String::new();
-        for index in 0..5000 {
-            let line = format!("{index}\n");
-            expected.push_str(&line);
-            feed(&mut capture, &line);
-        }
-        feed(&mut capture, &format!("{END}0\n"));
-        assert_eq!(capture.code.as_deref(), Some("0"));
-        assert!(expected.starts_with(&capture.output), "the earliest bytes");
-        assert_eq!(
-            capture.omitted(),
-            Some(expected.len() - capture.output.len()),
-            "every byte past the limit is reported"
-        );
-    }
-
-    #[test]
-    fn a_long_line_starting_with_the_marker_prefix_is_settled_not_held() {
-        let mut capture = capture();
-        feed(&mut capture, START);
-        let path = std::env::temp_dir().join(format!("capture-hold-{}", uuid::Uuid::new_v4()));
-        capture.bind(&path);
-
-        feed(&mut capture, "__DIM_");
-        let body = "a".repeat(1024 * 1024);
-        let mut settled = String::from("__DIM_");
-        for chunk in body.as_bytes().chunks(4096) {
-            let text = std::str::from_utf8(chunk).unwrap();
-            settled.push_str(text);
-            feed(&mut capture, text);
-            assert!(
-                capture.pending.len() <= MARKER_LINE_LIMIT,
-                "a line that can no longer become a marker is held: {} bytes",
-                capture.pending.len()
-            );
-        }
-        assert!(capture.code.is_none());
-        feed(&mut capture, "\n");
-        feed(&mut capture, &format!("{END}0\n"));
-        assert_eq!(capture.code.as_deref(), Some("0"));
-
-        let file = std::fs::read_to_string(&path).unwrap();
-        let _ = std::fs::remove_file(&path);
-        let expected = format!("{settled}\n");
-        assert!(
-            file.starts_with(&expected[..MARKER_LINE_LIMIT]),
-            "the log starts with the line's first bytes"
-        );
-        assert!(
-            file.ends_with(&expected),
-            "the log holds the whole line: {} bytes",
-            file.len()
-        );
-        assert_eq!(capture.output.len(), OUTPUT_LIMIT);
-        assert_eq!(capture.omitted(), Some(expected.len() - OUTPUT_LIMIT));
-    }
 }

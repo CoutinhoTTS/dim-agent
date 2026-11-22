@@ -3421,6 +3421,8 @@ pub(crate) mod shell {
         output: String,
         bytes: u64,
         omitted: usize,
+        tail: String,
+        file: Option<std::fs::File>,
     }
 
     impl ShellCommand {
@@ -3436,6 +3438,8 @@ pub(crate) mod shell {
                     output: String::new(),
                     bytes: 0,
                     omitted: 0,
+                    tail: String::new(),
+                    file: None,
                 }),
                 notify: Notify::new(),
             }
@@ -3450,6 +3454,18 @@ pub(crate) mod shell {
                 };
                 state.started = true;
                 rest = &rest[position + self.start_marker.len()..];
+            }
+            if state.file.is_none() {
+                let mut options = std::fs::OpenOptions::new();
+                options.create(true).append(true);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::OpenOptionsExt;
+                    options.mode(0o600);
+                }
+                if let Ok(file) = options.open(&self.path) {
+                    state.file = Some(file);
+                }
             }
             let Some(position) = rest.find(&self.end_marker) else {
                 if last_full_marker(rest).is_some() {
@@ -3507,7 +3523,7 @@ pub(crate) mod shell {
                             output_path: self.path.clone(),
                             output_bytes: state.bytes,
                             output_truncated: state.omitted > 0,
-                            preview: tail_bytes(&state.output, 16_000).to_owned(),
+                            preview: state.tail.clone(),
                             preview_truncated: state.omitted > 0,
                             failure_note: None,
                         };
@@ -3527,7 +3543,7 @@ pub(crate) mod shell {
                         output_path: self.path.clone(),
                         output_bytes: state.bytes,
                         output_truncated: state.omitted > 0,
-                        preview: tail_bytes(&state.output, 16_000).to_owned(),
+                        preview: state.tail.clone(),
                         preview_truncated: state.omitted > 0,
                         failure_note: None,
                     };
@@ -3545,7 +3561,15 @@ pub(crate) mod shell {
         if text.is_empty() {
             return;
         }
+        if let Some(file) = state.file.as_mut() {
+            use std::io::Write;
+            let _ = file.write_all(text.as_bytes());
+        }
         state.bytes += text.len() as u64;
+        state.tail.push_str(text);
+        if state.tail.len() > 16_000 {
+            state.tail = tail_bytes(&state.tail, 16_000).to_owned();
+        }
         let room = (64 * 1024usize).saturating_sub(state.output.len());
         if text.len() <= room {
             state.output.push_str(text);
@@ -3817,10 +3841,17 @@ pub(crate) mod shell {
                     pending.push_str(&chunk);
                     while let Some(newline) = pending.find('\n') {
                         let line: String = pending.drain(..=newline).collect();
-                        if let Some(command) = pump.active_command.lock().unwrap().clone() {
+                        let active = pump.active_command.lock().unwrap().clone();
+                        if let Some(command) = active {
                             command.feed(&line);
                             if command.ended() {
-                                *pump.active_command.lock().unwrap() = None;
+                                let mut active = pump.active_command.lock().unwrap();
+                                if active
+                                    .as_ref()
+                                    .is_some_and(|current| Arc::ptr_eq(current, &command))
+                                {
+                                    *active = None;
+                                }
                             }
                         }
                         if let Some((task_id, reported)) = parse_shell_job(&line) {
