@@ -2912,13 +2912,13 @@ can follow commit and must not trigger another send.
 
 In its default text mode, `exec` writes only the turn's final reply to stdout.
 Text a model writes before or between tool calls goes to stderr, together with
-the `[tool]`, `[done]` and `[failed]` lines. Whether a request's text completes
-the turn is known only when the request ends, so the text is held until then: a
-request that ends in a tool call, fails or is cancelled writes its text to
-stderr, and the request that ends the turn writes it to stdout. An interrupted
-run leaves no partial text on stdout; a turn whose final reply is empty writes
-nothing there. `exec --json` and a one-shot `dimcode --prompt` run keep their
-existing routing.
+the `[tool]`, `[done]` and `[failed]` lines. Whether a request's text is the
+turn's final reply is known only when the request ends, so the text is held
+until then: a request that ends in a tool call, fails (including at its output
+limit) or is cancelled writes its text to stderr, and the request that ends the
+turn normally writes its reply to stdout. An interrupted run leaves no partial
+text on stdout; a turn whose final reply is empty writes nothing there.
+`exec --json` and a one-shot `dimcode --prompt` run keep their existing routing.
 
 In JSON mode, stdout contains one compact JSON-RPC notification per line using
 the daemon's existing `method` and `params`. Only notifications for the selected
