@@ -1771,9 +1771,7 @@ async fn a_shell_burst_is_backpressured_instead_of_reset() {
     let _execution = root
         .provide(ExecutionSettingsHost::fixed(Default::default()))
         .unwrap();
-    let _toolchain = root
-        .provide(ToolchainSourceHost::fixed(vec![]))
-        .unwrap();
+    let _toolchain = root.provide(ToolchainSourceHost::fixed(vec![])).unwrap();
     let plugin = root.plugin(
         HostPlatformPlugin::new(
             &names,
@@ -1825,7 +1823,14 @@ async fn a_shell_burst_is_backpressured_instead_of_reset() {
         total += page
             .events
             .iter()
-            .map(|event| event.output.len())
+            .map(|event| match event {
+                dim_agent_capabilities::host_platform::ShellEvent::Output { text, .. } => {
+                    text.len()
+                }
+                dim_agent_capabilities::host_platform::ShellEvent::Marker { line, .. } => {
+                    line.len()
+                }
+            })
             .sum::<usize>();
         if let Some(next) = page.next_event_cursor {
             cursor = next;

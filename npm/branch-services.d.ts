@@ -345,10 +345,9 @@ export type OutputRequest = {
   eventCursor?: number | bigint | null
 }
 
-export type ShellEvent = {
-  cursor: number | bigint
-  output: string
-}
+export type ShellEvent =
+  | { kind: "output"; cursor: number | bigint; text: string }
+  | { kind: "marker"; cursor: number | bigint; line: string }
 
 export type ShellState = {
   busy: boolean

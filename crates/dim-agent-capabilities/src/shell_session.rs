@@ -15,8 +15,8 @@ use crate::{
     exec_stop::{ExecStop, TaskError},
     host::{HostError, SessionFiles},
     host_platform::{
-        HostPlatform, OutputRequest, ShellEdition, ShellRequest, ShellStatus, ShellWrite,
-        TaskRequest, WaitReply, WaitRequest,
+        HostPlatform, OutputRequest, ShellEdition, ShellEvent, ShellRequest, ShellStatus,
+        ShellWrite, TaskRequest, WaitReply, WaitRequest,
     },
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -638,8 +638,8 @@ impl ShellSession {
                                 break;
                             }
                             for event in page.events {
-                                this.handle_output(&event.output).await;
-                                event_cursor = event.cursor + 1;
+                                event_cursor = event.cursor() + 1;
+                                this.handle_event(event).await;
                             }
                             if let Some(next) = page.next_event_cursor {
                                 event_cursor = next;
@@ -660,8 +660,8 @@ impl ShellSession {
                                     break;
                                 }
                                 for event in page.events {
-                                    this.handle_output(&event.output).await;
-                                    event_cursor = event.cursor + 1;
+                                    event_cursor = event.cursor() + 1;
+                                    this.handle_event(event).await;
                                 }
                                 if let Some(next) = page.next_event_cursor {
                                     event_cursor = next;
@@ -775,6 +775,13 @@ impl ShellSession {
     /// occupying task. A background marker is looked for only in the tail
     /// this chunk can have completed, so the scan stays as small as the
     /// chunk however far `retained` has grown.
+    async fn handle_event(self: &Arc<Self>, event: ShellEvent) {
+        match event {
+            ShellEvent::Output { text, .. } => self.handle_output(&text).await,
+            ShellEvent::Marker { line, .. } => self.handle_output(&line).await,
+        }
+    }
+
     async fn handle_output(self: &Arc<Self>, text: &str) {
         let mut settled: Vec<Settlement> = Vec::new();
         {

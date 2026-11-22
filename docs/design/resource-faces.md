@@ -120,7 +120,7 @@ The command process, output file and PTY are owned by `HostPlatform`; the branch
 record and writes the facts. `shell` writes its bounded capture to `outputPath`, so the path is
 real for both task and file reads. `ShellSession` keeps its marker/occupancy policy but calls the owner's data operations (`shell`,
 `write`, `resize`, `output`, `wait`, `kill`, `settle`); it can run on the control side. The owner
-records the stream as ordered `ShellEvent`s with a cursor and `ShellState`, and `output` takes
+records the stream as ordered `ShellEvent` lines (`output` or full `marker`) with a cursor and `ShellState`, and `output` takes
 `eventCursor` and `waitMs` for that read. Background shell jobs are registered in the owner under
 the branch task id; the control side never sees a host pid. Moving the remaining marker parser into
 the owner is optional. `wait` takes the existing cancellation callback; a timeout stops the wait and answers `running`,

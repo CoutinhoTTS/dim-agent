@@ -415,10 +415,18 @@ pub struct OutputPageReply {
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ShellEvent {
-    pub cursor: u64,
-    pub output: String,
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ShellEvent {
+    Output { cursor: u64, text: String },
+    Marker { cursor: u64, line: String },
+}
+
+impl ShellEvent {
+    pub(crate) fn cursor(&self) -> u64 {
+        match self {
+            Self::Output { cursor, .. } | Self::Marker { cursor, .. } => *cursor,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, serde::Serialize)]
@@ -3356,6 +3364,13 @@ pub(crate) mod shell {
             .then(|| (task_id.to_owned(), pid))
     }
 
+    fn shell_event_len(event: &super::ShellEvent) -> usize {
+        match event {
+            super::ShellEvent::Output { text, .. } => text.len(),
+            super::ShellEvent::Marker { line, .. } => line.len(),
+        }
+    }
+
     fn last_full_marker(line: &str) -> Option<(&'static str, &str)> {
         let mut found: Option<(usize, (&'static str, &str))> = None;
         for (prefix, position) in [
@@ -3401,6 +3416,9 @@ pub(crate) mod shell {
             self.pending.push_str(&text);
             while let Some(newline) = self.pending.find('\n') {
                 let line: String = self.pending.drain(..=newline).collect();
+                let cursor = self.next;
+                self.next += 1;
+                self.chars += line.len();
                 if let Some((prefix, tail)) = last_full_marker(&line) {
                     if prefix == "__DIM_START_" {
                         self.state.busy = true;
@@ -3413,42 +3431,43 @@ pub(crate) mod shell {
                             self.state.last_code = Some(code.to_owned());
                         }
                     }
+                    self.items
+                        .push_back(super::ShellEvent::Marker { cursor, line });
+                } else {
+                    self.items
+                        .push_back(super::ShellEvent::Output { cursor, text: line });
                 }
             }
-            if self.pending.len() > 4096 {
-                let split = self.pending.len() - 4096;
-                let split = self.pending.floor_char_boundary(split);
-                self.pending.drain(..split);
+            if self.pending.len() > 65536 {
+                let cursor = self.next;
+                self.next += 1;
+                let text = std::mem::take(&mut self.pending);
+                self.chars += text.len();
+                self.items
+                    .push_back(super::ShellEvent::Output { cursor, text });
             }
-            let cursor = self.next;
-            self.next += 1;
-            self.chars += text.len();
-            self.items.push_back(super::ShellEvent {
-                cursor,
-                output: text,
-            });
         }
 
         fn page(&mut self, cursor: u64) -> EventPage {
             while let Some(front) = self.items.front() {
-                if front.cursor >= cursor {
+                if front.cursor() >= cursor {
                     break;
                 }
                 if let Some(front) = self.items.pop_front() {
-                    self.chars = self.chars.saturating_sub(front.output.len());
-                    self.base = front.cursor + 1;
+                    self.chars = self.chars.saturating_sub(shell_event_len(&front));
+                    self.base = front.cursor() + 1;
                 }
             }
             let reset = cursor < self.base;
             let events: Vec<_> = self
                 .items
                 .iter()
-                .filter(|event| event.cursor >= cursor)
+                .filter(|event| event.cursor() >= cursor)
                 .cloned()
                 .collect();
             let next_cursor = events
                 .last()
-                .map(|event| event.cursor + 1)
+                .map(|event| event.cursor() + 1)
                 .unwrap_or(cursor.max(self.base));
             EventPage {
                 events,
@@ -3882,10 +3901,7 @@ pub(crate) mod shell {
         #[test]
         fn a_full_marker_is_recognized_after_the_echo() {
             let line = "__DIM_START_aaaabbbb_ccccdddd__";
-            assert_eq!(
-                last_full_marker(line),
-                Some(("__DIM_START_", ""))
-            );
+            assert_eq!(last_full_marker(line), Some(("__DIM_START_", "")));
             let line = "__DIM_END_aaaabbbb_ccccdddd__7\n";
             assert_eq!(last_full_marker(line), Some(("__DIM_END_", "7\n")));
         }
@@ -3893,10 +3909,7 @@ pub(crate) mod shell {
         #[test]
         fn the_init_line_reports_its_last_marker() {
             let line = "__DIM_START_aaaabbbb_ccccdddd____DIM_END_eeeeffff_00001111__0\n";
-            assert_eq!(
-                last_full_marker(line),
-                Some(("__DIM_END_", "0\n"))
-            );
+            assert_eq!(last_full_marker(line), Some(("__DIM_END_", "0\n")));
         }
     }
 }
