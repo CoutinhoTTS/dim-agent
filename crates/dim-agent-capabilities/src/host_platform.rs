@@ -365,6 +365,7 @@ impl Drop for TemporaryDirectory {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WaitStatus {
+    Running,
     Exited,
     Signaled,
     TimedOut,
@@ -1074,8 +1075,9 @@ impl HostPlatform {
         })
     }
 
-    /// Waits for a task's terminal record; `timeoutMs` bounds the wait and
-    /// `cancelled` ends only the wait, leaving the task running.
+    /// Waits for a task's terminal record. `timeoutMs` stops the wait and
+    /// answers `running`; it never kills the task. `cancelled` ends only the
+    /// wait. Use `kill` to stop the task.
     pub async fn wait(
         &self,
         request: WaitRequest,
@@ -3723,25 +3725,23 @@ pub(crate) mod shell {
             let end = if let Some(ms) = ms {
                 tokio::select! {
                     biased;
-                    end = self.done() => end,
-                    _ = tokio::time::sleep(Duration::from_millis(ms)) => {
-                        self.timeout.cancel();
-                        self.done().await
-                    }
+                    end = self.done() => Some(end),
+                    _ = tokio::time::sleep(Duration::from_millis(ms)) => None,
                 }
             } else {
-                self.done().await
+                Some(self.done().await)
             };
             let tail = self.tail();
             let capture = self.capture.lock().unwrap();
-            let status = match end.status {
-                "exited" => super::WaitStatus::Exited,
-                "signaled" => super::WaitStatus::Signaled,
-                "timed_out" => super::WaitStatus::TimedOut,
-                "cancelled" => super::WaitStatus::Cancelled,
-                _ => super::WaitStatus::Failed,
+            let status = match end.as_ref().map(|end| end.status) {
+                Some("exited") => super::WaitStatus::Exited,
+                Some("signaled") => super::WaitStatus::Signaled,
+                Some("timed_out") => super::WaitStatus::TimedOut,
+                Some("cancelled") => super::WaitStatus::Cancelled,
+                Some(_) => super::WaitStatus::Failed,
+                None => super::WaitStatus::Running,
             };
-            let (exit_code, signal) = match end.exit {
+            let (exit_code, signal) = match end.as_ref().and_then(|end| end.exit.as_ref()) {
                 Some(exit) => (
                     Some(exit.exit_code() as i32),
                     exit.signal().map(str::to_owned),
@@ -3752,13 +3752,16 @@ pub(crate) mod shell {
                 status,
                 exit_code,
                 signal,
-                duration_ms: end.duration,
+                duration_ms: end
+                    .as_ref()
+                    .map(|end| end.duration)
+                    .unwrap_or_else(|| self.started.elapsed().as_millis() as u64),
                 output_path: self.path.clone(),
                 output_bytes: capture.total,
                 output_truncated: capture.total > capture.text.len() as u64,
                 preview: tail.text,
                 preview_truncated: tail.truncated,
-                failure_note: end.error,
+                failure_note: end.and_then(|end| end.error),
             }
         }
     }

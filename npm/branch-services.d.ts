@@ -295,7 +295,7 @@ export type WaitRequest = {
 }
 
 /** How a command task ended. */
-export type WaitStatus = "exited" | "signaled" | "timed_out" | "cancelled" | "failed"
+export type WaitStatus = "running" | "exited" | "signaled" | "timed_out" | "cancelled" | "failed"
 
 /** A command task's terminal record. */
 export type WaitReply = {
@@ -425,8 +425,9 @@ export interface HostPlatform {
    */
   spawn(request: SpawnRequest): Promise<SpawnReply>
   /**
-   * Waits for a task's terminal record; `timeoutMs` bounds the wait and
-   * `cancelled` ends only the wait, leaving the task running.
+   * Waits for a task's terminal record. `timeoutMs` stops the wait and
+   * answers `running`; it never kills the task. `cancelled` ends only the
+   * wait. Use `kill` to stop the task.
    * @throws {HostPlatformErrorThrown}
    */
   wait(request: WaitRequest, cancelled: () => void | Promise<void>): Promise<WaitReply>

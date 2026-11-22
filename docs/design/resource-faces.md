@@ -123,8 +123,9 @@ real for both task and file reads. `ShellSession` keeps its marker/occupancy pol
 records the stream as ordered `ShellEvent`s with a cursor and `ShellState`, and `output` takes
 `eventCursor` and `waitMs` for that read. Background shell jobs are registered in the owner under
 the branch task id; the control side never sees a host pid. Moving the remaining marker parser into
-the owner is optional. `wait` takes the existing cancellation callback and leaves the task running on
-cancel. `spawnConfined` success means the helper stayed within its limits; an output limit is an
+the owner is optional. `wait` takes the existing cancellation callback; a timeout stops the wait and answers `running`,
+and neither a timeout nor a cancelled call kills the task. A command's own `spawn.timeoutMs` still
+terminates it at that deadline; stopping a task is an explicit `kill`. `spawnConfined` success means the helper stayed within its limits; an output limit is an
 error, so its reply carries no truncation flags. Cancellation is the existing
 `cancelled: CancelledFn` parameter (`toolHost.execute` is the shape); it is not a separate
 `cancel` operation and carries no `callId`.

@@ -1604,3 +1604,79 @@ async fn the_host_platform_service_removes_output_and_composes_a_path() {
     assert!(matches!(refused, HostPlatformError::Invalid(_)));
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[tokio::test]
+async fn a_wait_timeout_leaves_the_command_running() {
+    let dir = std::env::temp_dir().join(unique("dim-host-wait-timeout"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let root = rutis::Ctx::root_with(tokio::runtime::Handle::current());
+    let catalog = dim_agent_capabilities::catalog();
+    let build = Default::default();
+    let names = dim_agent_runtime::Names::copy(&catalog, &build);
+    let _execution = root
+        .provide(ExecutionSettingsHost::fixed(Default::default()))
+        .unwrap();
+    let _toolchain = root.provide(ToolchainSourceHost::fixed(vec![])).unwrap();
+    let plugin = root.plugin(
+        HostPlatformPlugin::new(
+            &names,
+            HostPlatformConfig {
+                execution: names.key().unwrap(),
+                toolchain: names.key().unwrap(),
+                exec_shell_file: None,
+                command_files: None,
+                home: Some(dir.clone()),
+            },
+        )
+        .unwrap(),
+    );
+    (&plugin).await.unwrap();
+    let platform = root.get::<HostPlatform>().unwrap();
+    let path = dir.to_string_lossy().into_owned();
+    let spawn: serde_json::Value = serde_json::to_value(
+        platform
+            .spawn(SpawnRequest {
+                task_id: "wait-timeout".into(),
+                command: "sleep 0.3".into(),
+                cwd: dir.clone(),
+                workspace: dir.clone(),
+                roots: Vec::new(),
+                output_dir: dir.clone(),
+                timeout_ms: None,
+            })
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(spawn["taskId"], "wait-timeout");
+    let first = platform
+        .wait(
+            WaitRequest {
+                task_id: "wait-timeout".into(),
+                timeout_ms: Some(10),
+            },
+            never_cancelled(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(first.status, WaitStatus::Running);
+    let second = platform
+        .wait(
+            WaitRequest {
+                task_id: "wait-timeout".into(),
+                timeout_ms: None,
+            },
+            never_cancelled(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(second.status, WaitStatus::Exited);
+    platform
+        .settle(TaskRequest {
+            task_id: "wait-timeout".into(),
+        })
+        .await
+        .unwrap();
+    let _ = path;
+    std::fs::remove_dir_all(dir).unwrap();
+}

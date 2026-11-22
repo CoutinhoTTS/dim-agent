@@ -1948,6 +1948,9 @@ impl Output {
     pub(super) async fn truncated(&self) -> bool {
         self.capture.lock().await.truncated
     }
+    pub(super) async fn total(&self) -> u64 {
+        self.capture.lock().await.output_bytes
+    }
 }
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -2315,14 +2318,25 @@ impl CommandTask {
         let done = if let Some(ms) = timeout_ms {
             tokio::select! {
                 biased;
-                result = self.completion() => result,
-                _ = tokio::time::sleep(Duration::from_millis(ms)) => {
-                    self.timeout.cancel();
-                    self.completion().await
-                }
+                result = self.completion() => Some(result),
+                _ = tokio::time::sleep(Duration::from_millis(ms)) => None,
             }
         } else {
-            self.completion().await
+            Some(self.completion().await)
+        };
+        let Some(done) = done else {
+            return WaitReply {
+                status: WaitStatus::Running,
+                exit_code: None,
+                signal: None,
+                duration_ms: self.started.elapsed().as_millis() as u64,
+                output_path: self.path.clone(),
+                output_bytes: self.output.total().await,
+                output_truncated: self.output.truncated().await,
+                preview: self.output.preview().await,
+                preview_truncated: false,
+                failure_note: None,
+            };
         };
         let exit = match done.observed {
             Ok(Observed::Exited(status)) => Some(status),
