@@ -1134,8 +1134,8 @@ impl Worker {
         // The policy shown belonged to the Session this interface left; this
         // Session's own read publishes its own, and a refused or failed read
         // leaves it unknown rather than showing the outgoing preset (design
-        // §14).
-        self.send(Update::PermissionsUnknown);
+        // §14). A daemon that serves no preset read cannot report one, and the
+        // launch preset stays the only policy this client knows.
         let mut reads = Vec::new();
         if self.client.offers("provider.catalog") {
             reads.push((
@@ -1145,6 +1145,7 @@ impl Worker {
             ));
         }
         if self.client.supports(&permission::PRESET_METHODS) {
+            self.send(Update::PermissionsUnknown);
             reads.push((
                 "session.permission.get",
                 json!({"sessionId":session_id,"branchId":self.default_branch}),
