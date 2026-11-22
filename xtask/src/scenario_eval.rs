@@ -321,7 +321,9 @@ const QUIET: Duration = Duration::from_secs(1);
 /// How long one `session.idle` call may take before its line counts as busy.
 const IDLE_WAIT: Duration = Duration::from_secs(1);
 /// How long a failed run waits for its cancelled siblings to settle before
-/// their futures are dropped (and their children's groups killed with them).
+/// their futures are dropped (and their children's groups killed with them),
+/// and how long a run that stopped on its wall clock waits for its cleanup
+/// before it keeps the outcome it reached.
 const SETTLE_BOUND: Duration = Duration::from_secs(30);
 
 const JUDGE_SYSTEM: &str = "You check statements against the exported Timeline of a coding session. The Timeline is JSONL: a header line, one branch line per line of the Session, one event line per event, and an end line. A context/prepare or model/call event carries its request: addedMessages are the messages added since that line's previous request, with messageCount the whole request's count, and messages is the whole list when the history changed; every other field of the request appears in full only when it changed, and otherwise reads {\"unchanged\": true}. For each statement answer \"present\" when the run shows it and \"absent\" when it does not. Add the Timeline events that support the verdict as a short quote. Answer with a JSON array only, one object per statement: {\"id\": \"<statement id>\", \"verdict\": \"present|absent\", \"quote\": \"<Timeline evidence>\"}.";
@@ -2377,6 +2379,8 @@ struct ChildOutcome {
     view: Option<String>,
     session: Option<String>,
     stop: String,
+    /// The run stopped because its wall-clock budget ran out.
+    timed_out: bool,
     turns: u32,
     window: Option<f64>,
     duration_ms: f64,
@@ -2410,6 +2414,7 @@ fn harness_outcome(error: String, preflight: Vec<PreflightCheck>) -> ChildOutcom
         view: None,
         session: None,
         stop: "error".into(),
+        timed_out: false,
         turns: 0,
         window: None,
         duration_ms: 0.,
@@ -2581,8 +2586,17 @@ async fn child_outcome(params: &ChildParams, preflight: &Arc<Provider>) -> Child
     )
     .await;
     let duration_ms = started.elapsed().as_secs_f64() * 1000.;
+    let timed_out = matches!(&outcome, Ok(outcome) if outcome.timed_out);
     server.shutdown();
-    let _ = server.join().await;
+    // A run that stopped on its wall clock gives its served App Server the
+    // same bounded grace as its close: the tree close waits for the move the
+    // run stopped waiting on, and the child must print its outcome and exit
+    // so the parent's worker is released (model-prompts §8.1).
+    if timed_out {
+        let _ = tokio::time::timeout(SETTLE_BOUND, server.join()).await;
+    } else {
+        let _ = server.join().await;
+    }
     let mut outcome = outcome.unwrap_or_else(|error| {
         harness_outcome(format!("the run failed to finish: {error}"), Vec::new())
     });
@@ -2803,6 +2817,7 @@ async fn child_drive(
         view: finished.view,
         session: (!driven.session.is_empty()).then_some(driven.session),
         stop: driven.stop.to_owned(),
+        timed_out: driven.timed_out,
         turns: driven.turns,
         window: driven.window,
         duration_ms: 0.,
@@ -4407,6 +4422,7 @@ impl Finished {
             driven: Driven {
                 session: String::new(),
                 stop: "error",
+                timed_out: false,
                 turns: 0,
                 window: None,
                 decline_retries: 0,
@@ -4499,9 +4515,17 @@ async fn drive_once(
             judging: Judging::not_asked(scenario, None),
         });
     }
-    let _ = client
-        .rpc("session.close", json!({"sessionId": driven.session}))
-        .await;
+    let close = client.rpc("session.close", json!({"sessionId": driven.session}));
+    // A run that stopped on its wall clock gives the close a bounded grace: a
+    // move the run stopped waiting on keeps settling on the server, and the
+    // close waits behind it. Cleanup that cannot settle must not replace the
+    // outcome the run reached or hold the worker that runs it
+    // (model-prompts §8.1).
+    if driven.timed_out {
+        let _ = tokio::time::timeout(SETTLE_BOUND, close).await;
+    } else {
+        let _ = close.await;
+    }
     drop(client);
     let mut export = Vec::new();
     let export = match dim_app_server::storage::export_timeline(
@@ -4677,6 +4701,10 @@ async fn wait_for_plugins(client: &mut Client) -> Result<()> {
 struct Driven {
     session: String,
     stop: &'static str,
+    /// The run stopped because its wall-clock budget ran out. The stop can be
+    /// renamed afterwards (a pending switch makes its own outcome), so the
+    /// cleanup paths read this rather than the stop's spelling.
+    timed_out: bool,
     turns: u32,
     window: Option<f64>,
     /// How many declines the runner sent again after `question_not_pending`.
@@ -4716,6 +4744,7 @@ async fn drive(
         return Driven {
             session: String::new(),
             stop: "error",
+            timed_out: false,
             turns: 0,
             window: None,
             decline_retries: 0,
@@ -4739,6 +4768,7 @@ async fn drive(
             return Driven {
                 session: String::new(),
                 stop: "error",
+                timed_out: false,
                 turns: 0,
                 window: None,
                 decline_retries: 0,
@@ -4750,6 +4780,7 @@ async fn drive(
     let mut driven = Driven {
         session: session.clone(),
         stop: "idle",
+        timed_out: false,
         turns: 0,
         window: None,
         decline_retries: 0,
@@ -4915,6 +4946,7 @@ async fn drive(
             Ok(fired) => fired,
             Err(_) => {
                 driven.stop = "seconds";
+                driven.timed_out = true;
                 driven.error = Some(match line {
                     Some(line) => format!(
                         "the switch to line {line} did not answer before the run's {}s budget ran out",
@@ -4967,6 +4999,7 @@ async fn drive(
             });
         if started.elapsed().as_secs_f64() >= scenario.budget.seconds {
             driven.stop = "seconds";
+            driven.timed_out = true;
             break;
         }
         if driven.turns >= scenario.budget.turns {
@@ -5090,30 +5123,52 @@ async fn drive(
         }
     }
     if driven.stop == "turns" || driven.stop == "seconds" {
-        for branch in &branches {
-            let _ = client
-                .rpc(
-                    "session.stop",
-                    json!({"sessionId": session, "branchId": branch,
-                           "reason": format!("budget: {}", driven.stop)}),
-                )
-                .await;
+        let stop = async {
+            for branch in &branches {
+                let _ = client
+                    .rpc(
+                        "session.stop",
+                        json!({"sessionId": session, "branchId": branch,
+                               "reason": format!("budget: {}", driven.stop)}),
+                    )
+                    .await;
+            }
+        };
+        // A run that already spent its wall clock gives its cleanup a bounded
+        // grace: a server that keeps settling the operation the run stopped
+        // waiting on must not hold the run past the outcome it reached
+        // (model-prompts §8.1).
+        if driven.timed_out {
+            let _ = tokio::time::timeout(SETTLE_BOUND, stop).await;
+        } else {
+            stop.await;
         }
     }
     if window_deferred && driven.error.is_none() {
-        match client
-            .rpc(
-                "session.context.usage",
-                json!({"sessionId":session,"branchId":"main"}),
-            )
-            .await
-        {
-            Ok(usage) => {
+        let usage = async {
+            client
+                .rpc(
+                    "session.context.usage",
+                    json!({"sessionId":session,"branchId":"main"}),
+                )
+                .await
+        };
+        let usage = if driven.timed_out {
+            tokio::time::timeout(SETTLE_BOUND, usage).await.ok()
+        } else {
+            Some(usage.await)
+        };
+        match usage {
+            Some(Ok(usage)) => {
                 driven.window = usage["contextWindow"].as_f64();
                 driven.error = window_mismatch(driven.window, scenario.budget.window);
             }
-            Err(error) if dim_client::app_error(&error) == Some("context_usage_unavailable") => {}
-            Err(error) => driven.error = Some(format!("Context window check failed: {error}")),
+            Some(Err(error))
+                if dim_client::app_error(&error) == Some("context_usage_unavailable") => {}
+            Some(Err(error)) => {
+                driven.error = Some(format!("Context window check failed: {error}"))
+            }
+            None => {}
         }
         if driven.error.is_some() {
             driven.stop = "error";
@@ -11559,17 +11614,25 @@ mod tests {
         /// The target line `2` starts and ends its first turn and the move
         /// answers, and the input after the move never does.
         SwitchSubmitStalls,
+        /// The target line `2` starts and ends its first turn, the move to it
+        /// never answers, and the Session's close never answers either: a run
+        /// that stopped on its wall clock must still return, with cleanup
+        /// bounded.
+        SwitchMoveAndCloseStall,
     }
 
     /// What a scripted peer read: the `requestId` of every decline, in order,
     /// how many it had read when it first wrote a call's `step/tool-result`,
-    /// and how many `session.idle` calls it read while it held the line busy.
+    /// how many `session.idle` calls it read while it held the line busy, and
+    /// whether it read the attach and how many closes.
     #[cfg(unix)]
     #[derive(Default)]
     struct PeerReads {
         declines: Mutex<Vec<String>>,
         settled_at: AtomicUsize,
         idles: AtomicUsize,
+        attached: tokio::sync::Notify,
+        closes: AtomicUsize,
     }
 
     /// How long [`PeerScript::HeldIdle`] keeps the line busy: five quiet
@@ -11712,6 +11775,15 @@ mod tests {
                 let Some(line) = line.unwrap() else { break };
                 let request: Value = serde_json::from_str(&line).unwrap();
                 let method = request["method"].as_str().unwrap_or_default();
+                if method == "session.attach" {
+                    recorded.attached.notify_one();
+                }
+                if method == "session.close" {
+                    recorded.closes.fetch_add(1, Ordering::SeqCst);
+                    if matches!(script, PeerScript::SwitchMoveAndCloseStall) {
+                        continue;
+                    }
+                }
                 if method == "session.idle" {
                     if matches!(script, PeerScript::HeldIdle) {
                         let at = *hold_until.get_or_insert_with(|| Instant::now() + HELD);
@@ -11821,7 +11893,9 @@ mod tests {
                         }
                         PeerScript::SwitchNeverFires => None,
                         PeerScript::SwitchMoveRetries => None,
-                        PeerScript::SwitchMoveStalls | PeerScript::SwitchSubmitStalls => None,
+                        PeerScript::SwitchMoveStalls
+                        | PeerScript::SwitchSubmitStalls
+                        | PeerScript::SwitchMoveAndCloseStall => None,
                     };
                     if let Some((request, sequence)) = closed {
                         if recorded.settled_at.load(Ordering::SeqCst) == 0 {
@@ -11838,7 +11912,10 @@ mod tests {
                 // The stalling scripts hold their reply: the move in one, the
                 // input after it in the other.
                 if method == "session.branch_set_default"
-                    && matches!(script, PeerScript::SwitchMoveStalls)
+                    && matches!(
+                        script,
+                        PeerScript::SwitchMoveStalls | PeerScript::SwitchMoveAndCloseStall
+                    )
                 {
                     continue;
                 }
@@ -11849,6 +11926,12 @@ mod tests {
                     }
                 }
                 let body = match method {
+                    "hello" => json!({"result": {
+                        "instanceId": "peer", "serverVersion": "peer",
+                        "protocolVersion": 4,
+                        "features": ["session.create", "session.history"],
+                        "daemonProfile": {"kind": "mock"},
+                    }}),
                     "session.create" => json!({"result": {"sessionId": "peer"}}),
                     "session.context.usage" => json!({"result": {"contextWindow": window}}),
                     "session.idle" => json!({"result": {"sequence": PEER_SEQUENCE}}),
@@ -11886,6 +11969,7 @@ mod tests {
                         PeerScript::SwitchMoveRetries
                             | PeerScript::SwitchMoveStalls
                             | PeerScript::SwitchSubmitStalls
+                            | PeerScript::SwitchMoveAndCloseStall
                     ) {
                         for (name, sequence) in [("start", 1), ("end", 2)] {
                             write
@@ -12146,6 +12230,131 @@ mod tests {
                 "{name}: the timeout is a failed run on its own"
             );
         }
+    }
+
+    /// A run that stopped on its wall clock gives its cleanup a bounded
+    /// grace: its Session's close waits behind the move the run stopped
+    /// waiting on, and the run must still return the outcome it reached, so
+    /// the worker that runs it is released (model-prompts §8.1).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_timed_out_run_closes_within_a_bounded_grace() {
+        let directory = std::env::temp_dir().join(format!(
+            "dim-scenario-eval-close-grace-{}",
+            std::process::id()
+        ));
+        let (socket, reads) =
+            scripted_peer(&directory, 8_000, PeerScript::SwitchMoveAndCloseStall).await;
+        let server = app_server::serve_product(&directory.join("product"), |_| {})
+            .await
+            .unwrap();
+        let run_home = directory.join("run-home");
+        private_directory(&run_home).unwrap();
+        let settings = RunSettings {
+            overrides: Overrides::default(),
+            model_config: None,
+            unix_path: Some(socket),
+            defaults: None,
+            node: None,
+            js_runtime: None,
+            boundary: None,
+            plugin_tools: false,
+        };
+        let mut scenario = scenario(Vec::new());
+        scenario.budget.seconds = 0.5;
+        scenario.switch = Some(Switch {
+            to: SwitchTarget::Id("2".into()),
+            message: "next".into(),
+            branch_id: None,
+        });
+        let cancel = CancellationToken::new();
+        let model = peer_model();
+        let judge = peer_model();
+        let producer = ProducerState::default();
+        let finished = {
+            let run = drive_once(
+                &server,
+                &settings,
+                &run_home,
+                &directory,
+                &scenario,
+                &model,
+                &judge,
+                JudgeWindow {
+                    window: 128_000,
+                    max_output: 2_048,
+                },
+                &cancel,
+                &producer,
+                None,
+            );
+            tokio::pin!(run);
+            // The client connects and the Session attaches with real I/O;
+            // only the run's own deadlines are on the paused clock below.
+            tokio::select! {
+                _ = reads.attached.notified() => {}
+                result = &mut run => panic!(
+                    "the run ended before it attached: {:?}",
+                    result.map(|finished| finished.driven.stop)
+                ),
+            }
+            tokio::time::pause();
+            // Advance the paused clock in small steps until the close is on
+            // the wire, then past the cleanup grace. The switch deadline and
+            // the close bound are the only waits this drives, so no real
+            // sleep stands in for either.
+            let closer = reads.clone();
+            let advancing = tokio::spawn(async move {
+                let step = Duration::from_millis(100);
+                for _ in 0..600 {
+                    tokio::time::advance(step).await;
+                    tokio::task::yield_now().await;
+                    if closer.closes.load(Ordering::SeqCst) == 0 {
+                        continue;
+                    }
+                    for _ in 0..=SETTLE_BOUND.as_millis() / step.as_millis() + 2 {
+                        tokio::time::advance(step).await;
+                        tokio::task::yield_now().await;
+                    }
+                    return;
+                }
+            });
+            tokio::pin!(advancing);
+            tokio::select! {
+                biased;
+                result = &mut run => {
+                    advancing.abort();
+                    tokio::time::resume();
+                    result.expect("the run failed to finish")
+                }
+                _ = &mut advancing => {
+                    tokio::time::resume();
+                    tokio::time::timeout(Duration::from_secs(10), &mut run)
+                        .await
+                        .expect("the run kept waiting for cleanup after its timeout")
+                        .expect("the run failed to finish")
+                }
+            }
+        };
+        assert!(
+            reads.closes.load(Ordering::SeqCst) >= 1,
+            "the run tried to close the Session"
+        );
+        assert_eq!(
+            finished.driven.stop, "seconds",
+            "{:?}",
+            finished.driven.error
+        );
+        let error = finished.driven.error.as_deref().unwrap_or_default();
+        assert!(
+            error.contains("line 2")
+                && error.contains("did not answer")
+                && error.contains("budget ran out"),
+            "{error}"
+        );
+        server.shutdown();
+        let _ = server.join().await;
+        let _ = std::fs::remove_dir_all(directory);
     }
 
     /// A busy line does not multiply the declines: the peer refuses the first
