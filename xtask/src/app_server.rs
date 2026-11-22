@@ -104,10 +104,18 @@ pub struct RunSettings {
     /// frees the worker that runs it. The product and the evaluations set it
     /// off.
     pub stall_cleanup: bool,
-    /// A test hook: the deadline a timed-out run gives its judge, in
-    /// milliseconds, in place of the cleanup grace. The product and the
-    /// evaluations set it off.
-    pub judge_grace_ms: Option<u64>,
+    /// A test hook: a timed-out run's whole cleanup budget in milliseconds, in
+    /// place of the run's cleanup budget. The product and the evaluations set
+    /// it off.
+    pub cleanup_budget_ms: Option<u64>,
+    /// A test hook: this scenario's Timeline export never completes, to check
+    /// that a timed-out run keeps its outcome without an export. The product
+    /// and the evaluations set it off.
+    pub stall_export: Option<String>,
+    /// A test hook: this child blocks the thread after its run stopped on its
+    /// wall clock, so only the parent's hard bound ends it. The product and
+    /// the evaluations set it off.
+    pub block_after_wall_clock: bool,
 }
 
 impl Default for RunSettings {
@@ -122,7 +130,9 @@ impl Default for RunSettings {
             boundary: None,
             plugin_tools: true,
             stall_cleanup: false,
-            judge_grace_ms: None,
+            cleanup_budget_ms: None,
+            stall_export: None,
+            block_after_wall_clock: false,
         }
     }
 }
