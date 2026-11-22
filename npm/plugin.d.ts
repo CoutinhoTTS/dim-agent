@@ -261,7 +261,9 @@ export type BranchEvent = Omit<AgentEvent, 'sequence' | 'data'> & {
 export type {
   AgentErrorThrown, BranchLifecycle, Dispatcher, PartRegistry, PartScope, ProcessActivity, Services, SessionFault, SessionIdentity, SessionLifecycle,
   TimelineIdentity, TreeCommands, PermissionState, SessionPermissions, SessionsErrorThrown,
-  HostPlatform, HostInfo,
+  HostPlatform, HostInfo, ShellStatus, SandboxBackend, ExecShellRuntime, Os, ShellEdition,
+  ShellSource, OutputEncoding, OutputPage, OutputTail, OutputPathReply, ShellEvent, ShellState,
+  SpawnRequest, SpawnReply, WaitRequest, WaitReply, TaskRequest, OutputRequest, HostPlatformError,
   WorkflowFiles, WorkflowFileEntry, WorkflowRoot, WorkflowFilesErrorThrown,
   UiResources, PublishFile, ResourceRef, ResourceErrorThrown,
 } from './branch-services.js';

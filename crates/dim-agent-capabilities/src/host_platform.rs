@@ -1305,10 +1305,16 @@ impl HostPlatform {
         &self,
         request: OutputRequest,
     ) -> Result<OutputPageReply, HostPlatformError> {
-        let limit = request.limit.unwrap_or(64 * 1024).clamp(1, 4 * 1024 * 1024) as usize;
+        let limit = request.limit.unwrap_or(64 * 1024);
+        if limit == 0 {
+            return Err(HostPlatformError::Invalid(
+                "output limit must be positive".into(),
+            ));
+        }
+        let limit = limit.min(4 * 1024 * 1024) as usize;
         if let Some(shell) = self.shell_task(&request.task_id) {
             if let Some(cursor) = request.event_cursor {
-                let page = shell.events_page(cursor, request.wait_ms).await;
+                let page = shell.events_page(cursor, request.wait_ms, limit).await;
                 return Ok(OutputPageReply {
                     text: String::new(),
                     bytes: 0,
@@ -1355,6 +1361,16 @@ impl HostPlatform {
         &self,
         request: TaskRequest,
     ) -> Result<OutputPathReply, HostPlatformError> {
+        if let Some(shell) = self.shell_task(&request.task_id) {
+            return Ok(OutputPathReply {
+                output_path: shell.output_path().to_string_lossy().into_owned(),
+            });
+        }
+        if let Some(command) = self.shell_command(&request.task_id) {
+            return Ok(OutputPathReply {
+                output_path: command.output_path().to_string_lossy().into_owned(),
+            });
+        }
         let output_path = self.retain_output_by_id(&request.task_id).await?;
         Ok(OutputPathReply { output_path })
     }
@@ -1366,6 +1382,9 @@ impl HostPlatform {
     ) -> Result<crate::workspace_tools::exec::OutputTail, HostPlatformError> {
         if let Some(shell) = self.shell_task(&request.task_id) {
             return Ok(shell.tail());
+        }
+        if let Some(command) = self.shell_command(&request.task_id) {
+            return Ok(command.tail());
         }
         self.tail_by_id(&request.task_id).await.map_err(Into::into)
     }
@@ -3395,7 +3414,6 @@ pub(crate) mod shell {
         event_notify: Arc<Notify>,
         terminal: watch::Sender<Option<ShellExit>>,
         kill: CancellationToken,
-        timeout: CancellationToken,
         path: PathBuf,
         started: Instant,
     }
@@ -3484,6 +3502,19 @@ pub(crate) mod shell {
 
         pub(crate) fn ended(&self) -> bool {
             self.state.lock().unwrap().ended
+        }
+
+        pub(crate) fn output_path(&self) -> &Path {
+            &self.path
+        }
+
+        pub(crate) fn tail(&self) -> crate::workspace_tools::exec::OutputTail {
+            let state = self.state.lock().unwrap();
+            crate::workspace_tools::exec::OutputTail {
+                text: state.tail.clone(),
+                total_bytes: state.bytes,
+                truncated: state.omitted > 0,
+            }
         }
 
         pub(crate) fn page(&self, cursor: u64, limit: usize) -> super::OutputPageReply {
@@ -3690,7 +3721,7 @@ pub(crate) mod shell {
             }
         }
 
-        fn page(&mut self, cursor: u64) -> EventPage {
+        fn page(&mut self, cursor: u64, limit: usize) -> EventPage {
             while let Some(front) = self.items.front() {
                 if front.cursor() >= cursor {
                     break;
@@ -3701,12 +3732,19 @@ pub(crate) mod shell {
                 }
             }
             let reset = cursor < self.base;
-            let events: Vec<_> = self
-                .items
-                .iter()
-                .filter(|event| event.cursor() >= cursor)
-                .cloned()
-                .collect();
+            let mut events = Vec::new();
+            let mut used = 0;
+            for event in self.items.iter().filter(|event| event.cursor() >= cursor) {
+                let length = shell_event_len(event);
+                if !events.is_empty() && used + length > limit {
+                    break;
+                }
+                used += length;
+                events.push(event.clone());
+                if used >= limit {
+                    break;
+                }
+            }
             let next_cursor = events
                 .last()
                 .map(|event| event.cursor() + 1)
@@ -3817,7 +3855,6 @@ pub(crate) mod shell {
                 event_notify: Arc::new(Notify::new()),
                 terminal: watch::channel(None).0,
                 kill: CancellationToken::new(),
-                timeout: CancellationToken::new(),
                 path,
                 started: Instant::now(),
             });
@@ -3913,7 +3950,6 @@ pub(crate) mod shell {
                     let stop = tokio::select! {
                         biased;
                         _=poll.tick()=>None,
-                        _=worker.timeout.cancelled()=>Some("timed_out"),
                         _=worker.kill.cancelled()=>Some("cancelled"),
                         _=shutdown.cancelled()=>Some("cancelled"),
                     };
@@ -4000,13 +4036,18 @@ pub(crate) mod shell {
             self.events.lock().unwrap().state.clone()
         }
 
-        pub(crate) async fn events_page(&self, cursor: u64, wait_ms: Option<u64>) -> EventPage {
+        pub(crate) async fn events_page(
+            &self,
+            cursor: u64,
+            wait_ms: Option<u64>,
+            limit: usize,
+        ) -> EventPage {
             let wait = wait_ms.unwrap_or(0);
             let deadline = Instant::now() + Duration::from_millis(wait);
             loop {
                 let page = {
                     let mut events = self.events.lock().unwrap();
-                    let page = events.page(cursor);
+                    let page = events.page(cursor, limit);
                     drop(events);
                     self.event_space.notify_all();
                     page

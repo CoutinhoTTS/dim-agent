@@ -848,6 +848,7 @@ impl ShellSession {
         };
         let command_id = format!("exec-{}", uuid::Uuid::new_v4().simple());
         let output_path = self.config.output_dir.join(format!("{command_id}.log"));
+        self.register_output(&output_path).await?;
         self.start_command(&command_id, &start_marker, &end_marker, &wrapped)
             .await
             .map_err(|e| e.to_string())?;
@@ -1081,7 +1082,6 @@ impl ShellSession {
         output_path: &Path,
         context: &CallContext,
     ) -> Result<ToolResult, String> {
-        self.register_output(output_path).await?;
         let description = describe(command);
         let never = CancellationToken::new();
         let cancelled: crate::host::CancelledFn = Arc::new(move || {

@@ -2040,7 +2040,6 @@ impl HostPlatform {
             started,
             isolation,
             kill: CancellationToken::new(),
-            timeout: CancellationToken::new(),
             observed,
             terminal,
         });
@@ -2200,7 +2199,6 @@ pub(crate) struct CommandTask {
     started: Instant,
     isolation: Option<Isolation>,
     pub(crate) kill: CancellationToken,
-    pub(crate) timeout: CancellationToken,
     observed: tokio::sync::watch::Receiver<Option<Result<Observed, String>>>,
     terminal: tokio::sync::watch::Receiver<Option<Arc<CommandTerminal>>>,
 }
@@ -2235,7 +2233,6 @@ impl RunningCommand {
                 status.map(Observed::Exited).map_err(|error| error.to_string())
             },
             _ = async { tokio::time::sleep_until(deadline.expect("guarded")).await }, if deadline.is_some() => Ok(Observed::TimedOut),
-            _ = task.timeout.cancelled() => Ok(Observed::TimedOut),
             _ = self.output.failed.cancelled() => Ok(Observed::OutputFailed),
             _ = task.kill.cancelled() => Ok(Observed::Cancelled),
             _ = shutdown.cancelled() => Ok(Observed::Cancelled),

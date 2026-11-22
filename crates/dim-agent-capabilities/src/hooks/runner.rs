@@ -434,6 +434,9 @@ impl HooksRuntime {
             SpawnWithStdinStatus::Signaled => {
                 failed(format!("exited with {}", exit_text(&reply)), &stderr)
             }
+            SpawnWithStdinStatus::Cancelled if gate.is_some_and(|gate| gate.is_cancelled()) => {
+                unloaded_run(handler).result
+            }
             SpawnWithStdinStatus::Cancelled => failed("cancelled", &[]),
             SpawnWithStdinStatus::TimedOut => failed(
                 format!("timed out after {}s", handler.timeout.as_secs()),
