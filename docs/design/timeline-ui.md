@@ -209,6 +209,8 @@ The row is keyed by input id from the `input/message` that wrote it to the `inpu
 
 Unchanged from #427 §14: a switch writes a `⑂ name · id` boundary and the shown line's transcript, laid out once that line's history has loaded, which holds its own events only (each branch numbers its own sequences, [sessions service D11](appserver/sessions-service.md)). Its inherited history is its parent's, one marker away.
 
+A window has three states: loading, complete and failed. A failed first read is not still-loading: the line draws `Branch history failed; reopen to retry: <reason>` in place of its transcript, the interface waits at the idle poll instead of frame rate, and nothing reads it again in the background. Selecting the line again in `/lines`, or reopening the tasks panel, starts that read over. The failure belongs to the first read: when a later inventory refresh or an `/earlier` page fails, the loaded transcript stays drawn and the read reports its own error. `main` keeps the existing open failure (failure visible, submission refused, draft kept) from the [native CLI contract](../../crates/dim-cli/README.md).
+
 ## 6. Lines panel
 
 `/lines` is the map of the Timelines. Children are ordered by where they were cut from their parent, then by opening order. Each row leads with the line's purpose and says `after message N` and its id:

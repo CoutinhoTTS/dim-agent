@@ -518,13 +518,8 @@ fn run_terminal(
             (true, Some(at)) if !terminal.writing() => {
                 FRAME_INTERVAL.saturating_sub(now.duration_since(at))
             }
-            _ if app.running()
-                || terminal.writing()
-                || app.failure.is_none() && app.awaiting_window =>
-            {
-                FRAME_INTERVAL
-            }
-            _ => SESSION_POLL,
+            _ if terminal.writing() => FRAME_INTERVAL,
+            _ => app.poll_interval(),
         };
         let wait = full
             .as_ref()
@@ -1875,6 +1870,16 @@ impl App {
 
     fn running(&self) -> bool {
         self.failure.is_none() && self.snapshot.as_ref().is_some_and(|s| s.running)
+    }
+
+    /// The wait before input is polled again when no frame is due: frame rate
+    /// while a turn runs or a shown window still loads, else the idle poll.
+    fn poll_interval(&self) -> Duration {
+        if self.running() || (self.failure.is_none() && self.awaiting_window) {
+            FRAME_INTERVAL
+        } else {
+            SESSION_POLL
+        }
     }
 
     /// Refuses to start a clipboard or image read while a send-now is settling,
@@ -6881,10 +6886,13 @@ impl App {
         let Some(snapshot) = &self.snapshot else {
             return false;
         };
-        if !snapshot.history_complete {
+        if !snapshot.history_complete && snapshot.window_error.is_none() {
             return false;
         }
         self.awaiting_window = false;
+        if !snapshot.history_complete {
+            return true;
+        }
         let messages: Vec<usize> = snapshot
             .rows
             .iter()
@@ -7364,6 +7372,19 @@ impl App {
         }
         self.tail_groups = tail_groups;
         self.tail_thoughts = tail_thoughts;
+        if let Some(error) = snapshot.window_error.as_deref() {
+            let block = Block::Status {
+                text: format!(
+                    "{}: {}",
+                    t("Branch history failed; reopen to retry"),
+                    crate::sanitize::safe_line(error)
+                ),
+                tone: Tone::Warning,
+            };
+            let rows = render_block(&block, width, p, markdown, self.fullscreen);
+            tail.push(String::new());
+            tail.extend(rows.into_iter().map(|r| format!("{pad}{r}")));
+        }
         (commits, sources, tail)
     }
 
@@ -15742,6 +15763,60 @@ mod tests {
         assert!(text.contains("⑂ main"), "the return is marked: {text}");
         assert_eq!(text.matches("main one").count(), 2, "{text}");
         assert_eq!(text.matches("line one").count(), 1, "{text}");
+    }
+
+    #[test]
+    fn a_failed_line_window_shows_its_error_and_returns_the_idle_poll() {
+        for fullscreen in [false, true] {
+            let mut drawn = Drawn::new((100, 40), None, true);
+            drawn.app.fullscreen = fullscreen;
+            drawn.show(&[], "main", true);
+            drawn.show(&[], "b-7c", false);
+            assert!(
+                drawn.app.awaiting_window,
+                "fullscreen={fullscreen}: the line is still loading"
+            );
+            assert_eq!(
+                drawn.app.poll_interval(),
+                FRAME_INTERVAL,
+                "fullscreen={fullscreen}: a loading window asks for frames"
+            );
+            assert!(
+                !drawn.transcript().contains("Branch history failed"),
+                "fullscreen={fullscreen}: nothing is drawn while the window loads"
+            );
+
+            drawn.app.apply(Update::Snapshot(Box::new(ViewSnapshot {
+                session_id: "s1".into(),
+                focus: "b-7c".into(),
+                window_error: Some("the daemon dropped the read".into()),
+                ..ViewSnapshot::default()
+            })));
+            drawn.draw();
+
+            let text = drawn.transcript();
+            assert!(
+                !drawn.app.awaiting_window,
+                "fullscreen={fullscreen}: the failed window armed the view"
+            );
+            assert_eq!(
+                drawn.app.poll_interval(),
+                SESSION_POLL,
+                "fullscreen={fullscreen}: a failed window waits at the idle poll"
+            );
+            assert!(
+                text.contains("Branch history failed; reopen to retry"),
+                "fullscreen={fullscreen}: the line names the failure and its retry: {text}"
+            );
+            assert!(
+                text.contains("the daemon dropped the read"),
+                "fullscreen={fullscreen}: the line carries the reason: {text}"
+            );
+            assert!(
+                text.contains("⑂ b-7c"),
+                "fullscreen={fullscreen}: the failure draws under the line's boundary: {text}"
+            );
+        }
     }
 
     #[test]

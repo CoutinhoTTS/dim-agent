@@ -15,6 +15,11 @@ pub(super) struct BranchHistory {
     pub error: Option<String>,
     live: Vec<Event>,
     pub(super) window_complete: bool,
+    /// The first window's failed read; the line shows it instead of a
+    /// transcript until the line is opened again. A later read (an inventory
+    /// refresh or an `/earlier` page) records `error` and leaves the loaded
+    /// window in place.
+    pub(super) window_error: Option<String>,
     inventory_index: usize,
     inventory_cursor: Option<serde_json::Value>,
     goal_stale: bool,
@@ -124,13 +129,15 @@ impl Worker {
             .get_mut(branch_id)
             .expect("discovered line");
         history.seen_reply = history.latest_reply;
-        if !self.lines.contains_key(branch_id)
-            && (history.window.through.is_some() || history.done || history.error.is_some())
+        if (!self.lines.contains_key(branch_id)
+            && (history.window.through.is_some() || history.done || history.error.is_some()))
+            || history.window_error.is_some()
         {
             history.window = Default::default();
             history.done = false;
             history.error = None;
             history.window_complete = false;
+            history.window_error = None;
             history.inventory_index = 0;
             history.inventory_cursor = None;
             history.earlier = EarlierRead::None;
@@ -232,6 +239,7 @@ impl Worker {
     pub(super) fn retry_task_history(&mut self) {
         for (id, history) in &mut self.task_history {
             if history.error.take().is_some() {
+                history.window_error = None;
                 if history.earlier == EarlierRead::Failed {
                     history.earlier = EarlierRead::Reading;
                 }
@@ -256,7 +264,6 @@ impl Worker {
             return;
         }
         history.earlier = EarlierRead::Reading;
-        history.window_complete = false;
         history.error = None;
         self.task_history_queue.push_back(self.focus.clone());
     }
@@ -365,16 +372,18 @@ impl Worker {
                 "This daemon cannot read a bounded transcript window; update the daemon".into(),
             );
         }
-        let (stage, method, params) = if branch_id != DEFAULT_BRANCH_ID
+        let earlier_reading = self.task_history[&branch_id].earlier == EarlierRead::Reading;
+        let window_read = earlier_reading || !self.task_history[&branch_id].window_complete;
+        let (stage, method, params) = if window_read
+            && branch_id != DEFAULT_BRANCH_ID
             && !self.lines.contains_key(&branch_id)
-            && !self.task_history[&branch_id].window_complete
         {
             (
                 ReadStage::Cut,
                 "session.turn.get",
                 json!({"sessionId":self.session_id,"branchId":branch_id}),
             )
-        } else if self.task_history[&branch_id].window_complete {
+        } else if !window_read {
             for required in ["session.input.pending", "session.turn.get"] {
                 if !self.task_history[&branch_id].ended && !self.methods.contains(required) {
                     self.fail_inventory(
@@ -452,8 +461,13 @@ impl Worker {
                 })
             }
             Err(error) => {
-                let history = self.task_history.get_mut(&branch_id).unwrap();
-                history.error = Some(error.to_string());
+                match stage {
+                    ReadStage::History => self.fail_history(&branch_id, error.to_string()),
+                    _ => {
+                        self.task_history.get_mut(&branch_id).unwrap().error =
+                            Some(error.to_string());
+                    }
+                }
                 self.changed();
             }
         }
@@ -573,10 +587,8 @@ impl Worker {
             .and_then(|error| error.data.as_ref())
             .and_then(|data| data["appError"].as_str())
             .map(str::to_owned);
-        let history = self
-            .task_history
-            .get_mut(&request.branch_id)
-            .expect("current history");
+        let fatal =
+            request.branch_id == DEFAULT_BRANCH_ID && !self.task_history[&request.branch_id].done;
         let result = result.map_err(|error| error.to_string()).and_then(|value| {
             let page = if self
                 .client
@@ -587,27 +599,34 @@ impl Worker {
                 serde_json::from_value(value)
             }
             .map_err(|error| format!("Invalid history reply: {error}"))?;
-            history.window.push(page).map_err(|error| error.to_string())
+            self.task_history
+                .get_mut(&request.branch_id)
+                .expect("current history")
+                .window
+                .push(page)
+                .map_err(|error| error.to_string())
         });
         let window_ready = matches!(result, Ok(true));
         match result {
             Err(error) => {
-                history.error = Some(error.clone());
-                if history.earlier == EarlierRead::Reading {
-                    history.earlier = EarlierRead::Failed;
+                if fatal {
+                    return Err(format!("Main branch history: {error}").into());
                 }
-                let fatal = request.branch_id == DEFAULT_BRANCH_ID && !history.done;
+                self.fail_history(&request.branch_id, error.clone());
                 let report = crate::report::Captured::observed(
                     crate::report::Operation::SessionRead,
                     code.as_deref(),
                     format!("Could not read conversation state: {error}"),
                 );
-                if !self.reportable(report, true) && fatal {
-                    return Err(format!("Main branch history: {error}").into());
-                }
+                self.reportable(report, true);
             }
             Ok(false) => self.task_history_queue.push_back(request.branch_id.clone()),
             Ok(true) => {
+                let history = self
+                    .task_history
+                    .get_mut(&request.branch_id)
+                    .expect("current history");
+                history.window_error = None;
                 let events = history.window.take();
                 let missing_prefix = history.window.before.is_some();
                 history.window_complete = true;
@@ -640,6 +659,19 @@ impl Worker {
             self.publish();
         }
         Ok(())
+    }
+
+    /// Records a failed history read. A first window that never loaded is a
+    /// window failure; a failed older page leaves the loaded window in place
+    /// and returns `/earlier` to its unread state.
+    fn fail_history(&mut self, branch: &str, error: String) {
+        let history = self.task_history.get_mut(branch).expect("a line's history");
+        history.error = Some(error.clone());
+        if history.earlier == EarlierRead::Reading {
+            history.earlier = EarlierRead::Failed;
+        } else if !history.done && !history.window_complete {
+            history.window_error = Some(error);
+        }
     }
 
     fn fail_inventory(&mut self, branch: &str, error: String) {
@@ -837,6 +869,7 @@ impl Worker {
 mod tests {
     use super::*;
     use crate::client::Message;
+    use crate::model::view::ViewSnapshot;
 
     /// One `step/text` event, as the daemon sends it on the wire and in a page.
     fn text(sequence: u64, request: &str, delta: &str) -> serde_json::Value {
@@ -1134,5 +1167,156 @@ mod tests {
             worker.task_history_queue.is_empty(),
             "a press during the retried read queues nothing"
         );
+    }
+
+    /// A line whose first window read failed is not left waiting: opening the
+    /// line again in `/lines` starts its window over, and the page that lands
+    /// draws the conversation.
+    #[tokio::test]
+    async fn a_failed_line_window_reads_again_when_the_line_is_opened() {
+        let (mut worker, mut receiver, _sent) =
+            crate::session_host::test_worker(&crate::session_host::TEST_FEATURES).await;
+        worker.session_id = "s1".into();
+        worker.discover_branch("b-7c");
+        worker
+            .command(crate::model::session::Command::FocusLine("b-7c".into()))
+            .await
+            .unwrap();
+        worker.poll_task_history().await.unwrap();
+        fail(&mut worker, "the line's window").await;
+        assert!(
+            worker.lines["b-7c"].projection.rows().is_empty(),
+            "a failed window has drawn nothing"
+        );
+        worker.publish();
+        let snapshot = published(&mut receiver);
+        assert!(
+            snapshot
+                .window_error
+                .as_deref()
+                .is_some_and(|error| error.starts_with("the daemon dropped the read")),
+            "the failed window is published apart from a loading one: {:?}",
+            snapshot.window_error
+        );
+        assert!(!snapshot.history_complete, "the window did not load");
+
+        worker
+            .command(crate::model::session::Command::TaskHistory {
+                projection_id: worker.projection_id,
+            })
+            .await
+            .unwrap();
+        worker.publish();
+        let snapshot = published(&mut receiver);
+        assert!(
+            snapshot.window_error.is_none(),
+            "a retry is loading again, not still failed"
+        );
+        worker.poll_task_history().await.unwrap();
+        fail(&mut worker, "the retried window").await;
+        worker.publish();
+        let snapshot = published(&mut receiver);
+        assert!(
+            snapshot.window_error.is_some(),
+            "the retried window failed again"
+        );
+        worker.task_history_queue.clear();
+
+        worker
+            .command(crate::model::session::Command::FocusLine("b-7c".into()))
+            .await
+            .unwrap();
+        worker.poll_task_history().await.unwrap();
+        assert!(
+            worker.task_history_request.is_some(),
+            "opening the line again reads its window"
+        );
+        worker.task_history.get_mut("b-7c").unwrap().ended = true;
+        answer(
+            &mut worker,
+            json!({"events":[text(300, "r-answer", "the answer")], "through": 300, "nextBefore": 300, "nextAfter": 300}),
+        )
+        .await;
+        worker.poll_task_history().await.unwrap();
+
+        let rows = worker.lines["b-7c"].projection.rows();
+        assert_eq!(rows.len(), 1, "the page drew the line's conversation");
+        assert_eq!(rows[0].text, "the answer");
+        assert!(worker.task_history["b-7c"].done, "the read window finished");
+        worker.publish();
+        let snapshot = published(&mut receiver);
+        assert!(
+            snapshot.window_error.is_none(),
+            "the read page cleared the failure"
+        );
+        assert!(snapshot.history_complete, "the window loaded");
+        assert_eq!(snapshot.rows.len(), 1);
+    }
+
+    /// A failure after the window loaded belongs to that read: an inventory
+    /// refresh or an `/earlier` page that fails leaves the loaded transcript
+    /// drawn and the window complete.
+    #[tokio::test]
+    async fn late_inventory_and_earlier_failures_keep_the_loaded_line() {
+        let (mut worker, mut receiver, _sent) =
+            crate::session_host::test_worker(&crate::session_host::TEST_FEATURES).await;
+        worker.session_id = "s1".into();
+        worker.discover_branch("b-7c");
+        worker
+            .command(crate::model::session::Command::FocusLine("b-7c".into()))
+            .await
+            .unwrap();
+        {
+            let history = worker.task_history.get_mut("b-7c").unwrap();
+            history.done = true;
+            history.window_complete = true;
+            history.window.through = Some(300);
+            history.window.before = Some(200);
+        }
+        worker.apply("b-7c", event(300, "r-answer", "the loaded answer"));
+
+        worker.task_history_queue.push_back("b-7c".into());
+        worker.poll_task_history().await.unwrap();
+        assert!(
+            worker.task_history["b-7c"].error.is_some(),
+            "the inventory read failed"
+        );
+        let rows = worker.lines["b-7c"].projection.rows();
+        assert_eq!(rows.len(), 1, "the inventory failure drew over nothing");
+        assert_eq!(rows[0].text, "the loaded answer");
+        worker.publish();
+        let snapshot = published(&mut receiver);
+        assert!(
+            snapshot.history_complete,
+            "the loaded window stays complete"
+        );
+        assert_eq!(snapshot.rows.len(), 1, "the loaded row stays drawn");
+
+        worker.earlier();
+        worker.poll_task_history().await.unwrap();
+        fail(&mut worker, "the earlier page").await;
+        assert_eq!(
+            worker.lines["b-7c"].projection.rows().len(),
+            1,
+            "the failed older page drew over the loaded transcript"
+        );
+        assert_eq!(worker.earlier_view(), Earlier::Unread);
+        worker.publish();
+        let snapshot = published(&mut receiver);
+        assert!(
+            snapshot.history_complete,
+            "a failed older page leaves the window complete"
+        );
+        assert_eq!(snapshot.rows.len(), 1, "the loaded row stays drawn");
+    }
+
+    fn published(receiver: &mut std::sync::mpsc::Receiver<Update>) -> ViewSnapshot {
+        let mut snapshot = None;
+        while let Ok(update) = receiver.try_recv() {
+            if let Update::Snapshot(state) = update {
+                snapshot = Some(*state);
+            }
+        }
+        snapshot.expect("a published snapshot")
     }
 }

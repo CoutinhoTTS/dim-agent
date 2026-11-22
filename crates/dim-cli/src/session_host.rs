@@ -4927,10 +4927,9 @@ impl Worker {
         }
         snapshot.session_id = self.session_id.clone();
         snapshot.projection_id = self.projection_id;
-        snapshot.history_complete = self
-            .task_history
-            .get(&self.focus)
-            .is_some_and(|branch| branch.window_complete);
+        let shown = self.task_history.get(&self.focus);
+        snapshot.history_complete = shown.is_some_and(|branch| branch.window_complete);
+        snapshot.window_error = shown.and_then(|branch| branch.window_error.clone());
         snapshot.earlier = self.earlier_view();
         snapshot.task_history_loading = self
             .task_history
