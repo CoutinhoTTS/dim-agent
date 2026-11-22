@@ -1455,6 +1455,23 @@ async fn managed_provider_selection_http_recovery_and_restart_flow() {
         .await
         .unwrap()
         .unwrap();
+    for model in &catalog.models {
+        let raw = &model.metadata.as_ref().unwrap().raw;
+        if raw.get("type").and_then(Value::as_str) != Some("chat") {
+            continue;
+        }
+        assert!(
+            matches!(
+                (
+                    model.capabilities.context_window,
+                    raw.get("max_context_window").and_then(Value::as_u64)
+                ),
+                (Some(default), Some(ceiling)) if default > 0 && ceiling >= default
+            ),
+            "{} must declare a positive default and a ceiling at least as large",
+            model.id
+        );
+    }
     for model_id in ["gpt-6.2-sol", "gpt-6.1-sol", "gpt-6.1-terra"] {
         assert_eq!(window(&catalog, model_id), (Some(500_000), Some(872_000)));
     }
@@ -1582,6 +1599,16 @@ async fn managed_provider_selection_http_recovery_and_restart_flow() {
     assert_eq!(record["credentialAuthority"], "openai_codex");
     assert!(record["credential"].is_null());
     assert!(!record.to_string().contains("rotated-"));
+    let legacy_window = 900_000_i64;
+    assert_eq!(
+        db.execute(
+            "UPDATE provider_models SET entry=json_set(entry, '$.capabilities.contextWindow', ?1) \
+             WHERE provider_id='openai-codex' AND model_id='gpt-6.2-sol' AND source='override'",
+            [legacy_window],
+        )
+        .unwrap(),
+        1
+    );
     drop(db);
     let (restarted, _, _, _) = self::codex(&home, &f.base).await;
     let plugins = [
@@ -1620,10 +1647,43 @@ async fn managed_provider_selection_http_recovery_and_restart_flow() {
         window(&catalog, "gpt-6.2-sol"),
         (Some(872_000), Some(872_000))
     );
+    let renamed = provider
+        .update_model_config(
+            target.provider_id.clone(),
+            catalog.version,
+            target.model_id.clone(),
+            Some(serde_json::from_value(json!({"displayName": "Renamed Sol"})).unwrap()),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        renamed
+            .models
+            .iter()
+            .find(|model| model.id == target.model_id)
+            .unwrap()
+            .name,
+        "Renamed Sol"
+    );
+    assert_eq!(
+        window(&renamed, "gpt-6.2-sol"),
+        (Some(872_000), Some(872_000))
+    );
+    let stored_window: i64 = rusqlite::Connection::open(home.join("native.sqlite"))
+        .unwrap()
+        .query_row(
+            "SELECT json_extract(entry, '$.capabilities.contextWindow') FROM provider_models \
+             WHERE provider_id='openai-codex' AND model_id='gpt-6.2-sol' AND source='override'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(stored_window, legacy_window);
     let reset = provider
         .update_model_config(
             target.provider_id,
-            catalog.version,
+            renamed.version,
             target.model_id,
             None,
             &cancel,
