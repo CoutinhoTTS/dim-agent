@@ -89,6 +89,11 @@ pub struct RunSettings {
     /// run turns it off, so the tools the process registers are the ceiling
     /// its Sessions can declare.
     pub plugin_tools: bool,
+    /// A test hook: a timed-out run's Session close and its server's shutdown
+    /// never settle, to check that its child still returns the outcome and
+    /// frees the worker that runs it. The product and the evaluations set it
+    /// off.
+    pub stall_cleanup: bool,
 }
 
 impl Default for RunSettings {
@@ -102,6 +107,7 @@ impl Default for RunSettings {
             js_runtime: None,
             boundary: None,
             plugin_tools: true,
+            stall_cleanup: false,
         }
     }
 }
