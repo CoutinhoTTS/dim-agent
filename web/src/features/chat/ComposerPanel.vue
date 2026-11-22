@@ -682,7 +682,7 @@ async function runCommand(name: typeof availableCommands.value[number]["name"]):
     }
   } else if (name === "permissions") permissionMenu.value?.open()
   else if (name === "compact" || name === "usage") await props.sessionCommands?.[name]?.(line)
-  else if (name === "fork") await props.sessionCommands.fork?.()
+  else if (name === "fork") await props.sessionCommands?.fork?.()
 }
 
 function onKeydown(event: KeyboardEvent): void {
