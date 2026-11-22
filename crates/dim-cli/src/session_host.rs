@@ -1529,8 +1529,12 @@ impl Worker {
                     self.changed();
                 }
             }
-            // Home, not a Session: the first message creates one.
-            Command::NewSession => self.home(),
+            // Home, not a Session: the first message creates one. Every
+            // `/new` ends here, including the one that was already Home.
+            Command::NewSession => {
+                self.home();
+                self.send(Update::NewSessionDone);
+            }
             Command::DeleteSession { session_id, name } => {
                 let outcome = self.delete_session(&session_id).await;
                 let shown = session_id == self.session_id;
@@ -5421,9 +5425,9 @@ const TEST_FEATURES: [&str; 4] = [
 ];
 
 /// A worker on a daemon that advertises `features` and answers only
-/// `session.attach`: the test supplies every other reply itself, through
-/// `Worker::message`. Every request the worker sends is recorded, in order,
-/// for the tests that assert on one.
+/// `session.attach` and `session.detach`: the test supplies every other reply
+/// itself, through `Worker::message`. Every request the worker sends is
+/// recorded, in order, for the tests that assert on one.
 #[cfg(all(test, unix))]
 async fn test_worker(
     features: &[&str],
@@ -5432,15 +5436,16 @@ async fn test_worker(
     mpsc::Receiver<Update>,
     std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
 ) {
-    test_worker_answering(features, false).await
+    test_worker_answering(features, false, None).await
 }
 
-/// [`test_worker`] with a daemon that also refuses `session.fork` with an RPC
-/// error when `fail_fork` is set.
+/// [`test_worker`] with a daemon that refuses `session.fork` with an RPC error
+/// when `fail_fork` is set, and refuses `session.attach` for `refuse_attach`.
 #[cfg(all(test, unix))]
 async fn test_worker_answering(
     features: &[&str],
     fail_fork: bool,
+    refuse_attach: Option<&str>,
 ) -> (
     Worker,
     mpsc::Receiver<Update>,
@@ -5463,6 +5468,7 @@ async fn test_worker_answering(
         .collect();
     let sent = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let recorded = std::sync::Arc::clone(&sent);
+    let refuse_attach = refuse_attach.map(str::to_owned);
     tokio::spawn(async move {
         let _home = home;
         let Ok((stream, _)) = listener.accept().await else {
@@ -5488,10 +5494,29 @@ async fn test_worker_answering(
                         return;
                     }
                 }
+                if request["method"] == "session.detach" {
+                    let reply = json!({"jsonrpc":"2.0","id":request["id"],"result":{}});
+                    if writer
+                        .write_all(format!("{reply}\n").as_bytes())
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
                 if request["method"] == "session.attach" {
-                    let reply = json!({"jsonrpc":"2.0","id":request["id"],"result":{
-                        "sequence":1,"model":{"providerId":"test","modelId":"test"}
-                    }});
+                    let refused = refuse_attach
+                        .as_deref()
+                        .is_some_and(|id| request["params"]["sessionId"] == id);
+                    let reply = if refused {
+                        json!({"jsonrpc":"2.0","id":request["id"],"error":{
+                            "code":-32603,"message":"the test daemon refuses the attach"
+                        }})
+                    } else {
+                        json!({"jsonrpc":"2.0","id":request["id"],"result":{
+                            "sequence":1,"model":{"providerId":"test","modelId":"test"}
+                        }})
+                    };
                     if writer
                         .write_all(format!("{reply}\n").as_bytes())
                         .await
@@ -5684,7 +5709,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn a_refused_fork_ends_with_fork_failed() {
-        let (mut worker, receiver, _sent) = test_worker_answering(&TEST_FEATURES, true).await;
+        let (mut worker, receiver, _sent) = test_worker_answering(&TEST_FEATURES, true, None).await;
         worker
             .attach("s2".into(), SwitchKind::Resumed)
             .await
@@ -5711,6 +5736,85 @@ mod tests {
         }
         assert!(failed, "the refused fork ends the wait");
         assert!(!notices.is_empty(), "the refused fork says why");
+    }
+
+    /// A `/new` is one command: the host ends it once, whether it leaves a
+    /// Session or finds itself already Home. A refused resume reports Home
+    /// with its own kind, so it cannot end the `/new` queued behind it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn every_new_session_command_ends_with_its_own_completion() {
+        let mut features = TEST_FEATURES.to_vec();
+        features.push("report.prepare");
+        let (mut worker, receiver, _sent) =
+            test_worker_answering(&features, false, Some("refused")).await;
+        worker
+            .attach("s1".into(), SwitchKind::Resumed)
+            .await
+            .expect("the switch attaches");
+        receiver.try_iter().for_each(drop);
+
+        worker
+            .command(Command::Resume("refused".into()))
+            .await
+            .expect("the refused resume is handled");
+        let mut resumed_home = false;
+        for update in receiver.try_iter() {
+            match update {
+                Update::Switched {
+                    session_id,
+                    kind: SwitchKind::Resumed,
+                    ..
+                } => {
+                    assert!(session_id.is_empty(), "the refusal reports Home");
+                    resumed_home = true;
+                }
+                Update::NewSessionDone => panic!("the refused resume ended a /new"),
+                _ => {}
+            }
+        }
+        assert!(resumed_home, "the refused resume reports Home");
+
+        worker
+            .command(Command::NewSession)
+            .await
+            .expect("the already-Home /new is handled");
+        assert_eq!(
+            receiver
+                .try_iter()
+                .filter(|update| matches!(update, Update::NewSessionDone))
+                .count(),
+            1,
+            "the already-Home /new has no completion"
+        );
+
+        worker
+            .attach("s1".into(), SwitchKind::Resumed)
+            .await
+            .expect("the switch attaches");
+        receiver.try_iter().for_each(drop);
+        worker
+            .command(Command::NewSession)
+            .await
+            .expect("the /new from a Session is handled");
+        let mut switched = 0;
+        let mut completions = 0;
+        for update in receiver.try_iter() {
+            match update {
+                Update::Switched {
+                    session_id,
+                    kind: SwitchKind::New,
+                    ..
+                } => {
+                    assert!(session_id.is_empty(), "the /new switch reports Home");
+                    switched += 1;
+                }
+                Update::NewSessionDone => completions += 1,
+                _ => {}
+            }
+        }
+        assert_eq!(switched, 1, "the /new from a Session reports Home once");
+        assert_eq!(completions, 1, "the /new from a Session has one completion");
     }
 
     /// A turn read answers what the recorded turn looks like, and a turn that

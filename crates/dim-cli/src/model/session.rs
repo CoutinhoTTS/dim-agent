@@ -1426,6 +1426,9 @@ pub enum Update {
     /// A fork ended without opening a Session: the shown one is still
     /// attached, so no `Switched` ends the wait the fork started.
     ForkFailed,
+    /// The host handled a `/new`, whether it left a Session or was already
+    /// Home: every `Command::NewSession` ends with exactly one of these.
+    NewSessionDone,
     /// Progress of the sign-in tagged `attempt`.
     Oauth {
         attempt: u64,

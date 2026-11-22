@@ -1098,7 +1098,7 @@ struct DisplayedExcerpt {
 struct PendingSwitches {
     resumes: usize,
     forks: usize,
-    new_session: bool,
+    new_sessions: usize,
     deletes: Vec<String>,
 }
 
@@ -1107,7 +1107,7 @@ impl PendingSwitches {
         match kind {
             SwitchKind::Resumed => self.resumes += 1,
             SwitchKind::Forked => self.forks += 1,
-            SwitchKind::New => self.new_session = true,
+            SwitchKind::New => self.new_sessions += 1,
         }
     }
 
@@ -1115,9 +1115,7 @@ impl PendingSwitches {
         match kind {
             SwitchKind::Resumed => self.resumes = self.resumes.saturating_sub(1),
             SwitchKind::Forked => self.forks = self.forks.saturating_sub(1),
-            // Home and a new Session's first attach both end every `/new`
-            // this wait covers, so one report settles them all.
-            SwitchKind::New => self.new_session = false,
+            SwitchKind::New => self.new_sessions = self.new_sessions.saturating_sub(1),
         }
     }
 
@@ -1132,7 +1130,7 @@ impl PendingSwitches {
     }
 
     fn any(&self) -> bool {
-        self.resumes > 0 || self.forks > 0 || self.new_session || !self.deletes.is_empty()
+        self.resumes > 0 || self.forks > 0 || self.new_sessions > 0 || !self.deletes.is_empty()
     }
 
     fn clear(&mut self) {
@@ -3016,6 +3014,7 @@ impl App {
                 self.reports.push(Block::Status { text, tone });
             }
             Update::ForkFailed => self.end_switch(SwitchKind::Forked),
+            Update::NewSessionDone => self.end_switch(SwitchKind::New),
             Update::Oauth { attempt, event } => {
                 let effect = match &mut self.prompt {
                     Some(Prompt::Providers(panel)) => panel.oauth_event(attempt, event),
@@ -5669,8 +5668,8 @@ impl App {
             "exit" => Outcome::Exit(0),
             "tui" => Outcome::SwitchMode,
             "new" => {
-                // Home has no Session to leave: its host stays put and sends
-                // no switch, so waiting here would never end.
+                // Home has no Session to leave and nothing to change there, so
+                // there is no wait to start; the host still ends the command.
                 if !self.session_id.is_empty() {
                     self.begin_switch(SwitchKind::New);
                 }
@@ -7424,7 +7423,11 @@ impl App {
     }
 
     fn switch_session(&mut self, session_id: String, kind: SwitchKind) {
-        self.end_switch(kind);
+        // `/new` ends when the host reports the command done, not when a Home
+        // switch happens to pass by: a delete's Home switch is not its ending.
+        if kind != SwitchKind::New {
+            self.end_switch(kind);
+        }
         self.report_error = None;
         self.release_compaction_details();
         let first = self.session_id.is_empty();
@@ -10897,6 +10900,86 @@ mod tests {
         }
     }
 
+    /// A resume can be waiting for its attach reply while the previous
+    /// Session is still shown. `/new` queued then marks its own switch; when
+    /// the resume is refused, only the resume ends with the Home report, and
+    /// the queued `/new` must end with its own completion so `Update now` can
+    /// leave on Home.
+    #[test]
+    fn update_now_leaves_home_after_a_refused_resume_with_new_queued() {
+        for fullscreen in [false, true] {
+            use crate::model::session::SessionItem;
+
+            let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+            let mut drawn = Drawn::new((100, 30), None, true);
+            drawn.app.fullscreen = fullscreen;
+            drawn.app.host = Box::new(Recorder(sent.clone()));
+            shown_at_rest(&mut drawn);
+
+            typed(&mut drawn.app, "/resume");
+            drawn.key(KeyCode::Enter);
+            let id = sent
+                .borrow()
+                .iter()
+                .find_map(|command| match command {
+                    Command::ListSessions { id, .. } => Some(id.clone()),
+                    _ => None,
+                })
+                .expect("opening the list asks for its first page");
+            drawn.app.apply(Update::Sessions {
+                id,
+                paged: true,
+                result: Ok((
+                    vec![SessionItem {
+                        id: "s2".into(),
+                        title: Some("old session".into()),
+                        preview: None,
+                        cwd: "/work".into(),
+                        updated_at: u64::MAX,
+                        model: "p/m".into(),
+                        origin: None,
+                        closed: false,
+                    }],
+                    None,
+                )),
+            });
+            drawn.key(KeyCode::Enter);
+            assert!(matches!(sent.borrow().last(), Some(Command::Resume(id)) if id == "s2"));
+            assert!(drawn.app.switch_pending);
+
+            drawn.app.run_command("new", "");
+            assert!(matches!(sent.borrow().last(), Some(Command::NewSession)));
+            assert!(
+                drawn.app.switch_pending,
+                "fullscreen={fullscreen}: the new Session did not mark its wait"
+            );
+
+            drawn.app.apply(Update::Upgrade(update_offer()));
+            drawn.app.apply(Update::Switched {
+                session_id: String::new(),
+                kind: SwitchKind::Resumed,
+                cwd: None,
+            });
+            assert!(matches!(drawn.app.prompt, Some(Prompt::Upgrade(_))));
+            assert!(
+                drawn.app.switch_pending,
+                "fullscreen={fullscreen}: the refused resume ended the queued /new"
+            );
+            assert!(
+                matches!(enter(&mut drawn), Outcome::Continue),
+                "fullscreen={fullscreen}: Update now left before /new ended"
+            );
+
+            drawn.app.apply(Update::NewSessionDone);
+            assert!(!drawn.app.switch_pending);
+            assert!(
+                matches!(enter(&mut drawn), Outcome::Exit(0)),
+                "fullscreen={fullscreen}: Home did not let Update now leave"
+            );
+            assert!(drawn.app.update_requested);
+        }
+    }
+
     /// Session `s1`, shown and idle, with one finished turn a fork can cut
     /// at.
     fn shown_at_rest(drawn: &mut Drawn) {
@@ -11196,9 +11279,9 @@ mod tests {
         }
     }
 
-    /// `/new` leaves the shown Session for Home. That switch gates `Update
-    /// now` until the host sends it; on Home `/new` changes nothing and the
-    /// wait would never end, so it is not started there.
+    /// `/new` leaves the shown Session for Home. That command gates `Update
+    /// now` until the host reports it done; on Home it changes nothing, so no
+    /// wait starts there, but the host still ends that command.
     #[test]
     fn update_now_waits_for_new_from_a_session_but_not_from_home() {
         for fullscreen in [false, true] {
@@ -11223,6 +11306,12 @@ mod tests {
                 cwd: None,
             });
             assert!(matches!(drawn.app.prompt, Some(Prompt::Upgrade(_))));
+            assert!(
+                drawn.app.switch_pending,
+                "fullscreen={fullscreen}: the Home switch ended /new before the host did"
+            );
+            drawn.app.apply(Update::NewSessionDone);
+            assert!(!drawn.app.switch_pending);
             assert!(
                 matches!(enter(&mut drawn), Outcome::Exit(0)),
                 "fullscreen={fullscreen}: Home did not let Update now leave"
