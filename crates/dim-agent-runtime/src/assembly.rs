@@ -34,12 +34,13 @@ impl rutis::Event for OpeningAdvanced {
 }
 
 /// Reports that the opening this context's plugin belongs to advanced: the
-/// plugin made real progress in its `apply`. Any plugin whose opening can run
-/// long may call it; it renews the [`StartupProgress`] inactivity interval of
-/// every opening whose subtree contains the plugin's row, and changes nothing
-/// else about the opening. A report is a synchronous event, so a plugin whose
-/// work runs on a blocking thread reports from there. A context whose plugin
-/// has no live fiber reports nothing: the report would be dropped anyway.
+/// plugin made real progress in work the opening waits for, its own `apply` or
+/// a restore of the lines it owns. Any plugin whose opening can run long may
+/// call it; it renews the [`StartupProgress`] inactivity interval of every
+/// opening whose subtree contains the plugin's row, and changes nothing else
+/// about the opening. A report is a synchronous event, so a plugin whose work
+/// runs on a blocking thread reports from there. A context whose plugin has no
+/// live fiber reports nothing: the report would be dropped anyway.
 pub fn opening_advanced(ctx: &Ctx) {
     let instance = ctx.instance();
     let id = ctx
@@ -1588,7 +1589,7 @@ async fn create_instance(
                 .and_then(|instance| locate(loader, ctx, instance));
             let error = match &found {
                 _ if cancel.is_cancelled() => AgentError::Cancelled("initialization".into()),
-                Some(created) => timed_out(ctx, &created.children),
+                Some(created) => timed_out(ctx, &created.children, "instance creation"),
                 None => AgentError::Build(format!("initialization timed out: {group}")),
             };
             if found.is_none() {
@@ -1630,7 +1631,7 @@ async fn create_instance(
     let mut ready = progress
         .wait(active_rows(&group, cancel), || vec![created.view.id])
         .await
-        .unwrap_or_else(|| Err(timed_out(ctx, &group)));
+        .unwrap_or_else(|| Err(timed_out(ctx, &group, "instance creation")));
     // Read after the group is Active: a settle can return while it still waits,
     // and its rows are the ones the required-row wait has to name.
     let mut waiting: Vec<FiberView> = loader
@@ -1643,7 +1644,7 @@ async fn create_instance(
         ready = progress
             .wait(active_rows(&waiting, cancel), || vec![created.view.id])
             .await
-            .unwrap_or_else(|| Err(timed_out(ctx, &waiting)));
+            .unwrap_or_else(|| Err(timed_out(ctx, &waiting, "instance creation")));
     }
     let mut handed = Handed::default();
     if ready.is_ok() {
@@ -1654,7 +1655,7 @@ async fn create_instance(
                 vec![created.view.id]
             })
             .await
-            .unwrap_or_else(|| Err(timed_out(ctx, &handed.required)));
+            .unwrap_or_else(|| Err(timed_out(ctx, &handed.required, "instance creation")));
         if let Err(error) = &ready
             && failed_mounter(&handed.required).is_some()
         {
@@ -1667,7 +1668,7 @@ async fn create_instance(
         ready = progress
             .wait(active_rows(&parts, cancel), || vec![created.view.id])
             .await
-            .unwrap_or_else(|| Err(timed_out(ctx, &parts)));
+            .unwrap_or_else(|| Err(timed_out(ctx, &parts, "instance creation")));
     }
     // Parts create nested instances while they load, and their rows are this
     // creation's members: read them once the waits above are done.
@@ -1699,7 +1700,7 @@ async fn create_instance(
             || vec![created.view.id],
         )
         .await
-        .unwrap_or_else(|| Err(timed_out(ctx, &created.children)));
+        .unwrap_or_else(|| Err(timed_out(ctx, &created.children, "instance creation")));
     match settled {
         Ok(()) => Ok(created),
         Err(error) => Err((error, Some(created))),
@@ -1880,6 +1881,10 @@ pub(crate) async fn build_session(
             &session.ctx,
             session.scope.key::<dyn TimelineTreeControl>(),
         )?;
+        let phase = match &initialization {
+            SessionInitialization::Prepared(_) | SessionInitialization::Restore(_) => "restore",
+            SessionInitialization::New => "Session creation",
+        };
         let initialize = async {
             match initialization {
                 SessionInitialization::Prepared(branches)
@@ -1894,7 +1899,7 @@ pub(crate) async fn build_session(
                 match result {
                     Some(result) => result,
                     None => {
-                        let error = timed_out(host, std::slice::from_ref(&created.view));
+                        let error = timed_out(host, std::slice::from_ref(&created.view), phase);
                         tree.begin_close();
                         let _ = initialize.await;
                         Err(error)
@@ -1989,7 +1994,7 @@ pub async fn wait_active(
             views.iter().map(|view| view.id).collect()
         })
         .await
-        .unwrap_or_else(|| Err(timed_out(ctx, views)))
+        .unwrap_or_else(|| Err(timed_out(ctx, views, "row activation")))
 }
 
 async fn active_rows(views: &[FiberView], cancel: &CancellationToken) -> Result<()> {
@@ -2036,7 +2041,7 @@ async fn active_rows(views: &[FiberView], cancel: &CancellationToken) -> Result<
         }
     }
 }
-fn timed_out(ctx: &Ctx, views: &[FiberView]) -> AgentError {
+fn timed_out(ctx: &Ctx, views: &[FiberView], phase: &str) -> AgentError {
     let snapshot = ctx.diagnostics();
     let ids: HashSet<_> = views
         .iter()
@@ -2056,6 +2061,11 @@ fn timed_out(ctx: &Ctx, views: &[FiberView]) -> AgentError {
             format!("{} {:?} [{}]", p.name, p.state, unmet.join(", "))
         })
         .collect();
+    if pending.is_empty() {
+        return AgentError::Build(format!(
+            "initialization timed out: no row pending; still running: {phase}"
+        ));
+    }
     AgentError::Build(format!("initialization timed out: {}", pending.join("; ")))
 }
 

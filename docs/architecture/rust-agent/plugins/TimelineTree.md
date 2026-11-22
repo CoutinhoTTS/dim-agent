@@ -69,7 +69,7 @@ keyed input and reads only its keys and retire flags. Candidate branches remain 
 receipts/dispatch fences and initial input acceptance succeed. Creation retains
 its fixed ancestry cut even if a waiter disappears. One opening budget requests
 cancellation; rollback and accepted host work must still settle. Cleanup closes
-the tree, cancels reservations, joins builds and closes branch contexts. Restore settles interrupted creates without replaying external work. It selects each child's terminal kind and end position, preserving that end identity even if a fork has no own history for the child. Only a line that will mount reads its creation source at the known anchor. Accepted ancestry cuts use the directory directly; only a new cut is checked against context during creation. Tool-call
+the tree, cancels reservations, joins builds and closes branch contexts. Restore settles interrupted creates without replaying external work. It selects each child's terminal kind and end position, preserving that end identity even if a fork has no own history for the child. Every restore step reports `opening_advanced`, so a store read or a line's build that runs long renews the Session opening's inactivity bound, and a timeout with every row already Active names `restore` as the phase still running. Only a line that will mount reads its creation source at the known anchor. Accepted ancestry cuts use the directory directly; only a new cut is checked against context during creation. Tool-call
 ancestry cuts cannot split required result relationships. Client detach is not
 Session close, and closing is not deletion of persisted history.
 
@@ -91,6 +91,10 @@ Session close, and closing is not deletion of persisted history.
 `a_user_opened_line_records_its_own_source`,
 `a_default_branch_that_was_a_tool_line_stops_sending_its_idle_notice`,
 `a_switched_line_keeps_its_identity_after_a_compaction`.
+
+[storage_flow.rs](../../../../crates/dim-app-server/tests/storage_flow.rs):
+`a_silent_restore_times_out_naming_the_restore_phase`,
+`a_slow_restore_reports_progress_and_keeps_the_opening_alive`.
 
 <!-- generated:plugin TimelineTree — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
 | 项 | 值 |

@@ -14,9 +14,9 @@ use dim_agent_capabilities::file_storage::FileStoragePlugin;
 use dim_agent_capabilities::history::HistoryRenderer;
 use dim_agent_runtime::testing::{chain_events, timeline_events};
 use dim_agent_runtime::{
-    AgentBuilder, AgentConfig, AgentError, MemoryTimelineStore, SessionConfig, StoredEvent,
-    Timeline, TimelineKey, TimelineQueryScope, TimelineStore, TimelineTrace, TraceStep,
-    testing::MinimalHost,
+    AgentBuilder, AgentConfig, AgentError, BranchOptions, MemoryTimelineStore, SessionConfig,
+    StoredEvent, Timeline, TimelineKey, TimelineQueryScope, TimelineStore, TimelineTrace,
+    TraceStep, testing::MinimalHost,
 };
 use dim_agent_types::{
     grant::{GrantKind, GrantMode, SessionGrant},
@@ -2315,6 +2315,125 @@ async fn branch_end_events_restore_unchanged_and_the_line_stays_ended() {
         Err(AgentError::BranchEnded(_))
     ));
     agent.close().await.unwrap();
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+}
+
+/// A stored Session on its root and one open child line, as the next process
+/// finds it: the Session id and the child line's id, with the database closed.
+async fn stored_two_line_session(database: &Database) -> (String, String) {
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    dim_agent_capabilities::defaults::mock_hosts(&mut builder);
+    dim_agent_capabilities::defaults::install(&mut builder);
+    builder.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(store.clone()));
+    let agent = MinimalHost::start(&builder).await.unwrap();
+    let session = settled(
+        "the Session opens",
+        agent.create_session(SessionConfig::default()),
+    )
+    .await
+    .unwrap();
+    settled("the root line idles", session.idle("main"))
+        .await
+        .unwrap();
+    let cut = session.sequence("main").unwrap();
+    let child = settled(
+        "the child line opens",
+        session.branch(
+            "main".into(),
+            cut,
+            BranchOptions {
+                prompt: "child work".into(),
+                source: BranchSource::Host {
+                    operation_id: "restore-progress".into(),
+                },
+            },
+        ),
+    )
+    .await
+    .unwrap();
+    settled("the child line idles", session.idle(&child))
+        .await
+        .unwrap();
+    let id = session.id().to_owned();
+    settled("the first host closes", agent.close())
+        .await
+        .unwrap();
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+    (id, child)
+}
+
+/// The host that restores a stored Session, its opening bounded by `bound`.
+async fn restoring_host(
+    database: &Database,
+    bound: Duration,
+) -> (MinimalHost, Arc<SqliteTimelineStore>, Arc<SqliteStorage>) {
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    dim_agent_capabilities::defaults::mock_hosts(&mut builder);
+    dim_agent_capabilities::defaults::install(&mut builder);
+    builder.startup_timeout(bound);
+    builder.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(store.clone()));
+    let agent = MinimalHost::start(&builder).await.unwrap();
+    (agent, store, db)
+}
+
+/// A restore that reports no progress for longer than `startup_timeout` still
+/// names what it was running: every row is Active, so the message cannot list
+/// one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_silent_restore_times_out_naming_the_restore_phase() {
+    use dim_agent_capabilities::timeline_tree::testing::slow_restore_steps;
+    let database = Database::new();
+    let (id, _) = stored_two_line_session(&database).await;
+    let _slow = slow_restore_steps(&id, Duration::from_millis(1500));
+    let (agent, store, db) = restoring_host(&database, Duration::from_secs(1)).await;
+    let error = match settled("the silent restore times out", agent.restore_session(id)).await {
+        Ok(_) => panic!("a restore silent past the bound must fail the opening"),
+        Err(error) => error,
+    };
+    let message = error.to_string();
+    assert!(message.contains("initialization timed out"), "{message}");
+    assert!(
+        message.contains("restore"),
+        "the message names the phase still running: {message}"
+    );
+    settled("the host closes", agent.close()).await.unwrap();
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+}
+
+/// Each restore step reports opening progress, so a restore whose steps are
+/// each shorter than `startup_timeout` and together longer still completes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_slow_restore_reports_progress_and_keeps_the_opening_alive() {
+    use dim_agent_capabilities::timeline_tree::testing::slow_restore_steps;
+    let database = Database::new();
+    let (id, child) = stored_two_line_session(&database).await;
+    let bound = Duration::from_secs(1);
+    let _slow = slow_restore_steps(&id, Duration::from_millis(250));
+    let (agent, store, db) = restoring_host(&database, bound).await;
+    let started = Instant::now();
+    let session = settled("the slow restore completes", agent.restore_session(id))
+        .await
+        .expect("reported progress renews the opening's inactivity bound");
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed > bound,
+        "the restore must outlast the bound to exercise renewal: {elapsed:?}"
+    );
+    let branches = session.branches();
+    let ids = branches
+        .iter()
+        .map(|info| info.id.as_str())
+        .collect::<Vec<_>>();
+    assert!(ids.contains(&"main"), "{ids:?}");
+    assert!(ids.contains(&child.as_str()), "{ids:?}");
+    settled("the host closes", agent.close()).await.unwrap();
     store.close().await.unwrap();
     db.close().await.unwrap();
 }
