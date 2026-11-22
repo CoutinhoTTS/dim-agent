@@ -5,18 +5,22 @@
 //!
 //! ```text
 //! cargo run --locked -p xtask -- scenario-eval --scenarios DIR --text ID
-//!     --candidate FILE [--text ID --candidate FILE]... --model PROVIDER/MODEL
-//!     --judge PROVIDER/MODEL --runs N --out DIR [--jobs N]
-//!     [--model-config FILE]
+//!     --baseline FILE --candidate FILE [--text ID --baseline FILE
+//!     --candidate FILE]... --model PROVIDER/MODEL --judge PROVIDER/MODEL
+//!     --runs N --out DIR [--jobs N] [--model-config FILE]
 //! ```
 //!
-//! Both arms run the shipped assembly: `current` with the product's own texts
-//! and `candidate` with each candidate file in place of the text its `--text`
-//! id names. Every `--text ID --candidate FILE` pair replaces one text, a
-//! pair reads in either order, a text named twice is an error, and the report
-//! gives each candidate text's own token cost. The runs are interleaved: for
-//! each run index and scenario the `current` run is scheduled before the
-//! `candidate` one, so a drift in
+//! Both arms run the same assembly with each text named by a `--text` id put
+//! in place of the assembly's: `current` with the baseline file and
+//! `candidate` with the candidate file. A pair names both files, so an
+//! evaluation compares two texts it was given and never the candidate with the
+//! copy the checkout ships; a pair whose baseline and candidate hold the same
+//! bytes is refused, as is one with a file missing. A pair reads in either
+//! order, a text named twice is an error, and the report gives each candidate
+//! text's own token cost. The report and `runs.jsonl` also record the texts
+//! each arm emitted, as each text's id, length and fingerprint. The runs are
+//! interleaved: for each run index and scenario the `current` run is scheduled
+//! before the `candidate` one, so a drift in
 //! the endpoint lands on both arms alike, and the records come out in that
 //! order whatever order the runs complete in. `--jobs N` (default 1) runs N
 //! runs at once; each run keeps its own workspace copy, Dim home, local
@@ -735,7 +739,7 @@ async fn evaluate(options: &Options) -> Result<String> {
         }
     }
     let candidate = overrides(&options.texts)?;
-    let current = Overrides::default();
+    let baseline = overrides(&options.baseline)?;
     let scenarios = read_scenarios(&options.scenarios)?;
     // A live evaluation is isolated: the run's server must come from a
     // model configuration, which also names the credential its calls use.
@@ -762,7 +766,7 @@ async fn evaluate(options: &Options) -> Result<String> {
         .map(|(index, &(arm, scenario, run))| {
             let mut measured = instrument.clone();
             let overrides = match arm {
-                "current" => &current,
+                "current" => &baseline,
                 _ => &candidate,
             };
             let native = &native;
@@ -1035,6 +1039,7 @@ fn pooled_record(source: &Path, run: SavedRun, scenarios: &[Scenario]) -> Result
         arm: arm_name(&run.arm)?,
         scenario: run.scenario,
         run: run.run,
+        texts: run.texts,
         session: run.session,
         stop: stop_name(&run.stop)?,
         turns: run.turns,
@@ -1133,6 +1138,7 @@ async fn rejudge_one(
         arm: arm_name(&saved.arm)?,
         scenario: saved.scenario.clone(),
         run: saved.run,
+        texts: saved.texts.clone(),
         session: saved.session.clone(),
         stop,
         turns: saved.turns,
@@ -1182,6 +1188,10 @@ struct SavedRun {
     judge_reasks: u32,
     #[serde(default)]
     judge_calls: Vec<JudgeCall>,
+    /// The texts the arm emitted; empty in a record written before the runner
+    /// recorded them.
+    #[serde(default)]
+    texts: Vec<EmittedText>,
     /// `None` in a record written before the runner wrote this fact.
     #[serde(default)]
     temperature_dropped: Option<bool>,
@@ -1330,6 +1340,10 @@ fn schedule(runs: usize, scenarios: usize) -> Vec<(&'static str, usize, usize)> 
 
 struct Options {
     scenarios: PathBuf,
+    /// The `--text ID --baseline FILE` pairs, in the order given: the text each
+    /// candidate replaces, put in place of the assembly's in the `current`
+    /// arm.
+    baseline: Vec<(String, Arc<str>)>,
     /// The `--text ID --candidate FILE` pairs, in the order given.
     texts: Vec<(String, Arc<str>)>,
     model: ModelId,
@@ -1410,10 +1424,12 @@ impl Options {
     /// absolute, as `session.create` requires of the cwd.
     fn parse_from(args: impl IntoIterator<Item = String>) -> Result<Self> {
         let usage = "usage: cargo run -p xtask -- scenario-eval --scenarios DIR \
-                     --text ID --candidate FILE [--text ID --candidate FILE]... \
+                     --text ID --baseline FILE --candidate FILE [--text ID \
+                     --baseline FILE --candidate FILE]... \
                      --model PROVIDER/MODEL --judge PROVIDER/MODEL --runs N \
                      --out DIR [--jobs N] [--model-config FILE] \
-                     [--defaults FILE]; a text named twice is an error, and a \
+                     [--defaults FILE]; every text names the baseline it replaces \
+                     and its candidate, a text named twice is an error, and a \
                      run whose view does not fit the judge's own declared \
                      window is unjudged, so a model configuration narrowed for \
                      the scenarios declares the judge under its own provider \
@@ -1428,12 +1444,16 @@ impl Options {
         // names another default configuration file.
         let mut args = args.into_iter();
         let (mut scenarios, mut out) = (None, None);
-        let (mut text, mut candidate, mut model, mut judge) = (None, None, None, None);
+        let (mut model, mut judge) = (None, None);
         let (mut runs, mut jobs, mut model_config, mut defaults) = (None, None, None, None);
         let mut rejudge = None;
         let mut select: Vec<String> = Vec::new();
         let mut pool: Vec<PathBuf> = Vec::new();
+        let mut baseline: Vec<(String, Arc<str>)> = Vec::new();
         let mut texts: Vec<(String, Arc<str>)> = Vec::new();
+        // The pair whose files are being read: each `--text ID` opens one and
+        // the two roles fill it, in either order.
+        let mut pending = PendingText::default();
         while let Some(flag) = args.next() {
             let value = args.next().ok_or(format!("{flag} requires a value"))?;
             match flag.as_str() {
@@ -1451,23 +1471,43 @@ impl Options {
                 }
                 "--pool" => pool.push(PathBuf::from(value)),
                 "--text" => {
-                    if let Some(pending) = &text {
-                        return Err(format!("--text {pending} has no --candidate").into());
+                    if let Some(open) = &pending.id {
+                        return Err(
+                            format!("--text {open} has no --baseline and no --candidate").into(),
+                        );
                     }
-                    if texts.iter().any(|(given, _)| *given == value) {
+                    if baseline.iter().any(|(given, _)| *given == value)
+                        || texts.iter().any(|(given, _)| *given == value)
+                    {
                         return Err(format!("--text {value} is named twice").into());
                     }
-                    match candidate.take() {
-                        Some(prompt) => texts.push((value, prompt)),
-                        None => text = Some(value),
-                    }
+                    pending.id = Some(value);
                 }
-                "--candidate" => {
-                    let prompt = candidate_prompt(Path::new(&value))?;
-                    match text.take() {
-                        Some(id) => texts.push((id, prompt)),
-                        None if candidate.is_none() => candidate = Some(prompt),
-                        None => return Err("--candidate has no --text".into()),
+                "--baseline" | "--candidate" => {
+                    let is_baseline = flag == "--baseline";
+                    let filled = if is_baseline {
+                        pending.baseline.is_some()
+                    } else {
+                        pending.candidate.is_some()
+                    };
+                    if pending.id.is_none()
+                        && (pending.baseline.is_some() || pending.candidate.is_some())
+                    {
+                        return Err(format!("{flag} has no --text").into());
+                    }
+                    if filled {
+                        return Err(format!("{flag} is given twice for one --text").into());
+                    }
+                    let text = candidate_prompt(Path::new(&value))?;
+                    if is_baseline {
+                        pending.baseline = Some(text);
+                    } else {
+                        pending.candidate = Some(text);
+                    }
+                    if pending.baseline.is_some() && pending.candidate.is_some() {
+                        let id = pending.id.take().expect("a filled pair names its text");
+                        baseline.push((id.clone(), pending.baseline.take().expect("filled")));
+                        texts.push((id, pending.candidate.take().expect("filled")));
                     }
                 }
                 "--model" => model = Some(target(&value)?),
@@ -1481,11 +1521,35 @@ impl Options {
                 _ => return Err(usage.into()),
             }
         }
-        if let Some(text) = &text {
-            return Err(format!("--text {text} has no --candidate").into());
+        if let Some(open) = pending.id {
+            let missing = if pending.baseline.is_none() {
+                "--baseline"
+            } else {
+                "--candidate"
+            };
+            return Err(format!("--text {open} has no {missing}").into());
         }
-        if candidate.is_some() {
-            return Err("--candidate has no --text".into());
+        for (role, flag) in [
+            (&pending.baseline, "--baseline"),
+            (&pending.candidate, "--candidate"),
+        ] {
+            if role.is_some() {
+                return Err(format!("{flag} has no --text").into());
+            }
+        }
+        for (id, candidate) in &texts {
+            let replaced = &baseline
+                .iter()
+                .find(|(given, _)| given == id)
+                .expect("every pair carries its baseline")
+                .1;
+            if replaced == candidate {
+                return Err(format!(
+                    "--text {id}: the baseline and the candidate are the same text, so the \
+                     evaluation would compare the text with itself"
+                )
+                .into());
+            }
         }
         if texts.is_empty() && rejudge.is_none() && pool.is_empty() {
             return Err(usage.into());
@@ -1511,7 +1575,7 @@ impl Options {
         if finished && (!texts.is_empty() || runs.is_some() || defaults.is_some()) {
             return Err(
                 "--rejudge and --pool read finished evaluations' saved runs: --text, \
-                 --candidate, --runs and --defaults belong to a new evaluation"
+                 --baseline, --candidate, --runs and --defaults belong to a new evaluation"
                     .into(),
             );
         }
@@ -1534,6 +1598,7 @@ impl Options {
             .map_err(|error| format!("--out {}: {error}", out.display()))?;
         Ok(Self {
             scenarios,
+            baseline,
             texts,
             model,
             judge,
@@ -1561,6 +1626,30 @@ impl Options {
             pool,
         })
     }
+
+    /// The texts one arm puts in place of the assembly's, in the order the
+    /// evaluation was given them: `current` is each pair's baseline and
+    /// `candidate` its candidate.
+    fn arm_texts(&self, arm: &str) -> Vec<EmittedText> {
+        let texts = if arm == "current" {
+            &self.baseline
+        } else {
+            &self.texts
+        };
+        texts
+            .iter()
+            .map(|(id, text)| EmittedText::of(id, text))
+            .collect()
+    }
+}
+
+/// One `--text ID` pair while its files are read: each `--text ID` opens the
+/// pair and `--baseline` and `--candidate` fill it, in either order.
+#[derive(Default)]
+struct PendingText {
+    id: Option<String>,
+    baseline: Option<Arc<str>>,
+    candidate: Option<Arc<str>>,
 }
 
 /// A path from the environment: the TypeScript plugin rows run in Node,
@@ -2220,6 +2309,10 @@ struct RunRecord {
     arm: &'static str,
     scenario: String,
     run: usize,
+    /// The texts the arm put in place of the assembly's, in the order the
+    /// evaluation was given them: each is a text the arm emitted in place of
+    /// the one its id names.
+    texts: Vec<EmittedText>,
     session: Option<String>,
     /// `idle`, `turns`, `seconds`, `switch_target_not_reached`,
     /// `switch_target_ended`, `switch_target_unknown` or `error`.
@@ -2278,6 +2371,38 @@ impl RunRecord {
     fn judged(&self) -> bool {
         !self.failed && self.judge_outcome == JudgeOutcome::Judged
     }
+}
+
+/// One text an arm emitted: the id naming the text it replaced, the text's
+/// length in bytes, and a fingerprint of its bytes, so a report states which
+/// text each arm ran without carrying the text itself.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EmittedText {
+    id: String,
+    bytes: usize,
+    fingerprint: String,
+}
+impl EmittedText {
+    fn of(id: &str, text: &str) -> Self {
+        Self {
+            id: id.to_owned(),
+            bytes: text.len(),
+            fingerprint: fingerprint(text),
+        }
+    }
+}
+
+/// A text's fingerprint: FNV-1a 64 over its bytes, in lowercase hex. It tells
+/// the texts an evaluation compares apart in its records and report; it is not
+/// a security digest.
+fn fingerprint(text: &str) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in text.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{hash:016x}")
 }
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -3832,7 +3957,7 @@ async fn run_once(
     let socket = run_socket(options, arm, scenario, run);
     private_directory(socket.parent().expect("a socket has a parent"))?;
     let socket = bindable_socket(&socket)?;
-    let (record, outcome) = isolate_run(
+    let (mut record, outcome) = isolate_run(
         options,
         arm,
         overrides,
@@ -3847,6 +3972,7 @@ async fn run_once(
         instrument,
     )
     .await?;
+    record.texts = options.arm_texts(arm);
     write_run_outputs(options, arm, scenario, run, &outcome)?;
     Ok(record)
 }
@@ -4721,6 +4847,7 @@ fn child_record(
         arm,
         scenario: scenario.id.clone(),
         run,
+        texts: Vec::new(),
         session: outcome.session.clone(),
         stop,
         turns: outcome.turns,
@@ -7502,8 +7629,9 @@ fn report(instrument: &Instrument, scenarios: &[Scenario], records: &[RunRecord]
         )
     });
     let mut text = String::from("| | |\n| --- | --- |\n");
-    // A report built from saved runs names its sources instead: no saved run
-    // records the texts under test.
+    // A report built from saved runs names its sources instead: the ids an
+    // evaluation was given are not saved with a record, and the arm rows below
+    // state the texts each arm emitted.
     if instrument.sources.is_none() {
         let texts: Vec<String> = instrument
             .texts
@@ -7511,6 +7639,29 @@ fn report(instrument: &Instrument, scenarios: &[Scenario], records: &[RunRecord]
             .map(|text| format!("`{text}`"))
             .collect();
         text += &format!("| text | {} |\n", texts.join(", "));
+    }
+    // Every run of an arm carries the same texts, so the first one that names
+    // them states what the arm emitted.
+    let emitted = |arm: &str| {
+        records
+            .iter()
+            .find(|record| record.arm == arm && !record.texts.is_empty())
+            .map(|record| record.texts.as_slice())
+    };
+    for arm in ["current", "candidate"] {
+        let Some(texts) = emitted(arm) else {
+            continue;
+        };
+        let listed: Vec<String> = texts
+            .iter()
+            .map(|text| {
+                format!(
+                    "`{}`: {} bytes, fingerprint {}",
+                    text.id, text.bytes, text.fingerprint
+                )
+            })
+            .collect();
+        text += &format!("| {arm} texts | {} |\n", listed.join("; "));
     }
     text += &format!(
         "| model | `{}/{}`, {} |\n| judge | `{}/{}`, temperature 0, {}{window} |\n| runs | {} per arm and scenario |\n",
@@ -7760,6 +7911,7 @@ mod tests {
             arm,
             scenario: scenario.id.clone(),
             run: 0,
+            texts: Vec::new(),
             session: None,
             stop: "idle",
             turns: 1,
@@ -8944,12 +9096,16 @@ mod tests {
         std::fs::create_dir_all(&directory).unwrap();
         let candidate = directory.join("candidate.md");
         std::fs::write(&candidate, "candidate").unwrap();
+        let baseline = directory.join("baseline.md");
+        std::fs::write(&baseline, "baseline").unwrap();
         let out = directory.join("out");
         let args = [
             "--scenarios",
             "scenarios",
             "--text",
             "context-compaction/summary",
+            "--baseline",
+            baseline.to_str().unwrap(),
             "--candidate",
             candidate.to_str().unwrap(),
             "--model",
@@ -9184,16 +9340,22 @@ mod tests {
         std::fs::create_dir_all(&directory).unwrap();
         let candidate = directory.join("candidate.md");
         std::fs::write(&candidate, "candidate").unwrap();
+        let baseline = directory.join("baseline.md");
+        std::fs::write(&baseline, "baseline").unwrap();
         let parsed = Options::parse_from(
             [
                 "--scenarios",
                 "scenarios",
                 "--text",
                 "goal/objective",
+                "--baseline",
+                baseline.to_str().unwrap(),
                 "--candidate",
                 candidate.to_str().unwrap(),
                 "--text",
                 "goal/objective",
+                "--baseline",
+                baseline.to_str().unwrap(),
                 "--candidate",
                 candidate.to_str().unwrap(),
                 "--model",
@@ -9215,9 +9377,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&directory);
     }
 
-    /// A `--text ID --candidate FILE` pair reads in either order: the
-    /// candidate given first pairs with the text that follows it
-    /// (model-prompts §8.1).
+    /// A `--text ID` pair reads in either order: a file given before the text
+    /// pairs with the text that follows it (model-prompts §8.1).
     #[test]
     fn a_pair_reads_in_either_order() {
         let directory =
@@ -9225,17 +9386,16 @@ mod tests {
         std::fs::create_dir_all(&directory).unwrap();
         let candidate = directory.join("candidate.md");
         std::fs::write(&candidate, "candidate").unwrap();
+        let baseline = directory.join("baseline.md");
+        std::fs::write(&baseline, "baseline").unwrap();
         let out = directory.join("out");
         let file = candidate.to_str().unwrap();
-        let parse = |flags: [&str; 4]| {
-            Options::parse_from(
+        let base = baseline.to_str().unwrap();
+        let parse = |flags: &[&str]| {
+            let mut args: Vec<String> = ["--scenarios", "scenarios"].map(str::to_owned).to_vec();
+            args.extend(flags.iter().map(|value| (*value).to_owned()));
+            args.extend(
                 [
-                    "--scenarios",
-                    "scenarios",
-                    flags[0],
-                    flags[1],
-                    flags[2],
-                    flags[3],
                     "--model",
                     "gateway/model",
                     "--judge",
@@ -9246,17 +9406,116 @@ mod tests {
                     out.to_str().unwrap(),
                 ]
                 .map(str::to_owned),
-            )
+            );
+            Options::parse_from(args)
         };
         for flags in [
-            ["--text", "goal/objective", "--candidate", file],
-            ["--candidate", file, "--text", "goal/objective"],
+            [
+                "--text",
+                "goal/objective",
+                "--baseline",
+                base,
+                "--candidate",
+                file,
+            ],
+            [
+                "--text",
+                "goal/objective",
+                "--candidate",
+                file,
+                "--baseline",
+                base,
+            ],
+            [
+                "--baseline",
+                base,
+                "--text",
+                "goal/objective",
+                "--candidate",
+                file,
+            ],
+            [
+                "--candidate",
+                file,
+                "--text",
+                "goal/objective",
+                "--baseline",
+                base,
+            ],
         ] {
-            let options = parse(flags).unwrap_or_else(|error| panic!("{flags:?}: {error}"));
+            let options = parse(&flags).unwrap_or_else(|error| panic!("{flags:?}: {error}"));
             assert_eq!(options.texts.len(), 1, "{flags:?}");
+            assert_eq!(options.baseline.len(), 1, "{flags:?}");
             assert_eq!(options.texts[0].0, "goal/objective", "{flags:?}");
             assert_eq!(&*options.texts[0].1, "candidate", "{flags:?}");
+            assert_eq!(&*options.baseline[0].1, "baseline", "{flags:?}");
         }
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// A text is compared with the text it replaces, never with the copy the
+    /// checkout ships: `--text ID` names the baseline beside the candidate,
+    /// and a pair without one, or one whose baseline is its candidate, is
+    /// refused before any run (model-prompts §8.1).
+    #[test]
+    fn a_pair_without_its_baseline_is_refused() {
+        let directory =
+            std::env::temp_dir().join(format!("dim-scenario-eval-baseline-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        let candidate = directory.join("candidate.md");
+        std::fs::write(&candidate, "candidate").unwrap();
+        let baseline = directory.join("baseline.md");
+        std::fs::write(&baseline, "baseline").unwrap();
+        let same = directory.join("same.md");
+        std::fs::write(&same, "baseline").unwrap();
+        let out = directory.join("out");
+        let parse = |flags: &[&str]| {
+            let mut args: Vec<String> = [
+                "--scenarios",
+                "scenarios",
+                "--model",
+                "gateway/model",
+                "--judge",
+                "gateway/model",
+                "--runs",
+                "1",
+                "--out",
+                out.to_str().unwrap(),
+            ]
+            .map(str::to_owned)
+            .to_vec();
+            args.extend(flags.iter().map(|value| (*value).to_owned()));
+            Options::parse_from(args)
+        };
+        let error = match parse(&[
+            "--text",
+            "goal/objective",
+            "--candidate",
+            candidate.to_str().unwrap(),
+        ]) {
+            Err(error) => error.to_string(),
+            Ok(_) => panic!("a candidate without the baseline it replaces is refused"),
+        };
+        assert!(
+            error.contains("--text goal/objective has no --baseline"),
+            "the refusal names the missing text: {error}"
+        );
+        let error = match parse(&[
+            "--text",
+            "goal/objective",
+            "--baseline",
+            baseline.to_str().unwrap(),
+            "--candidate",
+            same.to_str().unwrap(),
+        ]) {
+            Err(error) => error.to_string(),
+            Ok(_) => panic!("a pair whose baseline is its candidate is refused"),
+        };
+        assert!(
+            error.contains("the baseline and the candidate are the same text"),
+            "the refusal says the comparison is the text with itself: {error}"
+        );
         let _ = std::fs::remove_dir_all(&directory);
     }
 
@@ -11022,6 +11281,10 @@ mod tests {
 
     /// The candidate text every fixture's candidate arm carries.
     const CANDIDATE: &str = "CANDIDATE SUMMARY PROMPT. Summarize the transcript briefly.";
+    /// The baseline text every fixture's current arm carries. It opens with
+    /// the shipped prompt's first words, which the fixture's summarizer
+    /// answers, and is not the candidate.
+    const BASELINE: &str = "You summarize a coding session. BASELINE SUMMARY PROMPT.";
     /// The text the workspace file `notes.txt` holds; a run's request carries
     /// it only once the `read` tool has returned it.
     const FILE_TEXT: &str = "The notes file says the read tool carried this line back.";
@@ -11256,6 +11519,7 @@ mod tests {
         fn options(&self, out: PathBuf) -> Options {
             Options {
                 scenarios: self.scenarios.clone(),
+                baseline: pairs(&[("context-compaction/summary", BASELINE)]),
                 texts: pairs(&[("context-compaction/summary", CANDIDATE)]),
                 model: self.target(),
                 judge: self.target(),
@@ -11541,6 +11805,13 @@ mod tests {
         // tool's description.
         const BRANCH: &str = "CANDIDATE BRANCH TOOL DESCRIPTION";
         let mut options = fixture.judge_options(fixture.directory.join("out"));
+        options.baseline = pairs(&[
+            ("context-compaction/summary", BASELINE),
+            (
+                "timeline-tree/branch-description",
+                "BASELINE BRANCH TOOL DESCRIPTION",
+            ),
+        ]);
         options.texts = pairs(&[
             ("context-compaction/summary", CANDIDATE),
             ("timeline-tree/branch-description", BRANCH),
@@ -11615,6 +11886,109 @@ mod tests {
             assert!(
                 rendered["event"]["data"]["request"]["messages"].is_array(),
                 "{arm}: the request after the history change carries the whole list: {rendered}"
+            );
+        }
+    }
+
+    /// A text's fingerprint is FNV-1a 64 over its bytes, in lowercase hex: the
+    /// canonical test vectors pin it, so a report's fingerprints stay
+    /// comparable across runs.
+    #[test]
+    fn a_texts_fingerprint_is_fnv1a_64() {
+        assert_eq!(fingerprint(""), "cbf29ce484222325");
+        assert_eq!(fingerprint("a"), "af63dc4c8601ec8c");
+        assert_eq!(fingerprint("foobar"), "85944171f73967e8");
+    }
+
+    /// Each arm emits the text its pair names, and the run's record and the
+    /// report state which: the current arm's requests carry the baseline, the
+    /// candidate arm's the candidate, and each record names both by length and
+    /// fingerprint. An evaluation on a head that already carries the candidate
+    /// therefore compares two texts it was given, not the candidate with
+    /// itself (model-prompts §8.1).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn each_arm_emits_and_records_the_text_its_pair_names() {
+        const BASELINE: &str = "BASELINE BRANCH TOOL DESCRIPTION";
+        const CANDIDATE: &str = "CANDIDATE BRANCH TOOL DESCRIPTION";
+        let fixture = Fixture::start(
+            "arm-texts",
+            judged,
+            json!({
+                "message": "Say hello.",
+                "budget": {"turns": 2, "seconds": 60, "window": 24000},
+                "probes": [{"id": "ran", "kind": "must_show", "text": "the run has a transcript"}]
+            }),
+            &[],
+        )
+        .await;
+        let mut options = fixture.options(fixture.directory.join("out"));
+        options.baseline = pairs(&[("timeline-tree/branch-description", BASELINE)]);
+        options.texts = pairs(&[("timeline-tree/branch-description", CANDIDATE)]);
+        let report = fixture.evaluate(&options).await.unwrap();
+        assert!(
+            report.contains("candidate is inconclusive: no comparison is a regression"),
+            "{report}"
+        );
+        let records = fixture.records(&options.out);
+        assert_eq!(records.len(), 2, "one run per arm");
+        let emitted = |arm: &str| {
+            records
+                .iter()
+                .find(|record| record["arm"] == arm)
+                .unwrap_or_else(|| panic!("a {arm} run"))["texts"]
+                .clone()
+        };
+        for (arm, text) in [("current", BASELINE), ("candidate", CANDIDATE)] {
+            let texts = emitted(arm);
+            let texts = texts.as_array().unwrap_or_else(|| panic!("{arm}: {texts}"));
+            assert_eq!(texts.len(), 1, "{arm}: {texts:?}");
+            assert_eq!(texts[0]["id"], "timeline-tree/branch-description", "{arm}");
+            assert_eq!(texts[0]["bytes"], text.len(), "{arm}: {texts:?}");
+            assert_eq!(
+                texts[0]["fingerprint"],
+                fingerprint(text),
+                "{arm}: the record names the text the arm emitted"
+            );
+        }
+        assert_ne!(
+            emitted("current")[0]["fingerprint"],
+            emitted("candidate")[0]["fingerprint"],
+            "the arms emitted different texts"
+        );
+        for (arm, text) in [("current", BASELINE), ("candidate", CANDIDATE)] {
+            assert!(
+                report.contains(&format!(
+                    "| {arm} texts | `timeline-tree/branch-description`: {} bytes, \
+                     fingerprint {} |",
+                    text.len(),
+                    fingerprint(text)
+                )),
+                "{arm}: the report names the text the arm emitted: {report}"
+            );
+        }
+        let described = |arm: &str| -> Vec<String> {
+            fixture
+                .arm(arm)
+                .iter()
+                .filter_map(|request| {
+                    let request: Value = serde_json::from_str(request).ok()?;
+                    request["tools"].as_array()?.iter().find_map(|tool| {
+                        (tool["function"]["name"] == "branch")
+                            .then(|| tool["function"]["description"].as_str().map(str::to_owned))
+                            .flatten()
+                    })
+                })
+                .collect()
+        };
+        for (arm, text) in [("current", BASELINE), ("candidate", CANDIDATE)] {
+            let descriptions = described(arm);
+            assert!(
+                !descriptions.is_empty(),
+                "{arm}: the requests declare the branch tool"
+            );
+            assert!(
+                descriptions.iter().all(|description| description == text),
+                "{arm}: the branch tool description is the pair's text: {descriptions:?}"
             );
         }
     }
@@ -11991,6 +12365,8 @@ mod tests {
         .await;
         let candidate = fixture.directory.join("candidate.md");
         std::fs::write(&candidate, CANDIDATE).unwrap();
+        let baseline = fixture.directory.join("baseline.md");
+        std::fs::write(&baseline, BASELINE).unwrap();
         let out = fixture.directory.join("out");
         let relative = relative_to_working_directory(&out);
         let mut options = Options::parse_from(
@@ -11999,6 +12375,8 @@ mod tests {
                 fixture.scenarios.to_str().unwrap(),
                 "--text",
                 "context-compaction/summary",
+                "--baseline",
+                baseline.to_str().unwrap(),
                 "--candidate",
                 candidate.to_str().unwrap(),
                 "--model",
@@ -14440,6 +14818,7 @@ mod tests {
         let options = Options {
             out: out.clone(),
             scenarios: PathBuf::new(),
+            baseline: Vec::new(),
             texts: Vec::new(),
             model: model(),
             judge: model(),
