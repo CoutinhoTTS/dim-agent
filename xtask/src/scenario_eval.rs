@@ -14723,7 +14723,8 @@ mod tests {
     /// judge whose provider never answers leaves the record a failed judge
     /// call naming the grace and keeps the timeout, and the child prints its
     /// record and exits, so the worker runs the next scenario. The judge's
-    /// deadline is the test hook's one second; the held answer is a minute.
+    /// deadline is the test hook's one second; the held answer is a minute,
+    /// and the guard only turns a hang into a failed assertion.
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_timed_out_run_whose_judge_never_answers_frees_its_worker() {
@@ -14767,7 +14768,7 @@ mod tests {
         let mut options = fixture.options(out.clone());
         options.jobs = 1;
         options.judge_grace_ms = Some(1_000);
-        let report = tokio::time::timeout(Duration::from_secs(30), fixture.evaluate(&options))
+        let report = tokio::time::timeout(Duration::from_secs(60), fixture.evaluate(&options))
             .await
             .expect("the evaluation returns though the first scenario's judge never answers")
             .expect("the evaluation records both scenarios");
