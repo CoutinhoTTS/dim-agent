@@ -15119,7 +15119,7 @@ mod tests {
                 "description": "Timed out",
                 "message": "Run the quick probe.",
                 "steers": [{"afterSeconds": 120, "text": "This steer is not due."}],
-                "budget": {"turns": 12, "seconds": 1.0, "window": 131072},
+                "budget": {"turns": 12, "seconds": 0.5, "window": 131072},
                 "probes": [{"id": "ran", "kind": "must_show",
                             "text": "the run has a transcript"}]
             }),
@@ -15149,7 +15149,7 @@ mod tests {
         options.stall_export = Some("case".into());
         // Long enough for the close to settle on a loaded host; the export is
         // the step that never finishes.
-        options.cleanup_budget_ms = Some(2_000);
+        options.cleanup_budget_ms = Some(1_000);
         let report = tokio::time::timeout(Duration::from_secs(30), fixture.evaluate(&options))
             .await
             .expect("the evaluation returns though the first scenario's export never finishes")
