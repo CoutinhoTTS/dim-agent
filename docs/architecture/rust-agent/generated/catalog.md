@@ -24,7 +24,7 @@ Each catalog name a part of the assembly provides or injects. `data` means share
 | `fsHost` | process | FileStorage | data | `backup` async, `closeRead` async, `createDirectory` async, `list` async, `lock` async, `openRead` async, `readAt` async, `readBytes` async, `remove` async, `replace` async, `stat` async, `unlock` async |
 | `grokOAuthService` | process | GrokOAuth | internal(secret) | — |
 | `hooksService` | process | HooksSettings | data | `plugins` async, `refusal` sync, `register` async, `withdraw` async |
-| `hostPlatform` | process | HostPlatform | data | `execRoot` async, `execShell` async, `info` async, `kill` async, `output` async, `persistentShell` async, `retainOutput` async, `sandboxBackend` async, `settle` async, `spawn` async, `tail` async, `wait` async |
+| `hostPlatform` | process | HostPlatform | data | `execRoot` async, `execShell` async, `info` async, `kill` async, `output` async, `persistentShell` async, `resize` async, `retainOutput` async, `sandboxBackend` async, `settle` async, `shell` async, `spawn` async, `tail` async, `wait` async, `write` async |
 | `listenAddresses` | process | Transport | data | `read` async |
 | `loader` | process | rutis-loader | internal(owner-api) | — |
 | `localId` | process | root | data | `get` sync |

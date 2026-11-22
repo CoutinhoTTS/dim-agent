@@ -7,6 +7,7 @@
 use crate::execution_settings::ExecutionSettingsHost;
 use crate::file_storage::{FileStorage, FileStorageError};
 use crate::toolchain::{InstalledToolchain, ToolchainSourceHost};
+use base64::{Engine, engine::general_purpose::STANDARD};
 use dim_agent_runtime::Names;
 use rutis::Ctx;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, ErrorKind, Key, TypeKey};
@@ -227,6 +228,7 @@ const ENVIRONMENT: &[&str] = &[
 #[derive(Clone)]
 pub(crate) enum ExecutionTask {
     Command(Arc<crate::workspace_tools::exec::CommandTask>),
+    Shell(Arc<shell::ShellTask>),
 }
 
 #[derive(Clone)]
@@ -384,6 +386,48 @@ pub struct WaitReply {
     pub preview_truncated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failure_note: Option<String>,
+}
+
+/// A page of a task's captured output.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OutputPageReply {
+    pub text: String,
+    pub bytes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<u64>,
+    pub truncated: bool,
+    pub retained_from: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reset: Option<bool>,
+}
+
+/// A request to start a persistent PTY shell on this execution node.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ShellRequest {
+    pub task_id: String,
+    pub cwd: PathBuf,
+    pub workspace: PathBuf,
+    pub roots: Vec<PathBuf>,
+    pub output_dir: PathBuf,
+    pub cols: u16,
+    pub rows: u16,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ShellWrite {
+    pub task_id: String,
+    pub data: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ShellResize {
+    pub task_id: String,
+    pub cols: u16,
+    pub rows: u16,
 }
 
 /// A request to start a command on this execution node.
@@ -732,12 +776,21 @@ impl HostPlatform {
 
     /// Waits for a task's terminal record; `timeoutMs` bounds the wait.
     pub async fn wait(&self, request: WaitRequest) -> Result<WaitReply, HostPlatformError> {
+        if let Some(shell) = self.shell_task(&request.task_id) {
+            return Ok(shell.wait(request.timeout_ms).await);
+        }
         let task = self.command_task(&request.task_id)?;
         Ok(task.wait(request.timeout_ms).await)
     }
 
     /// Kills a task's process tree.
     pub async fn kill(&self, request: TaskRequest) -> Result<(), HostPlatformError> {
+        if let Some(shell) = self.shell_task(&request.task_id) {
+            return shell
+                .terminate()
+                .await
+                .map_err(|error| HostPlatformError::Failed(error.to_string()));
+        }
         let task = self.command_task(&request.task_id)?;
         task.terminate()
             .await
@@ -746,6 +799,13 @@ impl HostPlatform {
 
     /// Releases an ended task's record.
     pub async fn settle(&self, request: TaskRequest) -> Result<(), HostPlatformError> {
+        if let Some(shell) = self.shell_task(&request.task_id) {
+            if shell.exit().is_some() {
+                self.settle_shell(&request.task_id, &shell);
+                return Ok(());
+            }
+            return Err(HostPlatformError::TaskRunning);
+        }
         let task = self.command_task(&request.task_id)?;
         if !task.ended() {
             return Err(HostPlatformError::TaskRunning);
@@ -754,16 +814,113 @@ impl HostPlatform {
         Ok(())
     }
 
+    /// Starts a persistent PTY shell on this node and returns the task id.
+    pub async fn shell(&self, request: ShellRequest) -> Result<SpawnReply, HostPlatformError> {
+        if request.task_id.is_empty()
+            || request.task_id.contains(['/', '\\', '\0', ':'])
+            || matches!(request.task_id.as_str(), "." | "..")
+        {
+            return Err(HostPlatformError::Invalid(
+                "taskId must be a single filename component".into(),
+            ));
+        }
+        if !request.cwd.is_absolute()
+            || !request.workspace.is_absolute()
+            || !request.output_dir.is_absolute()
+            || request.roots.iter().any(|root| !root.is_absolute())
+        {
+            return Err(HostPlatformError::Invalid(
+                "execution paths must be absolute".into(),
+            ));
+        }
+        if !tokio::fs::metadata(&request.cwd)
+            .await
+            .is_ok_and(|metadata| metadata.is_dir())
+        {
+            return Err(HostPlatformError::Invalid(
+                "working directory not found".into(),
+            ));
+        }
+        let mut roots = request.roots;
+        if !roots.contains(&request.workspace) {
+            roots.push(request.workspace.clone());
+        }
+        tokio::fs::create_dir_all(&request.output_dir)
+            .await
+            .map_err(|error| HostPlatformError::Failed(error.to_string()))?;
+        let owner = self.arc()?;
+        let (shell, _) = owner
+            .start_shell(
+                &request.task_id,
+                &request.cwd,
+                &roots,
+                &request.output_dir,
+                PtySize {
+                    cols: request.cols,
+                    rows: request.rows,
+                },
+                None,
+            )
+            .await
+            .map_err(|error| {
+                HostPlatformError::Failed(format!("{}: {}", error.code, error.reason))
+            })?;
+        Ok(SpawnReply {
+            task_id: request.task_id,
+            output_path: shell.output_path().to_owned(),
+        })
+    }
+
+    /// Writes bytes to a shell task.
+    pub async fn write(&self, request: ShellWrite) -> Result<(), HostPlatformError> {
+        let shell = self
+            .shell_task(&request.task_id)
+            .ok_or(HostPlatformError::TaskUnknown)?;
+        let bytes = STANDARD
+            .decode(request.data)
+            .map_err(|error| HostPlatformError::Invalid(error.to_string()))?;
+        shell
+            .write(&bytes)
+            .await
+            .map_err(|error| HostPlatformError::Failed(error.to_string()))
+    }
+
+    /// Resizes a shell task's PTY.
+    pub async fn resize(&self, request: ShellResize) -> Result<(), HostPlatformError> {
+        let shell = self
+            .shell_task(&request.task_id)
+            .ok_or(HostPlatformError::TaskUnknown)?;
+        shell
+            .resize(PtySize {
+                cols: request.cols,
+                rows: request.rows,
+            })
+            .await
+            .map_err(|error| HostPlatformError::Failed(error.to_string()))
+    }
+
     /// Reads a page of a task's captured output.
     pub async fn output(
         &self,
         request: OutputRequest,
-    ) -> Result<crate::workspace_tools::background::OutputPage, HostPlatformError> {
-        let task = self.command_task(&request.task_id)?;
+    ) -> Result<OutputPageReply, HostPlatformError> {
         let limit = request.limit.unwrap_or(64 * 1024).clamp(1, 4 * 1024 * 1024) as usize;
-        task.page(request.cursor.unwrap_or(0), limit)
+        if let Some(shell) = self.shell_task(&request.task_id) {
+            return shell.page(request.cursor, limit).map_err(Into::into);
+        }
+        let task = self.command_task(&request.task_id)?;
+        let page = task
+            .page(request.cursor.unwrap_or(0), limit)
             .await
-            .map_err(Into::into)
+            .map_err(HostPlatformError::from)?;
+        Ok(OutputPageReply {
+            text: page.text,
+            bytes: page.bytes,
+            next_cursor: page.next_cursor,
+            truncated: page.truncated,
+            retained_from: 0,
+            reset: None,
+        })
     }
 
     /// Writes the captured output to the task's log file and returns its path.
@@ -780,6 +937,9 @@ impl HostPlatform {
         &self,
         request: TaskRequest,
     ) -> Result<crate::workspace_tools::exec::OutputTail, HostPlatformError> {
+        if let Some(shell) = self.shell_task(&request.task_id) {
+            return Ok(shell.tail());
+        }
         self.tail_by_id(&request.task_id).await.map_err(Into::into)
     }
     /// Resolves the persistent shell: bash, zsh, pwsh, or Windows PowerShell.
@@ -2740,6 +2900,354 @@ pub fn signal_name(status: ExitStatus) -> Option<String> {
 #[cfg(windows)]
 pub fn signal_name(_: ExitStatus) -> Option<String> {
     None
+}
+
+pub(crate) mod shell {
+    use super::{
+        ExecShellRuntime, HostPlatform, ProcessSpec, ProcessSpecError, PtyProcessTree, PtySize,
+        ShellEdition, ShellStatus,
+    };
+    use crate::workspace_tools::{
+        background::{OutputPageError, PAGE_CHAR_TRAILING_BYTES, decode_page},
+        exec::{bounded_preview, tail_bytes},
+    };
+    use std::{
+        io::{self, Read},
+        path::{Path, PathBuf},
+        sync::{Arc, Mutex},
+        time::{Duration, Instant},
+    };
+    use tokio::sync::{Mutex as AsyncMutex, watch};
+    use tokio_util::sync::CancellationToken;
+
+    const RETAINED: usize = 64 * 1024;
+
+    #[derive(Default)]
+    struct Capture {
+        text: String,
+        total: u64,
+    }
+
+    pub(crate) struct ShellTask {
+        pty: AsyncMutex<Option<PtyProcessTree>>,
+        capture: Mutex<Capture>,
+        terminal: watch::Sender<Option<ShellExit>>,
+        kill: CancellationToken,
+        timeout: CancellationToken,
+        path: PathBuf,
+        started: Instant,
+    }
+
+    #[derive(Clone)]
+    pub(crate) struct ShellExit {
+        pub(crate) exit: Option<portable_pty::ExitStatus>,
+        status: &'static str,
+        error: Option<String>,
+        duration: u64,
+    }
+
+    impl HostPlatform {
+        pub(crate) async fn start_shell(
+            &self,
+            id: &str,
+            cwd: &Path,
+            roots: &[PathBuf],
+            directory: &Path,
+            size: PtySize,
+            output: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+        ) -> Result<(Arc<ShellTask>, ExecShellRuntime), ProcessSpecError> {
+            let runtime = match self.persistent_shell().await {
+                ShellStatus::Available(shell) => shell,
+                ShellStatus::Unavailable { code, reason } => {
+                    return Err(ProcessSpecError { code, reason });
+                }
+            };
+            let args: &[&str] = match runtime.edition {
+                ShellEdition::Pwsh | ShellEdition::WindowsPowershell => {
+                    &["-NoLogo", "-NoProfile", "-Command"]
+                }
+                _ => &["-i"],
+            };
+            let spec = ProcessSpec {
+                executable: runtime.executable_path.clone(),
+                args: args.iter().map(|s| (*s).into()).collect(),
+                cwd: cwd.into(),
+                env: self
+                    .env
+                    .iter()
+                    .cloned()
+                    .chain([
+                        ("GIT_PAGER".into(), "cat".into()),
+                        ("NO_COLOR".into(), "1".into()),
+                        ("TERM".into(), "dumb".into()),
+                        ("PAGER".into(), "cat".into()),
+                    ])
+                    .collect(),
+            };
+            let (spec, temporary, _) = self
+                .prepare_isolated_process(spec, roots, Some(directory))
+                .await?;
+            let mut commands = self.commands.lock().unwrap();
+            if self.command_shutdown.is_cancelled() {
+                return Err(ProcessSpecError {
+                    code: "cancelled",
+                    reason: "Execution host closed".into(),
+                });
+            }
+            if commands.contains_key(id) {
+                return Err(ProcessSpecError {
+                    code: "task_exists",
+                    reason: "Execution task already exists".into(),
+                });
+            }
+            let mut pty = self.spawn_pty(spec, size).map_err(|e| ProcessSpecError {
+                code: "failed",
+                reason: e.to_string(),
+            })?;
+            pty.hold(temporary);
+            let mut reader = pty.take_reader();
+            let shell = Arc::new(ShellTask {
+                pty: AsyncMutex::new(Some(pty)),
+                capture: Mutex::default(),
+                terminal: watch::channel(None).0,
+                kill: CancellationToken::new(),
+                timeout: CancellationToken::new(),
+                path: directory.join(format!("{id}.log")),
+                started: Instant::now(),
+            });
+            commands.insert(id.into(), super::ExecutionTask::Shell(shell.clone()));
+            let pump = Arc::downgrade(&shell);
+            let (drained, reader_finished) = tokio::sync::oneshot::channel();
+            std::thread::spawn(move || {
+                let mut bytes = [0; 4096];
+                while let Ok(n) = reader.read(&mut bytes) {
+                    if n == 0 {
+                        break;
+                    }
+                    let Some(pump) = pump.upgrade() else {
+                        break;
+                    };
+                    let chunk = crate::shell_session::regularize_output(&bytes[..n]);
+                    let mut capture = pump.capture.lock().unwrap();
+                    if pump.exit().is_some() {
+                        break;
+                    }
+                    capture.total += chunk.len() as u64;
+                    capture.text.push_str(&chunk);
+                    if capture.text.len() > RETAINED {
+                        let dropped =
+                            capture.text.len() - tail_bytes(&capture.text, RETAINED).len();
+                        capture.text.drain(..dropped);
+                    }
+                    if let Some(sender) = &output {
+                        let _ = sender.send(chunk);
+                    }
+                }
+                let _ = drained.send(());
+            });
+            let worker = shell.clone();
+            let shutdown = self.command_shutdown.clone();
+            self.command_workers.spawn(async move {
+                let mut poll = tokio::time::interval(Duration::from_millis(100));
+                let (exit, status, error) = loop {
+                    let stop = tokio::select! {
+                        biased;
+                        _=poll.tick()=>None,
+                        _=worker.timeout.cancelled()=>Some("timed_out"),
+                        _=worker.kill.cancelled()=>Some("cancelled"),
+                        _=shutdown.cancelled()=>Some("cancelled"),
+                    };
+                    let mut guard = worker.pty.lock().await;
+                    let tree = guard.as_mut().expect("shell worker owns the process");
+                    if let Some(status) = stop {
+                        match tree.terminate().await {
+                            Ok(()) => break (None, status, None),
+                            Err(e) => break (None, "failed", Some(e.to_string())),
+                        }
+                    }
+                    match tree.try_wait() {
+                        Ok(Some(exit)) => {
+                            let status = if exit.signal().is_some() {
+                                "signaled"
+                            } else {
+                                "exited"
+                            };
+                            break (Some(exit), status, None);
+                        }
+                        Ok(None) => {}
+                        Err(e) => {
+                            let _ = tree.terminate().await;
+                            break (None, "failed", Some(e.to_string()));
+                        }
+                    }
+                };
+                worker.pty.lock().await.take();
+                let _ = tokio::time::timeout(
+                    crate::workspace_tools::exec::EXIT_STDIO_GRACE,
+                    reader_finished,
+                )
+                .await;
+                let _capture = worker.capture.lock().unwrap();
+
+                worker.terminal.send_replace(Some(ShellExit {
+                    exit,
+                    status,
+                    error,
+                    duration: worker.started.elapsed().as_millis() as u64,
+                }));
+            });
+            Ok((shell, runtime))
+        }
+        pub(crate) fn shell_task(&self, id: &str) -> Option<Arc<ShellTask>> {
+            match self.commands.lock().unwrap().get(id) {
+                Some(super::ExecutionTask::Shell(shell)) => Some(shell.clone()),
+                _ => None,
+            }
+        }
+        pub(crate) fn settle_shell(&self, id: &str, shell: &Arc<ShellTask>) {
+            let mut shells = self.commands.lock().unwrap();
+            if matches!(shells.get(id),Some(super::ExecutionTask::Shell(s)) if Arc::ptr_eq(s,shell))
+            {
+                shells.remove(id);
+            }
+        }
+    }
+
+    impl ShellTask {
+        pub(crate) fn output_path(&self) -> &Path {
+            &self.path
+        }
+        pub(crate) fn exit(&self) -> Option<ShellExit> {
+            self.terminal.borrow().clone()
+        }
+        pub(crate) async fn done(&self) -> ShellExit {
+            self.terminal
+                .subscribe()
+                .wait_for(Option::is_some)
+                .await
+                .expect("shell owner publishes completion")
+                .as_ref()
+                .unwrap()
+                .clone()
+        }
+        pub(crate) async fn terminate(&self) -> io::Result<()> {
+            self.kill.cancel();
+            self.done()
+                .await
+                .error
+                .map_or(Ok(()), |e| Err(io::Error::other(e)))
+        }
+        pub(crate) async fn write(&self, data: &[u8]) -> io::Result<()> {
+            self.pty
+                .lock()
+                .await
+                .as_mut()
+                .ok_or_else(|| io::Error::other("Shell is not running"))?
+                .write(data)
+        }
+        pub(crate) async fn job_pid(&self, pid: u32) -> io::Result<u32> {
+            self.pty
+                .lock()
+                .await
+                .as_ref()
+                .ok_or_else(|| io::Error::other("Shell is not running"))?
+                .job_pid(pid)
+        }
+        pub(crate) async fn resize(&self, size: PtySize) -> io::Result<()> {
+            self.pty
+                .lock()
+                .await
+                .as_ref()
+                .ok_or_else(|| io::Error::other("Shell is not running"))?
+                .resize(size)
+        }
+        pub(crate) fn page(
+            &self,
+            cursor: Option<u64>,
+            limit: usize,
+        ) -> Result<super::OutputPageReply, OutputPageError> {
+            let capture = self.capture.lock().unwrap();
+            let first = capture.total - capture.text.len() as u64;
+            let cursor = cursor.unwrap_or(first);
+            if cursor < first {
+                return Ok(super::OutputPageReply {
+                    text: String::new(),
+                    bytes: 0,
+                    next_cursor: None,
+                    truncated: true,
+                    retained_from: first,
+                    reset: Some(true),
+                });
+            }
+            let start = (cursor - first).min(capture.text.len() as u64) as usize;
+            let end = (start + limit + PAGE_CHAR_TRAILING_BYTES).min(capture.text.len());
+            let page = decode_page(
+                &capture.text.as_bytes()[start..end],
+                cursor,
+                limit,
+                first != 0,
+            )?;
+            Ok(super::OutputPageReply {
+                text: page.text,
+                bytes: page.bytes,
+                next_cursor: page.next_cursor,
+                truncated: page.truncated,
+                retained_from: first,
+                reset: None,
+            })
+        }
+        pub(crate) fn tail(&self) -> crate::workspace_tools::exec::OutputTail {
+            let capture = self.capture.lock().unwrap();
+            let (text, truncated) = bounded_preview(&capture.text, capture.total as usize);
+            crate::workspace_tools::exec::OutputTail {
+                text,
+                total_bytes: capture.total,
+                truncated,
+            }
+        }
+        pub(crate) async fn wait(&self, ms: Option<u64>) -> super::WaitReply {
+            let end = if let Some(ms) = ms {
+                tokio::select! {
+                    biased;
+                    end = self.done() => end,
+                    _ = tokio::time::sleep(Duration::from_millis(ms)) => {
+                        self.timeout.cancel();
+                        self.done().await
+                    }
+                }
+            } else {
+                self.done().await
+            };
+            let tail = self.tail();
+            let capture = self.capture.lock().unwrap();
+            let status = match end.status {
+                "exited" => super::WaitStatus::Exited,
+                "signaled" => super::WaitStatus::Signaled,
+                "timed_out" => super::WaitStatus::TimedOut,
+                "cancelled" => super::WaitStatus::Cancelled,
+                _ => super::WaitStatus::Failed,
+            };
+            let (exit_code, signal) = match end.exit {
+                Some(exit) => (
+                    Some(exit.exit_code() as i32),
+                    exit.signal().map(str::to_owned),
+                ),
+                None => (None, None),
+            };
+            super::WaitReply {
+                status,
+                exit_code,
+                signal,
+                duration_ms: end.duration,
+                output_path: self.path.clone(),
+                output_bytes: capture.total,
+                output_truncated: capture.total > capture.text.len() as u64,
+                preview: tail.text,
+                preview_truncated: tail.truncated,
+                failure_note: end.error,
+            }
+        }
+    }
 }
 
 #[cfg(test)]

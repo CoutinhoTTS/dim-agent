@@ -235,34 +235,42 @@ export type TaskRequest = {
   taskId: string
 }
 
+/** A request to start a persistent PTY shell on this execution node. */
+export type ShellRequest = {
+  taskId: string
+  cwd: string
+  workspace: string
+  roots: string[]
+  outputDir: string
+  cols: number
+  rows: number
+}
+
+export type ShellWrite = {
+  taskId: string
+  data: string
+}
+
+export type ShellResize = {
+  taskId: string
+  cols: number
+  rows: number
+}
+
 export type OutputRequest = {
   taskId: string
   cursor?: number | bigint | null
   limit?: number | bigint | null
 }
 
-/**
- * One page of a task's registered output file, as
- * `session.exec.output.page` answers it.
- */
-export type OutputPage = {
-  /** The page's text, sanitized like the tail preview. */
+/** A page of a task's captured output. */
+export type OutputPageReply = {
   text: string
-  /**
-   * The file bytes this page consumed; a client's next cursor is always
-   * `cursor + bytes`. `text` can be shorter because sanitization drops
-   * control characters.
-   */
   bytes: number | bigint
-  /**
-   * Present when the read found at least `limit` bytes, so the client may
-   * continue immediately; always `cursor + bytes`. Absent on a shorter or
-   * empty page, which does not mean the file ended: the client advances by
-   * `bytes` and asks again.
-   */
   nextCursor?: number | bigint | null
-  /** Whether the output file reached `OUTPUT_FILE_BYTE_LIMIT`. */
   truncated: boolean
+  retainedFrom: number | bigint
+  reset?: boolean | null
 }
 
 export type OutputPathReply = {
@@ -311,10 +319,25 @@ export interface HostPlatform {
    */
   settle(request: TaskRequest): Promise<void>
   /**
+   * Starts a persistent PTY shell on this node and returns the task id.
+   * @throws {HostPlatformErrorThrown}
+   */
+  shell(request: ShellRequest): Promise<SpawnReply>
+  /**
+   * Writes bytes to a shell task.
+   * @throws {HostPlatformErrorThrown}
+   */
+  write(request: ShellWrite): Promise<void>
+  /**
+   * Resizes a shell task's PTY.
+   * @throws {HostPlatformErrorThrown}
+   */
+  resize(request: ShellResize): Promise<void>
+  /**
    * Reads a page of a task's captured output.
    * @throws {HostPlatformErrorThrown}
    */
-  output(request: OutputRequest): Promise<OutputPage>
+  output(request: OutputRequest): Promise<OutputPageReply>
   /**
    * Writes the captured output to the task's log file and returns its path.
    * @throws {HostPlatformErrorThrown}
@@ -905,6 +928,30 @@ export type TaskError =
   | /** Required task facts could not be read. */ { read: [] }
   | /** No matching task or live output on this branch. */ "unknown"
   | /** This instance was unloaded. */ "closed"
+
+/**
+ * One page of a task's registered output file, as
+ * `session.exec.output.page` answers it.
+ */
+export type OutputPage = {
+  /** The page's text, sanitized like the tail preview. */
+  text: string
+  /**
+   * The file bytes this page consumed; a client's next cursor is always
+   * `cursor + bytes`. `text` can be shorter because sanitization drops
+   * control characters.
+   */
+  bytes: number | bigint
+  /**
+   * Present when the read found at least `limit` bytes, so the client may
+   * continue immediately; always `cursor + bytes`. Absent on a shorter or
+   * empty page, which does not mean the file ended: the client advances by
+   * `bytes` and asks again.
+   */
+  nextCursor?: number | bigint | null
+  /** Whether the output file reached `OUTPUT_FILE_BYTE_LIMIT`. */
+  truncated: boolean
+}
 
 /** Why one paged read of a task's registered output file answered nothing. */
 export type OutputPageError =

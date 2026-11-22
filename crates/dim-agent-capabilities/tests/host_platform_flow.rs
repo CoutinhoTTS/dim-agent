@@ -1295,3 +1295,88 @@ async fn the_host_platform_service_starts_and_waits_for_a_command() {
     assert_eq!(missing.code(), Some("task_unknown"));
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[tokio::test]
+async fn the_host_platform_service_serves_a_shell() {
+    let dir = std::env::temp_dir().join(unique("dim-host-shell"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let root = rutis::Ctx::root_with(tokio::runtime::Handle::current());
+    let catalog = dim_agent_capabilities::catalog();
+    let build = Default::default();
+    let names = dim_agent_runtime::Names::copy(&catalog, &build);
+    let _execution = root
+        .provide(ExecutionSettingsHost::fixed(Default::default()))
+        .unwrap();
+    let _toolchain = root.provide(ToolchainSourceHost::fixed(vec![])).unwrap();
+    let plugin = root.plugin(
+        HostPlatformPlugin::new(
+            &names,
+            HostPlatformConfig {
+                execution: names.key().unwrap(),
+                toolchain: names.key().unwrap(),
+                exec_shell_file: None,
+                command_files: None,
+                home: Some(dir.clone()),
+            },
+        )
+        .unwrap(),
+    );
+    (&plugin).await.unwrap();
+    let face = root
+        .get_at::<dyn rutis_bridge::session::HostDispatch>(&rutis_bridge::session::host_key(
+            "hostPlatform",
+        ))
+        .unwrap();
+    let invoke = |method: &'static str, request: serde_json::Value| {
+        let face = face.clone();
+        async move {
+            rutis_bridge::session::settle(
+                face.invoke(method, serde_json::json!([request]).into())
+                    .unwrap(),
+            )
+            .await?
+            .json()
+        }
+    };
+    let path = dir.to_string_lossy().into_owned();
+    invoke(
+        "shell",
+        serde_json::json!({
+            "taskId": "service-shell",
+            "cwd": path,
+            "workspace": path,
+            "roots": [],
+            "outputDir": path,
+            "cols": 80,
+            "rows": 24
+        }),
+    )
+    .await
+    .unwrap();
+    invoke(
+        "write",
+        serde_json::json!({"taskId": "service-shell", "data": "cHJpbnRmIGhpOyBleGl0IDcK"}),
+    )
+    .await
+    .unwrap();
+    let terminal = invoke(
+        "wait",
+        serde_json::json!({"taskId": "service-shell", "timeoutMs": 10000}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(terminal["status"], "exited");
+    assert_eq!(terminal["exitCode"], 7);
+    assert!(terminal["preview"].as_str().unwrap().contains("hi"));
+    let page = invoke(
+        "output",
+        serde_json::json!({"taskId": "service-shell", "limit": 4096}),
+    )
+    .await
+    .unwrap();
+    assert!(page["text"].as_str().unwrap().contains("hi"));
+    invoke("settle", serde_json::json!({"taskId": "service-shell"}))
+        .await
+        .unwrap();
+    std::fs::remove_dir_all(dir).unwrap();
+}
