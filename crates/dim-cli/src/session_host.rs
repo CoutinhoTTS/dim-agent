@@ -830,7 +830,17 @@ impl Worker {
                         .into(),
                 );
             }
-            self.attach(id.clone(), SwitchKind::Resumed).await?;
+            // A launch preset or model is applied to the line the attach reply
+            // names, after the attachment. Registering this interface first
+            // would make the resumed leaf observable, and addressable for
+            // approvals, while the old policy or model is still in force; it
+            // therefore registers once they are applied (design §14).
+            let deferred = self.options.permission.is_some()
+                || self.options.startup.is_some()
+                || self.options.effort.is_some()
+                || self.options.model.is_some();
+            self.attach(id.clone(), SwitchKind::Resumed, !deferred)
+                .await?;
             // The preset belongs to the line the attach reply named
             // (design §14); a directory read would be one round trip older.
             if let Some(preset) = self.options.permission {
@@ -842,6 +852,9 @@ impl Worker {
                     })?;
             }
             adopt_startup(&mut self.client, &self.options, &id, &self.default_branch).await?;
+            if deferred {
+                self.register_ui().await?;
+            }
             return Ok(());
         }
         if self.client.offers("session.model.preview")
@@ -957,6 +970,7 @@ impl Worker {
                     Some(created.model),
                     SwitchKind::New,
                     attached_session,
+                    true,
                 )
                 .await?;
                 if let Some(worktree) = worktree {
@@ -977,6 +991,7 @@ impl Worker {
         model: Option<ModelId>,
         kind: SwitchKind,
         attached_session: String,
+        register: bool,
     ) -> crate::Result<()> {
         if !attached_session.is_empty() && attached_session != session_id {
             self.client
@@ -1041,7 +1056,9 @@ impl Worker {
         self.send(Update::SuggestionMethods(offered));
         self.suggestion_throttle_noted = false;
         self.session_cwd = attached.cwd;
-        self.register_ui().await?;
+        if register {
+            self.register_ui().await?;
+        }
         self.mcp_required.clear();
         // The reply's record is the root's adopted configuration, the model the
         // conversation keeps when it moves back to the root (design §14).
@@ -1253,9 +1270,15 @@ impl Worker {
             .find(|entry| entry.id == model.model_id)
     }
 
-    async fn attach(&mut self, session_id: String, kind: SwitchKind) -> crate::Result<()> {
+    async fn attach(
+        &mut self,
+        session_id: String,
+        kind: SwitchKind,
+        register: bool,
+    ) -> crate::Result<()> {
         let attached_session = self.invalidate_projection();
-        self.enter(session_id, None, kind, attached_session).await
+        self.enter(session_id, None, kind, attached_session, register)
+            .await
     }
 
     async fn suggestion_offered(&mut self) -> bool {
@@ -1636,7 +1659,7 @@ impl Worker {
                     )
                     .await;
                 match forked {
-                    Ok(forked) => self.attach(forked.session_id, SwitchKind::Forked).await?,
+                    Ok(forked) => self.attach(forked.session_id, SwitchKind::Forked, true).await?,
                     Err(error) => {
                         if !self.reportable(
                             crate::report::Captured::observed(
@@ -1775,7 +1798,8 @@ impl Worker {
                 }));
             }
             Command::Resume(session_id) => {
-                self.attach(session_id.clone(), SwitchKind::Resumed).await?;
+                self.attach(session_id.clone(), SwitchKind::Resumed, true)
+                    .await?;
                 if let Some(preset) = self.options.permission
                     && self.client.supports(&permission::PRESET_METHODS)
                 {

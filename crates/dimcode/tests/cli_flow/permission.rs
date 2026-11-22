@@ -140,6 +140,65 @@ fn tui_resume_writes_the_explicit_permission_on_the_attached_line() {
     }
 }
 
+/// A resumed launch registers its leaf only once the launch preset is in
+/// force: another client cannot see the interface online, or address it for
+/// approvals, while the resumed line still carries its old policy
+/// (design §14).
+#[test]
+fn tui_resume_registers_its_leaf_after_the_launch_preset_is_applied() {
+    let home = Home::new();
+    let (opened, open_seen) = std::sync::mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        wire.hello(&[
+            "ui.leaf.2",
+            "session.permission.get",
+            "session.permission.update",
+        ]);
+        wire.2 = true;
+        let attach = wire.read_any();
+        assert_eq!(attach["method"], json!("session.attach"));
+        let mut record = attach_record(&attach);
+        record["defaultBranch"] = json!({"branchId":"line-1","sequence":5});
+        wire.reply(&attach, record);
+        let update = loop {
+            let request = wire.read_any();
+            match request["method"].as_str().unwrap_or_default() {
+                "session.history" => wire.reply(
+                    &request,
+                    json!({"events":[],"through":5,"nextAfter":5,"done":true}),
+                ),
+                "session.permission.get" => wire.reply(
+                    &request,
+                    json!({"version":7,"policy":policy("full-access", &[], &[])}),
+                ),
+                "session.permission.update" => break request,
+                "ui.open" => panic!(
+                    "the leaf registers before the launch preset is applied: {request}"
+                ),
+                "account.providers" => wire.reply(&request, json!([])),
+                "provider.list" => wire.reply(&request, json!({"providers":[]})),
+                "session.context.usage" => wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+                    "code":-32601,"message":"Unknown method: session.context.usage",
+                    "data":{"appError":"unknown_method"}}})),
+                other => panic!("unexpected {other}: {request}"),
+            }
+        };
+        assert_eq!(update["params"]["policy"]["preset"], json!("read-only"));
+        wire.reply(&update, json!({"version":8}));
+        let open = wire.read("ui.open");
+        wire.reply(&open, json!({"uiId":"ui-1","token":"token-1"}));
+        opened.send(()).unwrap();
+    });
+    let mut command = home.command();
+    command.args(["--permission", "read-only"]);
+    sized(&mut command, 100, 32);
+    let mut terminal = Terminal::resume_tui(command);
+    open_seen.recv_timeout(PATIENCE).unwrap();
+    home.kill(&terminal);
+    terminal.wait();
+    daemon.join().unwrap();
+}
+
 /// One submitted turn that completes without tool calls.
 fn quiet_turn(wire: &mut Wire) {
     let submit = wire.read("session.submit");
