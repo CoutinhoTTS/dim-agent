@@ -7,6 +7,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         // providers_panel.rs
         "Providers" => "Fornecedores",
         "Enter open · Esc clear/close" => "Enter abrir · Esc limpar/fechar",
+        "↑↓/Tab move · Enter activate · Ctrl+R reread · Esc back" => {
+            "↑↓/Tab mover · Enter ativar · Ctrl+R reler · Esc voltar"
+        }
         "↑↓/Tab move · Enter activate · Esc back" => {
             "↑↓/Tab mover · Enter ativar · Esc voltar"
         }

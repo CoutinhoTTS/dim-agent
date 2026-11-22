@@ -7,6 +7,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         // providers_panel.rs
         "Providers" => "프로바이더",
         "Enter open · Esc clear/close" => "Enter 열기 · Esc 지우기/닫기",
+        "↑↓/Tab move · Enter activate · Ctrl+R reread · Esc back" => {
+            "↑↓/Tab 이동 · Enter 실행 · Ctrl+R 새로 읽기 · Esc 뒤로"
+        }
         "↑↓/Tab move · Enter activate · Esc back" => "↑↓/Tab 이동 · Enter 실행 · Esc 뒤로",
         "Loading providers..." => "프로바이더 불러오는 중…",
         "No matching providers." => "일치하는 프로바이더 없음",

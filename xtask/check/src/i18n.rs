@@ -3,17 +3,17 @@
 //! `ListPanel` text passes a key the Simplified Chinese table lacks. A key is
 //! the English text itself (`crates/dim-cli/src/ui/i18n/mod.rs`), so a table is
 //! a `lookup` function whose match arms are string literals, and a call site is
-//! a key argument that reduces to string literals: one literal, or the branches
-//! of an `if`, `match` or block. `ListPanel` keeps its title, loading text,
-//! empty text and no-match text English until it draws, so those arguments are
-//! keys too.
+//! a key argument that reduces to string literals: one literal, the text of a
+//! constant of the same file, or the branches of an `if`, `match` or block.
+//! `ListPanel` keeps its title, loading text, empty text and no-match text
+//! English until it draws, so those arguments are keys too.
 //!
 //! Both sides are parsed, not matched by hand: a table arm whose pattern is
 //! neither a string nor the catch-all is a failure, so a new shape cannot pass
 //! by being skipped. A `#[cfg(test)]` item is a fixture rather than text the
 //! interface draws, so the scan skips it. A key argument that reduces to no
-//! literal is reported rather than failed: the ones left name constants, which
-//! the check does not follow.
+//! literal is reported rather than failed: the ones left name a parameter, a
+//! field or a constant of another file, which the check does not follow.
 use std::{
     collections::{BTreeMap, BTreeSet},
     error::Error,
@@ -183,12 +183,15 @@ impl CallKeys {
     }
 }
 
-/// Every literal key in `text` (`site` names it in the result), with the line
-/// it is passed on.
+/// Every key in `text` (`site` names it in the result), with the line it is
+/// passed on.
 fn call_keys(text: &str, site: &str) -> Result<CallKeys> {
     let file: syn::File = syn::parse_file(text)?;
+    let mut consts = Consts::default();
+    consts.visit_file(&file);
     let mut visitor = Calls {
         site: site.to_owned(),
+        consts: consts.0,
         found: CallKeys::default(),
     };
     visitor.visit_file(&file);
@@ -253,8 +256,59 @@ fn key_positions(function: &Expr) -> Option<&'static [usize]> {
     }
 }
 
+/// The text a `&str` constant holds, when its value is one string.
+fn constant_value(ty: &syn::Type, value: &Expr) -> Option<String> {
+    let syn::Type::Reference(reference) = ty else {
+        return None;
+    };
+    let syn::Type::Path(text) = &*reference.elem else {
+        return None;
+    };
+    if !text.path.is_ident("str") {
+        return None;
+    }
+    match value {
+        Expr::Lit(ExprLit {
+            lit: Lit::Str(text),
+            ..
+        }) => Some(text.value()),
+        _ => None,
+    }
+}
+
+/// The `&str` constants of one file, by name.
+#[derive(Default)]
+struct Consts(BTreeMap<String, String>);
+
+impl<'ast> Visit<'ast> for Consts {
+    fn visit_item(&mut self, node: &'ast Item) {
+        if test_item(node) {
+            return;
+        }
+        if let Item::Const(item) = node
+            && let Some(text) = constant_value(&item.ty, &item.expr)
+        {
+            self.0.insert(item.ident.to_string(), text);
+        }
+        visit::visit_item(self, node);
+    }
+
+    fn visit_impl_item(&mut self, node: &'ast ImplItem) {
+        if test_impl_item(node) {
+            return;
+        }
+        if let ImplItem::Const(item) = node
+            && let Some(text) = constant_value(&item.ty, &item.expr)
+        {
+            self.0.insert(item.ident.to_string(), text);
+        }
+        visit::visit_impl_item(self, node);
+    }
+}
+
 struct Calls {
     site: String,
+    consts: BTreeMap<String, String>,
     found: CallKeys,
 }
 
@@ -266,7 +320,11 @@ impl Calls {
         match expr {
             Expr::Lit(ExprLit {
                 lit: Lit::Str(key), ..
-            }) => self.key(key),
+            }) => self.key(&key.value(), key.span()),
+            Expr::Path(node) => match self.constant(&node.path) {
+                Some(text) => self.key(&text, expr.span()),
+                None => self.unreadable(expr.span()),
+            },
             Expr::If(node) => {
                 self.block(&node.then_branch);
                 if let Some((_, otherwise)) = &node.else_branch {
@@ -309,17 +367,25 @@ impl Calls {
         }
     }
 
-    /// Adds `key`, unless it is empty: a panel draws nothing for one, so no
-    /// table holds it.
-    fn key(&mut self, key: &syn::LitStr) {
-        let text = key.value();
+    /// Adds `text` at `span`, unless it is empty: a panel draws nothing for
+    /// one, so no table holds it.
+    fn key(&mut self, text: &str, span: proc_macro2::Span) {
         if text.is_empty() {
             return;
         }
-        let found = (text, format!("{}:{}", self.site, key.span().start().line));
+        let found = (
+            text.to_owned(),
+            format!("{}:{}", self.site, span.start().line),
+        );
         if !self.found.keys.contains(&found) {
             self.found.keys.push(found);
         }
+    }
+
+    /// The text of the constant `path` names, when it is one of this file's.
+    fn constant(&self, path: &syn::Path) -> Option<String> {
+        let name = path.get_ident()?;
+        self.consts.get(&name.to_string()).cloned()
     }
 
     fn unreadable(&mut self, span: proc_macro2::Span) {

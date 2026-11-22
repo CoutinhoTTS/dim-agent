@@ -7,6 +7,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         // providers_panel.rs
         "Providers" => "プロバイダー",
         "Enter open · Esc clear/close" => "Enter 開く · Esc 消去/閉じる",
+        "↑↓/Tab move · Enter activate · Ctrl+R reread · Esc back" => {
+            "↑↓/Tab 移動 · Enter 実行 · Ctrl+R 再読込 · Esc 戻る"
+        }
         "↑↓/Tab move · Enter activate · Esc back" => "↑↓/Tab 移動 · Enter 実行 · Esc 戻る",
         "Loading providers..." => "プロバイダーを読込中…",
         "No matching providers." => "一致するプロバイダーなし。",

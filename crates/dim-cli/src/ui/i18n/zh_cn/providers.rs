@@ -6,6 +6,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Refreshing model list… · esc close" => "正在刷新模型列表… · Esc 关闭",
         "Providers" => "模型服务",
         "Enter open · Esc clear/close" => "Enter 打开 · Esc 清除/关闭",
+        "↑↓/Tab move · Enter activate · Ctrl+R reread · Esc back" => {
+            "↑↓/Tab 移动 · Enter 执行 · Ctrl+R 重新读取 · Esc 返回"
+        }
         "↑↓/Tab move · Enter activate · Esc back" => "↑↓/Tab 移动 · Enter 执行 · Esc 返回",
         "Loading providers..." => "正在加载模型服务…",
         "No matching providers." => "无匹配的模型服务。",

@@ -288,6 +288,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "Files" => "Archivos",
         "Searching…" => "Buscando…",
+        "type filter · enter select · esc clear/close" => {
+            "escribe filtro · enter elegir · esc borrar/cerrar"
+        }
         "↑↓ select · enter/tab insert · esc close" => {
             "↑↓ elegir · enter/tab insertar · esc cerrar"
         }

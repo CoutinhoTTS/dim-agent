@@ -7,6 +7,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         // providers_panel.rs
         "Providers" => "模型供應商",
         "Enter open · Esc clear/close" => "Enter 開啟 · Esc 清除/關閉",
+        "↑↓/Tab move · Enter activate · Ctrl+R reread · Esc back" => {
+            "↑↓/Tab 移動 · Enter 執行 · Ctrl+R 重新讀取 · Esc 返回"
+        }
         "↑↓/Tab move · Enter activate · Esc back" => "↑↓/Tab 移動 · Enter 執行 · Esc 返回",
         "Loading providers..." => "正在載入模型供應商…",
         "No matching providers." => "無相符的模型供應商。",
