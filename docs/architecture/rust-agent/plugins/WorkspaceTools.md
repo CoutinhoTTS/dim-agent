@@ -375,9 +375,16 @@ Known limits:
   and their cleanup is the parent-directory name check-then-unlink the
   replacement path already uses.
 - The Linux fallback keeps 0600 when the parent carries a POSIX default ACL.
-- A parent that cannot be read keeps the new file at 0600, because the ACL and
-  umask probes cannot run; only the parent sync then reports the unreadable
-  directory, exactly as the staging path did before this change.
+- On Linux, a parent that is writable and searchable but not readable keeps
+  the new file at 0600, because the default-ACL probe needs read permission and
+  an unreadable directory counts as an unknown ACL; only the parent sync then
+  reports the unreadable directory, exactly as the staging path did before this
+  change.
+- On macOS, such a parent still admits creation and publication because no
+  probe touches it, so the file takes `0o666 & ~umask` from the umask captured
+  at startup, usually 0644; only the parent sync reports the unreadable
+  directory, and a library or test caller that does not capture the umask
+  keeps 0600.
 - macOS caches the umask the process had at startup; native code that changes
   the process umask afterwards is not reflected.
 - A parent whose inheritable ACL denies delete refuses the macOS staging
