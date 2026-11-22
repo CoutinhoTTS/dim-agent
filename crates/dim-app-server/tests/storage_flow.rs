@@ -14,9 +14,9 @@ use dim_agent_capabilities::file_storage::FileStoragePlugin;
 use dim_agent_capabilities::history::HistoryRenderer;
 use dim_agent_runtime::testing::{chain_events, timeline_events};
 use dim_agent_runtime::{
-    AgentBuilder, AgentConfig, AgentError, BranchOptions, MemoryTimelineStore, SessionConfig,
-    StoredEvent, Timeline, TimelineKey, TimelineQueryScope, TimelineStore, TimelineTrace,
-    TraceStep, testing::MinimalHost,
+    AgentBuilder, AgentConfig, AgentError, BranchOptions, Feature, MemoryTimelineStore,
+    SessionConfig, StoredEvent, Timeline, TimelineKey, TimelineQueryScope, TimelineStore,
+    TimelineTrace, TimelineTreeControl, TraceStep, testing::MinimalHost,
 };
 use dim_agent_types::{
     grant::{GrantKind, GrantMode, SessionGrant},
@@ -2464,11 +2464,7 @@ async fn a_restore_resolves_its_reporting_identity_once() {
 
 /// Each tree resolves the identity its opening progress is reported under
 /// within its own generation: a Session whose tree closed and was restored
-/// again reports under the new tree's live fiber, never the previous one's. A
-/// row reload rebuilds the tree by the same path (`TimelineTreePlugin::apply`
-/// creates it, and the owning row's unload withdraws the registration that
-/// disposes every copy), but the suite can only move to another generation by
-/// restoring the Session.
+/// again reports under the new tree's live fiber, never the previous one's.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn each_tree_generation_resolves_its_own_reporting_identity() {
     use dim_agent_capabilities::timeline_tree::testing::count_identity_resolutions;
@@ -2513,6 +2509,129 @@ async fn each_tree_generation_resolves_its_own_reporting_identity() {
             .iter()
             .any(|plugin| plugin.id == ids[0] && plugin.state == FiberState::Active),
         "the first tree's fiber is gone, so a report under it would be dropped"
+    );
+    settled("the host closes", agent.close()).await.unwrap();
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+}
+
+/// A Session part that hands the flow the tree copy its Session's row mounts.
+/// Its declared inject makes it reload with that copy, so every tree it
+/// captures belongs to the generation that just applied.
+struct CaptureTree {
+    tree: rutis::host::Key<dim_agent_capabilities::timeline_tree::TimelineTree>,
+    captured: tokio::sync::mpsc::UnboundedSender<Arc<dyn TimelineTreeControl>>,
+}
+impl CaptureTree {
+    fn new(
+        names: &dim_agent_runtime::Names<'_>,
+        captured: tokio::sync::mpsc::UnboundedSender<Arc<dyn TimelineTreeControl>>,
+    ) -> rutis::Result<Self> {
+        Ok(Self {
+            tree: names.key()?,
+            captured,
+        })
+    }
+}
+impl rutis::host::DynPlugin for CaptureTree {
+    fn name(&self) -> &str {
+        "test.capture-tree"
+    }
+    fn injects(&self) -> Vec<rutis::host::TypeKey> {
+        vec![self.tree.erase()]
+    }
+    fn apply<'a>(
+        &'a self,
+        ctx: &'a rutis::Ctx,
+    ) -> rutis::host::BoxFuture<'a, rutis::Result<rutis::host::Effect>> {
+        Box::pin(async move {
+            let tree = ctx.require_at(&self.tree)?;
+            let _ = self.captured.send(tree);
+            Ok(rutis::host::Effect::Done)
+        })
+    }
+}
+
+/// A row reload rebuilds the tree for the Session that is already open: the
+/// new copy's tree reports under its own live fiber, and the disposed copy's
+/// fiber is no longer Active.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_row_reload_resolves_the_new_tree_reporting_identity() {
+    use dim_agent_capabilities::timeline_tree::testing::count_identity_resolutions;
+    let database = Database::new();
+    let (id, _) = stored_two_line_session(&database).await;
+    let resolutions = count_identity_resolutions(&id);
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    let (captured, mut trees) = tokio::sync::mpsc::unbounded_channel();
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    dim_agent_capabilities::defaults::mock_hosts(&mut builder);
+    dim_agent_capabilities::defaults::install(&mut builder);
+    builder.require_feature(
+        Feature::new("test.capture-tree").session("test.capture-tree", move |names| {
+            Ok(Box::new(CaptureTree::new(names, captured.clone())?))
+        }),
+    );
+    builder.startup_timeout(Duration::from_secs(1));
+    builder.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(store.clone()));
+    let agent = MinimalHost::start(&builder).await.unwrap();
+    let session = settled(
+        "the first restore completes",
+        agent.restore_session(id.clone()),
+    )
+    .await
+    .expect("a restore within its opening bound completes");
+    let first = settled("the first tree is captured", async {
+        trees.recv().await.expect("a mounted tree copy")
+    })
+    .await;
+    settled(
+        "the TimelineTree row reloads",
+        agent.loader().restart("TimelineTree"),
+    )
+    .await
+    .expect("the row's copies reload");
+    let second = settled("the reloaded tree is captured", async {
+        loop {
+            let tree = trees.recv().await.expect("a mounted tree copy");
+            if !Arc::ptr_eq(&tree, &first) {
+                break tree;
+            }
+        }
+    })
+    .await;
+    let branches = store.branches(&id).await.unwrap();
+    settled(
+        "the reloaded tree restores the stored Session",
+        second.restore(branches),
+    )
+    .await
+    .expect("the reloaded tree restores the stored branches");
+    let ids = resolutions.ids();
+    assert_eq!(
+        ids.len(),
+        2,
+        "each tree resolves the identity its reports are attributed to"
+    );
+    assert_ne!(
+        ids[0], ids[1],
+        "the reloaded tree resolves its own fiber, not the disposed copy's"
+    );
+    let live = session.diagnostics().unwrap().plugins;
+    assert!(
+        live.iter().any(|plugin| plugin.id == ids[1]
+            && plugin.name == "TimelineTree"
+            && plugin.state == FiberState::Active),
+        "the reloaded tree reports under its own live fiber"
+    );
+    assert!(
+        !agent
+            .root()
+            .diagnostics()
+            .plugins
+            .iter()
+            .any(|plugin| plugin.id == ids[0] && plugin.state == FiberState::Active),
+        "the reloaded row disposed the first tree's fiber"
     );
     settled("the host closes", agent.close()).await.unwrap();
     store.close().await.unwrap();

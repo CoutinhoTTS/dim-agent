@@ -95,7 +95,9 @@ Session close, and closing is not deletion of persisted history.
 [storage_flow.rs](../../../../crates/dim-app-server/tests/storage_flow.rs):
 `a_silent_restore_times_out_naming_the_restore_phase`,
 `a_slow_restore_reports_progress_and_keeps_the_opening_alive`,
-`a_restore_resolves_its_reporting_identity_once`.
+`a_restore_resolves_its_reporting_identity_once`,
+`each_tree_generation_resolves_its_own_reporting_identity`,
+`a_row_reload_resolves_the_new_tree_reporting_identity`.
 
 <!-- generated:plugin TimelineTree — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
 | 项 | 值 |
