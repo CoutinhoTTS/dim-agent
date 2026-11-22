@@ -9682,7 +9682,7 @@ async fn a_switched_line_keeps_its_identity_after_a_compaction() {
     assert!(!note.1, "the note is live");
 
     // A line the user opened, which the move makes the default branch.
-    let cut = session.sequence("main").unwrap();
+    let cut = idle_cut(&session, "main").await;
     let opened = soon(session.branch(
         "main".into(),
         cut,
