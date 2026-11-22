@@ -1349,14 +1349,16 @@ impl Stall {
 }
 
 /// Where a stalled child stops: before it prints anything (a startup stall),
-/// after it printed its outcome (a child that cannot exit), or after its run
-/// stopped on its wall clock (a cleanup that never settles).
+/// after it printed its outcome (a child that cannot exit), after its run
+/// stopped on its wall clock (a cleanup that never settles), or before its
+/// served App Server's join finishes (a shutdown that never settles).
 #[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 enum StallPoint {
     BeforeOutcome,
     AfterOutcome,
     AfterWallClock,
+    AfterShutdown,
 }
 
 /// A test hook: how a run's child ends before its outcome line.
@@ -2849,9 +2851,9 @@ async fn child_outcome(params: &ChildParams, preflight: &Arc<Provider>) -> Child
     // under the one deadline the wall-clock stop fixed: the tree close waits
     // for the move the run stopped waiting on, and the child must print its
     // outcome and exit so the parent's worker is released (model-prompts
-    // §8.1). Every other run's join gets the settle grace, and a join that
-    // outlives it is attached to the outcome as a teardown failure instead
-    // of holding the child before it prints.
+    // §8.1). Every other run's join gets the settle grace, or the test hook's
+    // shorter grace, and a join that outlives it is attached to the outcome
+    // as a teardown failure instead of holding the child before it prints.
     let teardown = match cleanup_deadline {
         Some(deadline) => {
             if settings.stall_cleanup {
@@ -2868,14 +2870,38 @@ async fn child_outcome(params: &ChildParams, preflight: &Arc<Provider>) -> Child
             }
             None
         }
-        None => match tokio::time::timeout(SETTLE_BOUND, server.join()).await {
-            Ok(Ok(_)) => None,
-            Ok(Err(error)) => Some(format!("the run's serve server did not shut down: {error}")),
-            Err(_) => Some(format!(
-                "the run's serve server did not finish shutting down within {}s",
-                SETTLE_BOUND.as_secs_f64()
-            )),
-        },
+        None => {
+            let settle = settle_bound(settings.stall_cleanup);
+            let stalled = params
+                .stall
+                .as_ref()
+                .filter(|stall| stall.point == StallPoint::AfterShutdown);
+            if let Some(stall) = stalled {
+                // The hook's stand-in for a server that never finishes
+                // shutting down: the real join runs, and the wait after it
+                // does not return. The marker proves the child reached the
+                // shutdown under test.
+                let _ = std::fs::write(&stall.marker, "before its server's shutdown settles");
+            }
+            let join = async move {
+                if stalled.is_some() {
+                    let _ = server.join().await;
+                    std::future::pending().await
+                } else {
+                    server.join().await
+                }
+            };
+            match tokio::time::timeout(settle, join).await {
+                Ok(Ok(_)) => None,
+                Ok(Err(error)) => {
+                    Some(format!("the run's serve server did not shut down: {error}"))
+                }
+                Err(_) => Some(format!(
+                    "the run's serve server did not finish shutting down within {}s",
+                    settle.as_secs_f64()
+                )),
+            }
+        }
     };
     let mut outcome = outcome.unwrap_or_else(|error| {
         harness_outcome(format!("the run failed to finish: {error}"), Vec::new())
@@ -5359,17 +5385,7 @@ async fn drive_once(
             let export = String::from_utf8_lossy_owned(export);
             let (turns, failed_turn) = turns_in_export(&export);
             driven.turns = turns;
-            // The export is read after the run's own ending is fixed: a
-            // failed turn it records cannot replace the wall-clock stop the
-            // run reached, as the deferred window read below cannot either
-            // (model-prompts §8.1).
-            if let Some(error) = failed_turn
-                && driven.error.is_none()
-                && !driven.timed_out
-            {
-                driven.stop = "error";
-                driven.error = Some(error);
-            }
+            settle_failed_turn(&mut driven, failed_turn);
             export
         }
         Err(error) => {
@@ -5510,6 +5526,20 @@ fn turns_in_export(export: &str) -> (u32, Option<String>) {
         }
     }
     (turns, failed)
+}
+
+/// Applies the export's turn account to a run's own ending: a failed turn it
+/// records fails a run that did not stop on its wall clock, and cannot replace
+/// the wall-clock stop the run reached, as the deferred window read cannot
+/// either (model-prompts §8.1).
+fn settle_failed_turn(driven: &mut Driven, failed_turn: Option<String>) {
+    if let Some(error) = failed_turn
+        && driven.error.is_none()
+        && !driven.timed_out
+    {
+        driven.stop = "error";
+        driven.error = Some(error);
+    }
 }
 
 pub(crate) async fn selection(
@@ -10015,6 +10045,48 @@ mod tests {
             (2, Some("main: the turn failed: provider error".to_owned()))
         );
         assert_eq!(turns_in_export(""), (0, None));
+    }
+
+    /// The export's failed turn fails a run that did not stop on its wall
+    /// clock, but a run that did keeps that stop: a run can reach its wall
+    /// clock with a failed turn in its export that its notice stream did not
+    /// deliver before the stop, and the stop it reached stands
+    /// (model-prompts §8.1). Dedicated, because the flows that end on a
+    /// failed turn return before their export is read, so no flow brings the
+    /// two endings together.
+    #[test]
+    fn a_failed_turn_in_the_export_does_not_replace_a_wall_clock_stop() {
+        fn driven(stop: &'static str, timed_out: bool) -> Driven {
+            Driven {
+                session: String::new(),
+                stop,
+                timed_out,
+                cleanup_deadline: None,
+                turns: 0,
+                window: None,
+                decline_retries: 0,
+                switch_retries: 0,
+                error: None,
+            }
+        }
+        let failed_turn = || Some("main: the turn failed: provider error".to_owned());
+
+        let mut stopped = driven("seconds", true);
+        settle_failed_turn(&mut stopped, failed_turn());
+        assert_eq!(stopped.stop, "seconds", "the wall-clock stop stands");
+        assert_eq!(
+            stopped.error, None,
+            "the export's failed turn does not replace the stop's ending"
+        );
+
+        let mut idle = driven("idle", false);
+        settle_failed_turn(&mut idle, failed_turn());
+        assert_eq!(idle.stop, "error", "a failed turn fails an idle run");
+        assert_eq!(
+            idle.error.as_deref(),
+            Some("main: the turn failed: provider error"),
+            "the run records the failed turn's error"
+        );
     }
 
     /// A declared tool without a source cannot come from the product: the
@@ -15717,6 +15789,93 @@ mod tests {
                 "the killed child and its group are gone ({arm}, pid {pid})"
             );
         }
+    }
+
+    /// A run that did not stop on its wall clock keeps the outcome it reached
+    /// when its served App Server's shutdown never settles: the join is
+    /// bounded by the settle grace, the teardown failure is attached as an
+    /// error, and the child prints its outcome and exits, so the next scenario
+    /// runs on the same slot (model-prompts §8.1).
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_run_whose_server_never_settles_keeps_its_outcome() {
+        let fixture = Fixture::with_window(
+            "server-join-stall",
+            reads_the_workspace_file,
+            judged_scenario(),
+            &[("notes.txt", FILE_TEXT)],
+            131_072,
+        )
+        .await;
+        next_scenario(&fixture, 131_072);
+        let out = fixture.directory.join("out");
+        let mut options = fixture.options(out.clone());
+        options.jobs = 1;
+        // The shutdown under test never settles, and the settle grace is the
+        // test hook's 200ms, so the bound is reached without a real wait. The
+        // run itself does not stop on its wall clock.
+        options.stall_cleanup = true;
+        options.stall = Some(Stall {
+            run: Some(("current".into(), "case".into())),
+            point: StallPoint::AfterShutdown,
+            // The parent's own bound stays past the child's settle grace, so
+            // the child's ending is the teardown, not the supervisor's.
+            bound_ms: 5_000,
+        });
+        let report = tokio::time::timeout(SUBPROCESS_EVAL_GUARD, fixture.evaluate(&options))
+            .await
+            .expect("the evaluation returns though a server never settles")
+            .expect("the evaluation records both scenarios");
+        let records = fixture.records(&out);
+        assert_eq!(records.len(), 4, "two scenarios, both arms: {report}");
+        for record in records
+            .iter()
+            .filter(|record| record["scenario"] == "case" && record["arm"] == "current")
+        {
+            assert_eq!(record["stop"], "idle", "{record}");
+            assert_eq!(record["failed"], true, "{record}");
+            assert_eq!(record["judgeOutcome"], "judged", "{record}");
+            let error = record["error"].as_str().unwrap_or_default();
+            assert!(
+                error.contains("did not finish shutting down within"),
+                "the run names the teardown failure: {record}"
+            );
+            assert!(
+                record["durationMs"].as_f64().unwrap_or_default() < 20_000.0,
+                "the run ends within its settle grace, not at a longer one: {record}"
+            );
+            assert!(
+                out.join("outputs")
+                    .join("current")
+                    .join("case")
+                    .join("run-0.timeline.jsonl")
+                    .exists(),
+                "the printed outcome keeps its export: {record}"
+            );
+        }
+        let marker = out
+            .join("children")
+            .join("current")
+            .join("case")
+            .join("run-0.stall");
+        assert_eq!(
+            std::fs::read_to_string(&marker).unwrap_or_default(),
+            "before its server's shutdown settles",
+            "the child reached its served server's shutdown"
+        );
+        for record in records
+            .iter()
+            .filter(|record| !(record["scenario"] == "case" && record["arm"] == "current"))
+        {
+            assert_eq!(record["stop"], "idle", "{record}");
+            assert_eq!(record["failed"], false, "{record}");
+            assert_eq!(record["judgeOutcome"], "judged", "{record}");
+        }
+        assert_eq!(
+            fixture.judge().len(),
+            4,
+            "both case runs reached the judge; the next scenario's runs were answered"
+        );
     }
 
     /// The fixture's basic scenario at a window the judge's view fits: one
