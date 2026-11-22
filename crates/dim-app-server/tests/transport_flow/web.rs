@@ -1429,11 +1429,18 @@ async fn the_web_assembly_reads_the_account_only_when_managed_search_is_needed()
     );
 
     configure(&mut client, json!({})).await;
-    create_with_tools(&mut client, Some(json!(["web_search", "web_fetch"]))).await;
+    await_reads(&reads, 1).await;
     assert_eq!(
         reads.load(Ordering::SeqCst),
         1,
-        "the default service reads the account once"
+        "switching the open Session to the default service observes the account once"
+    );
+    create_with_tools(&mut client, Some(json!(["web_search", "web_fetch"]))).await;
+    await_reads(&reads, 2).await;
+    assert_eq!(
+        reads.load(Ordering::SeqCst),
+        2,
+        "the default service reads the account once for the new Session"
     );
 
     drop(client);
