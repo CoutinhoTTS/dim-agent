@@ -343,19 +343,26 @@ original owner, group, mode and extended attributes before the rename.
   with `linkat("/proc/self/fd/<fd>", AT_SYMLINK_FOLLOW)`, which never replaces an
   existing name. The kernel settles the mode, the parent's POSIX default ACL
   and the `setgid` group at creation, and preparation has no directory entry to
-  clean up. Creation and publication act through an `O_PATH` handle of the
-  parent, so a directory that is writable and searchable but not readable still
-  admits a new file. A filesystem without `O_TMPFILE` (`EOPNOTSUPP`, `EISDIR`,
-  `EINVAL`, `ENOENT`, or an absent `/proc/self/fd`) falls back to the named 0600
-  sibling. On that path, a parent without `system.posix_acl_default` gives the
+  clean up. The parent is opened once, before anything is created, and staging,
+  the default-ACL probe, publication and the directory sync all run relative to
+  that handle; a directory that is writable and searchable but not readable
+  still admits a new file, and a parent renamed during preparation cannot move
+  the file into a directory other than the one whose metadata it inherited.
+  A filesystem without `O_TMPFILE` (`EOPNOTSUPP`, `EISDIR`, `EINVAL`, `ENOENT`,
+  or an absent `/proc/self/fd`) falls back to the named 0600 sibling. A
+  filesystem or process that cannot link the anonymous inode through
+  `/proc/self/fd` (`EOPNOTSUPP`, `EXDEV`, `EINVAL`, `ENOENT`) takes the same
+  fallback; an existing target or an access failure is still reported as one.
+  On the named path, a parent without `system.posix_acl_default` gives the
   sibling `0o666 & ~umask` through `fchmod` immediately before the link; a
   parent with a default ACL keeps it at 0600, because an existing inode cannot
   merge that ACL. The umask is read from `/proc/self/status`. Where a filesystem
   has no POSIX ACL support, an anonymous inode gets the same mode before the
   link, because kernels before 4.19 omitted the umask strip in `vfs_tmpfile`
   (`ac6800e279a2`). When the umask or the parent's default ACL cannot be read,
-  the new file keeps 0600 rather than publishing a mode that cannot be checked;
-  an unreadable parent reaches that case because the ACL probe needs read
+  the new file keeps at most the owner bits its inode already has, never more
+  than 0600, rather than publishing a mode that cannot be checked; an
+  unreadable parent reaches that case because the ACL probe needs read
   permission, which a write-only parent does not grant.
 - **macOS.** The named 0600 sibling is created in the target's parent, so XNU
   assigns the parent's group and the inheritable file ACL at creation; an
@@ -373,11 +380,14 @@ Known limits:
   creation.
 - The fallback and macOS paths apply the mode between the `fchmod` and the link,
   and their cleanup is the parent-directory name check-then-unlink the
-  replacement path already uses.
+  replacement path already uses. A failed publication restores the sibling's
+  private 0600 mode before that cleanup, so a removal the parent refuses leaves
+  the unpublished content private.
 - The Linux fallback keeps 0600 when the parent carries a POSIX default ACL.
 - On Linux, a parent that is writable and searchable but not readable keeps
-  the new file at 0600, because the default-ACL probe needs read permission and
-  an unreadable directory counts as an unknown ACL; only the parent sync then
+  the new file private, at most the owner bits its inode already has and never
+  more than 0600, because the default-ACL probe needs read permission and an
+  unreadable directory counts as an unknown ACL; only the parent sync then
   reports the unreadable directory, exactly as the staging path did before this
   change.
 - On macOS, such a parent still admits creation and publication because no
@@ -389,6 +399,8 @@ Known limits:
   the process umask afterwards is not reflected.
 - A parent whose inheritable ACL denies delete refuses the macOS staging
   entry's removal, so that entry stays behind after a successful publication.
+  After a failed publication the entry has its private 0600 mode back, so the
+  refused removal cannot leave unpublished content readable.
 
 ### Rule check
 
@@ -501,16 +513,22 @@ drives new-file creation: `a_new_file_takes_the_process_umask` runs a child
 process under umasks 022, 002, 300 and 700 on both Unix platforms and checks
 that a replacement keeps its original mode, `a_new_file_takes_the_creation_mode_on_the_named_fallback` repeats the mode check over the
 named staging path on Linux, `a_new_file_in_a_write_only_parent_is_created`
-checks that a write-only parent still admits a new file and leaves it at 0600,
+checks that a write-only parent still admits a new file and leaves it private,
 `a_new_file_takes_the_parents_acl_on_macos` covers five inheritable ACL shapes
 under the same umasks, and `a_new_file_under_a_deny_delete_acl_keeps_its_staging_entry`
 fixes the residue limit. The in-crate Linux tests
+`a_new_file_stays_on_its_opened_parent_through_publication`,
+`an_unsupported_anonymous_publication_falls_back_to_named_staging`,
+`a_fallback_publication_does_not_replace_an_existing_entry`,
+`an_unknown_policy_clamps_an_anonymous_new_file_to_its_owner_bits`,
 `an_unread_umask_keeps_an_anonymous_new_file_private` and
 `an_anonymous_new_file_has_no_entry_and_does_not_overwrite` need a filesystem
 with `O_TMPFILE` and fail with that reason when the test directory has none, so
-they never pass on the named fallback. The Linux tests that need `setfacl`, a
-foreign-group `setgid` directory or a filesystem without `O_TMPFILE` are
-`#[ignore]`d manual cases, named in their run instructions.
+they never pass on the named fallback. The in-crate macOS test
+`a_failed_publication_does_not_leave_a_widened_staging_entry` fixes the
+restored private mode under a deny-delete ACL. The Linux tests that need
+`setfacl`, a foreign-group `setgid` directory or a filesystem without
+`O_TMPFILE` are `#[ignore]`d manual cases, named in their run instructions.
 
 [workspace_files.rs](../../../../crates/dim-agent-capabilities/tests/workspace_files.rs)
 drives `edit` over its replacement list:
