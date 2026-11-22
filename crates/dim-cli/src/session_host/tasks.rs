@@ -124,14 +124,16 @@ impl Worker {
     }
 
     pub(super) fn line_projection(&mut self, branch_id: &str) -> &mut LineProjection {
+        let creation_failed = self.projection.creation_failed(branch_id);
         let history = self
             .task_history
             .get_mut(branch_id)
             .expect("discovered line");
         history.seen_reply = history.latest_reply;
-        if (!self.lines.contains_key(branch_id)
-            && (history.window.through.is_some() || history.done || history.error.is_some()))
-            || history.window_error.is_some()
+        if !creation_failed
+            && ((!self.lines.contains_key(branch_id)
+                && (history.window.through.is_some() || history.done || history.error.is_some()))
+                || history.window_error.is_some())
         {
             history.window = Default::default();
             history.done = false;

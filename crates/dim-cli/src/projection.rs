@@ -44,6 +44,10 @@ pub struct Projection {
     owner: String,
     /// The lines of the Session, as `main` recorded them (design §14).
     lines: Vec<LineView>,
+    /// Lines whose creation failed. The fact outruns the line's row: a
+    /// `branch/create-failed` the parent's page has not projected a
+    /// `branch/create` for is still terminal.
+    creation_failed: HashSet<String>,
     /// Each line's own user messages, by input id and submission sequence,
     /// to count where a line was cut (timeline UI §6); a withdrawn one is
     /// dropped.
@@ -158,7 +162,11 @@ impl Projection {
                         id: data.branch.clone(),
                         parent: Some(parent.to_owned()),
                         purpose,
-                        state: LineState::Waiting,
+                        state: if self.creation_failed.contains(&data.branch) {
+                            LineState::CreationFailed
+                        } else {
+                            LineState::Waiting
+                        },
                         running: None,
                         cut: Some(LineCut {
                             sequence,
@@ -172,6 +180,7 @@ impl Projection {
                     BranchCreateFailedData::Failed { branch, .. }
                     | BranchCreateFailedData::Cancelled { branch, .. } => branch,
                 };
+                self.creation_failed.insert(branch.clone());
                 if let Some(line) = self.lines.iter_mut().find(|line| line.id == *branch) {
                     line.state = LineState::CreationFailed;
                 }
@@ -1377,6 +1386,12 @@ impl Projection {
 
     pub fn line_views(&self) -> &[LineView] {
         &self.lines
+    }
+
+    /// Whether `branch`'s creation failed, whether or not its row is
+    /// projected yet: the line is terminal from the fact.
+    pub fn creation_failed(&self, branch: &str) -> bool {
+        self.creation_failed.contains(branch)
     }
 
     pub fn approvals(&self) -> Vec<ApprovalView> {

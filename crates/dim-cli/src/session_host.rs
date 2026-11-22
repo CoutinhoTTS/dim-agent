@@ -4834,13 +4834,7 @@ impl Worker {
             self.send(Update::Notice(format!("No line {line} in this session")));
             return;
         }
-        if line != ROOT_BRANCH_ID
-            && self
-                .projection
-                .line_views()
-                .iter()
-                .any(|view| view.id == line && view.state == LineState::CreationFailed)
-        {
+        if line != ROOT_BRANCH_ID && self.projection.creation_failed(&line) {
             self.send(Update::Notice(format!("Line creation failed: {line}")));
             return;
         }
