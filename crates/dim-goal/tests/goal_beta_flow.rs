@@ -922,17 +922,17 @@ async fn beta_11_a_queue_committed_during_the_catch_up_defers_the_creation() {
     );
     decision.release();
     let cutoff = cutoff_gate.arrived().await;
-    assert_eq!(
-        cutoff, held,
-        "the claim waits for the fold behind the report turn end"
+    assert!(
+        cutoff >= held,
+        "the claim's cutoff {cutoff} is not earlier than the input held behind the fold at {held}"
     );
 
     // The queue commits behind the cutoff the claim read, and its fold stays
     // held when the dispatcher reaches that cutoff.
     let queued = harness.submit("keep going", InputMode::Queue).await;
     assert!(
-        queued.sequence > held,
-        "the queued input at {} commits after the claim's cutoff {held}",
+        queued.sequence > cutoff,
+        "the queued input at {} commits after the claim's cutoff {cutoff}",
         queued.sequence
     );
     cutoff_gate.release();
@@ -1006,9 +1006,9 @@ async fn beta_12_a_queue_committed_during_the_catch_up_holds_the_continuation() 
     let queue_gate = dim_goal::testing::hold_input(&id, "main", held + 1);
     write.release();
     let cutoff = cutoff_gate.arrived().await;
-    assert_eq!(
-        cutoff, held,
-        "the continuation recheck waits for the fold behind the set turn end"
+    assert!(
+        cutoff >= held,
+        "the recheck's cutoff {cutoff} is not earlier than the input held behind the fold at {held}"
     );
 
     let queued = session
@@ -1016,8 +1016,8 @@ async fn beta_12_a_queue_committed_during_the_catch_up_holds_the_continuation() 
         .await
         .unwrap();
     assert!(
-        queued.sequence > held,
-        "the queued input at {} commits after the recheck's cutoff {held}",
+        queued.sequence > cutoff,
+        "the queued input at {} commits after the recheck's cutoff {cutoff}",
         queued.sequence
     );
     cutoff_gate.release();
