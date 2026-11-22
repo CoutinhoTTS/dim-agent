@@ -229,7 +229,7 @@ CLI 在提交前检查：
 
 ModelProvider 在构建对话模型请求时按所用模型的视觉能力和解析后目标的格式支持处理每个图片块，覆盖所有写入方的用户内容和工具结果。支持视觉的模型（或能力未知的请求）在目标接受该格式时收到可发送的图片块，文件来源先解析为字节，解析后按同一规则再检查一次，因此空的自有文件只会得到占位；不支持图像的模型从不收到像素，目标不接受的格式得到引用或占位。引用契约见 [ImageUnderstanding §3](../../../design/plugins/ImageUnderstanding.md#3-references)。
 
-目标的格式支持属于这条路由规则：准备阶段产生的格式是 PNG、JPEG、WebP 和 GIF；Gemini 除了 GIF 都接受（其指南列的是 PNG、JPEG、WebP、HEIC 和 HEIF），因此 GIF 在那里变成引用，其他目标接受请求可携带的所有格式。提供方的请求编码器按目标的放置能力处理：Bedrock 只在 Amazon Nova 和 Anthropic Claude 3、4 上把图片放进 `toolResult`，AWS 对同一批模型才支持该块的 `status` 字段；其他 Bedrock 模型的图片跟在结果之后的用户消息里，结果文本保留同样的结论而不带该字段。
+目标的格式支持属于这条路由规则：准备阶段产生的格式是 PNG、JPEG、WebP 和 GIF；Gemini 除了 GIF 都接受（其指南列的是 PNG、JPEG、WebP、HEIC 和 HEIF），因此 GIF 在那里变成引用，其他目标接受请求可携带的所有格式。提供方的请求编码器按目标的放置能力处理：Bedrock 只在 Amazon Nova 和 Anthropic Claude 3、4 上把图片放进 `toolResult`，AWS 对同一批模型才支持该块的 `status` 字段；其他 Bedrock 模型的图片跟在结果之后的用户消息里，这条形式没有报告结论的字段，因此失败结果的文本以 `[Error: this tool result reports a failed tool call.]` 开头。
 
 只有真正按像素发送的图片在加入请求时计入编码后的图片预算：用户图片和工具结果图片合计最多 32 MiB。文件解析后变成引用的图片不占字节。超出的请求在适配阶段就失败，不再读取其余图片。
 

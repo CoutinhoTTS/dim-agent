@@ -148,7 +148,9 @@ request encoder applies the destination's message-placement support: Bedrock
 takes an image inside a `toolResult` block only on Amazon Nova and Anthropic
 Claude 3 and 4, and AWS supports that block's `status` field only on the same
 families; on the other Bedrock models the image follows the result in a user
-message and the result text keeps the outcome without the field.
+message, and a failed result's text starts with
+`[Error: this tool result reports a failed tool call.]` because that wire form
+carries no field which reports the outcome.
 
 Only images the request sends as pixels join its encoded-image budget as they
 are added: at most 32 MiB across user and tool-result images. An image that

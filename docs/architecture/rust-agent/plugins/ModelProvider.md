@@ -30,9 +30,9 @@ The provider request encoder applies the destination's message-placement
 support: a Bedrock model outside the ones that support images in `toolResult`
 receives the tool image in the user message after the result, and the same
 families are the only ones AWS supports for `toolResult.status`; the other
-Bedrock models carry the outcome in the result text without the field. All of
-these decisions stay in the routing rule and the encoder; no catalog field
-states them.
+Bedrock models receive no such field, and a failed result's text starts with
+`[Error: this tool result reports a failed tool call.]`. All of these decisions
+stay in the routing rule and the encoder; no catalog field states them.
 
 The adapter selects replacements before copying content. An unchanged request
 keeps its Arc without cloning text, thinking, tool arguments or result blocks.
