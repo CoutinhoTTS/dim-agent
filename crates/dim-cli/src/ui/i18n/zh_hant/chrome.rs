@@ -303,6 +303,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Sign-in link:" => "登入連結：",
         "Resume" => "回到終端機",
         "Press Ctrl+C to stop the Web workspace." => "按 Ctrl+C 停止 Web 工作區。",
+        "Feedback or ideas? Join us on Discord:" => "有意見或想法？加入我們的 Discord：",
         "To resume this session:" => "繼續此工作階段：",
 
         // commands.rs: descriptions

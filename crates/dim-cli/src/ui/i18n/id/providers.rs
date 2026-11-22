@@ -73,6 +73,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Open this URL: {url}" => "Buka URL ini: {url}",
         "Enter code:    {code}" => "Masukkan kode: {code}",
         "Waiting after server slow-down" => "Menunggu, server minta melambat",
+        "DimAgent OAuth" => "DimAgent OAuth",
+        "{name} OAuth" => "{name} OAuth",
         "OAuth login cancelled" => "Masuk OAuth dibatalkan",
         "Enter your work email" => "Masukkan email kerja",
         "Invalid OAuth state - possible CSRF attempt" => {

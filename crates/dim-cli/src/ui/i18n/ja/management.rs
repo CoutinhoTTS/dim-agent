@@ -379,6 +379,18 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "The definition changed since it was read; nothing was written." => {
             "定義は読み取り後に変更されました。何も書き込まれていません。"
         }
+        "Columns: ID, client, scope, path, state, entries or error." => {
+            "列：ID、クライアント、スコープ、パス、状態、エントリ数またはエラー。"
+        }
+        "No value from a store is read out or printed; --from ID previews one inside the daemon." => {
+            "ストアから値を読み出したり出力したりしません。--from ID はデーモン内で 1 件をプレビューします。"
+        }
+        "Columns: ID, action, destination ID.\nA renamed entry is written under its destination id; the source's entry with the old id is left as it was." => {
+            "列：ID、操作、移動先 ID。\n名前を変更したエントリは移動先 id で書き込まれ、ソースにある古い id のエントリはそのまま残ります。"
+        }
+        "Imported and replaced entries start disabled: a user entry is written with enabled: false, and a project entry has no enablement record until you enable it locally." => {
+            "インポートおよび置き換えられたエントリは無効な状態で始まります。ユーザーエントリは enabled: false で書き込まれ、プロジェクトエントリはローカルで有効にするまで有効化レコードを持ちません。"
+        }
         "This daemon cannot list other clients' MCP stores." => {
             "このデーモンは他のクライアントの MCP ストアを一覧できません。"
         }

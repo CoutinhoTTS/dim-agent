@@ -343,6 +343,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Sign-in link:" => "Lien de connexion:",
         "Resume" => "Reprendre",
         "Press Ctrl+C to stop the Web workspace." => "Ctrl+C pour arrêter l'espace Web.",
+        "Feedback or ideas? Join us on Discord:" => {
+            "Un avis ou une idée ? Rejoignez-nous sur Discord :"
+        }
         "To resume this session:" => "Pour reprendre la session:",
 
         // commands.rs: descriptions

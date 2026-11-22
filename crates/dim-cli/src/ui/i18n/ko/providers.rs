@@ -71,6 +71,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Open this URL: {url}" => "이 URL 열기: {url}",
         "Enter code:    {code}" => "코드 입력:    {code}",
         "Waiting after server slow-down" => "서버 감속 요청으로 대기 중",
+        "DimAgent OAuth" => "DimAgent OAuth",
+        "{name} OAuth" => "{name} OAuth",
         "OAuth login cancelled" => "OAuth 로그인 취소됨",
         "Enter your work email" => "회사 이메일 입력",
         "Invalid OAuth state - possible CSRF attempt" => "잘못된 OAuth state - CSRF 시도 가능성",

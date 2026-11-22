@@ -323,6 +323,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Sign-in link:" => "サインインリンク：",
         "Resume" => "再開",
         "Press Ctrl+C to stop the Web workspace." => "Ctrl+C で Web ワークスペースを停止。",
+        "Feedback or ideas? Join us on Discord:" => "フィードバックやアイデアは Discord へ：",
         "To resume this session:" => "セッションの再開：",
 
         // commands.rs: descriptions

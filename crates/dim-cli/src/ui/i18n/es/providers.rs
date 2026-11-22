@@ -75,6 +75,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Open this URL: {url}" => "Abre esta URL: {url}",
         "Enter code:    {code}" => "Código:    {code}",
         "Waiting after server slow-down" => "Esperando: servidor ralentizado",
+        "DimAgent OAuth" => "DimAgent OAuth",
+        "{name} OAuth" => "{name} OAuth",
         "OAuth login cancelled" => "Acceso OAuth cancelado",
         "Enter your work email" => "Tu correo de trabajo",
         "Invalid OAuth state - possible CSRF attempt" => "Estado OAuth no válido - posible CSRF",

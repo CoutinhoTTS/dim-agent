@@ -337,6 +337,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Sign-in link:" => "Tautan masuk:",
         "Resume" => "Lanjutkan",
         "Press Ctrl+C to stop the Web workspace." => "Ctrl+C untuk menghentikan workspace Web.",
+        "Feedback or ideas? Join us on Discord:" => {
+            "Ada masukan atau ide? Bergabunglah dengan kami di Discord:"
+        }
         "To resume this session:" => "Lanjutkan sesi ini:",
 
         // commands.rs: descriptions

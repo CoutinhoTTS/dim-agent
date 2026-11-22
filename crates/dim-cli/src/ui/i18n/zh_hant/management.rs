@@ -331,6 +331,18 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "The definition changed since it was read; nothing was written." => {
             "定義在讀取之後已變更；沒有寫入任何內容。"
         }
+        "Columns: ID, client, scope, path, state, entries or error." => {
+            "欄位：ID、用戶端、範圍、路徑、狀態、項目數或錯誤。"
+        }
+        "No value from a store is read out or printed; --from ID previews one inside the daemon." => {
+            "不會讀出或印出儲存中的任何值；--from ID 會在守護進程內預覽其中一個。"
+        }
+        "Columns: ID, action, destination ID.\nA renamed entry is written under its destination id; the source's entry with the old id is left as it was." => {
+            "欄位：ID、動作、目標 ID。\n重新命名的項目會以其目標 id 寫入；來源中舊 id 的項目保持原狀。"
+        }
+        "Imported and replaced entries start disabled: a user entry is written with enabled: false, and a project entry has no enablement record until you enable it locally." => {
+            "匯入和替換的項目一開始為停用：使用者項目寫入時帶 enabled: false，專案項目在你於本機啟用前沒有啟用記錄。"
+        }
         "This daemon cannot list other clients' MCP stores." => {
             "此守護進程無法列出其他用戶端的 MCP 儲存。"
         }

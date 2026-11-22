@@ -317,6 +317,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Sign-in link:" => "登录链接：",
         "Resume" => "回到终端",
         "Press Ctrl+C to stop the Web workspace." => "按 Ctrl+C 停止 Web 工作区。",
+        "Feedback or ideas? Join us on Discord:" => "有反馈或想法？加入我们的 Discord：",
         "To resume this session:" => "恢复此会话：",
 
         "start a new session" => "开始新会话",

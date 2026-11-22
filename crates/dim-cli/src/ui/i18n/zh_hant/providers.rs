@@ -69,6 +69,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Open this URL: {url}" => "開啟此 URL：{url}",
         "Enter code:    {code}" => "輸入配對碼：{code}",
         "Waiting after server slow-down" => "伺服器要求放慢頻率，繼續等待",
+        "DimAgent OAuth" => "DimAgent OAuth",
+        "{name} OAuth" => "{name} OAuth",
         "OAuth login cancelled" => "已取消 OAuth 登入",
         "Enter your work email" => "輸入公司電子郵件",
         "Invalid OAuth state - possible CSRF attempt" => "無效的 OAuth state - 可能為 CSRF 攻擊",

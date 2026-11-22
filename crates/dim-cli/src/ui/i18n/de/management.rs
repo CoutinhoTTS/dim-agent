@@ -375,6 +375,18 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "The definition changed since it was read; nothing was written." => {
             "Die Definition wurde seit dem Lesen geändert; es wurde nichts geschrieben."
         }
+        "Columns: ID, client, scope, path, state, entries or error." => {
+            "Spalten: ID, Client, Bereich, Pfad, Status, Einträge oder Fehler."
+        }
+        "No value from a store is read out or printed; --from ID previews one inside the daemon." => {
+            "Kein Wert wird aus einem Speicher gelesen oder ausgegeben; --from ID zeigt einen im Daemon in der Vorschau."
+        }
+        "Columns: ID, action, destination ID.\nA renamed entry is written under its destination id; the source's entry with the old id is left as it was." => {
+            "Spalten: ID, Aktion, Ziel-ID.\nEin umbenannter Eintrag wird unter seiner Ziel-id geschrieben; der Eintrag der Quelle mit der alten id bleibt, wie er war."
+        }
+        "Imported and replaced entries start disabled: a user entry is written with enabled: false, and a project entry has no enablement record until you enable it locally." => {
+            "Importierte und ersetzte Einträge beginnen deaktiviert: Ein Benutzereintrag wird mit enabled: false geschrieben, und ein Projekteintrag hat keinen Aktivierungsdatensatz, bis du ihn lokal aktivierst."
+        }
         "This daemon cannot list other clients' MCP stores." => {
             "Dieser Daemon kann die MCP-Speicher anderer Clients nicht auflisten."
         }

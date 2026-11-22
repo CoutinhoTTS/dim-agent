@@ -349,6 +349,9 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Press Ctrl+C to stop the Web workspace." => {
             "Prima Ctrl+C para parar o espaço de trabalho Web."
         }
+        "Feedback or ideas? Join us on Discord:" => {
+            "Feedback ou ideias? Junte-se a nós no Discord:"
+        }
         "To resume this session:" => "Para retomar esta sessão:",
 
         // commands.rs: descriptions

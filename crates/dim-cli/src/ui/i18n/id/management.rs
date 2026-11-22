@@ -365,6 +365,18 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "The definition changed since it was read; nothing was written." => {
             "Definisi berubah sejak dibaca; tidak ada yang ditulis."
         }
+        "Columns: ID, client, scope, path, state, entries or error." => {
+            "Kolom: ID, klien, cakupan, path, status, entri atau galat."
+        }
+        "No value from a store is read out or printed; --from ID previews one inside the daemon." => {
+            "Tidak ada nilai dari penyimpanan yang dibaca atau dicetak; --from ID mempratinjau satu di dalam daemon."
+        }
+        "Columns: ID, action, destination ID.\nA renamed entry is written under its destination id; the source's entry with the old id is left as it was." => {
+            "Kolom: ID, aksi, ID tujuan.\nEntri yang diganti namanya ditulis dengan id tujuannya; entri sumber dengan id lama dibiarkan apa adanya."
+        }
+        "Imported and replaced entries start disabled: a user entry is written with enabled: false, and a project entry has no enablement record until you enable it locally." => {
+            "Entri yang diimpor dan diganti mulai nonaktif: entri pengguna ditulis dengan enabled: false, dan entri proyek tidak punya catatan pengaktifan sampai kamu mengaktifkannya secara lokal."
+        }
         "This daemon cannot list other clients' MCP stores." => {
             "Daemon ini tidak bisa mendaftar penyimpanan MCP klien lain."
         }

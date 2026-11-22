@@ -67,6 +67,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Open this URL: {url}" => "打开此 URL：{url}",
         "Enter code:    {code}" => "输入配对码：{code}",
         "Waiting after server slow-down" => "服务端要求减慢检查频率，继续等待",
+        "DimAgent OAuth" => "DimAgent OAuth",
+        "{name} OAuth" => "{name} OAuth",
         "OAuth login cancelled" => "OAuth 登录已取消",
         "Enter your work email" => "请输入工作邮箱",
         "Invalid OAuth state - possible CSRF attempt" => "无效的 OAuth state — 可能有 CSRF 尝试",

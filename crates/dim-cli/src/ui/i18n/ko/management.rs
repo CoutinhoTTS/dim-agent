@@ -369,6 +369,18 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "The definition changed since it was read; nothing was written." => {
             "정의가 읽은 뒤 변경되었습니다. 아무것도 기록되지 않았습니다."
         }
+        "Columns: ID, client, scope, path, state, entries or error." => {
+            "열: ID, 클라이언트, 범위, 경로, 상태, 항목 수 또는 오류."
+        }
+        "No value from a store is read out or printed; --from ID previews one inside the daemon." => {
+            "저장소에서 값을 읽거나 출력하지 않습니다. --from ID는 데몬 안에서 하나를 미리보기합니다."
+        }
+        "Columns: ID, action, destination ID.\nA renamed entry is written under its destination id; the source's entry with the old id is left as it was." => {
+            "열: ID, 작업, 대상 ID.\n이름이 바뀐 항목은 대상 id로 기록되고, 소스의 이전 id 항목은 그대로 남습니다."
+        }
+        "Imported and replaced entries start disabled: a user entry is written with enabled: false, and a project entry has no enablement record until you enable it locally." => {
+            "가져오거나 대체된 항목은 비활성 상태로 시작합니다. 사용자 항목은 enabled: false로 기록되고, 프로젝트 항목은 로컬에서 활성화하기 전까지 활성화 기록이 없습니다."
+        }
         "This daemon cannot list other clients' MCP stores." => {
             "이 데몬은 다른 클라이언트의 MCP 저장소를 나열할 수 없습니다."
         }
