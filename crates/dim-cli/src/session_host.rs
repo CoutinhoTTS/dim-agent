@@ -4804,7 +4804,7 @@ impl Worker {
             parent: None,
             purpose: String::new(),
             state: LineState::Main,
-            reported: running(ROOT_BRANCH_ID).is_some(),
+            running: running(ROOT_BRANCH_ID),
             cut: None,
         }];
         lines.extend(
@@ -4813,8 +4813,8 @@ impl Worker {
                 .iter()
                 .cloned()
                 .map(|mut line| {
-                    line.reported = running(&line.id).is_some();
-                    if line.state == LineState::Waiting && running(&line.id) == Some(true) {
+                    line.running = running(&line.id);
+                    if line.state == LineState::Waiting && line.running == Some(true) {
                         line.state = LineState::Working;
                     }
                     line
@@ -4912,7 +4912,6 @@ impl Worker {
             })
         });
         snapshot.focus = self.focus.clone();
-        snapshot.main_running = self.projection.running();
         snapshot.main_topic = self.projection.first_message();
         snapshot.session_title = self.session_title.clone();
         if self.focus != ROOT_BRANCH_ID {
@@ -5590,7 +5589,7 @@ mod tests {
         assert!(
             snapshots
                 .iter()
-                .all(|view| view.lines.iter().all(|line| !line.reported)),
+                .all(|view| view.lines.iter().all(|line| line.running.is_none())),
             "the switch has no Session state to report yet"
         );
 
@@ -5607,10 +5606,68 @@ mod tests {
             .last()
             .expect("the state report published a snapshot");
         assert!(
-            reported.lines.iter().all(|line| line.reported),
+            reported.lines.iter().all(|line| line.running.is_some()),
             "the report is the Session's state"
         );
         assert!(reported.running, "the report carries the running turn");
+    }
+
+    /// A turn read answers what the recorded turn looks like, and a turn that
+    /// already ended clears the transcript's running flag. The line's live
+    /// report is a separate observation: it stays what `session.state` said,
+    /// so a history reply cannot make a busy line read as idle.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_turn_read_rewrites_the_transcript_not_the_lines_live_report() {
+        use crate::model::view::ViewSnapshot;
+
+        let (mut worker, mut receiver, _sent) = test_worker(&TEST_FEATURES).await;
+        worker
+            .attach("s2".into(), SwitchKind::Resumed)
+            .await
+            .expect("the switch attaches");
+        let published = |receiver: &mut mpsc::Receiver<Update>| -> ViewSnapshot {
+            receiver
+                .try_iter()
+                .filter_map(|update| match update {
+                    Update::Snapshot(view) => Some(*view),
+                    _ => None,
+                })
+                .last()
+                .expect("the worker published a snapshot")
+        };
+        worker
+            .message(Message::Notice {
+                method: "session.state".into(),
+                params: json!({"sessionId":"s2","branchId":"main","running":true}),
+            })
+            .await
+            .unwrap();
+        worker.publish();
+        let reported = published(&mut receiver);
+        assert_eq!(reported.lines[0].running, Some(true));
+        assert!(reported.running, "the report is main's running turn");
+
+        worker
+            .apply_inventory(
+                DEFAULT_BRANCH_ID,
+                1,
+                "session.turn.get",
+                json!({
+                    "branchId":"main",
+                    "through":1,
+                    "turn":{"turnId":"t-1","sequence":1,"ended":true}
+                }),
+            )
+            .expect("the turn read applies");
+        worker.publish();
+        let replayed = published(&mut receiver);
+        assert!(!replayed.running, "the ended turn rewrites the transcript");
+        assert_eq!(
+            replayed.lines[0].running,
+            Some(true),
+            "the line keeps the daemon's live report"
+        );
     }
 
     /// Every live line reports on its own: an idle `main` leaves a known
@@ -5654,9 +5711,16 @@ mod tests {
             .unwrap();
         worker.publish();
         let shown = lines(&mut receiver);
-        assert!(shown[0].reported, "main reported its idle state");
+        assert_eq!(
+            shown[0].running,
+            Some(false),
+            "main reported its idle state"
+        );
         assert_eq!(shown[1].state, LineState::Waiting);
-        assert!(!shown[1].reported, "the child line has not reported yet");
+        assert_eq!(
+            shown[1].running, None,
+            "the child line has not reported yet"
+        );
 
         worker
             .message(Message::Notice {
@@ -5667,8 +5731,9 @@ mod tests {
             .unwrap();
         worker.publish();
         let shown = lines(&mut receiver);
-        assert!(
-            shown[1].reported,
+        assert_eq!(
+            shown[1].running,
+            Some(true),
             "the child line reported its running state"
         );
         assert_eq!(shown[1].state, LineState::Working);
@@ -5729,13 +5794,16 @@ mod tests {
             .find(|line| line.id == "b-gone")
             .expect("the ended line is listed");
         assert_eq!(gone.state, LineState::EndedByOperation);
-        assert!(!gone.reported, "the ended line never sends a state report");
+        assert_eq!(
+            gone.running, None,
+            "the ended line never sends a state report"
+        );
         assert!(
             shown
                 .lines
                 .iter()
                 .filter(|line| line.id == "main")
-                .all(|line| line.reported),
+                .all(|line| line.running.is_some()),
             "main did report"
         );
     }

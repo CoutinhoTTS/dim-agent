@@ -229,9 +229,9 @@ pub struct LineView {
     /// The first line of the purpose it was opened with.
     pub purpose: String,
     pub state: LineState,
-    /// The daemon has reported this line's running state; until it does,
-    /// the line stands in the directory but its activity is unknown.
-    pub reported: bool,
+    /// The running state the daemon last reported for this line; `None`
+    /// until it reports one. Readiness and busy both come from here.
+    pub running: Option<bool>,
     /// Where it was cut from its parent; `None` for `main`.
     pub cut: Option<LineCut>,
 }
@@ -479,7 +479,6 @@ pub struct ViewSnapshot {
     /// Shared with the worker's projection: publishing copies pointers.
     pub rows: Vec<std::sync::Arc<ViewRow>>,
     pub running: bool,
-    pub main_running: bool,
     /// The first message the user sent on `main`: the window title's topic
     /// until the Session has a stored title (`ui::title`), whichever line is
     /// shown.

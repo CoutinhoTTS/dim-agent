@@ -278,7 +278,7 @@ mod tests {
                     parent: None,
                     purpose: String::new(),
                     state: LineState::Main,
-                    reported: true,
+                    running: Some(false),
                     cut: None,
                 },
                 LineView {
@@ -286,7 +286,7 @@ mod tests {
                     parent: Some("main".into()),
                     purpose: "parser race".into(),
                     state: LineState::Working,
-                    reported: true,
+                    running: Some(true),
                     cut: Some(crate::model::view::LineCut {
                         sequence: 1,
                         messages: 0,
@@ -297,7 +297,7 @@ mod tests {
                     parent: Some("main".into()),
                     purpose: "docs pass".into(),
                     state: LineState::EndedItself,
-                    reported: true,
+                    running: None,
                     cut: Some(crate::model::view::LineCut {
                         sequence: 1,
                         messages: 0,
@@ -308,7 +308,7 @@ mod tests {
                     parent: Some("b-7c".into()),
                     purpose: "review".into(),
                     state: LineState::Waiting,
-                    reported: true,
+                    running: Some(false),
                     cut: Some(crate::model::view::LineCut {
                         sequence: 1,
                         messages: 0,

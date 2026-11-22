@@ -2043,7 +2043,9 @@ impl App {
         self.exit_armed_until = Some(Instant::now() + EXIT_ARM);
     }
 
-    /// Why leaving now would cut something off, if it would.
+    /// Why leaving now would cut something off, if it would. The daemon's
+    /// own report for each line decides whether it runs; the transcript's
+    /// running flag follows recorded turns and is not this gate's source.
     fn busy_reason(&self) -> Option<ExitReason> {
         let snapshot = self.snapshot.as_ref()?;
         if !snapshot.questions.is_empty() {
@@ -2052,13 +2054,11 @@ impl App {
         if !snapshot.approvals.is_empty() {
             return Some(ExitReason::PermissionPending);
         }
-        let working = snapshot.main_running
-            || snapshot.running
-            || snapshot
-                .lines
-                .iter()
-                .any(|line| line.state == LineState::Working);
-        working.then_some(ExitReason::AgentRunning)
+        snapshot
+            .lines
+            .iter()
+            .any(|line| line.running == Some(true))
+            .then_some(ExitReason::AgentRunning)
     }
 
     /// Why `Update now` cannot leave yet, if it cannot: work in the shown
@@ -2080,7 +2080,7 @@ impl App {
                         matches!(
                             line.state,
                             LineState::Main | LineState::Waiting | LineState::Working
-                        ) && !line.reported
+                        ) && line.running.is_none()
                     })
             });
         waiting.then_some(Blocked::Session)
@@ -9666,7 +9666,7 @@ mod tests {
                         parent: None,
                         purpose: String::new(),
                         state: LineState::Main,
-                        reported: true,
+                        running: Some(false),
                         cut: None,
                     },
                     LineView {
@@ -9674,7 +9674,7 @@ mod tests {
                         parent: Some("main".into()),
                         purpose: "parser race".into(),
                         state: LineState::Working,
-                        reported: true,
+                        running: Some(true),
                         cut: None,
                     },
                 ],
@@ -10256,24 +10256,22 @@ mod tests {
     /// the daemon's first `session.state` notice: the empty projection,
     /// stamped with the Session and its `main` line.
     fn switched_placeholder(session_id: &str) -> ViewSnapshot {
-        let projection = crate::projection::Projection::default();
-        let mut snapshot = projection.snapshot();
-        snapshot.lines = vec![reported_line("main", LineState::Main, false)];
+        let mut snapshot = crate::projection::Projection::default().snapshot();
+        snapshot.lines = vec![line_view("main", LineState::Main, None)];
         snapshot.focus = "main".into();
-        snapshot.main_running = projection.running();
         snapshot.session_id = session_id.into();
         snapshot.task_history_loading = 1;
         snapshot
     }
 
     /// A line as `session_host` lists it; `main` unless named otherwise.
-    fn reported_line(id: &str, state: LineState, reported: bool) -> LineView {
+    fn line_view(id: &str, state: LineState, running: Option<bool>) -> LineView {
         LineView {
             id: id.into(),
             parent: (id != "main").then(|| "main".into()),
             purpose: String::new(),
             state,
-            reported,
+            running,
             cut: None,
         }
     }
@@ -10343,7 +10341,7 @@ mod tests {
 
             drawn.app.apply(Update::Snapshot(Box::new(ViewSnapshot {
                 running: true,
-                ..session_snapshot("main", vec![reported_line("main", LineState::Main, true)])
+                ..session_snapshot("main", vec![line_view("main", LineState::Main, Some(true))])
             })));
             assert!(matches!(drawn.app.prompt, Some(Prompt::Upgrade(_))));
             assert!(
@@ -10359,11 +10357,64 @@ mod tests {
 
             drawn.app.apply(Update::Snapshot(Box::new(session_snapshot(
                 "main",
-                vec![reported_line("main", LineState::Main, true)],
+                vec![line_view("main", LineState::Main, Some(false))],
             ))));
             assert!(
                 matches!(enter(&mut drawn), Outcome::Exit(0)),
                 "fullscreen={fullscreen}: an idle Session did not let Update now leave"
+            );
+            assert!(drawn.app.update_requested);
+        }
+    }
+
+    /// A recorded turn that already ended reaches the transcript as a
+    /// history reply and clears its running flag. The line's activity is the
+    /// daemon's own report, so that reply may not release a line the daemon
+    /// reported busy; only its next idle report does.
+    #[test]
+    fn update_now_keeps_the_live_report_over_a_history_reply() {
+        for fullscreen in [false, true] {
+            let mut drawn = Drawn::new((80, 24), None, true);
+            drawn.app.fullscreen = fullscreen;
+            drawn.app.apply(Update::Upgrade(update_offer()));
+            drawn.app.apply(Update::Switched {
+                session_id: "s2".into(),
+                kind: SwitchKind::Resumed,
+                cwd: None,
+            });
+            let main = |running: Option<bool>| {
+                session_snapshot("main", vec![line_view("main", LineState::Main, running)])
+            };
+            drawn.app.apply(Update::Snapshot(Box::new(ViewSnapshot {
+                running: true,
+                ..main(Some(true))
+            })));
+            assert!(
+                matches!(enter(&mut drawn), Outcome::Continue),
+                "fullscreen={fullscreen}: the daemon reported main running"
+            );
+            assert!(!drawn.app.update_requested);
+
+            drawn
+                .app
+                .apply(Update::Snapshot(Box::new(main(Some(true)))));
+            assert!(
+                matches!(enter(&mut drawn), Outcome::Continue),
+                "fullscreen={fullscreen}: a history reply released the busy line"
+            );
+            assert!(!drawn.app.update_requested);
+            let screen = drawn.app.frame((80, 24)).live.join("\n");
+            assert!(
+                screen.contains("Finish or stop the current work"),
+                "fullscreen={fullscreen}: {screen}"
+            );
+
+            drawn
+                .app
+                .apply(Update::Snapshot(Box::new(main(Some(false)))));
+            assert!(
+                matches!(enter(&mut drawn), Outcome::Exit(0)),
+                "fullscreen={fullscreen}: the live idle report did not release Update now"
             );
             assert!(drawn.app.update_requested);
         }
@@ -10386,8 +10437,8 @@ mod tests {
             drawn.app.apply(Update::Snapshot(Box::new(session_snapshot(
                 "main",
                 vec![
-                    reported_line("main", LineState::Main, true),
-                    reported_line("b-1", LineState::Waiting, false),
+                    line_view("main", LineState::Main, Some(false)),
+                    line_view("b-1", LineState::Waiting, None),
                 ],
             ))));
             assert!(
@@ -10404,8 +10455,8 @@ mod tests {
             drawn.app.apply(Update::Snapshot(Box::new(session_snapshot(
                 "main",
                 vec![
-                    reported_line("main", LineState::Main, true),
-                    reported_line("b-1", LineState::Working, true),
+                    line_view("main", LineState::Main, Some(false)),
+                    line_view("b-1", LineState::Working, Some(true)),
                 ],
             ))));
             assert!(
@@ -10422,8 +10473,8 @@ mod tests {
             drawn.app.apply(Update::Snapshot(Box::new(session_snapshot(
                 "main",
                 vec![
-                    reported_line("main", LineState::Main, true),
-                    reported_line("b-1", LineState::Waiting, true),
+                    line_view("main", LineState::Main, Some(false)),
+                    line_view("b-1", LineState::Waiting, Some(false)),
                 ],
             ))));
             assert!(
@@ -10471,7 +10522,7 @@ mod tests {
             });
             drawn.app.apply(Update::Snapshot(Box::new(session_snapshot(
                 "main",
-                vec![reported_line("main", LineState::Main, true)],
+                vec![line_view("main", LineState::Main, Some(false))],
             ))));
             assert!(
                 matches!(enter(&mut drawn), Outcome::Exit(0)),
@@ -10498,8 +10549,8 @@ mod tests {
             drawn.app.apply(Update::Snapshot(Box::new(session_snapshot(
                 "b-gone",
                 vec![
-                    reported_line("main", LineState::Main, true),
-                    reported_line("b-gone", LineState::Ended, false),
+                    line_view("main", LineState::Main, Some(false)),
+                    line_view("b-gone", LineState::Ended, None),
                 ],
             ))));
             assert!(
@@ -11053,7 +11104,6 @@ mod tests {
         app.snapshot = Some(ViewSnapshot {
             session_id: "s1".into(),
             running: true,
-            main_running: true,
             focus: "main".into(),
             ..ViewSnapshot::default()
         });
@@ -11642,7 +11692,7 @@ mod tests {
                 parent: None,
                 purpose: String::new(),
                 state: LineState::Main,
-                reported: true,
+                running: Some(false),
                 cut: None,
             }],
             ..ViewSnapshot::default()
@@ -14908,7 +14958,7 @@ mod tests {
                         parent: None,
                         purpose: String::new(),
                         state: LineState::Main,
-                        reported: true,
+                        running: Some(false),
                         cut: None,
                     },
                     LineView {
@@ -14916,7 +14966,7 @@ mod tests {
                         parent: Some("main".into()),
                         purpose: "parser race".into(),
                         state: LineState::Waiting,
-                        reported: true,
+                        running: Some(false),
                         cut: Some(crate::model::view::LineCut {
                             sequence: 1,
                             messages: 1,
@@ -15024,15 +15074,21 @@ mod tests {
         drawn.app.apply(Update::Snapshot(Box::new(ViewSnapshot {
             session_id: "s1".into(),
             running: true,
-            main_running: true,
             focus: "main".into(),
             ..ViewSnapshot::default()
         })));
         drawn.app.notifications.clear();
         drawn.app.apply(Update::Snapshot(Box::new(ViewSnapshot {
             session_id: "s1".into(),
-            main_running: true,
             focus: "b-7c".into(),
+            lines: vec![crate::model::view::LineView {
+                id: "main".into(),
+                parent: None,
+                purpose: String::new(),
+                state: LineState::Main,
+                running: Some(true),
+                cut: None,
+            }],
             ..ViewSnapshot::default()
         })));
         assert!(
@@ -15054,7 +15110,7 @@ mod tests {
                     parent: None,
                     purpose: String::new(),
                     state: LineState::Main,
-                    reported: true,
+                    running: Some(false),
                     cut: None,
                 },
                 crate::model::view::LineView {
@@ -15062,7 +15118,7 @@ mod tests {
                     parent: Some("main".into()),
                     purpose: "review".into(),
                     state: LineState::Working,
-                    reported: true,
+                    running: Some(true),
                     cut: Some(crate::model::view::LineCut {
                         sequence: 1,
                         messages: 0,
@@ -18440,7 +18496,6 @@ mod tests {
             projection_id: 7,
             focus: "main".into(),
             running,
-            main_running: running,
             queued: queued
                 .iter()
                 .map(|(id, text)| crate::model::view::QueuedInput {
@@ -18494,18 +18549,15 @@ mod tests {
                     assert!(!applied.contains(t("Unread")), "{applied}");
                     assert_eq!(applied.matches("find the leak").count(), 1, "{applied}");
                     snapshot.running = false;
-                    snapshot.main_running = false;
                     snapshot.rows.push(stopped());
                     let idle = draw(&snapshot);
                     assert!(!idle.contains(t("Queue")), "{idle}");
                     assert_eq!(idle.matches("find the leak").count(), 1, "{idle}");
                     assert!(!idle.contains(t("Unread")), "{idle}");
                     snapshot.running = true;
-                    snapshot.main_running = true;
                     let resumed = draw(&snapshot);
                     assert!(!resumed.contains(t("Unread")), "{resumed}");
                     snapshot.running = false;
-                    snapshot.main_running = false;
                     snapshot.queued.clear();
                     snapshot.rows[0] = message(false);
                     let consumed = draw(&snapshot);
@@ -18775,7 +18827,6 @@ mod tests {
                 projection_id: 7,
                 focus: "main".into(),
                 running: true,
-                main_running: true,
                 ..ViewSnapshot::default()
             })));
             typed(&mut app, "follow up");
@@ -19427,7 +19478,6 @@ mod tests {
         press(&mut app, KeyCode::Esc);
         let mut settled = app.snapshot.as_ref().unwrap().clone();
         settled.running = false;
-        settled.main_running = false;
         app.apply(Update::Snapshot(Box::new(settled)));
         assert!(!app.running(), "the run shows as ended");
         app.handle(ctrl_enter());
