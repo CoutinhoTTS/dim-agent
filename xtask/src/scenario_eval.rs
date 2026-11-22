@@ -4895,7 +4895,33 @@ async fn drive(
             driven.error = Some(error);
             return driven;
         }
-        match fire_switch(client, &session, &mut switch).await {
+        // The move and the input after it are bounded by the same absolute
+        // deadline the budget check below applies: a reply that never comes
+        // must not hold the run past its wall clock (model-prompts §8.1).
+        let line = switch.as_ref().and_then(|pending| pending.line.clone());
+        let fired = match tokio::time::timeout(
+            time_left(started, &scenario.budget),
+            fire_switch(client, &session, &mut switch),
+        )
+        .await
+        {
+            Ok(fired) => fired,
+            Err(_) => {
+                driven.stop = "seconds";
+                driven.error = Some(match line {
+                    Some(line) => format!(
+                        "the switch to line {line} did not answer before the run's {}s budget ran out",
+                        scenario.budget.seconds
+                    ),
+                    None => format!(
+                        "the switch did not answer before the run's {}s budget ran out",
+                        scenario.budget.seconds
+                    ),
+                });
+                return driven;
+            }
+        };
+        match fired {
             Ok(SwitchFire::Retry) => driven.switch_retries += 1,
             Ok(SwitchFire::Fired) => awaiting = true,
             Ok(SwitchFire::NotFired) => {}
@@ -6117,6 +6143,12 @@ async fn fire_triggered(
         }
     }
     Ok(sent)
+}
+
+/// The wall clock left of the scenario's budget, counted from the first
+/// submission; a run past its budget has none left.
+fn time_left(started: Instant, budget: &Budget) -> Duration {
+    Duration::from_secs_f64((budget.seconds - started.elapsed().as_secs_f64()).max(0.))
 }
 
 /// How long to wait for the next notice: until the next timed steer, the
@@ -11341,6 +11373,13 @@ mod tests {
         /// to it answers `unknown_branch`: the run can stop on its budget
         /// while the switch still has retries left.
         SwitchMoveRetries,
+        /// The target line `2` starts and ends its first turn, and the move to
+        /// it never answers: the run must stop on its deadline instead of
+        /// waiting on the reply.
+        SwitchMoveStalls,
+        /// The target line `2` starts and ends its first turn and the move
+        /// answers, and the input after the move never does.
+        SwitchSubmitStalls,
     }
 
     /// What a scripted peer read: the `requestId` of every decline, in order,
@@ -11460,6 +11499,9 @@ mod tests {
                 _ => Vec::new(),
             };
             let mut declines = 0;
+            // The `session.submit` calls read so far: the stalling scripts
+            // hold the one after the move.
+            let mut submits = 0;
             let mut first: Option<Instant> = None;
             // The line is busy until the peer writes the call's result, the
             // way a running turn is: `session.idle` stays unanswered and the
@@ -11600,6 +11642,7 @@ mod tests {
                         }
                         PeerScript::SwitchNeverFires => None,
                         PeerScript::SwitchMoveRetries => None,
+                        PeerScript::SwitchMoveStalls | PeerScript::SwitchSubmitStalls => None,
                     };
                     if let Some((request, sequence)) = closed {
                         if recorded.settled_at.load(Ordering::SeqCst) == 0 {
@@ -11612,6 +11655,19 @@ mod tests {
                             .unwrap();
                     }
                     continue;
+                }
+                // The stalling scripts hold their reply: the move in one, the
+                // input after it in the other.
+                if method == "session.branch_set_default"
+                    && matches!(script, PeerScript::SwitchMoveStalls)
+                {
+                    continue;
+                }
+                if method == "session.submit" {
+                    submits += 1;
+                    if submits > 1 && matches!(script, PeerScript::SwitchSubmitStalls) {
+                        continue;
+                    }
                 }
                 let body = match method {
                     "session.create" => json!({"result": {"sessionId": "peer"}}),
@@ -11646,7 +11702,12 @@ mod tests {
                         }
                         continue;
                     }
-                    if matches!(script, PeerScript::SwitchMoveRetries) {
+                    if matches!(
+                        script,
+                        PeerScript::SwitchMoveRetries
+                            | PeerScript::SwitchMoveStalls
+                            | PeerScript::SwitchSubmitStalls
+                    ) {
                         for (name, sequence) in [("start", 1), ("end", 2)] {
                             write
                                 .write_all(&notice_on(
@@ -11852,6 +11913,60 @@ mod tests {
             failed(driven.stop, None, JudgeOutcome::Judged),
             "the outcome is a failed run on its own"
         );
+    }
+
+    /// A switch call that never answers is bounded by the scenario's wall
+    /// clock: the run records the timeout and returns instead of waiting on
+    /// the connection, so its worker is released (model-prompts §8.1).
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stalled_switch_call_stops_on_the_scenario_deadline() {
+        /// A run that has not returned by now waited on the reply.
+        const GUARD: Duration = Duration::from_secs(10);
+        for (script, name) in [
+            (PeerScript::SwitchMoveStalls, "move"),
+            (PeerScript::SwitchSubmitStalls, "submit"),
+        ] {
+            let directory = std::env::temp_dir().join(format!(
+                "dim-scenario-eval-switch-stall-{name}-{}",
+                std::process::id()
+            ));
+            let (socket, _) = scripted_peer(&directory, 8_000, script).await;
+            let mut client = driver_client(socket).await;
+            let mut scenario = scenario(Vec::new());
+            scenario.budget.seconds = 0.5;
+            scenario.switch = Some(Switch {
+                to: SwitchTarget::Id("2".into()),
+                message: "next".into(),
+                branch_id: None,
+            });
+            let driven = tokio::time::timeout(
+                GUARD,
+                drive(
+                    &mut client,
+                    &scenario,
+                    &std::env::temp_dir(),
+                    &peer_model(),
+                    &ProducerState::default(),
+                    None,
+                ),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("{name}: the run waited on a reply that never came"));
+            let _ = std::fs::remove_dir_all(directory);
+            assert_eq!(driven.stop, "seconds", "{name}: {:?}", driven.error);
+            let error = driven.error.unwrap_or_default();
+            assert!(
+                error.contains("line 2")
+                    && error.contains("did not answer")
+                    && error.contains("budget ran out"),
+                "{name}: {error}"
+            );
+            assert!(
+                failed(driven.stop, None, JudgeOutcome::Judged),
+                "{name}: the timeout is a failed run on its own"
+            );
+        }
     }
 
     /// A busy line does not multiply the declines: the peer refuses the first
