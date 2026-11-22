@@ -102,7 +102,10 @@ async fn system_is_static_and_instructions_and_environment_arrive_as_inputs() {
     for present in [
         "when a finding changes the plan",
         "when you hit a blocker",
-        "Skip updates when a task needs no tool or one quick read",
+        "When a task needs no tool or one quick read, \
+         or the request asks for only a final answer, a patch or structured output, \
+         write no text before or between tool calls",
+        "several reads or searches count as tool use",
         "when the request asks for only a final answer, a patch or structured output",
     ] {
         assert!(
