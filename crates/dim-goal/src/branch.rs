@@ -2024,9 +2024,17 @@ impl Owner {
                 };
                 // C7 measures the branch's own continuations; the evaluator
                 // judged this turn, so this path reads no progress (Pursuit §5).
+                // C4, C5: a Queue that commits while the conclusion waits
+                // leaves this fold behind. The recheck reads the fold at the
+                // latest committed cutoff, catching up to a fact that commits
+                // while it waits.
                 let write = self.write_guard().await?;
-                let decision = {
+                let decision = loop {
+                    let through = self.await_dispatched().await?;
                     let state = self.state.lock().unwrap();
+                    if self.timeline.committed() != through {
+                        continue;
+                    }
                     if state.written.contains(&sequence)
                         || fold::decide_conclusion(&state.fold, sequence, &conclusion)
                             != Some(ConclusionAction::Continue)
@@ -2035,7 +2043,7 @@ impl Owner {
                     {
                         return Ok(());
                     }
-                    fold::decide_evaluated_continuation(&state.fold, limit)
+                    break fold::decide_evaluated_continuation(&state.fold, limit);
                 };
                 let Some(decision) = decision else {
                     return Ok(());
