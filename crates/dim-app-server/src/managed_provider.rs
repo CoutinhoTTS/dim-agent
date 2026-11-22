@@ -20,9 +20,9 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 /// The longest a Session assembly or reconciliation waits for a provider's
-/// own account observation. A watched provider keeps its read, so a slower one
-/// still publishes through its watch and reaches open Sessions from there; a
-/// watchless read that outlives the wait leaves the last observation in place.
+/// own account observation. The provider publishes the read through its watch,
+/// so a slower one still reaches open Sessions from there; an observation that
+/// outlives the wait leaves the last observation in place.
 const ACCOUNT_OBSERVATION_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -255,20 +255,16 @@ pub trait ManagedProvider: Send + Sync + 'static {
     /// the watch's current value while its binding is current, so a login that
     /// completes after every client polling it is gone still reaches open
     /// Sessions. The first `Some` is the provider's initialized observation of
-    /// its store; `None` means the provider has not read it yet. A provider
-    /// that supplies this watch is the only source of its availability:
-    /// account reads and login attempt results never publish over it. `None`
-    /// when the provider cannot report its own changes: observations are then
-    /// the only source.
-    fn subscribe_account(&self) -> Option<watch::Receiver<Option<bool>>> {
-        None
-    }
+    /// its store; `None` means the provider has not read it yet. The watch is
+    /// the only source of this provider's availability: account reads and
+    /// login attempt results never publish over it.
+    fn subscribe_account(&self) -> watch::Receiver<Option<bool>>;
     /// Re-reads the stored account and publishes the result through
     /// [`Self::subscribe_account`], so a store another process wrote becomes
     /// visible without an `account.status` call. The managed provider owner
-    /// asks a watched provider for this observation once when managed search
-    /// first becomes necessary for a Session. A failed read leaves the watch
-    /// as it was.
+    /// asks the provider for this observation once when managed search first
+    /// becomes necessary for a Session. A failed read leaves the watch as it
+    /// was.
     fn observe_account(&self, provider: &str) -> ManagedFuture<()> {
         let _ = provider;
         Box::pin(async { Ok(()) })
@@ -386,9 +382,9 @@ impl From<ManagedError> for ManagedProviderError {
 pub struct ManagedProviders {
     provider: Mutex<Option<Bound>>,
     stop: CancellationToken,
-    /// Whether the bound provider last reported a signed-in account. The
-    /// owner writes it from every account observation and reads it in-process
-    /// for capabilities that depend on a usable account.
+    /// Whether the bound provider's watch last reported a signed-in account.
+    /// The owner publishes it from that watch and reads it in-process for
+    /// capabilities that depend on a usable account.
     usable: watch::Sender<bool>,
 }
 /// A published provider and the identity of the binding that published it.
@@ -397,12 +393,11 @@ pub struct ManagedProviders {
 struct Bound {
     provider: Arc<dyn ManagedProvider>,
     binding: u64,
-    /// The provider's own account watch, when it reports its own transitions.
-    /// That watch is authoritative for availability; an RPC result is only a
-    /// historical observation for it. The binding reads the current value from
-    /// this receiver while publishing, so a value subscribed earlier cannot
-    /// overwrite a newer one.
-    account: Option<watch::Receiver<Option<bool>>>,
+    /// The provider's own account watch. It is authoritative for
+    /// availability; an RPC result is only a historical observation for it.
+    /// The binding reads the current value from this receiver while
+    /// publishing, so a value subscribed earlier cannot overwrite a newer one.
+    account: watch::Receiver<Option<bool>>,
 }
 static NEXT_BINDING: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 fn retired() -> ManagedProviderError {
@@ -412,9 +407,8 @@ fn retired() -> ManagedProviderError {
     }
 }
 impl ManagedProviders {
-    /// The account availability the bound provider last reported: `true` when
-    /// an observed snapshot carries an account. Without a binding it is
-    /// `false`.
+    /// The account availability the bound provider's watch last reported.
+    /// Without a binding it is `false`.
     pub fn usable(&self) -> bool {
         *self.usable.borrow()
     }
@@ -423,54 +417,31 @@ impl ManagedProviders {
         self.usable.subscribe()
     }
     /// Observes the bound provider's account once and returns whether it is
-    /// signed in. A watched provider reads its own store and publishes through
-    /// its watch; only that watch is published here. Without a binding, while
-    /// `cancel` ends the wait, after the bounded wait, or when a read fails and
-    /// none reports an account, the last value stays: a failed read is not a
-    /// confirmed signed-out account. The wait is bounded for a provider
-    /// without a watch as well, so a stalled read cannot hold assembly or
+    /// signed in. The provider reads its own store and publishes through its
+    /// watch; only that watch is published here. Without a binding, while
+    /// `cancel` ends the wait, after the bounded wait, or when the observation
+    /// fails, the last value stays: a failed read is not a confirmed signed-out
+    /// account. The wait is bounded so a stalled read cannot hold assembly or
     /// Settings reconciliation past [`ACCOUNT_OBSERVATION_TIMEOUT`].
     pub async fn refresh_usable(&self, cancel: &CancellationToken) -> bool {
         let Ok(bound) = self.bound(cancel) else {
             return self.usable();
         };
-        if bound.account.is_some() {
-            for descriptor in bound.provider.providers() {
-                let observation = tokio::select! {
-                    biased;
-                    _ = cancel.cancelled() => return self.usable(),
-                    observation = tokio::time::timeout(
-                        ACCOUNT_OBSERVATION_TIMEOUT,
-                        bound.provider.observe_account(&descriptor.provider_id),
-                    ) => observation,
-                };
-                // A failed or timed-out observation leaves the watch as it
-                // was, which is what this publishes below.
-                let _ = observation;
-            }
-            if !cancel.is_cancelled() {
-                self.observe_watch(bound.binding);
-            }
-            return self.usable();
-        }
-        let mut confirmed = true;
-        let mut usable = false;
         for descriptor in bound.provider.providers() {
-            let status = tokio::select! {
+            let observation = tokio::select! {
                 biased;
-                _ = cancel.cancelled() => break,
-                status = tokio::time::timeout(
+                _ = cancel.cancelled() => return self.usable(),
+                observation = tokio::time::timeout(
                     ACCOUNT_OBSERVATION_TIMEOUT,
-                    bound.provider.status(&descriptor.provider_id),
-                ) => status,
+                    bound.provider.observe_account(&descriptor.provider_id),
+                ) => observation,
             };
-            match status {
-                Ok(Ok(account)) => usable |= account.account.is_some(),
-                Ok(Err(_)) | Err(_) => confirmed = false,
-            }
+            // A failed or timed-out observation leaves the watch as it was,
+            // which is what this publishes below.
+            let _ = observation;
         }
-        if !cancel.is_cancelled() && (usable || confirmed) {
-            self.observe_rpc(bound.binding, usable);
+        if !cancel.is_cancelled() {
+            self.observe_watch(bound.binding);
         }
         self.usable()
     }
@@ -487,22 +458,7 @@ impl ManagedProviders {
         if bound.binding != binding {
             return;
         }
-        let Some(account) = &bound.account else {
-            return;
-        };
-        if let Some(usable) = *account.borrow() {
-            self.usable.send_replace(usable);
-        }
-    }
-    /// Publishes an account read only for a provider without a watch and only
-    /// while `binding` is still the bound one. A historical login attempt or
-    /// an older read never overwrites a watched provider's own transitions.
-    fn observe_rpc(&self, binding: u64, usable: bool) {
-        let slot = self.provider.lock().unwrap();
-        let Some(bound) = slot.as_ref() else {
-            return;
-        };
-        if bound.binding == binding && bound.account.is_none() {
+        if let Some(usable) = *bound.account.borrow() {
             self.usable.send_replace(usable);
         }
     }
@@ -574,20 +530,14 @@ impl ManagedProviders {
         id: &str,
         cancel: &CancellationToken,
     ) -> Result<AccountSnapshot, ManagedProviderError> {
-        let bound = self.bound(cancel)?;
-        let account = checked_account(bound.provider.status(id).await?)?;
-        self.observe_rpc(bound.binding, account.account.is_some());
-        Ok(account)
+        checked_account(self.provider(cancel)?.status(id).await?)
     }
     pub async fn recover_account(
         &self,
         id: &str,
         cancel: &CancellationToken,
     ) -> Result<AccountSnapshot, ManagedProviderError> {
-        let bound = self.bound(cancel)?;
-        let account = checked_account(bound.provider.recover(id).await?)?;
-        self.observe_rpc(bound.binding, account.account.is_some());
-        Ok(account)
+        checked_account(self.provider(cancel)?.recover(id).await?)
     }
     pub async fn begin_browser(
         &self,
@@ -601,10 +551,7 @@ impl ManagedProviders {
         login: ManagedBrowserLoginComplete,
         cancel: &CancellationToken,
     ) -> Result<AccountSnapshot, ManagedProviderError> {
-        let bound = self.bound(cancel)?;
-        let account = checked_account(bound.provider.complete_browser(login).await?)?;
-        self.observe_rpc(bound.binding, account.account.is_some());
-        Ok(account)
+        checked_account(self.provider(cancel)?.complete_browser(login).await?)
     }
     pub async fn begin_device(
         &self,
@@ -618,11 +565,9 @@ impl ManagedProviders {
         attempt: &ManagedLoginAttempt,
         cancel: &CancellationToken,
     ) -> Result<LoginState, ManagedProviderError> {
-        let bound = self.bound(cancel)?;
-        let state = bound.provider.attempt_status(attempt)?;
+        let state = self.provider(cancel)?.attempt_status(attempt)?;
         if let LoginState::Completed { account } = &state {
             checked_account(account.clone())?;
-            self.observe_rpc(bound.binding, account.account.is_some());
         }
         Ok(state)
     }
@@ -638,10 +583,7 @@ impl ManagedProviders {
         id: &str,
         cancel: &CancellationToken,
     ) -> Result<AccountSnapshot, ManagedProviderError> {
-        let bound = self.bound(cancel)?;
-        let account = checked_account(bound.provider.logout(id).await?)?;
-        self.observe_rpc(bound.binding, account.account.is_some());
-        Ok(account)
+        checked_account(self.provider(cancel)?.logout(id).await?)
     }
     pub async fn usage(
         &self,
@@ -949,8 +891,8 @@ impl DynPlugin for ManagedProviderBinding {
                 )));
             }
             let binding = NEXT_BINDING.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let account = provider.subscribe_account();
-            let initial = account.as_ref().and_then(|account| *account.borrow());
+            let mut account = provider.subscribe_account();
+            let initial = *account.borrow();
             {
                 let mut slot = owner.provider.lock().unwrap();
                 *slot = Some(Bound {
@@ -964,7 +906,7 @@ impl DynPlugin for ManagedProviderBinding {
                 owner.usable.send_replace(initial.unwrap_or(false));
             }
             let stop = ctx.cancellation_token();
-            let mirror = account.map(|mut account| {
+            let mirror = {
                 let owner = owner.clone();
                 tokio::spawn(async move {
                     loop {
@@ -977,12 +919,10 @@ impl DynPlugin for ManagedProviderBinding {
                         owner.observe_watch(binding);
                     }
                 })
-            });
+            };
             ctx.effect(move || async move {
-                if let Some(mirror) = mirror {
-                    mirror.abort();
-                    let _ = mirror.await;
-                }
+                mirror.abort();
+                let _ = mirror.await;
                 {
                     let mut slot = owner.provider.lock().unwrap();
                     if slot.as_ref().is_some_and(|bound| bound.binding == binding) {

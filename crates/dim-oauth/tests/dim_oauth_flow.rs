@@ -648,7 +648,7 @@ async fn account_reads_follow_another_process_writes() {
     let first = process(&home).await;
     let second = process(&home).await;
     let service = second.root.get::<dyn ManagedProvider>().unwrap();
-    let mut account = service.subscribe_account().unwrap();
+    let mut account = service.subscribe_account();
     tokio::time::timeout(Duration::from_secs(10), async {
         while *account.borrow_and_update() != Some(false) {
             account.changed().await.unwrap();

@@ -23,10 +23,10 @@ struct SearchProvider {
     /// The account the owner stores; the test moves it directly, as a login
     /// completing without its client does.
     signed_in: watch::Sender<Option<bool>>,
-    /// Account observations, which the transition must not need.
+    /// Account observations, which the assembly and reconciliation count.
+    observations: Arc<AtomicUsize>,
+    /// Account reads, which an installed watch must make unnecessary.
     reads: Arc<AtomicUsize>,
-    /// Whether the provider reports its own account transitions.
-    watched: bool,
     /// Makes the next account read fail, as a transient store error does.
     fail_status: Arc<AtomicBool>,
 }
@@ -66,10 +66,11 @@ impl ManagedProvider for SearchProvider {
             Ok(account(signed_in))
         })
     }
-    fn subscribe_account(&self) -> Option<watch::Receiver<Option<bool>>> {
-        self.watched.then(|| self.signed_in.subscribe())
+    fn subscribe_account(&self) -> watch::Receiver<Option<bool>> {
+        self.signed_in.subscribe()
     }
     fn observe_account(&self, _: &str) -> ManagedFuture<()> {
+        self.observations.fetch_add(1, Ordering::SeqCst);
         let fail = self.fail_status.load(Ordering::SeqCst);
         let signed_in = self.signed_in.clone();
         Box::pin(async move {
@@ -158,7 +159,7 @@ impl ManagedProvider for SearchProvider {
 struct SearchProviderPlugin {
     signed_in: watch::Sender<Option<bool>>,
     reads: Arc<AtomicUsize>,
-    watched: bool,
+    observations: Arc<AtomicUsize>,
     fail_status: Arc<AtomicBool>,
 }
 impl SearchProviderPlugin {
@@ -166,21 +167,14 @@ impl SearchProviderPlugin {
         Self {
             signed_in,
             reads,
-            watched: true,
+            observations: Arc::new(AtomicUsize::new(0)),
             fail_status: Arc::new(AtomicBool::new(false)),
         }
     }
-    fn unwatched(
-        signed_in: watch::Sender<Option<bool>>,
-        reads: Arc<AtomicUsize>,
-        fail_status: Arc<AtomicBool>,
-    ) -> Self {
-        Self {
-            signed_in,
-            reads,
-            watched: false,
-            fail_status,
-        }
+    /// Also counts `observe_account` calls on `observations`.
+    fn observing(mut self, observations: Arc<AtomicUsize>) -> Self {
+        self.observations = observations;
+        self
     }
     fn with_failure(mut self, fail_status: Arc<AtomicBool>) -> Self {
         self.fail_status = fail_status;
@@ -195,8 +189,8 @@ impl Plugin for SearchProviderPlugin {
     async fn apply(&self, ctx: &Ctx, (): ()) -> rutis::Result {
         ctx.provide_as::<dyn ManagedProvider>(Arc::new(SearchProvider {
             signed_in: self.signed_in.clone(),
+            observations: self.observations.clone(),
             reads: self.reads.clone(),
-            watched: self.watched,
             fail_status: self.fail_status.clone(),
         }))?;
         Ok(())
@@ -1306,11 +1300,9 @@ async fn switching_an_open_session_to_managed_search_observes_the_account() {
             builtins
                 .builtins
                 .register::<Value, _, _>("SearchProviderFixture", move |_| {
-                    Ok(SearchProviderPlugin::unwatched(
-                        signed_in.clone(),
-                        reads.clone(),
-                        fail.clone(),
-                    ))
+                    Ok(SearchProviderPlugin::new(signed_in.clone(), reads.clone())
+                        .observing(reads.clone())
+                        .with_failure(fail.clone()))
                 });
             "SearchProviderFixture".to_owned()
         }))),
@@ -1399,11 +1391,9 @@ async fn the_web_assembly_reads_the_account_only_when_managed_search_is_needed()
             builtins
                 .builtins
                 .register::<Value, _, _>("SearchProviderFixture", move |_| {
-                    Ok(SearchProviderPlugin::unwatched(
-                        signed_in.clone(),
-                        reads.clone(),
-                        fail.clone(),
-                    ))
+                    Ok(SearchProviderPlugin::new(signed_in.clone(), reads.clone())
+                        .observing(reads.clone())
+                        .with_failure(fail.clone()))
                 });
             "SearchProviderFixture".to_owned()
         }))),
@@ -1476,11 +1466,9 @@ async fn a_failed_account_read_keeps_an_open_session_search_declared() {
             builtins
                 .builtins
                 .register::<Value, _, _>("SearchProviderFixture", move |_| {
-                    Ok(SearchProviderPlugin::unwatched(
-                        signed_in.clone(),
-                        reads.clone(),
-                        fail.clone(),
-                    ))
+                    Ok(SearchProviderPlugin::new(signed_in.clone(), reads.clone())
+                        .observing(reads.clone())
+                        .with_failure(fail.clone()))
                 });
             "SearchProviderFixture".to_owned()
         }))),

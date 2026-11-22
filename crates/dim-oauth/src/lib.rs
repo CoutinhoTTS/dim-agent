@@ -1095,8 +1095,8 @@ impl ManagedProvider for DimOAuth {
             inner.store.status().await
         })
     }
-    fn subscribe_account(&self) -> Option<tokio::sync::watch::Receiver<Option<bool>>> {
-        Some(self.0.store.account())
+    fn subscribe_account(&self) -> tokio::sync::watch::Receiver<Option<bool>> {
+        self.0.store.account()
     }
     fn observe_account(&self, provider: &str) -> ManagedFuture<()> {
         let provider = provider.to_owned();

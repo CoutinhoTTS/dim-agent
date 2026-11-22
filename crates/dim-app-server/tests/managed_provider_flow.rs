@@ -61,6 +61,9 @@ struct Fixture {
     watch: Mutex<Option<watch::Sender<Option<bool>>>>,
     /// Account reads, which an installed watch must make unnecessary.
     status_reads: AtomicUsize,
+    /// Whether `attempt_status` reports a completed login with the fixture
+    /// account.
+    completed_attempt: AtomicBool,
 }
 fn account(generation: u64) -> AccountSnapshot {
     AccountSnapshot {
@@ -147,13 +150,13 @@ impl ManagedProvider for Provider {
             Ok(account(1))
         })
     }
-    fn subscribe_account(&self) -> Option<watch::Receiver<Option<bool>>> {
+    fn subscribe_account(&self) -> watch::Receiver<Option<bool>> {
         self.0
             .watch
             .lock()
             .unwrap()
-            .as_ref()
-            .map(watch::Sender::subscribe)
+            .get_or_insert_with(|| watch::channel(Some(true)).0)
+            .subscribe()
     }
     fn observe_account(&self, _: &str) -> ManagedFuture<()> {
         let fixture = self.0.clone();
@@ -178,6 +181,11 @@ impl ManagedProvider for Provider {
         unused()
     }
     fn attempt_status(&self, _: &ManagedLoginAttempt) -> Result<LoginState, ManagedError> {
+        if self.0.completed_attempt.load(Ordering::SeqCst) {
+            return Ok(LoginState::Completed {
+                account: account(1),
+            });
+        }
         Err(ManagedError::AttemptNotFound)
     }
     fn cancel_attempt(&self, _: ManagedLoginAttempt) -> ManagedFuture<()> {
@@ -560,32 +568,86 @@ async fn an_older_account_refresh_does_not_overwrite_a_newer_watch_update() {
 }
 
 #[tokio::test]
-async fn a_watchless_account_read_that_never_finishes_leaves_the_last_observation() {
+async fn a_stalled_account_observation_leaves_the_last_observation() {
     tokio::time::timeout(std::time::Duration::from_secs(30), async {
         let (root, fixture, owner, binding) = setup().await;
         let cancel = CancellationToken::new();
         assert!(
             owner.refresh_usable(&cancel).await,
-            "the first status read reports the fixture account"
+            "the first observation reports the fixture account"
         );
-        fixture.pause_status.store(true, Ordering::SeqCst);
+        fixture.pause_observe.store(true, Ordering::SeqCst);
         tokio::time::pause();
         let refreshing = {
             let owner = owner.clone();
             tokio::spawn(async move { owner.refresh_usable(&CancellationToken::new()).await })
         };
-        fixture.status_entered.notified().await;
+        fixture.observe_entered.notified().await;
         tokio::time::advance(std::time::Duration::from_secs(6)).await;
         tokio::time::resume();
         let usable = tokio::time::timeout(std::time::Duration::from_secs(10), refreshing)
             .await
-            .expect("a watchless account read must not hold its caller past the bound")
+            .expect("a stalled account observation must not hold its caller past the bound")
             .unwrap();
         assert!(
             usable,
             "a timed-out read must leave the last observation in place"
         );
         assert!(owner.usable());
+        drop(binding);
+        root.shutdown().await.unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn account_reads_do_not_restore_a_watched_sign_out() {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let (root, fixture, owner, binding) = setup().await;
+        let cancel = CancellationToken::new();
+        assert!(owner.usable(), "the signed-in watch installs");
+        let sign_out = fixture
+            .watch
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("the fixture watch exists");
+        sign_out.send_replace(Some(false));
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while owner.usable() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the watched sign-out was not published");
+
+        let stale = owner.status("fixture", &cancel).await.unwrap();
+        assert!(
+            stale.account.is_some(),
+            "the fixture still reports its old signed-in snapshot"
+        );
+        assert!(
+            !owner.usable(),
+            "an account read must not restore a watched sign-out"
+        );
+
+        fixture.completed_attempt.store(true, Ordering::SeqCst);
+        let state = owner
+            .attempt_status(
+                &ManagedLoginAttempt {
+                    provider_id: "fixture".into(),
+                    attempt_id: "attempt".into(),
+                },
+                &cancel,
+            )
+            .unwrap();
+        assert!(matches!(state, LoginState::Completed { .. }));
+        assert!(
+            !owner.usable(),
+            "a completed attempt must not restore a watched sign-out"
+        );
+
         drop(binding);
         root.shutdown().await.unwrap();
     })
