@@ -59,8 +59,8 @@ pub enum Blocked {
     /// A Session was just switched to; the daemon has not reported every
     /// live line's state yet.
     Session,
-    /// A resume has not resolved: the target Session's activity is not known
-    /// yet.
+    /// A Session switch the user asked for has not resolved: the target
+    /// Session's activity is not known yet.
     Switch,
 }
 

@@ -1396,6 +1396,7 @@ impl Worker {
                     self.send(Update::Notice(
                         "Session attachment changed; pick the message again".into(),
                     ));
+                    self.send(Update::ForkFailed);
                     return Ok(());
                 }
                 let forked = self
@@ -1418,6 +1419,7 @@ impl Worker {
                         ) {
                             self.send(Update::Notice(error.to_string()));
                         }
+                        self.send(Update::ForkFailed);
                     }
                 }
             }

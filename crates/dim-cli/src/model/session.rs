@@ -1423,6 +1423,9 @@ pub enum Update {
     Renamed(RenameReply),
     /// What a `/resume` delete came to, localized by the interface.
     Deleted(DeleteReply),
+    /// A fork ended without opening a Session: the shown one is still
+    /// attached, so no `Switched` ends the wait the fork started.
+    ForkFailed,
     /// Progress of the sign-in tagged `attempt`.
     Oauth {
         attempt: u64,
