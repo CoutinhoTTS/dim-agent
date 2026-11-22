@@ -200,6 +200,9 @@ impl Worker {
                 if newly_failed {
                     self.send(Update::Notice(format!("Branch {branch}: {error}")));
                 }
+                // Terminal for the directory as soon as the fact arrives; the
+                // transcript still waits for the window that recorded it.
+                self.projection.apply(branch, event);
                 if self.focus == *branch {
                     let parent = self
                         .projection
