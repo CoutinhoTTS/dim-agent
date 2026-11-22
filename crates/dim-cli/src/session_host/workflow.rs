@@ -104,6 +104,15 @@ impl Worker {
         self.client.supports(&["workflow.status"])
     }
 
+    /// A status read may start now: the connection advertises the method, the
+    /// Session is attached, no read is in flight and no failure stopped reads.
+    pub(super) fn workflow_ready(&self) -> bool {
+        self.workflow_supported()
+            && !self.session_id.is_empty()
+            && self.workflow.request.is_none()
+            && self.workflow.error.is_none()
+    }
+
     /// Finds run IDs in the producer-defined fields of tool results and
     /// report inputs, never in result prose.
     pub(super) fn discover_workflow(&mut self, branch_id: &str, event: &Event) {
@@ -176,11 +185,8 @@ impl Worker {
     }
 
     pub(super) async fn poll_workflow(&mut self) {
-        if !self.workflow_supported()
-            || self.session_id.is_empty()
-            || self.workflow.request.is_some()
-            || self.workflow.error.is_some()
-        {
+        if !self.workflow_ready() {
+            self.workflow.next_at = None;
             return;
         }
         let run_id = if self.workflow.discovery {
@@ -512,6 +518,36 @@ mod tests {
         assert!(
             worker.workflow.next_at.is_none(),
             "a run record that does not decode leaves no wake"
+        );
+    }
+
+    /// A replayed run fact asks for a status read even when the connection
+    /// does not advertise `workflow.status`; no read can follow, so the poll
+    /// drops the deadline instead of leaving the Session loop an expired one.
+    #[tokio::test]
+    async fn a_replayed_run_fact_without_the_workflow_method_keeps_no_wake() {
+        let (mut worker, _receiver, _sent) =
+            crate::session_host::test_worker(&crate::session_host::TEST_FEATURES).await;
+        assert!(
+            !worker.client.supports(&["workflow.status"]),
+            "the test daemon advertises no workflow status"
+        );
+        worker.session_id = "s1".into();
+        worker.replay("main", call(1, "wf-call"));
+        worker.replay("main", completed(2, "wf-call", "run-a"));
+        assert!(
+            worker.workflow.next_at.is_some(),
+            "the replayed run fact asks for a status read"
+        );
+
+        worker.poll_workflow().await;
+        assert!(
+            worker.workflow.request.is_none(),
+            "a connection without workflow.status sends no read"
+        );
+        assert!(
+            worker.workflow.next_at.is_none(),
+            "a connection without workflow.status leaves no wake armed"
         );
     }
 }
