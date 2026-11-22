@@ -3,6 +3,8 @@
 use super::super::file_reads::{
     Bom, EncodingSource, FileReads, TextEncoding, TextFileBinding, WriteBinding,
 };
+#[cfg(unix)]
+use super::NewFile;
 use super::codec;
 use super::edit::unified_diff;
 use super::{
@@ -288,20 +290,43 @@ fn validated_bytes(
 /// resolves to this file, so it never deletes an entry another writer created.
 struct Temporary<'a> {
     target: &'a Target,
+    /// The new file's held parent; `None` on the replacement path, which
+    /// stages and removes the sibling by the target's path.
+    #[cfg(target_os = "linux")]
+    below: Option<&'a NewFile<'a>>,
     name: std::ffi::OsString,
     file: std::fs::File,
 }
+impl Temporary<'_> {
+    fn staged_owned(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        if let Some(new_file) = self.below {
+            return new_file.staged_owned(&self.name, &self.file);
+        }
+        self.target.staged_owned(&self.name, &self.file)
+    }
+
+    fn remove_staged(&self) {
+        #[cfg(target_os = "linux")]
+        if let Some(new_file) = self.below {
+            new_file.remove_staged(&self.name);
+            return;
+        }
+        self.target.remove_staged(&self.name);
+    }
+}
 impl Drop for Temporary<'_> {
     fn drop(&mut self) {
-        if self.target.staged_owned(&self.name, &self.file) {
-            #[cfg(windows)]
-            if let Ok(metadata) = self.file.metadata() {
-                let mut permissions = metadata.permissions();
-                permissions.set_readonly(false);
-                let _ = self.file.set_permissions(permissions);
-            }
-            self.target.remove_staged(&self.name);
+        if !self.staged_owned() {
+            return;
         }
+        #[cfg(windows)]
+        if let Ok(metadata) = self.file.metadata() {
+            let mut permissions = metadata.permissions();
+            permissions.set_readonly(false);
+            let _ = self.file.set_permissions(permissions);
+        }
+        self.remove_staged();
     }
 }
 
@@ -368,6 +393,8 @@ pub(super) fn write_target(
     };
     let mut temporary = Temporary {
         target,
+        #[cfg(target_os = "linux")]
+        below: None,
         name: staged.clone(),
         file,
     };
@@ -468,7 +495,9 @@ pub(super) fn write_target(
 /// Publishes a new file. Linux stages it as an unnamed `O_TMPFILE` inode and
 /// links it into place, so preparation has no directory entry; the fallback,
 /// and every other Unix platform, stages a named 0600 sibling and gives it the
-/// creation mode immediately before publication.
+/// creation mode immediately before publication. Every step uses the one
+/// [`NewFile`] parent handle, so a parent swap cannot split the file from the
+/// directory that gave it its metadata.
 #[cfg(unix)]
 fn write_new_file(
     target: &Target,
@@ -477,25 +506,39 @@ fn write_new_file(
     cancel: &CancellationToken,
     #[cfg(test)] hook: Option<super::CommitHook>,
 ) -> Result<Result<(), ToolResult>, Cancelled> {
+    let path = target.path();
+    let new_file = match NewFile::new(target) {
+        Ok(new_file) => new_file,
+        Err(TargetError::Refused) => return Ok(Err(refused(path))),
+        Err(TargetError::Io(error)) => return Ok(Err(write_failure(&error, display, false))),
+    };
+    #[cfg(all(target_os = "linux", test))]
+    let mut hook = hook;
     #[cfg(target_os = "linux")]
-    match target.create_anonymous_staged() {
+    match new_file.create_anonymous() {
         Ok(Some(file)) => {
-            return publish_anonymous_new(
-                target,
+            let publication = match publish_anonymous_new(
+                &new_file,
                 file,
                 bytes,
                 display,
                 cancel,
                 #[cfg(test)]
-                hook,
-            );
+                hook.take(),
+            )? {
+                Ok(publication) => publication,
+                Err(result) => return Ok(Err(result)),
+            };
+            if let AnonymousPublication::Published = publication {
+                return Ok(Ok(()));
+            }
         }
         Ok(None) => {}
-        Err(TargetError::Refused) => return Ok(Err(refused(target.path()))),
+        Err(TargetError::Refused) => return Ok(Err(refused(path))),
         Err(TargetError::Io(error)) => return Ok(Err(write_failure(&error, display, false))),
     }
     publish_named_new(
-        target,
+        &new_file,
         bytes,
         display,
         cancel,
@@ -504,19 +547,42 @@ fn write_new_file(
     )
 }
 
+/// The outcome of publishing a new file from an anonymous inode.
+#[cfg(target_os = "linux")]
+enum AnonymousPublication {
+    /// The inode is linked under the target's name.
+    Published,
+    /// The filesystem or the process cannot link an anonymous inode through
+    /// `/proc/self/fd`; the named fallback publishes instead.
+    Unsupported,
+}
+
+/// Whether a failed anonymous publication means the anonymous inode cannot be
+/// published at all, so the named fallback can take over. An existing target
+/// or an access failure is not unsupported and stays a failure.
+#[cfg(target_os = "linux")]
+fn anonymous_publication_unsupported(error: &std::io::Error) -> bool {
+    matches!(
+        error.raw_os_error(),
+        Some(libc::EOPNOTSUPP | libc::EXDEV | libc::EINVAL | libc::ENOENT)
+    )
+}
+
 /// Publishes a new file from an anonymous inode: write, sync, then link the
 /// inode under the target's name. The link never replaces an entry, and the
 /// inode disappears with its descriptor if the call fails or is cancelled.
+/// An unsupported link returns [`AnonymousPublication::Unsupported`] so the
+/// named fallback can publish the same bytes.
 #[cfg(target_os = "linux")]
 fn publish_anonymous_new(
-    target: &Target,
+    new_file: &NewFile<'_>,
     mut file: std::fs::File,
     bytes: &[u8],
     display: &str,
     cancel: &CancellationToken,
     #[cfg(test)] hook: Option<super::CommitHook>,
-) -> Result<Result<(), ToolResult>, Cancelled> {
-    let path = target.path();
+) -> Result<Result<AnonymousPublication, ToolResult>, Cancelled> {
+    let path = new_file.path();
     if let Err(error) = file.write_all(bytes).and_then(|()| file.sync_all()) {
         return Ok(Err(write_failure(&error, display, false)));
     }
@@ -525,44 +591,55 @@ fn publish_anonymous_new(
         hook(path);
     }
     Cancelled::check(cancel)?;
-    if let Err(error) = target.strip_tmpfile_umask(&file) {
+    if let Err(error) = new_file.strip_tmpfile_umask(&file) {
         return Ok(Err(match error {
             TargetError::Refused => refused(path),
             TargetError::Io(error) => write_failure(&error, display, false),
         }));
     }
-    if let Err(error) = target.publish_anonymous(&file) {
-        return Ok(Err(match error {
-            TargetError::Refused => refused(path),
-            TargetError::Io(error) if error.kind() == ErrorKind::AlreadyExists => failed(
+    match new_file.publish_anonymous(&file) {
+        Ok(()) => {}
+        Err(TargetError::Refused) => return Ok(Err(refused(path))),
+        Err(TargetError::Io(error)) if error.kind() == ErrorKind::AlreadyExists => {
+            return Ok(Err(failed(
                 "Read the existing file before overwriting it.",
                 json!({"code": "text_binding_required"}),
-            ),
-            TargetError::Io(error) => write_failure(&error, display, false),
-        }));
+            )));
+        }
+        Err(TargetError::Io(error)) if anonymous_publication_unsupported(&error) => {
+            return Ok(Ok(AnonymousPublication::Unsupported));
+        }
+        Err(TargetError::Io(error)) => return Ok(Err(write_failure(&error, display, false))),
     }
-    sync_parent(target, path, display)
+    if let Err(error) = new_file.sync() {
+        return Ok(Err(sync_failure(error, path, display)));
+    }
+    Ok(Ok(AnonymousPublication::Published))
 }
 
 /// Publishes a new file from a named 0600 sibling, the form every platform
-/// shares when no anonymous inode is available.
+/// shares when no anonymous inode is available. A failed publication restores
+/// the sibling's private mode, so a parent that refuses the cleanup unlink
+/// cannot leave unpublished content with the wider creation mode.
 #[cfg(unix)]
 fn publish_named_new(
-    target: &Target,
+    new_file: &NewFile<'_>,
     bytes: &[u8],
     display: &str,
     cancel: &CancellationToken,
     #[cfg(test)] hook: Option<super::CommitHook>,
 ) -> Result<Result<(), ToolResult>, Cancelled> {
-    let path = target.path();
+    let path = new_file.path();
     let staged = std::ffi::OsString::from(format!(".dim-write-{}", uuid::Uuid::new_v4()));
-    let file = match target.create_staged(&staged) {
+    let file = match new_file.create_staged(&staged) {
         Ok(file) => file,
         Err(TargetError::Refused) => return Ok(Err(refused(path))),
         Err(TargetError::Io(error)) => return Ok(Err(write_failure(&error, display, false))),
     };
     let mut temporary = Temporary {
-        target,
+        target: new_file.target,
+        #[cfg(target_os = "linux")]
+        below: Some(new_file),
         name: staged.clone(),
         file,
     };
@@ -578,20 +655,21 @@ fn publish_named_new(
         hook(path);
     }
     Cancelled::check(cancel)?;
-    if !target.staged_owned(&staged, &temporary.file) {
+    if !new_file.staged_owned(&staged, &temporary.file) {
         return Ok(Err(failed(
             "Staged file was replaced during preparation.",
             json!({"code": "write_error"}),
         )));
     }
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    if let Err(error) = target.prepare_new_file(&temporary.file) {
+    if let Err(error) = new_file.prepare(&temporary.file) {
         return Ok(Err(match error {
             TargetError::Refused => refused(path),
             TargetError::Io(error) => write_failure(&error, display, false),
         }));
     }
-    if let Err(error) = target.install(&staged, &temporary.file, false) {
+    if let Err(error) = new_file.install(&staged, &temporary.file) {
+        new_file.restore_private(&temporary.file);
         return Ok(Err(match error {
             TargetError::Refused => refused(path),
             TargetError::Io(error) if error.kind() == ErrorKind::AlreadyExists => failed(
@@ -602,7 +680,20 @@ fn publish_named_new(
         }));
     }
     drop(temporary);
-    sync_parent(target, path, display)
+    if let Err(error) = new_file.sync() {
+        return Ok(Err(sync_failure(error, path, display)));
+    }
+    Ok(Ok(()))
+}
+
+/// Maps a failed directory sync: the entry is already published, so the
+/// result warns that the file may have been partially written.
+#[cfg(unix)]
+fn sync_failure(error: TargetError, path: &Path, display: &str) -> ToolResult {
+    match error {
+        TargetError::Refused => refused(path),
+        TargetError::Io(error) => write_failure(&error, display, true),
+    }
 }
 
 /// Flushes the published directory entry. A failure here warns that the file
@@ -613,13 +704,10 @@ fn sync_parent(
     path: &Path,
     display: &str,
 ) -> Result<Result<(), ToolResult>, Cancelled> {
-    if let Err(error) = target.sync_parent() {
-        return Ok(Err(match error {
-            TargetError::Refused => refused(path),
-            TargetError::Io(error) => write_failure(&error, display, true),
-        }));
+    match target.sync_parent() {
+        Ok(()) => Ok(Ok(())),
+        Err(error) => Ok(Err(sync_failure(error, path, display))),
     }
-    Ok(Ok(()))
 }
 
 #[cfg(unix)]
