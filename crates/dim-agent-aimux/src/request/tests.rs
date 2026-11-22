@@ -891,7 +891,7 @@ fn bedrock_tool_image_request(model: &str, is_error: bool) -> ModelRequest {
 
 /// A Bedrock body for `request` as it reaches the wire.
 async fn bedrock_capture(request: ModelRequest, model: &'static str) -> Value {
-    let prepared = convert(&request, &ProviderKind::Bedrock, None).unwrap();
+    let transform = super::tool_result_status_rewrite(&ProviderKind::Bedrock, model);
     capture(
         move |url| {
             Arc::new(
@@ -901,14 +901,16 @@ async fn bedrock_capture(request: ModelRequest, model: &'static str) -> Value {
                     access_key_id: Some("access-key".into()),
                     secret_access_key: Some("secret-key".into()),
                     base_url: Some(url),
-                    transform_request_body: prepared.transform_request_body,
+                    transform_request_body: transform,
                     ..AmazonBedrockProviderSettings::default()
                 })
                 .unwrap()
                 .chat(model),
             )
         },
-        prepared.options,
+        convert(&request, &ProviderKind::Bedrock, None)
+            .unwrap()
+            .options,
     )
     .await
 }
@@ -1048,7 +1050,7 @@ async fn a_bedrock_error_tool_image_keeps_the_error_text_and_moves_the_image() {
         result.output
     );
     assert!(
-        prepared.transform_request_body.is_some(),
+        super::tool_result_status_rewrite(&ProviderKind::Bedrock, model).is_some(),
         "the unsupported model rewrites its serialized body"
     );
 }

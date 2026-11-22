@@ -31,9 +31,6 @@ pub(crate) struct PreparedRequest {
     pub options: CallOptions,
     pub tool_names: ToolNames,
     pub recording: Option<crate::recording::Capture>,
-    /// The provider's rewrite of the serialized request body, applied once
-    /// before the body is signed.
-    pub transform_request_body: Option<BodyRewrite>,
 }
 
 /// A rewrite of the provider's serialized JSON request body.
@@ -82,7 +79,10 @@ fn tool_result_images(kind: &ProviderKind, model_id: &str) -> bool {
 /// The body rewrite that drops `toolResult.status` for a Bedrock model AWS
 /// does not list for that optional field. The result text keeps the same
 /// meaning, and the families that support the field keep it.
-fn tool_result_status_rewrite(kind: &ProviderKind, model_id: &str) -> Option<BodyRewrite> {
+pub(crate) fn tool_result_status_rewrite(
+    kind: &ProviderKind,
+    model_id: &str,
+) -> Option<BodyRewrite> {
     if *kind != ProviderKind::Bedrock || bedrock_tool_result_fields(model_id) {
         return None;
     }
@@ -398,7 +398,6 @@ pub(crate) fn convert(
         options,
         tool_names,
         recording,
-        transform_request_body: tool_result_status_rewrite(kind, &request.model_id),
     })
 }
 
