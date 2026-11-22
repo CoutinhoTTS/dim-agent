@@ -1589,7 +1589,7 @@ async fn create_instance(
                 .and_then(|instance| locate(loader, ctx, instance));
             let error = match &found {
                 _ if cancel.is_cancelled() => AgentError::Cancelled("initialization".into()),
-                Some(created) => timed_out(ctx, &created.children, "instance creation"),
+                Some(created) => timed_out(ctx, &created.children, None),
                 None => AgentError::Build(format!("initialization timed out: {group}")),
             };
             if found.is_none() {
@@ -1631,7 +1631,7 @@ async fn create_instance(
     let mut ready = progress
         .wait(active_rows(&group, cancel), || vec![created.view.id])
         .await
-        .unwrap_or_else(|| Err(timed_out(ctx, &group, "instance creation")));
+        .unwrap_or_else(|| Err(timed_out(ctx, &group, None)));
     // Read after the group is Active: a settle can return while it still waits,
     // and its rows are the ones the required-row wait has to name.
     let mut waiting: Vec<FiberView> = loader
@@ -1644,7 +1644,7 @@ async fn create_instance(
         ready = progress
             .wait(active_rows(&waiting, cancel), || vec![created.view.id])
             .await
-            .unwrap_or_else(|| Err(timed_out(ctx, &waiting, "instance creation")));
+            .unwrap_or_else(|| Err(timed_out(ctx, &waiting, None)));
     }
     let mut handed = Handed::default();
     if ready.is_ok() {
@@ -1655,7 +1655,7 @@ async fn create_instance(
                 vec![created.view.id]
             })
             .await
-            .unwrap_or_else(|| Err(timed_out(ctx, &handed.required, "instance creation")));
+            .unwrap_or_else(|| Err(timed_out(ctx, &handed.required, None)));
         if let Err(error) = &ready
             && failed_mounter(&handed.required).is_some()
         {
@@ -1668,7 +1668,7 @@ async fn create_instance(
         ready = progress
             .wait(active_rows(&parts, cancel), || vec![created.view.id])
             .await
-            .unwrap_or_else(|| Err(timed_out(ctx, &parts, "instance creation")));
+            .unwrap_or_else(|| Err(timed_out(ctx, &parts, None)));
     }
     // Parts create nested instances while they load, and their rows are this
     // creation's members: read them once the waits above are done.
@@ -1700,7 +1700,7 @@ async fn create_instance(
             || vec![created.view.id],
         )
         .await
-        .unwrap_or_else(|| Err(timed_out(ctx, &created.children, "instance creation")));
+        .unwrap_or_else(|| Err(timed_out(ctx, &created.children, None)));
     match settled {
         Ok(()) => Ok(created),
         Err(error) => Err((error, Some(created))),
@@ -1882,8 +1882,10 @@ pub(crate) async fn build_session(
             session.scope.key::<dyn TimelineTreeControl>(),
         )?;
         let phase = match &initialization {
-            SessionInitialization::Prepared(_) | SessionInitialization::Restore(_) => "restore",
-            SessionInitialization::New => "Session creation",
+            SessionInitialization::Prepared(_) | SessionInitialization::Restore(_) => {
+                Some("restore")
+            }
+            SessionInitialization::New => None,
         };
         let initialize = async {
             match initialization {
@@ -1994,7 +1996,7 @@ pub async fn wait_active(
             views.iter().map(|view| view.id).collect()
         })
         .await
-        .unwrap_or_else(|| Err(timed_out(ctx, views, "row activation")))
+        .unwrap_or_else(|| Err(timed_out(ctx, views, None)))
 }
 
 async fn active_rows(views: &[FiberView], cancel: &CancellationToken) -> Result<()> {
@@ -2041,7 +2043,7 @@ async fn active_rows(views: &[FiberView], cancel: &CancellationToken) -> Result<
         }
     }
 }
-fn timed_out(ctx: &Ctx, views: &[FiberView], phase: &str) -> AgentError {
+fn timed_out(ctx: &Ctx, views: &[FiberView], phase: Option<&str>) -> AgentError {
     let snapshot = ctx.diagnostics();
     let ids: HashSet<_> = views
         .iter()
@@ -2061,9 +2063,11 @@ fn timed_out(ctx: &Ctx, views: &[FiberView], phase: &str) -> AgentError {
             format!("{} {:?} [{}]", p.name, p.state, unmet.join(", "))
         })
         .collect();
-    if pending.is_empty() {
+    if pending.is_empty()
+        && let Some(phase) = phase
+    {
         return AgentError::Build(format!(
-            "initialization timed out: no row pending; still running: {phase}"
+            "initialization timed out: no pending row in this wait; still running: {phase}"
         ));
     }
     AgentError::Build(format!("initialization timed out: {}", pending.join("; ")))

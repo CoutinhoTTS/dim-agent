@@ -2397,9 +2397,10 @@ async fn a_silent_restore_times_out_naming_the_restore_phase() {
         Err(error) => error,
     };
     let message = error.to_string();
-    assert!(message.contains("initialization timed out"), "{message}");
     assert!(
-        message.contains("restore"),
+        message.contains(
+            "initialization timed out: no pending row in this wait; still running: restore"
+        ),
         "the message names the phase still running: {message}"
     );
     settled("the host closes", agent.close()).await.unwrap();
