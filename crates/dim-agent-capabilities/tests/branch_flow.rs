@@ -1361,16 +1361,21 @@ impl TestStore {
             self.memory.append(key, events, publish).unwrap();
         }
     }
-    /// Answers the held append as a failed transaction that wrote nothing, then
-    /// commits what the store accepted behind it.
+    /// Answers the held append as a failed transaction that wrote nothing and
+    /// settles every batch already queued behind it in the same Session with
+    /// the same failure. A later append of that Session writes directly, and
+    /// another Session queued on the same line still commits.
     fn release_failed(&self) {
         let mut seam = self.seam.lock().unwrap();
-        let (_, _, publish) = seam.front.take().expect("a held append");
-        publish(Err(AgentError::Storage(
-            "injected transaction failure".into(),
-        )));
+        let (front, _, publish) = seam.front.take().expect("a held append");
+        let error = AgentError::Storage("injected transaction failure".into());
+        publish(Err(error.clone()));
         for (key, events, publish) in std::mem::take(&mut seam.behind) {
-            self.memory.append(key, events, publish).unwrap();
+            if key.session_id == front.session_id {
+                publish(Err(error.clone()));
+            } else {
+                self.memory.append(key, events, publish).unwrap();
+            }
         }
     }
     /// The pages `branch` was read with while selecting exactly `kinds`.
