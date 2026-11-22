@@ -4642,45 +4642,55 @@ async fn stored_attachment_and_tool_images_route_by_vision_capability() {
             .await
             .unwrap();
         session.idle("main").await.unwrap();
+        if vision {
+            assert!(
+                requests.lock().unwrap().is_empty(),
+                "the over-budget vision request is refused before the model host"
+            );
+            let events = chain_events(&session, "main", ..).await.unwrap();
+            let failure = events
+                .iter()
+                .rev()
+                .find_map(|event| match &event.kind {
+                    EventKind::ModelOutputEnd(data) => match &data.outcome {
+                        ModelOutputOutcome::Failed {
+                            failure: Some(failure),
+                            ..
+                        } => Some(failure.clone()),
+                        _ => None,
+                    },
+                    _ => None,
+                })
+                .expect("the refused request settles with a failure");
+            assert!(
+                failure
+                    .reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("Model request images exceed 32 MiB")),
+                "{:?}",
+                failure.reason
+            );
+            continue;
+        }
         let sent = requests.lock().unwrap().last().unwrap().clone();
         assert_eq!(sent.model_id, model_id);
-        if vision {
-            assert_eq!(
-                sent_image_sources(&sent).len(),
-                5,
-                "the attachment, three large images and the tool image reach {model_id} as pixels"
-            );
-            assert!(
-                sent_image_sources(&sent)
-                    .iter()
-                    .all(|source| source.source_type == ImageSourceType::Base64),
-                "a file-backed source is resolved for {model_id}"
-            );
-            assert!(
-                sent_texts(&sent)
-                    .iter()
-                    .all(|text| !text.starts_with("img:") && !text.contains("Image omitted")),
-                "a vision model needs no reference or placeholder"
-            );
-        } else {
-            assert!(sent_image_sources(&sent).is_empty());
-            assert_eq!(
-                sent_texts(&sent)
-                    .iter()
-                    .filter(|text| *text == "img:4739787cfd409e67")
-                    .count(),
-                3,
-                "retained images still reach {model_id} as references"
-            );
-            assert_eq!(
-                sent_texts(&sent)
-                    .iter()
-                    .filter(|text| *text == TOOL_IMAGE_REFERENCE)
-                    .count(),
-                3,
-                "the attachment and both tool images share one reference"
-            );
-        }
+        assert!(sent_image_sources(&sent).is_empty());
+        assert_eq!(
+            sent_texts(&sent)
+                .iter()
+                .filter(|text| *text == "img:4739787cfd409e67")
+                .count(),
+            3,
+            "retained images still reach {model_id} as references"
+        );
+        assert_eq!(
+            sent_texts(&sent)
+                .iter()
+                .filter(|text| *text == TOOL_IMAGE_REFERENCE)
+                .count(),
+            2,
+            "the attachment and this turn's tool image share one reference"
+        );
     }
     let events = chain_events(&session, "main", ..).await.unwrap();
     assert!(events.iter().any(|event| matches!(&event.kind,
