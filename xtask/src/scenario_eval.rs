@@ -7336,8 +7336,8 @@ mod tests {
     }
 
     /// A switch names the line to move to by role or by id, and the input
-    /// after the move; the runner moves the default branch after the target
-    /// line's first `turn/end` (model-prompts §9.8).
+    /// after the move; the runner moves the default branch at the target
+    /// line's first `turn/start` (model-prompts §9.8).
     #[test]
     fn a_switch_step_names_a_line_and_its_next_input() {
         let directory =
