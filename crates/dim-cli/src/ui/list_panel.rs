@@ -806,7 +806,7 @@ mod tests {
     use super::*;
 
     fn three_rows() -> ListPanel {
-        let mut panel = ListPanel::new("T", "h", "loading", "empty", "none", false);
+        let mut panel = ListPanel::new("", "h", "", "", "", false);
         panel.set_items(
             Ok(vec![
                 Item::new("a", "alpha", ""),
