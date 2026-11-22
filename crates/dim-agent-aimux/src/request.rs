@@ -759,15 +759,7 @@ fn tool_result(
             }
             ContentBlock::Image { source } => {
                 if !image_format_supported(kind, &source.media_type) {
-                    let reference = image_reference_or_placeholder(source);
-                    if inside {
-                        result.push(ToolResultContent::Text(TextPart {
-                            text: reference,
-                            provider_options: None,
-                        }));
-                    } else {
-                        text.push_str(&reference);
-                    }
+                    text.push_str(&image_reference_or_placeholder(source));
                     continue;
                 }
                 match (inside, base64_data(source)) {

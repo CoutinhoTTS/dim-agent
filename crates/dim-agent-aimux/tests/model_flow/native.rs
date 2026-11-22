@@ -4028,7 +4028,7 @@ fn error_tool_result_request() -> ModelRequest {
     input.insert("text".into(), json!("result text"));
     let mut request = ModelRequest::new(
         "local",
-        "test-model",
+        "anthropic.claude-3-5-sonnet-20241022-v2:0",
         vec![
             Message::text(Role::User, "question"),
             Message {
