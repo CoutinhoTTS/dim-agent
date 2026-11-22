@@ -1325,13 +1325,29 @@ mod tui_update {
             });
             let attach = wire.read("session.attach");
             wire.reply(&attach, attach_record(&attach));
+            wire.notice(
+                "session.state",
+                json!({"sessionId":"session","branchId":"main","running":false,"stopping":false}),
+            );
             let history = wire.read("session.history");
             wire.reply(
                 &history,
                 json!({"events":[],"through":8,"nextAfter":8,"done":true}),
             );
             wire.no_context();
-            let providers = wire.read("account.providers");
+            // The state report marks the context reading stale, so the host
+            // asks again before the providers read; this fixture reports the
+            // method as unknown every time.
+            let providers = loop {
+                let request = wire.read_any();
+                if request["method"] == "account.providers" {
+                    break request;
+                }
+                assert_eq!(request["method"], "session.context.usage", "{request}");
+                wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+                    "code":-32601,"message":"Unknown method: session.context.usage",
+                    "data":{"appError":"unknown_method"}}}));
+            };
             wire.reply(&providers, json!([]));
             while let Some(request) = wire.trailing_request() {
                 let request: Value = serde_json::from_str(&request).unwrap();
