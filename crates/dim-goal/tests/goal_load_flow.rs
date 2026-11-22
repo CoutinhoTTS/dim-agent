@@ -156,6 +156,7 @@ async fn a_clear_committed_behind_the_fold_wins_the_closing_pause() {
         .expect("the clear's state record is committed");
     let closing_session = tokio::spawn(env.session.close());
     let _ = tokio::time::timeout(NEGATIVE, closing.arrived()).await;
+    closing.release();
     release.send(()).unwrap();
     closing_session.await.unwrap().expect("the Session closes");
     let env = env.restore().await;
