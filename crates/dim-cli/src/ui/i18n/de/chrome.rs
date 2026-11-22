@@ -844,7 +844,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "Schreiben im Arbeitsbereich erlaubt; Befehle, Netzwerk und nicht gewährter Zugriff außerhalb fragen meist nach."
         }
         "Skips preset approval; pending calls on this branch are reevaluated. Explicit denies and isolation remain." => {
-            "Überspringt die Preset-Freigabe; ausstehende Aufrufe auf diesem Zweig werden neu bewertet. Ausdrückliche Ablehnungen und Isolation bleiben."
+            "Überspringt die Freigabe der Voreinstellung; ausstehende Aufrufe auf diesem Zweig werden neu bewertet. Ausdrückliche Ablehnungen und Prozessisolierung bleiben."
         }
         "↑↓ move · Enter select · Esc close" => "↑↓ bewegen · Enter wählen · Esc schließen",
         "Loading process isolation…" => "Prozessisolierung wird geladen…",

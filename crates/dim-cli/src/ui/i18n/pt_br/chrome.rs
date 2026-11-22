@@ -836,7 +836,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "Gravações no espaço de trabalho permitidas; comandos, rede e acesso externo não concedido geralmente perguntam."
         }
         "Skips preset approval; pending calls on this branch are reevaluated. Explicit denies and isolation remain." => {
-            "Pula a aprovação do preset; chamadas pendentes neste ramo são reavaliadas. Negações explícitas e isolamento continuam."
+            "Pula a aprovação da predefinição; chamadas pendentes neste ramo são reavaliadas. Negações explícitas e isolamento continuam."
         }
         "↑↓ move · Enter select · Esc close" => "↑↓ mover · Enter selecionar · Esc fechar",
         "Loading process isolation…" => "Carregando o isolamento de processos…",
