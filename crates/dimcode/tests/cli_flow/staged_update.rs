@@ -77,17 +77,50 @@ struct Installed {
     updater: PathBuf,
     prefix: PathBuf,
     home: Home,
+    _root: InstallRoot,
 }
 
+/// One flow's fake installation root, under the test target's temporary
+/// directory so it shares a filesystem with the built binary. It is removed
+/// when the flow ends, including while it is still being built.
+struct InstallRoot(PathBuf);
+
+impl InstallRoot {
+    fn new() -> Self {
+        let path = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+            .join(format!("dim-cli-update-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&path).unwrap();
+        Self(path)
+    }
+}
+
+impl Drop for InstallRoot {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Puts this test's own `dimcode` at `destination`, inside the package the
+/// update runs from. The installation tree lives beside the built binary in
+/// the test target's temporary directory, so a link cannot cross a filesystem;
+/// one that still cannot be made installs a copy.
 fn install_updater(destination: &Path) {
-    let status = Command::new("install")
-        .args(["-m", "700", env!("CARGO_BIN_EXE_dimcode")])
+    let source = Path::new(env!("CARGO_BIN_EXE_dimcode"));
+    if fs::hard_link(source, destination).is_ok() {
+        return;
+    }
+    let output = Command::new("install")
+        .args(["-m", "700"])
+        .arg(source)
         .arg(destination)
-        .status()
+        .output()
         .unwrap();
     assert!(
-        status.success(),
-        "install updater at {destination:?}: {status}"
+        output.status.success(),
+        "install {source:?} at {destination:?} failed ({}):\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
     );
 }
 
@@ -95,13 +128,14 @@ impl Installed {
     fn new(version: &str, commands: &[&str]) -> Self {
         let home = Home::new();
         fs::remove_dir_all(home.0.join("rust")).unwrap();
-        let prefix = home.0.join("node prefix");
+        let root = InstallRoot::new();
+        let prefix = root.0.join("node prefix");
         let package = prefix.join("lib/node_modules/dimcode-alpha");
         fs::create_dir_all(package.join("bin")).unwrap();
         fs::create_dir_all(package.join("node_modules/dimcode-darwin-arm64/bin")).unwrap();
         fs::create_dir_all(prefix.join("bin")).unwrap();
         // The update runs from inside the package, as the installed command
-        // does, so the copy it runs from is how it finds the installation.
+        // does, so the file it runs from is how it finds the installation.
         let updater = package.join("bin/dimcode");
         install_updater(&updater);
         let launcher = package.join("bin/dimcode.mjs");
@@ -123,6 +157,7 @@ impl Installed {
             updater: fs::canonicalize(updater).unwrap(),
             prefix: fs::canonicalize(prefix).unwrap(),
             home,
+            _root: root,
         }
     }
 
@@ -289,8 +324,10 @@ printf '%s\n' "$UPDATE_BINS" | while IFS= read -r line; do
 done
 if [ -n "$UPDATE_NATIVE" ]; then
   mkdir -p "$package/bin"
-  cp "$UPDATE_NATIVE" "$package/bin/dimcode"
-  chmod 700 "$package/bin/dimcode"
+  if ! ln "$UPDATE_NATIVE" "$package/bin/dimcode" 2>/dev/null; then
+    cp "$UPDATE_NATIVE" "$package/bin/dimcode"
+    chmod 700 "$package/bin/dimcode"
+  fi
 fi
 rm -rf "$retired"
 echo 'Installed package'
