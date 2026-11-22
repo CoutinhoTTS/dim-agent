@@ -95,8 +95,8 @@ agent 工具，不经过 Permission 批准，也从不服务给配对设备的�
   Git 才收到 `--force`，所以内容在检查后出现时 Git 自己会拒绝。删除走 `git worktree remove`，与记录删除在
   同一次存储操作里完成，分支保留，已提交内容不随目录消失。根已核验缺失，或存在但 Git 已不再登记时，只删
   记录并 `git worktree prune`；后者在目录非空时需要 `--force`。未登记目录按 task-id 显式删除，要求内容干净、
-  目录记录中没有根在其下的条目、没有 Session 的 cwd 在根下且不含 `.git`；带 `.git` 的残留由用户用
-  `git worktree remove` 处理，错误信息给出路径。
+  目录记录中没有根在其下的条目、没有 Session 的 cwd 在根下且要删除的整棵树不含 `.git` 条目（目录、gitdir 文件或
+  符号链接，含悬空链接）；带 `.git` 的残留由用户用 `git worktree remove` 处理，错误信息给出路径。
   记录只有 repository 与 root，同一路径被手工重建的 worktree 视为同一条记录，这是已知限制。
 - **prune**：候选只包括根在 `$DIMCODE_HOME/worktrees` 下、没有剩余使用关联的目录记录，再按最后使用时间
   应用 `--older-than` 或 `--keep`；未知时间按 §4 处理，仍有关联、Session 的 cwd 在根下、无法检查、Git 已不再登记（除显式
@@ -107,11 +107,12 @@ agent 工具，不经过 Permission 批准，也从不服务给配对设备的�
   所有权锁，先复核关联与存储中的 Session cwd，再调用调用方传入的 Git 删除步骤，最后删除记录。未登记的 remove
   经由 `store.removeUnregisteredDirectory`：它在同一把锁内复核目录记录中没有根在该目录或其下的条目、存储中没有
   Session 的 cwd 在该目录或其下，再运行调用方传入的删除步骤；该步骤在删除前用文件系统检查复核目录仍是管理根下的
-  普通目录、它的子目录仍是管理根内不含 `.git` 的普通目录（不起 Git 子进程），不满足就拒绝。
+  普通目录、它的直接子目录仍是管理根内的普通目录，以及删除范围内每个目录都没有 `.git` 条目（目录、gitdir 文件或
+  符号链接，含悬空链接；遍历不跟随符号链接，不起 Git 子进程），不满足就拒绝。
   `Session` 创建与 `associate_worktree` 在同一把锁内重新核验 cwd 与根是否仍是目录，所以复核之后不会出现指向已删根的
   新 Session 或关联；分叉、删除 Session 与关联移除也取同一把锁，会等这次删除结束。
   锁跨越的步骤没有时间上限：一次 `git worktree remove`（30 秒超时）、Git 不再登记时的 `cleanup_unregistered_root`
-  递归删除，以及未登记目录带 `--force` 的递归删除都在锁内；未登记目录的内容有多少，锁就持有多久。
+  递归删除，以及未登记目录删除前对整棵树 `.git` 条目的遍历和带 `--force` 的递归删除都在锁内；未登记目录的内容有多少，锁就持有多久。
   这期间 `session.create`、`session.fork`、`session.delete` 以及 worktree 关联与删除都要等这把锁。
   可证明的使用只有记录与存储中的 cwd；其余使用不可证明，由预览、确认和 worktree-access §4 的删除授权承担。
 - Session 删除和 `session cleanup` 不删除也不报告遗留的 worktree；`worktree list` 是查看它们的唯一入口。

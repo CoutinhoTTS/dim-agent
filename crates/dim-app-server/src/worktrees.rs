@@ -846,6 +846,7 @@ impl ManagedWorktrees {
                     let checked = async {
                         check_unregistered_entry(&entry).await?;
                         check_unregistered_children(&entry, &managed_root, force).await?;
+                        check_unregistered_tree(&entry).await?;
                         remove_checked_entry(&entry, &empty_children, force).await
                     };
                     checked.await.map_err(|error| match error {
@@ -1163,6 +1164,39 @@ async fn check_unregistered_children(
         }
     }
     Ok(empty_children)
+}
+
+/// Every directory in the tree a removal deletes must be free of Git metadata.
+/// The walk reads entries with `symlink_metadata` and never follows a symlink,
+/// so it stays inside the task directory; a `.git` entry in any form (a
+/// directory, a gitdir file or a dangling link) refuses the whole removal.
+async fn check_unregistered_tree(entry: &Path) -> Result<(), WorktreeError> {
+    let mut pending = vec![entry.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        if entry_exists(&directory.join(".git")).await? {
+            return Err(WorktreeError::InUse(format!(
+                "{} has a .git entry; run git worktree remove on it",
+                directory.display()
+            )));
+        }
+        let mut children = tokio::fs::read_dir(&directory)
+            .await
+            .map_err(|error| WorktreeError::Store(error.to_string()))?;
+        while let Some(child) = children
+            .next_entry()
+            .await
+            .map_err(|error| WorktreeError::Store(error.to_string()))?
+        {
+            let path = child.path();
+            let metadata = tokio::fs::symlink_metadata(&path)
+                .await
+                .map_err(|error| WorktreeError::Store(error.to_string()))?;
+            if metadata.is_dir() && !metadata.file_type().is_symlink() {
+                pending.push(path);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// A task directory whose checks passed. `force` removes everything; otherwise

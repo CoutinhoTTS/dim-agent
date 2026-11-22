@@ -1031,6 +1031,128 @@ async fn unregistered_remove_refuses_a_dangling_git_symlink_even_with_force() {
     server.join().await.unwrap();
 }
 
+/// A `.git` directory below a direct child is still inside the tree a forced
+/// removal deletes: the removal refuses and leaves the whole tree.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unregistered_remove_refuses_a_nested_git_directory_even_with_force() {
+    let work = Work::new();
+    let server = host(&work).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let task = unregistered_task(&work, "aaaaaa");
+    let nested = task.join("repo/a/b");
+    std::fs::create_dir_all(nested.join(".git")).unwrap();
+    std::fs::write(nested.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+    std::fs::write(nested.join("keep.txt"), "keep").unwrap();
+    let refused = client
+        .rpc(
+            "worktree.remove",
+            json!({"taskId": "aaaaaa", "force": true}),
+        )
+        .await;
+    assert_eq!(refused["error"]["data"]["appError"], "worktree_in_use");
+    assert_eq!(
+        std::fs::read_to_string(nested.join(".git/HEAD")).unwrap(),
+        "ref: refs/heads/main\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(nested.join("keep.txt")).unwrap(),
+        "keep"
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// A gitdir file below a direct child is Git metadata too, even with `--force`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unregistered_remove_refuses_a_nested_gitdir_file_even_with_force() {
+    let work = Work::new();
+    let server = host(&work).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let task = unregistered_task(&work, "aaaaaa");
+    let nested = task.join("repo/a");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::write(nested.join(".git"), "gitdir: elsewhere\n").unwrap();
+    std::fs::write(nested.join("keep.txt"), "keep").unwrap();
+    let refused = client
+        .rpc(
+            "worktree.remove",
+            json!({"taskId": "aaaaaa", "force": true}),
+        )
+        .await;
+    assert_eq!(refused["error"]["data"]["appError"], "worktree_in_use");
+    assert_eq!(
+        std::fs::read_to_string(nested.join(".git")).unwrap(),
+        "gitdir: elsewhere\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(nested.join("keep.txt")).unwrap(),
+        "keep"
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// A dangling `.git` symlink below a direct child still counts as Git metadata:
+/// the walk does not follow it, and the removal refuses the whole tree.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unregistered_remove_refuses_a_nested_dangling_git_symlink_even_with_force() {
+    let work = Work::new();
+    let server = host(&work).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let task = unregistered_task(&work, "aaaaaa");
+    let nested = task.join("repo/a/b");
+    std::fs::create_dir_all(&nested).unwrap();
+    let target = work.home.join("missing-gitdir");
+    std::os::unix::fs::symlink(&target, nested.join(".git")).unwrap();
+    std::fs::write(nested.join("keep.txt"), "keep").unwrap();
+    let refused = client
+        .rpc(
+            "worktree.remove",
+            json!({"taskId": "aaaaaa", "force": true}),
+        )
+        .await;
+    assert_eq!(refused["error"]["data"]["appError"], "worktree_in_use");
+    assert!(
+        nested
+            .join(".git")
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(std::fs::read_link(nested.join(".git")).unwrap(), target);
+    assert_eq!(
+        std::fs::read_to_string(nested.join("keep.txt")).unwrap(),
+        "keep"
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// A deep tree without Git metadata is ordinary content: `--force` removes it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unregistered_remove_with_force_deletes_a_deep_tree_without_git_metadata() {
+    let work = Work::new();
+    let server = host(&work).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let task = unregistered_task(&work, "aaaaaa");
+    let nested = task.join("repo/a/b/c");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::write(nested.join("notes.txt"), "delete").unwrap();
+    let removed = client
+        .rpc(
+            "worktree.remove",
+            json!({"taskId": "aaaaaa", "force": true}),
+        )
+        .await;
+    assert_ok(&removed);
+    assert_eq!(removed["result"]["removed"], true);
+    assert!(!task.exists());
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
 /// A Session whose workspace is the task directory itself keeps it, with or
 /// without `--force`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
