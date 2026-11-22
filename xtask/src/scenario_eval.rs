@@ -5082,12 +5082,16 @@ async fn drive(
         }
     }
     if let Some(pending) = &switch {
-        let reason = match &pending.line {
-            Some(line) => format!(
+        let reason = match (&pending.line, pending.triggered) {
+            (Some(line), true) => format!(
+                "the move to line {line} did not complete before the run stopped on {}",
+                driven.stop
+            ),
+            (Some(line), false) => format!(
                 "the switch never fired: line {line}'s first turn did not start before the run stopped on {}",
                 driven.stop
             ),
-            None => format!(
+            (None, _) => format!(
                 "the switch never fired: no tool line was opened before the run stopped on {}",
                 driven.stop
             ),
@@ -11261,6 +11265,10 @@ mod tests {
         /// The submitted turn starts and ends on `main`, and no other line is
         /// ever opened: a scenario's switch can never reach its target.
         SwitchNeverFires,
+        /// The target line `2` starts and ends its first turn, and every move
+        /// to it answers `unknown_branch`: the run can stop on its budget
+        /// while the switch still has retries left.
+        SwitchMoveRetries,
     }
 
     /// What a scripted peer read: the `requestId` of every decline, in order,
@@ -11306,12 +11314,16 @@ mod tests {
             }
             format!("{frame}\n").into_bytes()
         }
-        /// One `session.event` notice of `event`.
-        fn notice(event: Value) -> Vec<u8> {
+        /// One `session.event` notice of `event` on `branch`.
+        fn notice_on(branch: &str, event: Value) -> Vec<u8> {
             let notice = json!({"jsonrpc": "2.0", "method": "session.event",
-                                "params": {"sessionId": "peer", "branchId": "main",
+                                "params": {"sessionId": "peer", "branchId": branch,
                                            "event": event}});
             format!("{notice}\n").into_bytes()
+        }
+        /// One `session.event` notice of `event` on `main`.
+        fn notice(event: Value) -> Vec<u8> {
+            notice_on("main", event)
         }
         /// The refusal a client gets while the call has no waiter.
         fn not_pending() -> Value {
@@ -11515,6 +11527,7 @@ mod tests {
                             (declines == 3).then_some(("r1", 1))
                         }
                         PeerScript::SwitchNeverFires => None,
+                        PeerScript::SwitchMoveRetries => None,
                     };
                     if let Some((request, sequence)) = closed {
                         if recorded.settled_at.load(Ordering::SeqCst) == 0 {
@@ -11532,6 +11545,12 @@ mod tests {
                     "session.create" => json!({"result": {"sessionId": "peer"}}),
                     "session.context.usage" => json!({"result": {"contextWindow": window}}),
                     "session.idle" => json!({"result": {"sequence": PEER_SEQUENCE}}),
+                    "session.branch_set_default"
+                        if matches!(script, PeerScript::SwitchMoveRetries) =>
+                    {
+                        json!({"error": {"code": -32000, "message": "unknown branch: 2",
+                                         "data": {"appError": "session_invalid_input"}}})
+                    }
                     _ => json!({"result": {}}),
                 };
                 write.write_all(&frame(&request, body)).await.unwrap();
@@ -11550,6 +11569,19 @@ mod tests {
                             write
                                 .write_all(&notice(json!({"type": "turn", "name": "end",
                                                            "sequence": 2, "data": {}})))
+                                .await
+                                .unwrap();
+                        }
+                        continue;
+                    }
+                    if matches!(script, PeerScript::SwitchMoveRetries) {
+                        for (name, sequence) in [("start", 1), ("end", 2)] {
+                            write
+                                .write_all(&notice_on(
+                                    "2",
+                                    json!({"type": "turn", "name": name,
+                                           "sequence": sequence, "data": {}}),
+                                ))
                                 .await
                                 .unwrap();
                         }
@@ -11686,6 +11718,63 @@ mod tests {
         assert!(
             error.contains("line 2") && error.contains("turns"),
             "{error}"
+        );
+        assert!(
+            failed(driven.stop, None, JudgeOutcome::Judged),
+            "the outcome is a failed run on its own"
+        );
+    }
+
+    /// A switch whose target has started its first turn is not reported as
+    /// one that never fired: when the move keeps answering `unknown_branch`
+    /// and the run stops on its budget, the run records the unfinished move
+    /// (model-prompts §8.1).
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_switch_the_budget_stops_after_its_trigger_reports_the_move() {
+        let directory = std::env::temp_dir().join(format!(
+            "dim-scenario-eval-switch-retry-{}",
+            std::process::id()
+        ));
+        let (socket, _) = scripted_peer(&directory, 8_000, PeerScript::SwitchMoveRetries).await;
+        let mut client = driver_client(socket).await;
+        let mut scenario = scenario(Vec::new());
+        scenario.budget.turns = 1;
+        scenario.budget.seconds = 10.;
+        scenario.switch = Some(Switch {
+            to: SwitchTarget::Id("2".into()),
+            message: "next".into(),
+            branch_id: None,
+        });
+        let driven = drive(
+            &mut client,
+            &scenario,
+            &std::env::temp_dir(),
+            &peer_model(),
+            &ProducerState::default(),
+            None,
+        )
+        .await;
+        let _ = std::fs::remove_dir_all(directory);
+        assert_eq!(
+            driven.stop, "switch_target_not_reached",
+            "{:?}",
+            driven.error
+        );
+        let error = driven.error.as_deref().unwrap_or_default();
+        assert!(
+            error.contains("line 2")
+                && error.contains("did not complete")
+                && error.contains("turns"),
+            "{error}"
+        );
+        assert!(
+            !error.contains("first turn did not start"),
+            "the target's first turn started: {error}"
+        );
+        assert!(
+            driven.switch_retries >= 1,
+            "the move was retried while the line was not registered"
         );
         assert!(
             failed(driven.stop, None, JudgeOutcome::Judged),
