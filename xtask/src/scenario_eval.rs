@@ -322,8 +322,9 @@ const QUIET: Duration = Duration::from_secs(1);
 const IDLE_WAIT: Duration = Duration::from_secs(1);
 /// How long a failed run waits for its cancelled siblings to settle before
 /// their futures are dropped (and their children's groups killed with them),
-/// and how long a run that stopped on its wall clock waits for its cleanup
-/// before it keeps the outcome it reached.
+/// and how long a run that stopped on its wall clock waits for its cleanup —
+/// its close, its server's shutdown and its judge — before it keeps the
+/// outcome it reached.
 const SETTLE_BOUND: Duration = Duration::from_secs(30);
 /// The cleanup grace a run with the `stall_cleanup` test hook gives its
 /// close, its server's shutdown and the parent's read of its child's output:
@@ -1321,6 +1322,9 @@ struct Options {
     /// shutdown never settle, to exercise a child that must still return its
     /// outcome and free the worker that runs it.
     stall_cleanup: bool,
+    /// A test hook: the deadline a timed-out run gives its judge, in
+    /// milliseconds, in place of the cleanup grace.
+    judge_grace_ms: Option<u64>,
     /// The default plugin configuration file both arms load; `None` serves
     /// the assembly without the product's plugins.
     defaults: Option<PathBuf>,
@@ -1488,6 +1492,7 @@ impl Options {
             fail_child_holds_stdout: false,
             leave_member: None,
             stall_cleanup: false,
+            judge_grace_ms: None,
             rejudge,
             select,
             pool,
@@ -2236,8 +2241,9 @@ enum JudgeOutcome {
     /// The judge answered every call, and its verdicts are usable.
     Judged,
     /// A judge call failed: a window overflow, a transport or an HTTP error,
-    /// or a reply cut off at its output cap, on the first call, on its retry,
-    /// or on a re-ask.
+    /// a reply cut off at its output cap, or a call that did not finish
+    /// within the cleanup grace after a timed-out run, on the first call, on
+    /// its retry, or on a re-ask.
     CallFailed,
     /// The judge was never asked: the run left no export, the profile has no
     /// model host for the judge, or the run failed before the judge ran.
@@ -2380,6 +2386,10 @@ struct ChildParams {
     /// outcome and free the worker that runs it.
     #[serde(default)]
     stall_cleanup: bool,
+    /// A test hook: the deadline a timed-out run gives its judge, in
+    /// milliseconds, in place of the cleanup grace.
+    #[serde(default)]
+    judge_grace_ms: Option<u64>,
     /// The native probe's declared set: the assembly served without the
     /// plugin defaults. Each run's `tools-product` check reads its own
     /// declared set against it.
@@ -2621,6 +2631,7 @@ async fn child_outcome(params: &ChildParams, preflight: &Arc<Provider>) -> Child
         boundary: params.boundary.clone(),
         plugin_tools: false,
         stall_cleanup: params.stall_cleanup,
+        judge_grace_ms: params.judge_grace_ms,
     };
     // The scenario's event producers run in the child, whose process
     // publishes what the run's Session subscribes to (EventHub design A.1).
@@ -2703,6 +2714,7 @@ fn native_probe_settings(
         boundary,
         plugin_tools: false,
         stall_cleanup: false,
+        judge_grace_ms: None,
     }
 }
 
@@ -3852,6 +3864,7 @@ async fn isolate_run(
         fail_child_holds_stdout: options.fail_child_holds_stdout,
         leave_member: options.leave_member.clone(),
         stall_cleanup: options.stall_cleanup,
+        judge_grace_ms: options.judge_grace_ms,
         native_tools: native.to_vec(),
         probe_only: false,
     };
@@ -3960,6 +3973,7 @@ async fn native_probe(
         fail_child_holds_stdout: false,
         leave_member: None,
         stall_cleanup: false,
+        judge_grace_ms: None,
         native_tools: Vec::new(),
         probe_only: true,
     };
@@ -4589,6 +4603,18 @@ impl Judging {
             temperature_dropped: false,
         }
     }
+    /// A timed-out run whose judge did not answer within its cleanup grace:
+    /// the call is recorded as failed, and every probe stays unparsed.
+    fn unfinished(scenario: &Scenario, error: String) -> Self {
+        Self {
+            outcome: JudgeOutcome::CallFailed,
+            probes: unparsed(scenario),
+            error: Some(error),
+            reasks: 0,
+            calls: Vec::new(),
+            temperature_dropped: false,
+        }
+    }
 }
 
 #[expect(
@@ -4725,7 +4751,34 @@ async fn drive_once(
         });
     };
     let view = judge_view(&export);
-    let judging = judge_export(&host, &resolver, judge, scenario, &view, limits, cancel).await;
+    // A run that stopped on its wall clock gives its judge the same bounded
+    // grace as the rest of its cleanup. The judge then reads the view of a
+    // failed run, which enters no probe rate (model-prompts §8.1), so a judge
+    // that has not answered inside the grace leaves the run's judgment
+    // unfinished instead of holding the child — and the worker that runs it —
+    // open. A run that did not stop on its wall clock judges as before.
+    let judging = if driven.timed_out {
+        let grace = settings
+            .judge_grace_ms
+            .map(Duration::from_millis)
+            .unwrap_or(SETTLE_BOUND);
+        match tokio::time::timeout(
+            grace,
+            judge_export(&host, &resolver, judge, scenario, &view, limits, cancel),
+        )
+        .await
+        {
+            Ok(judging) => judging,
+            Err(_) => Judging::unfinished(
+                scenario,
+                "the judge did not finish within the cleanup grace after the run stopped on \
+                 its wall clock"
+                    .to_owned(),
+            ),
+        }
+    } else {
+        judge_export(&host, &resolver, judge, scenario, &view, limits, cancel).await
+    };
     Ok(Finished {
         driven,
         export: Some(export),
@@ -10864,6 +10917,7 @@ mod tests {
                 fail_child_holds_stdout: false,
                 leave_member: None,
                 stall_cleanup: false,
+                judge_grace_ms: None,
                 defaults: None,
                 node: None,
                 js_runtime: None,
@@ -12448,6 +12502,7 @@ mod tests {
             boundary: None,
             plugin_tools: false,
             stall_cleanup: false,
+            judge_grace_ms: None,
         };
         let mut scenario = scenario(Vec::new());
         scenario.budget.seconds = 0.5;
@@ -14020,6 +14075,7 @@ mod tests {
             fail_child_holds_stdout: false,
             leave_member: None,
             stall_cleanup: false,
+            judge_grace_ms: None,
             defaults: None,
             node: None,
             js_runtime: None,
@@ -14320,6 +14376,7 @@ mod tests {
             fail_child_holds_stdout: false,
             leave_member: None,
             stall_cleanup: false,
+            judge_grace_ms: None,
             native_tools: native
                 .iter()
                 .map(|name| ((*name).to_owned(), ToolSource::Builtin))
@@ -14660,6 +14717,91 @@ mod tests {
             );
         }
         assert_eq!(fixture.judge().len(), 2, "both runs reach the judge");
+    }
+
+    /// A timed-out run whose Session closes still gets a bounded judge: a
+    /// judge whose provider never answers leaves the record a failed judge
+    /// call naming the grace and keeps the timeout, and the child prints its
+    /// record and exits, so the worker runs the next scenario. The judge's
+    /// deadline is the test hook's one second; the held answer is a minute.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_timed_out_run_whose_judge_never_answers_frees_its_worker() {
+        fn hold_the_first_judge(text: &str) -> Option<Duration> {
+            (text.contains("You check statements") && text.contains("Run the quick probe."))
+                .then(|| Duration::from_secs(60))
+        }
+        let fixture = Fixture::holding(
+            "timed-out-judge",
+            reads_the_workspace_file,
+            hold_the_first_judge,
+            json!({
+                "description": "Timed out",
+                "message": "Run the quick probe.",
+                "steers": [{"afterSeconds": 120, "text": "This steer is not due."}],
+                "budget": {"turns": 12, "seconds": 1.0, "window": 131072},
+                "probes": [{"id": "ran", "kind": "must_show",
+                            "text": "the run has a transcript"}]
+            }),
+            &[("notes.txt", FILE_TEXT)],
+            131_072,
+        )
+        .await;
+        // The second scenario must run on the slot the first frees; its
+        // judge is answered at once.
+        let next = fixture.scenarios.join("next");
+        std::fs::create_dir_all(next.join("workspace")).unwrap();
+        std::fs::write(next.join("workspace").join("notes.txt"), FILE_TEXT).unwrap();
+        std::fs::write(
+            next.join("scenario.json"),
+            serde_json::to_string_pretty(&json!({
+                "message": "Finish the next scenario.",
+                "budget": {"turns": 4, "seconds": 60, "window": 131072},
+                "probes": [{"id": "ran", "kind": "must_show",
+                            "text": "the run has a transcript"}]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let out = fixture.directory.join("out");
+        let mut options = fixture.options(out.clone());
+        options.jobs = 1;
+        options.judge_grace_ms = Some(1_000);
+        let report = tokio::time::timeout(Duration::from_secs(30), fixture.evaluate(&options))
+            .await
+            .expect("the evaluation returns though the first scenario's judge never answers")
+            .expect("the evaluation records both scenarios");
+        let records = fixture.records(&out);
+        assert_eq!(records.len(), 4, "two scenarios, both arms: {report}");
+        for record in records.iter().filter(|record| record["scenario"] == "case") {
+            assert_eq!(record["stop"], "seconds", "{record}");
+            assert_eq!(record["failed"], true, "{record}");
+            assert_eq!(record["judgeOutcome"], "call_failed", "{record}");
+            assert_eq!(record["error"], Value::Null, "{record}");
+            let error = record["judgeError"].as_str().unwrap_or_default();
+            assert!(
+                error.contains("did not finish within the cleanup grace"),
+                "the run says why its judge is unfinished: {record}"
+            );
+            assert!(
+                out.join("outputs")
+                    .join(record["arm"].as_str().unwrap())
+                    .join("case")
+                    .join("run-0.timeline.jsonl")
+                    .exists(),
+                "the closed run still exports its Timeline: {record}"
+            );
+        }
+        for record in records.iter().filter(|record| record["scenario"] == "next") {
+            assert_eq!(record["stop"], "idle", "{record}");
+            assert_eq!(record["failed"], false, "{record}");
+            assert_eq!(record["judgeOutcome"], "judged", "{record}");
+        }
+        assert_eq!(
+            fixture.judge().len(),
+            4,
+            "the first scenario's judge was asked and held; the second's was answered"
+        );
     }
 
     /// A child that fails after it started a member of its group does not
