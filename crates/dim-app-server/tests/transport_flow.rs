@@ -654,6 +654,68 @@ impl rutis::host::DynPlugin for UnreadyCapability {
     }
 }
 
+/// A process row that stays in `apply` until shutdown cancels it.
+struct UnreadyRow;
+impl rutis::host::DynPlugin for UnreadyRow {
+    fn name(&self) -> &str {
+        "UnreadyRow"
+    }
+    fn apply<'a>(
+        &'a self,
+        ctx: &'a rutis::Ctx,
+    ) -> rutis::host::BoxFuture<'a, rutis::Result<rutis::host::Effect>> {
+        Box::pin(async move {
+            ctx.cancellation_token().cancelled().await;
+            Ok(rutis::host::Effect::Done)
+        })
+    }
+}
+
+/// An optional row still `Loading` when the process startup bound expires is
+/// named in the timeout error.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn process_startup_timeout_names_the_rows_that_are_not_active() {
+    let error = try_launch_with(
+        Arc::new(MockTools),
+        ServerConfig {
+            startup_timeout: Duration::from_secs(2),
+            ..Default::default()
+        },
+        |builder| {
+            builder.optional_plugin(|_| Ok(Box::new(UnreadyRow)));
+        },
+    )
+    .await
+    .err()
+    .expect("process startup times out")
+    .to_string();
+    assert!(error.contains("process assembly timed out"), "{error}");
+    assert!(error.contains("UnreadyRow"), "{error}");
+}
+
+/// A required row still `Loading` when the process startup bound expires keeps
+/// the initialization timeout message that names it and its state.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn process_startup_timeout_names_a_required_row_that_is_not_active() {
+    let error = try_launch_with(
+        Arc::new(MockTools),
+        ServerConfig {
+            startup_timeout: Duration::from_secs(2),
+            ..Default::default()
+        },
+        |builder| {
+            builder.plugin(|_| Ok(Box::new(UnreadyRow)));
+        },
+    )
+    .await
+    .err()
+    .expect("process startup times out")
+    .to_string();
+    assert!(error.contains("initialization timed out"), "{error}");
+    assert!(error.contains("UnreadyRow Loading"), "{error}");
+    assert!(!error.contains("process assembly timed out"), "{error}");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn session_initialization_timeout_and_missing_dependency_fail_the_creation() {
     for missing_dependency in [false, true] {
