@@ -455,6 +455,8 @@ pub struct ConfinedRequest {
     pub services: confined::SystemServices,
 }
 
+/// A confined helper's bounded result. Success means it stayed within its
+/// limits; an output limit is an error, not a truncated reply.
 #[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConfinedReply {
@@ -464,7 +466,8 @@ pub struct ConfinedReply {
     pub confined: bool,
 }
 
-/// A request to compose the PATH a child process gets.
+/// A request to compose the PATH a child process gets. `base` is UTF-8; a
+/// result that cannot be represented answers `None`.
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ChildPathRequest {
@@ -479,7 +482,8 @@ pub struct RemoveOutputDirectoryRequest {
     pub path: PathBuf,
 }
 
-/// A request to run one configured command with stdin.
+/// A request to run one configured command with stdin. `env` is UTF-8; a
+/// non-UTF-8 environment belongs to the in-process binding.
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SpawnWithStdinRequest {
@@ -965,7 +969,8 @@ impl HostPlatform {
         let root = self.home.join(".dim").join("exec");
         std::fs::canonicalize(&root).unwrap_or(root)
     }
-    /// The process facts a consumer needs, in one call.
+    /// The process facts a consumer needs, in one call. Resolves the exec
+    /// shell; in-process callers that need only captured facts read the fields.
     pub async fn info(&self) -> HostInfo {
         HostInfo {
             os: self.os,
@@ -984,6 +989,7 @@ impl HostPlatform {
     }
 
     /// Starts a command on this node and returns the task id and output path.
+    /// Requires the plugin-built owner.
     pub async fn spawn(&self, request: SpawnRequest) -> Result<SpawnReply, HostPlatformError> {
         if request.task_id.is_empty()
             || request.task_id.contains(['/', '\\', '\0', ':'])
@@ -1039,7 +1045,8 @@ impl HostPlatform {
         })
     }
 
-    /// Waits for a task's terminal record; `timeoutMs` bounds the wait.
+    /// Waits for a task's terminal record; `timeoutMs` bounds the wait and
+    /// `cancelled` ends only the wait, leaving the task running.
     pub async fn wait(
         &self,
         request: WaitRequest,
@@ -1092,6 +1099,7 @@ impl HostPlatform {
     }
 
     /// Starts a persistent PTY shell on this node and returns the task id.
+    /// Requires the plugin-built owner.
     pub async fn shell(&self, request: ShellRequest) -> Result<SpawnReply, HostPlatformError> {
         if request.task_id.is_empty()
             || request.task_id.contains(['/', '\\', '\0', ':'])

@@ -170,6 +170,10 @@ export type ConfinedRequest = {
   services: SystemServices
 }
 
+/**
+ * A confined helper's bounded result. Success means it stayed within its
+ * limits; an output limit is an error, not a truncated reply.
+ */
 export type ConfinedReply = {
   status?: number | null
   stdout: string
@@ -188,7 +192,10 @@ export type HostPlatformError =
   | "closed"
   | { failed: string }
 
-/** A request to compose the PATH a child process gets. */
+/**
+ * A request to compose the PATH a child process gets. `base` is UTF-8; a
+ * result that cannot be represented answers `None`.
+ */
 export type ChildPathRequest = {
   directories: string[]
   base: string
@@ -199,7 +206,10 @@ export type RemoveOutputDirectoryRequest = {
   path: string
 }
 
-/** A request to run one configured command with stdin. */
+/**
+ * A request to run one configured command with stdin. `env` is UTF-8; a
+ * non-UTF-8 environment belongs to the in-process binding.
+ */
 export type SpawnWithStdinRequest = {
   command: string
   cwd: string
@@ -386,15 +396,20 @@ export interface HostPlatform {
   sandboxBackend(): Promise<SandboxBackend>
   /** The directory the persistent shell owns: `<home>/.dim/exec`. */
   execRoot(): Promise<string>
-  /** The process facts a consumer needs, in one call. */
+  /**
+   * The process facts a consumer needs, in one call. Resolves the exec
+   * shell; in-process callers that need only captured facts read the fields.
+   */
   info(): Promise<HostInfo>
   /**
    * Starts a command on this node and returns the task id and output path.
+   * Requires the plugin-built owner.
    * @throws {HostPlatformErrorThrown}
    */
   spawn(request: SpawnRequest): Promise<SpawnReply>
   /**
-   * Waits for a task's terminal record; `timeoutMs` bounds the wait.
+   * Waits for a task's terminal record; `timeoutMs` bounds the wait and
+   * `cancelled` ends only the wait, leaving the task running.
    * @throws {HostPlatformErrorThrown}
    */
   wait(request: WaitRequest, cancelled: () => void | Promise<void>): Promise<WaitReply>
@@ -410,6 +425,7 @@ export interface HostPlatform {
   settle(request: TaskRequest): Promise<void>
   /**
    * Starts a persistent PTY shell on this node and returns the task id.
+   * Requires the plugin-built owner.
    * @throws {HostPlatformErrorThrown}
    */
   shell(request: ShellRequest): Promise<SpawnReply>
