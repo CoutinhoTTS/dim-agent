@@ -261,8 +261,11 @@ is written to.
 - `write` and `edit` declare `fileWritten` with the resolved path once the
   replacement is published, including the parent-sync failure whose result warns
   that the file may have been partially written: the file changed either way.
-  They declare nothing when the call fails before the publish or is cancelled
-  before it.
+  A new file is declared only when the requested path names the inode that was
+  published; a parent renamed during the call leaves the file in the directory
+  that was opened, and that call reports a failure with no declaration. They
+  declare nothing when the call fails before the publish or is cancelled before
+  it.
 - `exec` declares `commandRun` for every command whose process started:
   - the exit status the result observed, `exitCode` for a code and `signal` for a
     name, a non-zero exit included although its result is an error;
@@ -371,6 +374,17 @@ original owner, group, mode and extended attributes before the rename.
   before any thread starts, because the supported baseline has no `getumask`; a
   library or test caller that does not capture it keeps the 0600 staging mode.
 - **Windows.** Unchanged: the private handle is installed with a hard link.
+
+A new file's success belongs to a path that names the file actually written.
+Once the entry is published and before the directory sync, the call re-stats the
+requested path and compares its inode with the published one
+([`Target::path`](../../../../crates/dim-agent-capabilities/src/workspace_tools/files.rs)
+through `owned_temporary`). A parent renamed during the call leaves the file in
+the directory that was opened, while the requested path names another entry or
+nothing; that call returns `write_error`, declares no `fileWritten` effect and
+records no text binding for the path, so a later operation never starts from a
+revision the path does not hold. A parent-sync failure is still reported with
+its effect once this check passes.
 
 Known limits:
 
@@ -517,8 +531,13 @@ named staging path on Linux, `a_new_file_in_a_write_only_parent_is_created`
 checks that a write-only parent still admits a new file and leaves it private,
 `a_new_file_takes_the_parents_acl_on_macos` covers five inheritable ACL shapes
 under the same umasks, and `a_new_file_under_a_deny_delete_acl_keeps_its_staging_entry`
-fixes the residue limit. The in-crate Linux tests
-`a_new_file_stays_on_its_opened_parent_through_publication`,
+fixes the residue limit. The in-crate Linux test
+`a_new_file_stays_on_its_opened_parent_through_publication` renames the opened
+parent after preparation and checks that the file follows the directory while
+the path put back at the old name receives the `write_error`, the `fileWritten`
+effect and the text binding. The in-crate Unix test
+`a_bounded_new_file_records_no_success_after_a_parent_rename` fixes the same
+record for a target below a boundary's held parent. The Linux tests
 `an_unsupported_anonymous_publication_falls_back_to_named_staging`,
 `a_fallback_publication_does_not_replace_an_existing_entry`,
 `an_unknown_policy_clamps_an_anonymous_new_file_to_its_owner_bits`,

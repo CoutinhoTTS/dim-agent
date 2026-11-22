@@ -1194,6 +1194,14 @@ impl<'a> NewFile<'a> {
         self.target.path()
     }
 
+    /// Whether the requested path currently names `file`, the entry just
+    /// published. The held parent can stop being the directory at that path
+    /// while the operation runs, so a publication that succeeded below it is
+    /// not a success for the requested path and must not be recorded there.
+    pub(crate) fn published_at_target(&self, file: &std::fs::File) -> bool {
+        owned_temporary(self.path(), file)
+    }
+
     /// Creates an anonymous `O_TMPFILE` inode in the held parent for a new
     /// file, or `None` when the filesystem or the process cannot publish one
     /// through `/proc/self/fd`: the caller then stages a named sibling. `0o666`
@@ -2151,6 +2159,8 @@ mod mutation_tests {
     /// A new file stays on the parent it opened for preparation: renaming
     /// that directory before publication leaves the file in the renamed
     /// directory, and the directory put at the old path receives nothing.
+    /// The call reports, and binds, only a path that names the file written,
+    /// so the renamed parent's old path is a failure instead of a success.
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn a_new_file_stays_on_its_opened_parent_through_publication() {
@@ -2168,22 +2178,88 @@ mod mutation_tests {
             std::fs::create_dir(&swap.0).unwrap();
             std::fs::set_permissions(&swap.0, std::fs::Permissions::from_mode(0o300)).unwrap();
         }));
+        let reads = branch();
         let result = call(
             &tools,
-            &branch(),
+            &reads,
             "write",
             json!({"path": "parent/new", "content": "text\n"}),
             CancellationToken::new(),
         )
         .await
         .unwrap();
-        assert_eq!(result.is_error, None, "{result:?}");
+        assert_eq!(result.is_error, Some(true), "{result:?}");
+        assert_eq!(
+            result.structured_content.as_ref().unwrap()["code"],
+            "write_error"
+        );
+        assert_eq!(result.effects, None, "the old path was not written");
+        assert!(
+            reads.get(&parent.join("new")).is_none(),
+            "the old path gained no text binding"
+        );
         assert_eq!(std::fs::read(moved.join("new")).unwrap(), b"text\n");
         std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o700)).unwrap();
         assert_eq!(
             std::fs::read_dir(&parent).unwrap().count(),
             0,
             "the directory now at the old path receives nothing"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A bounded new file is published below the parent handle its boundary
+    /// opened. Renaming that directory and putting another at the admitted
+    /// path before publication leaves the file in the renamed directory, so
+    /// the call must not report or bind the admitted path as written.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_bounded_new_file_records_no_success_after_a_parent_rename() {
+        let root = std::env::temp_dir().join(format!("dim-new-file-{}", uuid::Uuid::new_v4()));
+        for dir in ["workspace/sub", "home"] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        let root = root.canonicalize().unwrap();
+        let workspace = root.join("workspace");
+        let boundary = FileToolBoundary {
+            workspace: workspace.clone(),
+            home: root.join("home"),
+            read_only_roots: Vec::new(),
+        };
+        let mut tools =
+            FileTools::with_boundary(workspace.clone(), workspace.join("out"), boundary);
+        let (parent, moved) = (workspace.join("sub"), workspace.join("moved"));
+        let swap = (parent.clone(), moved.clone());
+        tools.before_commit = Some(Arc::new(move |path| {
+            assert_eq!(path, swap.0.join("new"));
+            std::fs::rename(&swap.0, &swap.1).unwrap();
+            std::fs::create_dir(&swap.0).unwrap();
+        }));
+        let reads = branch();
+        let result = call(
+            &tools,
+            &reads,
+            "write",
+            json!({"path": "sub/new", "content": "text\n"}),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.is_error, Some(true), "{result:?}");
+        assert_eq!(
+            result.structured_content.as_ref().unwrap()["code"],
+            "write_error"
+        );
+        assert_eq!(result.effects, None, "the admitted path was not written");
+        assert!(
+            reads.get(&parent.join("new")).is_none(),
+            "the admitted path gained no text binding"
+        );
+        assert_eq!(std::fs::read(moved.join("new")).unwrap(), b"text\n");
+        assert_eq!(
+            std::fs::read_dir(&parent).unwrap().count(),
+            0,
+            "the directory now at the admitted path receives nothing"
         );
         std::fs::remove_dir_all(root).unwrap();
     }

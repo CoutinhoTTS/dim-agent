@@ -613,6 +613,9 @@ fn publish_anonymous_new(
         }
         Err(TargetError::Io(error)) => return Ok(Err(write_failure(&error, display, false))),
     }
+    if !new_file.published_at_target(&file) {
+        return Ok(Err(path_not_written(display)));
+    }
     if let Err(error) = new_file.sync() {
         return Ok(Err(sync_failure(error, path, display)));
     }
@@ -693,11 +696,27 @@ fn publish_named_new(
         }
         return Ok(Err(result));
     }
+    if !new_file.published_at_target(&temporary.file) {
+        return Ok(Err(path_not_written(display)));
+    }
     drop(temporary);
     if let Err(error) = new_file.sync() {
         return Ok(Err(sync_failure(error, path, display)));
     }
     Ok(Ok(()))
+}
+
+/// The failure for a publication that succeeded below the held parent while
+/// the requested path no longer names the written file, as after a parent
+/// rename: the call must not report or bind that path as written.
+#[cfg(unix)]
+fn path_not_written(display: &str) -> ToolResult {
+    failed(
+        format!(
+            "The parent directory was renamed during the write, so the file was not published at {display}. Write the file again."
+        ),
+        json!({ "code": "write_error" }),
+    )
 }
 
 /// Maps a failed directory sync: the entry is already published, so the
