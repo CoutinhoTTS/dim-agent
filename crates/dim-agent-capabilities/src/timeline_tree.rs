@@ -110,6 +110,86 @@ pub mod testing {
             }
         }
     }
+
+    type EndHold = (
+        String,
+        String,
+        mpsc::UnboundedSender<()>,
+        watch::Receiver<bool>,
+    );
+    static ENDS: Mutex<Vec<EndHold>> = Mutex::new(Vec::new());
+
+    /// One line's end, stopped after its scope closed and before its parent
+    /// records the fact.
+    pub struct HeldEnd {
+        session: String,
+        line: String,
+        arrived: mpsc::UnboundedReceiver<()>,
+        release: watch::Sender<bool>,
+    }
+    impl HeldEnd {
+        /// Resolves once the line's scope is closed and its end is not yet on
+        /// the parent.
+        pub async fn arrived(&mut self) {
+            let _ = self.arrived.recv().await;
+        }
+        /// Lets the end be recorded.
+        pub fn release(&self) {
+            self.release.send_replace(true);
+        }
+    }
+    impl Drop for HeldEnd {
+        fn drop(&mut self) {
+            self.release.send_replace(true);
+            let session = std::mem::take(&mut self.session);
+            let line = std::mem::take(&mut self.line);
+            ENDS.lock()
+                .unwrap()
+                .retain(|(held_session, held_line, ..)| {
+                    *held_session != session || *held_line != line
+                });
+        }
+    }
+
+    /// Holds the next end of `line` in `session_id` between the close of its
+    /// scope and the parent's `branch/ended`. The tests of one process run in
+    /// parallel, so the key is the Session and the line.
+    pub fn hold_end_record(session_id: &str, line: &str) -> HeldEnd {
+        let (arrived, arrivals) = mpsc::unbounded_channel();
+        let (release, released) = watch::channel(false);
+        ENDS.lock()
+            .unwrap()
+            .push((session_id.to_owned(), line.to_owned(), arrived, released));
+        HeldEnd {
+            session: session_id.to_owned(),
+            line: line.to_owned(),
+            arrived: arrivals,
+            release,
+        }
+    }
+
+    pub(crate) async fn end_record(session_id: &str, line: &str) {
+        let found = {
+            let ends = ENDS.lock().unwrap();
+            ends.iter()
+                .find(|(held_session, held_line, ..)| {
+                    held_session == session_id && held_line == line
+                })
+                .map(|(_, _, arrived, released)| (arrived.clone(), released.clone()))
+        };
+        let Some((arrived, mut released)) = found else {
+            return;
+        };
+        let _ = arrived.send(());
+        loop {
+            if *released.borrow_and_update() {
+                return;
+            }
+            if released.changed().await.is_err() {
+                return;
+            }
+        }
+    }
 }
 
 /// How a loaded branch begins on its Timeline.
@@ -2228,6 +2308,8 @@ impl TimelineTree {
         if let Err(error) = context.branch().close().await {
             errors.push(error);
         }
+        #[cfg(feature = "testing")]
+        testing::end_record(&self.session_id, id).await;
         if undelivered {
             // The message is still owed: recording the end now would make
             // restore skip the line and lose it. Leave the line ending, with
@@ -2638,6 +2720,58 @@ impl TimelineTree {
             )
         }) && !state.ended.contains_key(id)
     }
+    /// The directory records as `state` holds them, with the open and ending
+    /// lines' heads left at 0: every reader completes them after dropping the
+    /// lock, and both directory reads build on this one collection (design
+    /// §14).
+    fn directory_records(state: &TreeState) -> Vec<BranchDirectoryEntry> {
+        let mut entries: Vec<BranchDirectoryEntry> = state
+            .nodes
+            .values()
+            .filter(|node| matches!(&*node.ready.borrow(), Some(Ok(_))))
+            .map(|node| {
+                let end_event = node
+                    .context
+                    .as_ref()
+                    .and_then(|context| context.end_event());
+                BranchDirectoryEntry {
+                    info: node.info.clone(),
+                    head: 0,
+                    state: match end_event {
+                        Some(_) => BranchDirectoryState::Ending,
+                        None => BranchDirectoryState::Open,
+                    },
+                    end_event,
+                }
+            })
+            .collect();
+        for ended in state.ended.values() {
+            entries.push(BranchDirectoryEntry {
+                info: ended.info.clone(),
+                head: ended.head,
+                state: BranchDirectoryState::Ended,
+                end_event: ended.end_event,
+            });
+        }
+        entries
+    }
+    /// Resolves the open and ending lines' heads through `head()`, which takes
+    /// the lock itself, and orders the rows: `main` first, the rest by id.
+    fn complete_directory(
+        &self,
+        mut entries: Vec<BranchDirectoryEntry>,
+    ) -> Vec<BranchDirectoryEntry> {
+        for entry in &mut entries {
+            if entry.state != BranchDirectoryState::Ended {
+                entry.head = self.head(&entry.info.id).unwrap_or(0);
+            }
+        }
+        entries.sort_by(|a, b| {
+            let order = |id: &str| id != ROOT_BRANCH_ID;
+            (order(&a.info.id), &a.info.id).cmp(&(order(&b.info.id), &b.info.id))
+        });
+        entries
+    }
 }
 
 impl TimelineTreeControl for TimelineTree {
@@ -2887,6 +3021,22 @@ impl TimelineTreeControl for TimelineTree {
                 .and_then(|result| result.as_ref().ok().cloned())
         })
     }
+    fn published(&self, id: &str) -> Result<Branch> {
+        let state = self.state.lock().unwrap();
+        if state.ended.contains_key(id) {
+            return Err(AgentError::BranchEnded(id.into()));
+        }
+        state
+            .nodes
+            .get(id)
+            .and_then(|node| {
+                node.ready
+                    .borrow()
+                    .as_ref()
+                    .and_then(|result| result.as_ref().ok().cloned())
+            })
+            .ok_or_else(|| AgentError::UnknownBranch(id.into()))
+    }
     fn end(&self, id: String, source: BranchSource) -> BoxFuture<'_, Result<()>> {
         Box::pin(async move { TimelineTree::end(self, &id, source).await })
     }
@@ -2916,48 +3066,22 @@ impl TimelineTreeControl for TimelineTree {
     fn directory(&self) -> Vec<BranchDirectoryEntry> {
         // Collect the records under the lock, then resolve heads through
         // `head()`, which takes the lock itself.
-        let mut entries: Vec<BranchDirectoryEntry> = {
+        let entries = {
             let state = self.state.lock().unwrap();
-            let mut entries: Vec<BranchDirectoryEntry> = state
-                .nodes
-                .values()
-                .filter(|node| matches!(&*node.ready.borrow(), Some(Ok(_))))
-                .map(|node| {
-                    let end_event = node
-                        .context
-                        .as_ref()
-                        .and_then(|context| context.end_event());
-                    BranchDirectoryEntry {
-                        info: node.info.clone(),
-                        head: 0,
-                        state: match end_event {
-                            Some(_) => BranchDirectoryState::Ending,
-                            None => BranchDirectoryState::Open,
-                        },
-                        end_event,
-                    }
-                })
-                .collect();
-            for ended in state.ended.values() {
-                entries.push(BranchDirectoryEntry {
-                    info: ended.info.clone(),
-                    head: ended.head,
-                    state: BranchDirectoryState::Ended,
-                    end_event: ended.end_event,
-                });
-            }
-            entries
+            Self::directory_records(&state)
         };
-        for entry in &mut entries {
-            if entry.state != BranchDirectoryState::Ended {
-                entry.head = self.head(&entry.info.id).unwrap_or(0);
-            }
-        }
-        entries.sort_by(|a, b| {
-            let order = |id: &str| id != ROOT_BRANCH_ID;
-            (order(&a.info.id), &a.info.id).cmp(&(order(&b.info.id), &b.info.id))
-        });
-        entries
+        self.complete_directory(entries)
+    }
+    fn default_and_directory(&self) -> (String, Vec<BranchDirectoryEntry>) {
+        // One acquisition answers both, so the default a client selects is one
+        // of the identities and lifecycle states in the same answer (design
+        // §14): a move or an end that commits while this read holds the lock
+        // is either wholly in the answer or wholly out of it.
+        let (default, entries) = {
+            let state = self.state.lock().unwrap();
+            (state.default.clone(), Self::directory_records(&state))
+        };
+        (default, self.complete_directory(entries))
     }
     fn close(&self) -> BoxFuture<'_, Result<()>> {
         self.start_close();
