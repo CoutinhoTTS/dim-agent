@@ -829,6 +829,61 @@ mod tests {
         );
     }
 
+    /// A macro that is a statement holds keys the same way an expression does.
+    #[test]
+    fn a_key_missing_from_a_statement_macro_is_refused_by_name() {
+        let root = root(
+            "statement-macro",
+            TABLE,
+            "fn draw() {\n    println!(\"{} {}\", t(\"Kept\"), t(\"Missing from a statement macro\"));\n}\n",
+        );
+        let error = refusal(&root);
+        assert!(
+            error.contains(
+                "crates/dim-cli/src/ui/panel.rs:2: \"Missing from a statement macro\" is not in zh_cn"
+            ),
+            "{error}"
+        );
+    }
+
+    /// An item macro holds keys like any other macro call.
+    #[test]
+    fn a_key_missing_from_an_item_macro_is_refused_by_name() {
+        let root = root(
+            "item-macro",
+            TABLE,
+            "rows!(t(\"Missing from an item macro\"));\n",
+        );
+        let error = refusal(&root);
+        assert!(
+            error.contains(
+                "crates/dim-cli/src/ui/panel.rs:1: \"Missing from an item macro\" is not in zh_cn"
+            ),
+            "{error}"
+        );
+    }
+
+    /// A macro whose tokens are not expressions is one key argument the scan
+    /// cannot read when they hold a translation call, and no argument when they
+    /// do not.
+    #[test]
+    fn a_macro_the_scan_cannot_parse_is_counted_when_it_holds_a_translation_call() {
+        let counted = call_keys(
+            "fn draw() {\n    table! {\n        header: t(\"Unparsed key\"),\n    }\n}\n",
+            "src.rs",
+        )
+        .unwrap();
+        assert_eq!(counted.keys, Vec::new(), "no key is read from the tokens");
+        assert_eq!(counted.unreadable, vec!["src.rs:3".to_owned()]);
+
+        let quiet = call_keys(
+            "fn draw(x: Option<u8>) {\n    let a = matches!(x, Some(_));\n}\n",
+            "src.rs",
+        )
+        .unwrap();
+        assert!(quiet.unreadable.is_empty(), "{:?}", quiet.unreadable);
+    }
+
     /// A parameter that takes a constant's name hides it, so the scan reads no
     /// key rather than the constant's text.
     #[test]
