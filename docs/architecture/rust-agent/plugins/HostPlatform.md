@@ -369,6 +369,6 @@ workspace, and the same command with the sandbox off.
 | --- | --- |
 | 作用域 | 进程 |
 | 注入 | `P:ExecutionSettingsHost`、`P:FileStorage`、`P:ToolchainSourceHost` |
-| 提供 | `P:HostPlatform` |
+| 提供 | `P:HostPlatform`、`P:dyn HostDispatch#hostPlatform` |
 | 被注入于 | `HooksSession`、`PromptSources`、`ShellInput`、`SkillsCatalog`、`WorkspaceTools` |
 <!-- /generated -->

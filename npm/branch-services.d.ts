@@ -142,6 +142,65 @@ export interface ToolHost {
   execute(call: { id: string; name: string; input: { [key: string]: unknown } }, caller: ToolExecutionContext, cancelled: () => void | Promise<void>): Promise<import('./plugin.js').ToolResult>
 }
 
+export type ShellEdition = "bash" | "zsh" | "sh" | "dash" | "ksh" | "git-bash" | "pwsh" | "windows-powershell" | "cmd"
+
+export type ShellSource =
+  | /** The executable path configured in `exec-shell.json`. */ "explicit"
+  | /** A supported login shell (macOS / Linux). */ "login"
+  | /** The POSIX fallback chain after an unsupported or missing login shell. */ "fallback"
+  | /** The Windows automatic order `pwsh -> Windows PowerShell -> cmd`. */ "automatic"
+
+export type OutputEncoding = "utf8" | "unknown"
+
+export type ExecShellRuntime = {
+  executable: string
+  edition: ShellEdition
+  source: ShellSource
+  outputEncoding: OutputEncoding
+}
+
+export type ShellStatus =
+  | { state: "available" } & ExecShellRuntime
+  | { state: "unavailable"; code: string; reason: string }
+
+/**
+ * Whether a new process can be sandboxed on this host, or why it cannot. The
+ * Process isolation control shows this; preparation reads the same backend.
+ */
+export type SandboxBackend = { state: "available" } | { state: "unavailable"; reason: string }
+
+export type Os = "darwin" | "linux" | "win32"
+
+/** The process facts the `hostPlatform.info` operation answers. */
+export type HostInfo = {
+  os: Os
+  arch: string
+  home: string
+  timezone?: string | null
+  execRoot: string
+  platformRoots: string[]
+  backend: SandboxBackend
+  execShell: ShellStatus
+}
+
+/** Process facts and the source of the exec shell preference. */
+export interface HostPlatform {
+  /**
+   * Reads the configured exec shell for this invocation without reloading
+   * the plugin. Explicitly constructed platforms keep their supplied shell.
+   */
+  execShell(): Promise<ShellStatus>
+  /**
+   * The sandbox backend a new process would use: the same bubblewrap
+   * preparation resolves from the captured `PATH`.
+   */
+  sandboxBackend(): Promise<SandboxBackend>
+  /** The directory the persistent shell owns: `<home>/.dim/exec`. */
+  execRoot(): Promise<string>
+  /** The process facts a consumer needs, in one call. */
+  info(): Promise<HostInfo>
+}
+
 export type ImageSourceType = "base64" | "url" | "file"
 
 export type ImageSource = {
@@ -1418,6 +1477,7 @@ export interface Services {
   worktreeAssociations: WorktreeAssociations
   credentialVariablesHost: CredentialVariablesHost
   toolHost: ToolHost
+  hostPlatform: HostPlatform
   inputQueue: InputQueue
   reservedMethods: ReservedMethods
   permission: Permission

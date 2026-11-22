@@ -28,10 +28,12 @@ mod confined;
 mod exec_shell_settings;
 #[cfg(unix)]
 mod isolation;
+mod service;
 pub use confined::{
     ConfinedError, ConfinedOutput, ConfinedSpec, ConfinedStream, Confinement, SystemServices,
 };
 pub use exec_shell_settings::{ExecShellSettings, ExecShellSettingsError, ShellChoice};
+pub use service::HostInfo;
 
 pub const EXEC_SHELL_CONFIG_INVALID: &str = "EXEC_SHELL_CONFIG_INVALID";
 pub const EXEC_SHELL_UNAVAILABLE: &str = "EXEC_SHELL_UNAVAILABLE";
@@ -56,10 +58,13 @@ pub(crate) const ISOLATION_SUMMARY: Option<&str> = if cfg!(target_os = "macos") 
     None
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum Os {
+    #[serde(rename = "darwin")]
     Macos,
+    #[serde(rename = "linux")]
     Linux,
+    #[serde(rename = "win32")]
     Windows,
 }
 impl Os {
@@ -80,7 +85,8 @@ impl Os {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum ShellEdition {
     Bash,
     Zsh,
@@ -121,7 +127,8 @@ impl ShellEdition {
         }
     }
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ShellSource {
     /// The executable path configured in `exec-shell.json`.
     Explicit,
@@ -132,19 +139,23 @@ pub enum ShellSource {
     /// The Windows automatic order `pwsh -> Windows PowerShell -> cmd`.
     Automatic,
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum OutputEncoding {
     Utf8,
     Unknown,
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ExecShellRuntime {
+    #[serde(rename = "executable")]
     pub executable_path: PathBuf,
     pub edition: ShellEdition,
     pub source: ShellSource,
     pub output_encoding: OutputEncoding,
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "state", rename_all = "lowercase")]
 pub enum ShellStatus {
     Available(ExecShellRuntime),
     Unavailable { code: &'static str, reason: String },
@@ -276,7 +287,8 @@ pub struct ProcessSpecError {
 
 /// Whether a new process can be sandboxed on this host, or why it cannot. The
 /// Process isolation control shows this; preparation reads the same backend.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "state", rename_all = "lowercase")]
 pub enum SandboxBackend {
     Available,
     Unavailable { reason: &'static str },
@@ -375,27 +387,6 @@ impl HostPlatform {
         self.toolchain = Some(Arc::new(host));
         self
     }
-    /// Reads the configured exec shell for this invocation without reloading
-    /// the plugin. Explicitly constructed platforms keep their supplied shell.
-    pub async fn exec_shell(&self) -> ShellStatus {
-        let mut resolved = self.shell.lock().await;
-        if let Some((storage, root, relative)) = &self.shell_file {
-            let config = read_config(storage, *root, relative).await;
-            if config != resolved.config
-                || matches!(
-                    resolved.status,
-                    ShellStatus::Unavailable {
-                        code: EXEC_SHELL_UNAVAILABLE,
-                        ..
-                    }
-                )
-            {
-                let status = resolve_shell(config.clone(), &self.env).await;
-                *resolved = ResolvedShell { config, status };
-            }
-        }
-        resolved.status.clone()
-    }
     /// The command for `spec` with a cleared environment; `stdin` is the caller's choice.
     fn command(spec: &ProcessSpec, stdin: Stdio) -> tokio::process::Command {
         let mut command = tokio::process::Command::new(&spec.executable);
@@ -442,34 +433,6 @@ impl HostPlatform {
                 code: "isolation_config_invalid",
                 reason: error.to_string(),
             })
-    }
-
-    /// The sandbox backend a new process would use. Preparation reads the same
-    /// backend, so this report and the next process start cannot disagree.
-    #[cfg(windows)]
-    pub fn sandbox_backend(&self) -> SandboxBackend {
-        SandboxBackend::Unavailable {
-            reason: WINDOWS_SANDBOX_UNAVAILABLE,
-        }
-    }
-
-    /// The sandbox backend a new process would use. macOS always has
-    /// `sandbox-exec`.
-    #[cfg(target_os = "macos")]
-    pub fn sandbox_backend(&self) -> SandboxBackend {
-        SandboxBackend::Available
-    }
-
-    /// The sandbox backend a new process would use: the same bubblewrap
-    /// preparation resolves from the captured `PATH`.
-    #[cfg(all(unix, not(target_os = "macos")))]
-    pub fn sandbox_backend(&self) -> SandboxBackend {
-        match isolation::bubblewrap(&self.env) {
-            Some(_) => SandboxBackend::Available,
-            None => SandboxBackend::Unavailable {
-                reason: isolation::BWRAP_UNAVAILABLE,
-            },
-        }
     }
 
     #[cfg(windows)]
@@ -2277,12 +2240,6 @@ impl HostPlatform {
             reaped: false,
             temporary: None,
         })
-    }
-
-    /// The directory the persistent shell owns: `<home>/.dim/exec`.
-    pub fn exec_root(&self) -> PathBuf {
-        let root = self.home.join(".dim").join("exec");
-        std::fs::canonicalize(&root).unwrap_or(root)
     }
 
     /// Removes `path`, one persistent shell output directory below

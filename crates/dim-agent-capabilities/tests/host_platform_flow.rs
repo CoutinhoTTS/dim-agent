@@ -1183,3 +1183,27 @@ async fn an_exec_resolves_a_command_only_the_toolchain_source_provides() {
     );
     std::fs::remove_dir_all(base).unwrap();
 }
+
+#[tokio::test]
+async fn the_host_platform_service_answers_info() {
+    let platform = HostPlatform::current(ShellStatus::Unavailable {
+        code: "TEST",
+        reason: "no shell".into(),
+    })
+    .unwrap();
+    let root = rutis::Ctx::root_with(tokio::runtime::Handle::current());
+    root.provide_as::<HostPlatform>(std::sync::Arc::new(platform.clone()))
+        .unwrap();
+    let face = root
+        .get_at::<dyn rutis_bridge::session::HostDispatch>(&rutis_bridge::session::host_key(
+            "hostPlatform",
+        ))
+        .expect("hostPlatform is served");
+    let reply =
+        rutis_bridge::session::settle(face.invoke("info", serde_json::json!([]).into()).unwrap())
+            .await
+            .unwrap()
+            .json()
+            .unwrap();
+    assert_eq!(reply, serde_json::to_value(platform.info().await).unwrap());
+}

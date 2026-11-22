@@ -3781,6 +3781,12 @@
         "removing": false
       },
       {
+        "service": "dyn rutis_bridge::session::services::HostDispatch#hostPlatform",
+        "provider": 29,
+        "generation": 1,
+        "removing": false
+      },
+      {
         "service": "dyn rutis_bridge::session::services::HostDispatch#listenAddresses",
         "provider": 45,
         "generation": 1,
