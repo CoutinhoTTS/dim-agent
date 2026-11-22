@@ -902,7 +902,9 @@ impl ToolHandler for LoopTool {
                     self.loops
                         .stop(&self.session_id, &loop_id)
                         .await
-                        .map(|(record, _)| format!("loop: stopped\n{}", loop_preview(&record, &branch_id)))
+                        .map(|(record, _)| {
+                            format!("loop: stopped\n{}", loop_preview(&record, &branch_id))
+                        })
                         .map_err(|error| format!("loop: {}\n{}", error.code, error.message))
                 }
                 "list" => self
