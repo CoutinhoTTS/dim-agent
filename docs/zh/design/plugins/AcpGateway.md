@@ -53,7 +53,7 @@ Lody 方法和 metadata 按固定 Core DTO 及语义注释实现，不设连接�
 
 socket/pipe 身份校验与模型账户认证分开。网关从现有 account.providers/status 发现 managed provider，并只发布真正可执行的 auth method。agent-type browser 方法通过 authenticate 调用现有 begin/complete/status/cancel；terminal 方法另开交互 helper，不能把其 methodId 发给 authenticate。OAuth、凭据交换和持久化仍归 provider。准确调用、callback 所有权、headless 限制和取消合同见[计划 §4.4](../../../design/acp-gateway-implementation.md#44-账户认证与现有-oauth-插件)。没有账户插件时不强制 configured/API-key 模型登录。
 
-Provider 管理已经归 daemon 的 ProviderPlugin 所有，CLI 使用其公开方法。Gateway 复用该所有者，不新建 Provider registry。[计划 §4.5](../../../design/acp-gateway-implementation.md#45-provider-管理与现有插件) 将 providers/list 接到 provider.management，set/disable 接到带版本的 provider.update，明确完整 headers 替换和 credential 归属。ACP 修改共享持久化设置还是临时 routing，仍待产品选择；持久化本身不禁止 capability，Core 也没有定义这组 Provider API。选择未定前不启用整组 capability。仅临时 routing 缺现成覆盖接口，共享管理已经存在。
+Provider 管理归 daemon 的 ProviderPlugin 所有，CLI 使用其[公开方法](../../../design/acp-gateway-implementation.md#45-provider-管理与现有插件)。Gateway 复用该所有者。ACP 向导使用[仅在 Gateway 进程生效的临时路由](../../../design/acp-gateway-implementation.md#134-provider-向导)。三个方法都能控制后续 Session 实际使用的路由时，才发布整组 capability。
 
 ## 3. 状态与生命周期
 

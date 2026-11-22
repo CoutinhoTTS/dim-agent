@@ -163,9 +163,9 @@ new/load/resume/fork 通过独立的 [TemporaryMcp](plugins/TemporaryMcp.md) Ses
 | 表面 | 首版 | 原生路径 / 缺口 |
 | --- | --- | --- |
 | `session/fork` | 仅在原生同时声明 `session.fork` 与 `session.turn.get` 时提供；单独启用 SDK `unstable_session_fork` | 无锚点时固定 main head；有 Lody turnId 时定位该真实 turn 的 `turn/end` sequence。`session.fork {sessionId,at}` → 新 id → attach。原生 rest-point 检查决定能否 fork；活动 turn 内的切点失败，不偷偷改成早一点的切点 |
-| `providers/list` | 读取可复用；整组语义待选择 | `provider.management.list {after?,limit?}` 逐页读取安全可配置 Provider 概要；ACP 的 providers capability 同时承诺三个方法，不能只凭 list 可读就声明，见 §4.5 |
-| `providers/set` | 编辑可复用；共享设置或临时覆盖待选择 | `provider.management {providerId}` → 同版本 `provider.update` 是共享设置的路径；全量 headers、固定 driver/auth 和凭据归属须准确转换。临时覆盖另缺采用接口，见 §4.5 |
-| `providers/disable` | 禁用可复用；共享设置或临时覆盖待选择 | 同版本 `provider.update {patch:{enabled:false}}` 是持久化禁用，不是 CLI disconnect、delete、logout 或清除临时 override；不能混淆，见 §4.5 |
+| `providers/list` | 读取可复用；整组暂不声明 | `provider.management.list {after?,limit?}` 逐页读取安全可配置 Provider 概要；ACP 的 providers capability 同时承诺三个方法，不能只凭 list 可读就声明，见 §4.5 |
+| `providers/set` | 缺进程级路由采用入口 | `provider.management {providerId}` → 同版本 `provider.update` 是共享设置的路径；全量 headers、固定 driver/auth 和凭据归属须准确转换。临时覆盖另缺采用接口，见 §4.5 |
+| `providers/disable` | 缺进程级路由禁用入口 | 同版本 `provider.update {patch:{enabled:false}}` 是持久化禁用，不是 CLI disconnect、delete、logout 或清除临时 override；不能混淆，见 §4.5 |
 | `mcp/message` | 不支持 | 没有现成 MCP-over-ACP 入口 |
 | `session/set_model`、`document/didOpen`、`document/didChange`、`document/didClose`、`document/didSave`、`document/didFocus` | 不支持 | 历史 SDK 的入口不在固定稳定方法表；模型走 config options，文档通知不伪装成已维护 buffer |
 | `text` / `resource_link` | 可接 | 映射到 UserInput text；resource_link 为 `@<uri>` 引用，不自行下载或赋予路径访问权 |
@@ -262,11 +262,11 @@ CLI 的 Disconnect 是 `{credential:{action:"clear"},enabled:false}`，不适合
 
 固定基线的 [Configurable LLM Providers RFD](https://github.com/agentclientprotocol/agent-client-protocol/blob/66ff8076ec2320d85e84fedc83cb779e9d906a89/docs/rfds/custom-llm-endpoint.mdx) 写明配置为 process-scoped，并 **SHOULD NOT** 持久化；后者是推荐而非禁止。RFD 没有为代理加共享 daemon 的架构指定该进程必须是哪一个，更没有要求每 ACP connection / Session 隔离。Lody Core 本身不定义 `providers/*`，也没有改写此处作用域。独立 Gateway 进程并不自动构成必须隔离配置的协议要求。
 
-当前原生 `provider.update` 将版本化记录写入产品 home 的数据库，重启后仍在，共享该 home/daemon 的其他客户端后续模型请求也可能受影响。**若产品选择 ACP 管理 Dim 的共享设置，上表读写路径可复用，持久化本身不构成关闭 capability 的充分理由**；但必须明确共享影响及与 RFD 推荐的差异。**若产品选择仅本次 ACP 运行的临时路由覆盖，当前公开接口没有对应合同**，不能以 Gateway 本地 map 改 list 结果却继续使用旧模型连接，也不能暂存/还原共享记录。
+原生 `provider.update` 将版本化记录写入产品 home 的数据库，影响共享该 home/daemon 的客户端。ACP 路由采用复用已有的 Session-local 连接入口，由 Provider 补齐进程级发现、替换和禁用合同。临时设置必须用于真实模型连接，且不借用共享记录做暂存或还原。
 
 参考实现 [CodexAcpClient](https://github.com/LodyAI/acp-extension-codex/blob/df464ab94e3028ce49a95ae0a9377957c54d8b93/src/CodexAcpClient.ts) 将 ACP set 保存为内存 `gatewayConfig`，通过 `mergeGatewayConfig` 合入原生 Session 建立参数；[CodexAcpServer](https://github.com/LodyAI/acp-extension-codex/blob/df464ab94e3028ce49a95ae0a9377957c54d8b93/src/CodexAcpServer.ts) 在必要时排空并替换其自有 app-server。Dim 不拥有共享 daemon，不能复制该重启路径。该适配器的 disable 清除 override、恢复 native routing，list 随后仍有 current；这与 RFD 所述禁用后 current:null 不一致，不能把参考实现的行为当成协议授权，或等同于 Dim 停用持久化 Provider。
 
-两种产品语义仍待选择；当前不发布 `agentCapabilities.providers`、不启用 SDK `unstable_llm_providers`，不是协议禁止持久化的裁定。无论选择哪种，都复用现有 Provider 所有者；临时覆盖需要在实际模型连接采用处具备合同，不新增第二个路由业务所有者。相关公开流程复用现有 Provider fixture，覆盖完整 headers 替换/省略清空、auth header 分离、协议不匹配、managed 记录拒绝、未知 id、disable 保留 credential、CAS 冲突和 Drain 回复丢失，并验证真实模型调用的路由。产品语义未确定前，先验证 capability 缺席、调用不支持方法不修改隔离 home 的 Provider 记录。
+ACP 向导使用 [§13.4](#134-provider-向导) 的 Gateway 进程级临时路由。Provider 仍拥有实际模型连接的采用。等三个方法都能作用于实际路由后，再声明 `agentCapabilities.providers` 并启用 SDK `unstable_llm_providers`。验收按 §13.6。
 
 ### 4.6 临时 MCP 接线
 
@@ -620,7 +620,7 @@ acpx --agent "$ACP_TEST_COMMAND" --cwd "$ACP_TEST_ROOT/workspace" \
 | Goal 已有状态读取，Lody 跨轮 prompt 完成仍无现成合同 | 由 Goal 定义提交/终态关联；不在 Gateway 拥有第二个 Goal fold | 完成不能早于 owner 的决定；Goal，含 #422 的边界 |
 | usage 缺 reasoning 明细，费用可能未知 | 由 Usage/模型适配保留真实计数；累计显示仍从已有事实投影 | 持久化兼容需单独决定；ModelProvider/aimux/types |
 | 未保存 buffer / client terminal 没有资源生命周期合同 | 沿既有 HostPlatform 方案明确资源所有权与启用方式；客户端 MCP 已由 TemporaryMcp 承接 | 断线不能泄漏进程或赋予权限；HostPlatform/#5 |
-| Provider 共享设置与 ACP 临时覆盖的产品语义尚未选择；只有后者缺现成覆盖接口，driver/auth 也固定 | 选择共享设置时复用已有管理合同；选择临时覆盖时才需明确模型连接覆盖的作用域、认证归属、采用时点和关闭语义 | 在实际模型连接采用处生效，退出不能覆盖其他写入；Provider/ModelHost 所有者。首版不提出变更要求 |
+| 现有 Session 级直连接口缺少 Gateway 进程级路由采用和禁用 | Provider 按 §13.4 定义连接覆盖的实际采用、认证归属及退出语义 | 在实际模型连接采用处生效，退出不能覆盖其他写入；Provider/ModelHost 所有者。首版不提出变更要求 |
 | 新建 Session 已有模型参数，load/resume/fork 没有同等建立前配置覆盖 | 若需要该行为，由 Session 建立/恢复所有者明确允许覆盖的配置及采用原子性，不能先启用旧配置后补 update | 配置须在 native establishment 前采用；Session/ModelHost 所有者。首版仅接 new 的 model 选择 |
 | Lody 非 Session 绑定的 rateLimits 过滤语义未定义 | 明确已有安全 usage read 在该扩展中的访问范围与过滤语义；标准 `/usage` 按 §4.7 绑定当前 provider | 不扩展为任意管理透传；Provider 所有者 |
 
@@ -675,7 +675,7 @@ Lody [Open / Resume / Fork]
 
 ### 13.4 Provider 向导
 
-采用 ACP Gateway 进程内的临时作用域，复用 [Session-local startup connection](appserver/provider-management.md#session-local-startup-connections) 的底层连接采用与凭据归属。该入口已能为单个 Session 采用直连；所有者仍需定义如何在同一 ACP 进程内按稳定 Provider ID 发现、替换、禁用路由，并把它用于后续 Session 的模型解析。已有共享管理写入是 §4.5 中的另一种产品选择。
+采用 ACP Gateway 进程内的临时作用域，复用 [Session-local startup connection](appserver/provider-management.md#session-local-startup-connections) 的底层连接采用与凭据归属。该入口已能为单个 Session 采用直连；所有者仍需定义如何在同一 ACP 进程内按稳定 Provider ID 发现、替换、禁用路由，并把它用于后续 Session 的模型解析。原生共享设置继续由 [Provider 管理接口](appserver/provider-management.md#32-writes-and-field-operations)管理。
 
 初始化只在三个方法均可兑现时声明 `agentCapabilities.providers`。`list` 发布支持可配置合同的 ID、可用协议、`required` 和无秘密的有效路由。`set` 校验已知 ID、支持的协议和 URL，整体替换 headers，省略时按空 map 处理；新目标只使用该次输入提供的凭据。`disable` 对未知 ID 幂等，对 required ID 拒绝；成功后仍可发现，`current:null`，进程后续建立的 Session 排除该路由。已在运行的 Session 由原生已采用绑定结算。Gateway 退出清理本次配置；以恢复所需临时绑定失败告知客户端，避免切回共享凭据。流程按 [ACP Provider RFD](https://github.com/agentclientprotocol/agent-client-protocol/blob/66ff8076ec2320d85e84fedc83cb779e9d906a89/docs/rfds/custom-llm-endpoint.mdx#behavior) 验证。
 
