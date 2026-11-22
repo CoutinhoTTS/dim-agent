@@ -1553,13 +1553,11 @@ async fn a_tool_reply_carries_the_prompt_of_the_calling_branch_only() {
     let foreign_id = foreign["loop"]["loopId"].as_str().unwrap().to_owned();
 
     for (id, input) in [
-        (
-            "call-1",
-            json!({"action": "next", "loop_id": foreign_id}),
-        ),
+        ("call-1", json!({"action": "next", "loop_id": foreign_id})),
         ("call-2", json!({"action": "stop", "loop_id": foreign_id})),
         ("call-3", json!({"action": "next"})),
         ("call-4", json!({"action": "stop"})),
+        ("call-5", json!({"action": "list"})),
     ] {
         model.push(vec![ToolCall {
             id: id.into(),
@@ -1569,15 +1567,16 @@ async fn a_tool_reply_carries_the_prompt_of_the_calling_branch_only() {
     }
 
     let own_prompt = "inspect the main branch";
-    client
+    let own: Value = client
         .rpc(
             "session.loop.start",
             json!({"sessionId": session, "prompt": own_prompt}),
         )
         .await
         .unwrap();
+    let own_id = own["loop"]["loopId"].as_str().unwrap().to_owned();
     wait_for("the loop tool results", || {
-        (1..=4).all(|n| model.tool_result(&format!("call-{n}")).is_some())
+        (1..=5).all(|n| model.tool_result(&format!("call-{n}")).is_some())
     })
     .await;
 
@@ -1615,6 +1614,15 @@ async fn a_tool_reply_carries_the_prompt_of_the_calling_branch_only() {
         assert_eq!(record["prompt"], json!(own_prompt), "{text}");
         assert_eq!(record["prompt_truncated"], json!(false), "{text}");
     }
+    let listed = reply("call-5");
+    assert!(
+        !listed.contains(foreign_prompt) && !listed.contains(&foreign_id),
+        "list names no loop of another branch: {listed}"
+    );
+    assert!(
+        listed.contains(&format!("- {own_id} ")) && listed.contains(own_prompt),
+        "list names the calling branch's loop and its prompt: {listed}"
+    );
     model.release();
     drop(client);
     server.shutdown();
