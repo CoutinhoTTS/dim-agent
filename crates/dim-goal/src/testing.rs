@@ -94,6 +94,9 @@ pub(crate) async fn write_held(session_id: &str, branch_id: &str, after: u64) {
 pub enum Stage {
     /// Before `do_turn_end` reads the fold.
     Decision,
+    /// After a wait read the committed cutoff it delivers, before it waits for
+    /// the dispatcher to reach that cutoff.
+    Cutoff,
     /// After the evaluation decision and before `treeCommands.create`.
     Create,
     /// After `do_turn_end` took every decision it carries.

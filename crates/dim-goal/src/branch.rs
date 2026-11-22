@@ -1505,6 +1505,33 @@ impl Owner {
         Ok(exists)
     }
 
+    /// The evaluator creation for the turn ending at `after`, claimed only over
+    /// a fold that has consumed every fact committed before the claim (C4, C5,
+    /// Pursuit §4.1). The wait delivers the facts committed at the call, and the
+    /// cutoff is read again under the fold lock: a Queue or a goal change that
+    /// commits while the wait runs leaves that cutoff behind, so the claim
+    /// catches up to the newer one before it reads the fold.
+    async fn claim_evaluation(&self, after: u64) -> Result<Option<(String, String)>, AgentError> {
+        loop {
+            let through = self.await_dispatched().await?;
+            let mut state = self.state.lock().unwrap();
+            if self.timeline.committed() != through {
+                continue;
+            }
+            if !fold::decide_evaluation(&state.fold, after) {
+                return Ok(None);
+            }
+            let summary = state
+                .fold
+                .pending_request()
+                .map(|request| request.summary.clone())
+                .expect("an evaluation decision names a pending request");
+            let objective = state.fold.objective.clone().unwrap_or_default();
+            state.fold.start_evaluation(after);
+            return Ok(Some((summary, objective)));
+        }
+    }
+
     /// The turn-end decision (A.4, Pursuit §4.1): an evaluator creation when
     /// the judge asks for one, otherwise the continuation limit.
     async fn do_turn_end(self: &Arc<Self>, after: u64) -> Result<(), AgentError> {
@@ -1538,25 +1565,10 @@ impl Owner {
         };
         if evaluation {
             // A driving input or a goal change can commit after this turn end
-            // and still be waiting to fold. The claim reads the fold through
-            // every committed fact and rechecks the end, the pending request
-            // and the driving input there (C4, C5, Pursuit §4.1).
-            self.await_dispatched().await?;
-            let claim = {
-                let mut state = self.state.lock().unwrap();
-                let fold = &mut state.fold;
-                if fold::decide_evaluation(fold, after) {
-                    let summary = fold
-                        .pending_request()
-                        .map(|request| request.summary.clone())
-                        .expect("an evaluation decision names a pending request");
-                    fold.start_evaluation(after);
-                    Some((summary, fold.objective.clone().unwrap_or_default()))
-                } else {
-                    None
-                }
-            };
-            if let Some((summary, objective)) = claim {
+            // and still be waiting to fold: the claim rechecks the end, the
+            // pending request and the driving input over every committed fact
+            // (C4, C5, Pursuit §4.1).
+            if let Some((summary, objective)) = self.claim_evaluation(after).await? {
                 #[cfg(feature = "testing")]
                 crate::testing::stage_held(
                     &self.session_id,
@@ -1662,16 +1674,23 @@ impl Owner {
         #[cfg(feature = "testing")]
         crate::testing::write_held(&self.session_id, &self.branch_id, after).await;
         // C4, C5, #1989: a report input or a new turn that commits behind the
-        // decision makes this continuation stale.
+        // decision makes this continuation stale. The recheck reads the fold at
+        // the latest committed cutoff, catching up to a fact that commits while
+        // it waits.
         let decision = if matches!(decision, Decision::Continuation { .. }) {
-            self.await_dispatched().await?;
-            let state = self.state.lock().unwrap();
-            if state.fold.turn_end.as_ref().map(|end| end.sequence) != Some(after)
-                || state.fold.interrupt_after(after).is_some()
-            {
-                return Ok(());
+            loop {
+                let through = self.await_dispatched().await?;
+                let state = self.state.lock().unwrap();
+                if self.timeline.committed() != through {
+                    continue;
+                }
+                if state.fold.turn_end.as_ref().map(|end| end.sequence) != Some(after)
+                    || state.fold.interrupt_after(after).is_some()
+                {
+                    return Ok(());
+                }
+                break fold::decide_turn_end(&state.fold, limit, progress);
             }
-            fold::decide_turn_end(&state.fold, limit, progress)
         } else {
             Some(decision)
         };

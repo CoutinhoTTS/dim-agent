@@ -872,6 +872,210 @@ async fn beta_10_an_input_committed_behind_the_fold_defers_the_creation() {
     harness.close().await;
 }
 
+/// The same admission boundary one step later: the Queue commits while the
+/// claim waits for an earlier cutoff, and is still unfolded when that cutoff
+/// is reached. The claim catches up to the newer cutoff before it reads the
+/// fold, so the request waits for the queue's turn end (Pursuit §4.1, C4, C5).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn beta_11_a_queue_committed_during_the_catch_up_defers_the_creation() {
+    let model = Arc::new(ScriptedModel::default());
+    model.halt(Halt::AfterTool);
+    let harness = evaluator_harness(model.clone()).await;
+    harness.report().await;
+    model.entered().await;
+    let min = harness.session.sequence("main").unwrap();
+    let mut decision = dim_goal::testing::hold_stage(
+        &harness.id,
+        "main",
+        dim_goal::testing::Stage::Decision,
+        min,
+        None,
+    );
+    model.release();
+    let report_end = decision.arrived().await;
+
+    // An input that folds behind the report turn end is the cutoff the claim
+    // waits for. It drives nothing, so the decision is still to create.
+    let mut earlier_gate = dim_goal::testing::hold_input(&harness.id, "main", report_end);
+    let earlier = harness.submit("a note", InputMode::Append).await;
+    let held = earlier_gate.arrived().await;
+    assert!(
+        earlier.sequence == held && held > report_end,
+        "the append input at {} waits to fold at {held} after the report turn end {report_end}",
+        earlier.sequence
+    );
+
+    let mut cutoff_gate = dim_goal::testing::hold_stage(
+        &harness.id,
+        "main",
+        dim_goal::testing::Stage::Cutoff,
+        held,
+        None,
+    );
+    let queue_gate = dim_goal::testing::hold_input(&harness.id, "main", held + 1);
+    let mut early = dim_goal::testing::hold_stage(
+        &harness.id,
+        "main",
+        dim_goal::testing::Stage::Create,
+        report_end,
+        Some(report_end),
+    );
+    decision.release();
+    let cutoff = cutoff_gate.arrived().await;
+    assert_eq!(
+        cutoff, held,
+        "the claim waits for the fold behind the report turn end"
+    );
+
+    // The queue commits behind the cutoff the claim read, and its fold stays
+    // held when the dispatcher reaches that cutoff.
+    let queued = harness.submit("keep going", InputMode::Queue).await;
+    assert!(
+        queued.sequence > held,
+        "the queued input at {} commits after the claim's cutoff {held}",
+        queued.sequence
+    );
+    cutoff_gate.release();
+    earlier_gate.release();
+
+    let created = tokio::time::timeout(NEGATIVE, early.arrived()).await;
+    assert!(
+        created.is_err(),
+        "the report turn end creates no evaluator while a committed input is not folded"
+    );
+    queue_gate.release();
+
+    wait_event(&harness.session, "main", |kind| {
+        matches!(kind, EventKind::BranchCreate(_))
+    })
+    .await;
+    assert!(
+        harness.create_for(report_end).await.is_empty(),
+        "the report turn end creates no evaluator"
+    );
+    let ends = harness.turn_ends(report_end).await;
+    let queue_end = ends[0];
+    let creates = harness.create_for(queue_end).await;
+    assert_eq!(
+        creates.len(),
+        1,
+        "the queue drain turn end creates the evaluator: {creates:#?}"
+    );
+    harness.close().await;
+}
+
+/// The turn end's continuation reads the same committed cutoff: a Queue that
+/// commits while that wait runs leaves the continuation behind, so the turn
+/// end writes none and the queue's own turn end decides (Pursuit §4.1, C4,
+/// C5).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn beta_12_a_queue_committed_during_the_catch_up_holds_the_continuation() {
+    let model = Arc::new(ScriptedModel::default());
+    let mut fixture = Fixture::start_with(model).await;
+    fixture.set_limit(5).await;
+    let id = fixture.new_session(&["goal_update", "wait"]).await;
+    let session = fixture.agent.get_session(&id).unwrap();
+
+    let mut write = dim_goal::testing::hold_write(&id, "main");
+    fixture
+        .goal_on(
+            &id,
+            "set",
+            json!({"objective": "make the tests pass", "judge": "evaluator"}),
+        )
+        .await
+        .unwrap();
+    let set_end = tokio::time::timeout(WAIT, write.arrived())
+        .await
+        .expect("the set turn's continuation reached its write in time");
+
+    let mut earlier_gate = dim_goal::testing::hold_input(&id, "main", set_end);
+    let earlier = session
+        .submit("a note".to_owned(), InputMode::Append, "main")
+        .await
+        .unwrap();
+    let held = earlier_gate.arrived().await;
+    assert!(
+        earlier.sequence == held && held > set_end,
+        "the append input at {} waits to fold at {held} after the set turn end {set_end}",
+        earlier.sequence
+    );
+
+    let mut cutoff_gate =
+        dim_goal::testing::hold_stage(&id, "main", dim_goal::testing::Stage::Cutoff, held, None);
+    let queue_gate = dim_goal::testing::hold_input(&id, "main", held + 1);
+    write.release();
+    let cutoff = cutoff_gate.arrived().await;
+    assert_eq!(
+        cutoff, held,
+        "the continuation recheck waits for the fold behind the set turn end"
+    );
+
+    let queued = session
+        .submit("keep going".to_owned(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    assert!(
+        queued.sequence > held,
+        "the queued input at {} commits after the recheck's cutoff {held}",
+        queued.sequence
+    );
+    cutoff_gate.release();
+    earlier_gate.release();
+
+    let stale = tokio::time::timeout(NEGATIVE, async {
+        loop {
+            let writes = goal_writes(&session, "main").await;
+            if let Some(block) = writes.iter().find(|block| {
+                block.marker.contains(r#"kind="continuation""#)
+                    && block.marker.contains(&format!(r#"after="{set_end}""#))
+            }) {
+                return block.marker.clone();
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(
+        stale.is_err(),
+        "the set turn end writes no continuation while a committed input is not folded: {stale:?}"
+    );
+
+    queue_gate.release();
+    let queue_end = tokio::time::timeout(WAIT, async {
+        loop {
+            if let Some(end) = turn_ends(&session, "main")
+                .await
+                .into_iter()
+                .find(|end| *end > set_end)
+            {
+                return end;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the queued input's turn end");
+    let continued = tokio::time::timeout(WAIT, async {
+        loop {
+            let writes = goal_writes(&session, "main").await;
+            if let Some(block) = writes.iter().find(|block| {
+                block.marker.contains(r#"kind="continuation""#)
+                    && block.marker.contains(&format!(r#"after="{queue_end}""#))
+            }) {
+                return block.marker.clone();
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(
+        continued.is_ok(),
+        "the queued input's turn end decides the continuation: {continued:?}"
+    );
+    fixture.close().await;
+}
+
 /// Gap 4: with a background task still open, withdrawing the queued driving
 /// input still creates the evaluation at the turn end.
 #[tokio::test]
