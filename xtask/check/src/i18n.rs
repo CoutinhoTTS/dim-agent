@@ -203,7 +203,11 @@ fn key_positions(function: &Expr) -> Option<&'static [usize]> {
     match segments.next()?.ident.to_string().as_str() {
         "t" | "tf" => Some(&[0]),
         "t_in" | "tf_in" => Some(&[1]),
-        "new" if segments.next().is_some_and(|module| module.ident == "ListPanel") => {
+        "new"
+            if segments
+                .next()
+                .is_some_and(|module| module.ident == "ListPanel") =>
+        {
             Some(LIST_PANEL_TEXTS)
         }
         _ => None,
@@ -431,10 +435,8 @@ mod tests {
     /// A root whose Simplified Chinese table holds `table` and whose one source
     /// file passes `source`, so `check` reads both.
     fn root(name: &str, table: &str, source: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!(
-            "dim-xtask-i18n-{name}-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("dim-xtask-i18n-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let areas = root.join(TABLES).join(BASE);
         std::fs::create_dir_all(&areas).unwrap();
@@ -502,7 +504,9 @@ mod tests {
         );
         let error = refusal(&root);
         assert!(
-            error.contains("crates/dim-cli/src/ui/panel.rs:2: \"Missing panel title\" is not in zh_cn"),
+            error.contains(
+                "crates/dim-cli/src/ui/panel.rs:2: \"Missing panel title\" is not in zh_cn"
+            ),
             "{error}"
         );
     }
