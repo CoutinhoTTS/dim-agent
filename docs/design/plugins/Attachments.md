@@ -36,8 +36,9 @@ in `session.submit`. Web clients first upload the browser file through the
 [Web HTTP API](../web-workspace.md#session-file-http-api). Rpc validates reference
 shape and ownership. A failed import preserves the client's draft.
 
-The per-request image reference view and final provider encoding are requirements
-to their owners in A.4. The context flow is defined by the cross-module design.
+The per-request image view — pixels, a reference or a placeholder (A.1) — and the
+final provider encoding are requirements to their owners in A.4. The context flow
+is defined by the cross-module design.
 
 ### 3.2 Text paste
 

@@ -9,8 +9,9 @@ Rules: [design rules](../../architecture/rust-agent/principles.md), [ADR 002](..
 
 Images a Session receives — attachments ([Attachments](Attachments.md) A.1) and `read`
 ([WorkspaceTools § read results and images](../../architecture/rust-agent/plugins/WorkspaceTools.md#read-results-and-images))
-— reach a vision-capable conversational model as pixels and any other conversational model as
-`img:` references, which the model asks about through the `image_understand` tool. Which model
+— reach a vision-capable conversational model, or a request whose model capability is
+unknown, as pixels and any other conversational model as `img:` references, which the model
+asks about through the `image_understand` tool. Which model
 answers is Modality's `modality.image.understand` target
 ([Modality](Modality.md) A.1), resolved by its owner and executed through the existing
 `auxiliaryModel` host. The image's stored content never changes.
@@ -217,7 +218,7 @@ Rules: [principles §1 and §4](../../architecture/rust-agent/principles.md), [A
 | §4.1 Command events for others' state | The tool returns a result; it changes no other owner's state. Model selection is read from Modality. |
 | §4.2 No recall after handoff | References come from the request the model received; the tool resolves them inside the branch and touches no input. |
 | §4.3 Only before callbacks, never block | No before callback. The call registers its own task and returns; on cancellation it releases the request and returns the host's cancellation. |
-| §4.4 No business meaning in core | No core change: the tool is registered through `toolRegistry`, and the reference rule stays in ModelProvider as Attachments already owns it. |
+| §4.4 No business meaning in core | No core change: the tool is registered through `toolRegistry`, and the image routing rule — pixels, a reference or a placeholder — stays in ModelProvider as Attachments already owns it. |
 | §4.5 Atomic batches | The design writes no event itself; Loop's ordinary tool-call batch covers the call and its result. |
 | §4.6 Context only from handed-off events | The answer reaches the model only as a tool result; no injection during request preparation. |
 | §4.7 Public events and services only | The part uses `toolRegistry`, `treeCommands.query` with published chain scope (§5 M4) to resolve a reference, the declared `auxiliaryModel` host, `sessionFiles` to read stored image bytes, `guideEntries` for its input-guide entry, and Modality's M1 read. |
@@ -234,8 +235,8 @@ Rules: [principles §1 and §4](../../architecture/rust-agent/principles.md), [A
 ## 9. Acceptance
 
 - A fixture flow: an image attached in `session.submit` and one returned by `read` follow the
-  request's vision routing — pixels for a vision-capable model, references otherwise;
-  `image_understand` answers from the resolved target.
+  request's vision routing — pixels for a vision-capable model or one whose capability is
+  unknown, references otherwise; `image_understand` answers from the resolved target.
 - Changing the configured `modality.image.understand` model changes the model the fixture's
   provider sees; clearing the default restores automatic resolution; an unavailable default
   fails the call with its reason and no fallback.

@@ -458,8 +458,9 @@ animated GIF's first frame, transparent pixels on white, a WebP EXIF chunk
 larger than its file refused, a missing file reported as `file_not_found`, the
 pixel guard before decoding, and the refusals.
 [read_image_flow.rs](../../../../crates/dim-app-server/tests/read_image_flow.rs)
-runs a model's `read` on a PNG. The request-only reference rule for vision and
-text-only models, and preservation of the stored tool result, are covered by
+runs a model's `read` on a PNG. The per-request routing of images for vision
+and text-only models — pixels, a reference or a placeholder — and preservation
+of the stored tool result are covered by
 [host_flows.rs](../../../../crates/dim-agent-capabilities/tests/host_flows.rs).
 
 The App Server's [native execution flow](../../../../crates/dim-app-server/tests/transport_flow/shell_input.rs)
