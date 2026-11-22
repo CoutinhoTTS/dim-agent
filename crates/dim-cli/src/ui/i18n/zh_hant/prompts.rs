@@ -169,6 +169,10 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Checked on background task" => "查看了背景工作",
         "Waiting…" => "等待中…",
         "… +{count} lines" => "… 還有 {count} 行",
+        "New members from main inherit this policy; existing members retain theirs." => {
+            "之後從 main 建立的成員繼承此權限；既有成員保留自身權限。"
+        }
+        "Subagent tool approval" => "子代理工具核准",
         _ => return None,
     })
 }

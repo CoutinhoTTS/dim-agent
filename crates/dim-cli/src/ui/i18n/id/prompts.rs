@@ -185,6 +185,10 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Checked on background task" => "Memeriksa tugas latar",
         "Waiting…" => "Menunggu…",
         "… +{count} lines" => "… +{count} baris",
+        "New members from main inherit this policy; existing members retain theirs." => {
+            "Anggota baru dari main mewarisi kebijakan ini; anggota yang sudah ada tetap memakai miliknya."
+        }
+        "Subagent tool approval" => "Persetujuan tool subagen",
         _ => return None,
     })
 }

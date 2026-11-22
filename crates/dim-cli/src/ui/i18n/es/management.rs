@@ -364,6 +364,53 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Use the line prompt or dimcode permissions." => {
             "Usa el indicador de línea o dimcode permissions."
         }
+        "Tool call timeout: {millis} ms" => {
+            "Tiempo de espera de la llamada a la herramienta: {millis} ms"
+        }
+        "Variables: {names}" => "Variables: {names}",
+        "Unset variables: {names}" => "Variables sin definir: {names}",
+        "The MCP source changed since the preview; no entry was imported, and an entry it would have replaced may now be disabled. Preview again." => {
+            "La fuente MCP cambió desde la vista previa; no se importó ninguna entrada, y una entrada que habría reemplazado puede estar ahora desactivada. Vuelve a previsualizar."
+        }
+        "The project entries were written and their withheld values were not; replace them again to retry." => {
+            "Las entradas de proyecto se escribieron y sus valores retenidos no; reemplázalas otra vez para reintentar."
+        }
+        "Replaced {id}." => "{id} reemplazado.",
+        "Added {id}." => "{id} añadido.",
+        "Delivers to Session {session} branch {branch} ({mode})." => {
+            "Entrega a la sesión {session}, rama {branch} ({mode})."
+        }
+        "Launches a new Session in {cwd}." => "Inicia una sesión nueva en {cwd}.",
+        "Disabled: {code} at {instant}." => "Desactivado: {code} el {instant}.",
+        "The definition changed since it was read; nothing was written." => {
+            "La definición cambió desde que se leyó; no se escribió nada."
+        }
+        "This daemon cannot list other clients' MCP stores." => {
+            "Este daemon no puede listar los almacenes MCP de otros clientes."
+        }
+        "This daemon cannot import MCP servers." => "Este daemon no puede importar servidores MCP.",
+        "The document holds no mcpServers entries." => {
+            "El documento no contiene entradas mcpServers."
+        }
+        "Columns: ID, status, transport, changed fields, unsupported fields, error.\nA changed field names what a write would change and the kind of value it holds; no value is printed.\nAn unsupported field is kept unused or dropped, as shown after the field." => {
+            "Columnas: ID, estado, transporte, campos cambiados, campos no compatibles, error.\nUn campo cambiado indica qué cambiaría una escritura y el tipo de valor que contiene; no se imprime ningún valor.\nUn campo no compatible queda sin usar o se descarta, como se muestra tras el campo."
+        }
+        "A project entry is written as its public skeleton: the workspace file gets the command, declared cwd, URL origin and public OAuth fields. Its arguments, environment and header values, bearer token, a URL with userinfo, path, query or fragment, and unknown members go to your user-scope mcp-secrets record, never to the workspace file." => {
+            "Una entrada de proyecto se escribe como su esqueleto público: el archivo del espacio de trabajo recibe el comando, el cwd declarado, el origen de la URL y los campos OAuth públicos. Sus argumentos, valores de entorno y cabeceras, token bearer, una URL con userinfo, ruta, consulta o fragmento, y los miembros desconocidos van a tu registro mcp-secrets de ámbito de usuario, nunca al archivo del espacio de trabajo."
+        }
+        "{id} has {count} more field names than the lists above show." => {
+            "{id} tiene {count} nombres de campo más de los que muestran las listas de arriba."
+        }
+        "Top-level members the import does not carry: none." => {
+            "Miembros de nivel superior que la importación no traslada: ninguno."
+        }
+        "Top-level members the import does not carry: {names}." => {
+            "Miembros de nivel superior que la importación no traslada: {names}."
+        }
+        "Applying the selection at this revision." => "Aplicando la selección en esta revisión.",
+        "An unchanged entry was already in the source and was not written." => {
+            "Una entrada sin cambios ya estaba en la fuente y no se escribió."
+        }
         _ => return None,
     })
 }

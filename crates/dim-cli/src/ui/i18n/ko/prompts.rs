@@ -177,6 +177,10 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Checked on background task" => "백그라운드 작업 확인함",
         "Waiting…" => "대기 중…",
         "… +{count} lines" => "… +{count}줄",
+        "New members from main inherit this policy; existing members retain theirs." => {
+            "main에서 만들어지는 새 멤버는 이 권한을 상속하고, 기존 멤버는 자기 권한을 유지합니다."
+        }
+        "Subagent tool approval" => "하위 에이전트 도구 승인",
         _ => return None,
     })
 }

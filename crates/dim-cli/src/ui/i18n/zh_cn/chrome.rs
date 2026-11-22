@@ -706,6 +706,73 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "moving retained images into Session files" => "把保留下来的图片写入会话文件",
         "updating the text index of the rows that changed" => "更新已改动行的文本索引",
         "checking and committing the upgraded store" => "校验并提交升级后的库",
+        "Permission mode" => "权限模式",
+        "Related settings" => "相关设置",
+        "Process isolation" => "进程隔离",
+        "open" => "打开",
+        "User-wide command rules. Allow skips asks, never denials." => {
+            "用户级命令规则。允许只会跳过询问，不会越过拒绝。"
+        }
+        "Opens Settings; user-wide, for new processes; independent of permission mode." => {
+            "打开设置；用户级，作用于新进程；与权限模式无关。"
+        }
+        "keep mode" => "保持模式",
+        "use mode" => "使用模式",
+        "Current session; remembered for new sessions. {consequence}" => {
+            "仅当前会话；会记住用于新会话。{consequence}"
+        }
+        "↑↓/Tab move · Enter {action} · Esc close" => {
+            "↑↓/Tab 移动 · Enter {action} · Esc 关闭"
+        }
+        "Writes and commands denied; external reads may ask." => {
+            "写入和命令一律拒绝；外部读取可能会询问。"
+        }
+        "Workspace writes allowed; commands, network and ungranted outside access usually ask." => {
+            "允许工作区写入；命令、网络和未获授权的外部访问通常会询问。"
+        }
+        "Skips preset approval; pending calls on this branch are reevaluated. Explicit denies and isolation remain." => {
+            "跳过预设审批；此分支上待处理的调用会重新评估。明确的拒绝和隔离仍然有效。"
+        }
+        "↑↓ move · Enter select · Esc close" => "↑↓ 移动 · Enter 选择 · Esc 关闭",
+        "Loading process isolation…" => "正在读取进程隔离…",
+        "Sandbox is unavailable on this host: {reason}" => "此主机上沙箱不可用：{reason}",
+        "Applies to new processes and shells." => "作用于新进程和 shell。",
+        "Off: commands use your OS permissions, not file-tool limits." => {
+            "关闭：命令使用操作系统的权限，不受文件工具限制。"
+        }
+        "Off" => "关闭",
+        "Sandboxed · No network" => "沙箱 · 无网络",
+        "Sandboxed · Network allowed" => "沙箱 · 允许网络",
+        "selected" => "已选",
+        "Save" => "保存",
+        "Reset to defaults" => "重置为默认值",
+        "Reload" => "重新加载",
+        "Discard edits and read the current settings" => "放弃修改并读取当前设置",
+        "Reset the execution switches to defaults?" => "将执行开关重置为默认值？",
+        "Discard unsaved changes?" => "放弃未保存的修改？",
+        "Yes (y)" => "是 (y)",
+        "Cancel (n)" => "取消 (n)",
+        "y confirm · Enter/Esc cancel" => "y 确认 · Enter/Esc 取消",
+        "Read only" => "只读",
+        "Workspace write" => "工作区写入",
+        "Agent" => "智能体",
+        "agent" => "智能体",
+        "command" => "命令",
+        "ended" => "已结束",
+        "Signed in" => "已登录",
+        "Retry" => "重试",
+        "Provider changed; review the retained draft and press Apply again" => {
+            "提供方已更改；请检查保留的草稿并再次按应用"
+        }
+        "y allow · a always · n reject · ←→/Tab move · Enter confirm" => {
+            "y 允许 · a 始终允许 · n 拒绝 · ←→/Tab 切换 · Enter 确认"
+        }
+        "{count} in background · /tasks" => "后台 {count} 项 · /tasks",
+        "{field}: {error} Your text is kept in {path}" => {
+            "{field}：{error} 你的文本已保留在 {path}"
+        }
+        "{field}: {error}" => "{field}：{error}",
+        "Prompts: {error}" => "提示词：{error}",
         _ => return None,
     })
 }
