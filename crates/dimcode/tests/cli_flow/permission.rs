@@ -172,14 +172,16 @@ fn tui_resume_registers_its_leaf_after_the_launch_preset_is_applied() {
                     json!({"version":7,"policy":policy("full-access", &[], &[])}),
                 ),
                 "session.permission.update" => break request,
-                "ui.open" => panic!(
-                    "the leaf registers before the launch preset is applied: {request}"
-                ),
+                "ui.open" => {
+                    panic!("the leaf registers before the launch preset is applied: {request}")
+                }
                 "account.providers" => wire.reply(&request, json!([])),
                 "provider.list" => wire.reply(&request, json!({"providers":[]})),
-                "session.context.usage" => wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+                "session.context.usage" => {
+                    wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
                     "code":-32601,"message":"Unknown method: session.context.usage",
-                    "data":{"appError":"unknown_method"}}})),
+                    "data":{"appError":"unknown_method"}}}))
+                }
                 other => panic!("unexpected {other}: {request}"),
             }
         };

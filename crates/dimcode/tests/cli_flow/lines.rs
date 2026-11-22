@@ -2155,9 +2155,7 @@ fn tui_a_draft_typed_before_a_session_handoff_does_not_go_to_the_new_session() {
                     }
                     wire.reply(&request, record);
                 }
-                "session.branches" => {
-                    wire.reply(&request, directory("main", &[("main", None)]))
-                }
+                "session.branches" => wire.reply(&request, directory("main", &[("main", None)])),
                 "session.history" => wire.reply(&request, history(8, vec![])),
                 "session.permission.get" => wire.reply(
                     &request,

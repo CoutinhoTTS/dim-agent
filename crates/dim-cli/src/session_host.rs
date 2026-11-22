@@ -1505,9 +1505,7 @@ impl Worker {
                 None,
                 "The centre moved before /earlier ran; nothing was loaded",
             ),
-            Command::SetPermission {
-                session, line, ..
-            } if !session.is_empty() => (
+            Command::SetPermission { session, line, .. } if !session.is_empty() => (
                 session,
                 line,
                 None,
@@ -1519,10 +1517,7 @@ impl Worker {
             Command::Usage { .. } | Command::SetPermission { .. } => &self.default_branch,
             _ => &self.focus,
         };
-        if session.is_empty()
-            || line.is_empty()
-            || (session == &self.session_id && line == now)
-        {
+        if session.is_empty() || line.is_empty() || (session == &self.session_id && line == now) {
             return Some(command);
         }
         match draft {
@@ -1659,7 +1654,10 @@ impl Worker {
                     )
                     .await;
                 match forked {
-                    Ok(forked) => self.attach(forked.session_id, SwitchKind::Forked, true).await?,
+                    Ok(forked) => {
+                        self.attach(forked.session_id, SwitchKind::Forked, true)
+                            .await?
+                    }
                     Err(error) => {
                         if !self.reportable(
                             crate::report::Captured::observed(

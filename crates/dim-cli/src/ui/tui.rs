@@ -3503,9 +3503,8 @@ impl App {
                     && (key.mods == Modifiers::SHIFT
                         || (key.code == KeyCode::BackTab && key.mods == Modifiers::NONE)) =>
             {
-                self.host.send(self.permission_change(
-                    crate::permission::PresetSelection::Next,
-                ));
+                self.host
+                    .send(self.permission_change(crate::permission::PresetSelection::Next));
                 return Outcome::Continue;
             }
             KeyCode::Char('o' | 'p') if ctrl && !self.composer.palette_open() => {
@@ -3595,12 +3594,7 @@ impl App {
         match self.composer.handle_key(key) {
             ComposerOutcome::Command { name, args } => return self.run_command(&name, &args),
             outcome => {
-                self.dispatch_composer(
-                    outcome,
-                    mode,
-                    self.target_line(),
-                    self.target_session(),
-                );
+                self.dispatch_composer(outcome, mode, self.target_line(), self.target_session());
             }
         }
         if self.suggestion.is_some() && !self.composer.is_empty() {
@@ -4448,9 +4442,9 @@ impl App {
             }
             Effect::SetPermission(preset) => {
                 self.prompt = None;
-                self.host.send(self.permission_change(
-                    crate::permission::PresetSelection::Preset(preset),
-                ));
+                self.host.send(
+                    self.permission_change(crate::permission::PresetSelection::Preset(preset)),
+                );
             }
             Effect::Provider(action) => self.host.send(Command::Provider(action)),
             Effect::Plugin(action) => self.host.send(Command::Plugin(action)),
