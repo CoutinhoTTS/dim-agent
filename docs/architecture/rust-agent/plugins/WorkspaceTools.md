@@ -329,6 +329,52 @@ available. No partial diff or misleading complete change count is returned.
 Consumers use the recorded diff rather than rereading the current file; null
 or missing diffs do not provide a comparison.
 
+### New-file creation
+
+`write` creates a missing file, `edit` never does, so this section covers
+`write` alone. A new file's final mode, extended ACL and group match a direct
+creation in the same directory under the same umask, the target is never
+replaced, and the staged content has no directory entry or stays 0600 until
+publication. The replacement path is unchanged: a 0600 sibling that restores the
+original owner, group, mode and extended attributes before the rename.
+
+- **Linux.** The new file starts as an anonymous `O_TMPFILE` inode created
+  `0o666` in the target's parent, is written and synced there, and is published
+  with `linkat("/proc/self/fd/<fd>", AT_SYMLINK_FOLLOW)`, which never replaces an
+  existing name. The kernel settles the mode, the parent's POSIX default ACL
+  and the `setgid` group at creation, and preparation has no directory entry to
+  clean up. A filesystem without `O_TMPFILE` (`EOPNOTSUPP`, `EISDIR`, `EINVAL`,
+  `ENOENT`, or an absent `/proc/self/fd`) falls back to the named 0600 sibling.
+  On that path, a parent without `system.posix_acl_default` gives the sibling
+  `0o666 & ~umask` through `fchmod` immediately before the link; a parent with a
+  default ACL keeps it at 0600, because an existing inode cannot merge that
+  ACL. The umask is read from `/proc/self/status`. Where a filesystem has no
+  POSIX ACL support, an anonymous inode gets the same mode before the link,
+  because kernels before 4.19 omitted the umask strip in `vfs_tmpfile`
+  (`ac6800e279a2`).
+- **macOS.** The named 0600 sibling is created in the target's parent, so XNU
+  assigns the parent's group and the inheritable file ACL at creation; an
+  `fchmod(fd, 0o666 & ~umask)` immediately before the link sets the mode without
+  changing that ACL. Each product entry captures the umask once in `main`,
+  before any thread starts, because the supported baseline has no `getumask`; a
+  library or test caller that does not capture it keeps the 0600 staging mode.
+- **Windows.** Unchanged: the private handle is installed with a hard link.
+
+Known limits:
+
+- A parent whose inheritable ACL grants another user access gives the 0600
+  macOS sibling that ACE during preparation, as the replacement path and the
+  previous behavior do; the published file's ACL still matches a direct
+  creation.
+- The fallback and macOS paths apply the mode between the `fchmod` and the link,
+  and their cleanup is the parent-directory name check-then-unlink the
+  replacement path already uses.
+- The Linux fallback keeps 0600 when the parent carries a POSIX default ACL.
+- macOS caches the umask the process had at startup; native code that changes
+  the process umask afterwards is not reflected.
+- A parent whose inheritable ACL denies delete refuses the macOS staging
+  entry's removal, so that entry stays behind after a successful publication.
+
 ### Rule check
 
 The read-only [`session.exec.output`](../../../design/background-task-output.md)
@@ -434,6 +480,17 @@ tool that starts writing one into `content` moves that text into this section.
 [workspace_files.rs](../../../../crates/dim-agent-capabilities/tests/workspace_files.rs),
 [local_execution.rs](../../../../tests/integration/tests/local_execution.rs),
 [local_product.rs](../../../../tests/integration/tests/local_product.rs).
+
+[workspace_files.rs](../../../../crates/dim-agent-capabilities/tests/workspace_files.rs)
+drives new-file creation: `a_new_file_takes_the_process_umask` runs a child
+process under umasks 022, 002, 300 and 700 on both Unix platforms and checks
+that a replacement keeps its original mode, `a_new_file_takes_the_creation_mode_on_the_named_fallback` repeats the mode check over the
+named staging path on Linux, `a_new_file_takes_the_parents_acl_on_macos` covers
+five inheritable ACL shapes under the same umasks, and
+`a_new_file_under_a_deny_delete_acl_keeps_its_staging_entry` fixes the residue
+limit. The Linux tests that need `setfacl`, a foreign-group `setgid` directory or
+a filesystem without `O_TMPFILE` are `#[ignore]`d manual cases, named in their
+run instructions.
 
 [workspace_files.rs](../../../../crates/dim-agent-capabilities/tests/workspace_files.rs)
 drives `edit` over its replacement list:
