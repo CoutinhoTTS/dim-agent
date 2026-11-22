@@ -11,6 +11,7 @@ use dim_agent_types::{
     InputConsumedData, InputMode, ToolResult, TurnStartData,
 };
 use serde_json::json;
+use support::NEGATIVE;
 use support::parts::*;
 use support::texts;
 
@@ -881,19 +882,7 @@ async fn pursuit_2_a_continue_conclusion_reads_the_latest_committed_cutoff() {
     );
     cutoff_gate.release();
 
-    let stale = tokio::time::timeout(Duration::from_millis(750), async {
-        loop {
-            let writes = writes_with(&env, "main", &format!(r#"evaluation="{evaluation}""#)).await;
-            if let Some(block) = writes
-                .iter()
-                .find(|block| block.marker.contains(r#"kind="continuation""#))
-            {
-                return block.marker.clone();
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await;
+    let stale = tokio::time::timeout(NEGATIVE, wait_evaluated(&env, "main", evaluation)).await;
     assert!(
         stale.is_err(),
         "the continue conclusion writes no continuation while a committed Queue is not folded: {stale:?}"

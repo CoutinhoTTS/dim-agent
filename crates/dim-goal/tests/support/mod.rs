@@ -31,6 +31,11 @@ use std::{
     time::Duration,
 };
 
+/// The bound a flow waits for work it expects to happen.
+pub const WAIT: Duration = Duration::from_secs(20);
+/// The bound a flow waits for a decision it expects not to happen.
+pub const NEGATIVE: Duration = Duration::from_millis(750);
+
 /// The branch Timelines the Goal parts run against, by branch id: a flow
 /// writes the facts it would otherwise have to wait for a model to produce.
 #[derive(Default)]
