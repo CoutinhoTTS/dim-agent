@@ -467,11 +467,14 @@ pub enum Command {
     /// Sign the described account out.
     Logout(AccountTarget),
     /// Run a shell-mode command through the App Server; `private` (`!!`)
-    /// keeps its result out of the session.
+    /// keeps its result out of the session. The Session and line are the ones
+    /// the command was typed on (design §14).
     ShellRun {
         run_id: String,
         command: String,
         private: bool,
+        line: String,
+        session: Origin,
     },
     /// Ask the run `run_id` to end.
     ShellStop {

@@ -1432,15 +1432,16 @@ impl Worker {
 
     /// A command typed for a Session and line only runs while it still names
     /// that pair: the shown line for a submit, a draft, a goal, a loop, a
-    /// configuration, a compaction or an earlier read, and the Session's
-    /// default branch for `/usage` and a permission change, which act on it. A
-    /// move or a Session handoff the key could not see cancels the command and
-    /// returns what it carried to the draft, instead of writing it into
-    /// another line or Session. Home is its own origin: a command typed there
-    /// keeps the startup path it belongs to and never reaches a Session that
-    /// an attachment brought in. The stop gestures name the Session and line
-    /// they were pressed on: a handoff cancels them, while a move within the
-    /// same Session still stops the line the key saw (design §14).
+    /// configuration, a compaction, an earlier read or a shell command, and
+    /// the Session's default branch for `/usage` and a permission change,
+    /// which act on it. A move or a Session handoff the key could not see
+    /// cancels the command and returns what it carried to the draft, instead
+    /// of writing it into another line or Session. Home is its own origin: a
+    /// command typed there keeps the startup path it belongs to and never
+    /// reaches a Session that an attachment brought in. The stop gestures name
+    /// the Session and line they were pressed on: a handoff cancels them, while
+    /// a move within the same Session still stops the line the key saw (design
+    /// §14).
     fn typed_command(&mut self, command: Command) -> Option<Command> {
         const KEPT: &str = "The centre moved before the command ran; the draft was kept";
         let (origin, line, draft, cancelled) = match &command {
@@ -1526,6 +1527,12 @@ impl Worker {
             Command::SubmitNow { session, .. } => {
                 (session, None, None, "The session moved before the send ran")
             }
+            Command::ShellRun { line, session, .. } => (
+                session,
+                Some(line),
+                None,
+                "The centre moved before the shell command ran; nothing was run",
+            ),
             _ => return Some(command),
         };
         let now = match &command {
@@ -1538,6 +1545,10 @@ impl Worker {
         match &command {
             Command::SubmitNow { .. } => self.send(Update::Stopped {
                 error: Some(cancelled.into()),
+            }),
+            Command::ShellRun { run_id, .. } => self.send(Update::ShellDone {
+                run_id: run_id.clone(),
+                result: Err(cancelled.into()),
             }),
             _ => match draft {
                 Some(parts) => self.send(Update::DraftNotSent {
@@ -2330,6 +2341,7 @@ impl Worker {
                 run_id,
                 command,
                 private,
+                ..
             } => {
                 if self.shell.is_some() {
                     self.send(Update::ShellDone {

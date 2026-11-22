@@ -2846,3 +2846,317 @@ fn tui_a_launch_home_permission_change_does_not_reach_the_resumed_session() {
         }
     }
 }
+
+/// A shell command typed on a Session a `/resume` is about to leave does not
+/// run in the Session the attachment brings in: the command names the Session
+/// and line it was typed on, and the attachment has replaced both
+/// (design §14).
+#[test]
+fn tui_a_shell_command_typed_before_a_resume_does_not_run_in_the_new_session() {
+    for fullscreen in [false, true] {
+        let home = Home::new();
+        let (attaching, attach_seen) = std::sync::mpsc::channel();
+        let (release_attach, release) = std::sync::mpsc::channel::<()>();
+        let (shells, shell_seen) = std::sync::mpsc::channel::<Value>();
+        let (compacting, compact_seen) = std::sync::mpsc::channel::<()>();
+        let daemon = home.daemon(move |wire| {
+            wire.hello(&[
+                "session.catalog",
+                "session.branches",
+                "session.permission.get",
+                "session.permission.update",
+            ]);
+            let mut usage = |_request: &Value| None;
+            let attach = wire.read("session.attach");
+            let mut record = attach_record(&attach);
+            record["defaultBranch"] = json!({"branchId":"main","sequence":8});
+            wire.reply(&attach, record);
+            loop {
+                let request = next_usage(wire, &mut usage);
+                match request["method"].as_str().unwrap_or_default() {
+                    "session.catalog" => wire.reply(
+                        &request,
+                        json!({"sessions":[{"sessionId":"other","cwd":"/workspace",
+                            "preview":"second conversation",
+                            "model":{"providerId":"test","modelId":"model"},
+                            "updatedAt":9}]}),
+                    ),
+                    "session.branches" => {
+                        wire.reply(&request, directory("main", &[("main", None)]))
+                    }
+                    "session.history" => {
+                        let session = request["params"]["sessionId"].as_str().unwrap_or_default();
+                        wire.reply(
+                            &request,
+                            if session == "other" {
+                                history(8, vec![said(3, "other conversation")])
+                            } else {
+                                history(8, vec![said(3, "the first turn"), applied(4, "input-3")])
+                            },
+                        );
+                    }
+                    "session.permission.get" => wire.reply(
+                        &request,
+                        json!({"version":1,"policy":policy("workspace-write")}),
+                    ),
+                    "session.permission.update" => wire.reply(&request, json!({"version":2})),
+                    "session.attach" => {
+                        assert_eq!(request["params"]["sessionId"], "other");
+                        let mut record = attach_record(&request);
+                        record["defaultBranch"] = json!({"branchId":"main","sequence":8});
+                        attaching.send(()).unwrap();
+                        release.recv_timeout(PATIENCE).unwrap();
+                        wire.reply(&request, record);
+                    }
+                    "session.detach" => wire.reply(&request, json!({})),
+                    "shell.run" => {
+                        shells.send(request["params"].clone()).unwrap();
+                        wire.reply(
+                            &request,
+                            json!({"runId":request["params"]["runId"],
+                                "status":"completed","exitCode":0,"output":"stale-output\n",
+                                "truncated":false,"durationMs":1}),
+                        );
+                    }
+                    "session.context.compact" => {
+                        assert_eq!(request["params"]["branchId"], "main");
+                        compacting.send(()).unwrap();
+                        wire.reply(&request, json!({"status":"completed"}));
+                    }
+                    other => panic!("unexpected {other}: {request}"),
+                }
+            }
+        });
+        let mut command = home.command();
+        command.arg(if fullscreen {
+            "--fullscreen"
+        } else {
+            "--scrollback"
+        });
+        sized(&mut command, 120, 36);
+        let mut terminal = Terminal::resume_tui(command);
+        terminal.until("the first turn");
+        terminal.until("test / model");
+        terminal.write(b"/resume\r");
+        terminal.until("second conversation");
+        terminal.write(b"\r");
+        attach_seen.recv_timeout(PATIENCE).unwrap();
+        // The attachment's reply is held, so the interface still shows the
+        // Session the shell command is typed on.
+        terminal.write(b"!printf stale\r");
+        terminal.until("Ctrl+C to interrupt");
+        release_attach.send(()).unwrap();
+        terminal.until("other conversation");
+        // `/compact` on the attached Session is the boundary after the stale
+        // command: the daemon reads it whether that command ran or not, so an
+        // empty `shell.run` here is the refusal, not a race.
+        terminal.write(b"/compact\r");
+        compact_seen.recv_timeout(PATIENCE).unwrap();
+        assert!(
+            shell_seen.try_recv().is_err(),
+            "a shell command from the Session a resume left does not run in the new Session"
+        );
+        home.kill(&terminal);
+        terminal.wait();
+        daemon.join().unwrap();
+    }
+}
+
+/// A shell command left over from the Session `/new` left does not start a
+/// Session at Home: the command names the Session it was typed in, and the
+/// guard runs before Home can create one (design §14).
+#[test]
+fn tui_a_stale_shell_command_behind_new_does_not_start_a_session() {
+    for fullscreen in [false, true] {
+        let home = Home::new();
+        let (attaching, attach_seen) = std::sync::mpsc::channel();
+        let (release_attach, release) = std::sync::mpsc::channel::<()>();
+        let (created, create_seen) = std::sync::mpsc::channel::<Value>();
+        let daemon = home.daemon(move |wire| {
+            wire.hello(&[
+                "session.catalog",
+                "session.branches",
+                "session.permission.get",
+                "session.permission.update",
+            ]);
+            let mut usage = |_request: &Value| None;
+            let attach = wire.read("session.attach");
+            let mut record = attach_record(&attach);
+            record["defaultBranch"] = json!({"branchId":"main","sequence":8});
+            wire.reply(&attach, record);
+            loop {
+                let request = next_usage(wire, &mut usage);
+                match request["method"].as_str().unwrap_or_default() {
+                    "session.catalog" => wire.reply(
+                        &request,
+                        json!({"sessions":[{"sessionId":"other","cwd":"/workspace",
+                            "preview":"second conversation",
+                            "model":{"providerId":"test","modelId":"model"},
+                            "updatedAt":9}]}),
+                    ),
+                    "session.branches" => {
+                        wire.reply(&request, directory("main", &[("main", None)]))
+                    }
+                    "session.history" => wire.reply(
+                        &request,
+                        history(8, vec![said(3, "the first turn"), applied(4, "input-3")]),
+                    ),
+                    "session.permission.get" => wire.reply(
+                        &request,
+                        json!({"version":1,"policy":policy("workspace-write")}),
+                    ),
+                    "session.permission.update" => wire.reply(&request, json!({"version":2})),
+                    "session.attach" => {
+                        assert_eq!(request["params"]["sessionId"], "other");
+                        let mut record = attach_record(&request);
+                        record["defaultBranch"] = json!({"branchId":"main","sequence":8});
+                        attaching.send(()).unwrap();
+                        release.recv_timeout(PATIENCE).unwrap();
+                        wire.reply(&request, record);
+                    }
+                    "session.detach" => wire.reply(&request, json!({})),
+                    "session.create" => {
+                        created.send(request["params"].clone()).unwrap();
+                        wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+                            "code":-32603,"message":"no Session was created"}}));
+                    }
+                    "provider.catalog" => wire.reply(&request, json!({})),
+                    "shell.run" => panic!("a stale shell command runs at Home: {request}"),
+                    other => panic!("unexpected {other}: {request}"),
+                }
+            }
+        });
+        let mut command = home.command();
+        command.arg(if fullscreen {
+            "--fullscreen"
+        } else {
+            "--scrollback"
+        });
+        sized(&mut command, 120, 36);
+        let mut terminal = Terminal::resume_tui(command);
+        terminal.until("the first turn");
+        terminal.until("test / model");
+        terminal.write(b"/resume\r");
+        terminal.until("second conversation");
+        terminal.write(b"\r");
+        attach_seen.recv_timeout(PATIENCE).unwrap();
+        // The attachment's reply is held, so the interface still shows the
+        // Session `/new` is about to leave: this shell command belongs to it.
+        terminal.write(b"/new\r");
+        terminal.write(b"!printf stale\r");
+        terminal.until("Ctrl+C to interrupt");
+        release_attach.send(()).unwrap();
+        // The refusal is a `ShellDone` the interface draws; an unfixed command
+        // instead reaches `session.create` and shows its error there.
+        terminal.until("Shell: ");
+        assert!(
+            terminal
+                .transcript
+                .contains("The centre moved before the shell command ran"),
+            "the stale shell command is cancelled, not started at Home: {}",
+            terminal.transcript
+        );
+        assert!(
+            create_seen.try_recv().is_err(),
+            "a shell command from the Session `/new` left starts no Session"
+        );
+        home.kill(&terminal);
+        terminal.wait();
+        daemon.join().unwrap();
+    }
+}
+
+/// A shell command typed on the Home screen `--resume` shows before its
+/// attachment replies is Home's: once the reply lands, it does not run on the
+/// resumed Session's default line (design §14).
+#[test]
+fn tui_a_launch_home_shell_command_does_not_run_in_the_resumed_session() {
+    for fullscreen in [false, true] {
+        let home = Home::new();
+        let (attaching, attach_seen) = std::sync::mpsc::channel();
+        let (release_attach, release) = std::sync::mpsc::channel::<()>();
+        let (shells, shell_seen) = std::sync::mpsc::channel::<Value>();
+        let (compacting, compact_seen) = std::sync::mpsc::channel::<()>();
+        let daemon = home.daemon(move |wire| {
+            wire.hello(&["session.branches", "session.permission.get"]);
+            let mut usage = |_request: &Value| None;
+            loop {
+                let request = next_usage(wire, &mut usage);
+                match request["method"].as_str().unwrap_or_default() {
+                    "session.attach" => {
+                        let mut record = attach_record(&request);
+                        record["defaultBranch"] = json!({"branchId":"line-1","sequence":8});
+                        record["sequence"] = json!(8);
+                        attaching.send(()).unwrap();
+                        release.recv_timeout(PATIENCE).unwrap();
+                        wire.reply(&request, record);
+                    }
+                    "session.branches" => wire.reply(
+                        &request,
+                        directory("line-1", &[("main", None), ("line-1", Some("main"))]),
+                    ),
+                    "session.history" => wire.reply(
+                        &request,
+                        history(
+                            8,
+                            vec![said(3, "resumed conversation"), applied(4, "input-3")],
+                        ),
+                    ),
+                    "session.permission.get" => wire.reply(
+                        &request,
+                        json!({"version":1,"policy":policy("workspace-write")}),
+                    ),
+                    "shell.run" => {
+                        shells.send(request["params"].clone()).unwrap();
+                        wire.reply(
+                            &request,
+                            json!({"runId":request["params"]["runId"],
+                                "status":"completed","exitCode":0,"output":"stale-output\n",
+                                "truncated":false,"durationMs":1}),
+                        );
+                    }
+                    "session.context.compact" => {
+                        assert_eq!(request["params"]["branchId"], "line-1");
+                        compacting.send(()).unwrap();
+                        wire.reply(&request, json!({"status":"completed"}));
+                    }
+                    other => panic!("unexpected {other}: {request}"),
+                }
+            }
+        });
+        let mut command = home.command();
+        command.args([
+            "tui",
+            if fullscreen {
+                "--fullscreen"
+            } else {
+                "--scrollback"
+            },
+            "--resume",
+            "session",
+        ]);
+        sized(&mut command, 120, 36);
+        let mut terminal = Terminal::launch_tui(command);
+        attach_seen.recv_timeout(PATIENCE).unwrap();
+        terminal.until("Welcome to DIM");
+        // The screen is Home until the reply lands; this command is Home's.
+        terminal.write(b"!printf stale\r");
+        terminal.until("Ctrl+C to interrupt");
+        release_attach.send(()).unwrap();
+        // The boundary row is drawn from the attachment's own projection. The
+        // stale command was queued before it, so `/compact` below is read only
+        // after that command was decided.
+        terminal.until("resumed session");
+        // `/compact` is the boundary after the stale command, as in the
+        // `/resume` flow above.
+        terminal.write(b"/compact\r");
+        compact_seen.recv_timeout(PATIENCE).unwrap();
+        assert!(
+            shell_seen.try_recv().is_err(),
+            "a shell command typed on the launch Home does not run on the resumed line"
+        );
+        home.kill(&terminal);
+        terminal.wait();
+        daemon.join().unwrap();
+    }
+}

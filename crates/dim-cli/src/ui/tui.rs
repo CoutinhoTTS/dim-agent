@@ -3845,6 +3845,8 @@ impl App {
                     run_id: running.run_id.clone(),
                     command: running.command.clone(),
                     private: running.private,
+                    line,
+                    session,
                 });
                 self.shell = Some(running);
             }

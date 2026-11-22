@@ -24,9 +24,9 @@ pub struct Env {
     pub workspace: String,
     /// Start in the fullscreen interface instead of scrollback.
     pub fullscreen: bool,
-    /// The Session the invocation asked to resume: its first attachment has
-    /// not loaded yet, and a command typed before it does names this Session
-    /// rather than Home.
+    /// The Session the invocation asked to resume: only its first message
+    /// (`-p`) names it while its first attachment has not loaded, and a key
+    /// pressed on the Home screen before that reply is Home's.
     pub resume: Option<String>,
     /// The first message to submit once the first frame is drawn.
     pub initial: Option<Initial>,
