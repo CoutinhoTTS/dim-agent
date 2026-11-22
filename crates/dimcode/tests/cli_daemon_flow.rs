@@ -1773,6 +1773,48 @@ fn exec_demotes_a_reply_when_the_turn_fails() {
     );
 }
 
+/// A turn can be cancelled after its model request ended normally; stdout
+/// carries no reply the turn never delivered.
+#[test]
+fn exec_demotes_a_reply_when_the_turn_is_cancelled() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.start(false);
+        let submit = wire.read("session.submit");
+        wire.reply(&submit, json!({"event":{}}));
+        let idle = wire.read("session.idle");
+        wire.event(10,"text",json!({"turn_id":"turn","request_id":"request","delta":"The service listens on port 8080."}));
+        wire.event(11,"model-output-end",json!({"turn_id":"turn","request_id":"request","status":"completed","finish_reason":"end_turn"}));
+        wire.end(json!({"turn_id":"turn","status":"cancelled","reason":"interrupted"}));
+        wire.reply(&idle, json!({"sequence":30}));
+        wire.detach();
+    });
+    let output = wait(
+        home.command()
+            .args(["exec", "-p", "Which port does the service use?"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    daemon.join().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "status {:?} stdout {stdout:?} stderr {stderr:?}",
+        output.status.code()
+    );
+    assert!(
+        stdout.is_empty(),
+        "a cancelled turn leaves no reply on stdout; stdout was {stdout:?}"
+    );
+    assert!(
+        stderr.contains("The service listens on port 8080."),
+        "the answer of a turn that was cancelled goes to stderr: {stderr:?}"
+    );
+}
+
 /// A notice is a diagnostic: it does not decide where a request's held text
 /// goes, so the answer of a successful turn still reaches stdout when a notice
 /// arrives between its chunks.
