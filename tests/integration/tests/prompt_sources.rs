@@ -102,8 +102,8 @@ async fn system_is_static_and_instructions_and_environment_arrive_as_inputs() {
     for present in [
         "when a finding changes the plan",
         "when you hit a blocker",
-        "When a task needs no tool or one quick read, \
-         or when the request asks for only a final answer, a patch or structured output, \
+        "Exception: when the request asks for only a final answer, a patch or structured output, \
+         or when a task needs no tool or one quick read, \
          write no text before or between tool calls",
         "when the request asks for only a final answer, a patch or structured output",
     ] {
