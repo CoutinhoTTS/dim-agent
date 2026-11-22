@@ -4,6 +4,11 @@
 //! and rutis refuses a peer that speaks another session protocol at the
 //! handshake (ADR 025), so the spec the Skill's `package.json` example gives for
 //! `@arcships/rutis` is the one `runtime/package.json` declares.
+//!
+//! The Skill names that one version and no other: the install example carries
+//! it, and a note about another release states the history without a version
+//! number. The prose scan below therefore refuses every other version instead
+//! of guessing which ones were meant as history.
 
 use std::path::Path;
 
@@ -156,7 +161,9 @@ pub fn check(root: &Path) -> Result<()> {
     }
     if !stale.is_empty() {
         return Err(format!(
-            "{SKILL}: names {}; runtime/package.json declares {expected}",
+            "{SKILL}: names {}; runtime/package.json declares {expected}. \
+             This Skill names only that version, the install example carries it, \
+             and a note about another release leaves the version out",
             stale.join(", ")
         )
         .into());
@@ -289,6 +296,21 @@ mod tests {
         );
         assert!(
             error.contains("names 0.17.1; runtime/package.json declares 0.23.0"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_prose_version_says_the_skill_names_only_the_current_one() {
+        let error = error_for(
+            "prose-rule",
+            &skill("Install @arcships/rutis 0.17.1 today.\n", "0.23.0"),
+        );
+        assert!(
+            error.contains(concat!(
+                "This Skill names only that version, the install example carries it, ",
+                "and a note about another release leaves the version out"
+            )),
             "{error}"
         );
     }
