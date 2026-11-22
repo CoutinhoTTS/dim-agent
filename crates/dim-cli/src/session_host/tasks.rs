@@ -947,7 +947,12 @@ mod tests {
 
     /// A `branch/create-failed` event for `branch`, as the daemon sends it.
     fn create_failed(sequence: u64, branch: &str) -> Event {
-        serde_json::from_value(json!({
+        serde_json::from_value(create_failed_page(sequence, branch)).expect("a create-failed event")
+    }
+
+    /// The wire form of [`create_failed`], for a page that records it.
+    fn create_failed_page(sequence: u64, branch: &str) -> serde_json::Value {
+        json!({
             "id": format!("create-failed-{sequence}"),
             "sequence": sequence,
             "create_at": 2000,
@@ -957,8 +962,7 @@ mod tests {
                 "status": "failed", "branch": branch,
                 "createEvent": sequence - 1, "error": "creation refused"
             }
-        }))
-        .expect("a create-failed event")
+        })
     }
 
     /// A client whose daemon answered hello and then hung up: the next request
@@ -2049,6 +2053,111 @@ mod tests {
             worker.focus, "main",
             "a re-attached Session does not know the failed line"
         );
+    }
+
+    /// A page that records the child's creation and its failure in one read:
+    /// the replay folds the pair before any snapshot goes out, so the child is
+    /// terminal from that page alone, and a failed inventory on the parent
+    /// changes neither the child's state nor the queue.
+    #[tokio::test]
+    async fn a_page_that_records_a_create_and_its_failure_leaves_the_line_terminal() {
+        let (mut worker, _receiver, _sent) =
+            crate::session_host::test_worker(&crate::session_host::TEST_FEATURES).await;
+        worker.session_id = "s1".into();
+        worker.focus = "main".into();
+        worker.discover_branch("b-7c");
+        worker
+            .command(Command::FocusLine("b-7c".into()))
+            .await
+            .unwrap();
+        worker.poll_task_history().await.unwrap();
+        assert_eq!(
+            worker
+                .task_history_request
+                .as_ref()
+                .map(|read| read.branch_id.as_str()),
+            Some("b-7c"),
+            "the parent's first window is in flight"
+        );
+
+        answer(
+            &mut worker,
+            json!({"events":[{
+                "id": "create-child", "sequence": 2, "create_at": 1000, "type": "branch", "name": "create",
+                "data": {
+                    "at": {"kind": "sequence", "sequence": 1}, "branch": "b-7d", "prompt": "Narrow the parser",
+                    "source": {"kind": "host", "operation_id": "op"}
+                }
+            }, create_failed_page(3, "b-7d")], "through": 300, "nextBefore": 1, "nextAfter": 300}),
+        )
+        .await;
+
+        let child = worker
+            .projection
+            .line_views()
+            .iter()
+            .find(|line| line.id == "b-7d")
+            .expect("the page projected the child");
+        assert_eq!(
+            child.state,
+            LineState::CreationFailed,
+            "the page's failure is the child's only projected state"
+        );
+        worker
+            .command(Command::FocusLine("b-7d".into()))
+            .await
+            .unwrap();
+        assert_eq!(worker.focus, "b-7c", "the child is refused");
+        assert!(
+            worker.task_history["b-7d"].done,
+            "the refused child was not reset for a read"
+        );
+        assert!(
+            !worker.task_history_queue.contains(&"b-7d".to_owned()),
+            "the refused child is not queued for a read"
+        );
+        assert!(
+            !worker.lines.contains_key("b-7d"),
+            "the refused child has no transcript"
+        );
+
+        worker.methods.insert("session.input.pending".into());
+        worker.methods.insert("session.turn.get".into());
+        worker.poll_task_history().await.unwrap();
+        fail(&mut worker, "the parent's inventory").await;
+        worker.poll_task_history().await.unwrap();
+        assert!(
+            worker.task_history["b-7c"].error.is_some(),
+            "the parent's inventory failed"
+        );
+        assert!(
+            worker.task_history["b-7d"].done,
+            "the failed inventory left the child settled"
+        );
+        assert!(
+            !worker.task_history_queue.contains(&"b-7d".to_owned()),
+            "the failed inventory did not queue the child"
+        );
+
+        worker
+            .command(Command::TaskHistory {
+                projection_id: worker.projection_id,
+            })
+            .await
+            .unwrap();
+        assert!(
+            worker.task_history_queue.contains(&"b-7c".to_owned()),
+            "reopening /tasks retries the parent"
+        );
+        assert!(
+            !worker.task_history_queue.contains(&"b-7d".to_owned()),
+            "reopening /tasks does not queue the child"
+        );
+        worker
+            .command(Command::FocusLine("b-7d".into()))
+            .await
+            .unwrap();
+        assert_eq!(worker.focus, "b-7c", "the child stays refused");
     }
 
     fn published(receiver: &mut std::sync::mpsc::Receiver<Update>) -> ViewSnapshot {
