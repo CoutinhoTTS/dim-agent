@@ -456,7 +456,7 @@ Core README 在 capability catalog 中提到 sessionConfig，但固定版本的 
 | `_lody/session/history/read` / sessionHistory | 有 history | 已登记 Session；请求必须指定 version:2；拒绝本连接 prompt 在途。一次只输出一个有界展示页，返回 through/before/complete；不累积完整历史，旧完整读取合同明确报错。其他客户端仍可能运行，按固定头处理，不假定 Session 全局静止 |
 | `_meta.lody.forkAtTurn` / forkAtTurn | 有 native turn id、turn/end、session.fork | 只接有终态的真实 main turn，按 §4.3 调用；锚点未知、非 main、未结束均报错。标准更新带真实 turnId；不拿 tool call id 或 request id 冒充 turnId |
 | compaction / `_meta.lody.activity` | 有完整 compaction facts | §7；声明了 `session.compaction` 的客户端收标准 `compaction_update`，其余收 §7 的 `_meta.lody.activity` 工具活动 |
-| `_lody/session/usage_update` / usage / usageScopeId | 有 model/usage；aimux 保留输入/输出总量、可选 cache，丢失 reasoning/text 分区，cost/currency 为 None | 首版不支持。costUSD、reasoningOutputTokens、cacheCreationInputTokens 是可选，不因缺费用而禁用。实际缺口是必填 outputTokens 必须排除 reasoning，cacheReadInputTokens 也必填；上游未知分区不能补零或把总 completion 当文本。后续按 §8.4 从真实事实投影，无需新累计 RPC |
+| `_lody/session/usage_update` / usage / usageScopeId | 有 model/usage；aimux 保留输入/输出总量、可选 cache 和 reasoning，cost/currency 为 None | 首版不支持。costUSD、reasoningOutputTokens、cacheCreationInputTokens 是可选。必填 outputTokens 必须排除 reasoning，cacheReadInputTokens 也必填；上游未知分区不能补零或把总 completion 当文本。后续按 §8.4 从真实事实投影，无需新累计 RPC |
 | `_lody/rate_limits/get`、`_lody/rate_limits/update` / rateLimits | 有 account.usage；窗口能表达部分 quota，credits 是单位而非货币，完整 account/model 过滤尚未定义 | 首版暂不接，属于接线/交付范围，不能宣称 App Server 没有额度能力。以后复用真实 usage windows，cap>0 才算百分比，durationHours 转秒，过期时间转 epoch 秒；同长度窗口保留各自项，wallet 缺币种/金额时省略。get 是非 Session 绑定读取，不能强制要求 sessionId；不得造空列表掩盖读取失败 |
 | `_lody/session/steer`、`_lody/session/steer_applied`、prompt steer / steering | mode=steer 存在，但不能原子限定目标活跃 turn；空闲 steer 可驱动新 turn | 首版不支持。Core 允许 request/prompt、same/handoff、active/apply，不能把仅缺 same-turn 当作整个协议绝对不可实现。当前也没有已接入的“原生换 turn、同一 ACP prompt 继续承接并确认 injected”的 handoff 路径；不能把下一次 Queue 或闲时新 turn 冒充 handoff。请求报 method-not-found，prompt steer 控制在提交前报 unsupported |
 | `_lody/session/goal`、prompt goalControl、goal snapshot / goal | 有 session.goal.* 写入口与 goal.get 状态读取；自动继续跨原生 turns | 不支持 Lody 控制。标准 `/goal` 按 §4.7 确认操作和读取状态，不承诺与单 ACP prompt 对应的 Goal 完整结算；不能按第一次 turn/end 宣称目标结束 |
@@ -486,7 +486,7 @@ Core README 在 capability catalog 中提到 sessionConfig，但固定版本的 
 
 ### 8.4 计量和控制的真实缺口
 
-[usage.ts](https://github.com/LodyAI/acp-extension-core/blob/11e0708df0669568f44e287f17626a3944921dc5/src/usage.ts) 定义 inputTokens/outputTokens/cacheReadInputTokens 为必填且 bucket 不重叠；reasoning、cache creation 和 cost 是可选。当前 aimux 的 input/output total 不足以保证这种分区，未知 cache read 也不能写 0；这是边界保真问题。累计读取 API 并非硬性前置：有完整真实计数时，可以按已提交 model/usage 的 request 身份去重投影 modelUsage，用新的 usageScopeId 区分观察生命周期，继承回放不作为新 delta，compaction/换模型不重置 scope；delta 已包含在 modelUsage，不能双加。未知费用省略，不估造价格。Core accumulator 明确为 process-local，客户端计量投影不等同于原生业务账本；首版不为它添加数据库。
+[usage.ts](https://github.com/LodyAI/acp-extension-core/blob/11e0708df0669568f44e287f17626a3944921dc5/src/usage.ts) 定义 inputTokens/outputTokens/cacheReadInputTokens 为必填且 bucket 不重叠；reasoning、cache creation 和 cost 是可选。aimux 在适配器提供 `reasoningTokens` 时保留该分量。缺任一构成必填分桶的分量时，总量不足以完成换算。计数齐全时可以按已提交 model/usage 的 request 身份去重投影 modelUsage，用新的 usageScopeId 区分观察生命周期，继承回放不作为新 delta，compaction/换模型不重置 scope；delta 已包含在 modelUsage，不能双加。未知费用省略，不估造价格。Core accumulator 明确为 process-local，客户端计量投影不等同于原生业务账本；首版不为它添加数据库。
 
 Steering 的 handoff 允许上游换 turn，并不允许脱离 ACP prompt 槽启动无人承接的运行；确认 injected 和 steer_applied 必须有真实采用依据。Goal 的可选统计字段可省略，不能因缺 tokenBudget 就一概拒绝；owner 已提供 goal.get 状态读取，Lody 接线仍缺控制动作不启动 turn 的保证，以及 set/resume 对应的多 turn ACP prompt 完成合同。标准 `/goal` 的操作确认不能代替这些要求。临时 Provider 覆盖和原生配置写入则按 §4.5 分别讨论，不从 Lody 的 Session 配置元数据推导共享 Provider 更新授权。
 
@@ -623,3 +623,78 @@ acpx --agent "$ACP_TEST_COMMAND" --cwd "$ACP_TEST_ROOT/workspace" \
 | Lody 非 Session 绑定的 rateLimits 过滤语义未定义 | 明确已有安全 usage read 在该扩展中的访问范围与过滤语义；标准 `/usage` 按 §4.7 绑定当前 provider | 不扩展为任意管理透传；Provider 所有者 |
 
 消融：保留一个 Gateway 插件、一个共享 RPC 实现和必要的连接/投影状态；不建 ACP daemon、第二套 Session store、业务账本、通用扩展注册框架、定时 quota poller、每个协议字段一个插件或 daemon 内的接线插件。共享 RPC crate 用于消除实现复制；每 Session slot/cursor、在途请求、writer 队列分别用于并发准入、history/live 合流、结果关联和可靠输出，不能删除其职责。
+
+## 13. Lody 兼容性扩展提案
+
+### 13.1 对照范围
+
+以 `v0.1.0-alpha.27`、同一 Gateway 源码的 `main` `b48595585`、旧 TypeScript CLI 的 ACP 实现和 [§2 的协议基线](#2-核对基线和协议清单)为准。旧 CLI 的能力声明用于识别迁移缺口，wire 形状与语义以协议为准。
+
+| 场景 | Rust Alpha | 旧 TypeScript CLI |
+| --- | --- | --- |
+| 新建、加载、恢复、分叉携带 `sessionConfig` | `new` 采用 `model` / `mode`；带非空选项的 `load` / `resume` / `fork` 在建立前拒绝 | 建立方法未消费该 metadata；创建走默认选择，恢复走原生 Session 配置 |
+| 起步时选择 `effort` | Session options 已发布 `effort`，标准 setter 可采用；startup 校验拒绝该键 | 使用会话配置选项入口；`sessionConfig` 没有对应采用路径 |
+| Steering、Goal、usage、rate limits、subagent 查询及控制 | 当前 Lody 面缺这五项；`/goal` 和 `/usage` 是标准 ACP 命令。`subagentEvents` 已有双方协商后的快照 | 五项均有 handler 或投影；steer 绑定活跃 run，subagent 接口依赖旧 child-session API |
+| Provider 设置向导 | `providers/list`、`providers/set`、`providers/disable` 均无 handler | 同样无 handler；Lody 内置 Agent 的行为不能从这套旧 CLI 推断 |
+| 历史与标题 | `sessionHistory` v2 有界读取，标准标题通知；已有 compaction、后台 exec task、条件式 `forkAtTurn` | `sessionHistory` v1 全量 replay，声明 `sessionTitle`，用带来源的标准标题通知 |
+
+Core [v0.3.0](https://github.com/LodyAI/acp-extension-core/releases/tag/v0.3.0) 另增 `promptSuggestions`。`sessionActivity`、`worktreeProject`、scheduled tasks、elicitation answer notes 和旧 DimCode 文件撤销各自按 [§8](#8-lody-方法和能力逐项决策)评估，独立于本次恢复会话、扩展控制和 Provider 向导的验收。用真实 Lody 握手和读取请求确定所需的 history 版本。需要支持 v1 时，复用固定头和有界页逐页发送，按旧合同回复 `{}`；保留 v2 请求及响应的分页语义。标题 ownership 等待 SessionTitle 所有者提供可区分 `generated` / `fallback` 的来源及创建时可用性；继续使用标准标题更新。
+
+### 13.2 会话建立
+
+四个方法在同一 ACP 边界解析 Core v1 `sessionConfig`。字段必须属于对应操作可接受的 `model`、`mode`、`effort`。`modelId` 优先于 `configOptionValues.model`，目标从 Gateway 的公开 Model 选项解析。未知键继续返回 `-32602` / `unsupported_control` 和具体 `data.field`；错误类型、空标识和不受支持的版本按参数错误返回。回复中的配置取原生最终状态。
+
+| 方法 | 配置语义 |
+| --- | --- |
+| `session/new` | 同一次 `session.create` 携带显式模型、`permissionPolicy.preset` 和 `modelPreferences.reasoningEffort`。Reasoning 值由所选模型的所有者校验；切模型时以新目标为准。`provider-default` 是显示值，其清除语义与标准 setter 一致。若 create 无法表达显式清除并跳过已保存的 effort，由模型所有者补充该意图的表示后再接受此值。省略字段使用原生默认与已保存偏好。 |
+| `session/load`、`session/resume` | 缺省或与原生已采用值等价的选项沿用保存配置，支持 Lody 重发选择。采用不同配置须由 Session / 模型 / 权限所有者在建立时完成，保留 checked attach、同 Session 并发准入及原有授权；忙碌或冲突时明确失败。原生仅按独立 setter 提供的变化不得在 Gateway 串联成一次原子操作。load 回放、resume 无回放仍按 §5.2。 |
+| `session/fork` | 缺省选项沿用原生 fork 的继承结果。显式选项与子 Session 建立一起采用；校验失败不建立子 Session。fork 来源不发生配置写入，`forkAtTurn` 仍使用原生已终结的锚点。 |
+
+先实现可用 create 参数表达的 effort 和等价配置回传。比较与 native 建立之间必须有所有者保证，Gateway 的缓存或一次无版本查询不足以判定。不同配置的路径遵循 [模型启动采用](model-configuration.md#temporary-startup-adoption)的边界，增加的要求见 §13.5。
+
+```text
+Lody [Open / Resume / Fork]
+  -> sessionConfig (optional) -> validate -> native establishment
+                                 invalid -> field-specific error
+                                            established -> actual options
+```
+
+### 13.3 控制与计量
+
+现有标准 `usage_update` 继续报告上下文占用和窗口大小。
+
+| Lody 面 | 拟采用合同 |
+| --- | --- |
+| `steering` | 首选 `transport:request`、`upstreamTurn:same`、`configPolicy:active`。`_lody/session/steer` 只投给同连接拥有且活跃的 ACP prompt 所关联的原生 turn；转换内容后仍由原生原子判定目标。`injected` 以写入成功为依据；`_lody/session/steer_applied` 以该 `steerId` 的采用事实为依据。保留相同 ID 的在途和不确定结果关联，避免重复投递。目标结束、取消或已换轮时不得将内容加入下一轮。 |
+| `goal` | `pause` / `clear` 可走 `_lody/session/goal`，由 Goal 保证不启动 turn。`set` / `resume` 走 `prompt._meta.lody.goalControl`，同一 ACP prompt 持有由该操作启动的 turns，等 owner 对该执行结算后返回。采用后的快照通过 `session_info_update._meta.lody.goal` 投影。只声明可兑现的 actions 与 transport，取消按发起身份结算，不停止无关 turn。 |
+| `rateLimits` | `_lody/rate_limits/get` 的 `sessionId` 可省略；有 Session 则约束到其采用的 provider，`modelId` 从可用目录唯一解析并与 Session 条件一致。没有可核实的公开账户标识时拒绝 `accountId`。复用 [Provider 的账户用量读取](appserver/provider-management.md#33-probe-preference-adoption-and-usage)；同时用窗长和提供方窗口身份保留同长度的不同额度。百分比限于协议范围，仅从可解释的窗口计算；无匹配与查询失败给出不同结果。成功查询以相同快照回应并发送 `_lody/rate_limits/update`。 |
+| `usage` | 从已提交的 `model/usage` 投影 `_lody/session/usage_update`。Alpha.27 已保留部分模型回报的 `reasoningTokens`，该字段及 cached input 仍可能缺失。仅按 provider 的计数合同构造互斥分桶，保持未知与明确零的区别；无法支持必填分桶的来源需先确定门控。按请求去重，既有回放不产生新 delta；换模型和压缩延续当前累计范围，新的累计生命周期使用新 `usageScopeId`。没有真实 USD 费用时省略 `costUSD`。 |
+| `subagents` | `list`、`cancel`、`output` 按各自可兑现的权限声明。以一次 Collaboration request 的身份约束父 Session、branch 和 member。`activeOnly` 取该执行状态；输出使用该次执行授权范围内的有界文本及 `tail`。取消须在原生 owner 按该执行身份判定；目前的 [member 寻址取消](plugins/Collaboration.md#67-stopping-a-member-from-the-client)不足以防止迟到调用停掉下一次委派。保留 `subagentEvents` 的独立双向协商。 |
+
+### 13.4 Provider 向导
+
+采用 ACP Gateway 进程内的临时作用域，复用 [Session-local startup connection](appserver/provider-management.md#session-local-startup-connections) 的底层连接采用与凭据归属。该入口已能为单个 Session 采用直连；所有者仍需定义如何在同一 ACP 进程内按稳定 Provider ID 发现、替换、禁用路由，并把它用于后续 Session 的模型解析。已有共享管理写入是 §4.5 中的另一种产品选择。
+
+初始化只在三个方法均可兑现时声明 `agentCapabilities.providers`。`list` 发布支持可配置合同的 ID、可用协议、`required` 和无秘密的有效路由。`set` 校验已知 ID、支持的协议和 URL，整体替换 headers，省略时按空 map 处理；新目标只使用该次输入提供的凭据。`disable` 对未知 ID 幂等，对 required ID 拒绝；成功后仍可发现，`current:null`，进程后续建立的 Session 排除该路由。已在运行的 Session 由原生已采用绑定结算。Gateway 退出清理本次配置；以恢复所需临时绑定失败告知客户端，避免切回共享凭据。流程按 [ACP Provider RFD](https://github.com/agentclientprotocol/agent-client-protocol/blob/66ff8076ec2320d85e84fedc83cb779e9d906a89/docs/rfds/custom-llm-endpoint.mdx#behavior) 验证。
+
+### 13.5 向所有者提出的要求
+
+参照 [AcpGateway Rule check](plugins/AcpGateway.md#6-rule-check)。Gateway 继续通过已声明的公开 RPC、通知和已提交事实工作，负责请求槽、关联和输出投影。该提案不增加 rutis service face 或 Capability。Owner 侧新增公开接口时须在原设计中定义数据面、错误和 wire 合同。
+
+| 所有者 | 现有合同的缺口与请求 | 顺序、取消与恢复 |
+| --- | --- | --- |
+| Session / 模型配置 / Permission | checked attach / fork 缺配置和建立的一致性保证；通用建立入口要能检查等价配置，采用明确且获授权的变化。单独 model/permission setter 有各自的采用边界。[原生 fork](appserver/session-deletion-and-fork.md#6-fork)继承权限，允许变化的范围由 Permission 确认 | 成功回复前完成检查与采用；分叉只影响子 Session；并发或丢失回复沿用 owner 的冲突和恢复规则 |
+| InputQueue / Loop | 普通 steer 在无活跃 turn 时可启动新轮；需要按指定活跃 turn 原子接收入队的通用约束 | 接收与目标校验同一次决定，`input/applied` 后才通知 Lody；换轮、取消和掉线按原生结果结算 |
+| Goal | `get` 能给快照，但既有操作确认不足以拥有整个 Goal 执行；需要明确操作身份、所属 turns 及结算/取消结果 | `set` / `resume` 的首轮至终态归同一身份；`pause` / `clear` 不启动 turn；重连不能重新发起未知结果的操作 |
+| Usage / Provider | `model/usage` 的部分分桶依赖真实上报；额度读取需要可表达的目录和过滤边界；现有 Session 级连接入口缺进程作用域 | 使用既有计数和受保护连接采用；发布前验证支持条件。路由替换在后续 Session 建立前生效，退出清理临时秘密 |
+| Collaboration | member 寻址的取消无法给外部 task ID 提供执行条件；需要执行身份校验及对应的已提交输出读取 | 与 request 替换线性化；恢复后旧 ID 不能取消新 request，输出范围与该 request 的始末一致 |
+
+### 13.6 验收顺序
+
+1. 复用 [ACP stdio 流程](../../crates/dimcode/tests/cli_flow/acp.rs)，测 `model` + `mode` + `effort` 同发、无效选项的错误字段、默认值与已保存 effort 并存、旧聊天 load/resume/fork 回传配置、终态锚点和多客户端竞态。对照实际第一次模型请求及会话回复。
+2. 额度使用可控账户窗口 fixture，检查无会话查询、过滤、零值、有多个等长窗口和读取失败。计量检查正数、显式零、缺分区、重复提交、换模型、压缩和重放；保留已有历史与协商流程。
+3. 在同一公开流程验证 steer 采纳前后与换轮竞态、Goal 跨轮结算及取消、同 member 的旧 task 对新 task 的隔离，并覆盖未声明能力的握手。
+4. 两个 Gateway 共用一个隔离 daemon，通过实际模型请求验证 set 后的目标和完整 headers、disable 后的路由排除、原生客户端作用域、进程退出及恢复、凭据不进入回包、日志和持久化。
+5. 按 §10.2 固定 Lody 版本和 `dimcode` 构建，以隔离 home 实测新建、重开、续聊、分叉及各已声明扩展，并记录实际请求/通知。
+
+消融：首批配置改动复用现有选项解析、建立槽和原生 create，额度复用按需读取。扩展只增加实际需要的请求关联与协议投影。保留执行身份约束和临时路由作用域，分别用于防止命中后续委派及修改共享配置。
