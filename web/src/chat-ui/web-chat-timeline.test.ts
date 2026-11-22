@@ -1408,7 +1408,7 @@ describe("chat store moves", () => {
     chat.open("s-1")
     await vi.waitFor(() => expect(chat.views["s-1"]?.status).toBe("ready"))
 
-    const written = chat.writeGoal("s-1", "set", "root work", "main")
+    const written = chat.writeGoal("s-1", "set", "root work", "main").catch((cause: unknown) => cause)
     await vi.waitFor(() => expect(held.main !== undefined).toBe(true))
     const moved = chat.setDefaultBranch("s-1", "worker")
     await moved
@@ -1419,7 +1419,7 @@ describe("chat store moves", () => {
     held.main!.reject(new Error("the goal read failed"))
     await vi.waitFor(() => expect(held.worker !== undefined).toBe(true))
     held.worker!.resolve({ branchId: "worker", through: 5, goal: { objective: "worker work", status: { kind: "active" }, evaluator: false } })
-    await written
+    expect(await written).toBeUndefined()
 
     const view = chat.views["s-1"]!
     expect(view.defaultBranchId).toBe("worker")
