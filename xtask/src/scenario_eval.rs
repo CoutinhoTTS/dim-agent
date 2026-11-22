@@ -321,7 +321,9 @@ const QUIET: Duration = Duration::from_secs(1);
 /// How long one `session.idle` call may take before its line counts as busy.
 const IDLE_WAIT: Duration = Duration::from_secs(1);
 /// How long a failed run waits for its cancelled siblings to settle before
-/// their futures are dropped (and their children's groups killed with them).
+/// their futures are dropped (and their children's groups killed with them),
+/// and how long a run that stopped on its wall clock waits for its cleanup
+/// before it keeps the outcome it reached.
 const SETTLE_BOUND: Duration = Duration::from_secs(30);
 
 const JUDGE_SYSTEM: &str = "You check statements against the exported Timeline of a coding session. The Timeline is JSONL: a header line, one branch line per line of the Session, one event line per event, and an end line. A context/prepare or model/call event carries its request: addedMessages are the messages added since that line's previous request, with messageCount the whole request's count, and messages is the whole list when the history changed; every other field of the request appears in full only when it changed, and otherwise reads {\"unchanged\": true}. For each statement answer \"present\" when the run shows it and \"absent\" when it does not. Add the Timeline events that support the verdict as a short quote. Answer with a JSON array only, one object per statement: {\"id\": \"<statement id>\", \"verdict\": \"present|absent\", \"quote\": \"<Timeline evidence>\"}.";
@@ -581,15 +583,19 @@ enum TextMember {
 }
 /// The policy texts a candidate can replace, and the factory configuration
 /// member each is put in place of in the assembly [`app_server::serve_home`]
-/// builds. The summary prompt (ContextCompaction §13.5) and the branch tool's
-/// texts (timeline branches §12.4) are the texts exposed at a Rust factory
-/// configuration today; the other owners add their entries with their own
-/// factory members: Capabilities under
-/// [#551](https://github.com/arcships/dim/issues/551), and ContextCompaction
-/// under [#554](https://github.com/arcships/dim/issues/554).
+/// builds. Every entry is a Rust part's factory configuration member: the base
+/// prompt (model-prompts §8.2, PromptSources §2), the summary prompt
+/// (ContextCompaction §13.5), the branch tool's texts (timeline branches
+/// §12.4), Goal's sentences (model-prompts §8.1), EventHub's entry and tool
+/// descriptions (EventHub design A.6 and A.4) and Scheduler's description
+/// (Scheduler design §5.1).
 /// A plugin's text is its manifest `config` member, which the plugin's row
 /// carries into its `apply`.
 const TEXTS: &[(&str, TextMember)] = &[
+    (
+        "prompt-sources/base",
+        TextMember::Rust(|overrides, text| overrides.base_prompt = Some(text)),
+    ),
     (
         "context-compaction/summary",
         TextMember::Rust(|overrides, text| overrides.summary_prompt = Some(text)),
@@ -2373,6 +2379,8 @@ struct ChildOutcome {
     view: Option<String>,
     session: Option<String>,
     stop: String,
+    /// The run stopped because its wall-clock budget ran out.
+    timed_out: bool,
     turns: u32,
     window: Option<f64>,
     duration_ms: f64,
@@ -2406,6 +2414,7 @@ fn harness_outcome(error: String, preflight: Vec<PreflightCheck>) -> ChildOutcom
         view: None,
         session: None,
         stop: "error".into(),
+        timed_out: false,
         turns: 0,
         window: None,
         duration_ms: 0.,
@@ -2577,8 +2586,17 @@ async fn child_outcome(params: &ChildParams, preflight: &Arc<Provider>) -> Child
     )
     .await;
     let duration_ms = started.elapsed().as_secs_f64() * 1000.;
+    let timed_out = matches!(&outcome, Ok(outcome) if outcome.timed_out);
     server.shutdown();
-    let _ = server.join().await;
+    // A run that stopped on its wall clock gives its served App Server the
+    // same bounded grace as its close: the tree close waits for the move the
+    // run stopped waiting on, and the child must print its outcome and exit
+    // so the parent's worker is released (model-prompts §8.1).
+    if timed_out {
+        let _ = tokio::time::timeout(SETTLE_BOUND, server.join()).await;
+    } else {
+        let _ = server.join().await;
+    }
     let mut outcome = outcome.unwrap_or_else(|error| {
         harness_outcome(format!("the run failed to finish: {error}"), Vec::new())
     });
@@ -2799,6 +2817,7 @@ async fn child_drive(
         view: finished.view,
         session: (!driven.session.is_empty()).then_some(driven.session),
         stop: driven.stop.to_owned(),
+        timed_out: driven.timed_out,
         turns: driven.turns,
         window: driven.window,
         duration_ms: 0.,
@@ -2856,6 +2875,7 @@ fn carried_parts(configuration: &Configuration) -> Option<(Option<String>, Optio
 /// literal already does.
 fn overrides_value(overrides: &Overrides) -> Value {
     let Overrides {
+        base_prompt,
         summary_prompt,
         plugin_configs,
         branch_description,
@@ -2867,6 +2887,7 @@ fn overrides_value(overrides: &Overrides) -> Value {
         scheduler_description,
     } = overrides;
     json!({
+        "basePrompt": base_prompt.as_ref().map(ToString::to_string),
         "summaryPrompt": summary_prompt.as_ref().map(ToString::to_string),
         "eventhubEntry": eventhub_entry.as_ref().map(ToString::to_string),
         "eventhubTool": eventhub_tool.as_ref().map(ToString::to_string),
@@ -2882,6 +2903,7 @@ fn overrides_value(overrides: &Overrides) -> Value {
 fn child_overrides(value: &Value) -> Overrides {
     let text = |key: &str| value.get(key).and_then(Value::as_str).map(Arc::from);
     Overrides {
+        base_prompt: text("basePrompt"),
         summary_prompt: text("summaryPrompt"),
         eventhub_entry: text("eventhubEntry"),
         eventhub_tool: text("eventhubTool"),
@@ -4400,6 +4422,7 @@ impl Finished {
             driven: Driven {
                 session: String::new(),
                 stop: "error",
+                timed_out: false,
                 turns: 0,
                 window: None,
                 decline_retries: 0,
@@ -4492,9 +4515,17 @@ async fn drive_once(
             judging: Judging::not_asked(scenario, None),
         });
     }
-    let _ = client
-        .rpc("session.close", json!({"sessionId": driven.session}))
-        .await;
+    let close = client.rpc("session.close", json!({"sessionId": driven.session}));
+    // A run that stopped on its wall clock gives the close a bounded grace: a
+    // move the run stopped waiting on keeps settling on the server, and the
+    // close waits behind it. Cleanup that cannot settle must not replace the
+    // outcome the run reached or hold the worker that runs it
+    // (model-prompts §8.1).
+    if driven.timed_out {
+        let _ = tokio::time::timeout(SETTLE_BOUND, close).await;
+    } else {
+        let _ = close.await;
+    }
     drop(client);
     let mut export = Vec::new();
     let export = match dim_app_server::storage::export_timeline(
@@ -4670,6 +4701,10 @@ async fn wait_for_plugins(client: &mut Client) -> Result<()> {
 struct Driven {
     session: String,
     stop: &'static str,
+    /// The run stopped because its wall-clock budget ran out. The stop can be
+    /// renamed afterwards (a pending switch makes its own outcome), so the
+    /// cleanup paths read this rather than the stop's spelling.
+    timed_out: bool,
     turns: u32,
     window: Option<f64>,
     /// How many declines the runner sent again after `question_not_pending`.
@@ -4709,6 +4744,7 @@ async fn drive(
         return Driven {
             session: String::new(),
             stop: "error",
+            timed_out: false,
             turns: 0,
             window: None,
             decline_retries: 0,
@@ -4732,6 +4768,7 @@ async fn drive(
             return Driven {
                 session: String::new(),
                 stop: "error",
+                timed_out: false,
                 turns: 0,
                 window: None,
                 decline_retries: 0,
@@ -4743,6 +4780,7 @@ async fn drive(
     let mut driven = Driven {
         session: session.clone(),
         stop: "idle",
+        timed_out: false,
         turns: 0,
         window: None,
         decline_retries: 0,
@@ -4908,6 +4946,7 @@ async fn drive(
             Ok(fired) => fired,
             Err(_) => {
                 driven.stop = "seconds";
+                driven.timed_out = true;
                 driven.error = Some(match line {
                     Some(line) => format!(
                         "the switch to line {line} did not answer before the run's {}s budget ran out",
@@ -4960,6 +4999,7 @@ async fn drive(
             });
         if started.elapsed().as_secs_f64() >= scenario.budget.seconds {
             driven.stop = "seconds";
+            driven.timed_out = true;
             break;
         }
         if driven.turns >= scenario.budget.turns {
@@ -5083,33 +5123,63 @@ async fn drive(
         }
     }
     if driven.stop == "turns" || driven.stop == "seconds" {
-        for branch in &branches {
-            let _ = client
-                .rpc(
-                    "session.stop",
-                    json!({"sessionId": session, "branchId": branch,
-                           "reason": format!("budget: {}", driven.stop)}),
-                )
-                .await;
+        let stop = async {
+            for branch in &branches {
+                let _ = client
+                    .rpc(
+                        "session.stop",
+                        json!({"sessionId": session, "branchId": branch,
+                               "reason": format!("budget: {}", driven.stop)}),
+                    )
+                    .await;
+            }
+        };
+        // A run that already spent its wall clock gives its cleanup a bounded
+        // grace: a server that keeps settling the operation the run stopped
+        // waiting on must not hold the run past the outcome it reached
+        // (model-prompts §8.1).
+        if driven.timed_out {
+            let _ = tokio::time::timeout(SETTLE_BOUND, stop).await;
+        } else {
+            stop.await;
         }
     }
     if window_deferred && driven.error.is_none() {
-        match client
-            .rpc(
-                "session.context.usage",
-                json!({"sessionId":session,"branchId":"main"}),
-            )
-            .await
-        {
-            Ok(usage) => {
+        let usage = async {
+            client
+                .rpc(
+                    "session.context.usage",
+                    json!({"sessionId":session,"branchId":"main"}),
+                )
+                .await
+        };
+        let usage = if driven.timed_out {
+            tokio::time::timeout(SETTLE_BOUND, usage).await.ok()
+        } else {
+            Some(usage.await)
+        };
+        if driven.timed_out {
+            // The read belongs to the timed-out run's cleanup: what it returns
+            // cannot replace the ending the run reached (model-prompts §8.1).
+            if let Some(Ok(usage)) = usage {
                 driven.window = usage["contextWindow"].as_f64();
-                driven.error = window_mismatch(driven.window, scenario.budget.window);
             }
-            Err(error) if dim_client::app_error(&error) == Some("context_usage_unavailable") => {}
-            Err(error) => driven.error = Some(format!("Context window check failed: {error}")),
-        }
-        if driven.error.is_some() {
-            driven.stop = "error";
+        } else {
+            match usage {
+                Some(Ok(usage)) => {
+                    driven.window = usage["contextWindow"].as_f64();
+                    driven.error = window_mismatch(driven.window, scenario.budget.window);
+                }
+                Some(Err(error))
+                    if dim_client::app_error(&error) == Some("context_usage_unavailable") => {}
+                Some(Err(error)) => {
+                    driven.error = Some(format!("Context window check failed: {error}"))
+                }
+                None => {}
+            }
+            if driven.error.is_some() {
+                driven.stop = "error";
+            }
         }
     }
     if let Some(pending) = &switch {
@@ -7920,6 +7990,78 @@ mod tests {
         }
     }
 
+    /// The progress-updates set parses through the runner's own reader
+    /// (model-prompts §8.2): three scenarios that judge the reply text's
+    /// progress updates and the interactive task's outcome, each with a
+    /// starting workspace, a statement to see and a statement not to see,
+    /// and no EventHub source, since the reply text is the subject. No model
+    /// runs, so CI catches a schema or layout drift before a manual run.
+    #[test]
+    fn the_progress_updates_scenario_set_parses() {
+        let root = repository()
+            .join("xtask")
+            .join("scenario-eval")
+            .join("progress-updates");
+        let scenarios = read_scenarios(&root).unwrap();
+        let ids: Vec<_> = scenarios
+            .iter()
+            .map(|scenario| scenario.id.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                "answer-only",
+                "interactive-multi-tool",
+                "no-tool-quick-read"
+            ],
+            "the committed set is the three scenarios"
+        );
+        for scenario in &scenarios {
+            assert!(
+                scenario.directory.join("workspace").is_dir(),
+                "{}: a starting workspace",
+                scenario.id
+            );
+            assert!(
+                scenario.sources.is_empty() && scenario.events.is_empty(),
+                "{}: the reply text is the subject, not an EventHub source",
+                scenario.id
+            );
+            assert!(
+                scenario
+                    .probes
+                    .iter()
+                    .any(|probe| probe.kind == ProbeKind::MustShow),
+                "{}: a statement to see",
+                scenario.id
+            );
+            assert!(
+                scenario
+                    .probes
+                    .iter()
+                    .any(|probe| probe.kind == ProbeKind::MustNotShow),
+                "{}: a statement not to see",
+                scenario.id
+            );
+        }
+        let interactive = scenarios
+            .iter()
+            .find(|scenario| scenario.id == "interactive-multi-tool")
+            .expect("the interactive case is in the committed set");
+        assert!(
+            interactive
+                .probes
+                .iter()
+                .any(|probe| probe.id == "task-succeeds" && probe.kind == ProbeKind::MustShow),
+            "interactive-multi-tool checks that both repairs land and the test run passes"
+        );
+        assert!(
+            !interactive.message.contains("progress"),
+            "the interactive case asks for the work without coaching the progress updates: {}",
+            interactive.message
+        );
+    }
+
     /// The `schedule` description is injected through the product's own
     /// factory member (Scheduler §5.1, model-prompts §8.1): `--text
     /// scheduler/description` lands on the `Overrides` field
@@ -7940,6 +8082,34 @@ mod tests {
             Some("candidate description")
         );
         assert!(overrides.branch_description.is_none());
+    }
+
+    /// The base prompt is injected through PromptSources' own factory member
+    /// (model-prompts §8.2, PromptSources §2): `--text prompt-sources/base`
+    /// lands on the `Overrides` field [`app_server::serve_home`] hands
+    /// `PromptSourcesConfig`, never on a product string patched for the
+    /// evaluation; the child carries the same field to the arm it serves.
+    #[test]
+    fn the_base_prompt_is_a_factory_member() {
+        let overrides = overrides_in(
+            TEXTS,
+            &[(
+                "prompt-sources/base".to_owned(),
+                Arc::from("candidate base prompt"),
+            )],
+        )
+        .unwrap();
+        assert_eq!(
+            overrides.base_prompt.as_deref(),
+            Some("candidate base prompt")
+        );
+        assert!(overrides.summary_prompt.is_none());
+        let carried = child_overrides(&overrides_value(&overrides));
+        assert_eq!(
+            carried.base_prompt.as_deref(),
+            Some("candidate base prompt"),
+            "the serve child receives the candidate in the arm's overrides"
+        );
     }
 
     /// The `scheduler/description` candidate survives the serve child's JSON
@@ -8010,6 +8180,78 @@ mod tests {
                 .iter()
                 .all(|description| description.as_deref() == Some(CANDIDATE)),
             "the candidate arm's schedule tool description is the candidate text: {offered:?}"
+        );
+    }
+
+    /// The `prompt-sources/base` candidate survives the serve child's JSON
+    /// overrides and arrives in the run's first model request as the base of
+    /// its System (model-prompts §8.2, PromptSources §2): the candidate arm's
+    /// System begins with the candidate text, the current arm's with the
+    /// shipped identity. The input guide the assembly appends follows the
+    /// base.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_base_prompt_candidate_reaches_the_run_through_the_child() {
+        const CANDIDATE: &str = "CANDIDATE BASE PROMPT";
+        /// The shipped base prompt's opening (`prompt_sources.rs` `IDENTITY`).
+        const SHIPPED: &str = "You are DimAgent.";
+        fn answers(text: &str) -> Option<Value> {
+            judged(text).or_else(|| Some(content("ok")))
+        }
+        let fixture = Fixture::start(
+            "base-prompt",
+            answers,
+            json!({
+                "message": "Say ok.",
+                "budget": {"turns": 2, "seconds": 60, "window": 24000},
+                "probes": [{"id": "ran", "kind": "must_show", "text": "the run has a transcript"}]
+            }),
+            &[],
+        )
+        .await;
+        let options = fixture.options(fixture.directory.join("out"));
+        let candidate = overrides(&pairs(&[("prompt-sources/base", CANDIDATE)])).unwrap();
+        for (arm, overrides) in [("current", Overrides::default()), ("candidate", candidate)] {
+            let record = run_arm(&fixture, &options, arm, &overrides, 0).await;
+            assert_eq!(record.error, None, "{arm}");
+            assert!(!record.failed, "{arm}");
+        }
+        // The System the run's first request carries: the first request of the
+        // arm that declares the run's tools, before any title or judge call.
+        let system = |arm: &str| -> String {
+            fixture
+                .arm(arm)
+                .iter()
+                .find_map(|request| {
+                    let request: Value = serde_json::from_str(request).ok()?;
+                    let tools = request["tools"].as_array()?;
+                    if tools.is_empty() {
+                        return None;
+                    }
+                    request["messages"][0]["content"]
+                        .as_str()
+                        .map(str::to_owned)
+                })
+                .unwrap_or_else(|| {
+                    panic!("{arm}: the run's first model request declares the tools")
+                })
+        };
+        let current = system("current");
+        let offered = system("candidate");
+        assert!(
+            current.starts_with(SHIPPED),
+            "the current arm's System begins with the shipped base prompt: {current}"
+        );
+        assert!(
+            !current.contains(CANDIDATE),
+            "the current arm never carries the candidate text: {current}"
+        );
+        assert!(
+            offered.starts_with(CANDIDATE),
+            "the candidate arm's System begins with the candidate base prompt: {offered}"
+        );
+        assert!(
+            !offered.contains(SHIPPED),
+            "the candidate arm never carries the shipped base prompt: {offered}"
         );
     }
 
@@ -11380,17 +11622,30 @@ mod tests {
         /// The target line `2` starts and ends its first turn and the move
         /// answers, and the input after the move never does.
         SwitchSubmitStalls,
+        /// The target line `2` starts and ends its first turn, the move to it
+        /// never answers, and the Session's close never answers either: a run
+        /// that stopped on its wall clock must still return, with cleanup
+        /// bounded.
+        SwitchMoveAndCloseStall,
+        /// The setup's context window read answers `context_usage_unavailable`,
+        /// so the check is deferred, and the deferred read answers
+        /// `session_reloading`: a failure that is not the deferral itself.
+        DeferredUsageFails,
     }
 
     /// What a scripted peer read: the `requestId` of every decline, in order,
     /// how many it had read when it first wrote a call's `step/tool-result`,
-    /// and how many `session.idle` calls it read while it held the line busy.
+    /// how many `session.idle` calls it read while it held the line busy, and
+    /// whether it read the attach and how many closes.
     #[cfg(unix)]
     #[derive(Default)]
     struct PeerReads {
         declines: Mutex<Vec<String>>,
         settled_at: AtomicUsize,
         idles: AtomicUsize,
+        usages: AtomicUsize,
+        attached: tokio::sync::Notify,
+        closes: AtomicUsize,
     }
 
     /// How long [`PeerScript::HeldIdle`] keeps the line busy: five quiet
@@ -11533,6 +11788,15 @@ mod tests {
                 let Some(line) = line.unwrap() else { break };
                 let request: Value = serde_json::from_str(&line).unwrap();
                 let method = request["method"].as_str().unwrap_or_default();
+                if method == "session.attach" {
+                    recorded.attached.notify_one();
+                }
+                if method == "session.close" {
+                    recorded.closes.fetch_add(1, Ordering::SeqCst);
+                    if matches!(script, PeerScript::SwitchMoveAndCloseStall) {
+                        continue;
+                    }
+                }
                 if method == "session.idle" {
                     if matches!(script, PeerScript::HeldIdle) {
                         let at = *hold_until.get_or_insert_with(|| Instant::now() + HELD);
@@ -11642,7 +11906,10 @@ mod tests {
                         }
                         PeerScript::SwitchNeverFires => None,
                         PeerScript::SwitchMoveRetries => None,
-                        PeerScript::SwitchMoveStalls | PeerScript::SwitchSubmitStalls => None,
+                        PeerScript::SwitchMoveStalls
+                        | PeerScript::SwitchSubmitStalls
+                        | PeerScript::SwitchMoveAndCloseStall => None,
+                        PeerScript::DeferredUsageFails => None,
                     };
                     if let Some((request, sequence)) = closed {
                         if recorded.settled_at.load(Ordering::SeqCst) == 0 {
@@ -11659,7 +11926,10 @@ mod tests {
                 // The stalling scripts hold their reply: the move in one, the
                 // input after it in the other.
                 if method == "session.branch_set_default"
-                    && matches!(script, PeerScript::SwitchMoveStalls)
+                    && matches!(
+                        script,
+                        PeerScript::SwitchMoveStalls | PeerScript::SwitchMoveAndCloseStall
+                    )
                 {
                     continue;
                 }
@@ -11670,8 +11940,25 @@ mod tests {
                     }
                 }
                 let body = match method {
+                    "hello" => json!({"result": {
+                        "instanceId": "peer", "serverVersion": "peer",
+                        "protocolVersion": 4,
+                        "features": ["session.create", "session.history"],
+                        "daemonProfile": {"kind": "mock"},
+                    }}),
                     "session.create" => json!({"result": {"sessionId": "peer"}}),
-                    "session.context.usage" => json!({"result": {"contextWindow": window}}),
+                    "session.context.usage" => {
+                        let read = recorded.usages.fetch_add(1, Ordering::SeqCst) + 1;
+                        match (matches!(script, PeerScript::DeferredUsageFails), read) {
+                            (true, 1) => json!({"error": {"code": -32000,
+                                "message": "the context window is not known yet",
+                                "data": {"appError": "context_usage_unavailable"}}}),
+                            (true, _) => json!({"error": {"code": -32000,
+                                "message": "the Session is reloading",
+                                "data": {"appError": "session_reloading"}}}),
+                            _ => json!({"result": {"contextWindow": window}}),
+                        }
+                    }
                     "session.idle" => json!({"result": {"sequence": PEER_SEQUENCE}}),
                     "session.branch_set_default"
                         if matches!(script, PeerScript::SwitchMoveRetries) =>
@@ -11692,8 +11979,16 @@ mod tests {
                     // The held line asks nothing: the run's only work is the
                     // turn the peer holds open. A switch that never fires
                     // likewise asks nothing: its turn starts and ends.
-                    if matches!(script, PeerScript::HeldIdle | PeerScript::SwitchNeverFires) {
-                        if matches!(script, PeerScript::SwitchNeverFires) {
+                    if matches!(
+                        script,
+                        PeerScript::HeldIdle
+                            | PeerScript::SwitchNeverFires
+                            | PeerScript::DeferredUsageFails
+                    ) {
+                        if matches!(
+                            script,
+                            PeerScript::SwitchNeverFires | PeerScript::DeferredUsageFails
+                        ) {
                             write
                                 .write_all(&notice(json!({"type": "turn", "name": "end",
                                                            "sequence": 2, "data": {}})))
@@ -11707,6 +12002,7 @@ mod tests {
                         PeerScript::SwitchMoveRetries
                             | PeerScript::SwitchMoveStalls
                             | PeerScript::SwitchSubmitStalls
+                            | PeerScript::SwitchMoveAndCloseStall
                     ) {
                         for (name, sequence) in [("start", 1), ("end", 2)] {
                             write
@@ -11967,6 +12263,168 @@ mod tests {
                 "{name}: the timeout is a failed run on its own"
             );
         }
+    }
+
+    /// A run that stopped on its wall clock gives its cleanup a bounded
+    /// grace: its Session's close waits behind the move the run stopped
+    /// waiting on, and the run must still return the outcome it reached, so
+    /// the worker that runs it is released (model-prompts §8.1).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_timed_out_run_closes_within_a_bounded_grace() {
+        let directory = std::env::temp_dir().join(format!(
+            "dim-scenario-eval-close-grace-{}",
+            std::process::id()
+        ));
+        let (socket, reads) =
+            scripted_peer(&directory, 8_000, PeerScript::SwitchMoveAndCloseStall).await;
+        let server = app_server::serve_product(&directory.join("product"), |_| {})
+            .await
+            .unwrap();
+        let run_home = directory.join("run-home");
+        private_directory(&run_home).unwrap();
+        let settings = RunSettings {
+            overrides: Overrides::default(),
+            model_config: None,
+            unix_path: Some(socket),
+            defaults: None,
+            node: None,
+            js_runtime: None,
+            boundary: None,
+            plugin_tools: false,
+        };
+        let mut scenario = scenario(Vec::new());
+        scenario.budget.seconds = 0.5;
+        scenario.switch = Some(Switch {
+            to: SwitchTarget::Id("2".into()),
+            message: "next".into(),
+            branch_id: None,
+        });
+        let cancel = CancellationToken::new();
+        let model = peer_model();
+        let judge = peer_model();
+        let producer = ProducerState::default();
+        let finished = {
+            let run = drive_once(
+                &server,
+                &settings,
+                &run_home,
+                &directory,
+                &scenario,
+                &model,
+                &judge,
+                JudgeWindow {
+                    window: 128_000,
+                    max_output: 2_048,
+                },
+                &cancel,
+                &producer,
+                None,
+            );
+            tokio::pin!(run);
+            // The client connects and the Session attaches with real I/O;
+            // only the run's own deadlines are on the paused clock below.
+            tokio::select! {
+                _ = reads.attached.notified() => {}
+                result = &mut run => panic!(
+                    "the run ended before it attached: {:?}",
+                    result.map(|finished| finished.driven.stop)
+                ),
+            }
+            tokio::time::pause();
+            // Advance the paused clock in small steps until the close is on
+            // the wire, then past the cleanup grace. The switch deadline and
+            // the close bound are the only waits this drives, so no real
+            // sleep stands in for either.
+            let closer = reads.clone();
+            let advancing = tokio::spawn(async move {
+                let step = Duration::from_millis(100);
+                for _ in 0..600 {
+                    tokio::time::advance(step).await;
+                    tokio::task::yield_now().await;
+                    if closer.closes.load(Ordering::SeqCst) == 0 {
+                        continue;
+                    }
+                    for _ in 0..=SETTLE_BOUND.as_millis() / step.as_millis() + 2 {
+                        tokio::time::advance(step).await;
+                        tokio::task::yield_now().await;
+                    }
+                    return;
+                }
+            });
+            tokio::pin!(advancing);
+            tokio::select! {
+                biased;
+                result = &mut run => {
+                    advancing.abort();
+                    tokio::time::resume();
+                    result.expect("the run failed to finish")
+                }
+                _ = &mut advancing => {
+                    tokio::time::resume();
+                    tokio::time::timeout(Duration::from_secs(10), &mut run)
+                        .await
+                        .expect("the run kept waiting for cleanup after its timeout")
+                        .expect("the run failed to finish")
+                }
+            }
+        };
+        assert!(
+            reads.closes.load(Ordering::SeqCst) >= 1,
+            "the run tried to close the Session"
+        );
+        assert_eq!(
+            finished.driven.stop, "seconds",
+            "{:?}",
+            finished.driven.error
+        );
+        let error = finished.driven.error.as_deref().unwrap_or_default();
+        assert!(
+            error.contains("line 2")
+                && error.contains("did not answer")
+                && error.contains("budget ran out"),
+            "{error}"
+        );
+        server.shutdown();
+        let _ = server.join().await;
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    /// A run that stopped on its wall clock keeps that outcome when the
+    /// context window read it deferred fails afterwards: the read is
+    /// cleanup, and what it returns cannot replace `seconds`
+    /// (model-prompts §8.1).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_timed_out_run_keeps_its_outcome_when_the_deferred_window_read_fails() {
+        let directory = std::env::temp_dir().join(format!(
+            "dim-scenario-eval-window-after-timeout-{}",
+            std::process::id()
+        ));
+        let (socket, reads) =
+            scripted_peer(&directory, 8_000, PeerScript::DeferredUsageFails).await;
+        let mut client = driver_client(socket).await;
+        let mut scenario = scenario(Vec::new());
+        // The run is past its wall clock as soon as it submits: the timeout
+        // needs no clock of its own.
+        scenario.budget.seconds = 0.;
+        let workspace = std::env::temp_dir();
+        let model = peer_model();
+        let producer = ProducerState::default();
+        let driven = drive(&mut client, &scenario, &workspace, &model, &producer, None).await;
+        let _ = std::fs::remove_dir_all(directory);
+        assert_eq!(driven.stop, "seconds", "{:?}", driven.error);
+        assert!(driven.timed_out, "the run stopped on its wall clock");
+        assert_eq!(
+            reads.usages.load(Ordering::SeqCst),
+            2,
+            "the deferred read ran once after the timeout"
+        );
+        assert!(
+            driven.error.is_none(),
+            "the deferred read's failure is not the timeout's error: {:?}",
+            driven.error
+        );
     }
 
     /// A busy line does not multiply the declines: the peer refuses the first
