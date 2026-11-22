@@ -912,7 +912,6 @@ async fn beta_11_a_queue_committed_during_the_catch_up_defers_the_creation() {
         held,
         None,
     );
-    let queue_gate = dim_goal::testing::hold_input(&harness.id, "main", held + 1);
     let mut early = dim_goal::testing::hold_stage(
         &harness.id,
         "main",
@@ -929,6 +928,7 @@ async fn beta_11_a_queue_committed_during_the_catch_up_defers_the_creation() {
 
     // The queue commits behind the cutoff the claim read, and its fold stays
     // held when the dispatcher reaches that cutoff.
+    let queue_gate = dim_goal::testing::hold_input(&harness.id, "main", cutoff + 1);
     let queued = harness.submit("keep going", InputMode::Queue).await;
     assert!(
         queued.sequence > cutoff,
@@ -1003,7 +1003,6 @@ async fn beta_12_a_queue_committed_during_the_catch_up_holds_the_continuation() 
 
     let mut cutoff_gate =
         dim_goal::testing::hold_stage(&id, "main", dim_goal::testing::Stage::Cutoff, held, None);
-    let queue_gate = dim_goal::testing::hold_input(&id, "main", held + 1);
     write.release();
     let cutoff = cutoff_gate.arrived().await;
     assert!(
@@ -1011,6 +1010,7 @@ async fn beta_12_a_queue_committed_during_the_catch_up_holds_the_continuation() 
         "the recheck's cutoff {cutoff} is not earlier than the input held behind the fold at {held}"
     );
 
+    let queue_gate = dim_goal::testing::hold_input(&id, "main", cutoff + 1);
     let queued = session
         .submit("keep going".to_owned(), InputMode::Queue, "main")
         .await
