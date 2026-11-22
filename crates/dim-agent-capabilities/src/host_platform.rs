@@ -402,6 +402,30 @@ pub struct OutputPageReply {
     pub retained_from: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reset: Option<bool>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub events: Vec<ShellEvent>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_event_cursor: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event_retained_from: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state: Option<ShellState>,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShellEvent {
+    pub cursor: u64,
+    pub output: String,
+}
+
+#[derive(Clone, Debug, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShellState {
+    pub busy: bool,
+    pub ready: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_code: Option<String>,
 }
 
 /// A request to start a persistent PTY shell on this execution node.
@@ -558,6 +582,10 @@ pub struct OutputRequest {
     pub task_id: String,
     pub cursor: Option<u64>,
     pub limit: Option<u64>,
+    #[serde(default)]
+    pub wait_ms: Option<u64>,
+    #[serde(default)]
+    pub event_cursor: Option<u64>,
 }
 
 #[derive(serde::Serialize)]
@@ -1191,7 +1219,26 @@ impl HostPlatform {
     ) -> Result<OutputPageReply, HostPlatformError> {
         let limit = request.limit.unwrap_or(64 * 1024).clamp(1, 4 * 1024 * 1024) as usize;
         if let Some(shell) = self.shell_task(&request.task_id) {
-            return shell.page(request.cursor, limit).map_err(Into::into);
+            if let Some(cursor) = request.event_cursor {
+                let page = shell.events_page(cursor, request.wait_ms).await;
+                return Ok(OutputPageReply {
+                    text: String::new(),
+                    bytes: 0,
+                    next_cursor: None,
+                    truncated: false,
+                    retained_from: page.retained_from,
+                    reset: page.reset.then_some(true),
+                    events: page.events,
+                    next_event_cursor: Some(page.next_cursor),
+                    event_retained_from: Some(page.retained_from),
+                    state: Some(page.state),
+                });
+            }
+            let mut page = shell
+                .page(request.cursor, limit)
+                .map_err(HostPlatformError::from)?;
+            page.state = Some(shell.state());
+            return Ok(page);
         }
         let task = self.command_task(&request.task_id)?;
         let page = task
@@ -1205,6 +1252,10 @@ impl HostPlatform {
             truncated: page.truncated,
             retained_from: 0,
             reset: None,
+            events: Vec::new(),
+            next_event_cursor: None,
+            event_retained_from: None,
+            state: None,
         })
     }
 
@@ -3197,12 +3248,13 @@ pub(crate) mod shell {
         exec::{bounded_preview, tail_bytes},
     };
     use std::{
+        collections::VecDeque,
         io::{self, Read, Write},
         path::{Path, PathBuf},
         sync::{Arc, Mutex},
         time::{Duration, Instant},
     };
-    use tokio::sync::{Mutex as AsyncMutex, watch};
+    use tokio::sync::{Mutex as AsyncMutex, Notify, watch};
     use tokio_util::sync::CancellationToken;
 
     const RETAINED: usize = 64 * 1024;
@@ -3216,6 +3268,8 @@ pub(crate) mod shell {
     pub(crate) struct ShellTask {
         pty: AsyncMutex<Option<PtyProcessTree>>,
         capture: Mutex<Capture>,
+        events: Mutex<ShellEvents>,
+        event_notify: Arc<Notify>,
         terminal: watch::Sender<Option<ShellExit>>,
         kill: CancellationToken,
         timeout: CancellationToken,
@@ -3229,6 +3283,78 @@ pub(crate) mod shell {
         status: &'static str,
         error: Option<String>,
         duration: u64,
+    }
+
+    const EVENT_RETAIN_CHARS: usize = 1024 * 1024;
+
+    #[derive(Default)]
+    struct ShellEvents {
+        items: VecDeque<super::ShellEvent>,
+        base: u64,
+        next: u64,
+        chars: usize,
+        state: super::ShellState,
+    }
+
+    impl ShellEvents {
+        fn push(&mut self, text: String) {
+            if text.contains("__DIM_START_") {
+                self.state.busy = true;
+                self.state.ready = false;
+            }
+            if let Some(position) = text.rfind("__DIM_END_") {
+                let tail = &text[position..];
+                let after = &tail["__DIM_END_".len()..];
+                if let Some(end) = after.find("__") {
+                    let code = after[end + 2..].trim();
+                    self.state.last_code = (!code.is_empty()).then(|| code.to_owned());
+                }
+                self.state.busy = false;
+                self.state.ready = true;
+            }
+            let cursor = self.next;
+            self.next += 1;
+            self.chars += text.len();
+            self.items.push_back(super::ShellEvent {
+                cursor,
+                output: text,
+            });
+            while self.chars > EVENT_RETAIN_CHARS && self.items.len() > 1 {
+                if let Some(front) = self.items.pop_front() {
+                    self.chars -= front.output.len();
+                    self.base = front.cursor + 1;
+                }
+            }
+        }
+
+        fn page(&self, cursor: u64) -> EventPage {
+            let reset = cursor < self.base;
+            let events: Vec<_> = self
+                .items
+                .iter()
+                .filter(|event| event.cursor >= cursor)
+                .cloned()
+                .collect();
+            let next_cursor = events
+                .last()
+                .map(|event| event.cursor + 1)
+                .unwrap_or(cursor.max(self.base));
+            EventPage {
+                events,
+                next_cursor,
+                retained_from: self.base,
+                state: self.state.clone(),
+                reset,
+            }
+        }
+    }
+
+    pub(crate) struct EventPage {
+        pub(crate) events: Vec<super::ShellEvent>,
+        pub(crate) next_cursor: u64,
+        pub(crate) retained_from: u64,
+        pub(crate) state: super::ShellState,
+        pub(crate) reset: bool,
     }
 
     impl HostPlatform {
@@ -3307,6 +3433,8 @@ pub(crate) mod shell {
             let shell = Arc::new(ShellTask {
                 pty: AsyncMutex::new(Some(pty)),
                 capture: Mutex::default(),
+                events: Mutex::default(),
+                event_notify: Arc::new(Notify::new()),
                 terminal: watch::channel(None).0,
                 kill: CancellationToken::new(),
                 timeout: CancellationToken::new(),
@@ -3346,6 +3474,12 @@ pub(crate) mod shell {
                             written += take;
                         }
                     }
+                    drop(capture);
+                    {
+                        let mut events = pump.events.lock().unwrap();
+                        events.push(chunk.clone());
+                    }
+                    pump.event_notify.notify_waiters();
                     if let Some(sender) = &output {
                         let _ = sender.send(chunk);
                     }
@@ -3424,6 +3558,30 @@ pub(crate) mod shell {
         pub(crate) fn output_path(&self) -> &Path {
             &self.path
         }
+
+        pub(crate) fn state(&self) -> super::ShellState {
+            self.events.lock().unwrap().state.clone()
+        }
+
+        pub(crate) async fn events_page(&self, cursor: u64, wait_ms: Option<u64>) -> EventPage {
+            let wait = wait_ms.unwrap_or(0);
+            let deadline = Instant::now() + Duration::from_millis(wait);
+            loop {
+                let page = {
+                    let events = self.events.lock().unwrap();
+                    events.page(cursor)
+                };
+                if !page.events.is_empty() || page.reset || wait == 0 || Instant::now() >= deadline
+                {
+                    return page;
+                }
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                tokio::select! {
+                    _ = self.event_notify.notified() => {}
+                    _ = tokio::time::sleep(remaining) => {}
+                }
+            }
+        }
         pub(crate) fn exit(&self) -> Option<ShellExit> {
             self.terminal.borrow().clone()
         }
@@ -3484,6 +3642,10 @@ pub(crate) mod shell {
                     truncated: true,
                     retained_from: first,
                     reset: Some(true),
+                    events: Vec::new(),
+                    next_event_cursor: None,
+                    event_retained_from: None,
+                    state: None,
                 });
             }
             let start = (cursor - first).min(capture.text.len() as u64) as usize;
@@ -3501,6 +3663,10 @@ pub(crate) mod shell {
                 truncated: page.truncated,
                 retained_from: first,
                 reset: None,
+                events: Vec::new(),
+                next_event_cursor: None,
+                event_retained_from: None,
+                state: None,
             })
         }
         pub(crate) fn tail(&self) -> crate::workspace_tools::exec::OutputTail {

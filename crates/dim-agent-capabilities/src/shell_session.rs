@@ -14,7 +14,9 @@ use crate::workspace_tools::background::BackgroundExec;
 use crate::{
     exec_stop::{ExecStop, TaskError},
     host::{HostError, SessionFiles},
-    host_platform::{HostPlatform, PtySize, ShellEdition, kill_job, shell::ShellTask, stop_job},
+    host_platform::{
+        HostPlatform, OutputRequest, PtySize, ShellEdition, kill_job, shell::ShellTask, stop_job,
+    },
 };
 use dim_agent_runtime::{Dispatcher, Names, Timeline};
 use dim_agent_types::{
@@ -559,7 +561,6 @@ impl ShellSession {
             None => vec![self.config.cwd.clone()],
         };
         let id = format!("shell-{}", uuid::Uuid::new_v4());
-        let (output, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let (task, runtime) = self
             .host
             .start_shell(
@@ -571,7 +572,7 @@ impl ShellSession {
                     cols: 500,
                     rows: 50,
                 },
-                Some(output),
+                None,
             )
             .await
             .map_err(|error| HostError::failed(error.reason))?;
@@ -580,6 +581,7 @@ impl ShellSession {
             _ => ShellDialect::Posix,
         };
         let exe = runtime.executable_path;
+        let task_id = id.clone();
         let pty = NativeShell {
             task,
             host: self.host.clone(),
@@ -607,26 +609,39 @@ impl ShellSession {
             let tasks = self.tasks.lock().await;
             tasks.spawn(async move {
                 let mut poll = tokio::time::interval(SHELL_EXIT_POLL);
-                let mut reading = true;
+                let mut event_cursor = 0u64;
                 loop {
                     tokio::select! {
                         biased;
                         _ = lifecycle.cancelled() => break,
-                        chunk = rx.recv(), if reading => match chunk {
-                            Some(text) => {
-                                this.handle_output(&text).await;
+                        page = this.host.output(OutputRequest {
+                            task_id: task_id.clone(),
+                            cursor: None,
+                            limit: Some(64 * 1024),
+                            wait_ms: Some(100),
+                            event_cursor: Some(event_cursor),
+                        }) => if let Ok(page) = page {
+                            if page.reset == Some(true)
+                                || page.event_retained_from.unwrap_or(0) > event_cursor
+                            {
+                                if let Some(shell) = this.host.shell_task(&task_id) {
+                                    let _ = shell.terminate().await;
+                                }
+                                this.handle_shell_exit(generation, None).await;
+                                break;
                             }
-                            _ => {
-                                reading = false;
+                            for event in page.events {
+                                this.handle_output(&event.output).await;
+                                event_cursor = event.cursor + 1;
+                            }
+                            if let Some(next) = page.next_event_cursor {
+                                event_cursor = next;
                             }
                         },
                         _ = poll.tick() => match this.liveness(generation).await {
                             Liveness::Alive => {}
                             Liveness::Replaced => break,
                             Liveness::Dead(status) => {
-                                while let Ok(text) = rx.try_recv() {
-                                    this.handle_output(&text).await;
-                                }
                                 this.handle_shell_exit(generation, status).await;
                                 break;
                             }

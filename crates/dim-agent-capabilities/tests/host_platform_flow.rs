@@ -1409,6 +1409,14 @@ async fn the_host_platform_service_serves_a_shell() {
     .await
     .unwrap();
     assert!(page["text"].as_str().unwrap().contains("hi"));
+    let events = invoke(
+        "output",
+        serde_json::json!({"taskId": "service-shell", "eventCursor": 0, "waitMs": 1000}),
+    )
+    .await
+    .unwrap();
+    assert!(!events["events"].as_array().unwrap().is_empty());
+    assert!(events["nextEventCursor"].as_u64().unwrap() > 0);
     invoke("settle", serde_json::json!({"taskId": "service-shell"}))
         .await
         .unwrap();

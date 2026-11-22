@@ -341,6 +341,19 @@ export type OutputRequest = {
   taskId: string
   cursor?: number | bigint | null
   limit?: number | bigint | null
+  waitMs?: number | bigint | null
+  eventCursor?: number | bigint | null
+}
+
+export type ShellEvent = {
+  cursor: number | bigint
+  output: string
+}
+
+export type ShellState = {
+  busy: boolean
+  ready: boolean
+  lastCode?: string | null
 }
 
 /** A page of a task's captured output. */
@@ -351,6 +364,10 @@ export type OutputPageReply = {
   truncated: boolean
   retainedFrom: number | bigint
   reset?: boolean | null
+  events?: ShellEvent[]
+  nextEventCursor?: number | bigint | null
+  eventRetainedFrom?: number | bigint | null
+  state?: ShellState | null
 }
 
 export type OutputPathReply = {
