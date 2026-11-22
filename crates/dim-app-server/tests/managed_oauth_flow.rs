@@ -22,7 +22,7 @@ use dim_app_server::{
         OpenAICodexOAuthService,
     },
     grok_oauth::{GrokOAuthPlugin, GrokOAuthService},
-    provider::{ModelPreferences, ProviderPlugin, ProviderService},
+    provider::{ModelPreferences, ProviderCatalog, ProviderError, ProviderPlugin, ProviderService},
 };
 use futures_util::StreamExt;
 use rutis::Ctx;
@@ -1443,6 +1443,101 @@ async fn managed_provider_selection_http_recovery_and_restart_flow() {
         .await
         .unwrap();
     assert!(updated.info.connection.unwrap().credential_configured);
+    let window = |catalog: &ProviderCatalog, id| {
+        let model = catalog.models.iter().find(|model| model.id == id).unwrap();
+        (
+            model.capabilities.context_window,
+            model.metadata.as_ref().unwrap().raw["max_context_window"].as_u64(),
+        )
+    };
+    let catalog = provider
+        .catalog_for("openai-codex".into(), &cancel)
+        .await
+        .unwrap()
+        .unwrap();
+    for model_id in ["gpt-6.2-sol", "gpt-6.1-sol", "gpt-6.1-terra"] {
+        assert_eq!(window(&catalog, model_id), (Some(500_000), Some(872_000)));
+    }
+    assert_eq!(window(&catalog, "gpt-5.5"), (Some(272_000), Some(272_000)));
+    let target = ModelId {
+        provider_id: "openai-codex".into(),
+        model_id: "gpt-6.2-sol".into(),
+    };
+    let edit_window = |version, tokens| {
+        provider.update_model_config(
+            target.provider_id.clone(),
+            version,
+            target.model_id.clone(),
+            Some(serde_json::from_value(json!({"contextWindow": tokens})).unwrap()),
+            &cancel,
+        )
+    };
+    assert!(matches!(
+        edit_window(catalog.version, 872_001_u64).await,
+        Err(ProviderError::InvalidConfig(message)) if message.contains("872000")
+    ));
+    let edited = edit_window(catalog.version, 872_000_u64).await.unwrap();
+    assert_eq!(
+        window(&edited, "gpt-6.2-sol"),
+        (Some(872_000), Some(872_000))
+    );
+    let selection = provider
+        .configuration(
+            Some(target.clone()),
+            None,
+            ModelPreferences::default(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        selection
+            .capability_snapshot
+            .unwrap()
+            .capabilities
+            .context_window,
+        872_000
+    );
+    let startup = |tokens| {
+        provider.startup_configuration(
+            dim_app_server::protocol::ModelSelection {
+                provider: Some(target.provider_id.clone()),
+                model_id: Some(target.model_id.clone()),
+            },
+            &home,
+            ModelPreferences::default(),
+            serde_json::from_value(json!({"contextWindow": tokens, "autoCompactWindow": 400_000}))
+                .unwrap(),
+            None,
+            &cancel,
+        )
+    };
+    assert!(
+        matches!(startup(872_001_u64).await, Err(error) if error.to_string().contains("872000"))
+    );
+    let startup = startup(600_000_u64).await.unwrap();
+    assert_eq!(
+        startup
+            .model
+            .capability_snapshot
+            .as_ref()
+            .unwrap()
+            .capabilities
+            .context_window,
+        600_000
+    );
+    assert_eq!(
+        startup
+            .model
+            .metadata
+            .as_ref()
+            .unwrap()
+            .startup
+            .as_ref()
+            .unwrap()
+            .auto_compact_window,
+        Some(400_000)
+    );
     let old_request = {
         let selection = provider
             .configuration(
@@ -1521,6 +1616,24 @@ async fn managed_provider_selection_http_recovery_and_restart_flow() {
         .await
         .unwrap()
         .unwrap();
+    assert_eq!(
+        window(&catalog, "gpt-6.2-sol"),
+        (Some(872_000), Some(872_000))
+    );
+    let reset = provider
+        .update_model_config(
+            target.provider_id,
+            catalog.version,
+            target.model_id,
+            None,
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        window(&reset, "gpt-6.2-sol"),
+        (Some(500_000), Some(872_000))
+    );
     assert_eq!(
         catalog
             .models
