@@ -26,6 +26,14 @@ const event = (sequence, content) => ({ id: `e${sequence}`, sequence, createAt: 
 const input = (sequence, text) => event(sequence, { kind: "input", text, content: [{ type: "text", text }], blocks: [] })
 const page = (events, through, nextAfter = through, done = true) => ({ events, through, nextAfter, done })
 const flush = () => new Promise(resolve => setTimeout(resolve, 25))
+/** Waits for a publish the store schedules on its own timer, rather than guessing how long it takes. */
+const until = async (condition, timeout = 2000) => {
+  const deadline = Date.now() + timeout
+  while (!condition()) {
+    if (Date.now() > deadline) return
+    await new Promise(resolve => setTimeout(resolve, 5))
+  }
+}
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no }); return { promise, resolve, reject } }
 
 function session(t, history, reads = {}, display = true, transcript = false) {
@@ -128,7 +136,7 @@ for (const display of [true, false]) test(`conversation windows negotiate ${disp
   assert.equal(windows, 1)
   chat.receive({ method: display ? "session.display" : "session.event", sessionId: "session", branchId: "main", event: event(3, { kind: "other" }) })
   receive(chat, "main", input(4, "after compaction"))
-  await flush()
+  await until(() => chat.views.session.rows.length === 2)
   assert.deepEqual(chat.views.session.rows.map(row => row.text), ["stored", "after compaction"])
   assert.equal(chat.views.session.status, "ready")
 })
