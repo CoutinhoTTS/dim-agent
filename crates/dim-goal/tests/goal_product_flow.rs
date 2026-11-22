@@ -2252,7 +2252,9 @@ async fn a_continuation_is_not_written_after_the_report_turn_starts() {
         )
         .await
         .unwrap();
-    let set_end = gate.arrived().await;
+    let set_end = tokio::time::timeout(Duration::from_secs(15), gate.arrived())
+        .await
+        .expect("the set turn's continuation reached its write in time");
     assert!(set_end > 0, "the set turn's continuation reaches its write");
 
     let report = session
