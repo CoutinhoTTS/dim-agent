@@ -52,6 +52,10 @@ struct Fixture {
     pause_status: AtomicBool,
     status_entered: Notify,
     status_resume: Notify,
+    /// Whether the next account observation waits for the test to resume it.
+    pause_observe: AtomicBool,
+    observe_entered: Notify,
+    observe_resume: Notify,
     empty_catalog: AtomicBool,
     /// The account transitions this provider reports, when it reports them.
     watch: Mutex<Option<watch::Sender<Option<bool>>>>,
@@ -150,6 +154,16 @@ impl ManagedProvider for Provider {
             .unwrap()
             .as_ref()
             .map(watch::Sender::subscribe)
+    }
+    fn observe_account(&self, _: &str) -> ManagedFuture<()> {
+        let fixture = self.0.clone();
+        Box::pin(async move {
+            if fixture.pause_observe.swap(false, Ordering::SeqCst) {
+                fixture.observe_entered.notify_one();
+                fixture.observe_resume.notified().await;
+            }
+            Ok(())
+        })
     }
     fn recover(&self, _: &str) -> ManagedFuture<AccountSnapshot> {
         unused()
@@ -484,6 +498,95 @@ async fn an_unobserved_replacement_binding_does_not_inherit_the_previous_observa
         .expect("the replacement's sign-out was not published");
 
         drop((fixture_plugin, capture));
+        root.shutdown().await.unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_older_account_refresh_does_not_overwrite_a_newer_watch_update() {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let root = Ctx::root().unwrap();
+        let catalog = dim_app_server::catalog();
+        root.plugin(dim_app_server::methods::ManagementMethodsPlugin::typed(&catalog).unwrap());
+        let owner_plugin = root.plugin(ManagedProvidersPlugin::new(None));
+        let captured = Arc::new(OnceLock::new());
+        let fixture = Arc::new(Fixture::default());
+        *fixture.recovered_generation.lock().unwrap() = 1;
+        let watch = watch::channel(Some(true));
+        *fixture.watch.lock().unwrap() = Some(watch.0.clone());
+        let fixture_plugin = root.plugin(FixturePlugin(fixture.clone()));
+        let binding = root.plugin(ManagedProviderBinding);
+        let capture = root.plugin(Capture(captured.clone()));
+        for view in [&owner_plugin, &fixture_plugin, &binding, &capture] {
+            active(view).await;
+        }
+        let owner = captured.get().unwrap().clone();
+        assert!(owner.usable(), "the signed-in watch installs");
+
+        fixture.pause_observe.store(true, Ordering::SeqCst);
+        let refreshing = {
+            let owner = owner.clone();
+            tokio::spawn(async move { owner.refresh_usable(&CancellationToken::new()).await })
+        };
+        fixture.observe_entered.notified().await;
+        watch.0.send_replace(Some(false));
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while owner.usable() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the watch sign-out was not published");
+        // The refresh's next subscription replays an observation older than
+        // the one the binding's watch has already published.
+        *fixture.watch.lock().unwrap() = Some(watch::channel(Some(true)).0);
+        fixture.observe_resume.notify_one();
+        assert!(
+            !refreshing.await.unwrap(),
+            "the refresh published its older observation over the watch"
+        );
+        assert!(
+            !owner.usable(),
+            "the newer watch update must remain published"
+        );
+
+        drop((fixture_plugin, capture));
+        root.shutdown().await.unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn a_watchless_account_read_that_never_finishes_leaves_the_last_observation() {
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let (root, fixture, owner, binding) = setup().await;
+        let cancel = CancellationToken::new();
+        assert!(
+            owner.refresh_usable(&cancel).await,
+            "the first status read reports the fixture account"
+        );
+        fixture.pause_status.store(true, Ordering::SeqCst);
+        tokio::time::pause();
+        let refreshing = {
+            let owner = owner.clone();
+            tokio::spawn(async move { owner.refresh_usable(&CancellationToken::new()).await })
+        };
+        fixture.status_entered.notified().await;
+        tokio::time::advance(std::time::Duration::from_secs(6)).await;
+        tokio::time::resume();
+        let usable = tokio::time::timeout(std::time::Duration::from_secs(10), refreshing)
+            .await
+            .expect("a watchless account read must not hold its caller past the bound")
+            .unwrap();
+        assert!(
+            usable,
+            "a timed-out read must leave the last observation in place"
+        );
+        assert!(owner.usable());
+        drop(binding);
         root.shutdown().await.unwrap();
     })
     .await

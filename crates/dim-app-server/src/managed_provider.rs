@@ -20,8 +20,9 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 /// The longest a Session assembly or reconciliation waits for a provider's
-/// own account observation. The provider keeps its read, so a slower one still
-/// publishes through its watch and reaches open Sessions from there.
+/// own account observation. A watched provider keeps its read, so a slower one
+/// still publishes through its watch and reaches open Sessions from there; a
+/// watchless read that outlives the wait leaves the last observation in place.
 const ACCOUNT_OBSERVATION_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -251,13 +252,14 @@ pub trait ManagedProvider: Send + Sync + 'static {
     fn status(&self, provider: &str) -> ManagedFuture<AccountSnapshot>;
     /// A replayable watch over whether this provider stores a signed-in
     /// account, moved at every change of that account. The binding publishes
-    /// each move while its binding is current, so a login that completes after
-    /// every client polling it is gone still reaches open Sessions. The first
-    /// `Some` is the provider's initialized observation of its store; `None`
-    /// means the provider has not read it yet. A provider that supplies this
-    /// watch is the only source of its availability: account reads and login
-    /// attempt results never publish over it. `None` when the provider cannot
-    /// report its own changes: observations are then the only source.
+    /// the watch's current value while its binding is current, so a login that
+    /// completes after every client polling it is gone still reaches open
+    /// Sessions. The first `Some` is the provider's initialized observation of
+    /// its store; `None` means the provider has not read it yet. A provider
+    /// that supplies this watch is the only source of its availability:
+    /// account reads and login attempt results never publish over it. `None`
+    /// when the provider cannot report its own changes: observations are then
+    /// the only source.
     fn subscribe_account(&self) -> Option<watch::Receiver<Option<bool>>> {
         None
     }
@@ -395,10 +397,12 @@ pub struct ManagedProviders {
 struct Bound {
     provider: Arc<dyn ManagedProvider>,
     binding: u64,
-    /// Whether the provider reports its own account transitions. A watched
-    /// provider's watch is authoritative for availability; an RPC result is
-    /// only a historical observation for it.
-    watched: bool,
+    /// The provider's own account watch, when it reports its own transitions.
+    /// That watch is authoritative for availability; an RPC result is only a
+    /// historical observation for it. The binding reads the current value from
+    /// this receiver while publishing, so a value subscribed earlier cannot
+    /// overwrite a newer one.
+    account: Option<watch::Receiver<Option<bool>>>,
 }
 static NEXT_BINDING: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 fn retired() -> ManagedProviderError {
@@ -423,12 +427,14 @@ impl ManagedProviders {
     /// its watch; only that watch is published here. Without a binding, while
     /// `cancel` ends the wait, after the bounded wait, or when a read fails and
     /// none reports an account, the last value stays: a failed read is not a
-    /// confirmed signed-out account.
+    /// confirmed signed-out account. The wait is bounded for a provider
+    /// without a watch as well, so a stalled read cannot hold assembly or
+    /// Settings reconciliation past [`ACCOUNT_OBSERVATION_TIMEOUT`].
     pub async fn refresh_usable(&self, cancel: &CancellationToken) -> bool {
         let Ok(bound) = self.bound(cancel) else {
             return self.usable();
         };
-        if bound.watched {
+        if bound.account.is_some() {
             for descriptor in bound.provider.providers() {
                 let observation = tokio::select! {
                     biased;
@@ -442,13 +448,8 @@ impl ManagedProviders {
                 // was, which is what this publishes below.
                 let _ = observation;
             }
-            if !cancel.is_cancelled()
-                && let Some(usable) = bound
-                    .provider
-                    .subscribe_account()
-                    .and_then(|account| *account.borrow())
-            {
-                self.observe_watch(bound.binding, usable);
+            if !cancel.is_cancelled() {
+                self.observe_watch(bound.binding);
             }
             return self.usable();
         }
@@ -458,11 +459,14 @@ impl ManagedProviders {
             let status = tokio::select! {
                 biased;
                 _ = cancel.cancelled() => break,
-                status = bound.provider.status(&descriptor.provider_id) => status,
+                status = tokio::time::timeout(
+                    ACCOUNT_OBSERVATION_TIMEOUT,
+                    bound.provider.status(&descriptor.provider_id),
+                ) => status,
             };
             match status {
-                Ok(account) => usable |= account.account.is_some(),
-                Err(_) => confirmed = false,
+                Ok(Ok(account)) => usable |= account.account.is_some(),
+                Ok(Err(_)) | Err(_) => confirmed = false,
             }
         }
         if !cancel.is_cancelled() && (usable || confirmed) {
@@ -470,15 +474,23 @@ impl ManagedProviders {
         }
         self.usable()
     }
-    /// Publishes an account watch transition while `binding` is still the
-    /// bound one. The identity check and the publication share the lock, so a
-    /// retired binding cannot overwrite its replacement.
-    fn observe_watch(&self, binding: u64, usable: bool) {
+    /// Publishes the binding's current account watch value while `binding` is
+    /// still the bound one. The watch read and the publication share the lock
+    /// with every other watch publication, so a value obtained earlier cannot
+    /// overwrite a newer one, and a retired binding cannot overwrite its
+    /// replacement.
+    fn observe_watch(&self, binding: u64) {
         let slot = self.provider.lock().unwrap();
         let Some(bound) = slot.as_ref() else {
             return;
         };
-        if bound.binding == binding {
+        if bound.binding != binding {
+            return;
+        }
+        let Some(account) = &bound.account else {
+            return;
+        };
+        if let Some(usable) = *account.borrow() {
             self.usable.send_replace(usable);
         }
     }
@@ -490,7 +502,7 @@ impl ManagedProviders {
         let Some(bound) = slot.as_ref() else {
             return;
         };
-        if bound.binding == binding && !bound.watched {
+        if bound.binding == binding && bound.account.is_none() {
             self.usable.send_replace(usable);
         }
     }
@@ -938,14 +950,13 @@ impl DynPlugin for ManagedProviderBinding {
             }
             let binding = NEXT_BINDING.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let account = provider.subscribe_account();
-            let watched = account.is_some();
             let initial = account.as_ref().and_then(|account| *account.borrow());
             {
                 let mut slot = owner.provider.lock().unwrap();
                 *slot = Some(Bound {
                     provider: provider.clone(),
                     binding,
-                    watched,
+                    account: account.clone(),
                 });
                 // A replacement starts from its own observation: a new
                 // generation that has not read its store must not inherit the
@@ -963,10 +974,7 @@ impl DynPlugin for ManagedProviderBinding {
                                 return;
                             },
                         }
-                        let usable = *account.borrow_and_update();
-                        if let Some(usable) = usable {
-                            owner.observe_watch(binding, usable);
-                        }
+                        owner.observe_watch(binding);
                     }
                 })
             });
