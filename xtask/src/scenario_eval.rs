@@ -1724,7 +1724,7 @@ pub(crate) enum SwitchRole {
 const UNKNOWN_BRANCH_RETRIES: u32 = 3;
 
 /// A [`Switch`] as the run drives it: the target the role currently names,
-/// kept current while the switch is pending.
+/// kept current while the switch is pending and that target has not started.
 struct PendingSwitch {
     switch: Switch,
     line: Option<String>,
@@ -1750,8 +1750,13 @@ impl PendingSwitch {
 
     /// Reads one notice: a tool `branch/create` renames the role's target, and
     /// the target's first `turn/start` is when the move and the next input
-    /// happen.
+    /// happen. Once that turn has started the target is fixed: a line opened
+    /// afterwards has its own purpose, and the move and the input after it
+    /// stay with the line that started.
     fn notice(&mut self, branch: &str, event: &Value) {
+        if self.triggered {
+            return;
+        }
         if event["type"] == "branch" && event["name"] == "create" {
             if matches!(
                 &self.switch.to,
@@ -7436,6 +7441,64 @@ mod tests {
         });
         pending.notice("4", &turn_start);
         assert!(pending.triggered);
+    }
+
+    /// A switch that has started its target stays with it: a tool line opened
+    /// afterwards has its own purpose, so the retry of a move promotes the
+    /// line that started rather than the newer line (model-prompts §9.8).
+    #[tokio::test]
+    async fn a_retried_switch_stays_on_the_line_that_started() {
+        let create = |line: &str| {
+            json!({"type": "branch", "name": "create",
+                   "data": {"branch": line, "source": {"kind": "tool"}}})
+        };
+        let turn_start = json!({"type": "turn", "name": "start", "data": {}});
+        let mut switch = Some(PendingSwitch::new(Switch {
+            to: SwitchTarget::Role(SwitchRole::LatestToolLine),
+            message: "next".into(),
+            branch_id: None,
+        }));
+        let pending = switch.as_mut().expect("the switch is pending");
+        pending.notice("main", &create("A"));
+        pending.notice("A", &turn_start);
+        assert!(pending.triggered);
+        let mut client = SwitchRecorder {
+            refusals: vec![unknown_branch_refusal()],
+            ..SwitchRecorder::default()
+        };
+        assert!(matches!(
+            fire_switch(&mut client, "session", &mut switch).await,
+            Ok(SwitchFire::Retry)
+        ));
+        let pending = switch.as_mut().expect("the retry keeps the switch");
+        pending.notice("main", &create("B"));
+        assert_eq!(
+            pending.line.as_deref(),
+            Some("A"),
+            "the line that started keeps the move"
+        );
+        assert!(matches!(
+            fire_switch(&mut client, "session", &mut switch).await,
+            Ok(SwitchFire::Fired)
+        ));
+        let calls: Vec<&str> = client
+            .calls
+            .iter()
+            .map(|(method, _)| method.as_str())
+            .collect();
+        assert_eq!(
+            calls,
+            [
+                "session.branch_set_default",
+                "session.branch_set_default",
+                "session.submit"
+            ],
+            "the retry moves before it sends the next input"
+        );
+        assert_eq!(
+            client.calls[1].1["branchId"], "A",
+            "the retry promotes the line that started, not the line opened after it"
+        );
     }
 
     /// The switch's calls, recorded, and the refusals its
