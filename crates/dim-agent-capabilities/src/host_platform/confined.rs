@@ -19,7 +19,8 @@ use tokio_util::sync::CancellationToken;
 /// set is closed: every rule a variant adds is recorded in
 /// `docs/architecture/rust-agent/plugins/HostPlatform.md` with the denial it
 /// answers.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum SystemServices {
     /// No system service: the helper reads the system baseline, its own
     /// executable and [`Confinement::read`], and writes [`Confinement::write`];
@@ -176,7 +177,7 @@ impl HostPlatform {
     /// must not rely on the directory being quiescent on macOS or unconfined
     /// Linux: a process that left the group may still write to the `write`
     /// directories after `Ok`.
-    pub async fn spawn_confined(
+    pub async fn spawn_confined_process(
         &self,
         spec: ConfinedSpec,
         confinement: Confinement,

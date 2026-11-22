@@ -2301,7 +2301,7 @@ impl Shared {
             services,
         };
         let outcome = platform
-            .spawn_confined(spec, confinement, slot.cancel.child_token())
+            .spawn_confined_process(spec, confinement, slot.cancel.child_token())
             .await;
         if slot.cancel_requested() {
             // The helper was killed: nothing it wrote is published (A.2.1).

@@ -12,14 +12,16 @@ use dim_agent_runtime::Names;
 use rutis::Ctx;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, ErrorKind, Key, TypeKey};
 use std::{
+    collections::BTreeMap,
     ffi::{OsStr, OsString},
     io,
     path::{Path, PathBuf},
     process::{ExitStatus, Stdio},
     sync::Arc,
+    time::{Duration, Instant},
 };
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
     process::{Child, ChildStderr, ChildStdout},
     sync::Mutex,
 };
@@ -430,6 +432,76 @@ pub struct ShellResize {
     pub rows: u16,
 }
 
+/// Byte limits for a configured command's two streams.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OutputLimits {
+    pub stdout: usize,
+    pub stderr: usize,
+}
+
+/// A request to run one confined helper on this node.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ConfinedRequest {
+    pub program: String,
+    pub args: Vec<String>,
+    pub read: Vec<PathBuf>,
+    pub write: Vec<PathBuf>,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    pub timeout_ms: u64,
+    pub output_limit: OutputLimits,
+    pub services: confined::SystemServices,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfinedReply {
+    pub status: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+    pub confined: bool,
+    pub stdout_truncated: bool,
+    pub stderr_truncated: bool,
+}
+
+/// A request to run one configured command with stdin.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SpawnWithStdinRequest {
+    pub command: String,
+    pub cwd: PathBuf,
+    pub env: BTreeMap<String, Option<String>>,
+    pub stdin: Option<String>,
+    pub timeout_ms: u64,
+    pub limits: OutputLimits,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SpawnWithStdinStatus {
+    Exited,
+    Signaled,
+    Cancelled,
+    TimedOut,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpawnWithStdinReply {
+    pub status: SpawnWithStdinStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signal: Option<String>,
+    pub duration_ms: u64,
+    pub stdout: String,
+    pub stderr: String,
+    pub stdout_truncated: bool,
+    pub stderr_truncated: bool,
+}
+
 /// A request to start a command on this execution node.
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -597,8 +669,156 @@ impl HostPlatform {
     /// [`Self::spawn`] with `stdin` written to the child's standard input,
     /// which then closes. A child that exits before reading it does not fail
     /// the start.
+    /// Runs one confined helper and returns its bounded result.
+    pub async fn spawn_confined(
+        &self,
+        request: ConfinedRequest,
+        cancelled: crate::host::CancelledFn,
+    ) -> Result<ConfinedReply, HostPlatformError> {
+        let cancel = CancellationToken::new();
+        let waiter = {
+            let cancel = cancel.clone();
+            tokio::spawn(async move {
+                let _ = cancelled().await;
+                cancel.cancel();
+            })
+        };
+        let spec = confined::ConfinedSpec {
+            executable: request.program.into(),
+            args: request.args.into_iter().map(Into::into).collect(),
+            env: request
+                .env
+                .into_iter()
+                .map(|(key, value)| (key.into(), value.into()))
+                .collect(),
+        };
+        let confinement = confined::Confinement {
+            read: request.read,
+            write: request.write,
+            timeout: Duration::from_millis(request.timeout_ms),
+            stdout_limit: request.output_limit.stdout,
+            stderr_limit: request.output_limit.stderr,
+            services: request.services,
+        };
+        let result = self.spawn_confined_process(spec, confinement, cancel).await;
+        waiter.abort();
+        let output = result.map_err(|error| match error {
+            confined::ConfinedError::InvalidPath { .. } => {
+                HostPlatformError::Invalid(error.to_string())
+            }
+            confined::ConfinedError::Cancelled => HostPlatformError::Cancelled,
+            _ => HostPlatformError::Failed(error.to_string()),
+        })?;
+        Ok(ConfinedReply {
+            status: output.status.code(),
+            stdout: STANDARD.encode(output.stdout),
+            stderr: STANDARD.encode(output.stderr),
+            confined: output.confined,
+            stdout_truncated: false,
+            stderr_truncated: false,
+        })
+    }
+
+    /// Runs one configured command with stdin and returns its bounded result.
+    pub async fn spawn_with_stdin(
+        &self,
+        request: SpawnWithStdinRequest,
+        cancelled: crate::host::CancelledFn,
+    ) -> Result<SpawnWithStdinReply, HostPlatformError> {
+        let cancel = CancellationToken::new();
+        let waiter = {
+            let cancel = cancel.clone();
+            tokio::spawn(async move {
+                let _ = cancelled().await;
+                cancel.cancel();
+            })
+        };
+        let started = Instant::now();
+        let stdin = STANDARD
+            .decode(request.stdin.unwrap_or_default())
+            .map_err(|error| HostPlatformError::Invalid(error.to_string()))?;
+        let command = ConfiguredCommand {
+            command: request.command,
+            cwd: request.cwd,
+            env: request
+                .env
+                .into_iter()
+                .map(|(key, value)| (key.into(), value.map(Into::into)))
+                .collect(),
+            stdin,
+            timeout: Duration::from_millis(request.timeout_ms),
+            stdout_limit: request.limits.stdout,
+            stderr_limit: request.limits.stderr,
+        };
+        let end = self
+            .configured(command, &cancel, None)
+            .await
+            .map_err(|error| HostPlatformError::Failed(error.to_string()))?;
+        waiter.abort();
+        let duration_ms = started.elapsed().as_millis() as u64;
+        let (status, exit_code, signal, stdout, stderr, stdout_truncated, stderr_truncated) =
+            match end {
+                ConfiguredEnd::Exited {
+                    status,
+                    stdout,
+                    stderr,
+                    stdout_truncated,
+                    stderr_truncated,
+                } => {
+                    let signal = signal_name(status);
+                    let exit_code = status.code();
+                    let status = if signal.is_some() {
+                        SpawnWithStdinStatus::Signaled
+                    } else {
+                        SpawnWithStdinStatus::Exited
+                    };
+                    (
+                        status,
+                        exit_code,
+                        signal,
+                        stdout,
+                        stderr,
+                        stdout_truncated,
+                        stderr_truncated,
+                    )
+                }
+                ConfiguredEnd::Cancelled => (
+                    SpawnWithStdinStatus::Cancelled,
+                    None,
+                    None,
+                    Vec::new(),
+                    Vec::new(),
+                    false,
+                    false,
+                ),
+                ConfiguredEnd::TimedOut => (
+                    SpawnWithStdinStatus::TimedOut,
+                    None,
+                    None,
+                    Vec::new(),
+                    Vec::new(),
+                    false,
+                    false,
+                ),
+            };
+        Ok(SpawnWithStdinReply {
+            status,
+            exit_code,
+            signal,
+            duration_ms,
+            stdout: STANDARD.encode(stdout),
+            stderr: STANDARD.encode(stderr),
+            stdout_truncated,
+            stderr_truncated,
+        })
+    }
+
     #[service(skip)]
-    pub fn spawn_with_stdin(&self, spec: ProcessSpec, stdin: Vec<u8>) -> io::Result<ProcessTree> {
+    pub fn spawn_with_stdin_process(
+        &self,
+        spec: ProcessSpec,
+        stdin: Vec<u8>,
+    ) -> io::Result<ProcessTree> {
         let mut tree = ProcessTree::spawn(Self::command(&spec, Stdio::piped()))?;
         if let Some(mut pipe) = tree.child.stdin.take() {
             tokio::spawn(async move {
@@ -3245,6 +3465,132 @@ pub(crate) mod shell {
                 preview: tail.text,
                 preview_truncated: tail.truncated,
                 failure_note: end.error,
+            }
+        }
+    }
+}
+
+pub(crate) struct ConfiguredCommand {
+    pub command: String,
+    pub cwd: PathBuf,
+    pub env: BTreeMap<OsString, Option<OsString>>,
+    pub stdin: Vec<u8>,
+    pub timeout: Duration,
+    pub stdout_limit: usize,
+    pub stderr_limit: usize,
+}
+
+pub(crate) enum ConfiguredEnd {
+    Exited {
+        status: ExitStatus,
+        stdout: Vec<u8>,
+        stderr: Vec<u8>,
+        stdout_truncated: bool,
+        stderr_truncated: bool,
+    },
+    Cancelled,
+    TimedOut,
+}
+
+#[derive(Debug)]
+pub(crate) enum ConfiguredError {
+    Prepare(ProcessSpecError),
+    Unloaded,
+    Spawn(std::io::Error),
+    Wait(std::io::Error, Vec<u8>),
+}
+
+impl ConfiguredError {
+    pub(crate) fn stderr(&self) -> &[u8] {
+        match self {
+            Self::Wait(_, stderr) => stderr,
+            _ => &[],
+        }
+    }
+}
+
+impl std::fmt::Display for ConfiguredError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Prepare(error) => write!(f, "{}: {}", error.code, error.reason),
+            Self::Unloaded => f.write_str("unloaded"),
+            Self::Spawn(error) => write!(f, "spawn failed: {error}"),
+            Self::Wait(error, _) => write!(f, "wait failed: {error}"),
+        }
+    }
+}
+
+impl HostPlatform {
+    pub(crate) async fn configured(
+        &self,
+        request: ConfiguredCommand,
+        cancel: &CancellationToken,
+        gate: Option<&CancellationToken>,
+    ) -> Result<ConfiguredEnd, ConfiguredError> {
+        let (mut spec, _) = self
+            .build_process_spec(&request.command, &request.cwd)
+            .await
+            .map_err(ConfiguredError::Prepare)?;
+        spec.env.retain(|(name, _)| !request.env.contains_key(name));
+        spec.env.extend(
+            request
+                .env
+                .into_iter()
+                .filter_map(|(key, value)| value.map(|value| (key, value))),
+        );
+        if gate.is_some_and(CancellationToken::is_cancelled) {
+            return Err(ConfiguredError::Unloaded);
+        }
+        let mut tree = self
+            .spawn_with_stdin_process(spec, request.stdin)
+            .map_err(ConfiguredError::Spawn)?;
+        let mut stdout = tree.stdout();
+        let mut stderr = tree.stderr();
+        let end = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => ConfiguredEnd::Cancelled,
+            _ = tokio::time::sleep(request.timeout) => ConfiguredEnd::TimedOut,
+            (out, err, status) = async {
+                tokio::join!(
+                    read_capped(&mut stdout, request.stdout_limit),
+                    read_capped(&mut stderr, request.stderr_limit),
+                    tree.wait()
+                )
+            } => {
+                return match status {
+                    Ok(status) => Ok(ConfiguredEnd::Exited {
+                        status,
+                        stdout: out.0,
+                        stderr: err.0,
+                        stdout_truncated: out.1,
+                        stderr_truncated: err.1,
+                    }),
+                    Err(error) => Err(ConfiguredError::Wait(error, err.0))
+                }
+            }
+        };
+        let _ = tree.terminate().await;
+        Ok(end)
+    }
+}
+
+/// Reads at most `limit` bytes and drains the rest, so the writer never
+/// blocks; the bool says more was written.
+async fn read_capped<R: AsyncRead + Unpin>(reader: &mut R, limit: usize) -> (Vec<u8>, bool) {
+    let mut kept = Vec::new();
+    let mut buffer = [0u8; 8192];
+    let mut overflow = false;
+    loop {
+        match reader.read(&mut buffer).await {
+            Ok(0) | Err(_) => return (kept, overflow),
+            Ok(read) => {
+                let room = limit.saturating_sub(kept.len());
+                if read <= room {
+                    kept.extend_from_slice(&buffer[..read]);
+                } else {
+                    kept.extend_from_slice(&buffer[..room]);
+                    overflow = true;
+                }
             }
         }
     }

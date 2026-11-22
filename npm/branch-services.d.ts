@@ -142,6 +142,76 @@ export interface ToolHost {
   execute(call: { id: string; name: string; input: { [key: string]: unknown } }, caller: ToolExecutionContext, cancelled: () => void | Promise<void>): Promise<import('./plugin.js').ToolResult>
 }
 
+/** Byte limits for a configured command's two streams. */
+export type OutputLimits = {
+  stdout: number | bigint
+  stderr: number | bigint
+}
+
+/**
+ * The system services a host-owned helper may reach beyond its files. The
+ * set is closed: every rule a variant adds is recorded in
+ * `docs/architecture/rust-agent/plugins/HostPlatform.md` with the denial it
+ * answers.
+ */
+export type SystemServices =
+  | /** No system service: the helper reads the system baseline, its own executable and [`Confinement::read`], and writes [`Confinement::write`]; everything else is denied. */ "none"
+  | /** On-device text recognition: Apple Vision, the Apple Neural Engine and the GPU, and the sandbox extension that hands the framework's cache to the neural-engine compiler service. */ "onDeviceRecognition"
+
+/** A request to run one confined helper on this node. */
+export type ConfinedRequest = {
+  program: string
+  args: string[]
+  read: string[]
+  write: string[]
+  env?: Record<string, string>
+  timeoutMs: number | bigint
+  outputLimit: OutputLimits
+  services: SystemServices
+}
+
+export type ConfinedReply = {
+  status?: number | null
+  stdout: string
+  stderr: string
+  confined: boolean
+  stdoutTruncated: boolean
+  stderrTruncated: boolean
+}
+
+export type HostPlatformError =
+  | { invalid: string }
+  | "task_unknown"
+  | "task_exists"
+  | "task_running"
+  | { output_unavailable: string }
+  | "cancelled"
+  | "closed"
+  | { failed: string }
+
+/** A request to run one configured command with stdin. */
+export type SpawnWithStdinRequest = {
+  command: string
+  cwd: string
+  env: Record<string, string | null>
+  stdin?: string | null
+  timeoutMs: number | bigint
+  limits: OutputLimits
+}
+
+export type SpawnWithStdinStatus = "exited" | "signaled" | "cancelled" | "timed_out"
+
+export type SpawnWithStdinReply = {
+  status: SpawnWithStdinStatus
+  exitCode?: number | null
+  signal?: string | null
+  durationMs: number | bigint
+  stdout: string
+  stderr: string
+  stdoutTruncated: boolean
+  stderrTruncated: boolean
+}
+
 export type ShellEdition = "bash" | "zsh" | "sh" | "dash" | "ksh" | "git-bash" | "pwsh" | "windows-powershell" | "cmd"
 
 export type ShellSource =
@@ -198,16 +268,6 @@ export type SpawnReply = {
   taskId: string
   outputPath: string
 }
-
-export type HostPlatformError =
-  | { invalid: string }
-  | "task_unknown"
-  | "task_exists"
-  | "task_running"
-  | { output_unavailable: string }
-  | "cancelled"
-  | "closed"
-  | { failed: string }
 
 export type WaitRequest = {
   taskId: string
@@ -284,6 +344,19 @@ export type OutputTail = {
 }
 
 export interface HostPlatform {
+  /**
+   * [`Self::spawn`] with `stdin` written to the child's standard input,
+   * which then closes. A child that exits before reading it does not fail
+   * the start.
+   * Runs one confined helper and returns its bounded result.
+   * @throws {HostPlatformErrorThrown}
+   */
+  spawnConfined(request: ConfinedRequest, cancelled: () => void | Promise<void>): Promise<ConfinedReply>
+  /**
+   * Runs one configured command with stdin and returns its bounded result.
+   * @throws {HostPlatformErrorThrown}
+   */
+  spawnWithStdin(request: SpawnWithStdinRequest, cancelled: () => void | Promise<void>): Promise<SpawnWithStdinReply>
   /**
    * Reads the configured exec shell for this invocation without reloading
    * the plugin. Explicitly constructed platforms keep their supplied shell.

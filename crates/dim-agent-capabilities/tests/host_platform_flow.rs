@@ -296,7 +296,7 @@ async fn spawn_with_stdin_delivers_the_bytes_and_closes_the_pipe() {
     let cwd = std::env::temp_dir();
     let payload = br#"{"hook_event_name":"Stop"}"#.to_vec();
     let mut tree = platform
-        .spawn_with_stdin(
+        .spawn_with_stdin_process(
             ProcessSpec {
                 executable: "/bin/sh".into(),
                 args: vec!["-c".into(), "cat; echo done".into()],
@@ -312,7 +312,7 @@ async fn spawn_with_stdin_delivers_the_bytes_and_closes_the_pipe() {
     assert_eq!(output, "{\"hook_event_name\":\"Stop\"}done\n");
 
     let mut tree = platform
-        .spawn_with_stdin(
+        .spawn_with_stdin_process(
             ProcessSpec {
                 executable: "/bin/sh".into(),
                 args: vec!["-c".into(), "echo ok".into()],
@@ -413,7 +413,7 @@ async fn confined(
     timeout: Duration,
 ) -> Result<ConfinedOutput, ConfinedError> {
     platform
-        .spawn_confined(
+        .spawn_confined_process(
             ConfinedSpec {
                 executable: "/bin/sh".into(),
                 args: vec!["-c".into(), script.into()],
@@ -491,7 +491,7 @@ async fn a_confined_helper_reads_its_grants_and_writes_only_its_directory() {
     std::fs::remove_file(read.join("escape.txt")).unwrap();
 
     let output = platform
-        .spawn_confined(
+        .spawn_confined_process(
             ConfinedSpec {
                 executable: "/bin/sh".into(),
                 args: vec!["-c".into(), script.into()],
@@ -561,7 +561,7 @@ async fn a_confined_helper_reads_its_grants_and_writes_only_its_directory() {
         "the unconfined control did not reach the listener: {control_output}"
     );
     let output = platform
-        .spawn_confined(
+        .spawn_confined_process(
             ConfinedSpec {
                 executable: bash,
                 args: vec!["-c".into(), probe.into()],
@@ -624,7 +624,7 @@ async fn a_confined_helper_stdout_cap_kills_the_tree() {
     );
     let platform = confined_platform(switch_off());
     let result = platform
-        .spawn_confined(
+        .spawn_confined_process(
             ConfinedSpec {
                 executable: "/bin/sh".into(),
                 args: vec!["-c".into(), script.into()],
@@ -670,7 +670,7 @@ async fn a_confined_helper_cancel_kills_the_tree() {
     let platform = confined_platform(switch_off());
     let cancel = CancellationToken::new();
     let (result, (pid, cancelled_at)) = tokio::join!(
-        platform.spawn_confined(
+        platform.spawn_confined_process(
             ConfinedSpec {
                 executable: "/bin/sh".into(),
                 args: vec!["-c".into(), script.into()],
@@ -743,7 +743,7 @@ async fn a_confined_helper_refuses_relative_and_missing_paths() {
     ];
     for confinement in cases {
         let result = platform
-            .spawn_confined(
+            .spawn_confined_process(
                 ConfinedSpec {
                     executable: "/bin/sh".into(),
                     args: vec!["-c".into(), "true".into()],
@@ -773,7 +773,7 @@ async fn a_host_without_bubblewrap_runs_the_confined_helper_unconfined() {
     let mut platform = confined_platform(switch_off());
     platform.env = env(&[("PATH", bin.to_str().unwrap())]);
     let output = platform
-        .spawn_confined(
+        .spawn_confined_process(
             ConfinedSpec {
                 executable: "/bin/sh".into(),
                 args: vec!["-c".into(), "echo artifact > artifact.txt".into()],
@@ -826,7 +826,7 @@ async fn the_isolation_switch_does_not_change_a_confined_helper() {
         "if exec 3<>/dev/tcp/127.0.0.1/{port} 2>/dev/null; then echo tcp=yes; else echo tcp=no; fi\n"
     );
     let output = platform
-        .spawn_confined(
+        .spawn_confined_process(
             ConfinedSpec {
                 executable: bash,
                 args: vec!["-c".into(), script.into()],
@@ -995,7 +995,7 @@ async fn a_confined_helper_stderr_cap_kills_the_tree() {
     );
     let platform = confined_platform(switch_off());
     let result = platform
-        .spawn_confined(
+        .spawn_confined_process(
             ConfinedSpec {
                 executable: "/bin/sh".into(),
                 args: vec!["-c".into(), script.into()],
@@ -1051,7 +1051,7 @@ async fn a_confined_helper_gets_the_allowlist_plus_its_own_environment() {
         quote(&mktemp)
     );
     let output = platform
-        .spawn_confined(
+        .spawn_confined_process(
             ConfinedSpec {
                 executable: "/bin/sh".into(),
                 args: vec!["-c".into(), script.into()],
@@ -1378,5 +1378,123 @@ async fn the_host_platform_service_serves_a_shell() {
     invoke("settle", serde_json::json!({"taskId": "service-shell"}))
         .await
         .unwrap();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn the_host_platform_service_runs_a_command_with_stdin() {
+    let dir = std::env::temp_dir().join(unique("dim-host-stdin"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let root = rutis::Ctx::root_with(tokio::runtime::Handle::current());
+    let catalog = dim_agent_capabilities::catalog();
+    let build = Default::default();
+    let names = dim_agent_runtime::Names::copy(&catalog, &build);
+    let _execution = root
+        .provide(ExecutionSettingsHost::fixed(Default::default()))
+        .unwrap();
+    let _toolchain = root.provide(ToolchainSourceHost::fixed(vec![])).unwrap();
+    let plugin = root.plugin(
+        HostPlatformPlugin::new(
+            &names,
+            HostPlatformConfig {
+                execution: names.key().unwrap(),
+                toolchain: names.key().unwrap(),
+                exec_shell_file: None,
+                command_files: None,
+                home: Some(dir.clone()),
+            },
+        )
+        .unwrap(),
+    );
+    (&plugin).await.unwrap();
+    let platform = root.get::<HostPlatform>().unwrap();
+    let never = CancellationToken::new();
+    let cancelled: dim_agent_capabilities::host::CancelledFn = std::sync::Arc::new(move || {
+        let never = never.clone();
+        Box::pin(async move {
+            never.cancelled().await;
+            Ok(())
+        })
+    });
+    let reply = platform
+        .spawn_with_stdin(
+            SpawnWithStdinRequest {
+                command: "cat".into(),
+                cwd: dir.clone(),
+                env: Default::default(),
+                stdin: Some("aGk=".into()),
+                timeout_ms: 10000,
+                limits: OutputLimits {
+                    stdout: 64 * 1024,
+                    stderr: 64 * 1024,
+                },
+            },
+            cancelled,
+        )
+        .await
+        .unwrap();
+    assert_eq!(reply.status, SpawnWithStdinStatus::Exited);
+    assert_eq!(reply.exit_code, Some(0));
+    assert_eq!(reply.stdout, "aGk=");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn the_host_platform_service_runs_a_confined_helper() {
+    let dir = std::env::temp_dir().join(unique("dim-host-confined"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let root = rutis::Ctx::root_with(tokio::runtime::Handle::current());
+    let catalog = dim_agent_capabilities::catalog();
+    let build = Default::default();
+    let names = dim_agent_runtime::Names::copy(&catalog, &build);
+    let _execution = root
+        .provide(ExecutionSettingsHost::fixed(Default::default()))
+        .unwrap();
+    let _toolchain = root.provide(ToolchainSourceHost::fixed(vec![])).unwrap();
+    let plugin = root.plugin(
+        HostPlatformPlugin::new(
+            &names,
+            HostPlatformConfig {
+                execution: names.key().unwrap(),
+                toolchain: names.key().unwrap(),
+                exec_shell_file: None,
+                command_files: None,
+                home: Some(dir.clone()),
+            },
+        )
+        .unwrap(),
+    );
+    (&plugin).await.unwrap();
+    let platform = root.get::<HostPlatform>().unwrap();
+    let never = CancellationToken::new();
+    let cancelled: dim_agent_capabilities::host::CancelledFn = std::sync::Arc::new(move || {
+        let never = never.clone();
+        Box::pin(async move {
+            never.cancelled().await;
+            Ok(())
+        })
+    });
+    let reply = platform
+        .spawn_confined(
+            ConfinedRequest {
+                program: "/bin/sh".into(),
+                args: vec!["-c".into(), "printf hi; printf err >&2".into()],
+                read: vec![],
+                write: vec![dir.clone()],
+                env: Default::default(),
+                timeout_ms: 10000,
+                output_limit: OutputLimits {
+                    stdout: 64 * 1024,
+                    stderr: 64 * 1024,
+                },
+                services: dim_agent_capabilities::host_platform::SystemServices::None,
+            },
+            cancelled,
+        )
+        .await
+        .unwrap();
+    assert_eq!(reply.status, Some(0));
+    assert_eq!(reply.stdout, "aGk=");
+    assert_eq!(reply.stderr, "ZXJy");
     std::fs::remove_dir_all(dir).unwrap();
 }

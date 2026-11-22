@@ -19,7 +19,7 @@ Resource and state operations use these public services:
 
 | Face | Operations | Provided by | Issue |
 | --- | --- | --- | --- |
-| `hostPlatform` | `info`, `execShell`, `persistentShell`, `sandboxBackend`, `execRoot`, `spawn`, `wait`, `kill`, `settle`, `output`, `retainOutput`, `tail`, `shell`, `write`, `resize` | the process owner | #1295 |
+| `hostPlatform` | `info`, `execShell`, `persistentShell`, `sandboxBackend`, `execRoot`, `spawn`, `wait`, `kill`, `settle`, `output`, `retainOutput`, `tail`, `shell`, `write`, `resize`, `spawnWithStdin`, `spawnConfined` | the process owner | #1295 |
 | `fsHost` | tool family: `resolve`, `read`, `write`, `edit`, `glob`, `grep`, `mentions`; storage family: `stat`, `readBytes`, `openRead`, `readAt`, `closeRead`, `lock`, `unlock`, `backup`, `createDirectory`, `replace`, `list`, `remove` | the file-operations owner | #1297 |
 | `store` | Session-row repository operations (§5.2) | the process state owner | #1298 |
 | `timelineStore` | Timeline operations and completion notifications (§5.1) | the Session state owner | #1298 |
@@ -100,7 +100,7 @@ The process operations are split by their owners:
 
 | Service | Scope | Public operations | Owner document |
 | --- | --- | --- | --- |
-| `hostPlatform` | process | `info`, `execShell`, `persistentShell`, `sandboxBackend`, `execRoot`, `spawn`, `wait`, `kill`, `settle`, `output`, `retainOutput`, `tail`, `shell`, `write`, `resize` | [HostPlatform](../architecture/rust-agent/plugins/HostPlatform.md) |
+| `hostPlatform` | process | `info`, `execShell`, `persistentShell`, `sandboxBackend`, `execRoot`, `spawn`, `wait`, `kill`, `settle`, `output`, `retainOutput`, `tail`, `shell`, `write`, `resize`, `spawnWithStdin`, `spawnConfined` | [HostPlatform](../architecture/rust-agent/plugins/HostPlatform.md) |
 | `toolHost` | session | `execute` | [tool contributions §2.1](../architecture/rust-agent/tool-contributions.md#21-宿主工具的-toolhost-数据面) |
 | `backgroundExec` | branch | `output`, `outputPage`, `wait`, `stop` | [WorkspaceTools data face](../architecture/rust-agent/plugins/WorkspaceTools.md#data-face) |
 | `sessionMethods.shell` / `ShellSession` | session, branch | the shell operations | [ShellInput](../architecture/rust-agent/plugins/ShellInput.md) |
@@ -111,7 +111,8 @@ cross. Stage 1 serves the command task operations on `hostPlatform`: `spawn` ret
 the process/output state stays with the owner; `wait`, `kill`, `settle`, `output`, `retainOutput`
 and `tail` work by that id. `WorkspaceTools` and `backgroundExec` use the task id; the branch keeps
 the task record and the facts. `shell`/`write`/`resize` are served by the same owner; `ShellSession` runs its marker protocol
-over the owner's shell task. `configured` and `confined` follow in Stage 3.
+over the owner's shell task. `spawnWithStdin` and `spawnConfined` are the existing methods
+Hooks and OCR call, now with data requests and replies.
 
 The command process, output file and PTY are owned by `HostPlatform`; the branch keeps the task
 record and writes the facts. `ShellSession` keeps its marker protocol and runs where the shell
