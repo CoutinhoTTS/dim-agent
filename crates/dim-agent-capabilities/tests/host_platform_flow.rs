@@ -1759,3 +1759,93 @@ async fn output_removal_refuses_traversal_and_links() {
         .unwrap();
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[tokio::test]
+async fn a_shell_burst_is_backpressured_instead_of_reset() {
+    let dir = std::env::temp_dir().join(unique("dim-host-burst"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let root = rutis::Ctx::root_with(tokio::runtime::Handle::current());
+    let catalog = dim_agent_capabilities::catalog();
+    let build = Default::default();
+    let names = dim_agent_runtime::Names::copy(&catalog, &build);
+    let _execution = root
+        .provide(ExecutionSettingsHost::fixed(Default::default()))
+        .unwrap();
+    let _toolchain = root
+        .provide(ToolchainSourceHost::fixed(vec![]))
+        .unwrap();
+    let plugin = root.plugin(
+        HostPlatformPlugin::new(
+            &names,
+            HostPlatformConfig {
+                execution: names.key().unwrap(),
+                toolchain: names.key().unwrap(),
+                exec_shell_file: None,
+                command_files: None,
+                home: Some(dir.clone()),
+            },
+        )
+        .unwrap(),
+    );
+    (&plugin).await.unwrap();
+    let platform = root.get::<HostPlatform>().unwrap();
+    platform
+        .shell(ShellRequest {
+            task_id: "burst-shell".into(),
+            cwd: dir.clone(),
+            workspace: dir.clone(),
+            roots: Vec::new(),
+            output_dir: dir.clone(),
+            cols: 80,
+            rows: 24,
+        })
+        .await
+        .unwrap();
+    platform
+        .write(ShellWrite {
+            task_id: "burst-shell".into(),
+            data: "c2VxIDEgNDAwMDAwCg==".into(),
+        })
+        .await
+        .unwrap();
+    let mut cursor = 0u64;
+    let mut total = 0usize;
+    for _ in 0..2000 {
+        let page = platform
+            .output(OutputRequest {
+                task_id: "burst-shell".into(),
+                cursor: None,
+                limit: Some(64 * 1024),
+                wait_ms: Some(100),
+                event_cursor: Some(cursor),
+            })
+            .await
+            .unwrap();
+        assert_ne!(page.reset, Some(true));
+        total += page
+            .events
+            .iter()
+            .map(|event| event.output.len())
+            .sum::<usize>();
+        if let Some(next) = page.next_event_cursor {
+            cursor = next;
+        }
+        if total > 1_200_000 {
+            break;
+        }
+    }
+    assert!(total > 1_000_000, "only {total} bytes were served");
+    platform
+        .kill(TaskRequest {
+            task_id: "burst-shell".into(),
+        })
+        .await
+        .unwrap();
+    platform
+        .settle(TaskRequest {
+            task_id: "burst-shell".into(),
+        })
+        .await
+        .unwrap();
+    std::fs::remove_dir_all(dir).unwrap();
+}

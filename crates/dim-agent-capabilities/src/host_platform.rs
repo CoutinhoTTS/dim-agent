@@ -3296,7 +3296,7 @@ pub(crate) mod shell {
         collections::VecDeque,
         io::{self, Read, Write},
         path::{Path, PathBuf},
-        sync::{Arc, Mutex},
+        sync::{Arc, Condvar, Mutex},
         time::{Duration, Instant},
     };
     use tokio::sync::{Mutex as AsyncMutex, Notify, watch};
@@ -3314,6 +3314,7 @@ pub(crate) mod shell {
         pty: AsyncMutex<Option<PtyProcessTree>>,
         capture: Mutex<Capture>,
         events: Mutex<ShellEvents>,
+        event_space: Condvar,
         event_notify: Arc<Notify>,
         terminal: watch::Sender<Option<ShellExit>>,
         kill: CancellationToken,
@@ -3343,11 +3344,11 @@ pub(crate) mod shell {
     const EVENT_RETAIN_CHARS: usize = 1024 * 1024;
 
     fn parse_shell_job(line: &str) -> Option<(String, u32)> {
-        let start = line.find("__DIM_END_")?;
-        let rest = &line[start..];
-        let close = rest[2..].find("__")? + 2;
-        let after = rest.get(close + 2..)?;
-        let mut parts = after.split_whitespace();
+        let (prefix, tail) = last_full_marker(line)?;
+        if prefix != "__DIM_END_" {
+            return None;
+        }
+        let mut parts = tail.split_whitespace();
         let pid = parts.next()?.parse().ok()?;
         let task_id = parts.next()?;
         task_id
@@ -3355,9 +3356,40 @@ pub(crate) mod shell {
             .then(|| (task_id.to_owned(), pid))
     }
 
+    fn last_full_marker(line: &str) -> Option<(&'static str, &str)> {
+        let mut found: Option<(usize, (&'static str, &str))> = None;
+        for (prefix, position) in [
+            ("__DIM_START_", line.rfind("__DIM_START_")),
+            ("__DIM_END_", line.rfind("__DIM_END_")),
+        ] {
+            let Some(position) = position else {
+                continue;
+            };
+            if found.is_some_and(|(other, _)| other > position) {
+                continue;
+            }
+            let rest = &line[position + prefix.len()..];
+            let Some((first, rest)) = rest.split_once('_') else {
+                continue;
+            };
+            let Some((second, tail)) = rest.split_once("__") else {
+                continue;
+            };
+            if first.len() == 8
+                && second.len() == 8
+                && first.bytes().all(|byte| byte.is_ascii_hexdigit())
+                && second.bytes().all(|byte| byte.is_ascii_hexdigit())
+            {
+                found = Some((position, (prefix, tail)));
+            }
+        }
+        found.map(|(_, marker)| marker)
+    }
+
     #[derive(Default)]
     struct ShellEvents {
         items: VecDeque<super::ShellEvent>,
+        pending: String,
         base: u64,
         next: u64,
         chars: usize,
@@ -3366,19 +3398,27 @@ pub(crate) mod shell {
 
     impl ShellEvents {
         fn push(&mut self, text: String) {
-            if text.contains("__DIM_START_") {
-                self.state.busy = true;
-                self.state.ready = false;
-            }
-            if let Some(position) = text.rfind("__DIM_END_") {
-                let tail = &text[position..];
-                let after = &tail["__DIM_END_".len()..];
-                if let Some(end) = after.find("__") {
-                    let code = after[end + 2..].trim();
-                    self.state.last_code = (!code.is_empty()).then(|| code.to_owned());
+            self.pending.push_str(&text);
+            while let Some(newline) = self.pending.find('\n') {
+                let line: String = self.pending.drain(..=newline).collect();
+                if let Some((prefix, tail)) = last_full_marker(&line) {
+                    if prefix == "__DIM_START_" {
+                        self.state.busy = true;
+                        self.state.ready = false;
+                    } else {
+                        self.state.busy = false;
+                        self.state.ready = true;
+                        let code = tail.trim();
+                        if !code.is_empty() && !code.contains(char::is_whitespace) {
+                            self.state.last_code = Some(code.to_owned());
+                        }
+                    }
                 }
-                self.state.busy = false;
-                self.state.ready = true;
+            }
+            if self.pending.len() > 4096 {
+                let split = self.pending.len() - 4096;
+                let split = self.pending.floor_char_boundary(split);
+                self.pending.drain(..split);
             }
             let cursor = self.next;
             self.next += 1;
@@ -3387,15 +3427,18 @@ pub(crate) mod shell {
                 cursor,
                 output: text,
             });
-            while self.chars > EVENT_RETAIN_CHARS && self.items.len() > 1 {
+        }
+
+        fn page(&mut self, cursor: u64) -> EventPage {
+            while let Some(front) = self.items.front() {
+                if front.cursor >= cursor {
+                    break;
+                }
                 if let Some(front) = self.items.pop_front() {
-                    self.chars -= front.output.len();
+                    self.chars = self.chars.saturating_sub(front.output.len());
                     self.base = front.cursor + 1;
                 }
             }
-        }
-
-        fn page(&self, cursor: u64) -> EventPage {
             let reset = cursor < self.base;
             let events: Vec<_> = self
                 .items
@@ -3508,6 +3551,7 @@ pub(crate) mod shell {
                 pty: AsyncMutex::new(Some(pty)),
                 capture: Mutex::default(),
                 events: Mutex::default(),
+                event_space: Condvar::new(),
                 event_notify: Arc::new(Notify::new()),
                 terminal: watch::channel(None).0,
                 kill: CancellationToken::new(),
@@ -3571,7 +3615,16 @@ pub(crate) mod shell {
                     drop(capture);
                     {
                         let mut events = pump.events.lock().unwrap();
-                        events.push(chunk);
+                        while events.chars > EVENT_RETAIN_CHARS && pump.exit().is_none() {
+                            let (guard, _) = pump
+                                .event_space
+                                .wait_timeout(events, Duration::from_millis(100))
+                                .unwrap();
+                            events = guard;
+                        }
+                        if pump.exit().is_none() {
+                            events.push(chunk);
+                        }
                     }
                     pump.event_notify.notify_waiters();
                 }
@@ -3666,8 +3719,11 @@ pub(crate) mod shell {
             let deadline = Instant::now() + Duration::from_millis(wait);
             loop {
                 let page = {
-                    let events = self.events.lock().unwrap();
-                    events.page(cursor)
+                    let mut events = self.events.lock().unwrap();
+                    let page = events.page(cursor);
+                    drop(events);
+                    self.event_space.notify_all();
+                    page
                 };
                 if !page.events.is_empty() || page.reset || wait == 0 || Instant::now() >= deadline
                 {
@@ -3810,6 +3866,37 @@ pub(crate) mod shell {
                 preview_truncated: tail.truncated,
                 failure_note: end.and_then(|end| end.error),
             }
+        }
+    }
+
+    #[cfg(test)]
+    mod shell_marker_tests {
+        use super::last_full_marker;
+
+        #[test]
+        fn an_echoed_marker_is_not_a_full_marker() {
+            let echo = "printf '%s%s' '__DIM_START_aaaabbbb_' 'ccccdddd__';";
+            assert!(last_full_marker(echo).is_none());
+        }
+
+        #[test]
+        fn a_full_marker_is_recognized_after_the_echo() {
+            let line = "__DIM_START_aaaabbbb_ccccdddd__";
+            assert_eq!(
+                last_full_marker(line),
+                Some(("__DIM_START_", ""))
+            );
+            let line = "__DIM_END_aaaabbbb_ccccdddd__7\n";
+            assert_eq!(last_full_marker(line), Some(("__DIM_END_", "7\n")));
+        }
+
+        #[test]
+        fn the_init_line_reports_its_last_marker() {
+            let line = "__DIM_START_aaaabbbb_ccccdddd____DIM_END_eeeeffff_00001111__0\n";
+            assert_eq!(
+                last_full_marker(line),
+                Some(("__DIM_END_", "0\n"))
+            );
         }
     }
 }
