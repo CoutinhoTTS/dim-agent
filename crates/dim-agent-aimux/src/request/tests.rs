@@ -828,6 +828,146 @@ async fn the_gemini_body_carries_the_stored_nullable_type_verbatim() {
     assert_eq!(parameters["required"], json!(["space_id"]));
 }
 
+/// A 1x1 GIF: Gemini does not take GIF in any part of a request.
+const GIF: &str = "R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==";
+
+/// Gemini takes PNG, JPEG and WebP but not GIF; a GIF becomes its reference.
+#[tokio::test]
+async fn a_gif_image_reaches_gemini_as_its_reference() {
+    let request: ModelRequest = serde_json::from_value(json!({
+        "providerId": "application-alias", "modelId": "gemini-2.5-pro",
+        "messages": [{"role": "user", "content": [
+            {"type": "image", "source": {"type": "base64", "mediaType": "image/png", "data": "aGVsbG8="}},
+            {"type": "image", "source": {"type": "base64", "mediaType": "image/gif", "data": GIF}}
+        ]}]
+    }))
+    .unwrap();
+    let prepared = convert(&request, &ProviderKind::Gemini, None).unwrap();
+    let LanguageModelMessage::User { content, .. } = &prepared.options.prompt[0] else {
+        panic!("missing user message")
+    };
+    assert_eq!(content.len(), 2, "{content:?}");
+    assert!(matches!(&content[0], UserPart::File(file) if file.media_type == "image/png"));
+    assert!(
+        matches!(&content[1], UserPart::Text(part) if part.text.starts_with("img:")),
+        "the GIF is not a Gemini image format: {content:?}"
+    );
+    let (body, _) = gemini_capture(request, "gemini-2.5-pro").await;
+    let parts = body["contents"][0]["parts"].as_array().unwrap();
+    assert_eq!(parts[0]["inlineData"]["mimeType"], "image/png");
+    assert!(
+        parts[1]["text"].as_str().unwrap().starts_with("img:"),
+        "the GIF reaches the wire as its reference: {body}"
+    );
+    assert!(
+        parts
+            .iter()
+            .all(|part| part["inlineData"]["mimeType"] != "image/gif"),
+        "no GIF reaches the wire: {body}"
+    );
+}
+
+/// One Bedrock request whose tool result carries a PNG.
+fn bedrock_tool_image_request(model: &str) -> ModelRequest {
+    serde_json::from_value(json!({
+        "providerId": "application-alias", "modelId": model,
+        "messages": [
+            {"role": "user", "content": "look"},
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "call-1", "name": "read", "input": {}}
+            ]},
+            {"role": "tool_result", "content": [
+                {"type": "tool_result", "tool_use_id": "call-1", "is_error": false,
+                 "content": [
+                    {"type": "text", "text": "caption"},
+                    {"type": "image", "source": {"type": "base64", "mediaType": "image/png", "data": "aGVsbG8="}}
+                 ]}
+            ]}
+        ],
+        "tools": [tool("read")]
+    }))
+    .unwrap()
+}
+
+/// A Bedrock body for `request` as it reaches the wire.
+async fn bedrock_capture(request: ModelRequest, model: &'static str) -> Value {
+    capture(
+        move |url| {
+            Arc::new(
+                create_amazon_bedrock(AmazonBedrockProviderSettings {
+                    region: Some("us-east-1".into()),
+                    api_key: Some(Resolvable::Value(String::new())),
+                    access_key_id: Some("access-key".into()),
+                    secret_access_key: Some("secret-key".into()),
+                    base_url: Some(url),
+                    ..AmazonBedrockProviderSettings::default()
+                })
+                .unwrap()
+                .chat(model),
+            )
+        },
+        convert(&request, &ProviderKind::Bedrock, None)
+            .unwrap()
+            .options,
+    )
+    .await
+}
+
+fn bedrock_tool_result(body: &Value) -> &Value {
+    body["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|message| message["content"].as_array().unwrap())
+        .find_map(|part| part.get("toolResult"))
+        .map(|result| &result["content"])
+        .expect("the request carries a tool result")
+}
+
+/// Bedrock takes an image inside `toolResult` only on the models that support
+/// that block; the others receive it in the user message after the result.
+#[tokio::test]
+async fn a_bedrock_tool_image_uses_a_placement_the_model_supports() {
+    for model in [
+        "us.amazon.nova-pro-v1:0",
+        "global.anthropic.claude-haiku-4-5-20251001-v1:0",
+    ] {
+        let body = bedrock_capture(bedrock_tool_image_request(model), model).await;
+        let result = bedrock_tool_result(&body);
+        assert!(
+            result
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|part| part.get("image").is_some()),
+            "{model} takes the image inside toolResult: {body}"
+        );
+    }
+    for model in [
+        "us.meta.llama4-maverick-17b-instruct-v1:0",
+        "global.anthropic.claude-opus-5",
+    ] {
+        let body = bedrock_capture(bedrock_tool_image_request(model), model).await;
+        let result = bedrock_tool_result(&body);
+        assert!(
+            result
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|part| part.get("image").is_none()),
+            "{model} takes no image inside toolResult: {body}"
+        );
+        assert!(
+            body["messages"].as_array().unwrap().iter().any(|message| {
+                message["content"]
+                    .as_array()
+                    .is_some_and(|parts| parts.iter().any(|part| part.get("image").is_some()))
+            }),
+            "the image takes a supported placement instead: {body}"
+        );
+    }
+}
+
 /// A stored reply, the only varying input of #1038's switch table.
 fn switch_request(assistant: Value, config: Value) -> ModelRequest {
     let mut request: ModelRequest = serde_json::from_value(json!({

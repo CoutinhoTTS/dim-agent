@@ -962,6 +962,67 @@ async fn an_unsendable_image_is_a_placeholder_for_a_vision_model() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_empty_file_image_is_a_placeholder_for_a_vision_model() {
+    let fixture = Fixture::new().await;
+    let session = fixture.session().await;
+    configure_model(&session, "main", "alpha", true).await;
+    let stored = fixture
+        .server
+        .service::<SessionFiles>()
+        .unwrap()
+        .0
+        .put(
+            session.id().into(),
+            "empty.png".into(),
+            Vec::new(),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    session
+        .input(
+            InputMessageData {
+                user: Some(UserInput {
+                    content: vec![ContentBlock::Image {
+                        source: ImageSource {
+                            source_type: ImageSourceType::File,
+                            file_id: Some(stored.file_id),
+                            data: None,
+                            ..image()
+                        },
+                    }],
+                }),
+                ..Default::default()
+            },
+            "main",
+        )
+        .await
+        .unwrap();
+    idle(&session, "main").await;
+    let request = fixture
+        .script
+        .requests
+        .lock()
+        .unwrap()
+        .last()
+        .unwrap()
+        .clone();
+    assert!(
+        request_images(&request).is_empty(),
+        "the empty owned file is not sent as an image block"
+    );
+    assert_eq!(
+        request_texts(&request)
+            .iter()
+            .filter(|text| text.starts_with("[Image omitted:"))
+            .count(),
+        1,
+        "the empty file takes the omission placeholder"
+    );
+    fixture.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_image_understanding_default_does_not_change_conversational_routing() {
     let fixture = Fixture::new().await;
     let session = fixture.session().await;

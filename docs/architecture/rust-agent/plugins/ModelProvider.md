@@ -20,16 +20,25 @@ using the shared `images::image_reference` helper. The transformation changes
 the request only; adopted input, the Timeline and stored tool results never change.
 Auxiliary calls do not pass through ModelProvider, so their image pixels stay intact.
 
+The provider request encoder applies the destination's format and
+message-placement support on top of that rule: Gemini takes no GIF, and a
+Bedrock model outside the ones that support images in `toolResult` receives the
+tool image in the user message after the result. Both decisions stay in the
+encoder; no catalog field states them.
+
 The adapter selects replacements before copying content. An unchanged request
 keeps its Arc without cloning text, thinking, tool arguments or result blocks.
 When images change, only those messages are copied; other messages stay shared.
 
-The final Aimux boundary reads immutable accepted bytes without decoding or
-rescaling them again. A request permits at most 32 MiB of encoded image data,
-including user and tool-result images, and 64 MiB of final HTTP body. Exceeding
-these limits fails before sending the request. Each Aimux generation admits
-four concurrent request preparations and sends; waiting is cancellable and
-owner shutdown releases the waiters. Provider-specific limits still apply.
+Each kept image joins the request's 32 MiB encoded-image aggregate as it is
+added, so an over-budget request fails during adaptation before the remaining
+files are read. The final Aimux boundary reads immutable accepted bytes without
+decoding or rescaling them again and checks the aggregate again. A request
+permits at most 32 MiB of encoded image data, including user and tool-result
+images, and 64 MiB of final HTTP body. Exceeding these limits fails before
+sending the request. Each Aimux generation admits four concurrent request
+preparations and sends; waiting is cancellable and owner shutdown releases the
+waiters. Provider-specific limits still apply.
 
 ## Dependencies
 
@@ -159,23 +168,26 @@ a continuation declines it.
 
 ## Durable images at model execution
 
-During request adaptation and before budget validation, ModelProvider uses
-`session_files::resolve` to read a file-backed image for the request metadata's
-Session, then keeps the bytes for a vision-capable model, or hashes and
-releases them for a model that needs a reference. The same path handles user
-content and tool results for both kinds of model; only images in effective
-context are read. A reference route retains only the reference; the vision route
-retains the resolved bytes. The stored request and its File sources remain
-unchanged.
+During request adaptation, ModelProvider uses `session_files::resolve` to read
+a file-backed image for the request metadata's Session, then keeps the bytes
+for a vision-capable model, or hashes and releases them for a model that needs
+a reference. The resolved source is checked by the same sendable rule, so an
+empty owned file takes the placeholder instead of being sent as an empty image.
+The same path handles user content and tool results for both kinds of model;
+only images in effective context are read. A reference route retains only the
+reference; the vision route retains the resolved bytes. The stored request and
+its File sources remain unchanged.
 
 The optional dependency is named through `Names` and read with `get_at` at
 load. It does not gate or create a reload relation. A missing file service,
 Session identity or stored image fails a request that needs file bytes, rather
 than inventing a reference or silently omitting it. Cancellation propagates to
 bounded reads with the existing per-file storage limit. The aggregate image-data
-budget applies at Aimux's image-consuming boundary; a reference route carries no
-image data, so retained images totaling more than 32 MiB do not block text
-calls, while a vision request that carries them fails before sending.
+budget applies during adaptation, as each kept image joins the request: a
+reference route carries no image data, so retained images totaling more than
+32 MiB do not block text calls, while a vision request that carries them fails
+during adaptation before the remaining files are read. Aimux's image-consuming
+boundary checks the materialized request again.
 
 SessionStore provides `sessionFiles` in the process, under both its shared
 dispatch name and the native binding. The native-storage profile also gates

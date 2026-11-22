@@ -227,13 +227,17 @@ CLI 在提交前检查：
 
 限制（A2）：每次提交最多 20 张图片，整个编码请求不超过 16 MiB 传输帧；仍然超出帧的提交被拒绝并保留草稿。块保持其顺序。
 
-ModelProvider 在构建对话模型请求时按所用模型的视觉能力处理每个图片块，覆盖所有写入方的用户内容和工具结果。支持视觉的模型（或能力未知的请求）收到可发送的图片块，文件来源先解析为字节；不支持图像的模型从不收到像素。引用契约见 [ImageUnderstanding §3](../../../design/plugins/ImageUnderstanding.md#3-references)。
+ModelProvider 在构建对话模型请求时按所用模型的视觉能力处理每个图片块，覆盖所有写入方的用户内容和工具结果。支持视觉的模型（或能力未知的请求）收到可发送的图片块，文件来源先解析为字节，解析后按同一规则再检查一次，因此空的自有文件只会得到占位；不支持图像的模型从不收到像素。引用契约见 [ImageUnderstanding §3](../../../design/plugins/ImageUnderstanding.md#3-references)。
+
+提供方的请求编码器在路由规则之上再按目标支持的格式和放置位置处理。Gemini 接受 PNG、JPEG、WebP、HEIC 和 HEIF，不接受 GIF，因此 GIF 在那里变成引用。Bedrock 只在 Amazon Nova 和 Anthropic Claude 3、4 上把图片放进 `toolResult`；其他 Bedrock 模型的图片跟在结果之后的用户消息里，与其他协议已有的放置方式相同。目标不接受的格式变成引用或占位。
+
+留下的图片在加入请求时计入编码后的图片预算：用户图片和工具结果图片合计最多 32 MiB。超出的请求在适配阶段就失败，不再读取其余图片。
 
 | 图片块 | 请求内容 |
 | --- | --- |
 | 支持视觉的模型收到的、可发送的 PNG、JPEG、WebP 或 GIF base64 图片或带 id 的同格式文件 | 图片块本身；文件来源先解析为字节 |
 | 不支持图像的模型收到的、可发送的图片 | 文本 `img:` 加 base64 解码后的图片文件字节的 SHA-256 前 16 个小写十六进制字符；不散列像素或 base64 文本，相同字节得到相同引用 |
-| URL 来源、缺少 id 的文件、缺失或无法解码的 base64 数据，或本构建无法解码的格式 | 保留原有占位：不支持图像的模型为 `[Image omitted: the current model does not accept images.]`，否则为 `[Image omitted: the image cannot be sent to this model.]`（A10） |
+| URL 来源、缺少 id 或内容为空的文件、缺失或无法解码的 base64 数据，或本构建无法解码的格式 | 保留原有占位：不支持图像的模型为 `[Image omitted: the current model does not accept images.]`，否则为 `[Image omitted: the image cannot be sent to this model.]`（A10） |
 
 CLI 的缩放规则和限制（A2）在提交前仍然适用；引用散列图片块实际携带的文件字节，不再次缩放或重编码。
 

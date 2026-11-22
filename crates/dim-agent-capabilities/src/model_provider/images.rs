@@ -3,14 +3,14 @@
 //! results alike. A vision-capable model receives a sendable image as it is.
 //! The adopted input and the history are never changed.
 use crate::host::{HostError, SessionFiles};
-use crate::images::image_reference;
+use crate::images::{image_reference, image_reference_or_placeholder};
+use crate::session_files::check_image_budget;
 use base64::Engine;
 use dim_agent_types::*;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 const NO_IMAGE_INPUT: &str = "[Image omitted: the current model does not accept images.]";
-const UNSENDABLE: &str = "[Image omitted: the image cannot be sent to this model.]";
 
 /// Image formats every adapter accepts (feature list).
 const FORMATS: [&str; 4] = ["image/png", "image/jpeg", "image/webp", "image/gif"];
@@ -27,7 +27,9 @@ enum Routed {
 
 /// Returns the request to send: the same request when every image is sent as
 /// is, otherwise a copy whose images a model cannot take become references or
-/// placeholders. Messages without images stay shared.
+/// placeholders. Messages without images stay shared. Each image the copy keeps
+/// joins the encoded-image budget, so a request over it fails before the rest
+/// of the images are read.
 pub(super) async fn adapt(
     request: &Arc<ModelRequest>,
     files: Option<&SessionFiles>,
@@ -38,9 +40,12 @@ pub(super) async fn adapt(
         .capability_snapshot
         .as_ref()
         .is_none_or(|snapshot| snapshot.capabilities.vision);
+    let mut encoded = 0;
     let mut replacements = Vec::new();
     for (index, message) in request.messages.iter().enumerate() {
-        if let Some(message) = replace_images(message, request, files, vision, cancel).await? {
+        if let Some(message) =
+            replace_images(message, request, files, vision, cancel, &mut encoded).await?
+        {
             replacements.push((index, Arc::new(message)));
         }
     }
@@ -67,6 +72,7 @@ async fn replace_images(
     files: Option<&SessionFiles>,
     vision: bool,
     cancel: &CancellationToken,
+    encoded: &mut usize,
 ) -> Result<Option<Message>, HostError> {
     let MessageContent::Parts(parts) = &message.content else {
         return Ok(None);
@@ -75,7 +81,7 @@ async fn replace_images(
     for (index, part) in parts.iter().enumerate() {
         let replacement = match part {
             MessagePart::Image { source } => {
-                match route(source, request, files, vision, cancel).await? {
+                match route(source, request, files, vision, cancel, encoded).await? {
                     Routed::Keep => None,
                     Routed::Resolved(source) => Some(MessagePart::Image { source }),
                     Routed::Text(text) => Some(MessagePart::Text {
@@ -97,7 +103,7 @@ async fn replace_images(
                     let ContentBlock::Image { source } = block else {
                         continue;
                     };
-                    match route(source, request, files, vision, cancel).await? {
+                    match route(source, request, files, vision, cancel, encoded).await? {
                         Routed::Keep => {}
                         Routed::Resolved(source) => {
                             replacements.push((index, ContentBlock::Image { source }));
@@ -143,32 +149,45 @@ fn replace_selected<T: Clone>(values: &[T], replacements: Vec<(usize, T)>) -> Ve
 
 /// The form one image takes for this model: sent as it is when the model
 /// takes images and the image is sendable, else its reference or placeholder.
+/// A file-backed source is validated after it is resolved too: an empty owned
+/// file is not an image even though it has an id and a supported format.
 async fn route(
     source: &ImageSource,
     request: &ModelRequest,
     files: Option<&SessionFiles>,
     vision: bool,
     cancel: &CancellationToken,
+    encoded: &mut usize,
 ) -> Result<Routed, HostError> {
     crate::context_policy::check_cancel(cancel)?;
-    let resolvable = source.source_type == ImageSourceType::File && sendable(source);
-    let resolved;
-    let source = if resolvable {
-        resolved = crate::session_files::resolve(request, files, source, cancel).await?;
-        &resolved
-    } else {
-        source
-    };
-    if vision && (resolvable || sendable(source)) {
-        return Ok(if resolvable {
-            Routed::Resolved(source.clone())
+    if source.source_type == ImageSourceType::File && sendable(source) {
+        let resolved = crate::session_files::resolve(request, files, source, cancel).await?;
+        if vision && sendable(&resolved) {
+            add_encoded_image(encoded, &resolved)?;
+            return Ok(Routed::Resolved(resolved));
+        }
+        return Ok(Routed::Text(if vision {
+            image_reference_or_placeholder(&resolved)
         } else {
-            Routed::Keep
-        });
+            image_reference(&resolved).unwrap_or_else(|| NO_IMAGE_INPUT.into())
+        }));
     }
-    Ok(Routed::Text(image_reference(source).unwrap_or_else(|| {
-        if vision { UNSENDABLE } else { NO_IMAGE_INPUT }.into()
-    })))
+    if vision && sendable(source) {
+        add_encoded_image(encoded, source)?;
+        return Ok(Routed::Keep);
+    }
+    Ok(Routed::Text(if vision {
+        image_reference_or_placeholder(source)
+    } else {
+        image_reference(source).unwrap_or_else(|| NO_IMAGE_INPUT.into())
+    }))
+}
+
+/// Adds one image the request keeps to the encoded-image budget and fails when
+/// the request would exceed it.
+fn add_encoded_image(encoded: &mut usize, source: &ImageSource) -> Result<(), HostError> {
+    *encoded += source.data.as_ref().map_or(0, String::len);
+    check_image_budget(*encoded)
 }
 
 /// A URL source, a file without an id, undecodable data or a format adapters
@@ -185,4 +204,126 @@ fn sendable(source: &ImageSource) -> bool {
             }),
             ImageSourceType::Url => false,
         }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::host::{SessionFileError, SessionFilesService, StoredSessionFile};
+    use std::path::PathBuf;
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Serves one 100-byte chunk per file, more than the test target's whole
+    /// budget, and counts the files it opened.
+    struct Files {
+        opened: AtomicUsize,
+    }
+
+    impl SessionFilesService for Files {
+        fn read(
+            &self,
+            _: String,
+            _: String,
+            offset: u64,
+            _: CancellationToken,
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, SessionFileError>> + Send + '_>> {
+            if offset == 0 {
+                self.opened.fetch_add(1, Ordering::SeqCst);
+            }
+            Box::pin(async move {
+                Ok(if offset == 0 {
+                    vec![b'x'; 100]
+                } else {
+                    Vec::new()
+                })
+            })
+        }
+
+        fn put(
+            &self,
+            _: String,
+            _: String,
+            _: Vec<u8>,
+            _: CancellationToken,
+        ) -> Pin<Box<dyn Future<Output = Result<StoredSessionFile, SessionFileError>> + Send + '_>>
+        {
+            unimplemented!("the test only reads files")
+        }
+
+        fn register(
+            &self,
+            _: String,
+            _: PathBuf,
+        ) -> Pin<Box<dyn Future<Output = Result<(), SessionFileError>> + Send + '_>> {
+            unimplemented!("the test only reads files")
+        }
+
+        fn owns(
+            &self,
+            _: String,
+            _: PathBuf,
+        ) -> Pin<Box<dyn Future<Output = Result<bool, SessionFileError>> + Send + '_>> {
+            unimplemented!("the test only reads files")
+        }
+
+        fn owned_paths(
+            &self,
+            _: String,
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<PathBuf>, SessionFileError>> + Send + '_>>
+        {
+            unimplemented!("the test only reads files")
+        }
+    }
+
+    fn file_image(id: &str) -> ImageSource {
+        ImageSource {
+            source_type: ImageSourceType::File,
+            media_type: "image/png".into(),
+            data: None,
+            url: None,
+            file_id: Some(id.into()),
+        }
+    }
+
+    /// The test target carries a small cap so the assertion reaches it without
+    /// allocating a production-sized request.
+    #[tokio::test]
+    async fn the_encoded_image_budget_stops_adaptation_before_the_remaining_images() {
+        let opened = Arc::new(Files {
+            opened: AtomicUsize::new(0),
+        });
+        let files = SessionFiles(opened.clone());
+        let mut request = ModelRequest::new(
+            "provider",
+            "model",
+            vec![Message {
+                role: Role::User,
+                content: MessageContent::Parts(vec![
+                    MessagePart::Image {
+                        source: file_image("first"),
+                    },
+                    MessagePart::Image {
+                        source: file_image("second"),
+                    },
+                ]),
+            }],
+        );
+        request.metadata = Some(RequestMetadata {
+            session_id: Some("owner".into()),
+            ..Default::default()
+        });
+        let error = adapt(&Arc::new(request), Some(&files), &CancellationToken::new())
+            .await
+            .expect_err("the first image exceeds the encoded-image budget");
+        assert!(
+            error.to_string().contains("Model request images exceed"),
+            "the failure names the budget: {error}"
+        );
+        assert_eq!(
+            opened.opened.load(Ordering::SeqCst),
+            1,
+            "adaptation stops before the remaining image is read"
+        );
+    }
 }

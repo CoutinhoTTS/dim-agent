@@ -18,6 +18,7 @@ use aimux_core::{
     tool::{FunctionTool, Tool},
 };
 use dim_agent_capabilities::host::{HostError, HostErrorKind};
+use dim_agent_capabilities::images::image_reference_or_placeholder;
 use dim_agent_types::{
     ContentBlock, ContentMetadata, ImageSource, ImageSourceType, MessageContent, MessagePart,
     ModelRequest, Role, SystemPrompt, SystemPromptPart, ToolContent,
@@ -36,6 +37,16 @@ const TOOL_IMAGE_MARKER: &str = "[Image: sent in the following user message as t
 /// Names the tool call an image came from, before that image.
 const TOOL_IMAGE_LABEL: &str = "Tool output from tool call";
 
+/// The image formats Gemini accepts: its image understanding and generate
+/// content guides list PNG, JPEG, WebP, HEIC and HEIF, and not GIF.
+const GEMINI_IMAGE_FORMATS: [&str; 5] = [
+    "image/png",
+    "image/jpeg",
+    "image/webp",
+    "image/heic",
+    "image/heif",
+];
+
 /// Anthropic's limit on cache breakpoints in one request.
 const ANTHROPIC_CACHE_BREAKPOINTS: usize = 4;
 
@@ -44,6 +55,30 @@ const ANTHROPIC_CACHE_BREAKPOINTS: usize = 4;
 fn cache_breakpoint() -> SharedProviderOptions {
     provider_namespace("anthropic", json!({"cacheControl": {"type": "ephemeral"}}))
         .expect("a cache breakpoint is an object")
+}
+
+/// Whether the destination takes this image format (Attachments A.1). The
+/// other protocols take every format a request may carry.
+fn image_format_supported(kind: &ProviderKind, media_type: &str) -> bool {
+    *kind != ProviderKind::Gemini || GEMINI_IMAGE_FORMATS.contains(&media_type)
+}
+
+/// Whether the destination takes an image inside a `toolResult` block.
+/// Bedrock supports that block only on Amazon Nova and Anthropic Claude 3 and
+/// 4; every other model takes the image in the user message after the result.
+/// https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_ToolResultContentBlock.html
+fn tool_result_images(kind: &ProviderKind, model_id: &str) -> bool {
+    match kind {
+        ProviderKind::Anthropic => true,
+        ProviderKind::Bedrock => {
+            model_id.contains("amazon.nova")
+                || model_id.contains("claude-3")
+                || ["claude-sonnet-4", "claude-opus-4", "claude-haiku-4"]
+                    .iter()
+                    .any(|family| model_id.contains(family))
+        }
+        _ => false,
+    }
 }
 
 pub(crate) fn convert(
@@ -435,7 +470,7 @@ fn user_message(
                         }));
                     }
                     MessagePart::Image { source } if include => {
-                        content.push(image_part(request, &path, source)?);
+                        content.push(image_part(request, kind, &path, source)?);
                     }
                     MessagePart::Text { .. } | MessagePart::Image { .. } => {}
                     _ => {
@@ -604,9 +639,16 @@ fn tool_message<'a>(
 /// An image part as the protocols' user messages carry it.
 fn image_part(
     request: &ModelRequest,
+    kind: &ProviderKind,
     path: &str,
     source: &ImageSource,
 ) -> Result<UserPart, HostError> {
+    if !image_format_supported(kind, &source.media_type) {
+        return Ok(UserPart::Text(TextPart {
+            text: image_reference_or_placeholder(source),
+            provider_options: None,
+        }));
+    }
     let data = match source.source_type {
         ImageSourceType::File => {
             return Err(HostError::classified(
@@ -699,7 +741,7 @@ fn tool_result(
             }
         });
     }
-    let inside = matches!(kind, ProviderKind::Anthropic | ProviderKind::Bedrock);
+    let inside = tool_result_images(kind, &request.model_id);
     let mut result = Vec::with_capacity(blocks.len());
     let mut text = String::new();
     for block in blocks {
@@ -715,22 +757,36 @@ fn tool_result(
                 }
                 continue;
             }
-            ContentBlock::Image { source } => match (inside, base64_data(source)) {
-                (true, Some(data)) => {
-                    result.push(inside_image(source, data));
+            ContentBlock::Image { source } => {
+                if !image_format_supported(kind, &source.media_type) {
+                    let reference = image_reference_or_placeholder(source);
+                    if inside {
+                        result.push(ToolResultContent::Text(TextPart {
+                            text: reference,
+                            provider_options: None,
+                        }));
+                    } else {
+                        text.push_str(&reference);
+                    }
                     continue;
                 }
-                _ => {
-                    following.push(UserPart::Text(TextPart {
-                        text: format!(
-                            "{TOOL_IMAGE_LABEL} {tool_use_id}: the image after this text is that call's result."
-                        ),
-                        provider_options: None,
-                    }));
-                    following.push(image_part(request, path, source)?);
-                    TOOL_IMAGE_MARKER
+                match (inside, base64_data(source)) {
+                    (true, Some(data)) => {
+                        result.push(inside_image(source, data));
+                        continue;
+                    }
+                    _ => {
+                        following.push(UserPart::Text(TextPart {
+                            text: format!(
+                                "{TOOL_IMAGE_LABEL} {tool_use_id}: the image after this text is that call's result."
+                            ),
+                            provider_options: None,
+                        }));
+                        following.push(image_part(request, kind, path, source)?);
+                        TOOL_IMAGE_MARKER
+                    }
                 }
-            },
+            }
         };
         if inside {
             result.push(ToolResultContent::Text(TextPart {

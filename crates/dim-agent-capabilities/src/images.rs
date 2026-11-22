@@ -8,6 +8,10 @@ use image::{
 use sha2::{Digest, Sha256};
 use std::io::{BufRead, Cursor, Read, Seek, SeekFrom};
 
+/// The placeholder an image the request cannot carry becomes when it has no
+/// content reference.
+const UNSENDABLE: &str = "[Image omitted: the image cannot be sent to this model.]";
+
 /// Returns `img:` and the first 16 lowercase SHA-256 hex digits of the
 /// base64-decoded image file bytes, without scaling or re-encoding them.
 ///
@@ -29,6 +33,12 @@ pub fn image_reference(source: &ImageSource) -> Option<String> {
         .ok()?;
     let digest = format!("{:x}", Sha256::digest(bytes));
     Some(format!("img:{}", &digest[..16]))
+}
+
+/// The text an image becomes where the request cannot carry it: its content
+/// reference, or the omission placeholder when it has none.
+pub fn image_reference_or_placeholder(source: &ImageSource) -> String {
+    image_reference(source).unwrap_or_else(|| UNSENDABLE.into())
 }
 
 /// The longest edge an image may have and still be sent as it is, in pixels:

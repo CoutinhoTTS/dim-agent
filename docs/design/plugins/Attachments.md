@@ -124,9 +124,11 @@ ModelProvider routes every image block in a conversational request, in user
 content and tool results alike, by the request model's vision capability. A
 vision-capable model, or a request whose model capability is unknown, receives
 a sendable image as an image block; a file-backed source is resolved to its
-bytes. A model without image input never receives pixels. An image that cannot
-be sent — a URL source, a file without an id, missing or undecodable base64, or
-a format this build cannot decode — becomes the omission placeholder:
+bytes and checked by the same rule before it is sent, so an empty owned file
+takes the placeholder. A model without image input never receives pixels. An
+image that cannot be sent — a URL source, a file without an id, empty, missing
+or undecodable base64, or a format this build cannot decode — becomes the
+omission placeholder:
 `[Image omitted: the current model does not accept images.]` for a model
 without image input, otherwise `[Image omitted: the image cannot be sent to this model.]`.
 
@@ -135,6 +137,18 @@ first 16 lowercase hexadecimal characters of SHA-256 of the base64-decoded
 image file bytes, not the pixels or base64 text. Equal bytes have equal
 references; the reference contract is [ImageUnderstanding §3](ImageUnderstanding.md#3-references).
 File-backed sources must be resolved before computing the reference.
+
+The provider request encoder applies the destination's format and
+message-placement support on top of the routing rule. Gemini takes PNG, JPEG,
+WebP, HEIC and HEIF but no GIF, so a GIF becomes its reference there. Bedrock
+takes an image inside a `toolResult` block only on Amazon Nova and Anthropic
+Claude 3 and 4; on the other Bedrock models the image follows the result in a
+user message, the placement the other protocols already use. A format the
+destination does not take becomes the reference or placeholder.
+
+Kept images join the request's encoded-image budget as they are added: at most
+32 MiB across user and tool-result images. A request over it fails during
+adaptation, before the remaining images are read.
 
 Only the request changes: history, the Timeline and adopted input retain their
 original image blocks. There is no persisted reference or cross-request cache.
