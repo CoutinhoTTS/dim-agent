@@ -7809,6 +7809,15 @@ mod tests {
                 .is_some_and(|switch| switch.branch_id.as_deref() == Some("main")),
             "root-opens-after-switch names the root after the move"
         );
+        assert!(
+            find(&branches, "switch-then-open-lines")
+                .probes
+                .iter()
+                .any(|probe| {
+                    probe.id == "new-default-opens-a-line" && probe.kind == ProbeKind::MustShow
+                }),
+            "switch-then-open-lines requires the new default branch to open a line"
+        );
         let redone = find(&branches, "redone-work");
         let identity = find(&compact, "identity-after-compaction");
         assert_eq!(

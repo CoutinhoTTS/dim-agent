@@ -532,6 +532,7 @@ The opening and switching roles add seven scenarios: `long-work-and-a-flaky-test
 | Sibling relay | `timeline-branches/sibling-relay` | An opener is used to pass messages between lines that should have been one line |
 | Identity after compaction | `timeline-branches-compact/identity-after-compaction` | After compaction on `main` and on a line, each still knows which line it is and which lines are its own |
 | Continuing on a line after a switch | `—` | A line that became the default branch calls `end` on itself, hands its work to another line, keeps waking its opener with idle notices, or cannot open a line while the root could |
+| Opening lines after a switch | `timeline-branches/switch-then-open-lines` | The new default branch does both independent additions itself instead of opening a line for one of them, or the former default branch takes the new work |
 | The root opens while a line holds the role | `timeline-branches/root-opens-after-switch` | The user asks the root for a line after another line became the default branch: the root must open it, the new line must start from the root's history, and it must report to the root |
 | Ping-pong | `timeline-branches/ping-pong` | Steer exchanges that do not move the work forward |
 | Asking the user | `timeline-branches/asking-the-user` | A line asks the user directly when it should, and does not route through `main` |

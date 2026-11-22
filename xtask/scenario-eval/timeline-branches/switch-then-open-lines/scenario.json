@@ -9,6 +9,7 @@
   "probes": [
     {"id": "both-additions-work", "kind": "must_show", "text": "the --leeway option and the CSV export are implemented, with tests and help text"},
     {"id": "former-default-leaves-the-new-work", "kind": "must_not_show", "text": "after the switch, the former default branch opens a line for the new default branch's work or edits auth/token.py, cli/login.py, or audit/exporter.py"},
+    {"id": "new-default-opens-a-line", "kind": "must_show", "text": "after the switch, the new default branch opens at least one line for one of the two additions, either --leeway in cli/login.py or CSV output in audit/exporter.py"},
     {"id": "bug-fixed-with-test", "kind": "must_show", "text": "the early-expiry bug is fixed and a test covers it"}
   ]
 }

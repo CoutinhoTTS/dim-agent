@@ -498,6 +498,7 @@ WorkspaceTools 不变。
 | 兄弟中转 | `timeline-branches/sibling-relay` | 用 `main` 在本该合成一条线的几条线之间传话 |
 | 压缩后的身份 | `timeline-branches-compact/identity-after-compaction` | `main` 和某条线各自压缩之后，仍知道自己是哪条线、哪些线是自己的 |
 | 切换后继续在线上工作 | — | 成为默认分支的线对自己调用 `end`、把工作交给另一条线、不断用 idle 通知唤醒开它的线，或者根能开线而这条线不能 |
+| 切换后开线 | `timeline-branches/switch-then-open-lines` | 新的默认分支自己做掉两处互不相干的新增，而不是为其中一处开一条线；或者原默认分支接过新工作 |
 | 线持有角色时根开线 | `timeline-branches/root-opens-after-switch` | 另一条线成为默认分支后，用户向根要一条线：根必须开这条线，新线必须从根的历史开始，并向根汇报 |
 | 来回空转 | `timeline-branches/ping-pong` | 不推进工作的 steer 往复 |
 | 问用户 | `timeline-branches/asking-the-user` | 该问用户时，线直接问用户，而不是绕道 `main` |
