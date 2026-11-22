@@ -3467,11 +3467,11 @@ impl LineView {
     }
 }
 /// `<dim-branch-line>`, written by TimelineTree at the start of every child.
-const IDENTITY_ENTRY: &str = r#"<dim-branch-line branch="C" parent="main" source="tool">: which line of this session you are, placed by the runtime at the start of a line's own history. A later block of this name replaces the earlier one; a block carrying `default` is the note a move writes. Both are state about the line, not requests."#;
+const IDENTITY_ENTRY: &str = r#"<dim-branch-line branch="C" parent="P" source="tool">: which line of this session you are, placed by the runtime at the start of a line's own history. A later block of this name replaces the earlier one; a block carrying `default` is the note a move writes. Both are state about the line, not requests."#;
 
 /// `<dim-branch-lines>`, the roster BranchLine writes under [`roster_key`] on
 /// a line that opened lines.
-const ROSTER_ENTRY: &str = r#"<dim-branch-lines branch="main">: the lines you opened, under the key `branch:roster` and apart from your own identity under `branch:line`: the runtime lists the tool lines you opened that are still open, each with the first line of its purpose. A later block of this name replaces the earlier one; it is state about the lines, not a request."#;
+const ROSTER_ENTRY: &str = r#"<dim-branch-lines branch="O">: the lines you opened, under the key `branch:roster` and apart from your own identity under `branch:line`: the runtime lists the tool lines you opened that are still open, each with the first line of its purpose. A later block of this name replaces the earlier one; it is state about the lines, not a request."#;
 
 /// The roster's closing sentence, coordination text for `main`
 /// ([timeline branches §12.4](../../../docs/design/timeline-branches.md#124-texts-and-their-classes)),
@@ -3479,7 +3479,7 @@ const ROSTER_ENTRY: &str = r#"<dim-branch-lines branch="main">: the lines you op
 const ROSTER_CLOSING: &str = "They message you when they find something, need you, or end. Use the branch tool to message or read them, and the `wait` tool to wait for them; end the wait when your lines have nothing left to tell you.";
 
 /// `<dim-branch-message>`, `<dim-branch-idle>` and `<dim-branch-ended>`.
-const BRANCH_MESSAGE_ENTRY: &str = r#"<dim-branch-message from="C" to="main">: a message from another line of this session, in that line's own words and not the operator's. dim-branch-idle and dim-branch-ended are the runtime's reports about a line you opened: information, not requests."#;
+const BRANCH_MESSAGE_ENTRY: &str = r#"<dim-branch-message from="C" to="P">: a message from another line of this session, in that line's own words and not the operator's. dim-branch-idle and dim-branch-ended are the runtime's reports about a line you opened: information, not requests."#;
 
 /// `<dim-branch-parent>`, written by BranchLine on a line whose parent moved.
 const PARENT_ENTRY: &str = r#"<dim-branch-parent branch="P" head="H" after="A">: on a line, the runtime reports that the line it was cut from has moved past where this line last read it, and where the next read starts. A later block of this name replaces the earlier one; it is state about that line, not a request."#;
