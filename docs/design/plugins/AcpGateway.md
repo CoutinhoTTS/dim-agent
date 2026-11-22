@@ -63,7 +63,7 @@ Gateway memory contains only connection negotiation and generation, mapped Sessi
 
 - ACP EOF, signal, output failure and plugin unload stop gateway admission, release local waiters and detach/close its RPC connection. They do not stop or close Sessions or the shared daemon.
 - Explicit ACP `session/close` is a business close through native `session.close`, including its effects on other clients; it is not a synonym for disconnect or detach.
-- RPC loss pauses mutations and recovers through the existing endpoint and handshake. The gateway reattaches and reads facts, never blindly replays mutations.
+- RPC loss pauses mutations and recovers through the existing endpoint and handshake. The gateway reattaches and reads facts, never blindly replays mutations. A connection with a temporary Provider route change ends at RPC loss under [the route lifetime contract](../acp-gateway-implementation.md#134-provider-向导).
 - A disposed generation cannot register a late new/load/fork result, emit a late answer or write to the next connection.
 
 No plugin loader, lifecycle registry or per-Session daemon relay is added. The host transfers owned I/O, a connection and its reconnect configuration through construction; the gateway reads no external service and declares `Deps = ()`. Existing CLI dependency migration in [#434 U3](https://github.com/arcships/dim/issues/434) stays separate. No `AgentBuilder` client host or raw service-key dependency is introduced.

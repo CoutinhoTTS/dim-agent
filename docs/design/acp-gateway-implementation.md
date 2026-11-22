@@ -20,7 +20,7 @@
 | Lody Core | [0.2.0，`11e0708d`](https://github.com/LodyAI/acp-extension-core/tree/11e0708df0669568f44e287f17626a3944921dc5/src) | 每项独立 version 1；方法、元数据和计数语义 |
 | Lody Codex adapter | [`df464ab9`](https://github.com/LodyAI/acp-extension-codex/tree/df464ab94e3028ce49a95ae0a9377957c54d8b93/src) | Core 列出的参考实现；用于理解临时 Provider routing 和 startup config，不取代 Core/RFD 合同，也不复制其进程重启策略 |
 
-ACP 协议版本固定为 1，不能把 SDK 包版本当成协议版本。[v2](https://agentclientprotocol.com/protocol/v2/overview) 是另一个生命周期合同，首版不启用。Cargo.lock 固定 SDK 3.5.0 / schema 1.12.0，二者许可证均为 Apache-2.0；只启用所需的 unstable session fork。
+ACP 协议版本固定为 1，不能把 SDK 包版本当成协议版本。[v2](https://agentclientprotocol.com/protocol/v2/overview) 是另一个生命周期合同，首版不启用。Cargo.lock 固定 SDK 3.5.0 / schema 1.12.0，二者许可证均为 Apache-2.0；启用所需的 unstable session fork 和 LLM providers。
 
 下表“可接”表示已实现的现有接口映射；“条件可接”表示只有公开能力存在时提供；“不支持”表示首版不声明、不调用，收到已知但不支持的控制参数时在写入前报错。实际客户端验收不能从方法覆盖推定，见验收记录。
 
@@ -163,9 +163,9 @@ new/load/resume/fork 通过独立的 [TemporaryMcp](plugins/TemporaryMcp.md) Ses
 | 表面 | 首版 | 原生路径 / 缺口 |
 | --- | --- | --- |
 | `session/fork` | 仅在原生同时声明 `session.fork` 与 `session.turn.get` 时提供；单独启用 SDK `unstable_session_fork` | 无锚点时固定 main head；有 Lody turnId 时定位该真实 turn 的 `turn/end` sequence。`session.fork {sessionId,at}` → 新 id → attach。原生 rest-point 检查决定能否 fork；活动 turn 内的切点失败，不偷偷改成早一点的切点 |
-| `providers/list` | 读取可复用；整组暂不声明 | `provider.management.list {after?,limit?}` 逐页读取安全可配置 Provider 概要；ACP 的 providers capability 同时承诺三个方法，不能只凭 list 可读就声明，见 §4.5 |
-| `providers/set` | 缺进程级路由采用入口 | `provider.management {providerId}` → 同版本 `provider.update` 是共享设置的路径；全量 headers、固定 driver/auth 和凭据归属须准确转换。临时覆盖另缺采用接口，见 §4.5 |
-| `providers/disable` | 缺进程级路由禁用入口 | 同版本 `provider.update {patch:{enabled:false}}` 是持久化禁用，不是 CLI disconnect、delete、logout 或清除临时 override；不能混淆，见 §4.5 |
+| `providers/list` | 条件可接 | `provider.routes.list`，返回本进程的安全路由视图，见 §4.5 |
+| `providers/set` | 条件可接 | `provider.routes.set`，替换本进程的完整路由，见 §4.5 |
+| `providers/disable` | 条件可接 | `provider.routes.disable`，仅排除本进程后续采用，见 §4.5 |
 | `mcp/message` | 不支持 | 没有现成 MCP-over-ACP 入口 |
 | `session/set_model`、`document/didOpen`、`document/didChange`、`document/didClose`、`document/didSave`、`document/didFocus` | 不支持 | 历史 SDK 的入口不在固定稳定方法表；模型走 config options，文档通知不伪装成已维护 buffer |
 | `text` / `resource_link` | 可接 | 映射到 UserInput text；resource_link 为 `@<uri>` 引用，不自行下载或赋予路径访问权 |
@@ -237,36 +237,7 @@ EOF、插件卸载、用户取消或 `$/cancel_request` 结束本地认证等待
 
 ### 4.5 Provider 管理与现有插件
 
-Provider 业务已经由 daemon 的 [ProviderPlugin](../../crates/dim-app-server/src/provider.rs) 拥有，并通过 [management methods](../../crates/dim-app-server/src/provider/management.rs) 发布。现有 [CLI Provider flow](../../crates/dim-cli/src/session_host.rs) 调用 `provider.management`、`provider.probe`、`provider.create` 和 `provider.update`。Gateway 应复用这些公开方法；不新增 ACP Provider 插件、registry、数据库或与 ProviderPlugin 平行的模型路由所有者。字段、版本、secret 和 action 的权威合同是 [Provider management](appserver/provider-management.md)，对应 #329 / #349；下表只描述 ACP 边界转换。
-
-#### 已有调用与边界转换
-
-| ACP 方法 | 可复用的原生调用 | 必须保留的语义 |
-| --- | --- | --- |
-| `providers/list {}` | `provider.management.list {after?,limit?}` → `{drivers,providers,errors,next}`，按 `next` 读完所请求列表 | `providerId` 保留原值；只列能兑现配置合同的记录。静态连接的 driver/实际 endpoint 决定 `supported` 和 `current.apiType`；enabled=false 才投影 `current:null`，不能把未登录、缺凭据或缺模型伪装成禁用。只返回非秘密 `apiType/baseUrl`，不返回 headers、credential、secret ref、账户或 proxy 身份。损坏记录按原生 errors 处理，不能伪装为已禁用记录 |
-| `providers/set {providerId,apiType,baseUrl,headers?}` | 先 `provider.management {providerId}`，取得当前 `version/connection/actions`；再 `provider.update {providerId,expectedVersion,patch}` | 已知 id、可编辑记录、可表达的协议和认证方式才能进入写入；patch 组合 `baseUrl`、`enabled:true`、完整 header 操作及必要的 credential 操作，在原生一次 CAS 事务中提交。成功只返回 ACP `{}`，不返回原生管理快照 |
-| `providers/disable {providerId}` | 同样读取管理快照，再 `provider.update {providerId,expectedVersion,patch:{enabled:false}}` | 保留凭据、路由、模型和 Provider 身份；禁用后仍可发现且 `current:null`。明确未知 id 按草案幂等返回 `{}`；已存在但受限、损坏或管理读取失败不是未知 id。required=true 必须拒绝，不能以当前模型选中了该 Provider 就推导 required |
-
-`apiType` 不是 `driverKind` 的别名。原生 update 不允许改变 driver/auth；同一 Provider 只能列出其现有 driver 和实际模型路由确实支持的协议，不能把 `drivers` 全局目录当成每项的 `supported`。例如 `openai-compatible` / `custom` 的单一 OpenAI-compatible 路由、`anthropic` 的单一 Anthropic 路由可以明确映射；不能因字段相似便把 Gemini 当作 Vertex，或把 New API 多协议路由当作可整体切换的单协议 Provider。不存在的 Provider 在 set 时返回 invalid_params，不把 set 改造成 create，不生成新 UUID，也不悄悄换成另一个 Provider id。
-
-ACP set 的 `headers` 是**完整替换**，省略等同空 map；原生 patch 的省略则保留已有值。转换必须在外部协议边界完成：
-
-1. 从同一管理快照的 `headerNames` 得到已有名字；按 HTTP header 大小写不敏感比较，拒绝输入中重复名字。对输入未包含的旧名字生成 remove，对输入中的普通 header 生成 set；不需要读取旧值。
-2. 原生 Bearer / ApiKey / CustomHeader 的认证 header 归 credential 字段所有，不能同时写入普通 headers。只有输入可被既定 auth 的 header/prefix 无损表达时，才转换成已有 `credential:{action:"set",value}`；省略该 header 必须明确 clear，不能保留旧 credential 或 secret ref。清空后若该固定 auth 不允许启用无凭据记录，就属于当前原生合同不支持的路由，不能用旧密钥补齐，也不能伪造匿名认证。
-3. 原生 AwsBedrock 签名、managed account 连接、需要改变 driver/auth 的配置不能借普通 headers 绕过所有者。`connection:null`、`enabled:null` 或缺 version 也不能补默认值。账户插件的登录仍走 §4.4；它不自动获得 route override 能力。
-4. 不改未由 ACP 表达的 model catalog、selection、preferences、proxy 或 timeout；不调用 probe/refresh 后才承认 set 成功。版本冲突返回真实冲突，不重新读取后自动覆盖；已发送的 Drain 写入即使取消等待、EOF 或丢失回复仍可能提交。不得重发或在卸载时写回旧快照；安全管理读取也无法证明未回显的 secret header 值。
-
-CLI 的 Disconnect 是 `{credential:{action:"clear"},enabled:false}`，不适合 ACP disable；不能直接复用 UI action 而改变协议含义。管理写入也不等于为现有 Session 采用新模型；模型配置的后续采用仍归现有 Session/Provider 所有者。
-
-#### 首版作用域与能力声明
-
-固定基线的 [Configurable LLM Providers RFD](https://github.com/agentclientprotocol/agent-client-protocol/blob/66ff8076ec2320d85e84fedc83cb779e9d906a89/docs/rfds/custom-llm-endpoint.mdx) 写明配置为 process-scoped，并 **SHOULD NOT** 持久化；后者是推荐而非禁止。RFD 没有为代理加共享 daemon 的架构指定该进程必须是哪一个，更没有要求每 ACP connection / Session 隔离。Lody Core 本身不定义 `providers/*`，也没有改写此处作用域。独立 Gateway 进程并不自动构成必须隔离配置的协议要求。
-
-原生 `provider.update` 将版本化记录写入产品 home 的数据库，影响共享该 home/daemon 的客户端。ACP 路由采用复用已有的 Session-local 连接入口，由 Provider 补齐进程级发现、替换和禁用合同。临时设置必须用于真实模型连接，且不借用共享记录做暂存或还原。
-
-参考实现 [CodexAcpClient](https://github.com/LodyAI/acp-extension-codex/blob/df464ab94e3028ce49a95ae0a9377957c54d8b93/src/CodexAcpClient.ts) 将 ACP set 保存为内存 `gatewayConfig`，通过 `mergeGatewayConfig` 合入原生 Session 建立参数；[CodexAcpServer](https://github.com/LodyAI/acp-extension-codex/blob/df464ab94e3028ce49a95ae0a9377957c54d8b93/src/CodexAcpServer.ts) 在必要时排空并替换其自有 app-server。Dim 不拥有共享 daemon，不能复制该重启路径。该适配器的 disable 清除 override、恢复 native routing，list 随后仍有 current；这与 RFD 所述禁用后 current:null 不一致，不能把参考实现的行为当成协议授权，或等同于 Dim 停用持久化 Provider。
-
-ACP 向导使用 [§13.4](#134-provider-向导) 的 Gateway 进程级临时路由。Provider 仍拥有实际模型连接的采用。等三个方法都能作用于实际路由后，再声明 `agentCapabilities.providers` 并启用 SDK `unstable_llm_providers`。验收按 §13.6。
+[Provider](appserver/provider-management.md#connection-scoped-provider-routes) 拥有路由校验、连接采用和清理。Gateway 通过受保护本地 RPC 调用 `provider.routes.list`、`provider.routes.set`、`provider.routes.disable`，并将原生 `ModelProtocol` 映射到 ACP wire 的协议标识。三者均可用时才声明整组能力。Gateway 不通过 ACP 修改共享的 `provider.update`、`provider.select` 或凭据记录。作用域和公开行为见 [§13.4](#134-provider-向导)。
 
 ### 4.6 临时 MCP 接线
 
@@ -396,7 +367,7 @@ ACP responses 和主动通知由单 writer 保序。可靠业务输出按序列�
 | 情况 | 必须行为 |
 | --- | --- |
 | ACP EOF / writer failure / signal / plugin unload | 关闭本地准入，释放本地请求和 subscriptions；按 §4.4 尽力取消自己的 pending login attempt，尽力 session.detach 后断开 RPC。不调用 session.stop/close、daemon.shutdown、Agent close 或 logout；共享执行和已被插件接受的登录交换继续 |
-| RPC 连接丢失、ACP 仍在线 | 暂停新变更请求，保留已知关联；重连、submission lookup 和有界窗口准备共用从断线起算的 30 秒截止点。按 0.25/0.5/1/2 秒封顶间隔重连同一受保护 endpoint，不启动第二个 daemon。每次 hello 核验协议/profile/instance，再 checked attach、读取有界窗口和当前 inventories；排队 call 与异步结果均核验 generation |
+| RPC 连接丢失、ACP 仍在线 | 暂停新变更请求，保留已知关联；重连、submission lookup 和有界窗口准备共用从断线起算的 30 秒截止点。按 0.25/0.5/1/2 秒封顶间隔重连同一受保护 endpoint，不启动第二个 daemon。每次 hello 核验协议/profile/instance，再 checked attach、读取有界窗口和当前 inventories；排队 call 与异步结果均核验 generation。已发起临时路由变更时按 §13.4 结束连接 |
 | 恢复后 instance id 未变 | 接回当前 runtime；read/attach/history 可重试，已送出的变更只查询结果 |
 | daemon instance id 改变 | 旧 RPC ids 和非持久 progress 失效；Session identity 仍用持久 id。按已接受 inputId/已知 turnId 定位该轮终态，不恢复旧执行；未知 permission id 不擅自重发旧答案，等待 attach 的真实 pending replay |
 | 无法在恢复窗口内恢复 | 已收到 cancel 的 prompt 仍 best-effort 返回 cancelled，并记录无法确认 native stop 的诊断；其他在途请求返回 daemon_unavailable，随后关闭 ACP 连接。不报告原生执行已经取消 |
@@ -547,7 +518,7 @@ D 的消融复核：Lody 只是同一投影的 metadata 和受协商约束的通
 8. 标准 model/mode 选项反映真实采用状态；无 catalog/Questions/Attachments 的 profile 只失去对应功能。startup config 的显式 modelId 优先，公布的 mode 可回传到新会话建立参数；无 metadata 保留默认，歧义/未知模型、非法 mode/类型、未知选项/version 报错；new 在同一 create 采用 effort，显式 default 跳过已保存的 effort；load/resume/fork 接受在原生固定位置等价的选项，拒绝不同选项；不修改 Provider selection 或共享配置。
 9. history、终态 turn fork、compaction skipped/failed/cancelled；后台 exec 开始/终态使用独立 toolCallId，原工具转后台完成不等于 task 完成，取消保留真实原因；终态可发生在 prompt response 之后。普通客户端兼容，Lody capability 和 wire 输出一致。
 10. 通过公开 ManagedProvider 测试装配模拟 browser/device：无插件/API-key profile 不被其他账户阻塞、method 只按实际能力发布、已登录 authenticate 不重复 begin、callback 匹配、端口冲突、过期、取消/EOF、complete reply 丢失不重发。terminal method 不能走 authenticate；helper 保留同一 executable/home/profile，完成后重新检查 native 账户状态。断言 native 通用 -32000 错误不会变成 ACP auth_required。复用 callback capture 时保留既有 MCP/TUI 的安全与公开流程回归。
-11. Provider 管理插件存在时仍不虚报整组 providers capability；三个 ACP 管理方法不修改 Provider 记录。可复用调用与后续启用后的流验证见 §4.5，不能以 list 可读替代 set/disable 的作用域验收。
+11. 两个 Gateway 共用 daemon 时分别 list/set/disable，按 §13.6 检查实际请求、进程隔离和共享 Provider 记录。旧 daemon 缺整组方法时不声明 capability。
 12. subagentEvents 双向 version 1 才发送；从同一 member Session 发起的两次委派得到不同 opaque runId，最小 snapshot support 不声称输出/查询/取消。验证 request/delivery/result 关联、回放去重、迟到终态、断线 unknown/outputIncomplete、重连新 activation；不向普通 ACP 或错误 version 客户端发送自定义通知。toolName 只允许有真实 flow 的 Core canonical ID，不能以任意 native 工具名触发客户端特殊处理。
 
 公开流程的实际结果见验收记录；此清单定义所需语义，不能将未单独触发的每个分支都记作测试通过。共享 RPC 提取复用现有 CLI 回归，合并前完整检查仍遵循 AGENTS.md。
@@ -675,9 +646,11 @@ Lody [Open / Resume / Fork]
 
 ### 13.4 Provider 向导
 
-采用 ACP Gateway 进程内的临时作用域，复用 [Session-local startup connection](appserver/provider-management.md#session-local-startup-connections) 的底层连接采用与凭据归属。该入口已能为单个 Session 采用直连；所有者仍需定义如何在同一 ACP 进程内按稳定 Provider ID 发现、替换、禁用路由，并把它用于后续 Session 的模型解析。原生共享设置继续由 [Provider 管理接口](appserver/provider-management.md#32-writes-and-field-operations)管理。
+采用 ACP Gateway 进程内的临时作用域。Gateway 通过唯一的受保护本地 RPC 连接调用 [Provider 临时路由入口](appserver/provider-management.md#connection-scoped-provider-routes)。三个入口都可用时，initialize 声明 `agentCapabilities.providers`。已发起路由变更的 Gateway 在 RPC 断开时结束 ACP 连接，避免重连后把会话绕回共享路由。
 
-初始化只在三个方法均可兑现时声明 `agentCapabilities.providers`。`list` 发布支持可配置合同的 ID、可用协议、`required` 和无秘密的有效路由。`set` 校验已知 ID、支持的协议和 URL，整体替换 headers，省略时按空 map 处理；新目标只使用该次输入提供的凭据。`disable` 对未知 ID 幂等，对 required ID 拒绝；成功后仍可发现，`current:null`，进程后续建立的 Session 排除该路由。已在运行的 Session 由原生已采用绑定结算。Gateway 退出清理本次配置；以恢复所需临时绑定失败告知客户端，避免切回共享凭据。流程按 [ACP Provider RFD](https://github.com/agentclientprotocol/agent-client-protocol/blob/66ff8076ec2320d85e84fedc83cb779e9d906a89/docs/rfds/custom-llm-endpoint.mdx#behavior) 验证。
+`list` 发布可配置的启用中静态 Provider，须已具备普通模型选择所需凭据或使用匿名连接。协议为 `openai`（OpenAI-compatible Chat）、`openai-responses` 或 `anthropic`，按现有驱动取其中一个。列表回显协议、安全地址和 `required:false`。本进程禁用后仍可发现，`current` 省略。`set` 整体替换 headers，省略等同空 map。`disable` 对未知 ID 幂等。
+
+新建、首次加载或恢复空闲且未被其他客户端占用的 Session 时采用当前连接的路由。配置相等断言先于路由采用。所选 Provider 被禁用时返回明确错误，客户端可以选择其他模型。已建立的 Session 保留采用时的路由，显式切换模型时重新采用目标的当前路由。试图从其他连接续用临时路由、或连接结束后恢复该路由，均明确失败。协议边界见 [ACP Provider RFD](https://github.com/agentclientprotocol/agent-client-protocol/blob/66ff8076ec2320d85e84fedc83cb779e9d906a89/docs/rfds/custom-llm-endpoint.mdx#behavior)。
 
 ### 13.5 向所有者提出的要求
 
@@ -688,7 +661,7 @@ Lody [Open / Resume / Fork]
 | Session / 模型配置 / Permission | checked attach / fork 可核对等价配置。采用不同值仍需通用建立入口支持明确且获授权的变化。单独 model/permission setter 有各自的采用边界。[原生 fork](appserver/session-deletion-and-fork.md#6-fork)继承权限，允许变化的范围由 Permission 确认 | 成功回复前完成检查与采用；分叉只影响子 Session；并发或丢失回复沿用 owner 的冲突和恢复规则 |
 | InputQueue / Loop | 普通 steer 在无活跃 turn 时可启动新轮；需要按指定活跃 turn 原子接收入队的通用约束 | 接收与目标校验同一次决定，`input/applied` 后才通知 Lody；换轮、取消和掉线按原生结果结算 |
 | Goal | `get` 能给快照，但既有操作确认不足以拥有整个 Goal 执行；需要明确操作身份、所属 turns 及结算/取消结果 | `set` / `resume` 的首轮至终态归同一身份；`pause` / `clear` 不启动 turn；重连不能重新发起未知结果的操作 |
-| Usage / Provider | `model/usage` 的部分分桶依赖真实上报；额度读取需要可表达的目录和过滤边界；现有 Session 级连接入口缺进程作用域 | 使用既有计数和受保护连接采用；发布前验证支持条件。路由替换在后续 Session 建立前生效，退出清理临时秘密 |
+| Usage / Provider | `model/usage` 的部分分桶依赖真实上报；额度读取需要可表达的目录和过滤边界 | 计量使用已提交事实。进程级路由通过 [Provider 临时路由入口](appserver/provider-management.md#connection-scoped-provider-routes) 在 Session 建立时采用 |
 | Collaboration | member 寻址的取消无法给外部 task ID 提供执行条件；需要执行身份校验及对应的已提交输出读取 | 与 request 替换线性化；恢复后旧 ID 不能取消新 request，输出范围与该 request 的始末一致 |
 
 ### 13.6 验收顺序

@@ -1694,11 +1694,6 @@ impl Peer {
         );
         let response = self.response(1);
         assert_eq!(response["result"]["protocolVersion"], 1, "{response}");
-        assert!(
-            response["result"]["agentCapabilities"]
-                .get("providers")
-                .is_none()
-        );
     }
 
     fn close(self) {
@@ -3583,6 +3578,357 @@ fn acp_stdio_lody_config_round_trips_with_the_product_daemon() {
     assert_eq!(effort(&reopen.response(8))["currentValue"], "low");
     reopen.close();
     peer.close();
+}
+
+#[test]
+fn acp_provider_routes_are_isolated_between_processes_sharing_a_daemon() {
+    let home = Home::new();
+    let socket = home.0.join("rust/daemon.sock");
+    let _daemon = OwnedDaemon(socket.clone());
+    let ready = home.command().args(["mcp", "list"]).output().unwrap();
+    assert!(
+        ready.status.success(),
+        "{}",
+        String::from_utf8_lossy(&ready.stderr)
+    );
+    let mut native = BufReader::new(UnixStream::connect(socket).unwrap());
+    native.get_ref().set_read_timeout(Some(PATIENCE)).unwrap();
+    let mut id = 0;
+    let mut native_call = |method: &str, params: Value| {
+        id += 1;
+        writeln!(
+            native.get_mut(),
+            "{}",
+            json!({"jsonrpc":"2.0","id":id,"method":method,"params":params})
+        )
+        .unwrap();
+        loop {
+            let mut line = String::new();
+            assert_ne!(native.read_line(&mut line).unwrap(), 0);
+            let response: Value = serde_json::from_str(&line).unwrap();
+            if response["id"] == id {
+                assert!(response.get("result").is_some(), "{method}: {response}");
+                break response["result"].clone();
+            }
+        }
+    };
+    native_call("hello", json!({"protocolVersion":3,"clientKind":"cli"}));
+    let settings = native_call(
+        "settings.read",
+        json!({"source":"session-title","scope":"user"}),
+    );
+    native_call(
+        "settings.update",
+        json!({"source":"session-title","scope":"user",
+        "expectedRevision":settings["revision"],"document":{"enabled":false}}),
+    );
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let shared = format!("http://{address}/shared/v1");
+    let first = format!("http://{address}/first/v1");
+    let second = format!("http://{address}/second/v1");
+    let provider = "018ec73f-0000-7000-8000-000000000093";
+    let record = native_call(
+        "provider.create",
+        json!({"providerId":provider,"displayName":"ACP routing fixture","enabled":true,
+        "connection":{"driverKind":"openai-compatible","baseUrl":shared,"auth":{"type":"bearer"},
+            "credential":{"action":"set","value":"fixture-shared-only"},"headers":{"X-Route-Marker":"shared"}},
+        "models":[{"modelId":"acp-route-fixture","displayName":"Routing fixture","status":"active",
+            "capabilities":dim_agent_types::CatalogCapabilities::with_limits(32_000,1024)}]}),
+    );
+    native_call(
+        "provider.select",
+        json!({"providerId":provider,"modelId":"acp-route-fixture"}),
+    );
+    let stored = native_call("session.create", json!({"cwd":home.0}))["sessionId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    listener.set_nonblocking(true).unwrap();
+    let model = thread::spawn(move || {
+        let mut seen = Vec::new();
+        for _ in 0..6 {
+            let deadline = Instant::now() + PATIENCE;
+            let stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::WouldBlock
+                            && Instant::now() < deadline =>
+                    {
+                        thread::sleep(Duration::from_millis(5))
+                    }
+                    Err(error) => panic!("missing model call: {error}, captured {seen:?}"),
+                }
+            };
+            stream.set_read_timeout(Some(PATIENCE)).unwrap();
+            let mut request = BufReader::new(stream);
+            let mut line = String::new();
+            request.read_line(&mut line).unwrap();
+            let path = line.split_whitespace().nth(1).unwrap().to_owned();
+            let mut headers = std::collections::HashMap::new();
+            loop {
+                line.clear();
+                assert_ne!(request.read_line(&mut line).unwrap(), 0);
+                if line == "\r\n" {
+                    break;
+                }
+                let (name, value) = line.split_once(':').unwrap();
+                headers.insert(name.to_ascii_lowercase(), value.trim().to_owned());
+            }
+            let mut bytes = vec![0; headers["content-length"].parse().unwrap()];
+            request.read_exact(&mut bytes).unwrap();
+            let body: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(body["model"], "acp-route-fixture");
+            let data = "data: {\"id\":\"fixture\",\"object\":\"chat.completion.chunk\",\"model\":\"acp-route-fixture\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ROUTE_OK\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+            write!(request.get_mut(), "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{data}", data.len()).unwrap();
+            seen.push((
+                path,
+                headers.remove("authorization"),
+                headers.remove("x-route-marker"),
+            ));
+        }
+        seen
+    });
+
+    let mut a = Peer::start(&home);
+    let mut b = Peer::start(&home);
+    let mut acp_id = 0;
+    let mut call = |peer: &mut Peer, method: &str, params: Value| {
+        acp_id += 1;
+        peer.send(acp_id, method, params);
+        peer.response(acp_id)
+    };
+    let provider_row = |listed: Value| {
+        listed["result"]["providers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["providerId"] == provider)
+            .unwrap()
+            .clone()
+    };
+    let create = json!({"cwd":home.0,"mcpServers":[]});
+    let acp_init = json!({"protocolVersion":1,"clientCapabilities":{}});
+    for peer in [&mut a, &mut b] {
+        let initialized = call(peer, "initialize", acp_init.clone());
+        assert_eq!(
+            initialized["result"]["agentCapabilities"]["providers"],
+            json!({})
+        );
+    }
+    let jointly_attached = call(&mut b, "session/new", create.clone());
+    let jointly_attached = &jointly_attached["result"]["sessionId"];
+    let loaded = call(
+        &mut a,
+        "session/load",
+        json!({"sessionId":jointly_attached,"cwd":home.0,"mcpServers":[]}),
+    );
+    assert!(loaded.get("result").is_some(), "{loaded}");
+    let current = provider_row(call(&mut a, "providers/list", json!({})));
+    assert_eq!(
+        current["current"],
+        json!({"apiType":"openai","baseUrl":shared})
+    );
+    let invalid = call(
+        &mut a,
+        "providers/set",
+        json!({"providerId":provider,"apiType":"openai",
+        "baseUrl":format!("{first}?key=fixture-invalid")}),
+    );
+    assert_eq!(invalid["error"]["code"], -32602);
+    assert!(!invalid.to_string().contains("fixture-invalid"));
+    let changed = call(
+        &mut a,
+        "providers/set",
+        json!({"providerId":provider,"apiType":"openai","baseUrl":first,
+        "headers":{"Authorization":"Bearer fixture-acp-only","X-Route-Marker":"first"}}),
+    );
+    assert_eq!(changed["result"], json!({}), "{changed}");
+    let a_row = provider_row(call(&mut a, "providers/list", json!({})));
+    assert_eq!(
+        a_row["current"],
+        json!({"apiType":"openai","baseUrl":first})
+    );
+    assert_eq!(
+        provider_row(call(&mut b, "providers/list", json!({}))),
+        current
+    );
+    let selected = call(
+        &mut a,
+        "session/set_config_option",
+        json!({"sessionId":jointly_attached,"configId":"model","value":"acp-route-fixture"}),
+    );
+    assert_eq!(
+        selected["error"]["data"]["nativeAppError"], "provider_route_conflict",
+        "{selected}"
+    );
+
+    let a_new = call(&mut a, "session/new", create.clone());
+    let a_id = a_new["result"]["sessionId"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{a_new}"));
+    let foreign = call(
+        &mut b,
+        "session/resume",
+        json!({"sessionId":a_id,"cwd":home.0}),
+    );
+    assert_eq!(
+        foreign["error"]["data"]["nativeAppError"], "provider_route_conflict",
+        "{foreign}"
+    );
+    let b_new = call(&mut b, "session/new", create.clone());
+    let b_id = b_new["result"]["sessionId"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{b_new}"));
+    let in_use = call(
+        &mut a,
+        "session/load",
+        json!({"sessionId":b_id,"cwd":home.0,"mcpServers":[]}),
+    );
+    assert_eq!(
+        in_use["error"]["data"]["nativeAppError"], "provider_route_conflict",
+        "{in_use}"
+    );
+    for (peer, session_id) in [(&mut a, a_id), (&mut b, b_id)] {
+        let reply = call(
+            peer,
+            "session/prompt",
+            json!({"sessionId":session_id,"prompt":[{"type":"text","text":"Check route"}]}),
+        );
+        assert_eq!(reply["result"]["stopReason"], "end_turn", "{reply}");
+    }
+    let loaded = call(
+        &mut a,
+        "session/load",
+        json!({"sessionId":stored,"cwd":home.0,"mcpServers":[]}),
+    );
+    assert!(loaded.get("result").is_some(), "{loaded}");
+    let reply = call(
+        &mut a,
+        "session/prompt",
+        json!({"sessionId":stored,"prompt":[{"type":"text","text":"Check loaded route"}]}),
+    );
+    assert_eq!(reply["result"]["stopReason"], "end_turn", "{reply}");
+
+    let replaced = call(
+        &mut a,
+        "providers/set",
+        json!({"providerId":provider,"apiType":"openai","baseUrl":second}),
+    );
+    assert_eq!(replaced["result"], json!({}), "{replaced}");
+    let replaced_session = call(&mut a, "session/new", create.clone());
+    let replacement = replaced_session["result"]["sessionId"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{replaced_session}"));
+    let reply = call(
+        &mut a,
+        "session/prompt",
+        json!({"sessionId":replacement,"prompt":[{"type":"text","text":"Check replaced route"}]}),
+    );
+    assert_eq!(reply["result"]["stopReason"], "end_turn", "{reply}");
+
+    let disabled = call(&mut a, "providers/disable", json!({"providerId":provider}));
+    assert_eq!(disabled["result"], json!({}), "{disabled}");
+    let unknown = call(
+        &mut a,
+        "providers/disable",
+        json!({"providerId":"not-a-provider"}),
+    );
+    assert_eq!(unknown["result"], json!({}), "{unknown}");
+    assert!(provider_row(call(&mut a, "providers/list", json!({})))["current"].is_null());
+    assert_eq!(
+        provider_row(call(&mut b, "providers/list", json!({}))),
+        current
+    );
+    let rejected = call(&mut a, "session/new", create.clone());
+    assert_eq!(
+        rejected["error"]["data"]["nativeAppError"], "provider_route_disabled",
+        "{rejected}"
+    );
+    let another_b = call(&mut b, "session/new", create);
+    for (peer, session_id) in [
+        (&mut a, a_id),
+        (&mut b, another_b["result"]["sessionId"].as_str().unwrap()),
+    ] {
+        let reply = call(
+            peer,
+            "session/prompt",
+            json!({"sessionId":session_id,"prompt":[{"type":"text","text":"Check route after disable"}]}),
+        );
+        assert_eq!(reply["result"]["stopReason"], "end_turn", "{reply}");
+    }
+    let observed = model.join().unwrap();
+    assert_eq!(
+        observed,
+        [
+            (
+                "/first/v1/chat/completions".into(),
+                Some("Bearer fixture-acp-only".into()),
+                Some("first".into())
+            ),
+            (
+                "/shared/v1/chat/completions".into(),
+                Some("Bearer fixture-shared-only".into()),
+                Some("shared".into())
+            ),
+            (
+                "/first/v1/chat/completions".into(),
+                Some("Bearer fixture-acp-only".into()),
+                Some("first".into())
+            ),
+            ("/second/v1/chat/completions".into(), None, None),
+            (
+                "/first/v1/chat/completions".into(),
+                Some("Bearer fixture-acp-only".into()),
+                Some("first".into())
+            ),
+            (
+                "/shared/v1/chat/completions".into(),
+                Some("Bearer fixture-shared-only".into()),
+                Some("shared".into())
+            ),
+        ]
+    );
+
+    a.close();
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        let expired = call(
+            &mut b,
+            "session/resume",
+            json!({"sessionId":a_id,"cwd":home.0}),
+        );
+        let code = &expired["error"]["data"]["nativeAppError"];
+        if code == "provider_route_unavailable" {
+            break;
+        }
+        assert!(
+            code == "provider_route_conflict" && Instant::now() < deadline,
+            "{expired}"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(
+        native_call("provider.management", json!({"providerId":provider}))["providers"][0],
+        record
+    );
+    let database = rusqlite::Connection::open_with_flags(
+        home.0.join("rust/dimcode.sqlite"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let stored_config: String = database
+        .query_row(
+            "SELECT config FROM agent_sessions WHERE session_id = ?1",
+            [a_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(!stored_config.contains("fixture-acp-only"));
+    b.close();
 }
 
 #[test]

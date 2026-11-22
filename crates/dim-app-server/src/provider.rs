@@ -15,6 +15,7 @@ mod query;
 pub mod read_work;
 mod remote;
 pub use query::{ModelPage, ModelQuery};
+pub(crate) mod scoped_routes;
 mod secrets;
 mod startup;
 mod view;

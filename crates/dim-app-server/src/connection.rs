@@ -316,6 +316,26 @@ impl Connection {
             .expect("attachments")
             .contains_key(id)
     }
+    async fn scoped_route_admission(
+        &self,
+        usage: &SessionUse,
+    ) -> Result<tokio::sync::OwnedMutexGuard<()>, RpcError> {
+        let admission = usage.admission().await;
+        let session = &usage.session;
+        if session.is_closing()
+            || !usage.is_exclusive(self.is_attached(session.id()))
+            || session
+                .branches()
+                .iter()
+                .any(|branch| session.state(&branch.id).is_ok_and(|state| state.running))
+        {
+            return Err(RpcError::service(
+                "provider_route_conflict",
+                "Temporary routing requires a Session without active work or another client",
+            ));
+        }
+        Ok(admission)
+    }
     /// The channel `hello` declared; `unknown` before hello or for an
     /// unrecognized `other` client.
     pub fn channel(&self) -> dim_agent_capabilities::environment_clients::ClientChannel {
@@ -1059,7 +1079,7 @@ impl Connection {
             return Some(tokio::select! {
                 biased;
                 _ = rpc.unloading.cancelled() => Err(RpcError::interrupted()),
-                result = self.execution_session(rpc, &usage.as_ref().expect("execution operation pins its Session").session, call) => result,
+                result = self.execution_session(rpc, usage.as_ref().expect("execution operation pins its Session"), call) => result,
             });
         }
         let delivery = match &call {
@@ -1437,6 +1457,10 @@ impl Connection {
                     &params.session_id,
                     params.at,
                     params.expected_config.as_ref(),
+                    rpc.ctx
+                        .get::<crate::provider::ProviderService>()
+                        .as_deref()
+                        .map(|provider| (provider, self.id.as_str())),
                 )
                 .await
             {
@@ -1535,9 +1559,10 @@ impl Connection {
     async fn execution_session(
         &self,
         rpc: &RpcService,
-        session: &Session,
+        usage: &SessionUse,
         call: Call,
     ) -> Result<Reply, RpcError> {
+        let session = &usage.session;
         Ok(match call {
             Call::SessionMcp(_) => Reply::McpState(mcp::session_state(session)?),
             Call::McpRefresh(_) => {
@@ -1646,6 +1671,14 @@ impl Connection {
                     Some(branch) => branch,
                     None => self.unnamed_branch(session).map_err(RpcError::from)?,
                 };
+                let route_owner = rpc.ctx.get::<crate::provider::ProviderService>();
+                let current = session
+                    .get::<dim_agent_capabilities::prompt_state::PromptSnapshot>(&branch)?
+                    .and_then(|state| state.configuration);
+                if let (Some(provider), Some(current)) = (&route_owner, &current) {
+                    provider.scoped_connection_owner(&self.id, current.metadata.as_ref())?;
+                }
+                let scoped_target = p.startup.is_none() && p.provider_id.is_some();
                 let mut startup_admission = None;
                 let mut model = if let Some(startup) = p.startup {
                     if self.entry != Entry::Local || rpc.config.product_home.is_none() {
@@ -1742,6 +1775,15 @@ impl Connection {
                         }
                     }
                 };
+                let mut scoped_admission = None;
+                if scoped_target
+                    && let Some(provider) = route_owner
+                    && let Some(admission) = provider.scoped_model(&self.id, &model)?
+                {
+                    scoped_admission = Some(self.scoped_route_admission(usage).await?);
+                    model = admission.model.clone();
+                    startup_admission = Some(admission);
+                }
                 // A model selection replaces the model, not the profile the
                 // branch adopted: the record names the profile whose prompt
                 // the branch runs, so it carries over until another adoption.
@@ -1776,6 +1818,7 @@ impl Connection {
                         .retain_startup(session, &model)
                         .map_err(provider_error)?;
                 }
+                drop(scoped_admission);
                 Reply::ModelUpdate(ModelUpdateResult { model: id, outcome })
             }
             Call::PromptRefresh(p) => {
@@ -1877,9 +1920,12 @@ impl Connection {
                 .and_then(|metadata| metadata.startup.as_ref())
                 .and_then(|startup| startup.connection.as_ref())
             {
-                rpc.ctx
+                let provider = rpc
+                    .ctx
                     .get::<crate::provider::ProviderService>()
-                    .ok_or_else(RpcError::reloading)?
+                    .ok_or_else(RpcError::reloading)?;
+                provider.scoped_connection_owner(&self.id, config.model.metadata.as_ref())?;
+                provider
                     .startup_connection(connection)
                     .map_err(provider_error)?;
             }
@@ -1893,6 +1939,13 @@ impl Connection {
                     params.startup,
                 )
                 .await?;
+        }
+        if startup_admission.is_none()
+            && let Some(provider) = rpc.ctx.get::<crate::provider::ProviderService>()
+            && let Some(admission) = provider.scoped_model(&self.id, &config.model)?
+        {
+            config.model = admission.model.clone();
+            startup_admission = Some(admission);
         }
         if let Some(prompt) = params.system_prompt {
             config.system_prompt = prompt;

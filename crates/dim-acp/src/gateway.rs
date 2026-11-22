@@ -32,6 +32,10 @@ pub(crate) enum Incoming {
 }
 
 pub(crate) enum Work {
+    Providers {
+        reply: Responder,
+        result: Result<Value, Error>,
+    },
     Initialized {
         reply: Responder,
         result: Result<Vec<crate::auth::Method>, Error>,
@@ -299,6 +303,7 @@ pub(crate) struct Gateway {
     version: String,
     initialized: bool,
     initializing: bool,
+    provider_routes_used: bool,
     creating: usize,
     sessions: HashMap<String, Slot>,
     interactions: HashMap<String, Interaction>,
@@ -386,6 +391,7 @@ impl Gateway {
                     .http(self.mcp.supported())
                     .sse(self.mcp.supported()),
             )
+            .providers(crate::providers::supported(&self.rpc).then(acp::ProvidersCapabilities::new))
             .meta(lody)
     }
 
@@ -415,6 +421,7 @@ impl Gateway {
             agent_id,
             version,
             initialized: false,
+            provider_routes_used: false,
             initializing: false,
             creating: 0,
             sessions: HashMap::new(),
@@ -688,6 +695,31 @@ impl Gateway {
         };
         let rpc = self.rpc.clone();
         match request.method.as_str() {
+            "providers/list" | "providers/set" | "providers/disable"
+                if crate::providers::supported(&rpc) =>
+            {
+                let method = request.method;
+                let value = request.params;
+                self.provider_routes_used |= method != "providers/list";
+                self.spawn(async move {
+                    let result = async {
+                        match method.as_str() {
+                            "providers/list" => {
+                                let _: acp::ListProvidersRequest = params(value)?;
+                                encode_native(crate::providers::list(&rpc).await?)
+                            }
+                            "providers/set" => {
+                                encode_native(crate::providers::set(&rpc, params(value)?).await?)
+                            }
+                            _ => encode_native(
+                                crate::providers::disable(&rpc, params(value)?).await?,
+                            ),
+                        }
+                    }
+                    .await;
+                    Work::Providers { reply, result }
+                });
+            }
             "authenticate" => {
                 let args: acp::AuthenticateRequest = match params(request.params) {
                     Ok(args) => args,
@@ -1504,7 +1536,8 @@ impl Gateway {
                     self.authenticating.remove(&provider);
                     return reply.respond_with_error(rpc::unavailable());
                 }
-                Work::Listed { reply, .. }
+                Work::Providers { reply, .. }
+                | Work::Listed { reply, .. }
                 | Work::History { reply, .. }
                 | Work::Removed { reply, .. }
                 | Work::Configured { reply, .. } => {
@@ -1514,6 +1547,7 @@ impl Gateway {
             }
         }
         match work {
+            Work::Providers { reply, result } => reply.respond_with_result(result)?,
             Work::Initialized { reply, result } => {
                 self.initializing = false;
                 match result {
@@ -1787,7 +1821,15 @@ impl Gateway {
                             self.sessions.insert(id.clone(), Slot::Ready(previous));
                         } else if error.code != agent_client_protocol::ErrorCode::ResourceNotFound
                             && !error.data.as_ref().is_some_and(|data| {
-                                data["nativeAppError"] == "session_config_mismatch"
+                                matches!(
+                                    data["nativeAppError"].as_str(),
+                                    Some(
+                                        "session_config_mismatch"
+                                            | "provider_route_conflict"
+                                            | "provider_route_unavailable"
+                                            | "provider_route_disabled"
+                                    )
+                                )
                             })
                         {
                             let rpc = self.rpc.clone();
@@ -3099,6 +3141,10 @@ impl Gateway {
     async fn handle_native(&mut self, message: Option<Native>) -> Result<bool, Error> {
         match message {
             Some(Native::Notice { method, params }) => self.notice(method, params).await?,
+            Some(Native::Lost) if self.provider_routes_used => {
+                self.fail_connection().await?;
+                return Ok(true);
+            }
             Some(Native::Lost) => self.lost()?,
             Some(Native::Restored {
                 same_instance,

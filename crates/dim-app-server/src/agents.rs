@@ -195,6 +195,15 @@ pub(crate) struct SessionUse {
     slot: Arc<SessionSlot>,
     activity: Arc<ProcessHold>,
 }
+impl SessionUse {
+    pub(crate) async fn admission(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        self.slot.gate.clone().lock_owned().await
+    }
+
+    pub(crate) fn is_exclusive(&self, attached: bool) -> bool {
+        self.slot.uses.load(Ordering::Acquire) == 1 + usize::from(attached)
+    }
+}
 impl Clone for SessionUse {
     fn clone(&self) -> Self {
         self.slot.uses.fetch_add(1, Ordering::AcqRel);
@@ -1872,6 +1881,7 @@ impl AgentIndex {
         source: &str,
         at: u64,
         expected: Option<&dim_agent_types::SessionConfigExpectation>,
+        scope: Option<(&crate::provider::ProviderService, &str)>,
     ) -> Result<Session, RpcError> {
         let store = self
             .session_store
@@ -1915,6 +1925,17 @@ impl AgentIndex {
             .map_err(|error| AgentError::Storage(format!("the source configuration: {error}")))?;
         if let Some(expected) = expected {
             check_configuration(session, &config, at, expected).await?;
+        }
+        if let Some((provider, scope)) = scope {
+            let (adopted, _) = session
+                .session_service::<dim_agent_capabilities::timeline_tree::TreeCommands>()?
+                .adopted_configuration(ROOT_BRANCH_ID.into(), Some(at))
+                .await?;
+            let metadata = match &adopted {
+                Some(adopted) => adopted.metadata.as_ref(),
+                None => config.model.metadata.as_ref(),
+            };
+            provider.scoped_connection_owner(scope, metadata)?;
         }
         // A fork of an older protocol keeps the live Session's codemode
         // exclusion; the stored record is written without it, as on create.

@@ -44,6 +44,13 @@ impl Connection {
             None => self.unnamed_branch(&session).map_err(RpcError::from)?,
         };
         let publication = session.publication(&branch).map_err(RpcError::from)?;
+        if let Some(provider) = rpc.ctx.get::<crate::provider::ProviderService>()
+            && let Some(config) = session
+                .get::<dim_agent_capabilities::prompt_state::PromptSnapshot>(&branch)?
+                .and_then(|state| state.configuration)
+        {
+            provider.scoped_connection_owner(&self.id, config.metadata.as_ref())?;
+        }
         let user = params.user.or_else(|| {
             params.text.map(|text| UserInput {
                 content: vec![ContentBlock::Text { text }],

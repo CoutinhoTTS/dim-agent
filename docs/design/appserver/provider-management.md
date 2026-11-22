@@ -173,6 +173,14 @@ already running branches and members retain their captured connection. A changed
 destination adopts a new source on main only. No Provider record, saved
 preference, workspace selection, account lease or secret file is created.
 
+### Connection-scoped Provider routes
+
+The protected local Provider management contribution exposes `provider.routes.list`, `provider.routes.set` and `provider.routes.disable`. It identifies the caller through the existing [call channel](../contracts/session-boundary.md#a2-call-channel). List returns safe routing information and the caller's current overrides. Set takes `{providerId,connection}`, using the URL, protocol and full headers grammar of [startup connections](#session-local-startup-connections). Disable takes `{providerId}` and prevents adoption of that Provider by new Sessions on the caller's connection. The operations use the Provider management face and keep shared records, saved credentials and model preferences untouched.
+
+A Session on that connection adopts a snapshot through Provider's existing startup binding. First attachment of an existing Session requires exclusive admission and idle branches to apply a route, and checks the caller's configuration expectation beforehand. Fork checks the route at its inherited cut. Scoped models record the logical catalog Provider in the optional non-secret `scopedRouteProvider` extension of the open request metadata map. The existing startup source carries the binding identity and non-secret destination. Credentials and header values live in Provider memory. The storage schema and format version stay the same.
+
+Connection close releases both its route settings and its adopted route bindings. An exchange that already holds its resolved connection can settle. Model requests requiring an expired binding fail, and another connection cannot attach or fork a Session that needs the scoped source.
+
 ### 3.1 Read models
 
 | Method | Request | Reply | mutating | interruption |

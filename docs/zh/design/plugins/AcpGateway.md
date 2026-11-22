@@ -63,7 +63,7 @@ Provider 管理归 daemon 的 ProviderPlugin 所有，CLI 使用其[公开方法
 
 - ACP EOF、signal、写失败或插件卸载停止本地准入、释放本地等待、detach/断开 RPC；不停止/关闭 Session 或共享 daemon。
 - 显式 `session/close` 经 native session.close 关闭业务 Session，影响其他客户端，不等于断线或 detach。
-- RPC 丢失时暂停变更，通过现有 endpoint/handshake 恢复、attach、读事实；不盲重发变更。
+- RPC 丢失时暂停变更，通过现有 endpoint/handshake 恢复、attach、读事实，不盲重发变更。已发起临时 Provider 路由变更的连接按[路由生命周期](../../../design/acp-gateway-implementation.md#134-provider-向导)结束。
 - 已结束 generation 不能登记迟到的 new/load/fork 结果、发迟到回答或写入下一连接。
 
 不加 loader、生命周期注册表或每 Session daemon relay。宿主在构造时交出独占 I/O、连接及其重连配置；Gateway 不读取外部服务，声明 Deps = ()。既有 CLI 插件在 [#434 U3](https://github.com/arcships/dim/issues/434) 的依赖迁移另行讨论，不引入 AgentBuilder client host 或 raw service-key 依赖。
