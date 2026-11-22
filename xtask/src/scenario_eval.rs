@@ -4552,10 +4552,9 @@ fn marker_value(text: &str, marker: &str) -> std::result::Result<Option<Value>, 
 
 /// The run's own ending, if the child reported it before its outcome line.
 fn progress_value(text: &str) -> Option<RunProgress> {
-    let line = text
-        .lines()
-        .find(|line| line.starts_with("{\"runProgress\""))?;
-    let value: Value = serde_json::from_str(line).ok()?;
+    let line = text.lines().find(|line| line.contains("\"runProgress\""))?;
+    let json = &line[line.find('{')?..];
+    let value: Value = serde_json::from_str(json).ok()?;
     serde_json::from_value(value["runProgress"].clone()).ok()
 }
 
@@ -16042,7 +16041,9 @@ mod tests {
         next_scenario(&fixture, 131_072);
         let out = fixture.directory.join("out");
         let mut options = fixture.options(out.clone());
-        options.jobs = 1;
+        // Both case runs hold a slot while their judges time out; the next
+        // scenarios run once those slots are free.
+        options.jobs = 2;
         options.judge_budget_ms = Some(1_000);
         let report = tokio::time::timeout(SUBPROCESS_EVAL_GUARD, fixture.evaluate(&options))
             .await
