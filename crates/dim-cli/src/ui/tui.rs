@@ -2055,6 +2055,7 @@ impl App {
         self.recall_all_queued();
         self.host.send(Command::SubmitNow {
             line: self.target_line(),
+            session: self.target_session(),
         });
     }
 
@@ -3991,7 +3992,8 @@ impl App {
             });
         } else {
             let line = self.target_line();
-            self.host.stop(line);
+            let session = self.target_session();
+            self.host.stop(line, session);
         }
         self.set_notice(t("Stopping"));
     }

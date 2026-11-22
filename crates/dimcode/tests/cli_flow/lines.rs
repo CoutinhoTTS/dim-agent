@@ -2208,3 +2208,221 @@ fn tui_a_draft_typed_before_a_session_handoff_does_not_go_to_the_new_session() {
     terminal.wait();
     daemon.join().unwrap();
 }
+
+/// An interrupt pressed while a Session handoff is still in flight does not
+/// stop the Session that replaces it: the gesture names the Session and line
+/// it saw, and a handoff cancels it instead (design §14). A held `session.fork`
+/// is the command in front of the handoff, so the interface still shows the
+/// outgoing Session and its run when Esc is pressed.
+#[test]
+fn tui_an_interrupt_typed_before_a_session_handoff_does_not_stop_the_new_session() {
+    let home = Home::new();
+    let (forked, fork_seen) = std::sync::mpsc::channel();
+    let (release_fork, release) = std::sync::mpsc::channel::<()>();
+    let (updated, update_seen) = std::sync::mpsc::channel::<Value>();
+    let (stop, stop_seen) = std::sync::mpsc::channel::<Value>();
+    let daemon = home.daemon(move |wire| {
+        wire.hello(&[
+            "session.branches",
+            "session.fork",
+            "session.permission.get",
+            "session.permission.update",
+        ]);
+        let attach = wire.read("session.attach");
+        let mut record = attach_record(&attach);
+        record["defaultBranch"] = json!({"branchId":"main","sequence":8});
+        wire.reply(&attach, record);
+        wire.end(json!({"turn_id":"turn","status":"completed","reason":"done"}));
+        wire.notice(
+            "session.state",
+            json!({"sessionId":"session","branchId":"main","running":true}),
+        );
+        let mut usage = |_request: &Value| None;
+        loop {
+            let request = next_usage(wire, &mut usage);
+            let session = request["params"]["sessionId"].as_str().unwrap_or_default();
+            match request["method"].as_str().unwrap_or_default() {
+                "session.branches" => wire.reply(&request, directory("main", &[("main", None)])),
+                "session.history" if session == "forked" => wire.reply(
+                    &request,
+                    history(8, vec![said(3, "after the fork"), applied(4, "input-3")]),
+                ),
+                "session.history" => wire.reply(&request, history(8, vec![])),
+                "session.permission.get" => wire.reply(
+                    &request,
+                    json!({"version":1,"policy":policy("workspace-write")}),
+                ),
+                "session.fork" => {
+                    forked.send(()).unwrap();
+                    release.recv_timeout(PATIENCE).unwrap();
+                    wire.reply(&request, json!({"sessionId":"forked"}));
+                }
+                "session.detach" => wire.reply(&request, json!({})),
+                "session.attach" => {
+                    let mut record = attach_record(&request);
+                    record["defaultBranch"] = json!({"branchId":"main","sequence":8});
+                    wire.reply(&request, record);
+                }
+                "session.permission.update" => {
+                    updated.send(request["params"].clone()).unwrap();
+                    wire.reply(&request, json!({"version":2}));
+                }
+                "session.stop" => {
+                    stop.send(request["params"].clone()).unwrap();
+                    wire.reply(&request, json!({"sequence":9}));
+                }
+                other => panic!("unexpected {other}: {request}"),
+            }
+        }
+    });
+    let mut command = home.command();
+    command.arg("--scrollback");
+    sized(&mut command, 120, 36);
+    let mut terminal = Terminal::resume_tui(command);
+    terminal.until("test / model");
+    terminal.until("⏵⏵ Workspace write");
+    terminal.until("esc interrupt");
+    terminal.write(b"/fork\r");
+    terminal.until("Fork the session");
+    terminal.write(b"y");
+    fork_seen.recv_timeout(PATIENCE).unwrap();
+    // The fork's reply is held, so the interface still shows the outgoing
+    // Session's running turn: this Esc belongs to it.
+    terminal.write(b"\x1b[27u");
+    terminal.until("Stopping");
+    release_fork.send(()).unwrap();
+    terminal.until("after the fork");
+    // The permission change the probe starts flushes every command queued
+    // ahead of it; the stop must have been decided by then.
+    terminal.write(b"\x1b[Z");
+    let changed = update_seen.recv_timeout(PATIENCE).unwrap();
+    assert_eq!(changed["sessionId"], "forked");
+    assert!(
+        stop_seen.try_recv().is_err(),
+        "the interrupt pressed on the outgoing Session does not stop the new one"
+    );
+    terminal.until("The session moved before the stop ran");
+    home.kill(&terminal);
+    terminal.wait();
+    daemon.join().unwrap();
+}
+
+/// The `Ctrl+Enter` gesture is on the same boundary: a handoff while its stop
+/// is still queued cancels the stop without wedging the send key, and a later
+/// gesture reaches the Session on screen (design §14).
+#[test]
+fn tui_a_send_now_typed_before_a_session_handoff_does_not_stop_the_new_session() {
+    let home = Home::new();
+    let (forked, fork_seen) = std::sync::mpsc::channel();
+    let (release_fork, release) = std::sync::mpsc::channel::<()>();
+    let (stopped, stop_seen) = std::sync::mpsc::channel::<Value>();
+    let (submitted, submit_seen) = std::sync::mpsc::channel::<Value>();
+    let (updated, update_seen) = std::sync::mpsc::channel::<Value>();
+    let daemon = home.daemon(move |wire| {
+        wire.hello(&[
+            "session.branches",
+            "session.fork",
+            "session.permission.get",
+            "session.permission.update",
+        ]);
+        let attach = wire.read("session.attach");
+        let mut record = attach_record(&attach);
+        record["defaultBranch"] = json!({"branchId":"main","sequence":8});
+        wire.reply(&attach, record);
+        wire.end(json!({"turn_id":"turn","status":"completed","reason":"done"}));
+        wire.notice(
+            "session.state",
+            json!({"sessionId":"session","branchId":"main","running":true}),
+        );
+        let mut usage = |_request: &Value| None;
+        loop {
+            let request = next_usage(wire, &mut usage);
+            let session = request["params"]["sessionId"].as_str().unwrap_or_default();
+            match request["method"].as_str().unwrap_or_default() {
+                "session.branches" => wire.reply(&request, directory("main", &[("main", None)])),
+                "session.history" if session == "forked" => wire.reply(
+                    &request,
+                    history(8, vec![said(3, "after the fork"), applied(4, "input-3")]),
+                ),
+                "session.history" => wire.reply(&request, history(8, vec![])),
+                "session.permission.get" => wire.reply(
+                    &request,
+                    json!({"version":1,"policy":policy("workspace-write")}),
+                ),
+                "session.fork" => {
+                    forked.send(()).unwrap();
+                    release.recv_timeout(PATIENCE).unwrap();
+                    wire.reply(&request, json!({"sessionId":"forked"}));
+                    wire.notice(
+                        "session.state",
+                        json!({"sessionId":"forked","branchId":"main","running":true}),
+                    );
+                }
+                "session.detach" => wire.reply(&request, json!({})),
+                "session.attach" => {
+                    let mut record = attach_record(&request);
+                    record["defaultBranch"] = json!({"branchId":"main","sequence":8});
+                    wire.reply(&request, record);
+                }
+                "session.stop" => {
+                    stopped.send(request["params"].clone()).unwrap();
+                    wire.reply(&request, json!({"sequence":9}));
+                }
+                "session.permission.update" => {
+                    updated.send(request["params"].clone()).unwrap();
+                    wire.reply(&request, json!({"version":2}));
+                }
+                "session.submit" => {
+                    submitted.send(request["params"].clone()).unwrap();
+                    wire.reply(&request, json!({"event":{}}));
+                    wire.hold();
+                    return;
+                }
+                other => panic!("unexpected {other}: {request}"),
+            }
+        }
+    });
+    let mut command = home.command();
+    command.arg("--scrollback");
+    sized(&mut command, 120, 36);
+    let mut terminal = Terminal::resume_tui(command);
+    terminal.until("test / model");
+    terminal.until("⏵⏵ Workspace write");
+    terminal.until("esc interrupt");
+    terminal.write(b"/fork\r");
+    terminal.until("Fork the session");
+    terminal.write(b"y");
+    fork_seen.recv_timeout(PATIENCE).unwrap();
+    // The fork's reply is held: the draft and the gesture that stops its run
+    // belong to the Session still on screen.
+    terminal.write(b"carry on");
+    terminal.until("carry on");
+    terminal.write(b"\x1b[13;5u");
+    terminal.write(b"x");
+    terminal.until("carry onx");
+    release_fork.send(()).unwrap();
+    terminal.until("after the fork");
+    // The permission change the probe starts flushes every command queued
+    // ahead of it; the send-now stop must have been decided by then.
+    terminal.write(b"\x1b[Z");
+    let changed = update_seen.recv_timeout(PATIENCE).unwrap();
+    assert_eq!(changed["sessionId"], "forked");
+    assert!(
+        stop_seen.try_recv().is_err(),
+        "the send-now stop pressed on the outgoing Session does not stop the new one"
+    );
+    terminal.until("Send now failed: The session moved before the send ran");
+    terminal.until("esc interrupt");
+    terminal.write(b"again");
+    terminal.until("again");
+    terminal.write(b"\x1b[13;5u");
+    let second = stop_seen.recv_timeout(PATIENCE).unwrap();
+    assert_eq!(second["sessionId"], "forked");
+    assert_eq!(second["branchId"], "main");
+    let sent = submit_seen.recv_timeout(PATIENCE).unwrap();
+    assert_eq!(sent["sessionId"], "forked");
+    assert_eq!(sent["text"], "again");
+    home.kill(&terminal);
+    terminal.wait();
+    daemon.join().unwrap();
+}

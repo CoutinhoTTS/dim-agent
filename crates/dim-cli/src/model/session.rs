@@ -193,9 +193,11 @@ pub enum Command {
         line: String,
         session: String,
     },
-    /// Interrupt the run on the line the key was pressed on.
+    /// Interrupt the run on the line the key was pressed on, unless the
+    /// Session has changed since (design §14).
     Stop {
         line: String,
+        session: String,
     },
     /// Answer an approval request.
     Approval {
@@ -231,9 +233,10 @@ pub enum Command {
     },
     /// Interrupt the run on the line the gesture started on and reply once it
     /// has settled, so the interface can submit the draft it held back
-    /// (Ctrl+Enter).
+    /// (Ctrl+Enter); a Session handoff cancels it (design §14).
     SubmitNow {
         line: String,
+        session: String,
     },
     /// Stop a background command on its originating branch (`/tasks`).
     StopTask {
@@ -1566,8 +1569,8 @@ pub trait SessionPort {
             session,
         });
     }
-    fn stop(&self, line: String) {
-        self.send(Command::Stop { line });
+    fn stop(&self, line: String, session: String) {
+        self.send(Command::Stop { line, session });
     }
 }
 

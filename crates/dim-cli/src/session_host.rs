@@ -1433,8 +1433,10 @@ impl Worker {
     /// move or a Session handoff the key could not see cancels the command and
     /// returns what it carried to the draft, instead of writing it into
     /// another line or Session. A gesture made before any Session names none
-    /// and keeps the startup path it belongs to. The stop gestures are not
-    /// cancelled; each names the line it was pressed on (design §14).
+    /// and keeps the startup path it belongs to. The stop gestures name the
+    /// Session and line they were pressed on: a handoff cancels them, while a
+    /// move within the same Session still stops the line the key saw (design
+    /// §14).
     fn typed_command(&mut self, command: Command) -> Option<Command> {
         const KEPT: &str = "The centre moved before the command ran; the draft was kept";
         let (session, line, draft, cancelled) = match &command {
@@ -1445,7 +1447,7 @@ impl Worker {
                 ..
             } => (
                 session,
-                line,
+                Some(line),
                 Some(vec![DraftPart::Text(text.clone())]),
                 KEPT,
             ),
@@ -1454,7 +1456,7 @@ impl Worker {
                 line,
                 session,
                 ..
-            } => (session, line, Some(parts.clone()), KEPT),
+            } => (session, Some(line), Some(parts.clone()), KEPT),
             Command::Goal {
                 line,
                 session,
@@ -1462,7 +1464,7 @@ impl Worker {
                 ..
             } => (
                 session,
-                line,
+                Some(line),
                 Some(vec![DraftPart::Text(draft.clone())]),
                 KEPT,
             ),
@@ -1473,7 +1475,7 @@ impl Worker {
                 ..
             } => (
                 session,
-                line,
+                Some(line),
                 Some(vec![DraftPart::Text(draft.clone())]),
                 KEPT,
             ),
@@ -1483,49 +1485,66 @@ impl Worker {
                 session,
             } => (
                 session,
-                line,
+                Some(line),
                 Some(vec![DraftPart::Text(text.clone())]),
                 KEPT,
             ),
             Command::Compact { line, session } => (
                 session,
-                line,
+                Some(line),
                 None,
                 "The centre moved before /compact ran; nothing was compacted",
             ),
             Command::Usage { line, session } => (
                 session,
-                line,
+                Some(line),
                 None,
                 "The centre moved before /usage ran; no report was printed",
             ),
             Command::Earlier { line, session } => (
                 session,
-                line,
+                Some(line),
                 None,
                 "The centre moved before /earlier ran; nothing was loaded",
             ),
             Command::SetPermission { session, line, .. } if !session.is_empty() => (
                 session,
-                line,
+                Some(line),
                 None,
                 "The session or line moved before the permission change ran; nothing was changed",
             ),
+            Command::Stop { session, .. } => (
+                session,
+                None,
+                None,
+                "The session moved before the stop ran; nothing was stopped",
+            ),
+            Command::SubmitNow { session, .. } => {
+                (session, None, None, "The session moved before the send ran")
+            }
             _ => return Some(command),
         };
         let now = match &command {
             Command::Usage { .. } | Command::SetPermission { .. } => &self.default_branch,
             _ => &self.focus,
         };
-        if session.is_empty() || line.is_empty() || (session == &self.session_id && line == now) {
+        if session.is_empty()
+            || line.is_some_and(|line| line.is_empty())
+            || (session == &self.session_id && line.is_none_or(|line| line == now))
+        {
             return Some(command);
         }
-        match draft {
-            Some(parts) => self.send(Update::DraftNotSent {
-                parts,
-                message: cancelled.into(),
+        match &command {
+            Command::SubmitNow { .. } => self.send(Update::Stopped {
+                error: Some(cancelled.into()),
             }),
-            None => self.send(Update::Notice(cancelled.into())),
+            _ => match draft {
+                Some(parts) => self.send(Update::DraftNotSent {
+                    parts,
+                    message: cancelled.into(),
+                }),
+                None => self.send(Update::Notice(cancelled.into())),
+            },
         };
         None
     }
@@ -1672,7 +1691,7 @@ impl Worker {
                     }
                 }
             }
-            Command::Stop { line } => {
+            Command::Stop { line, .. } => {
                 let params = json!({
                     "sessionId": self.session_id,
                     "branchId": line,
@@ -1681,7 +1700,7 @@ impl Worker {
                 let result = self.client.rpc("session.stop", params).await;
                 self.report_failure(result);
             }
-            Command::SubmitNow { line } => {
+            Command::SubmitNow { line, .. } => {
                 let params = json!({
                     "sessionId": self.session_id,
                     "branchId": line,
