@@ -5438,8 +5438,8 @@ async fn drive_once(
         // A run that did not stop on its wall clock gives its judge phase
         // its own budget: the judge may legitimately make several calls, and
         // one that never answers must not hold the child — and the worker
-        // that runs it — open. The run keeps the stop it reached, its export
-        // and every call recorded so far (model-prompts §8.1).
+        // that runs it — open. The run keeps the stop it reached and its
+        // export (model-prompts §8.1).
         let budget = judge_phase_budget(settings.judge_budget_ms);
         match tokio::time::timeout(
             budget,
