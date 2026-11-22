@@ -2448,7 +2448,7 @@ async fn a_restore_resolves_its_reporting_identity_once() {
     let database = Database::new();
     let (id, _) = stored_two_line_session(&database).await;
     let resolutions = count_identity_resolutions(&id);
-    let (agent, store, db) = restoring_host(&database, Duration::from_secs(10)).await;
+    let (agent, store, db) = restoring_host(&database, Duration::from_secs(1)).await;
     settled("the restore completes", agent.restore_session(id))
         .await
         .expect("a restore within its opening bound completes");
