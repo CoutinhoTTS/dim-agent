@@ -2439,6 +2439,29 @@ async fn a_slow_restore_reports_progress_and_keeps_the_opening_alive() {
     db.close().await.unwrap();
 }
 
+/// A restore resolves the identity its opening progress is reported under once
+/// per tree, not once per step: the steps of a stored Session cost no complete
+/// process diagnostics snapshot each.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_restore_resolves_its_reporting_identity_once() {
+    use dim_agent_capabilities::timeline_tree::testing::count_identity_resolutions;
+    let database = Database::new();
+    let (id, _) = stored_two_line_session(&database).await;
+    let resolutions = count_identity_resolutions(&id);
+    let (agent, store, db) = restoring_host(&database, Duration::from_secs(10)).await;
+    settled("the restore completes", agent.restore_session(id))
+        .await
+        .expect("a restore within its opening bound completes");
+    assert_eq!(
+        resolutions.count(),
+        1,
+        "the restore resolves the identity it reports progress under once"
+    );
+    settled("the host closes", agent.close()).await.unwrap();
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+}
+
 /// A history whose requests cover every list case: a new list after a
 /// compaction, a request keeping part and one keeping all of the previous
 /// one, `tools` and `system` absent, reused and changed, request drafts, and

@@ -508,7 +508,8 @@ Carried from [#6](https://github.com/arcships/dim/issues/6):
   that interval. Restarting the same row does not renew it; activity in another Session does not.
   A plugin whose own `apply`, or a restore of the lines it owns, runs long may report real progress
   with `opening_advanced(ctx)` (`dim_agent_runtime::assembly`), which resets the same interval; a
-  plugin whose work runs on a blocking thread reports from there.
+  plugin whose work runs on a blocking thread reports from there. A report bounds the gap since the
+  previous one, not any single await: work that stalls without reporting still times out.
   There is no fixed total startup deadline. The
   same rule applies to Session and branch opening, process startup and restart. A branch waiting for
   its parent follows that parent's bounded opening rather than imposing another total deadline.

@@ -69,7 +69,7 @@ keyed input and reads only its keys and retire flags. Candidate branches remain 
 receipts/dispatch fences and initial input acceptance succeed. Creation retains
 its fixed ancestry cut even if a waiter disappears. One opening budget requests
 cancellation; rollback and accepted host work must still settle. Cleanup closes
-the tree, cancels reservations, joins builds and closes branch contexts. Restore settles interrupted creates without replaying external work. It selects each child's terminal kind and end position, preserving that end identity even if a fork has no own history for the child. Every restore step reports `opening_advanced`, so a store read or a line's build that runs long renews the Session opening's inactivity bound, and a timeout with every row already Active names `restore` as the phase still running. Only a line that will mount reads its creation source at the known anchor. Accepted ancestry cuts use the directory directly; only a new cut is checked against context during creation. Tool-call
+the tree, cancels reservations, joins builds and closes branch contexts. Restore settles interrupted creates without replaying external work. It selects each child's terminal kind and end position, preserving that end identity even if a fork has no own history for the child. Each finished restore step reports opening progress under an identity the tree resolves once, so the gaps between steps renew the Session opening's inactivity bound, and a timeout with every row already Active names `restore` as the phase still running. That bound covers only those gaps: a single store read the restore awaits, and the branch-directory read before its first report, can still outlast it. Only a line that will mount reads its creation source at the known anchor. Accepted ancestry cuts use the directory directly; only a new cut is checked against context during creation. Tool-call
 ancestry cuts cannot split required result relationships. Client detach is not
 Session close, and closing is not deletion of persisted history.
 
@@ -94,7 +94,8 @@ Session close, and closing is not deletion of persisted history.
 
 [storage_flow.rs](../../../../crates/dim-app-server/tests/storage_flow.rs):
 `a_silent_restore_times_out_naming_the_restore_phase`,
-`a_slow_restore_reports_progress_and_keeps_the_opening_alive`.
+`a_slow_restore_reports_progress_and_keeps_the_opening_alive`,
+`a_restore_resolves_its_reporting_identity_once`.
 
 <!-- generated:plugin TimelineTree — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
 | 项 | 值 |

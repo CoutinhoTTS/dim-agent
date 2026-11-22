@@ -41,16 +41,48 @@ impl rutis::Event for OpeningAdvanced {
 /// about the opening. A report is a synchronous event, so a plugin whose work
 /// runs on a blocking thread reports from there. A context whose plugin has no
 /// live fiber reports nothing: the report would be dropped anyway.
+///
+/// Each call takes a process diagnostics snapshot to find the plugin's id;
+/// resolve it once with [`OpeningReporter::new`] where a task reports at many
+/// steps.
 pub fn opening_advanced(ctx: &Ctx) {
-    let instance = ctx.instance();
-    let id = ctx
-        .diagnostics()
-        .plugins
-        .into_iter()
-        .find(|plugin| plugin.instance == instance)
-        .map(|plugin| plugin.id);
-    if let Some(id) = id {
-        let _ = ctx.emit(OpeningAdvanced(id));
+    if let Some(reporter) = OpeningReporter::new(ctx) {
+        reporter.report();
+    }
+}
+
+/// The identity an opening report is attributed to, resolved once and reused at
+/// every report. A task that reports at many steps, such as a restore after
+/// each read, costs one process diagnostics snapshot for the whole task instead
+/// of one per step.
+///
+/// Every report still counts only the openings whose subtree contains the row
+/// when they read it; a report after the row has ended extends no opening.
+pub struct OpeningReporter {
+    ctx: Ctx,
+    id: PluginId,
+}
+
+impl OpeningReporter {
+    /// Resolves the plugin id of `ctx`'s plugin, or none when no live fiber has
+    /// that instance.
+    pub fn new(ctx: &Ctx) -> Option<Self> {
+        let instance = ctx.instance();
+        let id = ctx
+            .diagnostics()
+            .plugins
+            .into_iter()
+            .find(|plugin| plugin.instance == instance)
+            .map(|plugin| plugin.id)?;
+        Some(Self {
+            ctx: ctx.clone(),
+            id,
+        })
+    }
+
+    /// Reports real progress; see [`opening_advanced`].
+    pub fn report(&self) {
+        let _ = self.ctx.emit(OpeningAdvanced(self.id));
     }
 }
 

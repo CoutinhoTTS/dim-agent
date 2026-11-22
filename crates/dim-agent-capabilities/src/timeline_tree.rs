@@ -7,8 +7,8 @@ use crate::{
 };
 use dim_agent_runtime::{
     AgentError, Branch, BranchDirectoryEntry, BranchDirectoryState, BranchLifecycle, BranchOptions,
-    BranchRefusal, Dispatcher, Names, QueryComparison, QueryFilter, QueryOperand, QueryOutput,
-    QueryPage, QueryPick, QuerySelect, QuerySpec, QueryValue, Result, SessionIdentity,
+    BranchRefusal, Dispatcher, Names, OpeningReporter, QueryComparison, QueryFilter, QueryOperand,
+    QueryOutput, QueryPage, QueryPick, QuerySelect, QuerySpec, QueryValue, Result, SessionIdentity,
     StoredBranch, StoredEvent, Timeline, TimelineContext, TimelineFactory, TimelineIdentity,
     TimelineInfo, TimelineKey, TimelineQuery, TimelineQueryReply, TimelineQueryScope,
     TimelineStore, TimelineTreeControl,
@@ -24,7 +24,7 @@ use std::{
     num::NonZeroU64,
     panic::AssertUnwindSafe,
     sync::{
-        Arc, Mutex, Weak,
+        Arc, Mutex, OnceLock, Weak,
         atomic::{AtomicBool, Ordering},
     },
 };
@@ -39,7 +39,9 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 /// its writer starting. Feature `testing` only: a production build has no hook.
 #[cfg(feature = "testing")]
 pub mod testing {
+    use std::sync::Arc;
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::{mpsc, watch};
 
     type Hold = (String, mpsc::UnboundedSender<String>, watch::Receiver<bool>);
@@ -232,6 +234,58 @@ pub mod testing {
             tokio::time::sleep(delay).await;
         }
     }
+
+    static IDENTITY_RESOLUTIONS: Mutex<Vec<(String, Arc<AtomicUsize>)>> = Mutex::new(Vec::new());
+
+    /// Counts how often one Session's tree resolves the identity its opening
+    /// progress is reported under, until dropped. A restore resolves it once,
+    /// so the count does not grow with the restore's steps.
+    pub struct IdentityResolutions {
+        session: String,
+        count: Arc<AtomicUsize>,
+    }
+    impl IdentityResolutions {
+        /// The resolutions of `session_id`'s tree since this was armed.
+        pub fn count(&self) -> usize {
+            self.count.load(Ordering::Relaxed)
+        }
+    }
+    impl Drop for IdentityResolutions {
+        fn drop(&mut self) {
+            let session = std::mem::take(&mut self.session);
+            IDENTITY_RESOLUTIONS
+                .lock()
+                .unwrap()
+                .retain(|(held, _)| *held != session);
+        }
+    }
+
+    /// Counts the opening report identity resolutions of `session_id`'s tree.
+    /// The tests of one process run in parallel, so the key is the Session.
+    pub fn count_identity_resolutions(session_id: &str) -> IdentityResolutions {
+        let count = Arc::new(AtomicUsize::new(0));
+        IDENTITY_RESOLUTIONS
+            .lock()
+            .unwrap()
+            .push((session_id.to_owned(), count.clone()));
+        IdentityResolutions {
+            session: session_id.to_owned(),
+            count,
+        }
+    }
+
+    pub(crate) fn identity_resolved(session_id: &str) {
+        let count = {
+            let resolutions = IDENTITY_RESOLUTIONS.lock().unwrap();
+            resolutions
+                .iter()
+                .find(|(held, _)| held == session_id)
+                .map(|(_, count)| count.clone())
+        };
+        if let Some(count) = count {
+            count.fetch_add(1, Ordering::Relaxed);
+        }
+    }
 }
 
 /// How a loaded branch begins on its Timeline.
@@ -336,9 +390,12 @@ pub struct TimelineTree {
     factory: Arc<TimelineFactory>,
     store: Arc<dyn TimelineStore>,
     session_id: String,
-    /// The plugin's context, which reports a restore's progress to the
-    /// Session opening that waits for it.
+    /// The plugin's context; the restore resolves the identity it reports
+    /// progress under from it once.
     ctx: Ctx,
+    /// The restore's reporting identity, resolved on the first finished step
+    /// so a Session that never restores costs no diagnostics snapshot.
+    reporter: OnceLock<Option<OpeningReporter>>,
     cancel: CancellationToken,
     builds: TaskTracker,
     close_result: watch::Sender<Option<Result<()>>>,
@@ -1087,6 +1144,7 @@ impl TimelineTree {
             store,
             session_id,
             ctx,
+            reporter: OnceLock::new(),
             cancel: CancellationToken::new(),
             builds: TaskTracker::new(),
             close_result: watch::channel(None).0,
@@ -2680,7 +2738,19 @@ impl TimelineTree {
     async fn step_finished(&self) {
         #[cfg(feature = "testing")]
         testing::restore_step(&self.session_id).await;
-        dim_agent_runtime::opening_advanced(&self.ctx);
+        let reporter = self.reporter.get_or_init(|| {
+            let reporter = OpeningReporter::new(&self.ctx);
+            #[cfg(feature = "testing")]
+            {
+                if reporter.is_some() {
+                    testing::identity_resolved(&self.session_id);
+                }
+            }
+            reporter
+        });
+        if let Some(reporter) = reporter {
+            reporter.report();
+        }
     }
     /// The default branch the root's stored facts name, or the root: the
     /// newest `branch/default` or `session/forked` on the root, by the same
