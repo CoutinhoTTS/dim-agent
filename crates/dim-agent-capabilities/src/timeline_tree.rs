@@ -39,9 +39,9 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 /// its writer starting. Feature `testing` only: a production build has no hook.
 #[cfg(feature = "testing")]
 pub mod testing {
+    use rutis::host::PluginId;
     use std::sync::Arc;
     use std::sync::Mutex;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::{mpsc, watch};
 
     type Hold = (String, mpsc::UnboundedSender<String>, watch::Receiver<bool>);
@@ -235,19 +235,26 @@ pub mod testing {
         }
     }
 
-    static IDENTITY_RESOLUTIONS: Mutex<Vec<(String, Arc<AtomicUsize>)>> = Mutex::new(Vec::new());
+    type Resolutions = Arc<Mutex<Vec<PluginId>>>;
+    static IDENTITY_RESOLUTIONS: Mutex<Vec<(String, Resolutions)>> = Mutex::new(Vec::new());
 
-    /// Counts how often one Session's tree resolves the identity its opening
-    /// progress is reported under, until dropped. A restore resolves it once,
-    /// so the count does not grow with the restore's steps.
+    /// Counts how often one Session's trees resolve the identity their opening
+    /// progress is reported under, and names the fibers they resolved, until
+    /// dropped. A restore resolves it once, so the list does not grow with the
+    /// restore's steps.
     pub struct IdentityResolutions {
         session: String,
-        count: Arc<AtomicUsize>,
+        ids: Resolutions,
     }
     impl IdentityResolutions {
-        /// The resolutions of `session_id`'s tree since this was armed.
+        /// The fibers the trees of `session_id` resolved since this was armed,
+        /// oldest first.
+        pub fn ids(&self) -> Vec<PluginId> {
+            self.ids.lock().unwrap().clone()
+        }
+        /// The resolutions of `session_id`'s trees since this was armed.
         pub fn count(&self) -> usize {
-            self.count.load(Ordering::Relaxed)
+            self.ids.lock().unwrap().len()
         }
     }
     impl Drop for IdentityResolutions {
@@ -260,30 +267,30 @@ pub mod testing {
         }
     }
 
-    /// Counts the opening report identity resolutions of `session_id`'s tree.
+    /// Counts the opening report identity resolutions of `session_id`'s trees.
     /// The tests of one process run in parallel, so the key is the Session.
     pub fn count_identity_resolutions(session_id: &str) -> IdentityResolutions {
-        let count = Arc::new(AtomicUsize::new(0));
+        let ids = Arc::new(Mutex::new(Vec::new()));
         IDENTITY_RESOLUTIONS
             .lock()
             .unwrap()
-            .push((session_id.to_owned(), count.clone()));
+            .push((session_id.to_owned(), ids.clone()));
         IdentityResolutions {
             session: session_id.to_owned(),
-            count,
+            ids,
         }
     }
 
-    pub(crate) fn identity_resolved(session_id: &str) {
-        let count = {
+    pub(crate) fn identity_resolved(session_id: &str, id: PluginId) {
+        let ids = {
             let resolutions = IDENTITY_RESOLUTIONS.lock().unwrap();
             resolutions
                 .iter()
                 .find(|(held, _)| held == session_id)
-                .map(|(_, count)| count.clone())
+                .map(|(_, ids)| ids.clone())
         };
-        if let Some(count) = count {
-            count.fetch_add(1, Ordering::Relaxed);
+        if let Some(ids) = ids {
+            ids.lock().unwrap().push(id);
         }
     }
 }
@@ -394,7 +401,12 @@ pub struct TimelineTree {
     /// progress under from it once.
     ctx: Ctx,
     /// The restore's reporting identity, resolved on the first finished step
-    /// so a Session that never restores costs no diagnostics snapshot.
+    /// so a Session that never restores costs no diagnostics snapshot. It is
+    /// the id of the copy that creates this tree and closes it again
+    /// (`TimelineTreePlugin::apply` below); the owning row's unload disposes
+    /// that copy, and so the tree, before the next generation applies
+    /// (`PartRegistry::register`), so a row reload rebuilds the tree and its id
+    /// rather than leaving a stale one behind.
     reporter: OnceLock<Option<OpeningReporter>>,
     cancel: CancellationToken,
     builds: TaskTracker,
@@ -2742,8 +2754,8 @@ impl TimelineTree {
             let reporter = OpeningReporter::new(&self.ctx);
             #[cfg(feature = "testing")]
             {
-                if reporter.is_some() {
-                    testing::identity_resolved(&self.session_id);
+                if let Some(reporter) = &reporter {
+                    testing::identity_resolved(&self.session_id, reporter.id());
                 }
             }
             reporter

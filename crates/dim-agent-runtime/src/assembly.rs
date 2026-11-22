@@ -84,6 +84,13 @@ impl OpeningReporter {
     pub fn report(&self) {
         let _ = self.ctx.emit(OpeningAdvanced(self.id));
     }
+
+    /// The fiber this reporter's reports are attributed to. Feature `testing`
+    /// only: a flow test asserts which tree's fiber a report lands on.
+    #[cfg(feature = "testing")]
+    pub fn id(&self) -> PluginId {
+        self.id
+    }
 }
 
 type ProgressReport = Arc<dyn Fn() + Send + Sync>;

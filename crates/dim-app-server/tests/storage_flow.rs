@@ -27,7 +27,7 @@ use dim_app_server::storage::{
     NodeLoads, STORE_FORMAT, SqliteStorage, SqliteTimelineStore, vacuum_store,
 };
 use rusqlite::{Connection, OptionalExtension, params};
-use rutis::host::CtxHost;
+use rutis::host::{CtxHost, FiberState};
 use std::{
     path::PathBuf,
     sync::Arc,
@@ -2456,6 +2456,63 @@ async fn a_restore_resolves_its_reporting_identity_once() {
         resolutions.count(),
         1,
         "the restore resolves the identity it reports progress under once"
+    );
+    settled("the host closes", agent.close()).await.unwrap();
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+}
+
+/// Each tree resolves the identity its opening progress is reported under
+/// within its own generation: a Session whose tree closed and was restored
+/// again reports under the new tree's live fiber, never the previous one's. A
+/// row reload rebuilds the tree by the same path (`TimelineTreePlugin::apply`
+/// creates it, and the owning row's unload withdraws the registration that
+/// disposes every copy), but the suite can only move to another generation by
+/// restoring the Session.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn each_tree_generation_resolves_its_own_reporting_identity() {
+    use dim_agent_capabilities::timeline_tree::testing::count_identity_resolutions;
+    let database = Database::new();
+    let (id, _) = stored_two_line_session(&database).await;
+    let resolutions = count_identity_resolutions(&id);
+    let (agent, store, db) = restoring_host(&database, Duration::from_secs(1)).await;
+    let session = settled(
+        "the first restore completes",
+        agent.restore_session(id.clone()),
+    )
+    .await
+    .expect("a restore within its opening bound completes");
+    settled("the first Session closes", session.close())
+        .await
+        .unwrap();
+    let second = settled("the second restore completes", agent.restore_session(id))
+        .await
+        .expect("a restore within its opening bound completes");
+    let ids = resolutions.ids();
+    assert_eq!(
+        ids.len(),
+        2,
+        "each tree resolves the identity its reports are attributed to"
+    );
+    assert_ne!(
+        ids[0], ids[1],
+        "the second tree resolves its own fiber, not the previous generation's"
+    );
+    let live = second.diagnostics().unwrap().plugins;
+    assert!(
+        live.iter().any(|plugin| plugin.id == ids[1]
+            && plugin.name == "TimelineTree"
+            && plugin.state == FiberState::Active),
+        "the second tree reports under its own live fiber"
+    );
+    assert!(
+        !agent
+            .root()
+            .diagnostics()
+            .plugins
+            .iter()
+            .any(|plugin| plugin.id == ids[0] && plugin.state == FiberState::Active),
+        "the first tree's fiber is gone, so a report under it would be dropped"
     );
     settled("the host closes", agent.close()).await.unwrap();
     store.close().await.unwrap();
