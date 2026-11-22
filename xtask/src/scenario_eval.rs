@@ -5871,6 +5871,8 @@ async fn drive(
             }
         };
         match fired {
+            // The next attempt waits for the loop's next notice (`wait_time`),
+            // so the retry is paced there rather than by a sleep here.
             Ok(SwitchFire::Retry) => driven.switch_retries += 1,
             Ok(SwitchFire::Fired) => awaiting = true,
             Ok(SwitchFire::NotFired) => {}
