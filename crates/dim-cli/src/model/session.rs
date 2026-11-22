@@ -177,10 +177,23 @@ pub enum Command {
         projection_id: u64,
         targets: std::collections::BTreeSet<crate::model::view::CompactionTarget>,
     },
-    Submit(String, SubmitMode),
+    /// A message and the line its draft was typed on; a submit whose line is
+    /// no longer the centre is cancelled and its draft kept (design §14).
+    Submit {
+        text: String,
+        mode: SubmitMode,
+        line: String,
+    },
     /// A draft with pastes to store or content blocks to send.
-    SubmitDraft(Vec<DraftPart>, SubmitMode),
-    Stop,
+    SubmitDraft {
+        parts: Vec<DraftPart>,
+        mode: SubmitMode,
+        line: String,
+    },
+    /// Interrupt the run on the line the key was pressed on.
+    Stop {
+        line: String,
+    },
     /// Answer an approval request.
     Approval {
         request_id: String,
@@ -213,9 +226,12 @@ pub enum Command {
         input_id: String,
         action: &'static str,
     },
-    /// Interrupt the run and reply once it has settled, so the interface can
-    /// submit the draft it held back (Ctrl+Enter).
-    SubmitNow,
+    /// Interrupt the run on the line the gesture started on and reply once it
+    /// has settled, so the interface can submit the draft it held back
+    /// (Ctrl+Enter).
+    SubmitNow {
+        line: String,
+    },
     /// Stop a background command on its originating branch (`/tasks`).
     StopTask {
         session_id: String,
@@ -371,10 +387,20 @@ pub enum Command {
     /// `title` is `None`; an empty text is refused, and only `--clear`
     /// clears. Nothing here reaches the model.
     Rename(Option<String>),
-    /// `/goal`: show, set, edit, pause, resume or clear the shown line's goal.
-    Goal(crate::goal::Request),
-    /// `/loop`: show, start or stop a loop on the shown line.
-    Loop(crate::loop_view::Request),
+    /// `/goal`: show, set, edit, pause, resume or clear the line the command
+    /// was typed on; `draft` restores the command when that line has moved.
+    Goal {
+        request: crate::goal::Request,
+        line: String,
+        draft: String,
+    },
+    /// `/loop`: show, start or stop a loop on the line the command was typed
+    /// on; `draft` restores the command when that line has moved.
+    Loop {
+        request: crate::loop_view::Request,
+        line: String,
+        draft: String,
+    },
     SetPermission(crate::permission::PresetSelection),
     /// List the providers of the `/connect` panel.
     ListProviders,
@@ -431,8 +457,12 @@ pub enum Command {
     /// Change one runtime; the worker lists the runtimes and the plugins
     /// again after it.
     Runtime(RuntimeAction),
-    /// A configuration command line (`/effort high`, `/agent`, ...).
-    Configure(String),
+    /// A configuration command line (`/effort high`, `/agent`, ...) and the
+    /// line its draft was typed on.
+    Configure {
+        text: String,
+        line: String,
+    },
     /// Make `(provider, model)` the default and the active session's model.
     /// `reasoning_effort` is set when the picker cycled that model's effort;
     /// `label` is the row's text the default's confirmation names back.
@@ -1503,11 +1533,11 @@ pub trait SessionPort {
     fn drain(&self) -> Vec<Update>;
     /// Closes the connection and gives the worker a moment to wind down.
     fn shutdown(self: Box<Self>);
-    fn submit(&self, text: String, mode: SubmitMode) {
-        self.send(Command::Submit(text, mode));
+    fn submit(&self, text: String, mode: SubmitMode, line: String) {
+        self.send(Command::Submit { text, mode, line });
     }
-    fn stop(&self) {
-        self.send(Command::Stop);
+    fn stop(&self, line: String) {
+        self.send(Command::Stop { line });
     }
 }
 

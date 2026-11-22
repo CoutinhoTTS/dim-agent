@@ -703,9 +703,20 @@ fn tui_a_line_without_a_readable_configuration_carries_no_model_and_the_root_res
                 &branches,
                 directory("main", &[("main", None), ("line-1", Some("main"))]),
             );
-            let root = next(wire);
-            assert_eq!(root["method"], "session.history");
-            wire.reply(&root, history(8, vec![]));
+            loop {
+                let request = next(wire);
+                match request["method"].as_str().unwrap_or_default() {
+                    "session.branches" => wire.reply(
+                        &request,
+                        directory("main", &[("main", None), ("line-1", Some("main"))]),
+                    ),
+                    "session.history" => {
+                        wire.reply(&request, history(8, vec![]));
+                        break;
+                    }
+                    other => panic!("unexpected opening request: {other}: {request}"),
+                }
+            }
             let mut usage = |_request: &Value| None;
             let mut moves = 0;
             loop {
@@ -1288,6 +1299,369 @@ fn tui_a_moved_line_with_a_refused_policy_read_shows_no_outgoing_preset() {
         "the panel marks no outgoing preset as current: {panel}"
     );
 
+    home.kill(&terminal);
+    terminal.wait();
+    daemon.join().unwrap();
+}
+
+/// A send-now pressed before a queued move reaches the centre stops the line
+/// it was pressed on, and its draft goes back to the composer rather than to
+/// the line the centre moved to (design §14).
+#[test]
+fn tui_send_now_keeps_its_draft_when_a_queued_move_reaches_the_centre_first() {
+    for fullscreen in [false, true] {
+        let home = Home::new();
+        let (move_seen, moved) = std::sync::mpsc::channel();
+        let (release_move, release) = std::sync::mpsc::channel::<()>();
+        let (stop, stop_seen) = std::sync::mpsc::channel::<Value>();
+        let (submit, submit_seen) = std::sync::mpsc::channel::<Value>();
+        let daemon = home.daemon(move |wire| {
+            wire.hello(&[
+                "session.methods",
+                "session.branches",
+                "session.branch.get",
+                "session.branch_set_default",
+                "session.permission.get",
+                "session.permission.update",
+            ]);
+            let attach = wire.read("session.attach");
+            let mut record = attach_record(&attach);
+            record["defaultBranch"] = json!({"branchId":"main","sequence":8});
+            record["running"] = json!(true);
+            wire.reply(&attach, record);
+            let branches = next(wire);
+            assert_eq!(branches["method"], "session.branches");
+            wire.reply(
+                &branches,
+                directory("main", &[("main", None), ("line-1", Some("main"))]),
+            );
+            loop {
+                let request = next(wire);
+                match request["method"].as_str().unwrap_or_default() {
+                    "session.branches" => wire.reply(
+                        &request,
+                        directory("main", &[("main", None), ("line-1", Some("main"))]),
+                    ),
+                    "session.history" => {
+                        wire.reply(&request, history(8, vec![]));
+                        break;
+                    }
+                    other => panic!("unexpected opening request: {other}: {request}"),
+                }
+            }
+            let mut usage = |_request: &Value| None;
+            let mut announced = false;
+            loop {
+                let request = next_usage(wire, &mut usage);
+                let branch = request["params"]["branchId"].as_str().unwrap_or_default();
+                match request["method"].as_str().unwrap_or_default() {
+                    "session.permission.get" => {
+                        if !announced && branch == "main" {
+                            announced = true;
+                            wire.notice(
+                                "session.state",
+                                json!({"sessionId":"session","branchId":"main","running":true}),
+                            );
+                        }
+                        wire.reply(
+                            &request,
+                            json!({"version":1,"policy":policy(if branch == "line-1" {
+                                "full-access"
+                            } else {
+                                "workspace-write"
+                            })}),
+                        )
+                    }
+                    "session.branch_set_default" => {
+                        assert_eq!(branch, "line-1");
+                        move_seen.send(()).unwrap();
+                        release.recv_timeout(PATIENCE).unwrap();
+                        wire.reply(&request, json!({"defaultBranchId":"line-1"}));
+                    }
+                    "session.branches" => wire.reply(
+                        &request,
+                        directory("main", &[("main", None), ("line-1", Some("main"))]),
+                    ),
+                    "session.branch.get" => wire.reply(&request, entry("line-1", "main")),
+                    "session.history" => {
+                        let through = if branch == "line-1" { 3 } else { 8 };
+                        wire.reply(&request, history(through, vec![]));
+                    }
+                    "session.stop" => {
+                        stop.send(request["params"].clone()).unwrap();
+                        wire.reply(&request, json!({"sequence":9}));
+                    }
+                    "session.submit" => {
+                        submit.send(request["params"].clone()).unwrap();
+                        wire.reply(&request, json!({"event":{}}));
+                        wire.hold();
+                        return;
+                    }
+                    other => panic!("unexpected {other}: {request}"),
+                }
+            }
+        });
+        let mut command = home.command();
+        command.arg(if fullscreen {
+            "--fullscreen"
+        } else {
+            "--scrollback"
+        });
+        sized(&mut command, 120, 36);
+        let mut terminal = Terminal::resume_tui(command);
+        terminal.until("test / model");
+        terminal.until("⏵⏵ Workspace write");
+        terminal.write(b"/lines\r");
+        terminal.until("Main line");
+        terminal.write(b"\x1b[B");
+        terminal.write(b"p");
+        moved.recv_timeout(PATIENCE).unwrap();
+        // The panel can close before the move replies: Esc returns the keys to
+        // the composer while the move is still in flight.
+        terminal.write(b"\x1b[27u");
+        terminal.write(b"carry on");
+        terminal.until("carry on");
+        terminal.write(b"\x1b[13;5u");
+        release_move.send(()).unwrap();
+        let stopped = stop_seen.recv_timeout(PATIENCE).unwrap();
+        assert_eq!(
+            stopped["branchId"], "main",
+            "the stop stays on the line the gesture started on"
+        );
+        // The cancelled submit reports itself; the draft is restored rather
+        // than written into the line the centre moved to.
+        terminal.until("The centre moved before the command ran");
+        terminal.write(b"\r");
+        let sent = submit_seen.recv_timeout(PATIENCE).unwrap();
+        assert_eq!(
+            sent["branchId"], "line-1",
+            "the kept draft goes to the line the operator sees"
+        );
+        assert_eq!(sent["text"], "carry on", "the whole draft is kept");
+        home.kill(&terminal);
+        terminal.wait();
+        daemon.join().unwrap();
+    }
+}
+
+/// A draft submitted while a move is in flight is not written into the line
+/// the centre moved to: it is kept and reported, and a second Enter sends it
+/// to the line on screen (design §14).
+#[test]
+fn tui_a_draft_typed_before_a_queued_move_does_not_go_to_the_new_centre() {
+    for fullscreen in [false, true] {
+        let home = Home::new();
+        let (move_seen, moved) = std::sync::mpsc::channel();
+        let (release_move, release) = std::sync::mpsc::channel::<()>();
+        let (probe, probe_seen) = std::sync::mpsc::channel::<Vec<Value>>();
+        let (submit, submit_seen) = std::sync::mpsc::channel::<Value>();
+        let daemon = home.daemon(move |wire| {
+            wire.hello(&[
+                "session.methods",
+                "session.branches",
+                "session.branch.get",
+                "session.branch_set_default",
+                "session.permission.get",
+                "session.permission.update",
+            ]);
+            let attach = wire.read("session.attach");
+            let mut record = attach_record(&attach);
+            record["defaultBranch"] = json!({"branchId":"main","sequence":8});
+            wire.reply(&attach, record);
+            let branches = next(wire);
+            assert_eq!(branches["method"], "session.branches");
+            wire.reply(
+                &branches,
+                directory("main", &[("main", None), ("line-1", Some("main"))]),
+            );
+            loop {
+                let request = next(wire);
+                match request["method"].as_str().unwrap_or_default() {
+                    "session.branches" => wire.reply(
+                        &request,
+                        directory("main", &[("main", None), ("line-1", Some("main"))]),
+                    ),
+                    "session.history" => {
+                        wire.reply(&request, history(8, vec![]));
+                        break;
+                    }
+                    other => panic!("unexpected opening request: {other}: {request}"),
+                }
+            }
+            let mut usage = |_request: &Value| None;
+            let mut submits: Vec<Value> = Vec::new();
+            let mut probed = false;
+            loop {
+                let request = next_usage(wire, &mut usage);
+                let branch = request["params"]["branchId"].as_str().unwrap_or_default();
+                match request["method"].as_str().unwrap_or_default() {
+                    "session.permission.get" => wire.reply(
+                        &request,
+                        json!({"version":1,"policy":policy(if branch == "line-1" {
+                            "full-access"
+                        } else {
+                            "workspace-write"
+                        })}),
+                    ),
+                    "session.branch_set_default" => {
+                        assert_eq!(branch, "line-1");
+                        move_seen.send(()).unwrap();
+                        release.recv_timeout(PATIENCE).unwrap();
+                        wire.reply(&request, json!({"defaultBranchId":"line-1"}));
+                    }
+                    "session.branches" => wire.reply(
+                        &request,
+                        directory("main", &[("main", None), ("line-1", Some("main"))]),
+                    ),
+                    "session.branch.get" => wire.reply(&request, entry("line-1", "main")),
+                    "session.history" => {
+                        let through = if branch == "line-1" { 3 } else { 8 };
+                        wire.reply(&request, history(through, vec![]));
+                    }
+                    "session.submit" => {
+                        submits.push(request["params"].clone());
+                        wire.reply(&request, json!({"event":{}}));
+                        if probed {
+                            submit.send(request["params"].clone()).unwrap();
+                            wire.hold();
+                            return;
+                        }
+                    }
+                    "session.permission.update" if !probed => {
+                        probed = true;
+                        probe.send(submits.clone()).unwrap();
+                        wire.reply(&request, json!({"version":2}));
+                    }
+                    other => panic!("unexpected {other}: {request}"),
+                }
+            }
+        });
+        let mut command = home.command();
+        command.arg(if fullscreen {
+            "--fullscreen"
+        } else {
+            "--scrollback"
+        });
+        sized(&mut command, 120, 36);
+        let mut terminal = Terminal::resume_tui(command);
+        terminal.until("test / model");
+        terminal.until("⏵⏵ Workspace write");
+        terminal.write(b"/lines\r");
+        terminal.until("Main line");
+        terminal.write(b"\x1b[B");
+        terminal.write(b"p");
+        moved.recv_timeout(PATIENCE).unwrap();
+        terminal.write(b"\x1b[27u");
+        terminal.write(b"hello");
+        terminal.until("hello");
+        terminal.write(b"\r");
+        release_move.send(()).unwrap();
+        terminal.until_anywhere("⏵⏵ Full access");
+        // A command queued after the draft's submit lets the daemon report
+        // which submits the submit decision let out.
+        terminal.write(b"\x1b[Z");
+        let before = probe_seen.recv_timeout(PATIENCE).unwrap();
+        assert_eq!(
+            before,
+            Vec::<Value>::new(),
+            "the draft typed on the outgoing line is not submitted to the new one"
+        );
+        terminal.write(b"\r");
+        let sent = submit_seen.recv_timeout(PATIENCE).unwrap();
+        assert_eq!(sent["branchId"], "line-1");
+        assert_eq!(sent["text"], "hello", "the kept draft is whole");
+        home.kill(&terminal);
+        terminal.wait();
+        daemon.join().unwrap();
+    }
+}
+
+/// `/resume` into a Session whose policy read is refused shows that Session's
+/// policy as unavailable: the outgoing Session's preset is not left in the
+/// status line, Settings or the Permissions panel (design §14).
+#[test]
+fn tui_resuming_into_a_refused_policy_read_shows_no_outgoing_preset() {
+    let home = Home::new();
+    let daemon = home.daemon(move |wire| {
+        wire.hello(&[
+            "session.methods",
+            "session.catalog",
+            "session.branches",
+            "session.permission.get",
+            "session.permission.update",
+        ]);
+        let attach = wire.read("session.attach");
+        let mut record = attach_record(&attach);
+        record["defaultBranch"] = json!({"branchId":"main","sequence":8});
+        wire.reply(&attach, record);
+        let mut usage = |_request: &Value| None;
+        loop {
+            let request = next_usage(wire, &mut usage);
+            let session = request["params"]["sessionId"].as_str().unwrap_or_default();
+            match request["method"].as_str().unwrap_or_default() {
+                "session.branches" => wire.reply(&request, directory("main", &[("main", None)])),
+                "session.history" => wire.reply(&request, history(8, vec![])),
+                "session.permission.get" => {
+                    if session == "other" {
+                        wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+                            "code":-32000,"message":"fixture denied",
+                            "data":{"appError":"denied"}}}));
+                    } else {
+                        wire.reply(
+                            &request,
+                            json!({"version":1,"policy":policy("full-access")}),
+                        );
+                    }
+                }
+                "session.catalog" => wire.reply(
+                    &request,
+                    json!({"sessions":[{"sessionId":"other","cwd":"/workspace",
+                        "preview":"second conversation",
+                        "model":{"providerId":"test","modelId":"model"},"updatedAt":9}]}),
+                ),
+                "session.detach" => wire.reply(&request, json!({})),
+                "session.attach" => {
+                    let mut record = attach_record(&request);
+                    record["defaultBranch"] = json!({"branchId":"main","sequence":8});
+                    wire.reply(&request, record);
+                }
+                other => panic!("unexpected {other}: {request}"),
+            }
+        }
+    });
+    let mut command = home.command();
+    command.arg("--scrollback");
+    sized(&mut command, 110, 34);
+    let mut terminal = Terminal::resume_tui(command);
+    terminal.until("test / model");
+    terminal.until("⏵⏵ Full access");
+    terminal.write(b"/resume\r");
+    terminal.until("second conversation");
+    terminal.write(b"\r");
+    terminal.until("permission: unavailable");
+    // A keystroke repaints the status line from the state the failed read
+    // left.
+    terminal.write(b"probe");
+    terminal.until("probe");
+    terminal.write(b"\x7f\x7f\x7f\x7f\x7f");
+    let shown = strip_ansi(&terminal.transcript);
+    let footer = shown.rsplit("⏵⏵").next().expect("the footer was painted");
+    assert!(
+        footer.trim_start().starts_with("Permission unavailable"),
+        "the outgoing Session's preset is not left in the status line: {footer}"
+    );
+
+    terminal.write(b"/permissions\r");
+    terminal.until("Permission mode");
+    let shown = strip_ansi(&terminal.transcript);
+    let panel = &shown[shown.rfind("Permission mode").expect("the panel opened")..];
+    assert!(
+        !panel.contains("(*)"),
+        "the panel marks no outgoing preset as current: {panel}"
+    );
+    terminal.write(b"\x1b[27u");
+    terminal.write(b"/settings\r");
+    terminal.until_row("Permission", "Unavailable");
     home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();

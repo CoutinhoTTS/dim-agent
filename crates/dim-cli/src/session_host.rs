@@ -512,8 +512,8 @@ async fn run(
                 if worker.session_id.is_empty()
                     && matches!(
                         command,
-                        Command::Submit(..)
-                            | Command::SubmitDraft(..)
+                        Command::Submit { .. }
+                            | Command::SubmitDraft { .. }
                             | Command::ShellRun { .. }
                     )
                     && let Err(error) = worker.start_session().await
@@ -540,7 +540,14 @@ async fn run(
                     });
                     continue;
                 }
-                if matches!(command, Command::Submit(..) | Command::SubmitDraft(..))
+                let submitted_line = match &command {
+                    Command::Submit { line, .. } | Command::SubmitDraft { line, .. } => {
+                        Some(line.as_str())
+                    }
+                    _ => None,
+                };
+                if let Some(line) = submitted_line
+                    && line == worker.focus
                     && worker
                         .task_history
                         .get(&worker.focus)
@@ -1124,6 +1131,11 @@ impl Worker {
             kind,
             cwd: self.session_cwd.clone(),
         });
+        // The policy shown belonged to the Session this interface left; this
+        // Session's own read publishes its own, and a refused or failed read
+        // leaves it unknown rather than showing the outgoing preset (design
+        // §14).
+        self.send(Update::PermissionsUnknown);
         let mut reads = Vec::new();
         if self.client.offers("provider.catalog") {
             reads.push((
@@ -1390,10 +1402,39 @@ impl Worker {
         self.report_failure(result);
     }
 
+    /// A command typed for a line only runs while that line is still the
+    /// centre: a move the key could not see cancels it and returns what it
+    /// carried to the draft, instead of writing it into the new centre. The
+    /// stop gestures are not cancelled; each names the line it was pressed on
+    /// (design §14).
+    fn typed_command(&mut self, command: Command) -> Option<Command> {
+        let (line, draft) = match &command {
+            Command::Submit { text, line, .. } => (line, vec![DraftPart::Text(text.clone())]),
+            Command::SubmitDraft { parts, line, .. } => (line, parts.clone()),
+            Command::Goal { line, draft, .. } => (line, vec![DraftPart::Text(draft.clone())]),
+            Command::Loop { line, draft, .. } => (line, vec![DraftPart::Text(draft.clone())]),
+            Command::Configure { text, line } => (line, vec![DraftPart::Text(text.clone())]),
+            _ => return Some(command),
+        };
+        if line.is_empty() || line == &self.focus {
+            return Some(command);
+        }
+        self.send(Update::DraftNotSent {
+            parts: draft,
+            message: "The centre moved before the command ran; the draft was kept".into(),
+        });
+        None
+    }
+
     async fn command(&mut self, command: Command) -> crate::Result<()> {
+        let Some(command) = self.typed_command(command) else {
+            return Ok(());
+        };
         match command {
-            Command::Submit(text, mode) => self.submit(text, mode.as_str()).await,
-            Command::SubmitDraft(parts, mode) => self.submit_draft(parts, mode.as_str()).await,
+            Command::Submit { text, mode, .. } => self.submit(text, mode.as_str()).await,
+            Command::SubmitDraft { parts, mode, .. } => {
+                self.submit_draft(parts, mode.as_str()).await
+            }
             Command::FocusLine(line) => self.focus_line(line).await,
             Command::CloseSide => {
                 self.side = None;
@@ -1524,19 +1565,19 @@ impl Worker {
                     }
                 }
             }
-            Command::Stop => {
+            Command::Stop { line } => {
                 let params = json!({
                     "sessionId": self.session_id,
-                    "branchId": self.focus,
+                    "branchId": line,
                     "reason": crate::model::view::INTERRUPT_REASON,
                 });
                 let result = self.client.rpc("session.stop", params).await;
                 self.report_failure(result);
             }
-            Command::SubmitNow => {
+            Command::SubmitNow { line } => {
                 let params = json!({
                     "sessionId": self.session_id,
-                    "branchId": self.focus,
+                    "branchId": line,
                     "reason": crate::model::view::INTERRUPT_REASON,
                 });
                 // `session.stop` replies once the turn has settled, so its
@@ -1756,8 +1797,8 @@ impl Worker {
             }
             Command::Rename(title) => self.rename(title).await,
             Command::Earlier => self.earlier(),
-            Command::Goal(request) => self.goal(request).await,
-            Command::Loop(request) => self.loop_command(request).await,
+            Command::Goal { request, .. } => self.goal(request).await,
+            Command::Loop { request, .. } => self.loop_command(request).await,
             Command::CheckUpdate => {
                 let updates = self.updates.clone();
                 let managed =
@@ -2254,7 +2295,7 @@ impl Worker {
                 }
             }
             Command::SetLocale(language) => crate::management::use_language(language),
-            Command::Configure(text) => {
+            Command::Configure { text, .. } => {
                 if self.session_id.is_empty() {
                     if configure::needs_session(&text) {
                         self.report(NO_SESSION.to_owned(), true);

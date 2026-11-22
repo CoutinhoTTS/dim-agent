@@ -1503,6 +1503,9 @@ enum ClipboardRead {
 /// A Ctrl+Enter that has withdrawn the queue and asked for a stop. At most one
 /// is in flight: its reply decides for the gesture the user last meant.
 struct SendNow {
+    /// The line the gesture started on: its stop and the draft it settles
+    /// belong to that line, not to the centre a queued move may install.
+    line: String,
     /// Esc called off the submit. The stop still settles, and its reply
     /// releases the gesture without submitting anything.
     submit_cancelled: bool,
@@ -1986,9 +1989,19 @@ impl App {
     /// Submits the draft a settled stop made ready, as a new message: the run
     /// is idle now, so the submit starts its own turn and takes whatever
     /// withdrawn messages joined the draft in the meantime.
-    fn submit_send_now(&mut self) {
+    fn submit_send_now(&mut self, line: String) {
         let outcome = self.composer.submit();
-        self.dispatch_composer(outcome, SubmitMode::Queue);
+        self.dispatch_composer(outcome, SubmitMode::Queue, line);
+    }
+
+    /// The centre as this interface last saw it: the line a key's command
+    /// belongs to. Empty before the first Snapshot, when a command can only
+    /// be the invocation's first message (design §14).
+    fn target_line(&self) -> String {
+        self.snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.focus.clone())
+            .unwrap_or_default()
     }
 
     /// Ctrl+Enter: withdraws every held message into the draft, stops the run
@@ -2004,11 +2017,14 @@ impl App {
             return;
         }
         self.send_now = Some(SendNow {
+            line: self.target_line(),
             submit_cancelled: false,
             at: 0,
         });
         self.recall_all_queued();
-        self.host.send(Command::SubmitNow);
+        self.host.send(Command::SubmitNow {
+            line: self.target_line(),
+        });
     }
 
     fn withdraw(&mut self, id: String) {
@@ -2028,6 +2044,19 @@ impl App {
             input_id: id,
             action: "withdraw",
         });
+    }
+
+    /// Shows that the centre's policy is not known to this interface: the
+    /// status line, Settings and the Permissions panel stop naming the
+    /// outgoing preset (design §14).
+    fn show_permission_unknown(&mut self) {
+        if let Some(Prompt::Approvals(panel)) = &mut self.prompt {
+            panel.set_policy(None);
+        }
+        self.permission_policy = None;
+        if let Some(Prompt::Settings(panel)) = &self.prompt {
+            self.open_settings(panel.selected());
+        }
     }
 
     fn set_notice(&mut self, text: impl Into<String>) {
@@ -2341,7 +2370,7 @@ impl App {
                     self.set_notice(t("Send now is waiting for the insertion before sending"));
                     return;
                 }
-                self.submit_send_now();
+                self.submit_send_now(pending.line);
             }
             Update::Exported { format, path } => self.notices.push(tf(
                 "Exported {format}: {path}",
@@ -2606,17 +2635,12 @@ impl App {
                         self.open_settings(panel.selected());
                     }
                 }
-                Err(error) => self.notices.push(error),
+                Err(error) => {
+                    self.notices.push(error);
+                    self.show_permission_unknown();
+                }
             },
-            Update::PermissionsUnknown => {
-                if let Some(Prompt::Approvals(panel)) = &mut self.prompt {
-                    panel.set_policy(None);
-                }
-                self.permission_policy = None;
-                if let Some(Prompt::Settings(panel)) = &self.prompt {
-                    self.open_settings(panel.selected());
-                }
-            }
+            Update::PermissionsUnknown => self.show_permission_unknown(),
             Update::PermissionSelected(preset) => {
                 let label = format!("Permission: {}", crate::permission::name(preset));
                 let message = crate::ui::config::write(
@@ -3540,7 +3564,7 @@ impl App {
         match self.composer.handle_key(key) {
             ComposerOutcome::Command { name, args } => return self.run_command(&name, &args),
             outcome => {
-                self.dispatch_composer(outcome, mode);
+                self.dispatch_composer(outcome, mode, self.target_line());
             }
         }
         if self.suggestion.is_some() && !self.composer.is_empty() {
@@ -3575,7 +3599,12 @@ impl App {
 
     /// What a composer outcome does, the same for Enter and for the
     /// invocation's first message.
-    fn dispatch_composer(&mut self, outcome: ComposerOutcome, mode: SubmitMode) -> Outcome {
+    fn dispatch_composer(
+        &mut self,
+        outcome: ComposerOutcome,
+        mode: SubmitMode,
+        line: String,
+    ) -> Outcome {
         // Every send key is refused before the composer acts (see
         // `settling_key_refused`), so an outcome that already cleared the draft
         // cannot arrive here while a gesture settles. If one ever does, the
@@ -3616,7 +3645,7 @@ impl App {
                 if mode == SubmitMode::Queue && self.running() {
                     self.set_notice(t("Message queued"));
                 }
-                self.host.submit(text, mode);
+                self.host.submit(text, mode, line);
             }
             ComposerOutcome::SubmitDraft { text, parts } => {
                 let text = text.trim().to_owned();
@@ -3626,7 +3655,7 @@ impl App {
                 if mode == SubmitMode::Queue && self.running() {
                     self.set_notice(t("Message queued"));
                 }
-                self.host.send(Command::SubmitDraft(parts, mode));
+                self.host.send(Command::SubmitDraft { parts, mode, line });
             }
             ComposerOutcome::Shell { command, shell } => {
                 let entry = format!("{}{command}", shell.prefix());
@@ -3674,7 +3703,7 @@ impl App {
         if submitted && self.session_id.is_empty() {
             self.unsent = Some(initial);
         }
-        self.dispatch_composer(outcome, SubmitMode::Queue)
+        self.dispatch_composer(outcome, SubmitMode::Queue, self.target_line())
     }
 
     /// Puts a first message no Session took back into the draft, unless the
@@ -3920,7 +3949,8 @@ impl App {
                 stop_turn: self.running(),
             });
         } else {
-            self.host.stop();
+            let line = self.target_line();
+            self.host.stop(line);
         }
         self.set_notice(t("Stopping"));
     }
@@ -4472,8 +4502,10 @@ impl App {
                     .as_ref()
                     .is_some_and(|label| label.model == model)
                 {
-                    self.host
-                        .send(Command::Configure(format!("/effort {value}")));
+                    self.host.send(Command::Configure {
+                        text: format!("/effort {value}"),
+                        line: self.target_line(),
+                    });
                 } else {
                     self.set_notice(t(
                         "Model changed; reopen /effort to choose its reasoning effort.",
@@ -5523,7 +5555,15 @@ impl App {
             }
             "goal" => {
                 match crate::goal::request(args) {
-                    Some(request) => self.host.send(Command::Goal(request)),
+                    Some(request) => self.host.send(Command::Goal {
+                        request,
+                        line: self.target_line(),
+                        draft: if args.trim().is_empty() {
+                            "/goal".to_owned()
+                        } else {
+                            format!("/goal {}", args.trim())
+                        },
+                    }),
                     None => self.reports.push(Block::Status {
                         text: crate::goal::USAGE.to_owned(),
                         tone: Tone::Muted,
@@ -5533,7 +5573,15 @@ impl App {
             }
             "loop" => {
                 match crate::loop_view::request(args) {
-                    Some(request) => self.host.send(Command::Loop(request)),
+                    Some(request) => self.host.send(Command::Loop {
+                        request,
+                        line: self.target_line(),
+                        draft: if args.trim().is_empty() {
+                            "/loop".to_owned()
+                        } else {
+                            format!("/loop {}", args.trim())
+                        },
+                    }),
                     None => self.reports.push(Block::Status {
                         text: crate::loop_view::USAGE.to_owned(),
                         tone: Tone::Muted,
@@ -5556,8 +5604,10 @@ impl App {
                     self.open_prompt(Prompt::Effort(EffortPrompt::new()));
                 }
                 let text = format!("/{name} {args}");
-                self.host
-                    .send(Command::Configure(text.trim_end().to_owned()));
+                self.host.send(Command::Configure {
+                    text: text.trim_end().to_owned(),
+                    line: self.target_line(),
+                });
                 Outcome::Continue
             }
             "report" => {
@@ -9514,7 +9564,7 @@ mod tests {
                     drawn.key(KeyCode::Enter);
                     assert!(matches!(
                         sent.borrow().last(),
-                        Some(Command::Submit(text, _)) if text == draft
+                        Some(Command::Submit { text, .. }) if text == draft
                     ));
                 }
             }
@@ -10341,7 +10391,7 @@ mod tests {
             }
             drawn.key(KeyCode::Enter);
             assert!(
-                matches!(sent.borrow().last(), Some(Command::Submit(text, _)) if text == &draft)
+                matches!(sent.borrow().last(), Some(Command::Submit { text, .. }) if text == &draft)
             );
         }
     }
@@ -11285,7 +11335,7 @@ mod tests {
         assert!(expected.ends_with(" appended"));
         press(&mut app, KeyCode::Enter);
         assert!(
-            matches!(sent.borrow().as_slice(), [Command::Submit(text, _)] if text == &expected)
+            matches!(sent.borrow().as_slice(), [Command::Submit { text, .. }] if text == &expected)
         );
     }
 
@@ -15016,7 +15066,7 @@ mod tests {
         assert!(
             matches!(
                 sent.borrow().as_slice(),
-                [Command::Submit(text, _)] if text == "/skill:commit fix the parser"
+                [Command::Submit { text, .. }] if text == "/skill:commit fix the parser"
             ),
             "the draft is a message, never a command"
         );
@@ -17450,7 +17500,7 @@ mod tests {
             assert!(!drawn.app.composer.text().contains("[Image #1]"));
             drawn.key(KeyCode::Enter);
             match sent.borrow().last().unwrap() {
-                Command::Submit(text, _) => assert!(!text.contains("[Image #1]")),
+                Command::Submit { text, .. } => assert!(!text.contains("[Image #1]")),
                 Command::OpenLine { prompt, .. } => assert_eq!(prompt, "look [Image #7]"),
                 _ => panic!("message reuse must submit text or open a line"),
             }
@@ -17968,7 +18018,7 @@ mod tests {
                     assert!(app.notice.as_ref().unwrap().0.contains("/effort"));
                 } else {
                     assert!(
-                        matches!(sent.borrow().last(), Some(Command::Configure(text)) if text == "/effort none")
+                        matches!(sent.borrow().last(), Some(Command::Configure { text, .. }) if text == "/effort none")
                     );
                 }
             }
@@ -18106,7 +18156,7 @@ mod tests {
                         press(&mut app, KeyCode::Enter);
                         assert!(matches!(
                             sent.borrow().as_slice(),
-                            [Command::Goal(request)] if *request == expected
+                            [Command::Goal { request, .. }] if *request == expected
                         ));
                         assert!(app.composer.is_empty());
                     }
@@ -18151,7 +18201,7 @@ mod tests {
                 assert!(
                     matches!(
                         sent.borrow().as_slice(),
-                        [Command::Loop(request)] if *request == expected
+                        [Command::Loop { request, .. }] if *request == expected
                     ),
                     "{words:?} dispatches {expected:?}"
                 );
@@ -18209,10 +18259,10 @@ mod tests {
         commands
             .iter()
             .map(|command| match command {
-                Command::Submit(text, mode) => format!("submit:{}:{}", mode.as_str(), text),
+                Command::Submit { text, mode, .. } => format!("submit:{}:{}", mode.as_str(), text),
                 Command::InputControl { input_id, action } => format!("{action}:{input_id}"),
-                Command::Stop => "stop".into(),
-                Command::SubmitNow => "submit-now".into(),
+                Command::Stop { .. } => "stop".into(),
+                Command::SubmitNow { .. } => "submit-now".into(),
                 _ => "other".into(),
             })
             .collect()
@@ -18542,7 +18592,7 @@ mod tests {
         assert!(
             matches!(
                 &sent_now[3..],
-                [Command::SubmitDraft(parts, SubmitMode::Queue)]
+                [Command::SubmitDraft { parts, mode: SubmitMode::Queue, .. }]
                     if matches!(parts.as_slice(), [DraftPart::Text(text), DraftPart::Block(dim_agent_types::ContentBlock::Image { .. })] if text == "first\n")
             ),
             "the message is the text then the image, with no blank text: {}",
@@ -18613,7 +18663,7 @@ mod tests {
             assert!(
                 matches!(
                     submitted,
-                    [Command::SubmitDraft(parts, SubmitMode::Queue)]
+                    [Command::SubmitDraft { parts, mode: SubmitMode::Queue, .. }]
                         if matches!(
                             parts.as_slice(),
                             [
@@ -18674,7 +18724,7 @@ mod tests {
         assert!(
             matches!(
                 &sent_now[2..],
-                [Command::SubmitDraft(parts, SubmitMode::Queue)]
+                [Command::SubmitDraft { parts, mode: SubmitMode::Queue, .. }]
                     if matches!(
                         parts.as_slice(),
                         [
@@ -18966,7 +19016,7 @@ mod tests {
             assert!(
                 matches!(
                     &sent_now[2..],
-                    [Command::SubmitDraft(parts, SubmitMode::Queue)]
+                    [Command::SubmitDraft { parts, mode: SubmitMode::Queue, .. }]
                         if matches!(
                             parts.as_slice(),
                             [
@@ -19044,7 +19094,10 @@ mod tests {
             sent_now
                 .iter()
                 .filter(|command| {
-                    matches!(command, Command::Submit(..) | Command::SubmitDraft(..))
+                    matches!(
+                        command,
+                        Command::Submit { .. } | Command::SubmitDraft { .. }
+                    )
                 })
                 .count(),
             1,
@@ -19065,9 +19118,10 @@ mod tests {
             error: Some("the stop failed".into()),
         });
         assert!(
-            sent.borrow()
-                .iter()
-                .all(|command| !matches!(command, Command::Submit(..) | Command::SubmitDraft(..))),
+            sent.borrow().iter().all(|command| !matches!(
+                command,
+                Command::Submit { .. } | Command::SubmitDraft { .. }
+            )),
             "a cancelled submit sends nothing: {}",
             describe(&sent.borrow()).join(", ")
         );
@@ -19095,9 +19149,10 @@ mod tests {
             error: Some("the retry stop failed".into()),
         });
         assert!(
-            sent.borrow()
-                .iter()
-                .all(|command| !matches!(command, Command::Submit(..) | Command::SubmitDraft(..))),
+            sent.borrow().iter().all(|command| !matches!(
+                command,
+                Command::Submit { .. } | Command::SubmitDraft { .. }
+            )),
             "no submit follows the retry's failed stop: {}",
             describe(&sent.borrow()).join(", ")
         );
@@ -19246,7 +19301,7 @@ mod tests {
                 if image {
                     assert!(matches!(
                         sent.borrow().as_slice(),
-                        [Command::SubmitDraft(parts, SubmitMode::Steer)]
+                        [Command::SubmitDraft { parts, mode: SubmitMode::Steer, .. }]
                             if matches!(parts.as_slice(), [DraftPart::Text(text), DraftPart::Block(dim_agent_types::ContentBlock::Image { .. })] if text == "look ")
                     ));
                 } else {
@@ -19331,7 +19386,7 @@ mod tests {
             assert!(
                 sent.borrow()
                     .iter()
-                    .all(|command| !matches!(command, Command::Submit(..))),
+                    .all(|command| !matches!(command, Command::Submit { .. })),
                 "nothing is submitted while the stop settles"
             );
             press(&mut app, KeyCode::Enter);
@@ -19339,7 +19394,7 @@ mod tests {
             assert!(
                 sent.borrow()
                     .iter()
-                    .all(|command| !matches!(command, Command::Submit(..))),
+                    .all(|command| !matches!(command, Command::Submit { .. })),
                 "Enter and Ctrl+Enter send nothing while the stop settles"
             );
 
@@ -19356,7 +19411,7 @@ mod tests {
                 assert!(
                     matches!(
                         submitted,
-                        [Command::SubmitDraft(parts, SubmitMode::Queue)]
+                        [Command::SubmitDraft { parts, mode: SubmitMode::Queue, .. }]
                             if matches!(parts.first(), Some(DraftPart::Text(text)) if text == "first\nsecond\nand then ")
                                 && parts.iter().any(|part| matches!(part, DraftPart::Block(_)))
                     ),
@@ -19394,9 +19449,10 @@ mod tests {
             error: Some("the run would not stop".into()),
         });
         assert!(
-            sent.borrow()
-                .iter()
-                .all(|command| !matches!(command, Command::Submit(..) | Command::SubmitDraft(..))),
+            sent.borrow().iter().all(|command| !matches!(
+                command,
+                Command::Submit { .. } | Command::SubmitDraft { .. }
+            )),
             "no submit follows a failed stop"
         );
         assert_eq!(app.composer.text(), "first\nand then");
@@ -19490,7 +19546,7 @@ mod tests {
         press(&mut app, KeyCode::Enter);
         assert!(matches!(
             sent.borrow().as_slice(),
-            [Command::SubmitDraft(restored, _)] if restored == &parts
+            [Command::SubmitDraft { parts: restored, .. }] if restored == &parts
         ));
     }
 
