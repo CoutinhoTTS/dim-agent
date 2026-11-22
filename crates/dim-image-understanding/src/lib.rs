@@ -354,7 +354,7 @@ impl DynPlugin for ImageUnderstandingPlugin {
             )?;
             ctx.require_at(&self.guide)?.register(ctx, GuideScope::Session, GuideEntry {
                 markers: vec!["img".into()], order: 140,
-                text: "An image reaches this model as pixels when the model accepts images; otherwise it appears as an img: reference, and an image that cannot be sent appears as an omitted-image placeholder. Use image_understand with a reference and your question for a one-shot answer; it is optional and returns text, not lasting visual context. References remain usable after compaction, but cannot resolve images outside this branch's inherited history or removed by a cut.".into(),
+                text: "An image reaches this model as pixels when the model accepts images in that format; otherwise it appears as an img: reference, and an image that cannot be sent appears as an omitted-image placeholder. Use image_understand with a reference and your question for a one-shot answer; it is optional and returns text, not lasting visual context. References remain usable after compaction, but cannot resolve images outside this branch's inherited history or removed by a cut.".into(),
             })?;
             Ok(Effect::Done)
         })

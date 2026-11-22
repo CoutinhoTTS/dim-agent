@@ -11,7 +11,9 @@ Images a Session receives — attachments ([Attachments](Attachments.md) A.1) an
 ([WorkspaceTools § read results and images](../../architecture/rust-agent/plugins/WorkspaceTools.md#read-results-and-images))
 — reach a vision-capable conversational model, or a request whose model capability is
 unknown, as pixels and any other conversational model as `img:` references, which the model
-asks about through the `image_understand` tool. Which model
+asks about through the `image_understand` tool. The provider request encoder applies the
+destination's format support, so an image in a format its destination does not take becomes
+its reference ([Attachments](Attachments.md) A.1). Which model
 answers is Modality's `modality.image.understand` target
 ([Modality](Modality.md) A.1), resolved by its owner and executed through the existing
 `auxiliaryModel` host. The image's stored content never changes.
@@ -114,8 +116,9 @@ An image block that carries no decodable bytes — a URL source, undecodable dat
 build cannot decode — has no reference. ModelProvider keeps a text placeholder for it, as
 Attachments A.1 already decides, and no `image_understand` call can reach it.
 
-A model that accepts image input receives a sendable image as an image block itself; a model
-without image input, or an image that cannot be sent, receives the reference or placeholder.
+A model that accepts image input receives a sendable image as an image block itself, unless
+the destination does not take its format; a model without image input, or an image that
+cannot be sent, receives the reference or placeholder.
 `image_understand` is therefore an optional tool: a vision model needs no call to see the
 image, and the tool stays one-shot for a text-only model, a focused question, or a reference
 the model must inspect again.

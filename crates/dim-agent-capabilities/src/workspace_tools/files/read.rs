@@ -46,7 +46,7 @@ const BINARY_EXTENSIONS: &[&str] = &[
 pub(super) fn definition() -> Value {
     json!({
         "name": "read",
-        "description": "Read a file from the filesystem. Text comes back with line numbers; use offset and limit for large files. A PNG, JPEG, WebP or GIF image comes back with one line giving its path and pixel size, and as an image itself when the model accepts images; any other model receives an img: reference.",
+        "description": "Read a file from the filesystem. Text comes back with line numbers; use offset and limit for large files. A PNG, JPEG, WebP or GIF image comes back with one line giving its path and pixel size, and as an image itself when the model accepts images in that format; otherwise it comes back as an img: reference or an omission placeholder.",
         "inputSchema": {
             "type": "object",
             "properties": {

@@ -4,9 +4,9 @@ Owner: [dim-image-understanding](../../crates/dim-image-understanding/src/lib.rs
 The product installs this Session Capability next to Modality. Its contract is
 [ImageUnderstanding](../design/plugins/ImageUnderstanding.md): a vision-capable
 conversational model, or a request whose model capability is unknown, receives a
-sendable image as pixels; a model without image input, or an image that cannot be
-sent, sees an `img:` reference or placeholder and can ask
-`image_understand {image, question}` for a one-shot answer.
+sendable image as pixels where the destination takes its format; a model without
+image input, or an image that cannot be sent, sees an `img:` reference or
+placeholder and can ask `image_understand {image, question}` for a one-shot answer.
 The tool is risk `session`; unknown input fields are rejected.
 
 ## Dependencies

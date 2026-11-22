@@ -319,7 +319,7 @@ fn definitions_match_the_ts_tool_contracts() {
     assert!(!FileTools::handles("exec"));
     assert_eq!(
         definitions[0].description,
-        "Read a file from the filesystem. Text comes back with line numbers; use offset and limit for large files. A PNG, JPEG, WebP or GIF image comes back with one line giving its path and pixel size, and as an image itself when the model accepts images; any other model receives an img: reference."
+        "Read a file from the filesystem. Text comes back with line numbers; use offset and limit for large files. A PNG, JPEG, WebP or GIF image comes back with one line giving its path and pixel size, and as an image itself when the model accepts images in that format; otherwise it comes back as an img: reference or an omission placeholder."
     );
 }
 
