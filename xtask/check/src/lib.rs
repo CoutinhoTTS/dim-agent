@@ -7,6 +7,7 @@ pub mod literal_main;
 pub mod modules;
 pub mod npm;
 pub mod plugin_docs;
+pub mod plugin_skills;
 pub mod types;
 
 use std::path::{Path, PathBuf};
@@ -28,6 +29,7 @@ pub fn check_all(root: &Path) -> Result<()> {
     boundaries::check(root)?;
     types::check(root)?;
     npm::check(root)?;
+    plugin_skills::check(root)?;
     comment_links::check(root)?;
     literal_main::check(root)?;
     Ok(())
