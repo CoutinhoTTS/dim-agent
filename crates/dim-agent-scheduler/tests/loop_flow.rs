@@ -3,8 +3,9 @@
 //! round 2; a round without `next` leaves the loop `waiting` and delivers
 //! nothing more; `stop` is idempotent; expiry settles `expired`; a gone branch
 //! settles `stopped`; a restart with a delivered round settles by lookup and
-//! never writes a second one. A row that waits for a window names one an hour
-//! out and crosses it with the clock; one that waits for a pass crosses a tick
+//! never writes a second one; a `next` or `stop` reply carries a prompt only
+//! for a loop of the calling branch. A row that waits for a window names one an
+//! hour out and crosses it with the clock; one that waits for a pass crosses a tick
 //! (#1536).
 use dim_agent_capabilities::{defaults, history::HistoryRenderer, host::*};
 use dim_agent_runtime::{AgentBuilder, AgentConfig};
@@ -1508,4 +1509,114 @@ async fn tool_replies_bound_the_loop_prompt() {
         .unwrap();
     wait_for("the stop result", || model.tool_result("call-3").is_some()).await;
     check("call-3");
+}
+
+/// A loop belongs to one branch: `next` and `stop` reach a record by its
+/// Session-wide id, so a reply from another branch carries that record's state
+/// and timing only, while the owning branch still reads its prompt.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_tool_reply_carries_the_prompt_of_the_calling_branch_only() {
+    let home = home();
+    let model = Arc::new(Script::default());
+    let server = start(home.path(), model.clone()).await;
+    let mut client = connect(&server).await;
+    let session = create_session(&mut client, home.path(), &["loop", "branch"], true).await;
+
+    // The child's opening turn waits at the model, so the child's first round
+    // stays queued and the batches below reach the turn on `main`.
+    model.hold("Child work.");
+    let agent = server.agent().expect("the default Agent");
+    let at = agent
+        .get_session(&session)
+        .unwrap()
+        .sequence("main")
+        .unwrap();
+    let child = client
+        .rpc(
+            "session.branch_create",
+            json!({"sessionId": session, "parentBranchId": "main", "at": at,
+                "prompt": "Child work."}),
+        )
+        .await
+        .unwrap()["branch"]["branchId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let foreign_prompt = "inspect the child branch";
+    let foreign: Value = client
+        .rpc(
+            "session.loop.start",
+            json!({"sessionId": session, "branchId": child, "prompt": foreign_prompt}),
+        )
+        .await
+        .unwrap();
+    let foreign_id = foreign["loop"]["loopId"].as_str().unwrap().to_owned();
+
+    for (id, input) in [
+        (
+            "call-1",
+            json!({"action": "next", "loop_id": foreign_id}),
+        ),
+        ("call-2", json!({"action": "stop", "loop_id": foreign_id})),
+        ("call-3", json!({"action": "next"})),
+        ("call-4", json!({"action": "stop"})),
+    ] {
+        model.push(vec![ToolCall {
+            id: id.into(),
+            name: "loop".into(),
+            input: input.as_object().cloned().unwrap(),
+        }]);
+    }
+
+    let own_prompt = "inspect the main branch";
+    client
+        .rpc(
+            "session.loop.start",
+            json!({"sessionId": session, "prompt": own_prompt}),
+        )
+        .await
+        .unwrap();
+    wait_for("the loop tool results", || {
+        (1..=4).all(|n| model.tool_result(&format!("call-{n}")).is_some())
+    })
+    .await;
+
+    let reply = |id: &str| {
+        let (text, is_error) = model.tool_result(id).expect("the tool replied");
+        assert!(!is_error, "{text}");
+        text
+    };
+    for id in ["call-1", "call-2"] {
+        let text = reply(id);
+        assert!(
+            !text.contains(foreign_prompt),
+            "another branch's prompt never reaches {id}: {text}"
+        );
+        let record: Value = serde_json::from_str(text.split_once('\n').unwrap().1).unwrap();
+        assert_eq!(record["loopId"], json!(foreign_id), "{text}");
+        assert_eq!(record["branchId"], json!(child), "{text}");
+        assert!(
+            record.get("prompt").is_none(),
+            "a foreign loop answers without its prompt: {text}"
+        );
+        assert!(
+            record.get("prompt_truncated").is_none(),
+            "a foreign loop says nothing about a prompt it does not carry: {text}"
+        );
+    }
+    for id in ["call-3", "call-4"] {
+        let text = reply(id);
+        assert!(
+            text.contains(own_prompt),
+            "the owning branch reads its prompt in {id}: {text}"
+        );
+        let record: Value = serde_json::from_str(text.split_once('\n').unwrap().1).unwrap();
+        assert_eq!(record["branchId"], json!("main"), "{text}");
+        assert_eq!(record["prompt"], json!(own_prompt), "{text}");
+        assert_eq!(record["prompt_truncated"], json!(false), "{text}");
+    }
+    model.release();
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
 }
