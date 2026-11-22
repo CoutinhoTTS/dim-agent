@@ -175,12 +175,11 @@ export type ConfinedReply = {
   stdout: string
   stderr: string
   confined: boolean
-  stdoutTruncated: boolean
-  stderrTruncated: boolean
 }
 
 export type HostPlatformError =
   | { invalid: string }
+  | { invalid_path: { path: string } }
   | "task_unknown"
   | "task_exists"
   | "task_running"
@@ -398,7 +397,7 @@ export interface HostPlatform {
    * Waits for a task's terminal record; `timeoutMs` bounds the wait.
    * @throws {HostPlatformErrorThrown}
    */
-  wait(request: WaitRequest): Promise<WaitReply>
+  wait(request: WaitRequest, cancelled: () => void | Promise<void>): Promise<WaitReply>
   /**
    * Kills a task's process tree.
    * @throws {HostPlatformErrorThrown}
@@ -1677,7 +1676,7 @@ export type ErrorThrown = RustError<"Error", string, undefined>
 export type HostErrorThrown = RustError<"HostError", "Failed" | "Cancelled", undefined>
 
 /** What a method returning `Err(HostPlatformError)` throws. */
-export type HostPlatformErrorThrown = RustError<"HostPlatformError", "invalid" | "task_unknown" | "task_exists" | "task_running" | "output_unavailable" | "cancelled" | "closed" | "failed", HostPlatformError>
+export type HostPlatformErrorThrown = RustError<"HostPlatformError", "invalid" | "invalid_path" | "task_unknown" | "task_exists" | "task_running" | "output_unavailable" | "cancelled" | "closed" | "failed", HostPlatformError>
 
 /** What a method returning `Err(ListenAddressesError)` throws. */
 export type ListenAddressesErrorThrown = RustError<"ListenAddressesError", "invalid_path", ListenAddressesError>

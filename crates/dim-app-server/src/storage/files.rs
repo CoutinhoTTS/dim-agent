@@ -16,7 +16,7 @@ use super::{SqliteStorage, sqlite::error};
 use dim_agent_capabilities::{
     file_storage::{FileStorage, FileStorageError},
     host::{SessionFileError, SessionFileErrorCode, SessionFilesService, StoredSessionFile},
-    host_platform::HostPlatform,
+    host_platform::{HostPlatform, RemoveOutputDirectoryRequest},
 };
 use rusqlite::{Connection, TransactionBehavior, params};
 use rutis::Ctx;
@@ -368,12 +368,11 @@ impl SessionFiles {
                 .as_ref()
                 .filter(|host| candidate.starts_with(host.exec_root()))
             {
-                let path = candidate.clone();
-                let host = host.clone();
-                tokio::task::spawn_blocking(move || host.remove_exec_directory(&path))
-                    .await
-                    .map_err(error)?
-                    .map_err(error)?;
+                host.remove_output_directory(RemoveOutputDirectoryRequest {
+                    path: candidate.clone(),
+                })
+                .await
+                .map_err(error)?;
                 continue;
             }
             let relative = candidate

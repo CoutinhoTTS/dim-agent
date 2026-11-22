@@ -105,20 +105,23 @@ The process operations are split by their owners:
 | `backgroundExec` | branch | `output`, `outputPage`, `wait`, `stop` | [WorkspaceTools data face](../architecture/rust-agent/plugins/WorkspaceTools.md#data-face) |
 | `sessionMethods.shell` / `ShellSession` | session, branch | the shell operations | [ShellInput](../architecture/rust-agent/plugins/ShellInput.md) |
 
-`hostPlatform`'s handle methods (`spawn_tree`, `spawn_with_stdin`, `spawn_pty`,
-`build_process_spec`, `child_path`) stay `#[service(skip)]`; they carry process handles and cannot
-cross. Stage 1 serves the command task operations on `hostPlatform`: `spawn` returns a task id and
+`hostPlatform`'s handle methods (`spawn_tree`, `spawn_with_stdin_process`, `spawn_pty`,
+`build_process_spec`, `child_path_process`) stay `#[service(skip)]`; they carry process handles and
+cannot cross. Stage 1 serves the command task operations on `hostPlatform`: `spawn` returns a task id and
 the process/output state stays with the owner; `wait`, `kill`, `settle`, `output`, `retainOutput`
 and `tail` work by that id. `WorkspaceTools` and `backgroundExec` use the task id; the branch keeps
 the task record and the facts. `shell`/`write`/`resize` are served by the same owner; `ShellSession` runs its marker protocol
 over the owner's shell task. `spawnWithStdin` and `spawnConfined` are the existing methods
 Hooks and OCR call, now with data requests and replies. `removeOutputDirectory` and `childPath`
-are the existing cleanup and PATH helpers, now data methods; SessionStore and MCP keep the Rust
-calls.
+are the existing cleanup and PATH helpers, now data methods; SessionStore and MCP call them. The
+in-process cores stay as the shared implementation, not a second public operation.
 
 The command process, output file and PTY are owned by `HostPlatform`; the branch keeps the task
-record and writes the facts. `ShellSession` keeps its marker protocol and runs where the shell
-owner runs. Cancellation is the existing
+record and writes the facts. `shell` writes its bounded capture to `outputPath`, so the path is
+real for both task and file reads. `ShellSession` keeps its marker protocol and runs where the
+shell owner runs. `wait` takes the existing cancellation callback and leaves the task running on
+cancel. `spawnConfined` success means the helper stayed within its limits; an output limit is an
+error, so its reply carries no truncation flags. Cancellation is the existing
 `cancelled: CancelledFn` parameter (`toolHost.execute` is the shape); it is not a separate
 `cancel` operation and carries no `callId`.
 

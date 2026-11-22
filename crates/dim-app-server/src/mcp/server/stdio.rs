@@ -1,6 +1,6 @@
 //! Server-owned stdio only; client-local processes require a separate bridge.
 use super::{DIAGNOSTIC_BYTES, McpServerError, Result};
-use dim_agent_capabilities::host_platform::HostPlatform;
+use dim_agent_capabilities::host_platform::{ChildPathRequest, HostPlatform};
 use futures_util::{SinkExt, StreamExt};
 use rmcp::{
     RoleClient,
@@ -157,7 +157,12 @@ impl Config {
                     .map(|(_, value)| value.clone())
             })
             .unwrap_or_default();
-        platform.child_path_process(&[], &base)
+        platform
+            .child_path(ChildPathRequest {
+                directories: Vec::new(),
+                base: base.to_string_lossy().into_owned(),
+            })
+            .map(std::ffi::OsString::from)
     }
 
     pub fn spawn(

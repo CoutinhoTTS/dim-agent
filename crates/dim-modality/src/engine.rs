@@ -23,7 +23,7 @@ use dim_agent_capabilities::host::{
     SelectableModelsHost,
 };
 use dim_agent_capabilities::host_platform::{
-    ConfinedError, ConfinedOutput, ConfinedSpec, Confinement, HostPlatform, SystemServices,
+    ConfinedReply, ConfinedRequest, HostPlatform, HostPlatformError, OutputLimits, SystemServices,
 };
 use dim_agent_capabilities::methods::{Progress, RpcError};
 use dim_agent_types::ModelId;
@@ -2287,22 +2287,41 @@ impl Shared {
             OsString::from("--output-mode"),
             OsString::from(params.output_mode.as_str()),
         ]);
-        let spec = ConfinedSpec {
-            executable,
-            args,
-            env,
-        };
-        let confinement = Confinement {
+        let request = ConfinedRequest {
+            program: executable.to_string_lossy().into_owned(),
+            args: args
+                .iter()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect(),
             read,
             write,
-            timeout: OCR_TIMEOUT,
-            stdout_limit: OCR_STDOUT_LIMIT,
-            stderr_limit: OCR_STDERR_LIMIT,
+            env: env
+                .into_iter()
+                .map(|(key, value)| {
+                    (
+                        key.to_string_lossy().into_owned(),
+                        value.to_string_lossy().into_owned(),
+                    )
+                })
+                .collect(),
+            timeout_ms: OCR_TIMEOUT.as_millis() as u64,
+            output_limit: OutputLimits {
+                stdout: OCR_STDOUT_LIMIT,
+                stderr: OCR_STDERR_LIMIT,
+            },
             services,
         };
-        let outcome = platform
-            .spawn_confined_process(spec, confinement, slot.cancel.child_token())
-            .await;
+        let cancelled: dim_agent_capabilities::host::CancelledFn = {
+            let cancel = slot.cancel.child_token();
+            std::sync::Arc::new(move || {
+                let cancel = cancel.clone();
+                Box::pin(async move {
+                    cancel.cancelled().await;
+                    Ok(())
+                })
+            })
+        };
+        let outcome = platform.spawn_confined(request, cancelled).await;
         if slot.cancel_requested() {
             // The helper was killed: nothing it wrote is published (A.2.1).
             let _ = task::remove_work(&self.files, &record.task_id).await;
@@ -2313,7 +2332,7 @@ impl Shared {
                 self.record_confined(slot, output.confined).await;
                 output
             }
-            Err(ConfinedError::Cancelled) => {
+            Err(HostPlatformError::Cancelled) => {
                 let _ = task::remove_work(&self.files, &record.task_id).await;
                 return;
             }
@@ -2321,15 +2340,15 @@ impl Shared {
                 // A path the description names that no longer exists is the
                 // copy becoming unreadable, not a request error (A.2.1).
                 let (code, message) = match &error {
-                    ConfinedError::InvalidPath { path, .. }
-                        if plugin_target && path != &input.path =>
+                    HostPlatformError::InvalidPath { path }
+                        if plugin_target && Path::new(path) != input.path =>
                     {
                         (
                             "executor_error",
-                            format!("The OCR helper's copy is unreadable: {path:?}"),
+                            format!("The OCR helper's copy is unreadable: {path}"),
                         )
                     }
-                    _ => (confinement_code(&error), error.to_string()),
+                    _ => (platform_error_code(&error), error.to_string()),
                 };
                 self.fail_host(slot, code, message).await;
                 return;
@@ -2365,9 +2384,11 @@ impl Shared {
     /// Maps one finished helper call to a terminal outcome (decision 7):
     /// exit 0 publishes the artifacts, exit 2 carries a typed code, anything
     /// else is `executor_error` with the tail of standard error.
-    async fn settle_host(self: &Arc<Self>, slot: &Arc<Slot>, output: ConfinedOutput) {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        match output.status.code() {
+    async fn settle_host(self: &Arc<Self>, slot: &Arc<Slot>, output: ConfinedReply) {
+        let stdout = STANDARD.decode(&output.stdout).unwrap_or_default();
+        let stderr = STANDARD.decode(&output.stderr).unwrap_or_default();
+        let stdout = String::from_utf8_lossy(&stdout);
+        match output.status {
             Some(0) => {
                 let ok = serde_json::from_str::<HelperSuccess>(stdout.trim())
                     .is_ok_and(|payload| payload.ok);
@@ -2377,7 +2398,7 @@ impl Shared {
                         "executor_error",
                         format!(
                             "The OCR helper printed no success line{}",
-                            stderr_tail(&output.stderr)
+                            stderr_tail(&stderr)
                         ),
                     )
                     .await;
@@ -2414,7 +2435,7 @@ impl Shared {
                 self.fail_host(
                     slot,
                     "executor_error",
-                    format!("The OCR helper failed{}", stderr_tail(&output.stderr)),
+                    format!("The OCR helper failed{}", stderr_tail(&stderr)),
                 )
                 .await;
             }
@@ -2838,9 +2859,17 @@ impl Shared {
 
 /// The record error code of a confinement failure (decision 7): a path the
 /// call cannot resolve is the caller's input, everything else the executor.
-fn confinement_code(error: &ConfinedError) -> &'static str {
+fn platform_error_code(error: &HostPlatformError) -> &'static str {
     match error {
-        ConfinedError::InvalidPath { .. } => "invalid_input",
+        HostPlatformError::Invalid(_) | HostPlatformError::InvalidPath { .. } => "invalid_input",
+        _ => "executor_error",
+    }
+}
+
+#[cfg(test)]
+fn confinement_code(error: &dim_agent_capabilities::host_platform::ConfinedError) -> &'static str {
+    match error {
+        dim_agent_capabilities::host_platform::ConfinedError::InvalidPath { .. } => "invalid_input",
         _ => "executor_error",
     }
 }

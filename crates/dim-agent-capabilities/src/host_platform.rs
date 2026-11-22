@@ -361,7 +361,7 @@ impl Drop for TemporaryDirectory {
 }
 
 /// How a command task ended.
-#[derive(Debug, Clone, Copy, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WaitStatus {
     Exited,
@@ -462,8 +462,6 @@ pub struct ConfinedReply {
     pub stdout: String,
     pub stderr: String,
     pub confined: bool,
-    pub stdout_truncated: bool,
-    pub stderr_truncated: bool,
 }
 
 /// A request to compose the PATH a child process gets.
@@ -569,6 +567,8 @@ pub struct OutputPathReply {
 pub enum HostPlatformError {
     #[error("invalid request: {0}")]
     Invalid(String),
+    #[error("invalid path: {path}")]
+    InvalidPath { path: String },
     #[error("unknown execution task")]
     TaskUnknown,
     #[error("execution task already exists")]
@@ -729,8 +729,6 @@ impl HostPlatform {
             stdout: STANDARD.encode(output.stdout),
             stderr: STANDARD.encode(output.stderr),
             confined: output.confined,
-            stdout_truncated: false,
-            stderr_truncated: false,
         })
     }
 
@@ -792,7 +790,15 @@ impl HostPlatform {
         let end = self
             .configured(command, &cancel, None)
             .await
-            .map_err(|error| HostPlatformError::Failed(error.to_string()))?;
+            .map_err(|error| {
+                let stderr = String::from_utf8_lossy(error.stderr()).into_owned();
+                let reason = error.to_string();
+                HostPlatformError::Failed(if stderr.is_empty() {
+                    reason
+                } else {
+                    format!("{reason}: {stderr}")
+                })
+            })?;
         waiter.abort();
         let duration_ms = started.elapsed().as_millis() as u64;
         let (status, exit_code, signal, stdout, stderr, stdout_truncated, stderr_truncated) =
@@ -1034,12 +1040,24 @@ impl HostPlatform {
     }
 
     /// Waits for a task's terminal record; `timeoutMs` bounds the wait.
-    pub async fn wait(&self, request: WaitRequest) -> Result<WaitReply, HostPlatformError> {
+    pub async fn wait(
+        &self,
+        request: WaitRequest,
+        cancelled: crate::host::CancelledFn,
+    ) -> Result<WaitReply, HostPlatformError> {
         if let Some(shell) = self.shell_task(&request.task_id) {
-            return Ok(shell.wait(request.timeout_ms).await);
+            return tokio::select! {
+                biased;
+                _ = cancelled() => Err(HostPlatformError::Cancelled),
+                value = shell.wait(request.timeout_ms) => Ok(value),
+            };
         }
         let task = self.command_task(&request.task_id)?;
-        Ok(task.wait(request.timeout_ms).await)
+        tokio::select! {
+            biased;
+            _ = cancelled() => Err(HostPlatformError::Cancelled),
+            value = task.wait(request.timeout_ms) => Ok(value),
+        }
     }
 
     /// Kills a task's process tree.
@@ -3171,7 +3189,7 @@ pub(crate) mod shell {
         exec::{bounded_preview, tail_bytes},
     };
     use std::{
-        io::{self, Read},
+        io::{self, Read, Write},
         path::{Path, PathBuf},
         sync::{Arc, Mutex},
         time::{Duration, Instant},
@@ -3259,6 +3277,19 @@ pub(crate) mod shell {
                     reason: "Execution task already exists".into(),
                 });
             }
+            std::fs::create_dir_all(directory).map_err(|error| ProcessSpecError {
+                code: "io",
+                reason: error.to_string(),
+            })?;
+            let path = directory.join(format!("{id}.log"));
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .map_err(|error| ProcessSpecError {
+                    code: "io",
+                    reason: error.to_string(),
+                })?;
             let mut pty = self.spawn_pty(spec, size).map_err(|e| ProcessSpecError {
                 code: "failed",
                 reason: e.to_string(),
@@ -3271,7 +3302,7 @@ pub(crate) mod shell {
                 terminal: watch::channel(None).0,
                 kill: CancellationToken::new(),
                 timeout: CancellationToken::new(),
-                path: directory.join(format!("{id}.log")),
+                path,
                 started: Instant::now(),
             });
             commands.insert(id.into(), super::ExecutionTask::Shell(shell.clone()));
@@ -3279,6 +3310,7 @@ pub(crate) mod shell {
             let (drained, reader_finished) = tokio::sync::oneshot::channel();
             std::thread::spawn(move || {
                 let mut bytes = [0; 4096];
+                let mut written = 0usize;
                 while let Ok(n) = reader.read(&mut bytes) {
                     if n == 0 {
                         break;
@@ -3297,6 +3329,14 @@ pub(crate) mod shell {
                         let dropped =
                             capture.text.len() - tail_bytes(&capture.text, RETAINED).len();
                         capture.text.drain(..dropped);
+                    }
+                    let room = (crate::workspace_tools::exec::OUTPUT_FILE_BYTE_LIMIT as usize)
+                        .saturating_sub(written);
+                    if room > 0 {
+                        let take = chunk.len().min(room);
+                        if file.write_all(&chunk.as_bytes()[..take]).is_ok() {
+                            written += take;
+                        }
                     }
                     if let Some(sender) = &output {
                         let _ = sender.send(chunk);
@@ -3715,7 +3755,9 @@ mod tests {
         let base = joined(&["/base", "/runtimes/node/bin"]);
         let installed = host_with(&[], Some(vec![toolchain("/runtimes/node/bin")]));
         assert!(
-            installed.child_path_process(&[], OsStr::new(&base)).is_none(),
+            installed
+                .child_path_process(&[], OsStr::new(&base))
+                .is_none(),
             "a runtime already on the PATH changes nothing"
         );
     }

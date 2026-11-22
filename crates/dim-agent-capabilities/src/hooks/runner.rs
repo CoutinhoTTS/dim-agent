@@ -14,11 +14,15 @@ use crate::{
         handlers,
     },
     host::{HostError, HostFuture},
-    host_platform::{ConfiguredCommand, ConfiguredEnd, ConfiguredError, HostPlatform, Os},
+    host_platform::{
+        HostPlatform, HostPlatformError, Os, OutputLimits, SpawnWithStdinReply,
+        SpawnWithStdinRequest, SpawnWithStdinStatus,
+    },
     input_queue::{CheckSubmission, SubmitCheckReply, SubmitCheckRequest, SubmitChecks},
     permission::{AdmissionDecision, AdviseTool, Permission, ToolAdviceReply, ToolAdviceRequest},
     tool_registry::ToolRegistry,
 };
+use base64::{Engine, engine::general_purpose::STANDARD};
 use dim_agent_runtime::{
     AgentError, BranchLifecycle, CollaborationRole, Dispatcher, Names, QueryComparison,
     QueryFilter, QueryOperand, QueryOutput, QueryPage, QueryPick, QuerySelect, QuerySpec,
@@ -35,7 +39,6 @@ use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
-    ffi::OsString,
     future::Future,
     num::NonZeroU64,
     path::Path,
@@ -382,46 +385,60 @@ impl HooksRuntime {
     ) -> HookResult {
         let command = handler.command(self.platform.os == Os::Windows);
         let started = Instant::now();
-        let request = ConfiguredCommand {
+        if gate.is_some_and(|gate| gate.is_cancelled()) {
+            return unloaded_run(handler).result;
+        }
+        let request = SpawnWithStdinRequest {
             command: command.into(),
             cwd: self.config.cwd.clone().into(),
             env: self.environment(handler),
-            stdin,
-            timeout: handler.timeout,
-            stdout_limit: STDOUT_LIMIT,
-            stderr_limit: STDERR_LIMIT,
+            stdin: Some(STANDARD.encode(stdin)),
+            timeout_ms: handler.timeout.as_millis() as u64,
+            limits: OutputLimits {
+                stdout: STDOUT_LIMIT,
+                stderr: STDERR_LIMIT,
+            },
         };
-        let result = match self.platform.configured(request, cancel, gate).await {
-            Err(ConfiguredError::Unloaded) => return unloaded_run(handler).result,
+        let reply = match self
+            .platform
+            .spawn_with_stdin(request, cancelled_by(cancel, gate))
+            .await
+        {
+            Ok(reply) => reply,
+            Err(HostPlatformError::Cancelled) if gate.is_some_and(|gate| gate.is_cancelled()) => {
+                return unloaded_run(handler).result;
+            }
+            Err(HostPlatformError::Cancelled) => return failed("cancelled", &[]),
             Err(error) => {
-                let result = failed(error.to_string(), error.stderr());
+                let result = failed(error.to_string(), &[]);
                 self.report(handler, &result, started.elapsed());
                 return result;
             }
-            Ok(ConfiguredEnd::Cancelled) => failed("cancelled", &[]),
-            Ok(ConfiguredEnd::TimedOut) => failed(
+        };
+        let stdout = STANDARD.decode(&reply.stdout).unwrap_or_default();
+        let stderr = STANDARD.decode(&reply.stderr).unwrap_or_default();
+        let result = match reply.status {
+            SpawnWithStdinStatus::Exited => {
+                if reply.stdout_truncated {
+                    failed("stdout exceeded 64 KiB", &stderr)
+                } else if reply.exit_code == Some(2) {
+                    exit_two(handler.event, &stderr)
+                } else if reply.exit_code == Some(0) {
+                    HookResult::Success {
+                        stdout: String::from_utf8_lossy_owned(stdout),
+                    }
+                } else {
+                    failed(format!("exited with {}", exit_text(&reply)), &stderr)
+                }
+            }
+            SpawnWithStdinStatus::Signaled => {
+                failed(format!("exited with {}", exit_text(&reply)), &stderr)
+            }
+            SpawnWithStdinStatus::Cancelled => failed("cancelled", &[]),
+            SpawnWithStdinStatus::TimedOut => failed(
                 format!("timed out after {}s", handler.timeout.as_secs()),
                 &[],
             ),
-            Ok(ConfiguredEnd::Exited {
-                stdout: bytes,
-                stdout_truncated: overflow,
-                stderr,
-                status,
-                ..
-            }) => {
-                if overflow {
-                    failed("stdout exceeded 64 KiB", &stderr)
-                } else if status.code() == Some(2) {
-                    exit_two(handler.event, &stderr)
-                } else if status.success() {
-                    HookResult::Success {
-                        stdout: String::from_utf8_lossy_owned(bytes),
-                    }
-                } else {
-                    failed(format!("exited with {status}"), &stderr)
-                }
-            }
         };
         self.report(handler, &result, started.elapsed());
         // The run's result is taken here, in the same poll that hands it to
@@ -454,33 +471,65 @@ impl HooksRuntime {
     fn environment(
         &self,
         handler: &HookHandler,
-    ) -> std::collections::BTreeMap<OsString, Option<OsString>> {
+    ) -> std::collections::BTreeMap<String, Option<String>> {
         let mut env: std::collections::BTreeMap<_, _> = MANAGED_ENV
             .into_iter()
-            .map(|key| (OsString::from(key), None))
+            .map(|key| (key.to_owned(), None))
             .collect();
         for (key, value) in [
-            ("DIM_PROJECT_DIR", Some(OsString::from(&self.config.cwd))),
-            ("DIM_HOOK_EVENT", Some(OsString::from(handler.event.name()))),
-            (
-                "DIM_SESSION_ID",
-                Some(OsString::from(&self.identity.session_id)),
-            ),
+            ("DIM_PROJECT_DIR", Some(self.config.cwd.clone())),
+            ("DIM_HOOK_EVENT", Some(handler.event.name().to_owned())),
+            ("DIM_SESSION_ID", Some(self.identity.session_id.clone())),
             (
                 "DIMCODE_HOME",
-                self.sources.0.home().map(|home| home.into_os_string()),
+                self.sources
+                    .0
+                    .home()
+                    .map(|home| home.to_string_lossy().into_owned()),
             ),
             (
                 "DIM_PLUGIN_ROOT",
                 handler
                     .plugin_root
                     .as_ref()
-                    .map(|root| root.as_os_str().into()),
+                    .map(|root| root.to_string_lossy().into_owned()),
             ),
         ] {
-            env.insert(key.into(), value);
+            env.insert(key.to_owned(), value);
         }
         env
+    }
+}
+
+/// Cancels the call when the point's cancel or the unload gate fires.
+fn cancelled_by(
+    cancel: &CancellationToken,
+    gate: Option<&CancellationToken>,
+) -> crate::host::CancelledFn {
+    let cancel = cancel.clone();
+    let gate = gate.cloned();
+    std::sync::Arc::new(move || {
+        let cancel = cancel.clone();
+        let gate = gate.clone();
+        Box::pin(async move {
+            match gate {
+                Some(gate) => tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => {}
+                    _ = gate.cancelled() => {}
+                },
+                None => cancel.cancelled().await,
+            }
+            Ok(())
+        })
+    })
+}
+
+fn exit_text(reply: &SpawnWithStdinReply) -> String {
+    match (reply.exit_code, &reply.signal) {
+        (Some(code), _) => format!("exit status: {code}"),
+        (_, Some(signal)) => format!("signal: {signal}"),
+        _ => "unknown".to_owned(),
     }
 }
 

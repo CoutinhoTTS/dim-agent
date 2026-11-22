@@ -1185,6 +1185,17 @@ async fn an_exec_resolves_a_command_only_the_toolchain_source_provides() {
     std::fs::remove_dir_all(base).unwrap();
 }
 
+fn never_cancelled() -> dim_agent_capabilities::host::CancelledFn {
+    let never = CancellationToken::new();
+    std::sync::Arc::new(move || {
+        let never = never.clone();
+        Box::pin(async move {
+            never.cancelled().await;
+            Ok(())
+        })
+    })
+}
+
 #[tokio::test]
 async fn the_host_platform_service_answers_info() {
     let platform = HostPlatform::current(ShellStatus::Unavailable {
@@ -1235,6 +1246,7 @@ async fn the_host_platform_service_starts_and_waits_for_a_command() {
         .unwrap(),
     );
     (&plugin).await.unwrap();
+    let platform = root.get::<HostPlatform>().unwrap();
     let face = root
         .get_at::<dyn rutis_bridge::session::HostDispatch>(&rutis_bridge::session::host_key(
             "hostPlatform",
@@ -1267,9 +1279,19 @@ async fn the_host_platform_service_starts_and_waits_for_a_command() {
     .await
     .unwrap();
     assert_eq!(spawn["taskId"], "service-task");
-    let terminal = invoke("wait", serde_json::json!({"taskId": "service-task"}))
-        .await
-        .unwrap();
+    let terminal = serde_json::to_value(
+        platform
+            .wait(
+                WaitRequest {
+                    task_id: "service-task".into(),
+                    timeout_ms: None,
+                },
+                never_cancelled(),
+            )
+            .await
+            .unwrap(),
+    )
+    .unwrap();
     assert_eq!(terminal["status"], "exited");
     assert_eq!(terminal["preview"], "hi");
     assert_eq!(terminal["outputPath"], spawn["outputPath"]);
@@ -1283,16 +1305,17 @@ async fn the_host_platform_service_starts_and_waits_for_a_command() {
     invoke("settle", serde_json::json!({"taskId": "service-task"}))
         .await
         .unwrap();
-    let missing = rutis_bridge::session::settle(
-        face.invoke(
-            "wait",
-            serde_json::json!([{"taskId": "service-task"}]).into(),
+    let missing = platform
+        .wait(
+            WaitRequest {
+                task_id: "service-task".into(),
+                timeout_ms: None,
+            },
+            never_cancelled(),
         )
-        .unwrap(),
-    )
-    .await
-    .unwrap_err();
-    assert_eq!(missing.code(), Some("task_unknown"));
+        .await
+        .unwrap_err();
+    assert!(matches!(missing, HostPlatformError::TaskUnknown));
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -1322,6 +1345,7 @@ async fn the_host_platform_service_serves_a_shell() {
         .unwrap(),
     );
     (&plugin).await.unwrap();
+    let platform = root.get::<HostPlatform>().unwrap();
     let face = root
         .get_at::<dyn rutis_bridge::session::HostDispatch>(&rutis_bridge::session::host_key(
             "hostPlatform",
@@ -1359,15 +1383,25 @@ async fn the_host_platform_service_serves_a_shell() {
     )
     .await
     .unwrap();
-    let terminal = invoke(
-        "wait",
-        serde_json::json!({"taskId": "service-shell", "timeoutMs": 10000}),
-    )
-    .await
-    .unwrap();
-    assert_eq!(terminal["status"], "exited");
-    assert_eq!(terminal["exitCode"], 7);
-    assert!(terminal["preview"].as_str().unwrap().contains("hi"));
+    let terminal = platform
+        .wait(
+            WaitRequest {
+                task_id: "service-shell".into(),
+                timeout_ms: Some(10000),
+            },
+            never_cancelled(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(terminal.status, WaitStatus::Exited);
+    assert_eq!(terminal.exit_code, Some(7));
+    assert!(terminal.preview.contains("hi"));
+    assert!(terminal.output_path.exists());
+    assert!(
+        std::fs::read_to_string(&terminal.output_path)
+            .unwrap()
+            .contains("hi")
+    );
     let page = invoke(
         "output",
         serde_json::json!({"taskId": "service-shell", "limit": 4096}),
