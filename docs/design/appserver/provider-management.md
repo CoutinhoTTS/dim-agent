@@ -713,6 +713,22 @@ already records:
 | Bundled catalog | `metadataSource` naming the matched bundled provider: an entry declares a limit only where its `metadata.raw` does, and the bundle drops every other limit when it is loaded; that provider's `contextWindowOverride` and `contextWindowFallback` metadata stay declarations | The models the lookup matches, or every model of the provider |
 | User | The same `capabilityOverrideFields` field on the descriptor override or user model: `models.edit` writes it for each limit it edits, and either legacy importer for an imported value it keeps | The model the override names |
 
+The bundled `openai-codex` chat rows declare a default `contextWindow` and a
+read-only `metadata.raw.max_context_window` for user configuration. These are the
+nominal token counts from the
+[Codex catalog](https://github.com/openai/codex/blob/8653ca9e99b2c805107bde7b7d6f57a634c643d0/codex-rs/models-manager/models.json),
+its [older catalog](https://github.com/openai/codex/blob/rust-v0.145.0/codex-rs/models-manager/models.json)
+for GPT-5.4 and GPT-5.4 Mini, and the
+[published Spark window](https://openai.com/index/introducing-gpt-5-3-codex-spark/).
+Dim uses its own input and compaction budgets. For example, GPT-6.2 Sol,
+GPT-6.1 Sol and GPT-6.1 Terra default to 500,000 tokens and allow up to 872,000.
+Edit `contextWindow` with `dimcode models openai-codex edit gpt-6.2-sol` or
+`provider.models.edit`. Reset restores the bundled default. Source adoption
+preserves explicit overrides and caps their effective value at the model's
+current ceiling. New edits above the ceiling return `provider_invalid_config`.
+The [Session startup override](../model-startup.md) is subject to the same
+ceiling when setting a new value.
+
 A listing declares a model's reasoning efforts the same way, and the first shape
 it states is the model's own list: the `values` of its `reasoning_options` entry
 of type `effort`, else the `effort` of each `supported_reasoning_levels` item,

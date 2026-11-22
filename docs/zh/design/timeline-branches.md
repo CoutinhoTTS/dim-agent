@@ -559,6 +559,8 @@ WorkspaceTools 不变。
 
 目录读取不访问历史，显示字段为空或省略。`session.branch.get {sessionId, branchId}`（v3，在 `hello.features` 单独声明）读取一条线的目录记录和显示详情：`purpose` 为创建提示的首行；`cutMessages` 为该分叉点继承的用户输入数，排除截止位置前已删除的输入；`end` 为可用的 `BranchEndData`。main 的前两项为空，没有可读结束事实时 `end` 为空。该读取由 TimelineTree 完成点查与固定前缀计数；未知分支和读取失败在本次详情调用中报错，不阻断目录列举，不写事实，也不重新打开结束的线。CLI 在选中一条线时才读取详情。
 
+`session.model.get {sessionId, branchId, through?}`（v3，与其他 Session 方法一起列在 `hello.features`，准入与 `session.attach` 相同）读取一条线在它自己截止位上的已采纳配置：`{branchId, through, configuration: {model: {providerId, modelId}, capabilitySnapshot?, modelPreferences?} | null}`。返回的 `through` 永远是所请求这条线自己的已提交截止位，绝不是祖先某次采纳的序号，所以客户端只应用这条线上 `sequence > through` 的 `Configuration` 事件，刷新时不传 `through` 再调一次。打开的线先等 Dispatcher 追平已提交的头，所以刚提交的采纳也会包含在内，不会被漏掉；返回的 `through` 是它作答时那个状态的截止位：owner 还停在捕获的头时就是那个头，owner 已经应用了更晚的 source 事件时就是最后那条已应用 source 事件的序号，所以按返回的 `through` 去读，读到的永远是返回的那份配置。作用域正在关闭的线按它已发布的头作答，不再经过 owner：发布还没完成的事实对任何读取都不可见，这条线也不越过它作答；关闭期间这次读取不回放 source，也不写恢复检查点。已结束的线按它固定的头经祖先链读取，不会被重新打开；传入 `through` 时按同一规则读那个截止位，超过这条线头的值按未来序号拒绝。不存在的线报错。旧服务器不宣告这个方法：客户端只对根线继续用 attach 回复（attach 回复里的 model 字段描述的始终是根线，即使它的 `defaultBranch` 指向另一条线），绝不把根线的配置当成另一条线的。
+
 
 `head` 有三条规则，决定客户端能用它做什么：
 
@@ -588,6 +590,8 @@ WorkspaceTools 不变。
 └ Enter 显示 · p 从这里继续 · x 结束 · Esc 关闭 ───────────────────┘
 ```
 
+**旧连接上的默认分支。** 移动现在已能经 RPC 触达，但跟随它的客户端随后才到，所以现有客户端依赖的每个字段和行为都保持旧含义，新含义经新字段到达。v1 连接的事件投影只带根（`connection/subscription.rs` 的 `project` 与 v1 分支监视），因此在该连接上，省略 `branchId` 仍然指向根，适用于本节会路由默认值的每个调用：`session.submit`、`session.stop` 和 `session.idle`（v1 客户端可以不带分支发出的三个；其余被路由的调用从 v3 起才准入，而 v3 的投影带每条线）。所以较新的连接移动默认分支后，v1 客户端仍能看到它的输入所跑的轮次。v2 及以后带每条线，必须在 v1 不能命名处命名一条线；v3 连接的缺省调用跟随默认分支。旧客户端读到的其他内容含义都不变：`session.attach` 回复里的 `SessionInfo.sequence` 仍是根的序号——CLI 用作 `main` 窗口 `through` 和根模型更新水位的截止点——对话所在的线以 `defaultBranch {branchId, sequence}` 并列给出。该游标只属于这条回复：`session.summaries` 的条目是目录行，不带 `defaultBranch`，所以客户端在 attach 之后读这条线，而不是从列表里读。早于该字段的客户端忽略它；跟随移动的客户端据它续读那条线。目录行的 `sequence` 同理：在已加载覆盖和存储查询两种投影里都是根的，所以加载或卸载 Session 都不会改变它；`running` 与 `updatedAt` 跟随默认分支，持久化的移动在它自己的事务里用新默认分支的最新活动刷新 `updatedAt`，移动本身不算活动，所以空闲移动不会让该行按离开的那条线显得刚刚活动。
+
 **Web** 让默认分支留在中央，在右侧详情面板里跟随其他线：Lines 树、每个打开的线一个标签，以及按 line 的发送、停止、审批和结束（[Web 工作区 §4.1](../../design/web-workspace.md#41-lines-and-branch)）。移动默认分支与 TUI 是同一个动作，经 `session.branch_set_default`。Lines 树标出根和默认分支，也就是能开线的两条线；其他线的 `create` 被拒绝，拒绝显示在发起该动作的地方。输入框提供的命令作用于当前居中的那条线，而不是根：`/goal`、`/compact`、`/usage` 和 `/effort` 不传分支或传当前显示的线，而 `/fork` 仍只复制根（[Web 工作区](../../design/web-workspace.md)）。会话列表显示一个 Session 的运行状态和最近活动，取自它的默认分支，所以对话在某条线上的 Session 按那条线读作繁忙或刚刚活动，而不是按它的根。Desktop 得到的是协议：`session.branch_set_default`，以及 v3 历史里的新事件。
 
 ## 15. 改动
@@ -599,7 +603,7 @@ WorkspaceTools 不变。
 | TreeTimeline | 消费 `branch/end`，以及由工具调用发出的结束时这条线的下一次轮次结束，并转给 TimelineTree。它把每一次 `turn/end` 报告给 TimelineTree，后者为这条线的子线发布 | 它现在就这样转 `branch/create` |
 | BranchTool | 按动作区分的工具，加上新的 BranchLine 分支部件。`read` 和 `message` 读、写调用方被切出来的那条线和它开出的工具线，共用一条游标规则。`create` 接受根和当前默认分支，其余线以 `branch_not_opener` 拒绝，然后检查 Session 上限，超过时以 `branch_limit_reached` 拒绝 | 工具的各个动作，以及一条线对自己相关各线的视图 |
 | Session 门面 | `Session::end_branch(id, source)`、`Session::default_branch(id)` 和 `Session::set_default_branch(id, source)`。已结束线的头部由 `Session::sequence` 给出；其历史在固定的头部经 `TreeCommands.page` 读取 | §17 |
-| App Server | `session.branch_end`（v3，用户来源，带生成的 `operation_id`；`session_execution` 打开、且连接的入口不是裸入口或守护进程 profile 未受保护时，`hello.features` 把它和其他会话方法一起列出）。`session.branch_set_default`（v3，同样的准入）。对已结束的线，`session.history` 立即返回，截到它存储的头部。`session.branches` 读树的目录并带 `defaultBranchId`（§14）。今天写死 `main` 的每个 Session 级缺省目标改读默认分支：`session.submit`、`session.stop`、`session.idle`、`session.goal.*` 和 `shell.run`，以及新建的排期任务。`session.model.update`、`session.agent.update` 和 `session.prompt.refresh` 作用于默认分支，而不是拒绝除根以外的每条线。`approval.respond` 仍用它通知里带的 `branchId`，所以已挂起的请求留在提问的那条线上。`ProductEvent::new` 在 v3 里带上新的事件种类，v1、v2 里不带 | 一个入口和三条读取路径，没有业务逻辑 |
+| App Server | `session.branch_end`（v3，用户来源，带生成的 `operation_id`；`session_execution` 打开、且连接的入口不是裸入口或守护进程 profile 未受保护时，`hello.features` 把它和其他会话方法一起列出）。`session.branch_set_default`（v3，同样的准入）。对已结束的线，`session.history` 立即返回，截到它存储的头部。`session.branches` 读树的目录并带 `defaultBranchId`（§14）。今天写死 `main` 的每个 Session 级缺省目标改读默认分支：`session.submit`、`session.stop`、`session.idle`、`session.goal.*` 和 `shell.run`，以及新建的排期任务。`session.model.update`、`session.agent.update` 和 `session.prompt.refresh` 作用于默认分支，而不是拒绝除根以外的每条线。`approval.respond` 仍用它通知里带的 `branchId`，所以已挂起的请求留在提问的那条线上。在投影只带根的连接（v1）上，省略 `branchId` 仍指向根；v2 及以后可以命名线，v3 连接的缺省调用跟随默认分支。`session.attach` 保持 `sequence` 为根的，并新增 `defaultBranch {branchId, sequence}`；目录行的 `sequence` 在两种投影里都是根的，而 `running` 与活动跟随默认分支，持久化的移动在自己的事务里刷新该活动。`session.branches` 在同一份树快照下读默认分支与目录。Collaboration 把一次请求的输入投递到的那条成员线存在请求上，空闲等待、结算和每次停止都读它；读取页报告它读的线，续读必须带上它，否则被拒绝。PromptSuggestion 把缓存的轮次、offer 和进行中的生成绑定到一条线，移动时清掉。EventHub 先回答准入、来源归属和类型，再解析缺省的目标分支。`ProductEvent::new` 在 v3 里带上新的事件种类，v1、v2 里不带 | 一个入口和三条读取路径，没有业务逻辑 |
 | dim-agent-types | 在 `EventKind` 和 v1 排除列表里加入 `branch/end`、`branch/ended`，再加入 `branch/default`，并在契约测试中登记。`BranchSource` 增加一个变体，表示用户开的线，与插件的区分开。冻结样本不变 | 核心事实（§16） |
 | 存储 | `FORMAT` 52 → 53，只升标记的升级 `(52, &[])`：不扫表、不迁移数据，所以旧 daemon 会直接拒绝这个库，而不是在第一次解码时失败。`SqliteTimelineStore` 的写线程为会话目录的最近活动缓存每个 Session 的默认分支，初值来自恢复用的同一条索引点查 | 新的事件种类和新的 `BranchSource` 变体，是 52 版 daemon 解不出的行 |
 | Goal（Pursuit 修订） | 从线的来源识别它的评审者，并结束它（[Pursuit §13](plugins/Pursuit.md#13-结束评审者随-427)） | 评审者的协议归 Goal |
@@ -613,9 +617,13 @@ WorkspaceTools 不变。
 - 一个 RPC 方法，`session.branch_set_default`；
 - 一次 TreeCommands 读和一次写，`default_branch()` 与 `set_default_branch(id, source)`；
 - 目录回复上的 `defaultBranchId`；
+- `session.attach` 回复上的 `defaultBranch {branchId, sequence}`，与根的 `sequence` 并列，而 `session.summaries` 的条目不带它；
+- Collaboration 读取页报告的 `branchId`，续读时带回；
+- PromptSuggestion 清除通知与拒绝携带的 `branch_changed` 原因；
 - 一个 `BranchSource` 变体，表示用户开的线；
 - 名册的 key `branch:roster`，经 `<dim-branch-lines>` 指南条目告知模型；
-- 两个拒绝码，`branch_not_opener` 与 `branch_limit_reached`。
+- 两个拒绝码，`branch_not_opener` 与 `branch_limit_reached`；
+- 一个按分支读取的接口，`session.model.get`，回答一条线在它自己已提交截止位上的已采纳配置。
 
 BranchLine 的服务只由同一插件里的工具读取。轮次结束信号是 crate 内部的，与 `TreeCommands.page`、`head` 并列：它不导出，TypeScript 绑定不变。
 

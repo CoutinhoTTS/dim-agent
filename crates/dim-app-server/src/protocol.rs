@@ -118,6 +118,7 @@ pub enum Call {
     ApprovalRespond(ApprovalRespond),
     BranchCreate(BranchCreate),
     BranchEnd(BranchEnd),
+    BranchSetDefault(BranchSetDefault),
     Branches(Branches),
     BranchGet(BranchRequest),
     AgentCreate(AgentCreate),
@@ -127,8 +128,9 @@ pub enum Call {
     PermissionUpdate(UpdatePermission),
     ExecStop(StopExec),
     SessionSkills(BranchRequest),
+    ModelGet(GetModel),
     ModelUpdate(UpdateModel),
-    PromptRefresh(BranchRequest),
+    PromptRefresh(PromptRefresh),
     SessionMcp(SessionId),
     McpRefresh(SessionId),
     McpAppWidget(McpAppWidget),
@@ -168,6 +170,11 @@ impl Call {
             self,
             Self::WebOpen(_) | Self::WebToggle(_) | Self::WebDisable | Self::WebStatus
         )
+    }
+    /// Methods that act on the line the Session's conversation is on when the
+    /// caller names none (design §9, §15).
+    pub(crate) fn defaults_to_the_default_branch(&self) -> bool {
+        matches!(self, Self::Submit(_) | Self::Stop(_) | Self::Idle(_))
     }
     /// Methods of the UI registry (Tui design §3.6); local transport only.
     pub(crate) fn is_ui_host(&self) -> bool {
@@ -366,6 +373,16 @@ pub struct BranchRequest {
     pub session_id: String,
     pub branch_id: String,
 }
+/// `session.model.get`: one line's adopted configuration at that line's own
+/// cutoff. `through` fixes an earlier committed cutoff; absent reads the head.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GetModel {
+    pub session_id: String,
+    pub branch_id: String,
+    #[serde(default, deserialize_with = "optional_non_null")]
+    pub through: Option<u64>,
+}
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UpdatePermission {
@@ -386,7 +403,9 @@ pub struct StopExec {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UpdateModel {
     pub session_id: String,
-    pub branch_id: String,
+    /// The line the update acts on; the default branch when omitted.
+    #[serde(default, deserialize_with = "optional_non_null")]
+    pub branch_id: Option<String>,
     #[serde(default, deserialize_with = "optional_non_null")]
     pub provider_id: Option<String>,
     #[serde(default, deserialize_with = "optional_non_null")]
@@ -495,6 +514,27 @@ pub struct ConfigurationResult {
 pub struct ModelUpdateResult {
     pub model: ModelId,
     pub outcome: &'static str,
+}
+/// One line's adopted configuration as `session.model.get` answers it: the
+/// same values its `context/configured` event carries, at the requested
+/// line's own cutoff.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelGetResult {
+    pub branch_id: String,
+    /// The requested line's own cutoff, never an ancestor's sequence: the
+    /// configuration is the one reading at this cutoff answers.
+    pub through: u64,
+    pub configuration: Option<ModelConfigurationView>,
+}
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelConfigurationView {
+    pub model: ModelId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capability_snapshot: Option<Box<dim_agent_types::ModelCapabilitySnapshot>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_preferences: Option<dim_agent_types::ModelPreferences>,
 }
 /// The `session.methods` reply: the declared methods of the namespaces the
 /// Session lists whose providers are active, each `{name, mutating}`.
@@ -858,6 +898,24 @@ pub struct BranchEnd {
     pub branch_id: String,
 }
 
+/// `session.branch_set_default`: the line the user continues on (design §14).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BranchSetDefault {
+    pub session_id: String,
+    pub branch_id: String,
+}
+
+/// `session.prompt.refresh`: the line whose prompt sources are re-read; the
+/// default branch when omitted.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PromptRefresh {
+    pub session_id: String,
+    #[serde(default, deserialize_with = "optional_non_null")]
+    pub branch_id: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Branches {
@@ -877,7 +935,7 @@ pub struct BranchCreate {
 /// Methods still decoded by the built-in protocol cannot be shadowed by
 /// runtime contributions. Session-looking names not listed here remain valid
 /// contributed names (for example `session.shell`).
-const BUILTIN_METHODS: [&str; 40] = [
+const BUILTIN_METHODS: [&str; 42] = [
     "hello",
     "daemon.ping",
     "daemon.shutdown",
@@ -893,6 +951,7 @@ const BUILTIN_METHODS: [&str; 40] = [
     "ui.replace",
     "session.create",
     "session.model.preview",
+    "session.model.get",
     "session.summaries",
     "session.catalog",
     "session.catalog.cancel",
@@ -912,6 +971,7 @@ const BUILTIN_METHODS: [&str; 40] = [
     "approval.respond",
     "session.branch_create",
     "session.branch_end",
+    "session.branch_set_default",
     "session.branches",
     "session.branch.get",
     "agent.create",
@@ -972,6 +1032,7 @@ pub fn decode(bytes: &[u8]) -> Result<Request, (Option<RequestId>, RpcError)> {
             "daemon.shutdown" => Call::Shutdown(params(raw_params)?),
             "session.create" => Call::Create(Box::new(params(raw_params)?)),
             "session.model.preview" => Call::ModelPreview(params(raw_params)?),
+            "session.model.get" => Call::ModelGet(params(raw_params)?),
             "session.summaries" => Call::Summaries(params(raw_params)?),
             "session.catalog" => Call::Catalog(params(raw_params)?),
             "session.catalog.cancel" => Call::CatalogCancel(params(raw_params)?),
@@ -1006,6 +1067,7 @@ pub fn decode(bytes: &[u8]) -> Result<Request, (Option<RequestId>, RpcError)> {
             "approval.respond" => Call::ApprovalRespond(params(raw_params)?),
             "session.branch_create" => Call::BranchCreate(params(raw_params)?),
             "session.branch_end" => Call::BranchEnd(params(raw_params)?),
+            "session.branch_set_default" => Call::BranchSetDefault(params(raw_params)?),
             "session.branches" => Call::Branches(params(raw_params)?),
             "session.branch.get" => Call::BranchGet(params(raw_params)?),
             "agent.create" => Call::AgentCreate(params(raw_params)?),
@@ -1327,6 +1389,22 @@ pub struct SessionInfo {
     #[serde(flatten)]
     pub title: Option<crate::storage::TitleFields>,
 }
+/// The line the Session's conversation is on, with that line's sequence: the
+/// branch-qualified cursor beside [`SessionInfo::sequence`], which keeps the
+/// root's meaning (design §14, §15).
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BranchCursor {
+    pub branch_id: String,
+    pub sequence: u64,
+}
+/// One Session's record as `session.attach` answers it: the summary fields
+/// plus the branch-qualified cursor beside the root's `sequence`.
+#[derive(Debug)]
+pub struct SessionRecord {
+    pub info: SessionInfo,
+    pub default_branch: BranchCursor,
+}
 /// The `session.attach` reply: the attached Session's directory record, as
 /// `session.summaries` gives it, plus the preferences its adopted
 /// configuration sends. Summaries do not include these preferences.
@@ -1334,6 +1412,12 @@ pub struct SessionInfo {
 pub struct AttachResult {
     #[serde(flatten)]
     pub session: SessionInfo,
+    /// The line the configured conversation is on and its sequence. New
+    /// clients resume the shown line from it; `sequence` above stays the
+    /// root's, the cutoff every client built before this field existed reads
+    /// (design §14, §15).
+    #[serde(rename = "defaultBranch")]
+    pub default_branch: BranchCursor,
     #[serde(rename = "capabilitySnapshot", skip_serializing_if = "Option::is_none")]
     pub capability_snapshot: Option<Box<dim_agent_types::ModelCapabilitySnapshot>>,
     #[serde(rename = "modelPreferences", skip_serializing_if = "Option::is_none")]
@@ -1407,12 +1491,14 @@ pub enum Reply {
     BranchGet(crate::tree_protocol::BranchDirectoryView),
     Keys(crate::tree_protocol::KeysResult),
     BranchCreate(crate::tree_protocol::CreateResult),
+    BranchSetDefault(crate::tree_protocol::SetDefaultResult),
     Barrier(crate::tree_protocol::BarrierResult),
     AgentCreated(AgentCreated),
     Agents(Vec<AgentInfo>),
     Permission(PermissionResult),
     ExecEnded(dim_agent_types::ExecEndedData),
     SessionSkills(SessionSkillsResult),
+    ModelGet(ModelGetResult),
     ModelUpdate(ModelUpdateResult),
     Configuration(ConfigurationResult),
     McpState(McpStateResult),
