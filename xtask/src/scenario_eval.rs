@@ -2559,7 +2559,7 @@ pub(crate) async fn serve_entry(params_path: Option<String>) -> Result<()> {
         // appended beside the marker for the test to check the group is gone.
         let mut member = std::process::Command::new("sleep");
         member
-            .arg("30")
+            .arg("90")
             .stdin(Stdio::null())
             .stderr(Stdio::null())
             .stdout(if *holds_stdout {
@@ -14751,8 +14751,8 @@ mod tests {
     /// A child whose group keeps the write end of its standard output open
     /// after the child exits must not hold the evaluation: the parent's read
     /// of the outcome is bounded and the group is killed when the bound runs
-    /// out, so the run still returns its record. The second scenario runs on
-    /// the slot the first frees.
+    /// out, so the run still returns its record. The second arm runs on the
+    /// slot the first frees.
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_child_that_leaves_a_stdout_holder_stops_at_the_read_bound() {
@@ -14763,36 +14763,28 @@ mod tests {
             &[("notes.txt", FILE_TEXT)],
         )
         .await;
-        let next = fixture.scenarios.join("next");
-        std::fs::create_dir_all(next.join("workspace")).unwrap();
-        std::fs::write(next.join("workspace").join("notes.txt"), FILE_TEXT).unwrap();
-        std::fs::write(
-            next.join("scenario.json"),
-            serde_json::to_string_pretty(&isolated_scenario()).unwrap(),
-        )
-        .unwrap();
         let out = fixture.directory.join("out");
         let mut options = fixture.judge_options(out.clone());
         options.jobs = 1;
         options.stall_cleanup = true;
         let marker = fixture.directory.join("leave.marker");
         options.leave_member = Some((true, marker.clone()));
-        // Four runs, each starting its own child and served Session: the
-        // guard only turns a hang into a failed assertion, so it is wide
-        // enough for a loaded machine. The bound under test is the test
+        // Two runs, each starting its own child and served Session: the
+        // guard only turns a hang into a failed assertion, and the member
+        // holds its stdout for 90 seconds. The bound under test is the test
         // hook's 200 ms read grace.
-        let report = tokio::time::timeout(Duration::from_secs(120), fixture.evaluate(&options))
+        let report = tokio::time::timeout(Duration::from_secs(60), fixture.evaluate(&options))
             .await
             .expect("the evaluation returns though a child left its stdout open")
-            .expect("the evaluation records both scenarios");
+            .expect("the evaluation records both arms");
         let records = fixture.records(&out);
-        assert_eq!(records.len(), 4, "two scenarios, both arms: {report}");
+        assert_eq!(records.len(), 2, "both arms: {report}");
         for record in &records {
             assert_eq!(record["stop"], "idle", "{record}");
             assert_eq!(record["judgeOutcome"], "judged", "{record}");
         }
         let members = left_members(&marker);
-        assert_eq!(members.len(), 4, "each run's child left its member");
+        assert_eq!(members.len(), 2, "each arm's child left its member");
         for pid in members {
             assert!(
                 child_tree_gone(pid).await,
