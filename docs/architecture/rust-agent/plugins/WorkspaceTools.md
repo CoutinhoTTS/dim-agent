@@ -539,9 +539,9 @@ checks that a write-only parent still admits a new file and leaves it private,
 under the same umasks, and `a_new_file_under_a_deny_delete_acl_keeps_its_staging_entry`
 fixes the residue limit. The in-crate Linux test
 `a_new_file_stays_on_its_opened_parent_through_publication` renames the opened
-parent after preparation and checks that the file follows the directory while
-the path put back at the old name receives the `write_error`, the `fileWritten`
-effect and the text binding. The in-crate Unix test
+parent after preparation and checks that the file follows the directory and
+that the call reports `write_error` for the path put back at the old name, with
+no `fileWritten` effect and no text binding. The in-crate Unix test
 `a_bounded_new_file_records_no_success_after_a_parent_rename` fixes the same
 record for a target below a boundary's held parent. The Linux tests
 `an_unsupported_anonymous_publication_falls_back_to_named_staging`,
