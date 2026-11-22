@@ -380,9 +380,10 @@ Known limits:
   creation.
 - The fallback and macOS paths apply the mode between the `fchmod` and the link,
   and their cleanup is the parent-directory name check-then-unlink the
-  replacement path already uses. A failed publication restores the sibling's
-  private 0600 mode before that cleanup, so a removal the parent refuses leaves
-  the unpublished content private.
+  replacement path already uses. A failed publication puts back the mode the
+  sibling started with before that cleanup, and adds a `fchmod` that failed to
+  put it back to the result, so a removal the parent refuses leaves no wider
+  access than the entry began with.
 - The Linux fallback keeps 0600 when the parent carries a POSIX default ACL.
 - On Linux, a parent that is writable and searchable but not readable keeps
   the new file private, at most the owner bits its inode already has and never
@@ -399,8 +400,8 @@ Known limits:
   the process umask afterwards is not reflected.
 - A parent whose inheritable ACL denies delete refuses the macOS staging
   entry's removal, so that entry stays behind after a successful publication.
-  After a failed publication the entry has its private 0600 mode back, so the
-  refused removal cannot leave unpublished content readable.
+  After a failed publication the entry has the mode it started with back, so
+  the refused removal cannot leave unpublished content wider than it began.
 
 ### Rule check
 
@@ -524,9 +525,11 @@ fixes the residue limit. The in-crate Linux tests
 `an_unread_umask_keeps_an_anonymous_new_file_private` and
 `an_anonymous_new_file_has_no_entry_and_does_not_overwrite` need a filesystem
 with `O_TMPFILE` and fail with that reason when the test directory has none, so
-they never pass on the named fallback. The in-crate macOS test
-`a_failed_publication_does_not_leave_a_widened_staging_entry` fixes the
-restored private mode under a deny-delete ACL. The Linux tests that need
+they never pass on the named fallback. The in-crate macOS tests
+`a_failed_publication_does_not_leave_a_widened_staging_entry` and
+`a_failed_publication_restores_the_staging_entrys_starting_mode` fix the
+restored starting mode under a deny-delete ACL, the second under a umask that
+narrows the staging entry below 0600. The Linux tests that need
 `setfacl`, a foreign-group `setgid` directory or a filesystem without
 `O_TMPFILE` are `#[ignore]`d manual cases, named in their run instructions.
 

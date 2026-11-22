@@ -12,6 +12,8 @@ use super::{
     failed, field, hex, invalid_input, not_regular, refused, resolve_path, revision, wrote,
 };
 use crate::host::HostError;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use dim_agent_types::ToolContent;
 use dim_agent_types::{JsonObject, ToolEffect, ToolResult};
 use serde_json::{Value, json};
 use std::{
@@ -662,22 +664,34 @@ fn publish_named_new(
         )));
     }
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    if let Err(error) = new_file.prepare(&temporary.file) {
-        return Ok(Err(match error {
-            TargetError::Refused => refused(path),
-            TargetError::Io(error) => write_failure(&error, display, false),
-        }));
-    }
+    let replaced = match new_file.prepare(&temporary.file) {
+        Ok(replaced) => replaced,
+        Err(error) => {
+            return Ok(Err(match error {
+                TargetError::Refused => refused(path),
+                TargetError::Io(error) => write_failure(&error, display, false),
+            }));
+        }
+    };
     if let Err(error) = new_file.install(&staged, &temporary.file) {
-        new_file.restore_private(&temporary.file);
-        return Ok(Err(match error {
+        let mut result = match error {
             TargetError::Refused => refused(path),
             TargetError::Io(error) if error.kind() == ErrorKind::AlreadyExists => failed(
                 "Read the existing file before overwriting it.",
                 json!({"code": "text_binding_required"}),
             ),
             TargetError::Io(error) => write_failure(&error, display, false),
-        }));
+        };
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if let Some(replaced) = replaced
+            && let Err(error) = new_file.restore_staging_mode(&temporary.file, replaced)
+            && let ToolContent::Text(content) = &mut result.content
+        {
+            content.push_str(&format!(
+                "\nThe staging entry could not be restored to its starting mode: {error}"
+            ));
+        }
+        return Ok(Err(result));
     }
     drop(temporary);
     if let Err(error) = new_file.sync() {

@@ -1346,35 +1346,48 @@ impl<'a> NewFile<'a> {
     }
 
     /// Gives a named staged new file the mode a direct creation would have,
-    /// immediately before publication. The 0600 staging mode stays when the
-    /// policy is unknown: on Linux when the parent's ACL cannot be ruled out
-    /// or the umask cannot be read, and on macOS when no process umask was
-    /// recorded.
+    /// immediately before publication, and reports the staging mode it
+    /// replaced. `None` means the staging mode already was the creation mode,
+    /// including when the policy is unknown: on Linux when the parent's ACL
+    /// cannot be ruled out or the umask cannot be read, and on macOS when no
+    /// process umask was recorded.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
-    pub(crate) fn prepare(&self, file: &std::fs::File) -> Result<(), TargetError> {
+    pub(crate) fn prepare(&self, file: &std::fs::File) -> Result<Option<u32>, TargetError> {
         #[cfg(target_os = "linux")]
         match self.parent_default_acl()? {
             Some(false) => {}
-            Some(true) | None => return Ok(()),
+            Some(true) | None => return Ok(None),
         }
         let Some(mode) = self.new_file_umask().map(|umask| 0o666 & !umask) else {
-            return Ok(());
+            return Ok(None);
         };
+        let staging = staged_mode(file)?;
+        if staging == mode {
+            return Ok(None);
+        }
         use std::os::fd::AsRawFd;
         // SAFETY: `file` is an open descriptor owned for the call.
         if unsafe { libc::fchmod(file.as_raw_fd(), mode as libc::mode_t) } != 0 {
             return Err(TargetError::Io(std::io::Error::last_os_error()));
         }
-        Ok(())
+        Ok(Some(staging))
     }
 
-    /// Restores the private staging mode after a failed publication, so an
-    /// entry the parent refuses to remove keeps no wider access than
-    /// preparation gave it.
-    pub(crate) fn restore_private(&self, file: &std::fs::File) {
+    /// Puts the staging mode back that a failed publication's preparation
+    /// replaced, so an entry the parent refuses to remove keeps no wider
+    /// access than it started with.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(crate) fn restore_staging_mode(
+        &self,
+        file: &std::fs::File,
+        mode: u32,
+    ) -> std::io::Result<()> {
         use std::os::fd::AsRawFd;
         // SAFETY: `file` is an open descriptor owned for the call.
-        let _ = unsafe { libc::fchmod(file.as_raw_fd(), 0o600) };
+        if unsafe { libc::fchmod(file.as_raw_fd(), mode as libc::mode_t) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
     }
 
     /// Links the staged sibling under the target's name without replacing an
@@ -1482,16 +1495,22 @@ fn owner_bits(observed: u32) -> u32 {
     observed & 0o600
 }
 
+/// The permission bits an open staged inode has now.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn staged_mode(file: &std::fs::File) -> Result<u32, TargetError> {
+    use std::os::unix::fs::PermissionsExt;
+    Ok(file
+        .metadata()
+        .map_err(TargetError::Io)?
+        .permissions()
+        .mode()
+        & 0o7777)
+}
+
 /// The private staging mode for an inode whose creation policy is unknown.
 #[cfg(target_os = "linux")]
 fn private_mode(file: &std::fs::File) -> Result<u32, TargetError> {
-    use std::os::unix::fs::PermissionsExt;
-    Ok(owner_bits(
-        file.metadata()
-            .map_err(TargetError::Io)?
-            .permissions()
-            .mode(),
-    ))
+    Ok(owner_bits(staged_mode(file)?))
 }
 
 /// Test-only controls over how a new file is staged.
@@ -2374,6 +2393,123 @@ mod mutation_tests {
             std::fs::metadata(&staged).unwrap().permissions().mode() & 0o777,
             0o600,
             "a failed publication restores the private staging mode"
+        );
+        for path in [&staged, &existing, &root] {
+            let _ = std::process::Command::new("chmod")
+                .arg("-N")
+                .arg(path)
+                .status();
+        }
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A failed publication restores the staging mode the entry started with,
+    /// never a fixed 0600: a umask that masks an owner bit starts the sibling
+    /// narrower, so putting 0600 back would widen it. A parent whose inherited
+    /// ACL denies delete keeps that unpublished entry. The child process fixes
+    /// the umask and records it through the product entry point, because the
+    /// value is read once per process.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn a_failed_publication_restores_the_staging_entrys_starting_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        const UNSET: &str = "DIM_TEST_FAILED_PUBLICATION_NARROW_UMASK";
+        if std::env::var_os(UNSET).is_none() {
+            let binary = std::env::current_exe().unwrap();
+            let script = r#"umask "$1" && exec "$0" a_failed_publication_restores_the_staging_entrys_starting_mode --nocapture"#;
+            let child = std::process::Command::new("sh")
+                .args(["-c", script])
+                .arg(&binary)
+                .arg("277")
+                .env(UNSET, "277")
+                .output()
+                .unwrap();
+            assert!(
+                child.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&child.stdout),
+                String::from_utf8_lossy(&child.stderr)
+            );
+            return;
+        }
+        install_process_umask();
+        let root = std::env::temp_dir().join(format!("dim-new-file-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let group = std::process::Command::new("id")
+            .arg("-gn")
+            .output()
+            .unwrap();
+        let group = String::from_utf8_lossy(&group.stdout).trim().to_owned();
+        assert!(
+            std::process::Command::new("chmod")
+                .arg("+a")
+                .arg(format!(
+                    "group:{group} deny delete,file_inherit,only_inherit"
+                ))
+                .arg(&root)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let mut tools = FileTools::new(root.clone(), root.clone(), root.join("out"));
+        let existing = root.join("new");
+        let starting = Arc::new(Mutex::new(None));
+        let observed = starting.clone();
+        tools.before_commit = Some(Arc::new(move |path| {
+            std::fs::write(path, b"external").unwrap();
+            let mode = std::fs::read_dir(path.parent().unwrap())
+                .unwrap()
+                .map(Result::unwrap)
+                .find(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".dim-write-")
+                })
+                .map(|entry| entry.metadata().unwrap().permissions().mode() & 0o777);
+            *observed.lock().unwrap() = mode;
+        }));
+        let result = call(
+            &tools,
+            &branch(),
+            "write",
+            json!({"path": "new", "content": "text\n"}),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.is_error, Some(true));
+        assert_eq!(
+            result.structured_content.unwrap()["code"],
+            "text_binding_required"
+        );
+        assert_eq!(std::fs::read(&existing).unwrap(), b"external");
+        let starting = *starting
+            .lock()
+            .unwrap()
+            .as_ref()
+            .expect("the hook sees the staging entry before preparation");
+        assert_eq!(
+            starting,
+            0o600 & !0o277,
+            "the umask narrows the staging entry below 0600"
+        );
+        let staged = std::fs::read_dir(&root)
+            .unwrap()
+            .map(Result::unwrap)
+            .find(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".dim-write-")
+            })
+            .expect("the denied delete keeps the failed staging entry")
+            .path();
+        assert_eq!(
+            std::fs::metadata(&staged).unwrap().permissions().mode() & 0o777,
+            starting,
+            "a failed publication keeps the staging entry's starting mode"
         );
         for path in [&staged, &existing, &root] {
             let _ = std::process::Command::new("chmod")
