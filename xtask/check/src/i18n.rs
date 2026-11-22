@@ -10,9 +10,10 @@
 //!
 //! Both sides are parsed, not matched by hand: a table arm whose pattern is
 //! neither a string nor the catch-all is a failure, so a new shape cannot pass
-//! by being skipped. A key argument that reduces to no literal is reported
-//! rather than failed: the ones left name constants, which the check does not
-//! follow.
+//! by being skipped. A `#[cfg(test)]` item is a fixture rather than text the
+//! interface draws, so the scan skips it. A key argument that reduces to no
+//! literal is reported rather than failed: the ones left name constants, which
+//! the check does not follow.
 use std::{
     collections::{BTreeMap, BTreeSet},
     error::Error,
@@ -21,7 +22,8 @@ use std::{
 };
 
 use syn::{
-    Block, Expr, ExprLit, Item, Lit, Pat, Stmt,
+    Attribute, Block, Expr, ExprLit, ImplItem, Item, Lit, Meta, Pat, Stmt, Token,
+    punctuated::Punctuated,
     spanned::Spanned,
     visit::{self, Visit},
 };
@@ -193,6 +195,43 @@ fn call_keys(text: &str, site: &str) -> Result<CallKeys> {
     Ok(visitor.found)
 }
 
+/// Whether `attributes` holds `#[cfg(test)]`, so the item is a fixture rather
+/// than text the interface draws.
+fn test_only(attributes: &[Attribute]) -> bool {
+    attributes.iter().any(|attribute| {
+        attribute.path().is_ident("cfg")
+            && attribute
+                .parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)
+                .is_ok_and(|predicates| {
+                    predicates
+                        .iter()
+                        .any(|predicate| predicate.path().is_ident("test"))
+                })
+    })
+}
+
+/// Whether `item` is a fixture.
+fn test_item(item: &Item) -> bool {
+    match item {
+        Item::Const(item) => test_only(&item.attrs),
+        Item::Fn(item) => test_only(&item.attrs),
+        Item::Impl(item) => test_only(&item.attrs),
+        Item::Mod(item) => test_only(&item.attrs),
+        Item::Static(item) => test_only(&item.attrs),
+        Item::Trait(item) => test_only(&item.attrs),
+        _ => false,
+    }
+}
+
+/// Whether `item` is a fixture.
+fn test_impl_item(item: &ImplItem) -> bool {
+    match item {
+        ImplItem::Const(item) => test_only(&item.attrs),
+        ImplItem::Fn(item) => test_only(&item.attrs),
+        _ => false,
+    }
+}
+
 /// The argument positions of a call that hold a translation key, when its name
 /// is one the check reads.
 fn key_positions(function: &Expr) -> Option<&'static [usize]> {
@@ -292,6 +331,18 @@ impl Calls {
 }
 
 impl<'ast> Visit<'ast> for Calls {
+    fn visit_item(&mut self, node: &'ast Item) {
+        if !test_item(node) {
+            visit::visit_item(self, node);
+        }
+    }
+
+    fn visit_impl_item(&mut self, node: &'ast ImplItem) {
+        if !test_impl_item(node) {
+            visit::visit_impl_item(self, node);
+        }
+    }
+
     fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
         if let Some(positions) = key_positions(&node.func) {
             for position in positions {
