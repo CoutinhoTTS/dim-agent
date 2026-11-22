@@ -1362,9 +1362,9 @@ impl TestStore {
         }
     }
     /// Answers the held append as a failed transaction that wrote nothing and
-    /// fails every later batch of its Session, as a failed Session rejects
-    /// them until it is released. Another Session queued on the same line
-    /// still commits.
+    /// settles every batch already queued behind it in the same Session with
+    /// the same failure. A later append of that Session writes directly, and
+    /// another Session queued on the same line still commits.
     fn release_failed(&self) {
         let mut seam = self.seam.lock().unwrap();
         let (front, _, publish) = seam.front.take().expect("a held append");
