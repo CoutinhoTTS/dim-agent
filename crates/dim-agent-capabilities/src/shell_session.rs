@@ -502,6 +502,7 @@ impl ShellSession {
             .write(ShellWrite {
                 task_id,
                 data: STANDARD.encode(bytes),
+                command: None,
             })
             .await
             .map_err(|error| HostError::failed(format!("Shell write failed: {error}")))
@@ -755,6 +756,7 @@ impl ShellSession {
             .write(ShellWrite {
                 task_id,
                 data: STANDARD.encode(line.as_bytes()),
+                command: None,
             })
             .await
             .map_err(|e| HostError::failed(format!("Shell write failed: {e}")))?;
