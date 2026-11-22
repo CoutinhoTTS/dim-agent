@@ -102,10 +102,9 @@ pub struct RunSettings {
     /// that a timed-out run keeps its outcome without an export. The product
     /// and the evaluations set it off.
     pub stall_export: Option<String>,
-    /// A test hook: this child blocks the thread after its run stopped on its
-    /// wall clock, so only the parent's hard bound ends it. The product and
-    /// the evaluations set it off.
-    pub block_after_wall_clock: bool,
+    /// A test hook: the judge phase's budget in milliseconds, in place of the
+    /// runner's own phase budget. The product and the evaluations set it off.
+    pub judge_budget_ms: Option<u64>,
 }
 
 impl Default for RunSettings {
@@ -122,7 +121,7 @@ impl Default for RunSettings {
             stall_cleanup: false,
             cleanup_budget_ms: None,
             stall_export: None,
-            block_after_wall_clock: false,
+            judge_budget_ms: None,
         }
     }
 }

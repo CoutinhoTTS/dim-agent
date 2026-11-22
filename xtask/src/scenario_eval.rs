@@ -332,12 +332,12 @@ const SETTLE_BOUND: Duration = Duration::from_secs(30);
 /// under it, so the cleanup is bounded as a whole rather than step by step
 /// (model-prompts §8.1).
 const CLEANUP_BUDGET: Duration = Duration::from_secs(30);
-/// The longest a judge's own retries may wait before its call fails: one
-/// request's wait budget in the product's failure policy. A run that did not
-/// stop on its wall clock is not under [`CLEANUP_BUDGET`], so the parent's hard
-/// bound on its child covers the judge's own budget instead when that is
-/// longer.
-const JUDGE_BUDGET: Duration = dim_agent_capabilities::model_provider::WAIT_BUDGET;
+/// The budget of one run's judge phase: its first call, the retry without a
+/// temperature, and two re-asks, each under the product's own retry policy. A
+/// run that did not stop on its wall clock is not under [`CLEANUP_BUDGET`], so
+/// its judge phase has this budget instead, and the parent's hard bound on its
+/// child covers it.
+const JUDGE_PHASE_BUDGET: Duration = Duration::from_secs(600);
 /// How long a run's serve child may take before the parent kills its process
 /// group: the child's startup before its wall clock starts — its server, its
 /// connect, the plugin wait (60 s), the model and judge selections, the
@@ -349,6 +349,10 @@ const STARTUP_BOUND: Duration = Duration::from_secs(120);
 /// short enough for a test to reach the bound without a real wait, and
 /// unsignalled by the product.
 const STALLED_CLEANUP_GRACE: Duration = Duration::from_millis(200);
+/// How long the parent waits for its read of a killed child's output to reach
+/// EOF: every writer in the child's group is dead, so the read ends at once;
+/// the grace only turns a stuck reader into a dropped one.
+const KILLED_READ_GRACE: Duration = Duration::from_secs(1);
 /// The outer hang guard of the tests that run a real serve child through the
 /// supervisor: a wait that never ends fails the guard instead of holding the
 /// suite.
@@ -379,6 +383,12 @@ fn cleanup_budget(stall_cleanup: bool, given_ms: Option<u64>) -> Duration {
     } else {
         given_ms.map_or(CLEANUP_BUDGET, Duration::from_millis)
     }
+}
+
+/// The budget of one run's judge phase: [`JUDGE_PHASE_BUDGET`], or the test
+/// hook's given milliseconds.
+fn judge_phase_budget(given_ms: Option<u64>) -> Duration {
+    given_ms.map_or(JUDGE_PHASE_BUDGET, Duration::from_millis)
 }
 
 const JUDGE_SYSTEM: &str = "You check statements against the exported Timeline of a coding session. The Timeline is JSONL: a header line, one branch line per line of the Session, one event line per event, and an end line. A context/prepare or model/call event carries its request: addedMessages are the messages added since that line's previous request, with messageCount the whole request's count, and messages is the whole list when the history changed; every other field of the request appears in full only when it changed, and otherwise reads {\"unchanged\": true}. For each statement answer \"present\" when the run shows it and \"absent\" when it does not. Add the Timeline events that support the verdict as a short quote. Answer with a JSON array only, one object per statement: {\"id\": \"<statement id>\", \"verdict\": \"present|absent\", \"quote\": \"<Timeline evidence>\"}.";
@@ -1316,6 +1326,56 @@ fn schedule(runs: usize, scenarios: usize) -> Vec<(&'static str, usize, usize)> 
     schedule
 }
 
+/// A test hook: a run's child stalls after writing its marker, and the
+/// parent's hard bound counts from that marker. The product and the ordinary
+/// tests leave it unset.
+struct Stall {
+    /// The arm and scenario whose child stalls; `None` stalls every run.
+    run: Option<(String, String)>,
+    point: StallPoint,
+    /// The parent's hard bound after the marker, in milliseconds.
+    bound_ms: u64,
+}
+impl Stall {
+    /// Where this run's child stalls, when the hook names it.
+    fn point_for(&self, arm: &str, scenario: &str) -> Option<StallPoint> {
+        match &self.run {
+            Some((arm_name, scenario_name)) => {
+                (arm_name == arm && scenario_name == scenario).then_some(self.point)
+            }
+            None => Some(self.point),
+        }
+    }
+}
+
+/// Where a stalled child stops: before it prints anything (a startup stall),
+/// after it printed its outcome (a child that cannot exit), or after its run
+/// stopped on its wall clock (a cleanup that never settles).
+#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum StallPoint {
+    BeforeOutcome,
+    AfterOutcome,
+    AfterWallClock,
+}
+
+/// A test hook: how a run's child ends before its outcome line.
+#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum BrokenOutcome {
+    /// It exits without printing a line.
+    Silent,
+    /// It prints a line that names the outcome but is not JSON.
+    Garbled,
+}
+
+/// A test hook: the run whose child ends before its outcome line.
+struct BrokenRun {
+    /// The arm and scenario of the run.
+    run: (String, String),
+    outcome: BrokenOutcome,
+}
+
 struct Options {
     scenarios: PathBuf,
     /// The `--text ID --candidate FILE` pairs, in the order given.
@@ -1366,13 +1426,16 @@ struct Options {
     /// A test hook: this scenario's Timeline export never completes, to
     /// exercise a run that keeps its wall-clock stop without an export.
     stall_export: Option<String>,
-    /// A test hook: a run's child blocks its thread after the run stopped on
-    /// its wall clock, so only the parent's hard bound ends it.
-    block_after_wall_clock: bool,
-    /// A test hook: the parent's hard bound on one run's child, in
-    /// milliseconds, in place of the bound its wall clock, startup, cleanup
-    /// and output grace add up to.
-    hard_bound_ms: Option<u64>,
+    /// A test hook: a run's child stalls at `point` after writing its marker,
+    /// and the parent's hard bound counts from that marker, so a slow start
+    /// does not spend the bound under test.
+    stall: Option<Stall>,
+    /// A test hook: the run whose child ends before its outcome line,
+    /// silently or with a garbled one.
+    broken: Option<BrokenRun>,
+    /// A test hook: the judge phase's budget in milliseconds, in place of
+    /// [`JUDGE_PHASE_BUDGET`].
+    judge_budget_ms: Option<u64>,
     /// The default plugin configuration file both arms load; `None` serves
     /// the assembly without the product's plugins.
     defaults: Option<PathBuf>,
@@ -1542,8 +1605,9 @@ impl Options {
             stall_cleanup: false,
             cleanup_budget_ms: None,
             stall_export: None,
-            block_after_wall_clock: false,
-            hard_bound_ms: None,
+            stall: None,
+            broken: None,
+            judge_budget_ms: None,
             rejudge,
             select,
             pool,
@@ -2355,6 +2419,14 @@ impl JudgeCall {
     }
 }
 
+/// A stalled child's marker and where it stalls.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ChildStall {
+    point: StallPoint,
+    marker: PathBuf,
+}
+
 /// One run's serve child: the App Server of the run, served in its own
 /// process with a disposable environment (isolation decision 1). The parent
 /// starts its own binary with `scenario-eval-serve <params>`; the offline
@@ -2445,10 +2517,18 @@ struct ChildParams {
     /// exercise a run that keeps its wall-clock stop without an export.
     #[serde(default)]
     stall_export: Option<String>,
-    /// A test hook: this child blocks its thread after the run stopped on its
-    /// wall clock, so only the parent's hard bound ends it.
+    /// A test hook: where this child stalls, the marker it writes, and the
+    /// parent's hard bound after that marker.
     #[serde(default)]
-    block_after_wall_clock: bool,
+    stall: Option<ChildStall>,
+    /// A test hook: this child ends before its outcome line, silently or with
+    /// a line that is not JSON.
+    #[serde(default)]
+    broken: Option<BrokenOutcome>,
+    /// A test hook: the judge phase's budget in milliseconds, in place of
+    /// [`JUDGE_PHASE_BUDGET`].
+    #[serde(default)]
+    judge_budget_ms: Option<u64>,
     /// The native probe's declared set: the assembly served without the
     /// plugin defaults. Each run's `tools-product` check reads its own
     /// declared set against it.
@@ -2562,6 +2642,11 @@ pub(crate) async fn serve_entry(params_path: Option<String>) -> Result<()> {
     augment_model_config(&params.model_config, &preflight_url, &config_path)?;
     let mut params = params;
     params.model_config = config_path;
+    if let Some(stall) = &params.stall
+        && stall.point == StallPoint::BeforeOutcome
+    {
+        stall_here(stall, "before its outcome")?;
+    }
     // A test hook: the test writes `marker` once the sibling arm's model
     // call is held; this child waits for that event, bounded, then exits
     // non-zero. The wait's outcome is printed on a line of its own, so the
@@ -2653,10 +2738,32 @@ pub(crate) async fn serve_entry(params_path: Option<String>) -> Result<()> {
             format!("the leaving-member test hook cannot record its member: {error}")
         })?;
     }
+    if let Some(broken) = params.broken {
+        // A test hook: the child ends before its outcome line, with the
+        // leaving member — if any — still holding its standard output.
+        match broken {
+            BrokenOutcome::Silent => {}
+            BrokenOutcome::Garbled => println!("{{\"judgeOutcome\": "),
+        }
+        return Ok(());
+    }
     println!(
         "{}",
         serde_json::to_string(&child_outcome(&params, &provider).await)?
     );
+    if let Some(stall) = &params.stall
+        && stall.point == StallPoint::AfterOutcome
+    {
+        stall_here(stall, "after its outcome")?;
+    }
+    Ok(())
+}
+
+/// The test hook's stall: the marker the parent's hard bound counts from,
+/// then a wait no timer of the child's ends.
+fn stall_here(stall: &ChildStall, note: &str) -> Result<()> {
+    std::fs::write(&stall.marker, note)?;
+    std::thread::sleep(Duration::from_secs(600));
     Ok(())
 }
 
@@ -2694,7 +2801,7 @@ async fn child_outcome(params: &ChildParams, preflight: &Arc<Provider>) -> Child
         stall_cleanup: params.stall_cleanup,
         cleanup_budget_ms: params.cleanup_budget_ms,
         stall_export: params.stall_export.clone(),
-        block_after_wall_clock: params.block_after_wall_clock,
+        judge_budget_ms: params.judge_budget_ms,
     };
     // The scenario's event producers run in the child, whose process
     // publishes what the run's Session subscribes to (EventHub design A.1).
@@ -2742,25 +2849,50 @@ async fn child_outcome(params: &ChildParams, preflight: &Arc<Provider>) -> Child
     // under the one deadline the wall-clock stop fixed: the tree close waits
     // for the move the run stopped waiting on, and the child must print its
     // outcome and exit so the parent's worker is released (model-prompts
-    // §8.1).
-    if let Some(deadline) = cleanup_deadline {
-        if settings.stall_cleanup {
-            // The hook's stand-in for a server that never finishes shutting
-            // down: the real join runs, and the wait after it does not return.
-            let stalled = async move {
-                let _ = server.join().await;
-                std::future::pending::<()>().await;
-            };
-            let _ = tokio::time::timeout_at(deadline, stalled).await;
-        } else {
-            let _ = tokio::time::timeout_at(deadline, server.join()).await;
+    // §8.1). Every other run's join gets the settle grace, and a join that
+    // outlives it is attached to the outcome as a teardown failure instead
+    // of holding the child before it prints.
+    let teardown = match cleanup_deadline {
+        Some(deadline) => {
+            if settings.stall_cleanup {
+                // The hook's stand-in for a server that never finishes
+                // shutting down: the real join runs, and the wait after it
+                // does not return.
+                let stalled = async move {
+                    let _ = server.join().await;
+                    std::future::pending::<()>().await;
+                };
+                let _ = tokio::time::timeout_at(deadline, stalled).await;
+            } else {
+                let _ = tokio::time::timeout_at(deadline, server.join()).await;
+            }
+            None
         }
-    } else {
-        let _ = server.join().await;
-    }
+        None => match tokio::time::timeout(SETTLE_BOUND, server.join()).await {
+            Ok(Ok(_)) => None,
+            Ok(Err(error)) => Some(format!("the run's serve server did not shut down: {error}")),
+            Err(_) => Some(format!(
+                "the run's serve server did not finish shutting down within {}s",
+                SETTLE_BOUND.as_secs_f64()
+            )),
+        },
+    };
     let mut outcome = outcome.unwrap_or_else(|error| {
         harness_outcome(format!("the run failed to finish: {error}"), Vec::new())
     });
+    if let Some(teardown) = teardown {
+        // The run's own ending stands; the teardown failure marks the run
+        // failed (model-prompts §8.1).
+        if let Some(harness) = outcome.harness.as_mut() {
+            harness.push_str("; ");
+            harness.push_str(&teardown);
+        } else if let Some(error) = outcome.error.as_mut() {
+            error.push_str("; ");
+            error.push_str(&teardown);
+        } else {
+            outcome.error = Some(teardown);
+        }
+    }
     if outcome.duration_ms == 0. {
         outcome.duration_ms = duration_ms;
     }
@@ -2788,7 +2920,7 @@ fn native_probe_settings(
         stall_cleanup: false,
         cleanup_budget_ms: None,
         stall_export: None,
-        block_after_wall_clock: false,
+        judge_budget_ms: None,
     }
 }
 
@@ -2837,7 +2969,10 @@ async fn native_probe_child(params: &ChildParams) -> Result<Vec<(String, ToolSou
     }
     .await;
     server.shutdown();
-    let _ = server.join().await;
+    // The probe's set is in hand: a join that outlives the settle grace must
+    // not keep the set from the parent, whose own startup bound ends the
+    // child anyway.
+    let _ = tokio::time::timeout(SETTLE_BOUND, server.join()).await;
     Ok(connected?)
 }
 
@@ -2968,6 +3103,7 @@ async fn child_drive(
             producer,
             (!params.offer_plugin)
                 .then(|| ceiling.clone().unwrap_or_else(|| session_tools(scenario))),
+            params.stall.as_ref(),
         )
         .await
         {
@@ -3856,6 +3992,17 @@ fn run_socket(options: &Options, arm: &str, scenario: &Scenario, run: usize) -> 
         .join(format!("{arm}-{}-run-{run}.sock", scenario.id))
 }
 
+/// The marker a stalled child writes, beside its params: one per run, so a
+/// bound counts from this child's stall and no other's.
+fn run_stall_marker(options: &Options, arm: &str, scenario: &Scenario, run: usize) -> PathBuf {
+    options
+        .out
+        .join("children")
+        .join(arm)
+        .join(&scenario.id)
+        .join(format!("run-{run}.stall"))
+}
+
 /// The run's own account files, under the output root, never inside the run
 /// root: the export and the view the judge read. A re-judge reads them from
 /// here ([`read_saved_runs`]).
@@ -3911,6 +4058,17 @@ async fn isolate_run(
     let operator_home = std::env::var_os("HOME").map(PathBuf::from);
     let boundary = run_boundary(options, workspace, env_home)?;
     let credentials = augmented_credentials(options);
+    let stall = options.stall.as_ref().and_then(|stall| {
+        stall.point_for(arm, &scenario.id).map(|point| ChildStall {
+            point,
+            marker: run_stall_marker(options, arm, scenario, run),
+        })
+    });
+    let broken = options
+        .broken
+        .as_ref()
+        .filter(|broken| broken.run.0 == arm && broken.run.1 == scenario.id)
+        .map(|broken| broken.outcome);
     let params = ChildParams {
         home: run_home.to_owned(),
         workspace: workspace.to_owned(),
@@ -3946,7 +4104,9 @@ async fn isolate_run(
         stall_cleanup: options.stall_cleanup,
         cleanup_budget_ms: options.cleanup_budget_ms,
         stall_export: options.stall_export.clone(),
-        block_after_wall_clock: options.block_after_wall_clock,
+        stall,
+        broken,
+        judge_budget_ms: options.judge_budget_ms,
         native_tools: native.to_vec(),
         probe_only: false,
     };
@@ -4064,13 +4224,18 @@ async fn native_probe(
         stall_cleanup: false,
         cleanup_budget_ms: None,
         stall_export: None,
-        block_after_wall_clock: false,
+        stall: None,
+        broken: None,
+        judge_budget_ms: None,
         native_tools: Vec::new(),
         probe_only: true,
     };
     let params_path = root.join("params.json");
     std::fs::write(&params_path, serde_json::to_string_pretty(&params)?)?;
-    let outcome = spawn_child_json(
+    // The probe's set is all the parent needs: any ending without it fails
+    // the evaluation before its runs, as a startup probe that never finished
+    // always did.
+    let ChildOutput::Read(outcome) = spawn_child_json(
         options,
         &params_path,
         &params,
@@ -4079,7 +4244,9 @@ async fn native_probe(
         Some(STARTUP_BOUND),
     )
     .await?
-    .ok_or("the native probe's serve child did not exit within its bound")?;
+    else {
+        return Err("the native probe's serve child did not exit within its bound".into());
+    };
     serde_json::from_value(outcome["nativeTools"].clone())
         .map_err(|error| format!("the native probe printed no tool set: {error}").into())
 }
@@ -4334,11 +4501,68 @@ fn child_environment(
     Ok(env)
 }
 
+/// How the parent's read of a serve child's output ended.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReadEnd {
+    /// The reader saw the write end close: the child's output is complete.
+    Eof,
+    /// The read's deadline passed with the write end still open: the output
+    /// the reader collected is the child's, but the read was cut short.
+    Deadline,
+}
+
+/// The run's own ending, as the child reported it before its outcome line: a
+/// parent that ends the child before the outcome keeps the stop the run
+/// reached and records the supervisor failure beside it (model-prompts
+/// §8.1).
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RunProgress {
+    stop: String,
+    timed_out: bool,
+}
+
+/// What one serve child's life left the parent: the eight endings of
+/// [`spawn_child_json`] group into these four records.
+enum ChildOutput {
+    /// The output holds the marker's JSON line, and the read reached EOF (or
+    /// the line was complete when the read's deadline cut it).
+    Read(Value),
+    /// The hard bound ended a child that had already printed its complete
+    /// line: the line stands, and the teardown did not settle.
+    Unsettled { value: Value, error: String },
+    /// The child exited, but the read was cut at its deadline before the
+    /// marker's line arrived.
+    CutShort { progress: Option<RunProgress> },
+    /// The hard bound ended the child before it printed the marker's line.
+    Killed { progress: Option<RunProgress> },
+}
+
+/// The JSON object of the first line that names `marker`, or `None` when the
+/// output holds no such line; a line that does not parse is an error.
+fn marker_value(text: &str, marker: &str) -> std::result::Result<Option<Value>, serde_json::Error> {
+    match text.lines().find(|line| line.contains(marker)) {
+        Some(line) => {
+            let json = &line[line.find('{').unwrap_or(line.len())..];
+            serde_json::from_str(json).map(Some)
+        }
+        None => Ok(None),
+    }
+}
+
+/// The run's own ending, if the child reported it before its outcome line.
+fn progress_value(text: &str) -> Option<RunProgress> {
+    let line = text
+        .lines()
+        .find(|line| line.starts_with("{\"runProgress\""))?;
+    let value: Value = serde_json::from_str(line).ok()?;
+    serde_json::from_value(value["runProgress"].clone()).ok()
+}
+
 /// Spawns the run's serve child and reads its outcome line. The child runs
 /// under the parent's hard bound on one run: one that is still alive when the
-/// bound expires is killed with its process group and recorded as a run that
-/// stopped on its wall clock without an export or a judgment (model-prompts
-/// §8.1).
+/// bound expires is killed with its process group, and what the child had
+/// already printed decides the record (model-prompts §8.1).
 async fn spawn_child(
     options: &Options,
     params_path: &Path,
@@ -4358,33 +4582,106 @@ async fn spawn_child(
     )
     .await?
     {
-        Some(outcome) => Ok(serde_json::from_value(outcome)?),
-        None => Ok(bound_outcome(params, bound, started.elapsed())),
+        ChildOutput::Read(value) => Ok(serde_json::from_value(value)?),
+        ChildOutput::Unsettled { value, error } => unsettled_outcome(value, error),
+        ChildOutput::Killed { progress } => {
+            Ok(bound_outcome(params, bound, started.elapsed(), progress))
+        }
+        ChildOutput::CutShort { progress } => {
+            Ok(cut_short_outcome(params, started.elapsed(), progress))
+        }
     }
 }
 
 /// The parent's hard bound on one run's serve child: the run's wall clock, the
 /// startup before it ([`STARTUP_BOUND`]), the cleanup budget after it — or the
-/// judge's own retry budget when that is longer — and the grace to read the
+/// judge phase's budget when that is longer — and the grace to read the
 /// output the child may print. A child stuck in blocking work may never reach
-/// its own cleanup, so this bound is what ends it.
+/// its own cleanup, so this bound is what ends it. A test stall hook replaces
+/// it with its own bound and counts that from the child's stall marker.
 fn child_hard_bound(options: &Options, params: &ChildParams, wall_clock: Duration) -> Duration {
-    options
-        .hard_bound_ms
-        .map(Duration::from_millis)
-        .unwrap_or_else(|| {
+    match (&params.stall, &options.stall) {
+        (Some(_), Some(stall)) => Duration::from_millis(stall.bound_ms),
+        _ => {
             wall_clock
                 + STARTUP_BOUND
-                + cleanup_budget(params.stall_cleanup, params.cleanup_budget_ms).max(JUDGE_BUDGET)
+                + cleanup_budget(params.stall_cleanup, params.cleanup_budget_ms)
+                    .max(judge_phase_budget(params.judge_budget_ms))
                 + settle_bound(params.stall_cleanup)
-        })
+        }
+    }
 }
 
-/// The record of a run whose serve child the parent killed at its hard bound:
-/// the child printed no outcome, so the run takes the wall-clock stop the
-/// supervisor vouches for, with no export and no judgment (model-prompts
-/// §8.1).
-fn bound_outcome(params: &ChildParams, bound: Duration, elapsed: Duration) -> ChildOutcome {
+/// The instant a stalled child's bound falls: the bound counts from the
+/// marker the child writes at its stall, so the bound under test is not spent
+/// on the startup before it. A marker that never appears leaves the bound at
+/// [`STARTUP_BOUND`], the cap a child that never reports its stall gets.
+async fn bound_after_stall(marker: &Path, bound: Duration) -> tokio::time::Instant {
+    let startup = tokio::time::Instant::now() + STARTUP_BOUND;
+    loop {
+        if marker.exists() {
+            return tokio::time::Instant::now() + bound;
+        }
+        if tokio::time::Instant::now() >= startup {
+            return startup;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// The record of a run the parent ended before its child printed its outcome:
+/// a supervisor failure, unless the child had reported the run's own
+/// wall-clock stop, which the record keeps (model-prompts §8.1).
+fn bound_outcome(
+    params: &ChildParams,
+    bound: Duration,
+    elapsed: Duration,
+    progress: Option<RunProgress>,
+) -> ChildOutcome {
+    supervisor_outcome(
+        params,
+        elapsed,
+        progress,
+        format!(
+            "the run's serve child did not exit within the parent's bound of {}s",
+            bound.as_secs_f64()
+        ),
+        "the run's Timeline was not exported: its serve child did not exit within the parent's \
+         bound"
+            .to_owned(),
+    )
+}
+
+/// The record of a run whose child exited before its outcome was read: a
+/// supervisor failure, unless the child had reported the run's own wall-clock
+/// stop, which the record keeps (model-prompts §8.1).
+fn cut_short_outcome(
+    params: &ChildParams,
+    elapsed: Duration,
+    progress: Option<RunProgress>,
+) -> ChildOutcome {
+    supervisor_outcome(
+        params,
+        elapsed,
+        progress,
+        "the run's serve child exited before its outcome was read within the parent's deadline"
+            .to_owned(),
+        "the run's Timeline was not exported: its serve child exited before its outcome was \
+         read"
+            .to_owned(),
+    )
+}
+
+/// The record of a run the supervisor ended: a failure, with no export and no
+/// judgment. A reported wall-clock stop is the run's own ending and is kept;
+/// every other ending is the supervisor failure `error` names.
+fn supervisor_outcome(
+    params: &ChildParams,
+    elapsed: Duration,
+    progress: Option<RunProgress>,
+    error: String,
+    judge_error: String,
+) -> ChildOutcome {
     let scenario: Option<Scenario> = serde_json::from_value(params.scenario.clone()).ok();
     let probes = scenario
         .as_ref()
@@ -4398,29 +4695,26 @@ fn bound_outcome(params: &ChildParams, bound: Duration, elapsed: Duration) -> Ch
             quote: probe.quote,
         })
         .collect();
+    let (stop, timed_out) = match progress {
+        Some(progress) if progress.timed_out => (progress.stop, true),
+        _ => ("error".to_owned(), false),
+    };
     ChildOutcome {
         preflight: Vec::new(),
         harness: None,
         export: None,
         view: None,
         session: None,
-        stop: "seconds".into(),
-        timed_out: true,
+        stop,
+        timed_out,
         turns: 0,
         window: None,
         duration_ms: elapsed.as_secs_f64() * 1000.,
         decline_retries: 0,
         switch_retries: 0,
-        error: Some(format!(
-            "the run's serve child did not exit within the parent's bound of {}s",
-            bound.as_secs_f64()
-        )),
+        error: Some(error),
         judge_outcome: JudgeOutcome::NotAsked,
-        judge_error: Some(
-            "the run's Timeline was not exported: its serve child did not exit within the \
-             parent's bound"
-                .to_owned(),
-        ),
+        judge_error: Some(judge_error),
         judge_reasks: 0,
         judge_calls: Vec::new(),
         temperature_dropped: false,
@@ -4433,6 +4727,23 @@ fn bound_outcome(params: &ChildParams, bound: Duration, elapsed: Duration) -> Ch
     }
 }
 
+/// The record of a run whose child printed its complete outcome and then did
+/// not exit: the outcome stands, and the teardown failure is attached so the
+/// run is failed (model-prompts §8.1).
+fn unsettled_outcome(value: Value, error: String) -> Result<ChildOutcome> {
+    let mut outcome: ChildOutcome = serde_json::from_value(value)?;
+    if let Some(harness) = outcome.harness.as_mut() {
+        harness.push_str("; ");
+        harness.push_str(&error);
+    } else if let Some(existing) = outcome.error.as_mut() {
+        existing.push_str("; ");
+        existing.push_str(&error);
+    } else {
+        outcome.error = Some(error);
+    }
+    Ok(outcome)
+}
+
 /// The serve children this test binary started, by their params path: a
 /// test finds the child another run's failure must have taken down.
 #[cfg(test)]
@@ -4440,9 +4751,11 @@ static SPAWNED: Mutex<Vec<(PathBuf, u32)>> = Mutex::new(Vec::new());
 
 /// Spawns a child and reads the JSON object of the output line that names
 /// `marker`: a run's child prints its outcome under `judgeOutcome`, the
-/// native probe's child its declared tool set under `nativeTools`. `hard_bound`
-/// is the parent's limit on the child's whole life; the answer is `None` when
-/// that bound expired first, and the child's group was killed.
+/// native probe's child its declared tool set under `nativeTools`.
+/// `hard_bound` is the parent's limit on the child's whole life. The answer
+/// tells the four endings apart: a complete line, a complete line printed by
+/// a child the bound had to end, a read cut at its deadline before the line,
+/// and a child the bound ended before the line.
 async fn spawn_child_json(
     options: &Options,
     params_path: &Path,
@@ -4450,7 +4763,7 @@ async fn spawn_child_json(
     cancel: &CancellationToken,
     marker: &str,
     hard_bound: Option<Duration>,
-) -> Result<Option<Value>> {
+) -> Result<ChildOutput> {
     let (executable, args, test_binary) = child_command(params_path);
     let env = child_environment(options, params, params_path, test_binary)?;
     let mut command = tokio::process::Command::new(&executable);
@@ -4486,7 +4799,10 @@ async fn spawn_child_json(
     #[cfg(unix)]
     let mut group = ChildGroup::new(child.id().unwrap_or_default());
     // The parent's hard bound runs from the spawn, so a child that never
-    // reaches its own cleanup is still ended.
+    // reaches its own cleanup is still ended. A test stall hook counts its
+    // bound from the child's marker instead: a slow start does not spend the
+    // bound, and the marker proves the child reached the stall under test.
+    let stall_marker = params.stall.as_ref().map(|stall| stall.marker.clone());
     let deadline = hard_bound.map(|bound| tokio::time::Instant::now() + bound);
     // Drain the pipe while the child runs: the child may print more than a
     // pipe holds (the run's logged output rides the same stream), and a full
@@ -4532,26 +4848,57 @@ async fn spawn_child_json(
             return Err("the evaluation was cancelled".into());
         }
         _ = async {
-            match deadline {
-                Some(deadline) => tokio::time::sleep_until(deadline).await,
-                None => std::future::pending().await,
-            }
+            let Some(bound) = hard_bound else {
+                return std::future::pending::<()>().await;
+            };
+            let until = match &stall_marker {
+                Some(marker) => bound_after_stall(marker, bound).await,
+                None => tokio::time::Instant::now() + bound,
+            };
+            tokio::time::sleep_until(until).await
         } => {
             // The child is still alive at the parent's hard bound: it may be
             // stuck in blocking work and never reach its own cleanup. Its
-            // group is killed so no member outlives the run, and the run gets
-            // the outcome the supervisor can vouch for.
+            // group is killed so no member outlives the run; every writer is
+            // gone, so the reader reaches EOF, and what the child printed
+            // before the bound is in hand when the outcome is decided.
             #[cfg(unix)]
             group.kill();
             let _ = child.kill().await;
             let _ = child.wait().await;
-            if let Some(reading) = reading {
+            if let Some(mut reading) = reading
+                && tokio::time::timeout(KILLED_READ_GRACE, &mut reading)
+                    .await
+                    .is_err()
+            {
                 reading.abort();
                 let _ = reading.await;
             }
-            return Ok(None);
+            let output = std::mem::take(&mut *collected.lock().unwrap());
+            let text = String::from_utf8_lossy(&output);
+            let bound = hard_bound.unwrap_or_default();
+            return match marker_value(&text, marker).ok().flatten() {
+                // The child printed its complete line and only could not
+                // exit: the outcome stands, and the teardown failure is
+                // attached (model-prompts §8.1).
+                Some(value) => Ok(ChildOutput::Unsettled {
+                    value,
+                    error: format!(
+                        "the run's serve child did not exit within the parent's bound of {}s",
+                        bound.as_secs_f64()
+                    ),
+                }),
+                // No complete line: a supervisor failure, unless the child
+                // reported the run's own wall-clock stop before the bound.
+                None => Ok(ChildOutput::Killed {
+                    progress: progress_value(&text),
+                }),
+            };
         }
     };
+    // Whether the child's output was read to its end or the read was cut at
+    // its deadline: the same missing line means different things.
+    let mut read_end = ReadEnd::Eof;
     let output = match reading {
         Some(mut reading) => {
             // The child has exited, but a member it left behind may hold the
@@ -4561,10 +4908,14 @@ async fn spawn_child_json(
             // the reader is dropped; what it collected is still the child's
             // output, so a missing outcome line is reported as one.
             let grace = settle_bound(params.stall_cleanup);
-            let until = deadline.map_or_else(
-                || tokio::time::Instant::now() + grace,
-                |deadline| deadline.min(tokio::time::Instant::now() + grace),
-            );
+            let until = if stall_marker.is_some() {
+                tokio::time::Instant::now() + grace
+            } else {
+                deadline.map_or_else(
+                    || tokio::time::Instant::now() + grace,
+                    |deadline| deadline.min(tokio::time::Instant::now() + grace),
+                )
+            };
             let read = tokio::select! {
                 _ = cancel.cancelled() => {
                     #[cfg(unix)]
@@ -4584,7 +4935,9 @@ async fn spawn_child_json(
                     // holds the write end of its stdout: the read's grace ran
                     // out. The group is killed so no member outlives the
                     // harness, and the output the reader collected is what
-                    // the outcome line is looked for in.
+                    // the outcome line is looked for in. Whether the child's
+                    // own line arrived is decided by that output.
+                    read_end = ReadEnd::Deadline;
                     #[cfg(unix)]
                     group.kill();
                     reading.abort();
@@ -4619,22 +4972,34 @@ async fn spawn_child_json(
         }
         return Err(format!("the run's serve child exited with {status}").into());
     }
-    let line = text
-        .lines()
-        .find(|line| line.contains(marker))
-        .ok_or_else(|| {
-            format!(
-                "the run's serve child printed no {marker} line: {}",
-                text.trim()
-            )
-        })?;
     // A test-binary child runs under the test harness, which opens its
-    // output line with the test's name; the outcome is the rest of the
-    // line.
-    let json = &line[line
-        .find('{')
-        .ok_or("the child's outcome line carries no JSON")?..];
-    Ok(Some(serde_json::from_str(json)?))
+    // output line with the test's name; the outcome is the rest of the line.
+    let value = match marker_value(&text, marker) {
+        Ok(value) => value,
+        // A read cut at its deadline may hold half a line: that is the
+        // supervisor's ending, decided below, not a malformed answer.
+        Err(_) if read_end == ReadEnd::Deadline => None,
+        // A read that reached EOF holds the child's whole output: a line
+        // that does not parse is a malformed answer and fails the evaluation
+        // as it always did.
+        Err(error) => return Err(error.into()),
+    };
+    match (value, read_end) {
+        // A complete line stands whether the read reached EOF or was cut
+        // afterwards: a member of the child's group held the write end, and
+        // the line was already in hand.
+        (Some(value), _) => Ok(ChildOutput::Read(value)),
+        // The child exited before its line could be read: one run's
+        // supervisor failure, and the evaluation continues.
+        (None, ReadEnd::Deadline) => Ok(ChildOutput::CutShort {
+            progress: progress_value(&text),
+        }),
+        (None, ReadEnd::Eof) => Err(format!(
+            "the run's serve child printed no {marker} line: {}",
+            text.trim()
+        )
+        .into()),
+    }
 }
 
 /// The serve child's process group: the child leads it (`process_group(0)`),
@@ -4852,6 +5217,7 @@ async fn drive_once(
     cancel: &CancellationToken,
     producer: &ProducerState,
     tools: Option<Vec<String>>,
+    stall: Option<&ChildStall>,
 ) -> Result<Finished> {
     let socket = settings
         .unix_path
@@ -4891,11 +5257,21 @@ async fn drive_once(
             judging: Judging::not_asked(scenario, None),
         });
     }
-    if driven.timed_out && settings.block_after_wall_clock {
+    // The ending the run reached, printed before any cleanup: a parent that
+    // ends the child before its outcome line keeps the run's own stop and
+    // records the supervisor failure beside it (model-prompts §8.1).
+    println!(
+        "{}",
+        json!({"runProgress": {"stop": driven.stop, "timedOut": driven.timed_out}})
+    );
+    if let Some(stall) = stall
+        && stall.point == StallPoint::AfterWallClock
+        && driven.timed_out
+    {
         // The hook's stand-in for a child stuck in blocking work after its
         // wall clock: no timer of the child's can end it, so only the
-        // parent's hard bound does.
-        std::thread::sleep(Duration::from_secs(600));
+        // parent's hard bound does. The marker is what the bound counts from.
+        stall_here(stall, "after its run's wall clock")?;
     }
     let close = client.rpc("session.close", json!({"sessionId": driven.session}));
     // A run that stopped on its wall clock runs its close under the one
@@ -4984,8 +5360,13 @@ async fn drive_once(
             let export = String::from_utf8_lossy_owned(export);
             let (turns, failed_turn) = turns_in_export(&export);
             driven.turns = turns;
+            // The export is read after the run's own ending is fixed: a
+            // failed turn it records cannot replace the wall-clock stop the
+            // run reached, as the deferred window read below cannot either
+            // (model-prompts §8.1).
             if let Some(error) = failed_turn
                 && driven.error.is_none()
+                && !driven.timed_out
             {
                 driven.stop = "error";
                 driven.error = Some(error);
@@ -5039,7 +5420,27 @@ async fn drive_once(
             ),
         }
     } else {
-        judge_export(&host, &resolver, judge, scenario, &view, limits, cancel).await
+        // A run that did not stop on its wall clock gives its judge phase
+        // its own budget: the judge may legitimately make several calls, and
+        // one that never answers must not hold the child — and the worker
+        // that runs it — open. The run keeps the stop it reached, its export
+        // and every call recorded so far (model-prompts §8.1).
+        let budget = judge_phase_budget(settings.judge_budget_ms);
+        match tokio::time::timeout(
+            budget,
+            judge_export(&host, &resolver, judge, scenario, &view, limits, cancel),
+        )
+        .await
+        {
+            Ok(judging) => judging,
+            Err(_) => Judging::unfinished(
+                scenario,
+                format!(
+                    "the judge did not finish within its phase budget of {}s",
+                    budget.as_secs_f64()
+                ),
+            ),
+        }
     };
     Ok(Finished {
         driven,
@@ -11197,8 +11598,9 @@ mod tests {
                 stall_cleanup: false,
                 cleanup_budget_ms: None,
                 stall_export: None,
-                block_after_wall_clock: false,
-                hard_bound_ms: None,
+                stall: None,
+                broken: None,
+                judge_budget_ms: None,
                 defaults: None,
                 node: None,
                 js_runtime: None,
@@ -12789,7 +13191,7 @@ mod tests {
             stall_cleanup: false,
             cleanup_budget_ms: None,
             stall_export: None,
-            block_after_wall_clock: false,
+            judge_budget_ms: None,
         };
         let mut scenario = scenario(Vec::new());
         scenario.budget.seconds = 0.5;
@@ -12817,6 +13219,7 @@ mod tests {
                 },
                 &cancel,
                 &producer,
+                None,
                 None,
             );
             tokio::pin!(run);
@@ -14380,8 +14783,9 @@ mod tests {
             stall_cleanup: false,
             cleanup_budget_ms: None,
             stall_export: None,
-            block_after_wall_clock: false,
-            hard_bound_ms: None,
+            stall: None,
+            broken: None,
+            judge_budget_ms: None,
             defaults: None,
             node: None,
             js_runtime: None,
@@ -14684,7 +15088,9 @@ mod tests {
             stall_cleanup: false,
             cleanup_budget_ms: None,
             stall_export: None,
-            block_after_wall_clock: false,
+            stall: None,
+            broken: None,
+            judge_budget_ms: None,
             native_tools: native
                 .iter()
                 .map(|name| ((*name).to_owned(), ToolSource::Builtin))
@@ -15249,10 +15655,14 @@ mod tests {
         let out = fixture.directory.join("out");
         let mut options = fixture.options(out.clone());
         options.jobs = 1;
-        options.block_after_wall_clock = true;
-        // The bound under test is the parent's two seconds per child; the
-        // guard only turns a hang into a failed assertion.
-        options.hard_bound_ms = Some(2_000);
+        options.stall = Some(Stall {
+            run: None,
+            point: StallPoint::AfterWallClock,
+            // The bound under test is the parent's two seconds after the
+            // child reaches its stall; the guard only turns a hang into a
+            // failed assertion.
+            bound_ms: 2_000,
+        });
         let report = tokio::time::timeout(SUBPROCESS_EVAL_GUARD, fixture.evaluate(&options))
             .await
             .expect("the evaluation returns though each child blocks after its wall clock")
@@ -15288,6 +15698,14 @@ mod tests {
                 .join(arm)
                 .join("case")
                 .join("run-0.json");
+            assert!(
+                out.join("children")
+                    .join(arm)
+                    .join("case")
+                    .join("run-0.stall")
+                    .exists(),
+                "the child reached its stall before the bound ({arm})"
+            );
             let pid = SPAWNED
                 .lock()
                 .unwrap()
@@ -15300,6 +15718,373 @@ mod tests {
                 "the killed child and its group are gone ({arm}, pid {pid})"
             );
         }
+    }
+
+    /// The fixture's basic scenario at a window the judge's view fits: one
+    /// message, a plain answer, and the workspace file's read.
+    fn judged_scenario() -> Value {
+        json!({
+            "description": "A quick probe",
+            "message": "Run the quick probe.",
+            "budget": {"turns": 4, "seconds": 60, "window": 131072},
+            "probes": [{"id": "ran", "kind": "must_show",
+                        "text": "the run has a transcript"}]
+        })
+    }
+
+    /// A second scenario beside the fixture's own: it must run on the slot a
+    /// stalled or failed first scenario frees, and its judge answers at once.
+    fn next_scenario(fixture: &Fixture, window: u64) {
+        let next = fixture.scenarios.join("next");
+        std::fs::create_dir_all(next.join("workspace")).unwrap();
+        std::fs::write(next.join("workspace").join("notes.txt"), FILE_TEXT).unwrap();
+        std::fs::write(
+            next.join("scenario.json"),
+            serde_json::to_string_pretty(&json!({
+                "message": "Finish the next scenario.",
+                "budget": {"turns": 4, "seconds": 60, "window": window},
+                "probes": [{"id": "ran", "kind": "must_show",
+                            "text": "the run has a transcript"}]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// A child that exits before it prints its outcome, with a member of its
+    /// group still holding its standard output, is one run's supervisor
+    /// failure: the evaluation keeps its next scheduled run and judges it
+    /// (model-prompts §8.1).
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_child_that_exits_before_its_outcome_leaves_the_next_run_intact() {
+        let fixture = Fixture::with_window(
+            "exit-before-outcome",
+            reads_the_workspace_file,
+            judged_scenario(),
+            &[("notes.txt", FILE_TEXT)],
+            131_072,
+        )
+        .await;
+        next_scenario(&fixture, 131_072);
+        let out = fixture.directory.join("out");
+        let mut options = fixture.options(out.clone());
+        options.jobs = 1;
+        // The read grace the member outlives is the test hook's 200ms.
+        options.stall_cleanup = true;
+        let marker = fixture.directory.join("leave.marker");
+        options.leave_member = Some((true, marker.clone()));
+        options.broken = Some(BrokenRun {
+            run: ("current".into(), "case".into()),
+            outcome: BrokenOutcome::Silent,
+        });
+        let report = tokio::time::timeout(SUBPROCESS_EVAL_GUARD, fixture.evaluate(&options))
+            .await
+            .expect("the evaluation returns after one run exits before its outcome")
+            .expect("the evaluation records both scenarios");
+        let records = fixture.records(&out);
+        assert_eq!(records.len(), 4, "two scenarios, both arms: {report}");
+        for record in records
+            .iter()
+            .filter(|record| record["scenario"] == "case" && record["arm"] == "current")
+        {
+            assert_eq!(record["stop"], "error", "{record}");
+            assert_eq!(record["failed"], true, "{record}");
+            assert_eq!(record["judgeOutcome"], "not_asked", "{record}");
+            let error = record["error"].as_str().unwrap_or_default();
+            assert!(
+                error.contains("exited before its outcome was read"),
+                "the run says why it has no outcome: {record}"
+            );
+            assert!(
+                !out.join("outputs")
+                    .join("current")
+                    .join("case")
+                    .join("run-0.timeline.jsonl")
+                    .exists(),
+                "an unread outcome leaves no export: {record}"
+            );
+        }
+        for record in records.iter().filter(|record| record["scenario"] == "next") {
+            assert_eq!(record["stop"], "idle", "{record}");
+            assert_eq!(record["failed"], false, "{record}");
+            assert_eq!(record["judgeOutcome"], "judged", "{record}");
+        }
+        let members = left_members(&marker);
+        assert_eq!(members.len(), 4, "each child left its member");
+        for pid in members {
+            assert!(
+                child_tree_gone(pid).await,
+                "the member and its group are gone (pid {pid})"
+            );
+        }
+    }
+
+    /// A child that exits before its outcome line with nothing holding its
+    /// output is a malformed run: the evaluation fails it as it failed
+    /// before (model-prompts §8.1).
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_child_that_exits_without_its_outcome_fails_the_evaluation() {
+        let fixture = Fixture::start(
+            "silent-child",
+            reads_the_workspace_file,
+            isolated_scenario(),
+            &[("notes.txt", FILE_TEXT)],
+        )
+        .await;
+        let mut options = fixture.options(fixture.directory.join("out"));
+        options.broken = Some(BrokenRun {
+            run: ("current".into(), "case".into()),
+            outcome: BrokenOutcome::Silent,
+        });
+        let error = fixture
+            .evaluate(&options)
+            .await
+            .expect_err("a run without an outcome fails the evaluation")
+            .to_string();
+        assert!(
+            error.contains("printed no judgeOutcome line"),
+            "the error names the missing outcome: {error}"
+        );
+    }
+
+    /// A child whose completed output line is not JSON is still a malformed
+    /// run: the parse error is surfaced, not recorded as a timeout
+    /// (model-prompts §8.1).
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_garbled_outcome_line_fails_the_evaluation() {
+        let fixture = Fixture::start(
+            "garbled-child",
+            reads_the_workspace_file,
+            isolated_scenario(),
+            &[("notes.txt", FILE_TEXT)],
+        )
+        .await;
+        let mut options = fixture.options(fixture.directory.join("out"));
+        options.broken = Some(BrokenRun {
+            run: ("current".into(), "case".into()),
+            outcome: BrokenOutcome::Garbled,
+        });
+        let error = fixture
+            .evaluate(&options)
+            .await
+            .expect_err("a garbled outcome fails the evaluation")
+            .to_string();
+        assert!(
+            error.contains("EOF while parsing"),
+            "the error is the parse error of the completed line: {error}"
+        );
+    }
+
+    /// A child that never prints its outcome is a supervisor failure, not a
+    /// wall-clock stop the supervisor invents: the record names the parent's
+    /// bound, and the run that follows on the same worker is judged
+    /// (model-prompts §8.1).
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_child_stuck_before_its_outcome_is_a_supervisor_failure() {
+        let fixture = Fixture::with_window(
+            "stuck-before-outcome",
+            reads_the_workspace_file,
+            judged_scenario(),
+            &[("notes.txt", FILE_TEXT)],
+            131_072,
+        )
+        .await;
+        next_scenario(&fixture, 131_072);
+        let out = fixture.directory.join("out");
+        let mut options = fixture.options(out.clone());
+        options.jobs = 1;
+        options.stall = Some(Stall {
+            run: Some(("current".into(), "case".into())),
+            point: StallPoint::BeforeOutcome,
+            bound_ms: 2_000,
+        });
+        let report = tokio::time::timeout(SUBPROCESS_EVAL_GUARD, fixture.evaluate(&options))
+            .await
+            .expect("the evaluation returns though a child never prints its outcome")
+            .expect("the evaluation records both scenarios");
+        let records = fixture.records(&out);
+        assert_eq!(records.len(), 4, "two scenarios, both arms: {report}");
+        for record in records
+            .iter()
+            .filter(|record| record["scenario"] == "case" && record["arm"] == "current")
+        {
+            assert_eq!(record["stop"], "error", "{record}");
+            assert_eq!(record["failed"], true, "{record}");
+            assert_eq!(record["judgeOutcome"], "not_asked", "{record}");
+            let error = record["error"].as_str().unwrap_or_default();
+            assert!(
+                error.contains("did not exit within the parent's bound"),
+                "the run names the supervisor's bound: {record}"
+            );
+            assert!(
+                record["judgeError"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("was not exported"),
+                "the run says why it was not judged: {record}"
+            );
+            assert!(
+                out.join("children")
+                    .join("current")
+                    .join("case")
+                    .join("run-0.stall")
+                    .exists(),
+                "the child reached its stall before the bound: {record}"
+            );
+            assert!(
+                !out.join("outputs")
+                    .join("current")
+                    .join("case")
+                    .join("run-0.timeline.jsonl")
+                    .exists(),
+                "a child with no outcome leaves no export: {record}"
+            );
+        }
+        for record in records
+            .iter()
+            .filter(|record| !(record["scenario"] == "case" && record["arm"] == "current"))
+        {
+            assert_eq!(record["stop"], "idle", "{record}");
+            assert_eq!(record["failed"], false, "{record}");
+            assert_eq!(record["judgeOutcome"], "judged", "{record}");
+        }
+    }
+
+    /// A child that printed its complete outcome and then cannot exit keeps
+    /// its outcome: the run's stop, its export and its judgment stand, and
+    /// the teardown failure is attached as an error (model-prompts §8.1).
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_child_that_printed_its_outcome_and_blocks_keeps_it() {
+        let fixture = Fixture::with_window(
+            "stuck-after-outcome",
+            reads_the_workspace_file,
+            judged_scenario(),
+            &[("notes.txt", FILE_TEXT)],
+            131_072,
+        )
+        .await;
+        next_scenario(&fixture, 131_072);
+        let out = fixture.directory.join("out");
+        let mut options = fixture.options(out.clone());
+        options.jobs = 1;
+        options.stall = Some(Stall {
+            run: Some(("current".into(), "case".into())),
+            point: StallPoint::AfterOutcome,
+            bound_ms: 2_000,
+        });
+        let report = tokio::time::timeout(SUBPROCESS_EVAL_GUARD, fixture.evaluate(&options))
+            .await
+            .expect("the evaluation returns though a child cannot exit")
+            .expect("the evaluation records both scenarios");
+        let records = fixture.records(&out);
+        assert_eq!(records.len(), 4, "two scenarios, both arms: {report}");
+        for record in records
+            .iter()
+            .filter(|record| record["scenario"] == "case" && record["arm"] == "current")
+        {
+            assert_eq!(record["stop"], "idle", "{record}");
+            assert_eq!(record["failed"], true, "{record}");
+            assert_eq!(record["judgeOutcome"], "judged", "{record}");
+            let error = record["error"].as_str().unwrap_or_default();
+            assert!(
+                error.contains("did not exit within the parent's bound"),
+                "the run names the teardown failure: {record}"
+            );
+            assert!(
+                out.join("outputs")
+                    .join("current")
+                    .join("case")
+                    .join("run-0.timeline.jsonl")
+                    .exists(),
+                "the printed outcome keeps its export: {record}"
+            );
+        }
+        for record in records
+            .iter()
+            .filter(|record| !(record["scenario"] == "case" && record["arm"] == "current"))
+        {
+            assert_eq!(record["stop"], "idle", "{record}");
+            assert_eq!(record["failed"], false, "{record}");
+            assert_eq!(record["judgeOutcome"], "judged", "{record}");
+        }
+    }
+
+    /// A run whose judge outlives the judge phase's budget keeps the stop it
+    /// reached and its export, records a failed judge call, and frees the
+    /// worker: the next scenario runs on the same slot (model-prompts §8.1).
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_run_whose_judge_outlives_its_phase_budget_keeps_its_stop() {
+        fn hold_the_case_judge(text: &str) -> Option<Duration> {
+            (text.contains("You check statements") && text.contains("Run the quick probe."))
+                .then_some(HELD_PAST_GUARD)
+        }
+        let fixture = Fixture::holding(
+            "judge-phase-budget",
+            reads_the_workspace_file,
+            hold_the_case_judge,
+            json!({
+                "description": "An idle run",
+                "message": "Run the quick probe.",
+                "budget": {"turns": 4, "seconds": 60, "window": 131072},
+                "probes": [{"id": "ran", "kind": "must_show",
+                            "text": "the run has a transcript"}]
+            }),
+            &[("notes.txt", FILE_TEXT)],
+            131_072,
+        )
+        .await;
+        next_scenario(&fixture, 131_072);
+        let out = fixture.directory.join("out");
+        let mut options = fixture.options(out.clone());
+        options.jobs = 1;
+        options.judge_budget_ms = Some(1_000);
+        let report = tokio::time::timeout(SUBPROCESS_EVAL_GUARD, fixture.evaluate(&options))
+            .await
+            .expect("the evaluation returns though a judge never answers")
+            .expect("the evaluation records both scenarios");
+        let records = fixture.records(&out);
+        assert_eq!(records.len(), 4, "two scenarios, both arms: {report}");
+        for record in records.iter().filter(|record| record["scenario"] == "case") {
+            assert_eq!(record["stop"], "idle", "{record}");
+            assert_eq!(record["failed"], true, "{record}");
+            assert_eq!(record["judgeOutcome"], "call_failed", "{record}");
+            assert_eq!(record["error"], Value::Null, "{record}");
+            assert!(
+                record["judgeError"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("did not finish within its phase budget"),
+                "the run says why its judge is unfinished: {record}"
+            );
+            assert!(
+                out.join("outputs")
+                    .join(record["arm"].as_str().unwrap())
+                    .join("case")
+                    .join("run-0.timeline.jsonl")
+                    .exists(),
+                "the closed run still exports its Timeline: {record}"
+            );
+            assert!(
+                record["durationMs"].as_f64().unwrap_or_default() < 20_000.0,
+                "the run ends within its phase budget, not at a longer one: {record}"
+            );
+        }
+        for record in records.iter().filter(|record| record["scenario"] == "next") {
+            assert_eq!(record["stop"], "idle", "{record}");
+            assert_eq!(record["failed"], false, "{record}");
+            assert_eq!(record["judgeOutcome"], "judged", "{record}");
+        }
+        assert_eq!(
+            fixture.judge().len(),
+            4,
+            "both case runs asked their held judge; both next runs were answered"
+        );
     }
 
     /// A child that fails after it started a member of its group does not
