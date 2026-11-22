@@ -200,6 +200,24 @@ impl Worker {
                 if newly_failed {
                     self.send(Update::Notice(format!("Branch {branch}: {error}")));
                 }
+                if self.focus == *branch {
+                    let parent = self
+                        .projection
+                        .line_views()
+                        .iter()
+                        .find(|line| line.id == *branch)
+                        .and_then(|line| line.parent.clone())
+                        .filter(|parent| {
+                            parent.as_str() == DEFAULT_BRANCH_ID
+                                || self.task_history.contains_key(parent)
+                        })
+                        .unwrap_or_else(|| DEFAULT_BRANCH_ID.into());
+                    if parent != DEFAULT_BRANCH_ID {
+                        self.line_projection(&parent);
+                    }
+                    self.focus = parent;
+                    self.changed();
+                }
             }
             _ => {}
         }

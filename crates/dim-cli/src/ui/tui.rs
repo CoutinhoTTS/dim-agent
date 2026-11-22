@@ -2478,6 +2478,13 @@ impl App {
                     .is_some_and(|shown| shown.focus != snapshot.focus);
                 if switched {
                     self.switch_line(snapshot.focus.clone());
+                } else if self
+                    .snapshot
+                    .as_ref()
+                    .is_some_and(|shown| shown.window_error.is_some())
+                    && snapshot.window_error.is_none()
+                {
+                    self.rearm_window();
                 }
                 if let Some(Prompt::Tasks(panel)) = &mut self.prompt {
                     if panel.projection_id == snapshot.projection_id {
@@ -7386,6 +7393,17 @@ impl App {
             tail.extend(rows.into_iter().map(|r| format!("{pad}{r}")));
         }
         (commits, sources, tail)
+    }
+
+    /// Arms the shown line's window again after its first read failed. A
+    /// retry publishes the same focus as loading, so no switch announces it.
+    fn rearm_window(&mut self) {
+        self.window_floor = 0;
+        self.history_floor = 0;
+        self.load_more = false;
+        self.window_info = (0, 0);
+        self.history_request = None;
+        self.awaiting_window = true;
     }
 
     fn switch_line(&mut self, line: String) {
@@ -15825,6 +15843,7 @@ mod tests {
     #[test]
     fn reopening_a_failed_line_rearms_its_window() {
         let mut drawn = Drawn::new((80, 40), None, true);
+        drawn.app.fullscreen = true;
         let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         drawn.app.host = Box::new(Recorder(sent.clone()));
         drawn.show(&[], "main", true);
@@ -15906,7 +15925,14 @@ mod tests {
             (HISTORY_WINDOW, 30),
             "the window names the older messages it hides"
         );
-        assert!(drawn.app.load_more, "the older history is left to load");
+        assert!(
+            drawn
+                .app
+                .history
+                .iter()
+                .any(|block| matches!(block, Block::LoadMore(30))),
+            "the older history is left to the load-more row"
+        );
     }
 
     #[test]
