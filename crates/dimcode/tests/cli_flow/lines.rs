@@ -703,20 +703,9 @@ fn tui_a_line_without_a_readable_configuration_carries_no_model_and_the_root_res
                 &branches,
                 directory("main", &[("main", None), ("line-1", Some("main"))]),
             );
-            loop {
-                let request = next(wire);
-                match request["method"].as_str().unwrap_or_default() {
-                    "session.branches" => wire.reply(
-                        &request,
-                        directory("main", &[("main", None), ("line-1", Some("main"))]),
-                    ),
-                    "session.history" => {
-                        wire.reply(&request, history(8, vec![]));
-                        break;
-                    }
-                    other => panic!("unexpected opening request: {other}: {request}"),
-                }
-            }
+            let root = next(wire);
+            assert_eq!(root["method"], "session.history");
+            wire.reply(&root, history(8, vec![]));
             let mut usage = |_request: &Value| None;
             let mut moves = 0;
             loop {
