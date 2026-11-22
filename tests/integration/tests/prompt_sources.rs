@@ -103,7 +103,7 @@ async fn system_is_static_and_instructions_and_environment_arrive_as_inputs() {
         "when a finding changes the plan",
         "when you hit a blocker",
         "When a task needs no tool or one quick read, \
-         or the request asks for only a final answer, a patch or structured output, \
+         or when the request asks for only a final answer, a patch or structured output, \
          write no text before or between tool calls",
         "when the request asks for only a final answer, a patch or structured output",
     ] {
