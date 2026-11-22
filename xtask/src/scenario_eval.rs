@@ -17,8 +17,9 @@
 //! copy the checkout ships; a pair whose baseline and candidate hold the same
 //! bytes is refused, as is one with a file missing. A pair reads in either
 //! order, a text named twice is an error, and the report gives each candidate
-//! text's own token cost. The report and `runs.jsonl` also record the texts
-//! each arm emitted, as each text's id, length and fingerprint. The runs are
+//! text's own token cost. The report and `runs.jsonl` also record the
+//! configured texts each arm was given, as each text's id, length and
+//! fingerprint. The runs are
 //! interleaved: for each run index and scenario the `current` run is scheduled
 //! before the `candidate` one, so a drift in
 //! the endpoint lands on both arms alike, and the records come out in that
@@ -837,6 +838,7 @@ async fn rejudge(
         .map_err(|error| format!("--rejudge {}: {error}", source.display()))?;
     let saved = read_saved_runs(&source)?;
     let selected = select_saved(&saved, &options.select)?;
+    one_saved_texts_per_arm(&selected, "--rejudge")?;
     let scenarios = read_scenarios(&options.scenarios)?;
     let mut plan = Vec::with_capacity(selected.len());
     for run in selected {
@@ -881,7 +883,7 @@ async fn pooled(options: &Options, observe: impl Fn(&mut AgentBuilder)) -> Resul
         directories.push((source, read.len()));
         records.extend(read);
     }
-    one_texts_per_arm(&records)?;
+    one_texts_per_arm(&records, "--pool")?;
     let cancel = CancellationToken::new();
     let server = served(options, observe).await?;
     let resolved = async {
@@ -977,26 +979,67 @@ fn read_pooled_runs(source: &Path, scenarios: &[Scenario]) -> Result<Vec<RunReco
         .collect()
 }
 
-/// A report states one set of texts for each arm, so a pool's runs of one arm
-/// must have recorded the same one: evaluations that were given different
-/// texts are refused rather than stated as one.
-fn one_texts_per_arm(records: &[RunRecord]) -> Result<()> {
+/// A report states one configured set of texts for each arm, so the runs of
+/// one arm must all name the same set or all name none: a report that stated
+/// one set for runs whose texts only some of them recorded would be wrong.
+fn one_texts_per_arm(records: &[RunRecord], flag: &str) -> Result<()> {
     for arm in ["current", "candidate"] {
-        let mut recorded: Option<&[EmittedText]> = None;
-        for record in records
-            .iter()
-            .filter(|record| record.arm == arm && !record.texts.is_empty())
-        {
-            if recorded.is_some_and(|texts| texts != record.texts.as_slice()) {
-                return Err(format!(
-                    "--pool: the {arm} runs recorded different texts; a report states one set per \
-                     arm, so pool evaluations that were given the same texts or report them \
-                     separately"
-                )
-                .into());
-            }
-            recorded.get_or_insert(record.texts.as_slice());
+        one_text_set(
+            flag,
+            arm,
+            records
+                .iter()
+                .filter(|record| record.arm == arm)
+                .map(|record| record.texts.as_slice()),
+        )?;
+    }
+    Ok(())
+}
+
+/// The same rule over a rejudge source's saved runs, checked before any judge
+/// call.
+fn one_saved_texts_per_arm(runs: &[&SavedRun], flag: &str) -> Result<()> {
+    for arm in ["current", "candidate"] {
+        one_text_set(
+            flag,
+            arm,
+            runs.iter()
+                .filter(|run| run.arm == arm)
+                .map(|run| run.texts.as_slice()),
+        )?;
+    }
+    Ok(())
+}
+
+fn one_text_set<'a>(
+    flag: &str,
+    arm: &str,
+    runs: impl Iterator<Item = &'a [ConfiguredText]>,
+) -> Result<()> {
+    let mut recorded: Option<&'a [ConfiguredText]> = None;
+    let mut unrecorded = false;
+    for texts in runs {
+        if texts.is_empty() {
+            unrecorded = true;
+            continue;
         }
+        if recorded.is_some_and(|recorded| recorded != texts) {
+            return Err(format!(
+                "{flag}: the {arm} runs recorded different texts; a report states one set per \
+                 arm, so pool evaluations that were given the same texts or report them \
+                 separately"
+            )
+            .into());
+        }
+        recorded.get_or_insert(texts);
+    }
+    if unrecorded && recorded.is_some() {
+        return Err(format!(
+            "{flag}: the {arm} runs mix records that name their configured texts with records \
+             written before the runner recorded them; a report states one set per arm, so report \
+             the runs that name their texts and the older runs separately"
+        )
+        .into());
     }
     Ok(())
 }
@@ -1213,10 +1256,10 @@ struct SavedRun {
     judge_reasks: u32,
     #[serde(default)]
     judge_calls: Vec<JudgeCall>,
-    /// The texts the arm emitted; empty in a record written before the runner
-    /// recorded them.
+    /// The texts the arm was given; empty in a record written before the
+    /// runner recorded them.
     #[serde(default)]
-    texts: Vec<EmittedText>,
+    texts: Vec<ConfiguredText>,
     /// `None` in a record written before the runner wrote this fact.
     #[serde(default)]
     temperature_dropped: Option<bool>,
@@ -1523,7 +1566,7 @@ impl Options {
                     if filled {
                         return Err(format!("{flag} is given twice for one --text").into());
                     }
-                    let text = candidate_prompt(Path::new(&value))?;
+                    let text = candidate_prompt(Path::new(&value), &flag)?;
                     if is_baseline {
                         pending.baseline = Some(text);
                     } else {
@@ -1655,7 +1698,7 @@ impl Options {
     /// The texts one arm puts in place of the assembly's, in the order the
     /// evaluation was given them: `current` is each pair's baseline and
     /// `candidate` its candidate.
-    fn arm_texts(&self, arm: &str) -> Vec<EmittedText> {
+    fn arm_texts(&self, arm: &str) -> Vec<ConfiguredText> {
         let texts = if arm == "current" {
             &self.baseline
         } else {
@@ -1663,7 +1706,7 @@ impl Options {
         };
         texts
             .iter()
-            .map(|(id, text)| EmittedText::of(id, text))
+            .map(|(id, text)| ConfiguredText::of(id, text))
             .collect()
     }
 }
@@ -1791,11 +1834,11 @@ fn refuse_output_inside_sources(
     Ok(())
 }
 
-fn candidate_prompt(path: &Path) -> Result<Arc<str>> {
+fn candidate_prompt(path: &Path, flag: &str) -> Result<Arc<str>> {
     let bytes =
-        std::fs::read(path).map_err(|error| format!("--candidate {}: {error}", path.display()))?;
+        std::fs::read(path).map_err(|error| format!("{flag} {}: {error}", path.display()))?;
     let text = String::from_utf8(bytes)
-        .map_err(|_| format!("--candidate {}: not UTF-8 text", path.display()))?;
+        .map_err(|_| format!("{flag} {}: not UTF-8 text", path.display()))?;
     Ok(Arc::from(text))
 }
 
@@ -2334,10 +2377,11 @@ struct RunRecord {
     arm: &'static str,
     scenario: String,
     run: usize,
-    /// The texts the arm put in place of the assembly's, in the order the
-    /// evaluation was given them: each is a text the arm emitted in place of
-    /// the one its id names.
-    texts: Vec<EmittedText>,
+    /// The texts the arm was given, in the order the evaluation was given
+    /// them: each is a configured input in place of the text its id names. A
+    /// record states what the arm was configured with, not that every text was
+    /// emitted.
+    texts: Vec<ConfiguredText>,
     session: Option<String>,
     /// `idle`, `turns`, `seconds`, `switch_target_not_reached`,
     /// `switch_target_ended`, `switch_target_unknown` or `error`.
@@ -2398,17 +2442,17 @@ impl RunRecord {
     }
 }
 
-/// One text an arm emitted: the id naming the text it replaced, the text's
+/// One text an arm was given: the id naming the text it replaced, the text's
 /// length in bytes, and a fingerprint of its bytes, so a report states which
-/// text each arm ran without carrying the text itself.
+/// configured text each arm ran without carrying the text itself.
 #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct EmittedText {
+struct ConfiguredText {
     id: String,
     bytes: usize,
     fingerprint: String,
 }
-impl EmittedText {
+impl ConfiguredText {
     fn of(id: &str, text: &str) -> Self {
         Self {
             id: id.to_owned(),
@@ -7665,17 +7709,21 @@ fn report(instrument: &Instrument, scenarios: &[Scenario], records: &[RunRecord]
             .collect();
         text += &format!("| text | {} |\n", texts.join(", "));
     }
-    // Each evaluation's runs carry the texts it was given, and a pool refuses
-    // runs of one arm that recorded different ones, so the first record that
-    // names them states what the arm emitted.
-    let emitted = |arm: &str| {
+    // Each evaluation's runs carry the configured texts it was given. A pool
+    // and a rejudge refuse runs of one arm that mix recorded and unrecorded
+    // texts, so the first record that names them states the arm's set.
+    let configured = |arm: &str| {
         records
             .iter()
             .find(|record| record.arm == arm && !record.texts.is_empty())
             .map(|record| record.texts.as_slice())
     };
     for arm in ["current", "candidate"] {
-        let Some(texts) = emitted(arm) else {
+        if !records.iter().any(|record| record.arm == arm) {
+            continue;
+        }
+        let Some(texts) = configured(arm) else {
+            text += &format!("| {arm} configured texts | not recorded |\n");
             continue;
         };
         let listed: Vec<String> = texts
@@ -7687,7 +7735,7 @@ fn report(instrument: &Instrument, scenarios: &[Scenario], records: &[RunRecord]
                 )
             })
             .collect();
-        text += &format!("| {arm} texts | {} |\n", listed.join("; "));
+        text += &format!("| {arm} configured texts | {} |\n", listed.join("; "));
     }
     text += &format!(
         "| model | `{}/{}`, {} |\n| judge | `{}/{}`, temperature 0, {}{window} |\n| runs | {} per arm and scenario |\n",
@@ -10845,6 +10893,12 @@ mod tests {
             !report.contains("| text |"),
             "no saved run records the texts under test: {report}"
         );
+        for arm in ["current", "candidate"] {
+            assert!(
+                report.contains(&format!("| {arm} configured texts | not recorded |")),
+                "{arm}: runs that recorded no text are reported as unrecorded: {report}"
+            );
+        }
         assert!(
             report.contains("| decline retries | 3 across all runs; not recorded for 2 runs |"),
             "a saved run written before the runner counted declines is not read as none: {report}"
@@ -11000,6 +11054,12 @@ mod tests {
             !report.contains("| text |"),
             "no saved run records the texts under test: {report}"
         );
+        for arm in ["current", "candidate"] {
+            assert!(
+                report.contains(&format!("| {arm} configured texts | not recorded |")),
+                "{arm}: runs that recorded no text are reported as unrecorded: {report}"
+            );
+        }
         assert_eq!(
             std::fs::read_to_string(first.join("runs.jsonl")).unwrap(),
             first_jsonl,
@@ -11019,9 +11079,9 @@ mod tests {
         assert!(out.join("scenario.md").exists());
     }
 
-    /// A pool states the texts its runs recorded, and refuses an arm whose
-    /// runs recorded different ones: a report that stated one set for runs
-    /// that compared several would be wrong.
+    /// A pool states the configured texts its runs recorded, and refuses an
+    /// arm whose runs recorded different ones: a report that stated one set
+    /// for runs that compared several would be wrong.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_pool_refuses_runs_that_recorded_different_texts() {
         const BASELINE: &str = "BASELINE BRANCH TOOL DESCRIPTION";
@@ -11070,12 +11130,12 @@ mod tests {
         for (arm, text) in [("current", BASELINE), ("candidate", CANDIDATE)] {
             assert!(
                 report.contains(&format!(
-                    "| {arm} texts | `timeline-tree/branch-description`: {} bytes, \
+                    "| {arm} configured texts | `timeline-tree/branch-description`: {} bytes, \
                      fingerprint {} |",
                     text.len(),
                     fingerprint(text)
                 )),
-                "{arm}: a pool states the texts its runs recorded: {report}"
+                "{arm}: a pool states the configured texts its runs recorded: {report}"
             );
         }
         let other = source("other", OTHER);
@@ -11087,6 +11147,88 @@ mod tests {
             "{error}"
         );
         assert!(error.contains("report them separately"), "{error}");
+    }
+
+    /// A pool refuses runs of one arm whose texts only some of them recorded:
+    /// a record written before the runner recorded texts would otherwise be
+    /// counted and labeled as one comparison with a recorded run. An
+    /// all-legacy pool stays supported as unrecorded.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_pool_refuses_mixed_text_provenance() {
+        const TEXT: &str = "BASELINE BRANCH TOOL DESCRIPTION";
+        let fixture = Fixture::start(
+            "pool-mixed",
+            judged,
+            json!({
+                "message": "Say hello.",
+                "budget": {"turns": 4, "seconds": 120, "window": 24000},
+                "probes": [{"id": "ran", "kind": "must_show", "text": "the run has a transcript"}]
+            }),
+            &[],
+        )
+        .await;
+        let run = |arm: &str, texts: Option<Value>| {
+            let mut record = json!({"arm": arm, "scenario": "case", "run": 0,
+                   "session": null, "stop": "idle", "turns": 2, "window": 24000.0,
+                   "durationMs": 1.0, "failed": false, "judgeOutcome": "judged",
+                   "error": null, "judgeError": null, "judgeReasks": 0,
+                   "probes": [{"id": "ran", "kind": "must_show",
+                               "verdict": "present", "quote": null}]});
+            if let Some(texts) = texts {
+                record["texts"] = texts;
+            }
+            record
+        };
+        let recorded = || {
+            json!([{"id": "timeline-tree/branch-description", "bytes": TEXT.len(),
+                    "fingerprint": fingerprint(TEXT)}])
+        };
+        let source = |name: &str, current: Value, candidate: Value| {
+            let directory = fixture.directory.join(name);
+            std::fs::create_dir_all(&directory).unwrap();
+            let jsonl: String = [current, candidate]
+                .into_iter()
+                .map(|record| format!("{record}\n"))
+                .collect();
+            std::fs::write(directory.join("runs.jsonl"), &jsonl).unwrap();
+            directory
+        };
+        let legacy = source("legacy", run("current", None), run("candidate", None));
+        let named = source(
+            "named",
+            run("current", Some(recorded())),
+            run("candidate", Some(recorded())),
+        );
+        let mut options = fixture.options(fixture.directory.join("mixed"));
+        options.pool = vec![legacy, named];
+        let error = fixture.pooled(&options).await.unwrap_err().to_string();
+        assert!(
+            error.contains("the current runs mix records that name their configured texts"),
+            "{error}"
+        );
+        assert!(
+            error.contains("report the runs that name their texts and the older runs separately"),
+            "{error}"
+        );
+        // The candidate arm is checked on its own: both sources' current runs
+        // recorded none, while one candidate run names its text.
+        let legacy_current = source(
+            "legacy-current",
+            run("current", None),
+            run("candidate", None),
+        );
+        let named_candidate = source(
+            "named-candidate",
+            run("current", None),
+            run("candidate", Some(recorded())),
+        );
+        let mut options = fixture.options(fixture.directory.join("mixed-candidate"));
+        options.pool = vec![legacy_current, named_candidate];
+        let error = fixture.pooled(&options).await.unwrap_err().to_string();
+        assert!(
+            error.contains("the candidate runs mix records that name their configured texts"),
+            "{error}"
+        );
     }
 
     /// A report over saved runs counts the declines their records carry and
@@ -11996,14 +12138,14 @@ mod tests {
         assert_eq!(fingerprint("foobar"), "85944171f73967e8");
     }
 
-    /// Each arm emits the text its pair names, and the run's record and the
-    /// report state which: the current arm's requests carry the baseline, the
-    /// candidate arm's the candidate, and each record names both by length and
-    /// fingerprint. An evaluation on a head that already carries the candidate
-    /// therefore compares two texts it was given, not the candidate with
-    /// itself (model-prompts §8.1).
+    /// Each arm is given the text its pair names, and the run's record and
+    /// the report state which: the current arm's requests carry the baseline,
+    /// the candidate arm's the candidate, and each record names both by length
+    /// and fingerprint. An evaluation on a head that already carries the
+    /// candidate therefore compares two texts it was given, not the candidate
+    /// with itself (model-prompts §8.1).
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn each_arm_emits_and_records_the_text_its_pair_names() {
+    async fn each_arm_records_the_configured_text_its_pair_names() {
         const BASELINE: &str = "BASELINE BRANCH TOOL DESCRIPTION";
         const CANDIDATE: &str = "CANDIDATE BRANCH TOOL DESCRIPTION";
         let fixture = Fixture::start(
@@ -12027,7 +12169,7 @@ mod tests {
         );
         let records = fixture.records(&options.out);
         assert_eq!(records.len(), 2, "one run per arm");
-        let emitted = |arm: &str| {
+        let configured = |arm: &str| {
             records
                 .iter()
                 .find(|record| record["arm"] == arm)
@@ -12035,7 +12177,7 @@ mod tests {
                 .clone()
         };
         for (arm, text) in [("current", BASELINE), ("candidate", CANDIDATE)] {
-            let texts = emitted(arm);
+            let texts = configured(arm);
             let texts = texts.as_array().unwrap_or_else(|| panic!("{arm}: {texts}"));
             assert_eq!(texts.len(), 1, "{arm}: {texts:?}");
             assert_eq!(texts[0]["id"], "timeline-tree/branch-description", "{arm}");
@@ -12043,23 +12185,23 @@ mod tests {
             assert_eq!(
                 texts[0]["fingerprint"],
                 fingerprint(text),
-                "{arm}: the record names the text the arm emitted"
+                "{arm}: the record names the configured text"
             );
         }
         assert_ne!(
-            emitted("current")[0]["fingerprint"],
-            emitted("candidate")[0]["fingerprint"],
-            "the arms emitted different texts"
+            configured("current")[0]["fingerprint"],
+            configured("candidate")[0]["fingerprint"],
+            "the arms were given different texts"
         );
         for (arm, text) in [("current", BASELINE), ("candidate", CANDIDATE)] {
             assert!(
                 report.contains(&format!(
-                    "| {arm} texts | `timeline-tree/branch-description`: {} bytes, \
+                    "| {arm} configured texts | `timeline-tree/branch-description`: {} bytes, \
                      fingerprint {} |",
                     text.len(),
                     fingerprint(text)
                 )),
-                "{arm}: the report names the text the arm emitted: {report}"
+                "{arm}: the report names the configured text: {report}"
             );
         }
         let described = |arm: &str| -> Vec<String> {
