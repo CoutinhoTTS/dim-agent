@@ -10188,7 +10188,9 @@ mod tests {
             assert!(!screen.contains("dima update"), "{screen}");
 
             drawn.app.snapshot = Some(ViewSnapshot {
+                session_id: "s1".into(),
                 running: true,
+                lines: vec![line_view("main", LineState::Main, Some(true))],
                 ..ViewSnapshot::default()
             });
             assert!(matches!(
@@ -10205,7 +10207,11 @@ mod tests {
                 "{screen}"
             );
 
-            drawn.app.snapshot = Some(ViewSnapshot::default());
+            drawn.app.snapshot = Some(ViewSnapshot {
+                session_id: "s1".into(),
+                lines: vec![line_view("main", LineState::Main, Some(false))],
+                ..ViewSnapshot::default()
+            });
             let screen = drawn.app.frame((80, 24)).live.join("\n");
             assert!(
                 !screen.contains("Finish or stop the current work"),
