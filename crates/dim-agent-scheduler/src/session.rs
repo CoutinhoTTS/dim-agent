@@ -4,7 +4,7 @@
 use crate::{
     document::MAX_PROMPT_BYTES,
     loops::{self, Loops, StartRequest, wire_loop},
-    methods::{Caller, ScheduleJobs, Shared, ToolRequest},
+    methods::{Caller, PROMPT_PREVIEW_BYTES, ScheduleJobs, Shared, ToolRequest, truncate},
     runs::SchedulerError,
     wakeups::{WakeupRequest, Wakeups},
 };
@@ -350,6 +350,17 @@ fn loop_listing(records: &[loops::Loop]) -> String {
         ));
     }
     text
+}
+
+/// A loop as the model reads it: the wire record with the prompt bounded and
+/// `prompt_truncated` saying so, the way `job_preview` bounds a job's; the wire
+/// itself carries the whole prompt.
+fn loop_preview(record: &loops::Loop) -> Value {
+    let mut value = wire_loop(record);
+    let prompt = truncate(&record.prompt, PROMPT_PREVIEW_BYTES);
+    value["prompt_truncated"] = json!(prompt.len() < record.prompt.len());
+    value["prompt"] = json!(prompt);
+    value
 }
 
 /// The `session.loop.*` handler: parses at the wire boundary, forwards to the
@@ -856,7 +867,7 @@ impl ToolHandler for LoopTool {
                         .map(|record| {
                             format!(
                                 "loop: started\n{}\nThe first round is due at {}, in {delay} seconds. It is not delivered now: work that is due now belongs to this turn.",
-                                wire_loop(&record),
+                                loop_preview(&record),
                                 record.next_at.as_deref().unwrap_or_default(),
                             )
                         })
@@ -871,7 +882,7 @@ impl ToolHandler for LoopTool {
                     self.loops
                         .next(&self.session_id, &loop_id, delay)
                         .await
-                        .map(|record| format!("loop: next\n{}", wire_loop(&record)))
+                        .map(|record| format!("loop: next\n{}", loop_preview(&record)))
                         .map_err(|error| format!("loop: {}\n{}", error.code, error.message))
                 }
                 "stop" => {
@@ -882,7 +893,7 @@ impl ToolHandler for LoopTool {
                     self.loops
                         .stop(&self.session_id, &loop_id)
                         .await
-                        .map(|(record, _)| format!("loop: stopped\n{}", wire_loop(&record)))
+                        .map(|(record, _)| format!("loop: stopped\n{}", loop_preview(&record)))
                         .map_err(|error| format!("loop: {}\n{}", error.code, error.message))
                 }
                 "list" => self

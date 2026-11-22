@@ -1398,3 +1398,114 @@ async fn a_tool_start_keeps_its_round_across_a_restart() {
         "the round is delivered once"
     );
 }
+
+/// `session.loop.list` carries the whole prompt, including one longer than a
+/// client's display bound: truncation belongs to the reader.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn list_carries_the_whole_prompt() {
+    let home = home();
+    let server = start(home.path(), Arc::new(Script::default())).await;
+    let mut client = connect(&server).await;
+    let session = create_session(&mut client, home.path(), &[], true).await;
+    let prompt = format!("first line\n{}", "p".repeat(8_000));
+
+    let created: Value = client
+        .rpc(
+            "session.loop.start",
+            json!({"sessionId": session, "prompt": prompt}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(created["loop"]["prompt"], json!(prompt), "{created}");
+
+    let listed: Value = client
+        .rpc("session.loop.list", json!({"sessionId": session}))
+        .await
+        .unwrap();
+    let records = listed["loops"].as_array().unwrap();
+    assert_eq!(records.len(), 1, "{listed}");
+    assert_eq!(
+        records[0]["prompt"],
+        json!(prompt),
+        "the wire keeps the whole prompt: {listed}"
+    );
+}
+
+/// Tool results bound the prompt to a preview and say so, while the record
+/// keeps the whole prompt: a long self-paced prompt must not repeat in every
+/// `next` reply.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tool_replies_bound_the_loop_prompt() {
+    let home = home();
+    let model = Arc::new(Script::default());
+    let server = start(home.path(), model.clone()).await;
+    let mut client = connect(&server).await;
+    let session = create_session(&mut client, home.path(), &["loop"], true).await;
+    let prompt = "x".repeat(5_000);
+    let preview = "x".repeat(4_096);
+
+    let check = |id: &str| {
+        let (text, is_error) = model.tool_result(id).expect("the tool replied");
+        assert!(!is_error, "{text}");
+        assert!(text.contains("\"prompt_truncated\":true"), "{text}");
+        assert!(
+            !text.contains(&prompt),
+            "the whole prompt is not repeated: {text}"
+        );
+        assert!(
+            text.contains(&preview),
+            "the preview keeps the first 4 KiB: {text}"
+        );
+    };
+
+    model.push(vec![ToolCall {
+        id: "call-1".into(),
+        name: "loop".into(),
+        input: json!({"action":"start","delay_seconds":600,"prompt":prompt})
+            .as_object()
+            .cloned()
+            .unwrap(),
+    }]);
+    client
+        .rpc(
+            "session.submit",
+            json!({"sessionId": session, "branchId": "main", "text": "set the loop"}),
+        )
+        .await
+        .unwrap();
+    wait_for("the start result", || model.tool_result("call-1").is_some()).await;
+    check("call-1");
+
+    model.push(vec![ToolCall {
+        id: "call-2".into(),
+        name: "loop".into(),
+        input: json!({"action":"next","delay_seconds":120})
+            .as_object()
+            .cloned()
+            .unwrap(),
+    }]);
+    client
+        .rpc(
+            "session.submit",
+            json!({"sessionId": session, "branchId": "main", "text": "run it sooner"}),
+        )
+        .await
+        .unwrap();
+    wait_for("the next result", || model.tool_result("call-2").is_some()).await;
+    check("call-2");
+
+    model.push(vec![ToolCall {
+        id: "call-3".into(),
+        name: "loop".into(),
+        input: json!({"action":"stop"}).as_object().cloned().unwrap(),
+    }]);
+    client
+        .rpc(
+            "session.submit",
+            json!({"sessionId": session, "branchId": "main", "text": "stop it"}),
+        )
+        .await
+        .unwrap();
+    wait_for("the stop result", || model.tool_result("call-3").is_some()).await;
+    check("call-3");
+}
