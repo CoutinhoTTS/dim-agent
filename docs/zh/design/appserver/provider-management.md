@@ -436,6 +436,19 @@ Rpc 沿用 service_reloading/service_unavailable 和准入；调用由 owner 追
 | 捆绑目录 | `metadataSource` 指向匹配的捆绑 Provider：条目仅在其 `metadata.raw` 声明处才有上限，其余取值在捆绑加载时删除；该 Provider 的 `contextWindowOverride`、`contextWindowFallback` 元数据仍是声明 | 匹配到的模型，或该 Provider 的全部模型 |
 | 用户 | 同一 `capabilityOverrideFields` 字段，写在描述覆盖或用户模型上：`models.edit` 为它编辑的每项上限写入，两个旧版导入器为导入时保留的每项值写入 | 覆盖所指的模型 |
 
+内置 `openai-codex` 对话模型按条目声明默认 `contextWindow` 和只读的配置上限
+`metadata.raw.max_context_window`。数值采用
+[Codex 目录](https://github.com/openai/codex/blob/8653ca9e99b2c805107bde7b7d6f57a634c643d0/codex-rs/models-manager/models.json)
+的标称 token 数，GPT-5.4 和 GPT-5.4 Mini 采用
+[旧版目录](https://github.com/openai/codex/blob/rust-v0.145.0/codex-rs/models-manager/models.json)，
+Spark 采用[公开窗口](https://openai.com/index/introducing-gpt-5-3-codex-spark/)。
+Dim 根据自己的规则计算输入与压缩预算。例如，GPT-6.2 Sol、GPT-6.1 Sol 和
+GPT-6.1 Terra 默认都是 500,000 token，可配置到 872,000。可用
+`dimcode models openai-codex edit gpt-6.2-sol` 或 `provider.models.edit`
+修改 `contextWindow`，重置后恢复目录默认值。接纳新版目录时保留显式覆盖，其生效值
+受当前模型上限约束。新写入的值超出上限会收到 `provider_invalid_config`。
+[会话启动覆盖](../../../design/model-startup.md)设置新值时遵守同一上限。
+
 清单以同样的方式声明模型的推理档位，且它声明的第一个形状就是模型自己的列表：先取
 `reasoning_options` 中 `type` 为 `effort` 那一项的 `values`，否则取各项
 `supported_reasoning_levels` 的 `effort`，最后才是扁平的 `reasoning_levels` 列表。
