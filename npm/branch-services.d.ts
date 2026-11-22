@@ -332,10 +332,16 @@ export type ShellCommandStart = {
   endMarker: string
 }
 
+export type ShellJobStart = {
+  taskId: string
+  endMarker: string
+}
+
 export type ShellWrite = {
   taskId: string
   data: string
   command?: ShellCommandStart | null
+  job?: ShellJobStart | null
 }
 
 export type ShellResize = {

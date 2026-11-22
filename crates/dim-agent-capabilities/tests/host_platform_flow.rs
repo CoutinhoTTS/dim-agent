@@ -1804,6 +1804,7 @@ async fn a_shell_burst_is_backpressured_instead_of_reset() {
             task_id: "burst-shell".into(),
             data: "c2VxIDEgNDAwMDAwCg==".into(),
             command: None,
+            job: None,
         })
         .await
         .unwrap();
@@ -1904,6 +1905,7 @@ async fn a_shell_command_capture_is_owned_by_the_host() {
                 start_marker: "__DIM_START_aaaabbbb_ccccdddd__".into(),
                 end_marker: "__DIM_END_eeeeffff_00001111__".into(),
             }),
+            job: None,
         })
         .await
         .unwrap();
@@ -1930,6 +1932,20 @@ async fn a_shell_command_capture_is_owned_by_the_host() {
         .unwrap();
     assert!(page.text.contains("hi"), "{:?}", page.text);
     assert!(!page.text.contains("11112222"), "{:?}", page.text);
+    let tail = platform
+        .tail(TaskRequest {
+            task_id: "owner-command".into(),
+        })
+        .await
+        .unwrap();
+    assert!(tail.text.contains("hi"), "{:?}", tail.text);
+    let retained = platform
+        .retain_output(TaskRequest {
+            task_id: "owner-command".into(),
+        })
+        .await
+        .unwrap();
+    assert!(retained.output_path.ends_with(".log"));
     platform
         .settle(TaskRequest {
             task_id: "owner-command".into(),

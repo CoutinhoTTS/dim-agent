@@ -16,8 +16,8 @@ use crate::{
     host::{HostError, SessionFiles},
     host_platform::{
         HostPlatform, HostPlatformError, OutputRequest, ShellCommandStart, ShellEdition,
-        ShellEvent, ShellRequest, ShellStatus, ShellWrite, TaskRequest, WaitReply, WaitRequest,
-        WaitStatus,
+        ShellEvent, ShellJobStart, ShellRequest, ShellStatus, ShellWrite, TaskRequest, WaitReply,
+        WaitRequest, WaitStatus,
     },
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -386,6 +386,7 @@ impl ShellSession {
                 task_id,
                 data: STANDARD.encode(bytes),
                 command: None,
+                job: None,
             })
             .await
             .map_err(|error| HostError::failed(format!("Shell write failed: {error}")))
@@ -644,6 +645,7 @@ impl ShellSession {
                     start_marker: start_marker.to_owned(),
                     end_marker: end_marker.to_owned(),
                 }),
+                job: None,
             })
             .await
             .map_err(|e| HostError::failed(format!("Shell write failed: {e}")))?;
@@ -1311,7 +1313,16 @@ impl ShellSession {
                 },
             );
         }
-        if let Err(error) = self.write_line(&wrapped).await {
+        if let Err(error) = self
+            .write_line_job(
+                &wrapped,
+                ShellJobStart {
+                    task_id: task_id.clone(),
+                    end_marker: completion.full(),
+                },
+            )
+            .await
+        {
             let task = self.inner.lock().await.background.remove(&task_id);
             if task.is_some() {
                 self.settle(ExecEndedData {
@@ -1523,6 +1534,22 @@ impl ShellSession {
 
     async fn write_line(&self, line: &str) -> Result<(), HostError> {
         self.write_shell(format!("{line}\n").as_bytes()).await
+    }
+
+    async fn write_line_job(&self, line: &str, job: ShellJobStart) -> Result<(), HostError> {
+        let inner = self.inner.lock().await;
+        let Some(task_id) = inner.shell.clone() else {
+            return Err(HostError::failed("Shell is not running"));
+        };
+        self.host
+            .write(ShellWrite {
+                task_id,
+                data: STANDARD.encode(format!("{line}\n").as_bytes()),
+                command: None,
+                job: Some(job),
+            })
+            .await
+            .map_err(|error| HostError::failed(format!("Shell write failed: {error}")))
     }
 }
 

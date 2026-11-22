@@ -264,6 +264,9 @@ export type {
   HostPlatform, HostInfo, ShellStatus, SandboxBackend, ExecShellRuntime, Os, ShellEdition,
   ShellSource, OutputEncoding, OutputPage, OutputTail, OutputPathReply, ShellEvent, ShellState,
   SpawnRequest, SpawnReply, WaitRequest, WaitReply, TaskRequest, OutputRequest, HostPlatformError,
+  ShellRequest, ShellWrite, ShellCommandStart, ShellJobStart, ShellResize, OutputLimits,
+  SpawnWithStdinRequest, SpawnWithStdinReply, ConfinedRequest, ConfinedReply, ChildPathRequest,
+  RemoveOutputDirectoryRequest,
   WorkflowFiles, WorkflowFileEntry, WorkflowRoot, WorkflowFilesErrorThrown,
   UiResources, PublishFile, ResourceRef, ResourceErrorThrown,
 } from './branch-services.js';

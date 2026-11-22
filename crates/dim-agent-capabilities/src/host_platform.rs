@@ -459,6 +459,15 @@ pub struct ShellWrite {
     pub data: String,
     #[serde(default)]
     pub command: Option<ShellCommandStart>,
+    #[serde(default)]
+    pub job: Option<ShellJobStart>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ShellJobStart {
+    pub task_id: String,
+    pub end_marker: String,
 }
 
 #[derive(serde::Deserialize)]
@@ -1140,9 +1149,15 @@ impl HostPlatform {
                 .map_err(|error| HostPlatformError::Failed(error.to_string()));
         }
         if let Some(job) = self.job_task(&request.task_id) {
-            return kill_job(job.pid)
+            let pid = *job.pid.lock().unwrap();
+            let Some(pid) = pid else {
+                return Err(HostPlatformError::TaskRunning);
+            };
+            kill_job(pid)
                 .await
-                .map_err(|error| HostPlatformError::Failed(error.to_string()));
+                .map_err(|error| HostPlatformError::Failed(error.to_string()))?;
+            *job.ended.lock().unwrap() = true;
+            return Ok(());
         }
         if self.shell_command(&request.task_id).is_some() {
             return Err(HostPlatformError::TaskUnknown);
@@ -1162,7 +1177,10 @@ impl HostPlatform {
             }
             return Err(HostPlatformError::TaskRunning);
         }
-        if self.job_task(&request.task_id).is_some() {
+        if let Some(job) = self.job_task(&request.task_id) {
+            if job.pid.lock().unwrap().is_some() && !*job.ended.lock().unwrap() {
+                return Err(HostPlatformError::TaskRunning);
+            }
             self.commands.lock().unwrap().remove(&request.task_id);
             return Ok(());
         }
@@ -1240,6 +1258,11 @@ impl HostPlatform {
         let shell = self
             .shell_task(&request.task_id)
             .ok_or(HostPlatformError::TaskUnknown)?;
+        if request.command.is_some() && request.job.is_some() {
+            return Err(HostPlatformError::Invalid(
+                "a shell write cannot start a command and a job together".into(),
+            ));
+        }
         let command = if let Some(start) = request.command {
             if start.task_id.is_empty()
                 || start.task_id.contains(['/', '\\', '\0', ':'])
@@ -1273,11 +1296,39 @@ impl HostPlatform {
         } else {
             None
         };
+        let job = if let Some(start) = request.job {
+            if start.task_id.is_empty()
+                || start.task_id.contains(['/', '\\', '\0', ':'])
+                || matches!(start.task_id.as_str(), "." | "..")
+            {
+                return Err(HostPlatformError::Invalid(
+                    "job taskId must be a single filename component".into(),
+                ));
+            }
+            let job = Arc::new(shell::ShellJob {
+                pid: std::sync::Mutex::new(None),
+                ended: std::sync::Mutex::new(false),
+                end_marker: start.end_marker,
+            });
+            {
+                let mut commands = self.commands.lock().unwrap();
+                if commands.contains_key(&start.task_id) {
+                    return Err(HostPlatformError::TaskExists);
+                }
+                commands.insert(start.task_id.clone(), ExecutionTask::Job(job.clone()));
+            }
+            Some((start.task_id, job))
+        } else {
+            None
+        };
         let bytes = STANDARD
             .decode(request.data)
             .map_err(|error| HostPlatformError::Invalid(error.to_string()))?;
         if let Err(error) = shell.write(&bytes).await {
             if let Some((id, _)) = &command {
+                self.commands.lock().unwrap().remove(id);
+            }
+            if let Some((id, _)) = &job {
                 self.commands.lock().unwrap().remove(id);
             }
             shell.set_active_command(None);
@@ -3611,7 +3662,9 @@ pub(crate) mod shell {
     }
 
     pub(crate) struct ShellJob {
-        pub(crate) pid: u32,
+        pub(crate) pid: Mutex<Option<u32>>,
+        pub(crate) ended: Mutex<bool>,
+        pub(crate) end_marker: String,
     }
 
     #[derive(Clone)]
@@ -3898,10 +3951,23 @@ pub(crate) mod shell {
                                 .as_ref()
                                 .and_then(|pty| pty.job_pid(reported).ok());
                             if let Some(pid) = pid {
-                                let mut jobs = jobs.lock().unwrap();
-                                jobs.entry(task_id).or_insert_with(|| {
-                                    super::ExecutionTask::Job(Arc::new(ShellJob { pid }))
-                                });
+                                let jobs = jobs.lock().unwrap();
+                                if let Some(super::ExecutionTask::Job(job)) = jobs.get(&task_id) {
+                                    let mut slot = job.pid.lock().unwrap();
+                                    if slot.is_none() {
+                                        *slot = Some(pid);
+                                    }
+                                }
+                            }
+                        }
+                        {
+                            let jobs = jobs.lock().unwrap();
+                            for task in jobs.values() {
+                                if let super::ExecutionTask::Job(job) = task
+                                    && line.contains(&job.end_marker)
+                                {
+                                    *job.ended.lock().unwrap() = true;
+                                }
                             }
                         }
                     }
