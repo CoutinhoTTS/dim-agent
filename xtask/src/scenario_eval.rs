@@ -15007,7 +15007,7 @@ mod tests {
         .await;
         let out = fixture.directory.join("out");
         let options = fixture.options(out.clone());
-        let report = tokio::time::timeout(Duration::from_secs(30), fixture.evaluate(&options))
+        let report = tokio::time::timeout(SUBPROCESS_EVAL_GUARD, fixture.evaluate(&options))
             .await
             .expect("the evaluation returns")
             .expect("the evaluation records both arms");
@@ -15018,6 +15018,10 @@ mod tests {
             assert_eq!(record["failed"], true, "{record}");
             assert_eq!(record["judgeOutcome"], "judged", "{record}");
             assert_eq!(record["error"], Value::Null, "{record}");
+            assert!(
+                record["durationMs"].as_f64().unwrap_or_default() < 20_000.0,
+                "the stop, close, export and judge do not sit at a longer bound: {record}"
+            );
         }
         for arm in ["current", "candidate"] {
             assert!(
