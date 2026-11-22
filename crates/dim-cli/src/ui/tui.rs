@@ -311,7 +311,7 @@ fn run_terminal(
     app.fullscreen = full.is_some();
     app.initial = surroundings.initial;
     app.awaiting_window = surroundings.resume;
-    app.startup_resume = surroundings.resume;
+    app.switch_pending = surroundings.resume;
     app.terminal_clipboard =
         terminal.clipboard_protocol() && crate::clipboard::terminal::native_unreachable();
     app.host.send(Command::LoginStatus(DIM_OAUTH_ID.into()));
@@ -1217,9 +1217,10 @@ struct App {
     landing: Option<(String, bool)>,
     /// A session was just switched; the next snapshot decides the window.
     awaiting_window: bool,
-    /// A startup `--resume` whose attach has not resolved yet: the interface
-    /// is not Home even though `session_id` is still empty.
-    startup_resume: bool,
+    /// A `--resume` or `/resume` whose switch has not resolved yet: the
+    /// target Session's activity is not known, whatever the current view
+    /// still shows.
+    switch_pending: bool,
     /// What to write once the switched-to history is out.
     pending_boundary: Option<SwitchKind>,
     /// The line the transcript switched to, until its boundary row is out.
@@ -1646,7 +1647,7 @@ impl App {
             reveal_pending: false,
             landing: None,
             awaiting_window: false,
-            startup_resume: false,
+            switch_pending: false,
             pending_boundary: None,
             pending_line: None,
             window_info: (0, 0),
@@ -2063,15 +2064,15 @@ impl App {
 
     /// Why `Update now` cannot leave yet, if it cannot: work in the shown
     /// Session, a live line whose current state the daemon has not reported
-    /// yet, or a startup resume whose attach has not resolved. A line that
-    /// has ended, or that the tree never built, is settled without a report.
+    /// yet, or a resume whose switch has not resolved. A line that has
+    /// ended, or that the tree never built, is settled without a report.
     /// Home has no Session state to wait for.
     fn update_blocked(&self) -> Option<Blocked> {
         if self.shell.is_some() || self.busy_reason().is_some() {
             return Some(Blocked::Busy);
         }
-        if self.startup_resume && self.session_id.is_empty() {
-            return Some(Blocked::Startup);
+        if self.switch_pending {
+            return Some(Blocked::Switch);
         }
         let waiting = !self.session_id.is_empty()
             && self.snapshot.as_ref().is_none_or(|snapshot| {
@@ -3151,6 +3152,7 @@ impl App {
                 if let Some(Prompt::Report(report)) = &mut self.prompt {
                     report.disconnected(&message);
                 }
+                self.switch_pending = false;
                 self.restore_unsent();
                 self.failure = Some(message);
                 self.run_started = None;
@@ -3165,7 +3167,7 @@ impl App {
             }
             Update::StartupFailed { message, resumable } => {
                 self.prompt = None;
-                self.startup_resume = false;
+                self.switch_pending = false;
                 self.failure = Some(message);
                 self.failure_resumable = resumable;
                 // A first message the invocation supplied has no Session
@@ -4189,6 +4191,7 @@ impl App {
                 });
             }
             Effect::Resume(id) => {
+                self.switch_pending = true;
                 self.host.send(Command::CloseSessions);
                 self.prompt = None;
                 self.composer.clear();
@@ -7330,7 +7333,7 @@ impl App {
     }
 
     fn switch_session(&mut self, session_id: String, kind: SwitchKind) {
-        self.startup_resume = false;
+        self.switch_pending = false;
         self.report_error = None;
         self.release_compaction_details();
         let first = self.session_id.is_empty();
@@ -10508,7 +10511,7 @@ mod tests {
 
             let mut drawn = Drawn::new((80, 24), None, true);
             drawn.app.fullscreen = fullscreen;
-            drawn.app.startup_resume = true;
+            drawn.app.switch_pending = true;
             drawn.app.apply(Update::Upgrade(update_offer()));
             assert!(
                 matches!(enter(&mut drawn), Outcome::Continue),
@@ -10678,20 +10681,15 @@ mod tests {
         assert!(screen.contains(t("Update available")), "{screen}");
     }
 
-    /// The offer can also arrive while the Session list is open: choosing a
-    /// row closes the list and reopens the dialog, and the switch that follows
-    /// must keep it.
-    #[test]
-    fn a_session_picked_from_the_list_keeps_the_update_offer() {
+    /// Serves the Session list, lets the offer arrive behind it, and picks
+    /// the one row: the list closes and the dialog comes back while the
+    /// picked Session is still loading.
+    fn pick_a_session_from_the_list(
+        drawn: &mut Drawn,
+        sent: &std::rc::Rc<std::cell::RefCell<Vec<Command>>>,
+    ) {
         use crate::model::session::SessionItem;
 
-        let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-        let mut drawn = Drawn::new((100, 30), None, true);
-        drawn.app.host = Box::new(Recorder(sent.clone()));
-        drawn.app.apply(Update::Snapshot(Box::new(ViewSnapshot {
-            session_id: "s1".into(),
-            ..ViewSnapshot::default()
-        })));
         typed(&mut drawn.app, "/resume");
         drawn.key(KeyCode::Enter);
         let id = sent
@@ -10719,12 +10717,7 @@ mod tests {
                 None,
             )),
         });
-        drawn.app.apply(Update::Upgrade(crate::update::Offer {
-            current: "0.1.0-alpha.27".into(),
-            version: "0.1.0-alpha.28".into(),
-            manual: "dima update".into(),
-            direct: true,
-        }));
+        drawn.app.apply(Update::Upgrade(update_offer()));
         assert!(
             matches!(drawn.app.prompt, Some(Prompt::Sessions(_))),
             "the list keeps the screen while it is open"
@@ -10735,17 +10728,82 @@ mod tests {
             matches!(drawn.app.prompt, Some(Prompt::Upgrade(_))),
             "closing the list reopens the offer"
         );
-        drawn.app.apply(Update::Switched {
-            session_id: "s2".into(),
-            kind: SwitchKind::Resumed,
-            cwd: None,
-        });
-        assert!(
-            matches!(drawn.app.prompt, Some(Prompt::Upgrade(_))),
-            "the switch after the resume cleared the offer"
-        );
-        let screen = drawn.app.frame((100, 30)).live.join("\n");
-        assert!(screen.contains(t("Update available")), "{screen}");
+    }
+
+    /// The offer can also arrive while the Session list is open: choosing a
+    /// row closes the list and reopens the dialog, and the switch that follows
+    /// must keep it. Until the picked Session's state is known, Home's own
+    /// readiness may not let `Update now` leave.
+    #[test]
+    fn a_session_picked_from_the_list_keeps_the_update_offer() {
+        for fullscreen in [false, true] {
+            let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+            let mut drawn = Drawn::new((100, 30), None, true);
+            drawn.app.fullscreen = fullscreen;
+            drawn.app.host = Box::new(Recorder(sent.clone()));
+            drawn.app.apply(Update::Snapshot(Box::new(ViewSnapshot {
+                session_id: "s1".into(),
+                ..ViewSnapshot::default()
+            })));
+            pick_a_session_from_the_list(&mut drawn, &sent);
+            assert!(
+                matches!(enter(&mut drawn), Outcome::Continue),
+                "fullscreen={fullscreen}: Update now left while the resume was in flight"
+            );
+            assert!(!drawn.app.update_requested);
+            let screen = drawn.app.frame((100, 30)).live.join("\n");
+            assert!(
+                screen.contains(t("Waiting for the resumed Session to load.")),
+                "fullscreen={fullscreen}: {screen}"
+            );
+            drawn.app.apply(Update::Switched {
+                session_id: "s2".into(),
+                kind: SwitchKind::Resumed,
+                cwd: None,
+            });
+            assert!(
+                matches!(drawn.app.prompt, Some(Prompt::Upgrade(_))),
+                "the switch after the resume cleared the offer"
+            );
+            let screen = drawn.app.frame((100, 30)).live.join("\n");
+            assert!(screen.contains(t("Update available")), "{screen}");
+        }
+    }
+
+    /// A resume the daemon refuses comes back to Home. That ends the pending
+    /// switch, and `Update now` follows the view it came back to.
+    #[test]
+    fn a_refused_resume_ends_the_pending_switch() {
+        for fullscreen in [false, true] {
+            let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+            let mut drawn = Drawn::new((100, 30), None, true);
+            drawn.app.fullscreen = fullscreen;
+            drawn.app.host = Box::new(Recorder(sent.clone()));
+            drawn.app.session_id = "s1".into();
+            drawn.app.apply(Update::Snapshot(Box::new(ViewSnapshot {
+                session_id: "s1".into(),
+                lines: vec![line_view("main", LineState::Main, Some(false))],
+                ..ViewSnapshot::default()
+            })));
+            pick_a_session_from_the_list(&mut drawn, &sent);
+            assert!(drawn.app.switch_pending);
+            assert!(
+                matches!(enter(&mut drawn), Outcome::Continue),
+                "fullscreen={fullscreen}: Update now left while the resume was in flight"
+            );
+            drawn.app.apply(Update::Switched {
+                session_id: String::new(),
+                kind: SwitchKind::Resumed,
+                cwd: None,
+            });
+            assert!(!drawn.app.switch_pending);
+            assert!(matches!(drawn.app.prompt, Some(Prompt::Upgrade(_))));
+            assert!(
+                matches!(enter(&mut drawn), Outcome::Exit(0)),
+                "fullscreen={fullscreen}: Home did not let Update now leave after the refusal"
+            );
+            assert!(drawn.app.update_requested);
+        }
     }
 
     /// An empty composer shows the locale's placeholder; typing replaces it.

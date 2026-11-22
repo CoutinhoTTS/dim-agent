@@ -59,9 +59,9 @@ pub enum Blocked {
     /// A Session was just switched to; the daemon has not reported every
     /// live line's state yet.
     Session,
-    /// A startup resume has not resolved: the resumed Session's activity is
-    /// not known yet.
-    Startup,
+    /// A resume has not resolved: the target Session's activity is not known
+    /// yet.
+    Switch,
 }
 
 impl UpgradeDialog {
@@ -131,7 +131,7 @@ impl UpgradeDialog {
                     Blocked::Session => {
                         t("Waiting for this Session's state after the switch.")
                     }
-                    Blocked::Startup => t("Waiting for the resumed Session to load."),
+                    Blocked::Switch => t("Waiting for the resumed Session to load."),
                 }
                 .to_owned(),
             );
