@@ -4563,6 +4563,108 @@ async fn a_configured_note_block_reaches_the_note() {
     soon(agent.close()).await.unwrap();
 }
 
+/// The note `4560a5d67` wrote when a tool line became the default branch: its
+/// birth identity, then the sentences the move changes, with no `How you work
+/// here:` block, which that head's `status_note` had not grown yet. The
+/// branch-policy evaluation gives `default_note` an empty baseline so its
+/// current arm emits this text byte for byte. `{line}` and `{purpose}` stand
+/// where the code substitutes them.
+const PRE_POLICY_TOOL_NOTE: &str = r#"<dim-branch-line branch="{line}" parent="main" source="tool" default="true">
+You are line {line} of this session. Line main opened you at this point of its history to work in parallel with it. You are the same agent as main: everything above is your own history, and you continue from here on your own line. main keeps working on its line; you can read its work after this point, and it can read yours. Messages above that were addressed to main, such as its list of open lines, are main's, not yours.
+
+Your purpose, as main wrote it:
+{purpose}
+
+How you work with main:
+- Work on this purpose only. You cannot open lines unless this line is the default branch of the session, and this block does not make it one: a status note would. If more parallel work is needed and you cannot open a line, tell main.
+- Read main with the branch tool (action read, branch "main") when what main did or decided since your cut changes your work; the parent block reports when main has moved. Message main only for what it must act on: a decision that changes its work, a blocker only the user can settle, a conflict with another line, or a change to your purpose. Use mode "steer" for what main must act on now, "append" for what main should see at its next step. Do not send main a progress report it can read, and do not page through main's whole stream: read the page that answers your question, then act.
+- You share the workspace with main and its other lines. Change only the files main gave you; before changing any other file, tell main which. If edit or write fails because the file was modified after it was last read, another line may have changed the file: read it again and tell main before you continue.
+- The user can talk to you directly. Answer the user, and ask with ask_user when only the user can decide.
+- When your purpose is done, or cannot be done, call the branch tool with action "end" and content saying what you found, did, changed and left undone. If you already told main that in a message, your end content carries only what is new. Read main once more before you end if the parent block says main has moved, so your last word still holds. That is your last action; main receives it.
+
+This line is now the session's default branch, switched from line main. While this block is your latest one: answer the user here; you can open lines with create; you send no automatic idle notice to main; you cannot call end on yourself. Line main stays open and keeps the lines it opened.
+</dim-branch-line>"#;
+
+/// An empty `default_note` writes the note with no `How you work here:` block,
+/// byte for byte as `4560a5d67` wrote it: the branch-policy evaluation's
+/// current arm is that head's text, not this head's default block (timeline
+/// branches §12.4, model-prompts §8.1).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_empty_note_block_writes_the_note_without_guidance() {
+    let purpose = "the purpose of B";
+    let probe = Arc::new(Probe::default());
+    let agent = MinimalHost::start(&builder_with_branch_config(
+        &probe,
+        BranchToolConfig {
+            default_note: Some("".into()),
+            ..Default::default()
+        },
+    ))
+    .await
+    .unwrap();
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let line = open_line(&session, purpose).await;
+    switch(&session, &line).await;
+    let notes = owed_notes(&session, &line, 1).await;
+    let note = notes.last().expect("the line holds its note");
+    let expected = PRE_POLICY_TOOL_NOTE
+        .replace("{line}", &line)
+        .replace("{purpose}", purpose);
+    assert_eq!(
+        note, &expected,
+        "an empty block emits the note the pre-policy head wrote"
+    );
+    soon(session.submit("next request".into(), InputMode::Queue, &line))
+        .await
+        .unwrap();
+    soon(session.idle(&line)).await.unwrap();
+    let events = local_events(&session, &line).await;
+    let request = events
+        .iter()
+        .rev()
+        .find_map(|event| match &event.kind {
+            EventKind::ModelCall(data) => Some(&data.request),
+            _ => None,
+        })
+        .expect("the line's next turn makes a request");
+    assert!(
+        request
+            .messages
+            .iter()
+            .any(|message| said(message).contains(&expected)),
+        "the rendered request carries the note the baseline wrote"
+    );
+    soon(agent.close()).await.unwrap();
+}
+
+/// The product's note blocks keep their `How you work here:` heading: the
+/// empty-block rule serves a candidate that replaces the block with nothing,
+/// not the shipped text.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_product_note_block_keeps_its_guidance_heading() {
+    let probe = Arc::new(Probe::default());
+    let agent = MinimalHost::start(&builder_with_branch_config(
+        &probe,
+        BranchToolConfig::default(),
+    ))
+    .await
+    .unwrap();
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let line = open_line(&session, "the shipped line").await;
+    switch(&session, &line).await;
+    let notes = owed_notes(&session, &line, 1).await;
+    let note = notes.last().expect("the line holds its note");
+    assert!(
+        note.contains("\n\nHow you work here:\n- The user switched here to continue directly from this line's context and approach"),
+        "{note}"
+    );
+    soon(agent.close()).await.unwrap();
+}
+
 /// #549: a description set at the declaring owner's factory configuration
 /// reaches the model request byte for byte, carried through ToolRegistry and
 /// ToolBinding by the shipped assembly.

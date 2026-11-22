@@ -4865,7 +4865,8 @@ impl BranchLine {
     /// The status note a move writes on this line: the line's birth identity
     /// under the same key, restated byte for byte, then the sentences the move
     /// changes and the guidance block a candidate replaces (design §5,
-    /// §12.1). A line the user opened and a tool line get their own rule.
+    /// §12.1). An empty block writes no `How you work here:` heading. A line
+    /// the user opened and a tool line get their own rule.
     fn status_note(
         &self,
         parent: &str,
@@ -4919,10 +4920,12 @@ impl BranchLine {
                     .unwrap_or(FORMER_DEFAULT_NOTE),
             )
         };
-        let body = format!(
-            "{birth}\n\n{change}\n\nHow you work here:\n{}",
-            block.replace("{parent}", parent).replace("{other}", other)
-        );
+        let guidance = block.replace("{parent}", parent).replace("{other}", other);
+        let body = if guidance.is_empty() {
+            format!("{birth}\n\n{change}")
+        } else {
+            format!("{birth}\n\n{change}\n\nHow you work here:\n{guidance}")
+        };
         let mut attrs = vec![
             ("branch", line),
             ("parent", parent),
