@@ -190,6 +190,7 @@ impl Worker {
                 history.error = None;
                 history.live.clear();
                 history.window_complete = false;
+                history.window_error = None;
                 self.task_history_queue.retain(|id| id != branch);
                 if let Some(request) = &mut self.task_history_request
                     && request.branch_id == *branch
@@ -921,6 +922,80 @@ mod tests {
             .unwrap();
     }
 
+    /// A `branch/create-failed` event for `branch`, as the daemon sends it.
+    fn create_failed(sequence: u64, branch: &str) -> Event {
+        serde_json::from_value(json!({
+            "id": format!("create-failed-{sequence}"),
+            "sequence": sequence,
+            "create_at": 2000,
+            "type": "branch",
+            "name": "create-failed",
+            "data": {
+                "status": "failed", "branch": branch,
+                "createEvent": sequence - 1, "error": "creation refused"
+            }
+        }))
+        .expect("a create-failed event")
+    }
+
+    /// A client whose daemon answered hello and then hung up: the next request
+    /// fails where it is written, before any reply exists.
+    async fn hung_up_client() -> Client {
+        use std::os::unix::fs::PermissionsExt;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let home = tempfile::tempdir().unwrap();
+        let endpoint = home.path().join("daemon.sock");
+        let listener = tokio::net::UnixListener::bind(&endpoint).unwrap();
+        std::fs::set_permissions(&endpoint, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let (hung_up, wait) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let _home = home;
+            let Ok((stream, _)) = listener.accept().await else {
+                return;
+            };
+            let mut reader = BufReader::new(stream);
+            let mut line = String::new();
+            if reader.read_line(&mut line).await.unwrap_or(0) == 0 {
+                return;
+            }
+            let Ok(request) = serde_json::from_str::<serde_json::Value>(&line) else {
+                return;
+            };
+            let mut socket = reader.into_inner();
+            let reply = json!({"jsonrpc":"2.0","id":request["id"],"result":{
+                "instanceId":"hung-up-test","serverVersion":"test","protocolVersion":4,
+                "features":["session.create","session.history","session.history.latestTurn"],
+                "daemonProfile":{"kind":"product"}
+            }});
+            if socket
+                .write_all(format!("{reply}\n").as_bytes())
+                .await
+                .is_err()
+            {
+                return;
+            }
+            let _ = socket.shutdown().await;
+            drop(socket);
+            let _ = hung_up.send(());
+        });
+        let client = Client::connect(&dim_client::ConnectionConfig {
+            endpoint,
+            server: dim_client::Server {
+                program: std::env::current_exe().unwrap(),
+                embedded: false,
+            },
+            profile: None,
+            client_kind: "cli",
+            client_name: "dim-cli-test",
+            protocol_version: 4,
+        })
+        .await
+        .unwrap();
+        wait.await.unwrap();
+        client
+    }
+
     /// A branch whose earlier read failed reports `Unread` and reads again on
     /// the next press. A failure that kept the read recorded as in flight makes
     /// `earlier_view` report `Reading` with nothing sent, and `earlier` returns
@@ -1308,6 +1383,87 @@ mod tests {
             "a failed older page leaves the window complete"
         );
         assert_eq!(snapshot.rows.len(), 1, "the loaded row stays drawn");
+    }
+
+    /// A request that fails on the transport, before any reply exists, lands a
+    /// first window in its failed state: the line shows the failure instead of
+    /// staying blank and nothing reads it again on its own.
+    #[tokio::test]
+    async fn a_failed_window_send_lands_the_line_in_the_error_state() {
+        let (mut worker, mut receiver, _sent) =
+            crate::session_host::test_worker(&crate::session_host::TEST_FEATURES).await;
+        worker.session_id = "s1".into();
+        worker.focus = "main".into();
+        worker.discover_branch("main");
+        worker.client = hung_up_client().await;
+
+        worker.poll_task_history().await.unwrap();
+
+        let history = &worker.task_history["main"];
+        assert!(
+            history.window_error.is_some(),
+            "a window that could not be sent is a failed window: {:?}",
+            history.error
+        );
+        assert!(!history.window_complete, "the window did not read");
+        assert!(
+            worker.task_history_request.is_none(),
+            "no read is in flight"
+        );
+        assert!(
+            !worker.task_history_queue.iter().any(|id| id == "main"),
+            "the failed window is not read again on its own"
+        );
+
+        worker.publish();
+        let snapshot = published(&mut receiver);
+        assert!(
+            snapshot.window_error.is_some(),
+            "the failed window is published, not left loading"
+        );
+        assert!(!snapshot.history_complete, "the window did not load");
+    }
+
+    /// A first window that failed is not kept as the line's failure once its
+    /// creation fails: the creation settles the line and `/tasks` no longer
+    /// lists the read error, so a stale read failure would be all the line
+    /// still showed.
+    #[tokio::test]
+    async fn a_create_failure_clears_a_failed_window() {
+        let (mut worker, mut receiver, _sent) =
+            crate::session_host::test_worker(&crate::session_host::TEST_FEATURES).await;
+        worker.session_id = "s1".into();
+        worker.discover_branch("b-7c");
+        worker
+            .command(crate::model::session::Command::FocusLine("b-7c".into()))
+            .await
+            .unwrap();
+        worker.poll_task_history().await.unwrap();
+        fail(&mut worker, "the line's window").await;
+        assert!(worker.task_history["b-7c"].window_error.is_some());
+
+        worker.task_event("b-7c", create_failed(400, "b-7c"));
+
+        let history = &worker.task_history["b-7c"];
+        assert!(history.done, "the failed creation settled the line");
+        assert!(
+            history.error.is_none(),
+            "the tasks panel no longer lists it"
+        );
+        assert!(
+            history.window_error.is_none(),
+            "the line does not keep the read failure of a window it will never read"
+        );
+        assert!(
+            !history.window_complete,
+            "the failed creation read no window"
+        );
+        worker.publish();
+        let snapshot = published(&mut receiver);
+        assert!(
+            snapshot.window_error.is_none(),
+            "the settled line publishes no read failure"
+        );
     }
 
     fn published(receiver: &mut std::sync::mpsc::Receiver<Update>) -> ViewSnapshot {

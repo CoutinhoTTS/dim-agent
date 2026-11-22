@@ -1852,6 +1852,13 @@ fn tui_main_history_failure_is_visible_on_a_reporting_daemon() {
         "the refused submission stays in the composer: {}",
         terminal.transcript
     );
+    assert!(
+        !terminal
+            .transcript
+            .contains("Run /report to create a report."),
+        "a fatal main history failure is not offered as a report: {}",
+        terminal.transcript
+    );
     home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
