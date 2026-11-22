@@ -434,6 +434,13 @@ export const useChatStore = defineStore("chat", () => {
     // new line's own read publishes its own (design §14).
     channel.view.permission = undefined
     channel.view.permissionVersion = undefined
+    // A failure published for the outgoing line belongs to it: the centre that
+    // took its place starts clean, and its own reads report their own (design
+    // §14).
+    if (channel.view.status === "failed") {
+      channel.view.status = "ready"
+      channel.view.error = ""
+    }
     channel.view.defaultBranchId = branchId
     useUiStore().followDefault(channel.view.sessionId, branchId)
     channel.branches.delete(branchId)
@@ -875,9 +882,9 @@ export const useChatStore = defineStore("chat", () => {
     return views[sessionId]?.defaultBranchId ?? ROOT_BRANCH_ID
   }
 
-  /** Compacts the centred line's context. */
-  async function compact(sessionId: string) {
-    return client().call("session.context.compact", { sessionId, branchId: defaultBranch(sessionId) }, readCompactResult)
+  /** Compacts `branchId`'s context, or the centre's when no line is named. */
+  async function compact(sessionId: string, branchId = defaultBranch(sessionId)) {
+    return client().call("session.context.compact", { sessionId, branchId }, readCompactResult)
   }
 
   /** Writes `branchId`'s goal through `session.goal.<call>`; the goal changes when its events arrive. */
@@ -910,9 +917,9 @@ export const useChatStore = defineStore("chat", () => {
     await client().call("session.loop.stop", { sessionId, loopId }, readAck)
   }
 
-  /** Reads the centred line's context window usage. */
-  async function usage(sessionId: string) {
-    return client().call("session.context.usage", { sessionId, branchId: defaultBranch(sessionId) }, readContextUsage)
+  /** Reads `branchId`'s context window usage, or the centre's when no line is named. */
+  async function usage(sessionId: string, branchId = defaultBranch(sessionId)) {
+    return client().call("session.context.usage", { sessionId, branchId }, readContextUsage)
   }
 
   /**

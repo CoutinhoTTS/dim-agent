@@ -137,9 +137,9 @@ function failure(cause: unknown): void {
   toast.push({ tone: "danger", title: t("command.failed"), description: cause instanceof Error ? cause.message : String(cause) })
 }
 
-async function compact(): Promise<void> {
+async function compact(branchId: string): Promise<void> {
   try {
-    const result = await chat.compact(props.sessionId)
+    const result = await chat.compact(props.sessionId, branchId)
     if (result.status === "completed") toast.push({ tone: "success", title: t("command.compacted") })
     else toast.push({ tone: "info", title: t("command.compactSkipped"), description: result.reason })
   } catch (cause) {
@@ -161,9 +161,9 @@ function usageLine(reading: ContextUsage): string {
   })
 }
 
-async function usage(): Promise<void> {
+async function usage(branchId: string): Promise<void> {
   try {
-    toast.push({ tone: "info", title: t("command.usageTitle"), description: usageLine(await chat.usage(props.sessionId)) })
+    toast.push({ tone: "info", title: t("command.usageTitle"), description: usageLine(await chat.usage(props.sessionId, branchId)) })
   } catch (cause) {
     failure(cause)
   }

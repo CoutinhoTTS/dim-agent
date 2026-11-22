@@ -881,6 +881,33 @@ for (const [draft, action] of [["/goal carry on", "writeGoal"], ["/loop carry on
   })
 }
 
+for (const name of ["compact", "usage"]) {
+  test(`/${name}: a command names the line it was typed on`, async (t) => {
+    const view = reactive({
+      status: "ready", rows: [], running: true, stopping: false, sessionRunning: true,
+      approvals: [], questions: [], methods: ["attachment.put", "session.files.search"], queued: [],
+      defaultBranchId: "main",
+      lines: [{ id: "worker", purpose: "Worker", parentId: "main", state: { kind: "working" } }],
+      branches: { worker: { status: "ready", rows: [], running: true } },
+    })
+    const lines = []
+    const { root } = mount(t, "main", [], ComposerPanel, {}, {
+      centre: () => view.defaultBranchId,
+      sessionCommands: { [name]: async (line) => { lines.push(line) } },
+    }, view)
+    await flush()
+    const field = all(root).find((element) => element.type === "textarea")
+    field.props.onFocus()
+    field.props["onUpdate:modelValue"](`/${name}`)
+    await flush()
+    field.props.onKeydown({ key: "Enter", preventDefault() {}, stopPropagation() {} })
+    // The centre moves after the check, before the command's next tick.
+    view.defaultBranchId = "worker"
+    await flush()
+    assert.deepEqual(lines, ["main"], `the command stays on the line it was typed on`)
+  })
+}
+
 for (const [branchId, kind] of [["main", "question"], ["main", "approval"], ["worker", "question"], ["worker", "approval"]]) {
   test(`${kind} on ${branchId}: a prompt that takes the composer's place keeps a withdrawn draft through a failed stop`, async (t) => {
     const picture = storedImage("stored-before")

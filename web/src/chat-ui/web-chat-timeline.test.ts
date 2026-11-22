@@ -1428,6 +1428,49 @@ describe("chat store moves", () => {
     await vi.waitFor(() => expect(view.goal?.objective).toBe("worker work"))
   })
 
+  it("does not carry a failure from the outgoing line into the new centre", async () => {
+    const pinia = stores(LINE_FEATURES, null)
+    const held: Record<string, { resolve: (value: unknown) => void; reject: (cause: unknown) => void }> = {}
+    let mainReads = 0
+    let releaseMove: ((value: unknown) => void) | undefined
+    serveChat({
+      "session.methods": () => ({ methods: [...SESSION_METHODS, "session.goal.get"].map(name => ({ name })) }),
+      "session.goal.set": () => ({ reply: {} }),
+      "session.goal.get": (params) => {
+        if (params.branchId === "worker") return new Promise<unknown>((resolve, reject) => { held.worker = { resolve, reject } })
+        mainReads += 1
+        return mainReads === 1
+          ? { branchId: params.branchId, through: 5, goal: null }
+          : new Promise<unknown>((resolve, reject) => { held.main = { resolve, reject } })
+      },
+      "session.branch_set_default": (params) => new Promise<unknown>((resolve) => { releaseMove = () => resolve({ defaultBranchId: params.branchId }) }),
+    })
+    const chat = useChatStore(pinia)
+    chat.open("s-1")
+    await vi.waitFor(() => expect(chat.views["s-1"]?.status).toBe("ready"))
+
+    const written = chat.writeGoal("s-1", "set", "root work", "main").catch((cause: unknown) => cause)
+    await vi.waitFor(() => expect(held.main !== undefined).toBe(true))
+    const moved = chat.setDefaultBranch("s-1", "worker")
+    await vi.waitFor(() => expect(releaseMove !== undefined).toBe(true))
+    // The outgoing line's goal read fails before the move's reply, while that
+    // line is still the centre, so the failure is published to the page.
+    held.main!.reject(new Error("the goal read failed"))
+    await vi.waitFor(() => expect(chat.views["s-1"]?.status).toBe("failed"))
+    expect(await written).toBeInstanceOf(Error)
+
+    releaseMove!({ defaultBranchId: "worker" })
+    await vi.waitFor(() => expect(held.worker !== undefined).toBe(true))
+    held.worker!.resolve({ branchId: "worker", through: 5, goal: { objective: "worker work", status: { kind: "active" }, evaluator: false } })
+    await moved
+
+    const view = chat.views["s-1"]!
+    expect(view.defaultBranchId).toBe("worker")
+    expect(view.status).toBe("ready")
+    expect(view.error).toBe("")
+    expect(view.goal?.objective).toBe("worker work")
+  })
+
   it("publishes a model update only to the line that issued it", async () => {
     const pinia = stores(LINE_FEATURES, null)
     const held: { resolve?: (value: unknown) => void } = {}

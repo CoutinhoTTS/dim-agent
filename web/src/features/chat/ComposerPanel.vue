@@ -16,8 +16,10 @@ import { quoteInto } from "./quote"
 
 /** The Session commands the menu lists, each only when given. Errors are reported by the callee. */
 type SessionCommands = {
-  compact?: () => Promise<void>
-  usage?: () => Promise<void>
+  /** Compacts the line the command was typed on. */
+  compact?: (branchId: string) => Promise<void>
+  /** Reports the context window the line the command was typed on is using. */
+  usage?: (branchId: string) => Promise<void>
   fork?: () => Promise<void>
   /** Receives the words after `/goal` and the line the draft was written on; empty shows the goal. */
   goal?: (words: string, branchId: string) => Promise<void>
@@ -657,6 +659,10 @@ function completeSkill(name: string): void {
 async function runCommand(name: typeof availableCommands.value[number]["name"]): Promise<void> {
   if (composing.value) return
   error.value = ""
+  // A command belongs to the line the draft was written on: the line is read
+  // here, before the tick that lets the menu close, so a move that completes
+  // while the command opens cannot retarget it (design §14).
+  const line = props.branchId ?? ""
   const argument = name === "branch" || name === "goal" || name === "loop" || name === "effort"
   text.value = argument ? `/${name} ` : ""
   await nextTick()
@@ -675,7 +681,8 @@ async function runCommand(name: typeof availableCommands.value[number]["name"]):
       error.value = cause instanceof Error ? cause.message : String(cause)
     }
   } else if (name === "permissions") permissionMenu.value?.open()
-  else if (name === "compact" || name === "usage" || name === "fork") await props.sessionCommands?.[name]?.()
+  else if (name === "compact" || name === "usage") await props.sessionCommands?.[name]?.(line)
+  else if (name === "fork") await props.sessionCommands.fork?.()
 }
 
 function onKeydown(event: KeyboardEvent): void {
