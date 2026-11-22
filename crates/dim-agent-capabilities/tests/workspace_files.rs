@@ -388,6 +388,7 @@ fn acl_text(path: &Path) -> Vec<String> {
 #[tokio::test]
 async fn a_new_file_takes_the_process_umask() {
     if let Some(umask) = std::env::var_os(CHILD_UMASK) {
+        use std::os::unix::fs::PermissionsExt;
         let umask = u32::from_str_radix(umask.to_str().unwrap(), 8).unwrap();
         #[cfg(target_os = "macos")]
         dim_agent_capabilities::workspace_tools::files::install_process_umask();
@@ -413,6 +414,26 @@ async fn a_new_file_takes_the_process_umask() {
             "a new file takes the mode of a direct creation under umask {umask:03o}"
         );
         assert_eq!(mode, 0o666 & !umask, "under umask {umask:03o}");
+        workspace.put("existing", b"before\n");
+        fs::set_permissions(
+            workspace.path("existing"),
+            fs::Permissions::from_mode(0o640),
+        )
+        .unwrap();
+        ok(&workspace.read(&reads, "existing").await);
+        ok(&workspace
+            .call(
+                &reads,
+                "write",
+                json!({"path": "existing", "content": "after\n"}),
+            )
+            .await);
+        assert_eq!(workspace.bytes("existing"), b"after\n");
+        assert_eq!(
+            mode_of(&workspace.path("existing")),
+            0o640,
+            "a replacement keeps the original mode under umask {umask:03o}"
+        );
         return;
     }
     for umask in ["022", "002", "300", "700"] {
