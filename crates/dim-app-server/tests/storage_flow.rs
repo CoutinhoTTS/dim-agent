@@ -2572,7 +2572,6 @@ async fn a_row_reload_resolves_the_new_tree_reporting_identity() {
             Ok(Box::new(CaptureTree::new(names, captured.clone())?))
         }),
     );
-    builder.startup_timeout(Duration::from_secs(1));
     builder.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(store.clone()));
     let agent = MinimalHost::start(&builder).await.unwrap();
     let session = settled(
