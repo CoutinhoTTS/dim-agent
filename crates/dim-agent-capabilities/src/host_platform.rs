@@ -225,7 +225,13 @@ const ENVIRONMENT: &[&str] = &[
 
 /// Process facts and the source of the exec shell preference.
 #[derive(Clone)]
+pub(crate) enum ExecutionTask {
+    Command(Arc<crate::workspace_tools::exec::CommandTask>),
+}
+
+#[derive(Clone)]
 pub struct HostPlatform {
+    mounted: std::sync::Weak<Self>,
     pub home: PathBuf,
     pub os: Os,
     /// Node's `process.arch` name (`arm64`, `x64`), as the TS texts use it.
@@ -238,8 +244,12 @@ pub struct HostPlatform {
     /// The fixed system roots, captured when the platform mounts. The sandbox
     /// and file-access facts read this one list.
     pub platform_roots: Vec<PathBuf>,
+    pub(crate) commands: Arc<std::sync::Mutex<std::collections::HashMap<String, ExecutionTask>>>,
+    pub(crate) command_shutdown: CancellationToken,
+    pub(crate) command_workers: tokio_util::task::TaskTracker,
     shell: Arc<Mutex<ResolvedShell>>,
     shell_file: Option<(Arc<FileStorage>, usize, PathBuf)>,
+    command_files: Option<(Arc<FileStorage>, usize, PathBuf)>,
     pub(crate) execution: Option<Arc<ExecutionSettingsHost>>,
     /// The installed runtimes a started process finds at the end of its
     /// `PATH`; `None` is a host that installs none.
@@ -294,6 +304,7 @@ pub enum SandboxBackend {
 
 /// What a consumer keeps for a process that
 /// [`HostPlatform::prepare_isolated_process`] sandboxed.
+#[derive(Clone, Copy)]
 pub(crate) struct Isolation;
 
 impl Isolation {
@@ -345,6 +356,91 @@ impl Drop for TemporaryDirectory {
     }
 }
 
+/// A request to start a command on this execution node.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SpawnRequest {
+    pub task_id: String,
+    pub command: String,
+    pub cwd: PathBuf,
+    pub workspace: PathBuf,
+    pub roots: Vec<PathBuf>,
+    pub output_dir: PathBuf,
+    pub timeout_ms: Option<u64>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpawnReply {
+    pub task_id: String,
+    pub output_path: PathBuf,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TaskRequest {
+    pub task_id: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WaitRequest {
+    pub task_id: String,
+    pub timeout_ms: Option<u64>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OutputRequest {
+    pub task_id: String,
+    pub cursor: Option<u64>,
+    pub limit: Option<u64>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OutputPathReply {
+    pub output_path: String,
+}
+
+#[derive(Debug, thiserror::Error, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HostPlatformError {
+    #[error("invalid request: {0}")]
+    Invalid(String),
+    #[error("unknown execution task")]
+    TaskUnknown,
+    #[error("execution task already exists")]
+    TaskExists,
+    #[error("execution task is still running")]
+    TaskRunning,
+    #[error("output unavailable: {0}")]
+    OutputUnavailable(String),
+    #[error("cancelled")]
+    Cancelled,
+    #[error("execution host closed")]
+    Closed,
+    #[error("{0}")]
+    Failed(String),
+}
+
+impl From<crate::workspace_tools::background::OutputPageError> for HostPlatformError {
+    fn from(error: crate::workspace_tools::background::OutputPageError) -> Self {
+        Self::OutputUnavailable(error.to_string())
+    }
+}
+
+impl From<crate::workspace_tools::exec::CaptureError> for HostPlatformError {
+    fn from(error: crate::workspace_tools::exec::CaptureError) -> Self {
+        match error {
+            crate::workspace_tools::exec::CaptureError::Unknown => Self::TaskUnknown,
+            crate::workspace_tools::exec::CaptureError::Unavailable(reason) => {
+                Self::OutputUnavailable(reason)
+            }
+        }
+    }
+}
+
 /// The process facts the `hostPlatform.info` operation answers.
 #[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -383,6 +479,11 @@ impl HostPlatform {
                 status: shell,
             })),
             shell_file: None,
+            command_files: None,
+            mounted: std::sync::Weak::new(),
+            commands: Arc::default(),
+            command_shutdown: CancellationToken::new(),
+            command_workers: tokio_util::task::TaskTracker::new(),
             execution: None,
             toolchain: None,
         })
@@ -416,7 +517,7 @@ impl HostPlatform {
     }
     /// Starts `spec` as the root of its own process tree.
     #[service(skip)]
-    pub fn spawn(&self, spec: ProcessSpec) -> io::Result<ProcessTree> {
+    pub fn spawn_tree(&self, spec: ProcessSpec) -> io::Result<ProcessTree> {
         ProcessTree::spawn(Self::command(&spec, Stdio::null()))
     }
     /// [`Self::spawn`] with `stdin` written to the child's standard input,
@@ -536,6 +637,133 @@ impl HostPlatform {
             platform_roots: self.platform_roots.clone(),
             backend: self.sandbox_backend(),
             exec_shell: self.exec_shell().await,
+        }
+    }
+
+    fn arc(&self) -> Result<Arc<Self>, HostPlatformError> {
+        self.mounted.upgrade().ok_or(HostPlatformError::Closed)
+    }
+
+    /// Starts a command on this node and returns the task id and output path.
+    pub async fn spawn(&self, request: SpawnRequest) -> Result<SpawnReply, HostPlatformError> {
+        if request.task_id.is_empty()
+            || request.task_id.contains(['/', '\\', '\0', ':'])
+            || matches!(request.task_id.as_str(), "." | "..")
+        {
+            return Err(HostPlatformError::Invalid(
+                "taskId must be a single filename component".into(),
+            ));
+        }
+        if !request.cwd.is_absolute()
+            || !request.workspace.is_absolute()
+            || !request.output_dir.is_absolute()
+            || request.roots.iter().any(|root| !root.is_absolute())
+        {
+            return Err(HostPlatformError::Invalid(
+                "execution paths must be absolute".into(),
+            ));
+        }
+        if !tokio::fs::metadata(&request.cwd)
+            .await
+            .is_ok_and(|metadata| metadata.is_dir())
+        {
+            return Err(HostPlatformError::Invalid(
+                "working directory not found".into(),
+            ));
+        }
+        let mut roots = request.roots;
+        if !roots.contains(&request.workspace) {
+            roots.push(request.workspace.clone());
+        }
+        let (spec, _) = self
+            .build_process_spec(&request.command, &request.cwd)
+            .await
+            .map_err(|error| {
+                HostPlatformError::Failed(format!("{}: {}", error.code, error.reason))
+            })?;
+        let owner = self.arc()?;
+        let process = owner
+            .start_command(
+                &request.task_id,
+                spec,
+                &roots,
+                &request.output_dir,
+                request.timeout_ms,
+            )
+            .await
+            .map_err(|error| {
+                HostPlatformError::Failed(format!("{}: {}", error.code, error.reason))
+            })?;
+        Ok(SpawnReply {
+            task_id: request.task_id,
+            output_path: process.retain_task(),
+        })
+    }
+
+    /// Waits for a task's terminal record; `timeoutMs` bounds the wait.
+    pub async fn wait(&self, request: WaitRequest) -> Result<serde_json::Value, HostPlatformError> {
+        let task = self.command_task(&request.task_id)?;
+        Ok(task.wait(request.timeout_ms).await)
+    }
+
+    /// Kills a task's process tree.
+    pub async fn kill(&self, request: TaskRequest) -> Result<(), HostPlatformError> {
+        let task = self.command_task(&request.task_id)?;
+        task.terminate()
+            .await
+            .map_err(|error| HostPlatformError::Failed(error.to_string()))
+    }
+
+    /// Releases an ended task's record.
+    pub async fn settle(&self, request: TaskRequest) -> Result<(), HostPlatformError> {
+        let task = self.command_task(&request.task_id)?;
+        if !task.ended() {
+            return Err(HostPlatformError::TaskRunning);
+        }
+        self.settle_command(&request.task_id, &task);
+        Ok(())
+    }
+
+    /// Reads a page of a task's captured output.
+    pub async fn output(
+        &self,
+        request: OutputRequest,
+    ) -> Result<crate::workspace_tools::background::OutputPage, HostPlatformError> {
+        let task = self.command_task(&request.task_id)?;
+        let limit = request.limit.unwrap_or(64 * 1024).clamp(1, 4 * 1024 * 1024) as usize;
+        task.page(request.cursor.unwrap_or(0), limit)
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Writes the captured output to the task's log file and returns its path.
+    pub async fn retain_output(
+        &self,
+        request: TaskRequest,
+    ) -> Result<OutputPathReply, HostPlatformError> {
+        let output_path = self.retain_output_by_id(&request.task_id).await?;
+        Ok(OutputPathReply { output_path })
+    }
+
+    /// Reads the bounded live tail of a task.
+    pub async fn tail(
+        &self,
+        request: TaskRequest,
+    ) -> Result<crate::workspace_tools::exec::OutputTail, HostPlatformError> {
+        self.tail_by_id(&request.task_id).await.map_err(Into::into)
+    }
+    /// Resolves the persistent shell: bash, zsh, pwsh, or Windows PowerShell.
+    /// Other shells fall back per the platform rules.
+    pub async fn persistent_shell(&self) -> ShellStatus {
+        match self.exec_shell().await {
+            ShellStatus::Available(runtime) => match runtime.edition {
+                ShellEdition::Bash
+                | ShellEdition::Zsh
+                | ShellEdition::Pwsh
+                | ShellEdition::WindowsPowershell => ShellStatus::Available(runtime),
+                _ => self.fallback_persistent_shell(),
+            },
+            ShellStatus::Unavailable { .. } => self.fallback_persistent_shell(),
         }
     }
 }
@@ -925,7 +1153,9 @@ fn git_bash_cygpath(bash: &Path) -> Option<PathBuf> {
 
 /// Runs a product helper and returns its stdout.
 async fn capture(platform: &HostPlatform, spec: ProcessSpec) -> Result<String, String> {
-    let mut tree = platform.spawn(spec).map_err(|error| error.to_string())?;
+    let mut tree = platform
+        .spawn_tree(spec)
+        .map_err(|error| error.to_string())?;
     let mut stdout = tree.stdout();
     drop(tree.stderr());
     let mut bytes = vec![];
@@ -1038,6 +1268,8 @@ pub struct HostPlatformConfig {
     /// `exec-shell.json`: FileStorage root index and relative path. `None`
     /// means the profile has no home; the shell is resolved automatically.
     pub exec_shell_file: Option<(usize, PathBuf)>,
+    /// Storage root and relative directory holding retained command logs.
+    pub command_files: Option<(usize, PathBuf)>,
     /// The user home the platform reports. `None` uses the process home; a
     /// host that runs with an isolated home sets it, so every capability
     /// resolves `~` and the user Skill root inside that home.
@@ -1069,7 +1301,7 @@ impl HostPlatformPlugin {
 }
 /// File storage only when a local configuration source is configured.
 fn uses_storage(config: &HostPlatformConfig) -> bool {
-    config.exec_shell_file.is_some()
+    config.exec_shell_file.is_some() || config.command_files.is_some()
 }
 impl DynPlugin for HostPlatformPlugin {
     fn name(&self) -> &str {
@@ -1107,12 +1339,34 @@ impl DynPlugin for HostPlatformPlugin {
                 platform.home = home.clone();
             }
             platform.shell_file = shell_file;
+            platform.command_files = self
+                .config
+                .command_files
+                .clone()
+                .zip(storage.clone())
+                .map(|((root, directory), files)| (files, root, directory));
             let execution = ctx.require_at(&self.execution)?;
             platform.execution = Some(execution.clone());
             let toolchain = ctx.require_at(&self.toolchain)?;
             platform.toolchain = Some(toolchain.clone());
             platform.shell.lock().await.config = config;
-            ctx.provide_as::<HostPlatform>(Arc::new(platform))?;
+            platform.command_shutdown = ctx.cancellation_token().child_token();
+            let platform = Arc::new_cyclic(|mounted| {
+                platform.mounted = mounted.clone();
+                platform
+            });
+            let owner = platform.clone();
+            ctx.effect(move || async move {
+                {
+                    let _admission = owner.commands.lock().unwrap();
+                    owner.command_shutdown.cancel();
+                }
+                owner.command_workers.close();
+                owner.command_workers.wait().await;
+                owner.commands.lock().unwrap().clear();
+                Ok(())
+            })?;
+            ctx.provide_as::<HostPlatform>(platform)?;
             Ok(Effect::Done)
         })
     }
@@ -2231,21 +2485,6 @@ async fn wait_job_exit(pid: u32) -> io::Result<()> {
 }
 
 impl HostPlatform {
-    /// Resolves the persistent shell: bash, zsh, pwsh, or Windows PowerShell.
-    /// Other shells fall back per the platform rules.
-    pub async fn persistent_shell(&self) -> ShellStatus {
-        match self.exec_shell().await {
-            ShellStatus::Available(runtime) => match runtime.edition {
-                ShellEdition::Bash
-                | ShellEdition::Zsh
-                | ShellEdition::Pwsh
-                | ShellEdition::WindowsPowershell => ShellStatus::Available(runtime),
-                _ => self.fallback_persistent_shell(),
-            },
-            ShellStatus::Unavailable { .. } => self.fallback_persistent_shell(),
-        }
-    }
-
     fn fallback_persistent_shell(&self) -> ShellStatus {
         if cfg!(windows) {
             for name in ["pwsh.exe", "powershell.exe"] {
@@ -2362,6 +2601,114 @@ fn find_executable(name: &str) -> Option<PathBuf> {
             return Some(candidate);
         }
     }
+    None
+}
+
+impl HostPlatform {
+    pub(crate) async fn retained_output_page(
+        &self,
+        path: &std::path::Path,
+        cursor: u64,
+        limit: usize,
+    ) -> Result<
+        crate::workspace_tools::background::OutputPage,
+        crate::workspace_tools::background::OutputPageError,
+    > {
+        use crate::workspace_tools::{
+            background::{OutputPageError, PAGE_CHAR_TRAILING_BYTES, decode_page},
+            exec::OUTPUT_FILE_BYTE_LIMIT,
+        };
+        use std::io::SeekFrom;
+        use tokio::io::{AsyncReadExt, AsyncSeekExt};
+        if let Some((files, root, _)) = &self.command_files
+            && let Ok(relative) = path.strip_prefix(
+                files
+                    .root_path(*root)
+                    .map_err(|_| OutputPageError::Unavailable)?,
+            )
+        {
+            let file = files
+                .path(*root, relative)
+                .map_err(|_| OutputPageError::Unavailable)?;
+            let cancel = CancellationToken::new();
+            let _guard = cancel.clone().drop_guard();
+            let reader = files
+                .open_read(&file, &cancel)
+                .await
+                .map_err(|_| OutputPageError::Unavailable)?;
+            let size = reader
+                .len()
+                .saturating_sub(cursor)
+                .min((limit + PAGE_CHAR_TRAILING_BYTES) as u64) as usize;
+            let mut bytes = Vec::with_capacity(size);
+            while bytes.len() < size {
+                let chunk = reader
+                    .read_at(cursor + bytes.len() as u64, size - bytes.len(), &cancel)
+                    .await
+                    .map_err(|_| OutputPageError::Unavailable)?;
+                if chunk.is_empty() {
+                    break;
+                }
+                bytes.extend_from_slice(&chunk);
+            }
+            return decode_page(
+                &bytes,
+                cursor,
+                limit,
+                reader.len() >= crate::workspace_tools::exec::OUTPUT_FILE_BYTE_LIMIT,
+            );
+        }
+        let mut file = tokio::fs::File::open(path)
+            .await
+            .map_err(|_| OutputPageError::Unavailable)?;
+        file.seek(SeekFrom::Start(cursor))
+            .await
+            .map_err(|_| OutputPageError::Unavailable)?;
+        let mut buffer = vec![0u8; limit + PAGE_CHAR_TRAILING_BYTES];
+        let mut read = 0;
+        while read < buffer.len() {
+            match file.read(&mut buffer[read..]).await {
+                Ok(0) => break,
+                Ok(bytes) => read += bytes,
+                Err(_) => return Err(OutputPageError::Unavailable),
+            }
+        }
+        let truncated = file
+            .metadata()
+            .await
+            .map(|m| m.len() >= OUTPUT_FILE_BYTE_LIMIT)
+            .unwrap_or(false);
+        decode_page(&buffer[..read], cursor, limit, truncated)
+    }
+}
+
+/// The name of the signal that ended a process, as `exec` reports it.
+#[cfg(unix)]
+pub fn signal_name(status: ExitStatus) -> Option<String> {
+    use std::os::unix::process::ExitStatusExt;
+    let signal = status.signal()?;
+    let name = match signal {
+        libc::SIGHUP => "SIGHUP",
+        libc::SIGINT => "SIGINT",
+        libc::SIGQUIT => "SIGQUIT",
+        libc::SIGILL => "SIGILL",
+        libc::SIGTRAP => "SIGTRAP",
+        libc::SIGABRT => "SIGABRT",
+        libc::SIGBUS => "SIGBUS",
+        libc::SIGFPE => "SIGFPE",
+        libc::SIGKILL => "SIGKILL",
+        libc::SIGUSR1 => "SIGUSR1",
+        libc::SIGSEGV => "SIGSEGV",
+        libc::SIGUSR2 => "SIGUSR2",
+        libc::SIGPIPE => "SIGPIPE",
+        libc::SIGALRM => "SIGALRM",
+        libc::SIGTERM => "SIGTERM",
+        _ => return Some(format!("SIG{signal}")),
+    };
+    Some(name.into())
+}
+#[cfg(windows)]
+pub fn signal_name(_: ExitStatus) -> Option<String> {
     None
 }
 
@@ -2557,7 +2904,7 @@ mod tests {
                 std::fs::canonicalize(&path).unwrap_or(path)
             })
             .collect();
-        let mut tree = platform.spawn(spec).unwrap();
+        let mut tree = platform.spawn_tree(spec).unwrap();
         tree.hold(temporary);
         let mut stdout = tree.stdout();
         let mut stderr = tree.stderr();

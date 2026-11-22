@@ -186,7 +186,7 @@ impl HostPlatform {
         if cancel.is_cancelled() {
             return Err(ConfinedError::Cancelled);
         }
-        let mut tree = self.spawn(process).map_err(ConfinedError::Spawn)?;
+        let mut tree = self.spawn_tree(process).map_err(ConfinedError::Spawn)?;
         let stdout = tree.stdout();
         let stderr = tree.stderr();
         let outcome = {

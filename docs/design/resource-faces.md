@@ -19,7 +19,7 @@ Resource and state operations use these public services:
 
 | Face | Operations | Provided by | Issue |
 | --- | --- | --- | --- |
-| `hostPlatform` | `info`, `execShell`, `sandboxBackend`, `execRoot` | the process owner | #1295 |
+| `hostPlatform` | `info`, `execShell`, `persistentShell`, `sandboxBackend`, `execRoot`, `spawn`, `wait`, `kill`, `settle`, `output`, `retainOutput`, `tail` | the process owner | #1295 |
 | `fsHost` | tool family: `resolve`, `read`, `write`, `edit`, `glob`, `grep`, `mentions`; storage family: `stat`, `readBytes`, `openRead`, `readAt`, `closeRead`, `lock`, `unlock`, `backup`, `createDirectory`, `replace`, `list`, `remove` | the file-operations owner | #1297 |
 | `store` | Session-row repository operations (§5.2) | the process state owner | #1298 |
 | `timelineStore` | Timeline operations and completion notifications (§5.1) | the Session state owner | #1298 |
@@ -100,20 +100,21 @@ The process operations are split by their owners:
 
 | Service | Scope | Public operations | Owner document |
 | --- | --- | --- | --- |
-| `hostPlatform` | process | `info`, `execShell`, `sandboxBackend`, `execRoot` | [HostPlatform](../architecture/rust-agent/plugins/HostPlatform.md) |
+| `hostPlatform` | process | `info`, `execShell`, `persistentShell`, `sandboxBackend`, `execRoot`, `spawn`, `wait`, `kill`, `settle`, `output`, `retainOutput`, `tail` | [HostPlatform](../architecture/rust-agent/plugins/HostPlatform.md) |
 | `toolHost` | session | `execute` | [tool contributions §2.1](../architecture/rust-agent/tool-contributions.md#21-宿主工具的-toolhost-数据面) |
 | `backgroundExec` | branch | `output`, `outputPage`, `wait`, `stop` | [WorkspaceTools data face](../architecture/rust-agent/plugins/WorkspaceTools.md#data-face) |
 | `sessionMethods.shell` / `ShellSession` | session, branch | the shell operations | [ShellInput](../architecture/rust-agent/plugins/ShellInput.md) |
 
-`hostPlatform`'s handle methods (`spawn`, `spawn_with_stdin`, `spawn_pty`, `build_process_spec`,
-`child_path`) stay `#[service(skip)]`; they carry process handles and cannot cross.
-`backgroundExec.start` stays skip too: it takes the live `ExecProcess`, and the cross-language
-start entry is `toolHost.execute` with the `exec` tool. `configured` and `confined` remain Rust
-calls until a foreign caller needs them; `removeOutputDirectory` is SessionStore's Rust call.
+`hostPlatform`'s handle methods (`spawn_tree`, `spawn_with_stdin`, `spawn_pty`,
+`build_process_spec`, `child_path`) stay `#[service(skip)]`; they carry process handles and cannot
+cross. Stage 1 serves the command task operations on `hostPlatform`: `spawn` returns a task id and
+the process/output state stays with the owner; `wait`, `kill`, `settle`, `output`, `retainOutput`
+and `tail` work by that id. `WorkspaceTools` and `backgroundExec` use the task id; the branch keeps
+the task record and the facts. `shell`/`write`/`resize` follow in Stage 2; `configured` and
+`confined` in Stage 3.
 
-No process or PTY state moves between services. `WorkspaceTools` keeps the spawn and hands the
-live process to `backgroundExec`; `ShellSession` keeps its PTY. The task record stays with the
-branch, the process with the service that owns it. Cancellation is the existing
+The command process and output file are owned by `HostPlatform`; the branch keeps the task record
+and writes the facts. `ShellSession` keeps its PTY until Stage 2. Cancellation is the existing
 `cancelled: CancelledFn` parameter (`toolHost.execute` is the shape); it is not a separate
 `cancel` operation and carries no `callId`.
 

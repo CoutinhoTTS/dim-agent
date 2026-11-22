@@ -107,7 +107,7 @@ async fn spawn_isolates_the_environment_and_terminate_releases_the_tree() {
     let cwd = std::env::temp_dir();
 
     let mut tree = platform
-        .spawn(ProcessSpec {
+        .spawn_tree(ProcessSpec {
             executable: "/bin/sh".into(),
             args: vec!["-c".into(), "env; cat".into()],
             cwd: cwd.clone(),
@@ -122,7 +122,7 @@ async fn spawn_isolates_the_environment_and_terminate_releases_the_tree() {
 
     let spawn_tree = || {
         platform
-            .spawn(ProcessSpec {
+            .spawn_tree(ProcessSpec {
                 executable: "/bin/sh".into(),
                 args: vec!["-c".into(), "sleep 100 & echo $!; wait".into()],
                 cwd: cwd.clone(),
@@ -154,7 +154,7 @@ async fn spawn_isolates_the_environment_and_terminate_releases_the_tree() {
 
     assert!(
         platform
-            .spawn(ProcessSpec {
+            .spawn_tree(ProcessSpec {
                 executable: "/bin/sh".into(),
                 args: vec!["-c".into(), "true".into()],
                 cwd: cwd.join("dim-missing-cwd-for-spawn"),
@@ -233,6 +233,7 @@ async fn unchanged_shell_preferences_reuse_detection_and_edits_recover() {
                 execution: names.key().unwrap(),
                 toolchain: names.key().unwrap(),
                 exec_shell_file: Some((0, "exec-shell.json".into())),
+                command_files: None,
                 home: None,
             },
         )
@@ -466,7 +467,7 @@ async fn a_confined_helper_reads_its_grants_and_writes_only_its_directory() {
     let has_home = std::env::var_os("HOME").is_some();
 
     let mut control = platform
-        .spawn(ProcessSpec {
+        .spawn_tree(ProcessSpec {
             executable: "/bin/sh".into(),
             args: vec!["-c".into(), script.clone().into()],
             cwd: write.clone(),
@@ -541,7 +542,7 @@ async fn a_confined_helper_reads_its_grants_and_writes_only_its_directory() {
         "if exec 3<>/dev/tcp/127.0.0.1/{port} 2>/dev/null; then echo tcp=yes; else echo tcp=no; fi\n"
     );
     let mut control = platform
-        .spawn(ProcessSpec {
+        .spawn_tree(ProcessSpec {
             executable: bash.clone(),
             args: vec!["-c".into(), probe.clone().into()],
             cwd: write.clone(),
@@ -1156,7 +1157,7 @@ async fn an_exec_resolves_a_command_only_the_toolchain_source_provides() {
         .build_process_spec("command -v fixturetool", &base)
         .await
         .unwrap();
-    let mut tree = platform.spawn(spec).unwrap();
+    let mut tree = platform.spawn_tree(spec).unwrap();
     let mut output = String::new();
     tree.stdout().read_to_string(&mut output).await.unwrap();
     assert!(tree.wait().await.unwrap().success());
@@ -1172,7 +1173,7 @@ async fn an_exec_resolves_a_command_only_the_toolchain_source_provides() {
         .build_process_spec("command -v fixturetool", &base)
         .await
         .unwrap();
-    let mut tree = platform.spawn(spec).unwrap();
+    let mut tree = platform.spawn_tree(spec).unwrap();
     let mut output = String::new();
     tree.stdout().read_to_string(&mut output).await.unwrap();
     assert!(tree.wait().await.unwrap().success());
@@ -1206,4 +1207,91 @@ async fn the_host_platform_service_answers_info() {
             .json()
             .unwrap();
     assert_eq!(reply, serde_json::to_value(platform.info().await).unwrap());
+}
+
+#[tokio::test]
+async fn the_host_platform_service_starts_and_waits_for_a_command() {
+    let dir = std::env::temp_dir().join(unique("dim-host-service"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let root = rutis::Ctx::root_with(tokio::runtime::Handle::current());
+    let catalog = dim_agent_capabilities::catalog();
+    let build = Default::default();
+    let names = dim_agent_runtime::Names::copy(&catalog, &build);
+    let _execution = root
+        .provide(ExecutionSettingsHost::fixed(Default::default()))
+        .unwrap();
+    let _toolchain = root.provide(ToolchainSourceHost::fixed(vec![])).unwrap();
+    let plugin = root.plugin(
+        HostPlatformPlugin::new(
+            &names,
+            HostPlatformConfig {
+                execution: names.key().unwrap(),
+                toolchain: names.key().unwrap(),
+                exec_shell_file: None,
+                command_files: None,
+                home: Some(dir.clone()),
+            },
+        )
+        .unwrap(),
+    );
+    (&plugin).await.unwrap();
+    let face = root
+        .get_at::<dyn rutis_bridge::session::HostDispatch>(&rutis_bridge::session::host_key(
+            "hostPlatform",
+        ))
+        .unwrap();
+    let invoke = |method: &'static str, request: serde_json::Value| {
+        let face = face.clone();
+        async move {
+            rutis_bridge::session::settle(
+                face.invoke(method, serde_json::json!([request]).into())
+                    .unwrap(),
+            )
+            .await?
+            .json()
+        }
+    };
+    let path = dir.to_string_lossy().into_owned();
+    let spawn = invoke(
+        "spawn",
+        serde_json::json!({
+            "taskId": "service-task",
+            "command": "printf hi",
+            "cwd": path,
+            "workspace": path,
+            "roots": [],
+            "outputDir": path,
+            "timeoutMs": 10000
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(spawn["taskId"], "service-task");
+    let terminal = invoke("wait", serde_json::json!({"taskId": "service-task"}))
+        .await
+        .unwrap();
+    assert_eq!(terminal["status"], "exited");
+    assert_eq!(terminal["preview"], "hi");
+    assert_eq!(terminal["outputPath"], spawn["outputPath"]);
+    let page = invoke(
+        "output",
+        serde_json::json!({"taskId": "service-task", "limit": 16}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(page["text"], "hi");
+    invoke("settle", serde_json::json!({"taskId": "service-task"}))
+        .await
+        .unwrap();
+    let missing = rutis_bridge::session::settle(
+        face.invoke(
+            "wait",
+            serde_json::json!([{"taskId": "service-task"}]).into(),
+        )
+        .unwrap(),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(missing.code(), Some("task_unknown"));
+    std::fs::remove_dir_all(dir).unwrap();
 }

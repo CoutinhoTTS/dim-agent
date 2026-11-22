@@ -575,6 +575,7 @@ releases no lock across a read: the page opens the registered file itself.
 | `B:Dispatcher` | Replay commands, then consume command ends and interrupts in dispatch order. |
 | `B:Timeline` | Commit ends/notices, recovered ones included. |
 | `B:TimelineIdentity` | The branch whose entry this part registers. |
+| `P:HostPlatform` | Read retained task output and stop a running task. |
 | `S:GuideEntries` | Register the exec notification's entry for this branch, until this part unloads. |
 | `S:SessionLifecycle` | `hold()`: each running task holds the Session, so an idle unload waits for it. |
 
@@ -638,7 +639,7 @@ and Session isolation.
 | 项 | 值 |
 | --- | --- |
 | 作用域 | 分支 |
-| 注入 | `B:Dispatcher`、`B:Timeline`、`B:TimelineIdentity`、`S:GuideEntries`、`S:SessionLifecycle` |
+| 注入 | `B:Dispatcher`、`B:Timeline`、`B:TimelineIdentity`、`P:HostPlatform`、`S:GuideEntries`、`S:SessionLifecycle` |
 | 提供 | `B:BackgroundExec`、`B:dyn HostDispatch#backgroundExec` |
 | 被注入于 | — |
 <!-- /generated -->

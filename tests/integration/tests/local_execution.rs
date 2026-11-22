@@ -162,6 +162,7 @@ fn configured_platform(home: PathBuf) -> impl FnOnce(&mut AgentBuilder) {
                     execution: names.key()?,
                     toolchain: names.key()?,
                     exec_shell_file: Some((0, "exec-shell.json".into())),
+                    command_files: None,
                     home: None,
                 },
             )?))
@@ -612,7 +613,7 @@ async fn exec_and_external_shell_callers_use_live_shell_preferences() {
             .unwrap();
         assert_eq!(spec.executable, PathBuf::from(executable));
         assert_eq!(shell.executable_path, spec.executable);
-        let mut process = platform.spawn(spec).unwrap();
+        let mut process = platform.spawn_tree(spec).unwrap();
         let mut output = Vec::new();
         process.stdout().read_to_end(&mut output).await.unwrap();
         assert!(process.wait().await.unwrap().success());

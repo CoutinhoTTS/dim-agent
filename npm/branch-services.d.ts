@@ -183,7 +183,81 @@ export type HostInfo = {
   execShell: ShellStatus
 }
 
-/** Process facts and the source of the exec shell preference. */
+/** A request to start a command on this execution node. */
+export type SpawnRequest = {
+  taskId: string
+  command: string
+  cwd: string
+  workspace: string
+  roots: string[]
+  outputDir: string
+  timeoutMs?: number | bigint | null
+}
+
+export type SpawnReply = {
+  taskId: string
+  outputPath: string
+}
+
+export type HostPlatformError =
+  | { invalid: string }
+  | "task_unknown"
+  | "task_exists"
+  | "task_running"
+  | { output_unavailable: string }
+  | "cancelled"
+  | "closed"
+  | { failed: string }
+
+export type WaitRequest = {
+  taskId: string
+  timeoutMs?: number | bigint | null
+}
+
+export type TaskRequest = {
+  taskId: string
+}
+
+export type OutputRequest = {
+  taskId: string
+  cursor?: number | bigint | null
+  limit?: number | bigint | null
+}
+
+/**
+ * One page of a task's registered output file, as
+ * `session.exec.output.page` answers it.
+ */
+export type OutputPage = {
+  /** The page's text, sanitized like the tail preview. */
+  text: string
+  /**
+   * The file bytes this page consumed; a client's next cursor is always
+   * `cursor + bytes`. `text` can be shorter because sanitization drops
+   * control characters.
+   */
+  bytes: number | bigint
+  /**
+   * Present when the read found at least `limit` bytes, so the client may
+   * continue immediately; always `cursor + bytes`. Absent on a shorter or
+   * empty page, which does not mean the file ended: the client advances by
+   * `bytes` and asks again.
+   */
+  nextCursor?: number | bigint | null
+  /** Whether the output file reached `OUTPUT_FILE_BYTE_LIMIT`. */
+  truncated: boolean
+}
+
+export type OutputPathReply = {
+  outputPath: string
+}
+
+export type OutputTail = {
+  text: string
+  totalBytes: number | bigint
+  truncated: boolean
+}
+
 export interface HostPlatform {
   /**
    * Reads the configured exec shell for this invocation without reloading
@@ -199,6 +273,46 @@ export interface HostPlatform {
   execRoot(): Promise<string>
   /** The process facts a consumer needs, in one call. */
   info(): Promise<HostInfo>
+  /**
+   * Starts a command on this node and returns the task id and output path.
+   * @throws {HostPlatformErrorThrown}
+   */
+  spawn(request: SpawnRequest): Promise<SpawnReply>
+  /**
+   * Waits for a task's terminal record; `timeoutMs` bounds the wait.
+   * @throws {HostPlatformErrorThrown}
+   */
+  wait(request: WaitRequest): Promise<import('./plugin.js').BridgeJsonValue>
+  /**
+   * Kills a task's process tree.
+   * @throws {HostPlatformErrorThrown}
+   */
+  kill(request: TaskRequest): Promise<void>
+  /**
+   * Releases an ended task's record.
+   * @throws {HostPlatformErrorThrown}
+   */
+  settle(request: TaskRequest): Promise<void>
+  /**
+   * Reads a page of a task's captured output.
+   * @throws {HostPlatformErrorThrown}
+   */
+  output(request: OutputRequest): Promise<OutputPage>
+  /**
+   * Writes the captured output to the task's log file and returns its path.
+   * @throws {HostPlatformErrorThrown}
+   */
+  retainOutput(request: TaskRequest): Promise<OutputPathReply>
+  /**
+   * Reads the bounded live tail of a task.
+   * @throws {HostPlatformErrorThrown}
+   */
+  tail(request: TaskRequest): Promise<OutputTail>
+  /**
+   * Resolves the persistent shell: bash, zsh, pwsh, or Windows PowerShell.
+   * Other shells fall back per the platform rules.
+   */
+  persistentShell(): Promise<ShellStatus>
 }
 
 export type ImageSourceType = "base64" | "url" | "file"
@@ -774,30 +888,6 @@ export type TaskError =
   | /** Required task facts could not be read. */ { read: [] }
   | /** No matching task or live output on this branch. */ "unknown"
   | /** This instance was unloaded. */ "closed"
-
-/**
- * One page of a task's registered output file, as
- * `session.exec.output.page` answers it.
- */
-export type OutputPage = {
-  /** The page's text, sanitized like the tail preview. */
-  text: string
-  /**
-   * The file bytes this page consumed; a client's next cursor is always
-   * `cursor + bytes`. `text` can be shorter because sanitization drops
-   * control characters.
-   */
-  bytes: number | bigint
-  /**
-   * Present when the read found at least `limit` bytes, so the client may
-   * continue immediately; always `cursor + bytes`. Absent on a shorter or
-   * empty page, which does not mean the file ended: the client advances by
-   * `bytes` and asks again.
-   */
-  nextCursor?: number | bigint | null
-  /** Whether the output file reached `OUTPUT_FILE_BYTE_LIMIT`. */
-  truncated: boolean
-}
 
 /** Why one paged read of a task's registered output file answered nothing. */
 export type OutputPageError =
@@ -1430,6 +1520,9 @@ export type ErrorThrown = RustError<"Error", string, undefined>
 
 /** What a method returning `Err(HostError)` throws. */
 export type HostErrorThrown = RustError<"HostError", "Failed" | "Cancelled", undefined>
+
+/** What a method returning `Err(HostPlatformError)` throws. */
+export type HostPlatformErrorThrown = RustError<"HostPlatformError", "invalid" | "task_unknown" | "task_exists" | "task_running" | "output_unavailable" | "cancelled" | "closed" | "failed", HostPlatformError>
 
 /** What a method returning `Err(ListenAddressesError)` throws. */
 export type ListenAddressesErrorThrown = RustError<"ListenAddressesError", "invalid_path", ListenAddressesError>

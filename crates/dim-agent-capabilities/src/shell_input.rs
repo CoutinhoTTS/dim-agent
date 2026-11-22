@@ -11,6 +11,7 @@
 //! Session (`SessionLifecycle::take_hold`), so an idle unload never ends it.
 use crate::{
     context_block::{element, raw, text},
+    host_platform::signal_name,
     host_platform::{HostPlatform, ProcessTree},
     methods::{
         Interruption, MethodCall, MethodDecl, Progress, RpcError, SessionMethods, params, reply,
@@ -18,7 +19,7 @@ use crate::{
     prompt_guide::{GuideEntries, GuideEntry, GuideScope},
     timeline_tree::TreeCommands,
     workspace_tools::exec::{
-        OutputSink, bounded_preview, capture_preview, pump, sanitize, signal_name, tail_bytes,
+        OutputSink, bounded_preview, capture_preview, pump, sanitize, tail_bytes,
     },
 };
 use dim_agent_runtime::{
@@ -261,7 +262,7 @@ impl ShellInput {
                 }));
             }
             let hold = self.lifecycle.take_hold().ok_or_else(RpcError::closed)?;
-            let tree = self.platform.spawn(spec).map_err(|error| {
+            let tree = self.platform.spawn_tree(spec).map_err(|error| {
                 refused("spawn_failed", format!("Failed to spawn process: {error}"))
             })?;
             let info = RunInfo {
