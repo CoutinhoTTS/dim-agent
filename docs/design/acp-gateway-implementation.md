@@ -125,7 +125,7 @@ Zed 保持原有启动入口：npm 包的 `dim` 与 `dimcode` 别名指向同一
 | `initialize` | 可接 | 先 `hello {protocolVersion:3, clientKind:"other", clientName:"AcpGateway"}`。按 SDK 协商 ACP 1；记录 client capabilities；读取现有 account discovery/status，按 §4.4 生成真实可执行的 authMethods。initialize 不自动开始登录；无 managed provider 时不强制登录。重复 initialize 拒绝 |
 | `authenticate` | 条件可接 | 仅接受本连接已发布的 agent-type methodId；`account.status` 确认已登录则返回 `{}`，否则走现有 browser begin → 宿主 callback capture → browser complete → status。OAuth 和 token 交换由原插件完成，不由本地 RPC transport 的身份校验代替 |
 | `logout` | 不支持 | 不映射到账户登出，不声明 logout capability |
-| `session/new` | 可接 | 校验绝对 `cwd`，只接受空/缺失 additional directories；按 §8.3 验证 startup config 后，在同一 `session.create {cwd, agentId?, model?, permissionPolicy?}` 中传入 → `session.attach {sessionId}` → 读取 main 固定历史头和 Session methods / permission / adopted model → 按 §4.6 绑定 mcpServers。初始化及初始工具注册完成才返回 id、可用 modes/configOptions |
+| `session/new` | 可接 | 校验绝对 `cwd`，只接受空/缺失 additional directories；按 §8.3 验证 startup config 后，在同一 `session.create {cwd, agentId?, model?, permissionPolicy?, modelPreferences?}` 中传入 → `session.attach {sessionId}` → 读取 main 固定历史头和 Session methods / permission / adopted model → 按 §4.6 绑定 mcpServers。初始化及初始工具注册完成才返回 id、可用 modes/configOptions |
 | `session/load` | 可接 | 从 `session.summaries` 或 `session.list` 获取真实 cwd，检查一致；attach → 固定头 main history 从 0 回放 → 接上 live → 返回。重复 load 复用 runtime，不重复建立订阅；在 prompt 中拒绝重放 |
 | `session/resume` | 可接 | 同 load 的准备和状态恢复，但历史只用于内部关联/去重，不向客户端发送旧消息；先返回，再发送准备期间缓存的真正 live updates |
 | `session/list` | 条件可接 | `session.summaries {agentId?}`；不存在时用 `session.list {agentId?}` 并省略不可得的 updatedAt。按 ACP cwd 在内存过滤；毫秒时间转 ISO 8601。返回完整的一页，不声明原生分页，不制造 nextCursor；非空未知 cursor 报错。原生全量响应超过 frame limit 就报错，不循环扫描凑页 |
@@ -447,7 +447,7 @@ Agent 在 initialize response 的 `agentCapabilities._meta.lody` 按项声明；
 
 Core README 在 capability catalog 中提到 sessionConfig，但固定版本的 `LodyExtensionCapabilities` 未列该字段；实际 DTO 是 `LodySessionMeta.sessionConfig`。首版按明确 metadata DTO 处理，不自创 `sessionConfig:{version:1}` capability。对这个上游文档/类型差异不作兼容字段猜测。
 
-首版计划接入 `sessionHistory` version 2（有界单页）、`compaction`、条件提供的 `forkAtTurn`、后台 exec 的 `tasks:{version:1,background:true}`，以及双向协商的最小 `subagentEvents` 状态流。新会话的 startup config 走已有创建参数。完整 task/subagent 控制、计量和 Goal 不由这些声明隐含获得。
+首版计划接入 `sessionHistory` version 2（有界单页）、`compaction`、条件提供的 `forkAtTurn`、后台 exec 的 `tasks:{version:1,background:true}`，以及双向协商的最小 `subagentEvents` 状态流。新会话的 startup config 走创建参数，恢复和分叉的等价选项走原生配置检查。完整 task/subagent 控制、计量和 Goal 不由这些声明隐含获得。
 
 ### 8.2 逐项映射
 
@@ -467,7 +467,7 @@ Core README 在 capability catalog 中提到 sessionConfig，但固定版本的 
 | `_lody/session/activity_update` / sessionActivity | 有 branch running 和各类后台 facts，没有已接入的完整 requires_action/backgroundTaskCount 投影 | 不支持。不能把 main running=false 当作整个 Session idle |
 | sessionTitle / `_meta.lody.titleSource` | 有标准标题通知；当前 auto/manual 不能证明 generated/fallback，初始化也不能保证每 Session 安装标题插件 | 不声明 title ownership；标准标题照常投影，不拦截 Lody 的 title-agent，不加专用环境变量 |
 | worktreeProject | 没有相同的逻辑项目归属合同 | 不支持；不把 cwd 当 originProjectPath |
-| `_meta.lody.sessionConfig` | session.create 可接 model、modelPreferences、permissionPolicy；attach/fork 没有同等 startup override | new 可接 model 和 mode 选择；显式 modelId 优先于 configOptionValues.model，模型使用本 Gateway 发布的候选映射，不能自行拆 provider id。mode 选择映射到同一 create 的 permissionPolicy.preset。缺 metadata 保持默认。其他配置项、load/resume/fork 的非空覆盖在变更前拒绝；不能先 attach/fork 后 update 冒充建立前采用，见 §8.3 |
+| `_meta.lody.sessionConfig` | create 采用显式配置；checked attach/fork 可核对原生配置 | new 支持 model、mode、effort。load/resume/fork 接受省略或等价配置；不同值在 attach/fork 的原生边界拒绝，见 §8.3 |
 | Lody elicitation metadata | Questions 可表达部分表单字段 | 仅实际 question/options/multiSelect/allowCustom；不声明 answerNotes，不合成 secret/preview/自动应答 |
 | toolName / notice / messagePhase / plan_mode / proposal plan | 标准工具名和真实错误已有；独立计划模式等来源不完整 | 标准 name/title 保留真实工具名；Lody toolName 仅可写 LODY_TOOL_NAMES 的 ImageGeneration/CronCreate/CronDelete/CronList/ScheduleWakeup，且必须有对应真实 flow，不能写任意 native name。notice 只展示真实诊断。messagePhase、独立 boolean plan_mode、提案计划不支持，plan_mode 不得替代 Permission preset |
 | `_dimcode/rewind-files/preview`、`_dimcode/rewind-files`、`_dimcode/reapply-files`、`_dimcode/file-undo-state` | native 没有历史实现中的文件回滚合同 | 不支持，不以 session.fork 冒充文件回滚 |
@@ -476,7 +476,9 @@ Core README 在 capability catalog 中提到 sessionConfig，但固定版本的 
 
 ### 8.3 首版具体接线与生命周期
 
-**Startup config**：在任何 native 写入之前解析 `{version:1,modelId?,configOptionValues}`。接受 model 和 mode 两个选项；未知选项以参数错误拒绝，错误信息及 data.field 指明配置路径。modelId 若存在即为唯一模型选择，否则取 configOptionValues.model；被覆盖的 model 选项不再参与选择，但整个 DTO 仍须合法。通过安全 catalog 和生成 ACP model option 时保留的映射取得 `{provider,modelId}`，放入同一 `session.create` 请求的 `model`。mode 只接受 `read-only`、`workspace-write`、`full-access`，放入同一请求的 `permissionPolicy:{preset:mode}`，沿用原生显式创建策略；未提供 mode 时不发送 permissionPolicy，保留原生默认。两项可以单独提供，不调用 provider.select/update 或创建后的 permission.update，不改共享默认值。显式模型选择要求 catalog 能解析唯一目标，不能退回默认。load/resume/fork 若携带有效非空选择，在 attach/fork 之前拒绝；空配置无副作用。native 建立成功后才从实际响应生成 config options。
+**Startup config**：在 native 写入之前解析 `{version:1,modelId?,configOptionValues}`，支持 model、mode、effort。未知选项返回参数错误，data.field 指明路径。modelId 优先于 configOptionValues.model，省略选项保留原生默认或既有采用值。new 用 Gateway 的候选目录解析唯一显式模型，在同一次 create 传入模型、permissionPolicy.preset 和 modelPreferences.reasoningEffort。effort 由模型所有者校验；provider-default 映射到 [原生创建 clear](model-configuration.md#clearing-one-preference)，要求 daemon 声明该输入。create 以及后续 config options 都沿用模型实际采用值。
+
+load/resume 的非空配置走 [checked attach](contracts/session-access.md#3-flows)，按 main 的发布序号核对；fork 走 [checked fork](appserver/session-deletion-and-fork.md#61-method)，按实际继承的 cut 核对。modelId 用已采用的精确 ID 比较，mode 用许可 preset，effort 用已采用的偏好值；provider-default 断言没有已采用的 effort。不同值返回 session_config_mismatch，缺少相应 daemon feature 则返回 unsupported_control。等价配置不触发 setter 或 Provider 写入。相同检查条件的并发 load/resume 可合并；不同条件走 session_busy。回复使用原生实际配置。空 metadata 的建立与断线恢复沿用普通调用。
 
 **Background exec**：直接消费已提交的 `exec/started` / `exec/ended`，来源是现有 [BackgroundExec](../../crates/dim-agent-capabilities/src/workspace_tools/background.rs)，不另造 task 业务服务。开始时生成与发起工具不同的稳定 ACP toolCallId，并以 parentToolCallId 关联；这样原工具因转后台返回 completed 后，不会被重新改成 in_progress。任务状态开始为 in_progress，原生 completed → completed，failed/cancelled → failed 并保留真实原因，不能造 Core 不存在的 task cancelled 状态。结束通知允许发生在 prompt response 之后；不因此延长或重新打开那个 prompt。固定头回放重建投影并去重，live 后续仅处理新的 sequence。EOF/卸载只丢弃显示关联，不停止原生后台任务。
 
@@ -542,7 +544,7 @@ D 的消融复核：Lody 只是同一投影的 metadata 和受协商约束的通
 5. 审批 allow/deny、其他客户端先答、native cancel 后迟答；Questions 单选/多选/custom/decline、重复 callId 的不同 request、断线和关闭。
 6. RPC 断线/重连/daemon 重启、丢失 mutation reply、lookup unknown 后原请求迟到；确认没有重复 submit/new/fork/attachment/config/approval。
 7. EOF、signal、插件 unload 只 detach；从另一客户端观察 turn 继续。显式 close 才结算 Session；其他 Session/daemon 不受影响。可靠输出队列溢出结束连接而不无声丢消息。
-8. 标准 model/mode 选项反映真实采用状态；无 catalog/Questions/Attachments 的 profile 只失去对应功能。startup config 的显式 modelId 优先，公布的 mode 可回传到新会话建立参数；无 metadata 保留默认，歧义/未知模型、非法 mode/类型、未知选项/version 报错；new 在同一 create 采用，load/resume/fork 非空覆盖在变更前拒绝；不修改 Provider selection 或共享配置。
+8. 标准 model/mode 选项反映真实采用状态；无 catalog/Questions/Attachments 的 profile 只失去对应功能。startup config 的显式 modelId 优先，公布的 mode 可回传到新会话建立参数；无 metadata 保留默认，歧义/未知模型、非法 mode/类型、未知选项/version 报错；new 在同一 create 采用 effort，显式 default 跳过已保存的 effort；load/resume/fork 接受在原生固定位置等价的选项，拒绝不同选项；不修改 Provider selection 或共享配置。
 9. history、终态 turn fork、compaction skipped/failed/cancelled；后台 exec 开始/终态使用独立 toolCallId，原工具转后台完成不等于 task 完成，取消保留真实原因；终态可发生在 prompt response 之后。普通客户端兼容，Lody capability 和 wire 输出一致。
 10. 通过公开 ManagedProvider 测试装配模拟 browser/device：无插件/API-key profile 不被其他账户阻塞、method 只按实际能力发布、已登录 authenticate 不重复 begin、callback 匹配、端口冲突、过期、取消/EOF、complete reply 丢失不重发。terminal method 不能走 authenticate；helper 保留同一 executable/home/profile，完成后重新检查 native 账户状态。断言 native 通用 -32000 错误不会变成 ACP auth_required。复用 callback capture 时保留既有 MCP/TUI 的安全与公开流程回归。
 11. Provider 管理插件存在时仍不虚报整组 providers capability；三个 ACP 管理方法不修改 Provider 记录。可复用调用与后续启用后的流验证见 §4.5，不能以 list 可读替代 set/disable 的作用域验收。
@@ -646,11 +648,11 @@ Core [v0.3.0](https://github.com/LodyAI/acp-extension-core/releases/tag/v0.3.0) 
 
 | 方法 | 配置语义 |
 | --- | --- |
-| `session/new` | 同一次 `session.create` 携带显式模型、`permissionPolicy.preset` 和 `modelPreferences.reasoningEffort`。Reasoning 值由所选模型的所有者校验；切模型时以新目标为准。`provider-default` 是显示值，其清除语义与标准 setter 一致。若 create 无法表达显式清除并跳过已保存的 effort，由模型所有者补充该意图的表示后再接受此值。省略字段使用原生默认与已保存偏好。 |
+| `session/new` | 同一次 `session.create` 携带显式模型、`permissionPolicy.preset` 和 `modelPreferences.reasoningEffort`。Reasoning 值由所选模型的所有者校验；切模型时以新目标为准。`provider-default` 是显示值，其清除语义与标准 setter 一致。创建时的清除跳过已保存的 effort 并采用声明默认。省略字段使用原生默认与已保存偏好。 |
 | `session/load`、`session/resume` | 缺省或与原生已采用值等价的选项沿用保存配置，支持 Lody 重发选择。采用不同配置须由 Session / 模型 / 权限所有者在建立时完成，保留 checked attach、同 Session 并发准入及原有授权；忙碌或冲突时明确失败。原生仅按独立 setter 提供的变化不得在 Gateway 串联成一次原子操作。load 回放、resume 无回放仍按 §5.2。 |
 | `session/fork` | 缺省选项沿用原生 fork 的继承结果。显式选项与子 Session 建立一起采用；校验失败不建立子 Session。fork 来源不发生配置写入，`forkAtTurn` 仍使用原生已终结的锚点。 |
 
-先实现可用 create 参数表达的 effort 和等价配置回传。比较与 native 建立之间必须有所有者保证，Gateway 的缓存或一次无版本查询不足以判定。不同配置的路径遵循 [模型启动采用](model-configuration.md#temporary-startup-adoption)的边界，增加的要求见 §13.5。
+创建 effort 与等价配置检查见 [§8.3](#83-首版具体接线与生命周期)。不同配置的路径遵循 [模型启动采用](model-configuration.md#temporary-startup-adoption)的边界，增加的要求见 §13.5。
 
 ```text
 Lody [Open / Resume / Fork]
@@ -683,7 +685,7 @@ Lody [Open / Resume / Fork]
 
 | 所有者 | 现有合同的缺口与请求 | 顺序、取消与恢复 |
 | --- | --- | --- |
-| Session / 模型配置 / Permission | checked attach / fork 缺配置和建立的一致性保证；通用建立入口要能检查等价配置，采用明确且获授权的变化。单独 model/permission setter 有各自的采用边界。[原生 fork](appserver/session-deletion-and-fork.md#6-fork)继承权限，允许变化的范围由 Permission 确认 | 成功回复前完成检查与采用；分叉只影响子 Session；并发或丢失回复沿用 owner 的冲突和恢复规则 |
+| Session / 模型配置 / Permission | checked attach / fork 可核对等价配置。采用不同值仍需通用建立入口支持明确且获授权的变化。单独 model/permission setter 有各自的采用边界。[原生 fork](appserver/session-deletion-and-fork.md#6-fork)继承权限，允许变化的范围由 Permission 确认 | 成功回复前完成检查与采用；分叉只影响子 Session；并发或丢失回复沿用 owner 的冲突和恢复规则 |
 | InputQueue / Loop | 普通 steer 在无活跃 turn 时可启动新轮；需要按指定活跃 turn 原子接收入队的通用约束 | 接收与目标校验同一次决定，`input/applied` 后才通知 Lody；换轮、取消和掉线按原生结果结算 |
 | Goal | `get` 能给快照，但既有操作确认不足以拥有整个 Goal 执行；需要明确操作身份、所属 turns 及结算/取消结果 | `set` / `resume` 的首轮至终态归同一身份；`pause` / `clear` 不启动 turn；重连不能重新发起未知结果的操作 |
 | Usage / Provider | `model/usage` 的部分分桶依赖真实上报；额度读取需要可表达的目录和过滤边界；现有 Session 级连接入口缺进程作用域 | 使用既有计数和受保护连接采用；发布前验证支持条件。路由替换在后续 Session 建立前生效，退出清理临时秘密 |

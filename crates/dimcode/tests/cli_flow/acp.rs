@@ -3254,7 +3254,7 @@ fn acp_stdio_lody_startup_config_is_applied_before_creation_without_shared_write
     let home = Home::new();
     let daemon = home.daemon(|wire| {
         let mut methods = METHODS.to_vec();
-        methods.push("provider.models.query");
+        methods.extend(["provider.models.query", "session.fork", "session.turn.get"]);
         wire.hello(&methods);
 
         let catalog = wire.read("provider.models.query");
@@ -3271,6 +3271,7 @@ fn acp_stdio_lody_startup_config_is_applied_before_creation_without_shared_write
             create["params"]["permissionPolicy"],
             json!({"preset":"workspace-write"})
         );
+        assert_eq!(create["params"]["modelPreferences"], json!({"reasoningEffort":"high"}));
         let attach = wire.read("session.attach");
         wire.reply(&attach, json!({}));
         let history = wire.read("session.history");
@@ -3282,7 +3283,7 @@ fn acp_stdio_lody_startup_config_is_applied_before_creation_without_shared_write
     });
     let mut peer = Peer::start(&home);
     peer.initialize();
-    peer.send(2,"session/new",json!({"cwd":home.0,"mcpServers":[],"_meta":{"lody":{"sessionConfig":{"version":1,"modelId":"chosen","configOptionValues":{"model":"ignored","mode":"workspace-write"}}}}}));
+    peer.send(2,"session/new",json!({"cwd":home.0,"mcpServers":[],"_meta":{"lody":{"sessionConfig":{"version":1,"modelId":"chosen","configOptionValues":{"model":"ignored","mode":"workspace-write","effort":"high"}}}}}));
     assert_eq!(peer.response(2)["result"]["sessionId"], "session");
     peer.send(3,"session/resume",json!({"sessionId":"session","cwd":home.0,"_meta":{"lody":{"sessionConfig":{"version":1,"configOptionValues":{"model":"chosen"}}}}}));
     assert_eq!(
@@ -3377,6 +3378,211 @@ fn acp_stdio_lody_startup_config_is_applied_before_creation_without_shared_write
         peer.close();
         daemon.join().unwrap();
     }
+}
+
+#[test]
+fn acp_stdio_lody_config_round_trips_with_the_product_daemon() {
+    let home = Home::new();
+    let socket = home.0.join("rust/daemon.sock");
+    let _daemon = OwnedDaemon(socket.clone());
+    let ready = home.command().args(["mcp", "list"]).output().unwrap();
+    assert!(
+        ready.status.success(),
+        "{}",
+        String::from_utf8_lossy(&ready.stderr)
+    );
+    let stream = UnixStream::connect(socket).unwrap();
+    stream.set_read_timeout(Some(PATIENCE)).unwrap();
+    let mut native = Wire::new(stream);
+    let mut next = 0;
+    let mut call = |method: &str, params: Value| {
+        next += 1;
+        native.send(json!({"jsonrpc":"2.0","id":next,"method":method,"params":params}));
+        loop {
+            let mut line = String::new();
+            assert_ne!(native.0.read_line(&mut line).unwrap(), 0);
+            let reply: Value = serde_json::from_str(&line).unwrap();
+            if reply["id"] == next {
+                assert!(reply.get("result").is_some(), "{method}: {reply}");
+                break reply["result"].clone();
+            }
+        }
+    };
+    call("hello", json!({"protocolVersion":4,"clientKind":"cli"}));
+    let settings = call(
+        "settings.read",
+        json!({"source":"session-title","scope":"user"}),
+    );
+    call(
+        "settings.update",
+        json!({"source":"session-title","scope":"user","expectedRevision":settings["revision"],"document":{"enabled":false}}),
+    );
+
+    let endpoint = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = endpoint.local_addr().unwrap();
+    let provider = "018ec73f-0000-7000-8000-000000000092";
+    let mut capabilities = dim_agent_types::CatalogCapabilities::with_limits(32_000, 1024);
+    capabilities.reasoning = true;
+    let created_provider = call(
+        "provider.create",
+        json!({"providerId":provider,"displayName":"ACP effort fixture", "enabled":true,
+        "connection":{"driverKind":"openai-compatible","baseUrl":format!("http://{address}/v1"),"auth":{"type":"anonymous"}},
+        "models":[{"modelId":"acp-effort","displayName":"ACP effort","status":"active","capabilities":capabilities,
+            "metadata":{"reasoning":{"supported":true,"effortOptions":["low","high"]}}}]}),
+    );
+    call(
+        "provider.preferences.update",
+        json!({"providerId":provider,"expectedVersion":created_provider["version"],"modelId":"acp-effort",
+        "patch":{"reasoningEffort":{"action":"set","value":"low"}}}),
+    );
+    call(
+        "provider.select",
+        json!({"providerId":provider,"modelId":"acp-effort"}),
+    );
+
+    let mut peer = Peer::start(&home);
+    peer.initialize();
+    let config = |mode: &str, effort: &str| json!({"lody":{"sessionConfig":{"version":1,"modelId":"acp-effort","configOptionValues":{"mode":mode,"effort":effort}}}});
+    let selected = config("workspace-write", "high");
+    peer.send(
+        2,
+        "session/new",
+        json!({"cwd":home.0,"mcpServers":[],"_meta":selected}),
+    );
+    let response = peer.response(2);
+    assert_eq!(effort(&response)["currentValue"], "high");
+    let source = response["result"]["sessionId"].as_str().unwrap();
+
+    endpoint.set_nonblocking(true).unwrap();
+    let model = thread::spawn(move || {
+        let deadline = Instant::now() + PATIENCE;
+        let mut request = loop {
+            match endpoint.accept() {
+                Ok((stream, _)) => break BufReader::new(stream),
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::WouldBlock
+                        && Instant::now() < deadline =>
+                {
+                    thread::sleep(Duration::from_millis(5))
+                }
+                Err(error) => panic!("no model request: {error}"),
+            }
+        };
+        request.get_ref().set_read_timeout(Some(PATIENCE)).unwrap();
+        let mut length = 0;
+        loop {
+            let mut line = String::new();
+            assert_ne!(request.read_line(&mut line).unwrap(), 0);
+            if line == "\r\n" {
+                break;
+            }
+            if let Some((name, value)) = line.split_once(':')
+                && name.eq_ignore_ascii_case("content-length")
+            {
+                length = value.trim().parse().unwrap();
+            }
+        }
+        let mut body = vec![0; length];
+        request.read_exact(&mut body).unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        let data = "data: {\"id\":\"fixture\",\"object\":\"chat.completion.chunk\",\"model\":\"acp-effort\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ACP_EFFORT_OK\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+        write!(request.get_mut(), "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{data}", data.len()).unwrap();
+        body
+    });
+    peer.send(
+        3,
+        "session/prompt",
+        json!({"sessionId":source,"prompt":[{"type":"text","text":"check startup effort"}]}),
+    );
+    assert_eq!(peer.response(3)["result"]["stopReason"], "end_turn");
+    let request = model.join().unwrap();
+    assert_eq!(request["reasoning_effort"], "high", "{request}");
+    let anchor = peer
+        .updates
+        .iter()
+        .find_map(|frame| frame.pointer("/params/update/_meta/lody/turnId"))
+        .unwrap()
+        .clone();
+
+    let mut reopen = Peer::start(&home);
+    reopen.initialize();
+    for (id, method) in [(2, "session/load"), (3, "session/resume")] {
+        reopen.send(
+            id,
+            method,
+            json!({"sessionId":source,"cwd":home.0,"mcpServers":[],"_meta":selected}),
+        );
+        let reply = reopen.response(id);
+        assert_eq!(effort(&reply)["currentValue"], "high");
+        assert_eq!(reply["result"]["modes"]["currentModeId"], "workspace-write");
+    }
+    call(
+        "session.model.update",
+        json!({"sessionId":source,"modelPreferences":{"reasoningEffort":"low"}}),
+    );
+    reopen.send(
+        4,
+        "session/resume",
+        json!({"sessionId":source,"cwd":home.0,"_meta":selected}),
+    );
+    assert_eq!(
+        reopen.response(4)["error"]["data"]["nativeAppError"],
+        "session_config_mismatch"
+    );
+    reopen.send(
+        9,
+        "session/load",
+        json!({"sessionId":source,"cwd":home.0,"mcpServers":[],"_meta":config("full-access", "low")}),
+    );
+    let mismatch = reopen.response(9);
+    assert_eq!(
+        mismatch["error"]["data"]["nativeAppError"], "session_config_mismatch",
+        "{mismatch}"
+    );
+    assert_eq!(
+        mismatch["error"]["message"],
+        "Session configuration differs: permissionPreset"
+    );
+
+    let mut fork_from = selected.clone();
+    fork_from["lody"]["forkAtTurn"] = json!({"version":1,"turnId":anchor});
+    reopen.send(
+        5,
+        "session/fork",
+        json!({"sessionId":source,"cwd":home.0,"mcpServers":[],"_meta":fork_from}),
+    );
+    let forked = reopen.response(5);
+    assert_eq!(effort(&forked)["currentValue"], "high");
+    assert_ne!(forked["result"]["sessionId"], source);
+    reopen.send(
+        6,
+        "session/fork",
+        json!({"sessionId":source,"cwd":home.0,"mcpServers":[],"_meta":selected}),
+    );
+    let mismatch = reopen.response(6);
+    assert_eq!(
+        mismatch["error"]["data"]["nativeAppError"], "session_config_mismatch",
+        "{mismatch}"
+    );
+    let catalog = call("session.summaries", json!({}));
+    assert_eq!(catalog.as_array().unwrap().len(), 2, "{catalog}");
+
+    reopen.send(
+        7,
+        "session/new",
+        json!({"cwd":home.0,"mcpServers":[],"_meta":config("read-only", "provider-default")}),
+    );
+    let cleared = reopen.response(7);
+    assert_eq!(effort(&cleared)["currentValue"], "provider-default");
+    reopen.send(10, "session/resume", json!({"sessionId":cleared["result"]["sessionId"],"cwd":home.0,"_meta":config("read-only", "provider-default")}));
+    assert_eq!(
+        effort(&reopen.response(10))["currentValue"],
+        "provider-default"
+    );
+    reopen.send(8, "session/new", json!({"cwd":home.0,"mcpServers":[]}));
+    assert_eq!(effort(&reopen.response(8))["currentValue"], "low");
+    reopen.close();
+    peer.close();
 }
 
 #[test]
@@ -4649,8 +4855,6 @@ fn acp_load_and_resume_report_unavailable_sessions_without_listing_history() {
             let attach = wire.read("session.attach");
             assert_eq!(attach["params"]["expectedCwd"], json!(cwd));
             wire.send(json!({"jsonrpc":"2.0","id":attach["id"],"error":{"code":-32001,"message":"missing is closed","data":{"appError":"session_closed"}}}));
-            let detach = wire.read("session.detach");
-            wire.reply(&detach, json!({}));
         }
         detached_eof(wire);
     });

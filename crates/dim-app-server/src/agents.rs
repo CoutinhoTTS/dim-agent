@@ -35,6 +35,7 @@ use std::{
 use tokio_util::sync::CancellationToken;
 
 mod configuration;
+pub(crate) use configuration::check_configuration;
 mod fork;
 pub(crate) const SESSION_NAMESPACE: &str = "session.agent";
 
@@ -1866,7 +1867,12 @@ impl AgentIndex {
     /// fork is a prepared creation whose prepare step is SessionStore's fork
     /// transaction; it belongs to the source's Agent and protocol version,
     /// and its `main` opens with `branch/resume`.
-    pub(crate) async fn fork(&self, source: &str, at: u64) -> dim_agent_runtime::Result<Session> {
+    pub(crate) async fn fork(
+        &self,
+        source: &str,
+        at: u64,
+        expected: Option<&dim_agent_types::SessionConfigExpectation>,
+    ) -> Result<Session, RpcError> {
         let store = self
             .session_store
             .clone()
@@ -1874,9 +1880,9 @@ impl AgentIndex {
         let usage = self.acquire(source).await?;
         let session = &usage.session;
         if session.config().collaboration_role == CollaborationRole::Member {
-            return Err(AgentError::InvalidInput(
-                "a member conversation cannot be forked".into(),
-            ));
+            return Err(
+                AgentError::InvalidInput("a member conversation cannot be forked".into()).into(),
+            );
         }
         let checked = async {
             dim_agent_capabilities::history::validate_context_boundary_in(
@@ -1890,7 +1896,7 @@ impl AgentIndex {
         }
         .await;
         if session.is_closing() {
-            return Err(AgentError::Closed(source.into()));
+            return Err(AgentError::Closed(source.into()).into());
         }
         checked?;
         let version = self
@@ -1907,6 +1913,9 @@ impl AgentIndex {
             .ok_or_else(|| AgentError::Closed(source.to_owned()))?;
         let mut config = serde_json::from_str::<SessionConfig>(&stored)
             .map_err(|error| AgentError::Storage(format!("the source configuration: {error}")))?;
+        if let Some(expected) = expected {
+            check_configuration(session, &config, at, expected).await?;
+        }
         // A fork of an older protocol keeps the live Session's codemode
         // exclusion; the stored record is written without it, as on create.
         config.exclude_codemode_below(version);
@@ -1924,7 +1933,8 @@ impl AgentIndex {
             let Some(members) = value.as_object_mut() else {
                 return Err(AgentError::Storage(
                     "the source configuration is not an object".into(),
-                ));
+                )
+                .into());
             };
             members.remove(INITIAL_TITLE);
             record = serde_json::to_string(&value)
@@ -1948,7 +1958,8 @@ impl AgentIndex {
                 agent_id: usage.host.agent_id.clone(),
                 session_id: id,
             })
-            .await?;
+            .await
+            .map_err(AgentError::from)?;
         Ok(fork)
     }
     /// `agent.create`: one more Agent, a peer of every other. A requested

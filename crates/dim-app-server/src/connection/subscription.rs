@@ -480,6 +480,15 @@ impl Connection {
         // attach, or a detach that completed first — events committed between
         // the pin and the new listener have none.
         let _transition = self.transitions.lock().await;
+        if let Some(expected) = &params.expected_config {
+            crate::agents::check_configuration(
+                &session,
+                session.config(),
+                record_info.sequence,
+                expected,
+            )
+            .await?;
+        }
         let generation = self.next_attachment.fetch_add(1, Ordering::Relaxed);
         let cancel = self.closed.child_token();
         let watched = Arc::new(Mutex::new(HashSet::new()));

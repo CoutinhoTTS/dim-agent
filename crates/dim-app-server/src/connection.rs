@@ -1431,7 +1431,15 @@ impl Connection {
                     tracing::error!(%error, session_id=%params.session_id, "Session delete failed");
                     RpcError::from(error)
                 }),
-            Call::Fork(params) => match rpc.index.fork(&params.session_id, params.at).await {
+            Call::Fork(params) => match rpc
+                .index
+                .fork(
+                    &params.session_id,
+                    params.at,
+                    params.expected_config.as_ref(),
+                )
+                .await
+            {
                 Ok(fork) => fork
                     .sequence(ROOT_BRANCH_ID)
                     .map(|sequence| {
@@ -1441,7 +1449,7 @@ impl Connection {
                         })
                     })
                     .map_err(RpcError::from),
-                Err(error) => Err(RpcError::from(error)),
+                Err(error) => Err(error),
             },
             Call::ApprovalRespond(params) => {
                 let branch = params
@@ -1691,7 +1699,7 @@ impl Connection {
                                     model_id,
                                 }),
                                 Some(PathBuf::from(&session.config().cwd)),
-                                p.model_preferences.values(),
+                                p.model_preferences.values().into(),
                             )
                             .await?
                         }
@@ -2415,7 +2423,7 @@ impl RpcService {
                 &mut config,
                 &host.profile,
                 params.model,
-                params.model_preferences.unwrap_or_default(),
+                params.model_preferences.unwrap_or_default().into(),
                 params.startup,
             )
             .await?;
@@ -2436,15 +2444,20 @@ impl RpcService {
         config: &mut dim_agent_runtime::SessionConfig,
         profile: &crate::agents::AgentProfile,
         model: Option<ModelSelection>,
-        preferences: crate::provider::ModelPreferences,
+        preferences: ModelPreferenceUpdate,
         startup: Option<crate::provider::StartupInput>,
     ) -> Result<Option<crate::provider::StartupSelection>, RpcError> {
-        if !self.index.selects_models() && preferences != Default::default() {
+        if !self.index.selects_models() && !preferences.is_empty() {
             return Err(RpcError::invalid(
                 "Model preferences require the product provider",
             ));
         }
         if let Some(startup) = startup {
+            if preferences.clears_reasoning() || preferences.clears_service_tier() {
+                return Err(RpcError::invalid(
+                    "Startup preferences accept set values only",
+                ));
+            }
             if self.config.product_home.is_none() {
                 return Err(RpcError::invalid(
                     "Model startup requires the protected-local product entry",
@@ -2468,7 +2481,7 @@ impl RpcService {
                 .startup_configuration(
                     target,
                     Path::new(&config.cwd),
-                    preferences,
+                    preferences.values(),
                     startup,
                     None,
                     &self.unloading,
@@ -2525,7 +2538,7 @@ impl RpcService {
         &self,
         explicit: Option<dim_agent_types::ModelId>,
         cwd: Option<PathBuf>,
-        preferences: crate::provider::ModelPreferences,
+        preferences: ModelPreferenceUpdate,
     ) -> Result<dim_agent_types::ModelSelection, RpcError> {
         if self.config.product_home.is_some() {
             let provider = self
@@ -2533,11 +2546,16 @@ impl RpcService {
                 .get::<crate::provider::ProviderService>()
                 .ok_or_else(RpcError::reloading)?;
             return provider
-                .configuration(explicit, cwd.as_deref(), preferences, &self.unloading)
+                .configuration_with_preference_update(
+                    explicit,
+                    cwd.as_deref(),
+                    preferences,
+                    &self.unloading,
+                )
                 .await
                 .map_err(provider_error);
         }
-        if preferences != Default::default() {
+        if !preferences.is_empty() {
             return Err(provider_error(
                 dim_agent_capabilities::host::HostError::failed(
                     "Model preferences require a catalog with capability declarations; configure the API-key model's generation settings in --model-config",

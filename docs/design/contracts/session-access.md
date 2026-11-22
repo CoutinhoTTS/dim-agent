@@ -72,6 +72,8 @@ An input is pending from its `input/message` until either `input/applied` follow
 
 The native `session.attach.expectedCwd` capability permits an optional `expectedCwd` on `session.attach`. The boundary canonicalizes that one path and checks the target Session's stored or live cwd by Session ID under its acquire gate, before project authorization, Session restore or plugin activation. A mismatch fails without attaching or running that project's configuration. Omitting it preserves existing callers. Attach already returns cwd and title metadata; a checked attach never lists all Sessions to find its target.
 
+`session.attach.expectedConfig` advertises an optional `expectedConfig` on `session.attach`. After authorization and acquisition, attach checks the specified fields against `main` at the reply's pinned published sequence, before registering or replacing the subscription. An expectation can name `modelId` (an exact adopted ID), `permissionPreset`, and `reasoningEffort` (an exact adopted value, or `{action:"clear"}` to expect absence). Omitted fields impose no condition. A mismatch returns `session_config_mismatch` with code `-32602`. The check makes no configuration write. Changes published after the pinned sequence remain ordinary live changes. Fork uses [the same expectation](../appserver/session-deletion-and-fork.md#61-method) at its inherited cut.
+
 ### 3.1 Launch, write, wait
 
 ```mermaid

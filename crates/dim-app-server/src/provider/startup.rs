@@ -353,7 +353,7 @@ impl ProviderService {
                 explicit,
                 Some(cwd),
                 preferences,
-                Saved::Apply,
+                Saved::ALL,
                 (input.context_window, input.max_output_tokens),
                 cancel,
             )

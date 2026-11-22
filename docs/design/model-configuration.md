@@ -393,9 +393,13 @@ both fields start from the target's declared configuration as for any explicit
 adoption, so a clear there is accepted and adds nothing to that adoption; the
 adoption can still change the model. An omitted sibling is reset by that
 adoption. A client that clears one field and keeps the other sends no target.
-`session.create` keeps the set-only spelling: a new Session has no value to
-clear. A clear follows the same `main`-only, admission, supersession and
-cancellation behavior as a set.
+On servers advertising `session.create.clearModelPreferences`, an ordinary product
+`session.create` accepts `{action:"clear"}` for an individual preference to
+use that field's catalog-declared configuration and bypass the saved preference.
+An omitted sibling still uses its saved preference and then its declared default.
+This uses the creation's model resolution and leaves saved preferences untouched.
+The `startup` and preview inputs keep their set-only contract. An in-Session
+clear follows the same admission, supersession and cancellation behavior as a set.
 
 `session.model.update` still requires at least one preference field and returns
 its existing `{model, outcome}` reply. A clear that leaves the adopted

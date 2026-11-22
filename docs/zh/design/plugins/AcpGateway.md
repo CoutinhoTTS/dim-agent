@@ -45,7 +45,7 @@ Gateway 实现位于 `crates/dim-acp`。公开 RPC 引擎、产品事件边界�
 
 每个稳定 v1 agent/client/protocol 方法、选定的 unstable 表面和 Lody 方法，分别在[计划 §4](../../../design/acp-gateway-implementation.md#4-稳定-acp-v1-方法逐项映射)、[§8](../../../design/acp-gateway-implementation.md#8-lody-方法和能力逐项决策) 判定。能力只来自已实现 handler 和真实 native availability，不复制历史能力对象。
 
-标准协议覆盖 Session create/list/load/resume、prompt/cancel、工具输出、审批、图片和文本资源。账户认证、mode/model/effort、表单提问、close/delete、fork 按现有 native 接口的可用性提供。原生 `/compact`、`/usage`、`/goal`、`/loop` 命令的发布和交互见[计划 §4.7](../../../design/acp-gateway-implementation.md#47-原生命令交互)，使用可读回复，无须客户端专用面板。Lody 子集为 history、compaction、终态 turn fork 锚点、新会话 startup model 和 permission mode、detached exec task lifecycle 和双向协商的 snapshot-only subagent events。Lody steering、Goal 控制、token 统计、额度面板、subagent 查询/输出/取消、scheduled tasks、session activity、标题接管、项目归属及文件回滚仍不支持；slash command 不隐含这些扩展合同。
+标准协议覆盖 Session create/list/load/resume、prompt/cancel、工具输出、审批、图片和文本资源。账户认证、mode/model/effort、表单提问、close/delete、fork 按现有 native 接口的可用性提供。原生 `/compact`、`/usage`、`/goal`、`/loop` 命令的发布和交互见[计划 §4.7](../../../design/acp-gateway-implementation.md#47-原生命令交互)，使用可读回复，无须客户端专用面板。Lody 子集为 history、compaction、终态 turn fork 锚点、[启动配置](../../../design/acp-gateway-implementation.md#83-首版具体接线与生命周期)、detached exec task lifecycle 和双向协商的 snapshot-only subagent events。Lody steering、Goal 控制、token 统计、额度面板、subagent 查询/输出/取消、scheduled tasks、session activity、标题接管、项目归属及文件回滚仍不支持；slash command 不隐含这些扩展合同。
 
 Lody 方法和 metadata 按固定 Core DTO 及语义注释实现，不设连接级 Lody 总开关，不从一项推导整套支持。Subagent snapshot 可以如实声明无输出流、progress、read 或 cancel；最小投影不需要旧 SDK task API。准确协商、native fact 关联、startup config 和各项限制见[计划 §8](../../../design/acp-gateway-implementation.md#8-lody-方法和能力逐项决策)。Lody canonical tool ID 不能填任意 native 工具名。
 

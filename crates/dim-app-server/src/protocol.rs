@@ -1,6 +1,7 @@
 use dim_agent_capabilities::methods::{RpcError, params};
 use dim_agent_runtime::{ModelId, PermissionPolicy};
 use dim_agent_types::{AgentEvent, InputMode, JS_MAX_SAFE_INTEGER, JsonObject, UserInput, v1};
+pub use dim_agent_types::{ClearPreference, ModelPreferenceUpdate, PreferenceUpdate};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
@@ -416,91 +417,6 @@ pub struct UpdateModel {
     pub startup: Option<crate::provider::StartupInput>,
 }
 
-/// One field of a Session preference update: a value sets it and
-/// `{action:"clear"}` removes the Session's value.
-#[derive(Clone, Debug, Deserialize)]
-#[serde(untagged)]
-pub enum PreferenceUpdate {
-    Value(String),
-    Clear(ClearPreference),
-}
-
-#[derive(Clone, Copy, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ClearPreference {
-    action: ClearAction,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum ClearAction {
-    Clear,
-}
-
-impl ClearPreference {
-    fn is_clear(&self) -> bool {
-        matches!(self.action, ClearAction::Clear)
-    }
-}
-
-/// The per-field patch `session.model.update` accepts. An omitted field keeps
-/// its adopted value; a clear contributes no value.
-#[derive(Clone, Debug, Default, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ModelPreferenceUpdate {
-    #[serde(default, deserialize_with = "optional_non_null")]
-    pub reasoning_effort: Option<PreferenceUpdate>,
-    #[serde(default, deserialize_with = "optional_non_null")]
-    pub service_tier: Option<PreferenceUpdate>,
-}
-
-impl ModelPreferenceUpdate {
-    pub fn is_empty(&self) -> bool {
-        self.reasoning_effort.is_none() && self.service_tier.is_none()
-    }
-
-    /// The values to apply; a cleared field contributes none.
-    pub fn values(&self) -> crate::provider::ModelPreferences {
-        crate::provider::ModelPreferences {
-            reasoning_effort: self
-                .reasoning_effort
-                .as_ref()
-                .and_then(PreferenceUpdate::value)
-                .cloned(),
-            service_tier: self
-                .service_tier
-                .as_ref()
-                .and_then(PreferenceUpdate::value)
-                .cloned(),
-        }
-    }
-
-    pub fn clears_reasoning(&self) -> bool {
-        self.reasoning_effort
-            .as_ref()
-            .is_some_and(PreferenceUpdate::is_clear)
-    }
-
-    pub fn clears_service_tier(&self) -> bool {
-        self.service_tier
-            .as_ref()
-            .is_some_and(PreferenceUpdate::is_clear)
-    }
-}
-
-impl PreferenceUpdate {
-    fn value(&self) -> Option<&String> {
-        match self {
-            Self::Value(value) => Some(value),
-            Self::Clear(_) => None,
-        }
-    }
-
-    fn is_clear(&self) -> bool {
-        matches!(self, Self::Clear(clear) if clear.is_clear())
-    }
-}
-
 #[derive(Debug, Serialize)]
 pub struct PermissionResult {
     pub version: u64,
@@ -618,7 +534,7 @@ pub struct Create {
     #[serde(default, deserialize_with = "optional_non_null")]
     pub model_from_session: Option<String>,
     #[serde(default, deserialize_with = "optional_non_null")]
-    pub model_preferences: Option<crate::provider::ModelPreferences>,
+    pub model_preferences: Option<ModelPreferenceUpdate>,
     #[serde(default, deserialize_with = "optional_non_null")]
     pub startup: Option<crate::provider::StartupInput>,
     #[serde(default, deserialize_with = "optional_non_null")]
@@ -787,6 +703,8 @@ pub struct Fork {
     pub session_id: String,
     #[serde(deserialize_with = "cursor")]
     pub at: u64,
+    #[serde(default, deserialize_with = "optional_non_null")]
+    pub expected_config: Option<dim_agent_types::SessionConfigExpectation>,
 }
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -796,6 +714,8 @@ pub struct Attach {
     pub display: bool,
     #[serde(default, deserialize_with = "optional_non_null")]
     pub expected_cwd: Option<String>,
+    #[serde(default, deserialize_with = "optional_non_null")]
+    pub expected_config: Option<dim_agent_types::SessionConfigExpectation>,
 }
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
