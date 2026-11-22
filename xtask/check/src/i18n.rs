@@ -643,6 +643,47 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_key_missing_from_a_macro_is_refused_by_name() {
+        let root = root(
+            "macro-key",
+            TABLE,
+            "fn draw() {\n    let rows = vec![t(\"Kept\"), t(\"Missing from a macro\")];\n    drop(rows);\n}\n",
+        );
+        let error = refusal(&root);
+        assert!(
+            error.contains(
+                "crates/dim-cli/src/ui/panel.rs:2: \"Missing from a macro\" is not in zh_cn"
+            ),
+            "{error}"
+        );
+    }
+
+    /// A parameter that takes a constant's name hides it, so the scan reads no
+    /// key rather than the constant's text.
+    #[test]
+    fn a_parameter_that_hides_a_constant_is_not_read_as_its_key() {
+        let text = "const HINT: &str = \"Kept\";\n\nfn footer(HINT: &str) {\n    let a = t(HINT);\n}\n";
+        let keys = call_keys(text, "src.rs").unwrap();
+        assert_eq!(keys.keys, Vec::new(), "a parameter is not the constant");
+        assert_eq!(keys.unreadable, vec!["src.rs:4".to_owned()]);
+    }
+
+    /// Two modules may hold a constant of the same name: a call site reads the
+    /// one its own module declares.
+    #[test]
+    fn a_constant_is_read_from_the_module_of_the_call_site() {
+        let text = "mod a {\n    const HINT: &str = \"A key\";\n\n    fn draw() {\n        let a = t(HINT);\n    }\n}\n\nmod b {\n    const HINT: &str = \"B key\";\n\n    fn draw() {\n        let b = t(HINT);\n    }\n}\n";
+        let keys = call_keys(text, "src.rs").unwrap();
+        assert_eq!(
+            keys.keys,
+            vec![
+                ("A key".to_owned(), "src.rs:5".to_owned()),
+                ("B key".to_owned(), "src.rs:13".to_owned()),
+            ]
+        );
+    }
+
     /// A `#[cfg(test)]` item holds a fixture the interface never draws, so the
     /// check reads no key from it.
     #[test]
