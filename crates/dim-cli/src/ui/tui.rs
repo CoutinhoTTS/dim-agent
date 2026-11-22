@@ -15819,6 +15819,96 @@ mod tests {
         }
     }
 
+    /// A failed first window can be read again: reopening `/tasks` on the
+    /// same line publishes it as loading, and the page that lands is laid out
+    /// as a first window with the older history behind the load-more row.
+    #[test]
+    fn reopening_a_failed_line_rearms_its_window() {
+        let mut drawn = Drawn::new((80, 40), None, true);
+        let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        drawn.app.host = Box::new(Recorder(sent.clone()));
+        drawn.show(&[], "main", true);
+        drawn.show(&[], "b-7c", false);
+        drawn.app.apply(Update::Snapshot(Box::new(ViewSnapshot {
+            session_id: "s1".into(),
+            focus: "b-7c".into(),
+            window_error: Some("the daemon dropped the read".into()),
+            ..ViewSnapshot::default()
+        })));
+        drawn.draw();
+        assert!(
+            !drawn.app.awaiting_window,
+            "the failed window settled the view"
+        );
+
+        drawn.app.run_command("tasks", "");
+        assert!(
+            matches!(drawn.app.prompt, Some(Prompt::Tasks(_))),
+            "/tasks opens on the failed line"
+        );
+        assert!(
+            sent.borrow()
+                .iter()
+                .any(|command| matches!(command, Command::TaskHistory { .. })),
+            "reopening the panel retries the line's window"
+        );
+
+        drawn.app.apply(Update::Snapshot(Box::new(ViewSnapshot {
+            session_id: "s1".into(),
+            focus: "b-7c".into(),
+            ..ViewSnapshot::default()
+        })));
+        drawn.draw();
+        assert!(
+            drawn.app.awaiting_window,
+            "the retry loads the same line again instead of staying failed"
+        );
+        assert_eq!(
+            drawn.app.poll_interval(),
+            FRAME_INTERVAL,
+            "a loading window asks for frames"
+        );
+        assert!(
+            !drawn.transcript().contains("Branch history failed"),
+            "the retry clears the failure from the line"
+        );
+
+        let mut rows = older_rows(30);
+        rows.extend(window_rows(HISTORY_WINDOW));
+        drawn.app.apply(Update::Snapshot(Box::new(ViewSnapshot {
+            session_id: "s1".into(),
+            focus: "b-7c".into(),
+            rows,
+            history_complete: true,
+            earlier: Earlier::Unread,
+            ..ViewSnapshot::default()
+        })));
+        drawn.draw();
+        assert!(
+            !drawn.app.awaiting_window,
+            "the retried page armed the view"
+        );
+        assert_eq!(
+            drawn.app.poll_interval(),
+            SESSION_POLL,
+            "the loaded window waits at the idle poll"
+        );
+        assert_eq!(
+            drawn.app.window_floor, 30,
+            "the page is laid out over the newest window"
+        );
+        assert_eq!(
+            drawn.app.history_floor, 30,
+            "the retried page starts at the same floor"
+        );
+        assert_eq!(
+            drawn.app.window_info,
+            (HISTORY_WINDOW, 30),
+            "the window names the older messages it hides"
+        );
+        assert!(drawn.app.load_more, "the older history is left to load");
+    }
+
     #[test]
     fn the_scrollback_composer_names_the_shown_line() {
         let mut drawn = Drawn::new((80, 40), None, true);

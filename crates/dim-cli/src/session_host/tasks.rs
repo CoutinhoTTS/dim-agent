@@ -1466,6 +1466,101 @@ mod tests {
         );
     }
 
+    /// A creation that fails while the line's first window is still loading
+    /// leaves no request that could settle it. The line is terminal, so the
+    /// interface shows the line it was cut from, and `/lines` cannot show it
+    /// again.
+    #[tokio::test]
+    async fn a_create_failure_before_the_first_window_moves_to_the_parent() {
+        let (mut worker, mut receiver, _sent) =
+            crate::session_host::test_worker(&crate::session_host::TEST_FEATURES).await;
+        worker.session_id = "s1".into();
+        worker.focus = "main".into();
+        worker.discover_branch("b-7c");
+        worker.discover_branch("main");
+        {
+            let history = worker.task_history.get_mut("main").unwrap();
+            history.done = true;
+            history.window_complete = true;
+            history.window.through = Some(1);
+        }
+        let create: Event = serde_json::from_value(json!({
+            "id": "create", "sequence": 1, "create_at": 1000, "type": "branch", "name": "create",
+            "data": {
+                "at": {"kind": "sequence", "sequence": 0}, "branch": "b-7c", "prompt": "Check the parser",
+                "source": {"kind": "host", "operation_id": "op"}
+            }
+        }))
+        .expect("a branch create event");
+        worker.discover_task_branches(&create);
+        worker.apply("main", create);
+        worker
+            .command(crate::model::session::Command::FocusLine("b-7c".into()))
+            .await
+            .unwrap();
+        worker.poll_task_history().await.unwrap();
+        assert_eq!(
+            worker
+                .task_history_request
+                .as_ref()
+                .map(|read| read.branch_id.as_str()),
+            Some("b-7c"),
+            "the line's first window is in flight"
+        );
+
+        worker.task_event("main", create_failed(400, "b-7c"));
+
+        assert_eq!(
+            worker.focus, "main",
+            "a line whose creation failed is not left loading"
+        );
+        let history = &worker.task_history["b-7c"];
+        assert!(history.done, "the failed creation settled the line");
+        assert!(
+            !history.window_complete,
+            "the failed creation read no window"
+        );
+        assert!(
+            history.window_error.is_none(),
+            "there is no first-window failure to show"
+        );
+        if let Some(read) = &worker.task_history_request {
+            assert!(!read.current, "the failed line's read is no longer current");
+        }
+        assert!(
+            !worker.task_history_queue.contains(&"b-7c".to_owned()),
+            "the failed line is not read again on its own"
+        );
+
+        worker
+            .command(crate::model::session::Command::FocusLine("b-7c".into()))
+            .await
+            .unwrap();
+        assert_eq!(
+            worker.focus, "main",
+            "the terminal line cannot be shown again"
+        );
+        let notices: Vec<String> = receiver
+            .try_iter()
+            .filter_map(|update| match update {
+                Update::Notice(text) => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            notices
+                .iter()
+                .any(|notice| notice == "Line creation failed: b-7c"),
+            "the refusal names the failed creation: {notices:?}"
+        );
+
+        worker.publish();
+        let snapshot = published(&mut receiver);
+        assert_eq!(snapshot.focus, "main", "the shown line survives");
+        assert!(snapshot.window_error.is_none());
+        assert!(snapshot.history_complete, "the surviving line is settled");
+    }
+
     fn published(receiver: &mut std::sync::mpsc::Receiver<Update>) -> ViewSnapshot {
         let mut snapshot = None;
         while let Ok(update) = receiver.try_recv() {
