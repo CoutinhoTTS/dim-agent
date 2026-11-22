@@ -1,6 +1,92 @@
 use super::*;
+use std::time::{Duration, Instant};
+
+/// How long a closing branch waits for the Dispatcher before it gives up on
+/// the pause record: its `stop` is already cancelled, and a handler that
+/// cannot run must not hold the unload open (Pursuit §5).
+const CLOSING_CATCH_UP: Duration = Duration::from_millis(250);
+
+/// Whether a decision may wait for the branch's `stop` while it catches up
+/// with the Dispatcher.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum CatchUp {
+    /// A live decision waits until the Dispatcher delivers the cutoff.
+    Live,
+    /// A closing branch waits at most [`CLOSING_CATCH_UP`] and decides nothing
+    /// when the fold is still behind: a fact that committed later wins the
+    /// record it would have written.
+    Closing,
+}
 
 impl Owner {
+    /// Runs `decide` on the fold once the Dispatcher has delivered every fact
+    /// committed at the cutoff, and returns `None` when the fold is not that
+    /// far. The `state` lock is released before every wait, and the cutoff is
+    /// read again under it: a fact committing while the wait runs leaves the
+    /// cutoff behind, so a live caller waits again and a closing caller gives
+    /// up instead of writing a state that fact overrides (C4, C5, Pursuit §5).
+    pub(super) async fn decide_committed<T>(
+        &self,
+        catch_up: CatchUp,
+        decide: impl Fn(&mut State, u64) -> Option<T>,
+    ) -> Result<Option<T>, AgentError> {
+        let deadline = Instant::now() + CLOSING_CATCH_UP;
+        loop {
+            let through = match catch_up {
+                CatchUp::Live => self.await_dispatched().await?,
+                CatchUp::Closing => {
+                    let through = self.timeline.committed();
+                    let waited = tokio::time::timeout(
+                        deadline.saturating_duration_since(Instant::now()),
+                        self.await_sequence(through, None),
+                    )
+                    .await;
+                    match waited {
+                        Ok(result) => {
+                            result?;
+                            through
+                        }
+                        Err(_) => return Ok(None),
+                    }
+                }
+            };
+            let mut state = self.state.lock().unwrap();
+            if self.timeline.committed() != through {
+                if catch_up == CatchUp::Closing && Instant::now() >= deadline {
+                    return Ok(None);
+                }
+                continue;
+            }
+            return Ok(decide(&mut state, through));
+        }
+    }
+
+    /// Waits until the Dispatcher delivered `through`; `stop` bounds a live
+    /// caller, and a closing caller wraps this wait in its own deadline.
+    async fn await_sequence(
+        &self,
+        through: u64,
+        stop: Option<&CancellationToken>,
+    ) -> Result<(), AgentError> {
+        let mut dispatched = self.dispatcher.watch();
+        while self.dispatcher.sequence() < through {
+            if let Some(error) = self.dispatcher.failure() {
+                return Err(error);
+            }
+            match stop {
+                Some(stop) => tokio::select! {
+                    result = dispatched.changed() => result.map_err(|_| AgentError::Closed("Goal".into()))?,
+                    _ = stop.cancelled() => return Err(AgentError::Closed("Goal".into())),
+                },
+                None => dispatched
+                    .changed()
+                    .await
+                    .map_err(|_| AgentError::Closed("Goal".into()))?,
+            }
+        }
+        Ok(())
+    }
+
     pub(super) async fn write_guard(&self) -> Result<tokio::sync::MutexGuard<'_, ()>, AgentError> {
         let write = tokio::select! {
             guard = self.write.lock() => guard,
@@ -29,13 +115,7 @@ impl Owner {
             through,
         )
         .await;
-        let mut dispatched = self.dispatcher.watch();
-        while self.dispatcher.sequence() < through {
-            if let Some(error) = self.dispatcher.failure() {
-                return Err(error);
-            }
-            tokio::select! {result=dispatched.changed()=>result.map_err(|_|AgentError::Closed("Goal".into()))?,_=self.stop.cancelled()=>return Err(AgentError::Closed("Goal".into()))}
-        }
+        self.await_sequence(through, Some(&self.stop)).await?;
         Ok(through)
     }
 
