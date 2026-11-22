@@ -48,6 +48,16 @@ pub struct Overrides {
     /// The roster's closing sentence in place of its built-in text
     /// (timeline branches §12.4).
     pub roster_closing: Option<Arc<str>>,
+    /// The `How you work here:` bullets of the note a move writes on a tool
+    /// line it makes the default branch, in place of its built-in text
+    /// (timeline branches §12.4).
+    pub default_note: Option<Arc<str>>,
+    /// The same bullets on a line the user opened that becomes the default
+    /// branch (timeline branches §12.4).
+    pub user_default_note: Option<Arc<str>>,
+    /// The same bullets on the former default branch of either source
+    /// (timeline branches §12.4).
+    pub former_default_note: Option<Arc<str>>,
     /// Goal's objective policy sentence in place of the shipped one
     /// (model-prompts §8.1).
     pub goal_objective: Option<Arc<str>>,
@@ -234,6 +244,9 @@ pub async fn serve_home(
         dim_agent_capabilities::timeline_tree::BranchToolConfig {
             description: run.overrides.branch_description.clone(),
             roster_closing: run.overrides.roster_closing.clone(),
+            default_note: run.overrides.default_note.clone(),
+            user_default_note: run.overrides.user_default_note.clone(),
+            former_default_note: run.overrides.former_default_note.clone(),
             max_open_lines: None,
         },
         PromptSourcesConfig {

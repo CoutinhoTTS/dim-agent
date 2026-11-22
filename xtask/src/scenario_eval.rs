@@ -605,8 +605,20 @@ const TEXTS: &[(&str, TextMember)] = &[
         TextMember::Rust(|overrides, text| overrides.branch_description = Some(text)),
     ),
     (
+        "timeline-tree/default-note",
+        TextMember::Rust(|overrides, text| overrides.default_note = Some(text)),
+    ),
+    (
+        "timeline-tree/former-default-note",
+        TextMember::Rust(|overrides, text| overrides.former_default_note = Some(text)),
+    ),
+    (
         "timeline-tree/roster-closing",
         TextMember::Rust(|overrides, text| overrides.roster_closing = Some(text)),
+    ),
+    (
+        "timeline-tree/user-default-note",
+        TextMember::Rust(|overrides, text| overrides.user_default_note = Some(text)),
     ),
     (
         "goal/objective",
@@ -2880,6 +2892,9 @@ fn overrides_value(overrides: &Overrides) -> Value {
         plugin_configs,
         branch_description,
         roster_closing,
+        default_note,
+        user_default_note,
+        former_default_note,
         goal_objective,
         goal_continuation,
         eventhub_entry,
@@ -2894,6 +2909,9 @@ fn overrides_value(overrides: &Overrides) -> Value {
         "pluginConfigs": plugin_configs,
         "branchDescription": branch_description.as_ref().map(ToString::to_string),
         "rosterClosing": roster_closing.as_ref().map(ToString::to_string),
+        "defaultNote": default_note.as_ref().map(ToString::to_string),
+        "userDefaultNote": user_default_note.as_ref().map(ToString::to_string),
+        "formerDefaultNote": former_default_note.as_ref().map(ToString::to_string),
         "goalObjective": goal_objective.as_ref().map(ToString::to_string),
         "goalContinuation": goal_continuation.as_ref().map(ToString::to_string),
         "schedulerDescription": scheduler_description.as_ref().map(ToString::to_string),
@@ -2918,6 +2936,9 @@ fn child_overrides(value: &Value) -> Overrides {
             .unwrap_or_default(),
         branch_description: text("branchDescription"),
         roster_closing: text("rosterClosing"),
+        default_note: text("defaultNote"),
+        user_default_note: text("userDefaultNote"),
+        former_default_note: text("formerDefaultNote"),
         goal_objective: text("goalObjective"),
         goal_continuation: text("goalContinuation"),
         scheduler_description: text("schedulerDescription"),
@@ -8082,6 +8103,61 @@ mod tests {
             Some("candidate description")
         );
         assert!(overrides.branch_description.is_none());
+    }
+
+    /// Each status note's `How you work here:` block is injected through its
+    /// own factory member (timeline branches §12.4, model-prompts §8.1):
+    /// `--text timeline-tree/default-note`, `user-default-note` and
+    /// `former-default-note` land on the `Overrides` fields
+    /// [`app_server::serve_home`] hands `BranchToolConfig`, never on a product
+    /// string patched for the evaluation, and the serve child carries them.
+    #[test]
+    fn the_status_note_blocks_are_factory_members() {
+        let overrides = overrides_in(
+            TEXTS,
+            &[
+                (
+                    "timeline-tree/default-note".to_owned(),
+                    Arc::from("candidate default note"),
+                ),
+                (
+                    "timeline-tree/user-default-note".to_owned(),
+                    Arc::from("candidate user note"),
+                ),
+                (
+                    "timeline-tree/former-default-note".to_owned(),
+                    Arc::from("candidate former note"),
+                ),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            overrides.default_note.as_deref(),
+            Some("candidate default note")
+        );
+        assert_eq!(
+            overrides.user_default_note.as_deref(),
+            Some("candidate user note")
+        );
+        assert_eq!(
+            overrides.former_default_note.as_deref(),
+            Some("candidate former note")
+        );
+        assert!(overrides.branch_description.is_none());
+        assert!(overrides.roster_closing.is_none());
+        let carried = child_overrides(&overrides_value(&overrides));
+        assert_eq!(
+            carried.default_note.as_deref(),
+            Some("candidate default note")
+        );
+        assert_eq!(
+            carried.user_default_note.as_deref(),
+            Some("candidate user note")
+        );
+        assert_eq!(
+            carried.former_default_note.as_deref(),
+            Some("candidate former note")
+        );
     }
 
     /// The base prompt is injected through PromptSources' own factory member

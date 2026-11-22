@@ -4523,6 +4523,46 @@ async fn a_configured_roster_closing_reaches_the_roster() {
     soon(agent.close()).await.unwrap();
 }
 
+/// A note's `How you work here:` block is the factory member
+/// `BranchToolConfig::default_note`: a configured value reaches the note byte
+/// for byte in place of the built-in bullets, with the line ids its `{parent}`
+/// and `{other}` placeholders name, while the note's protocol sentences stay
+/// the code's (design §12.1, §12.4).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_configured_note_block_reaches_the_note() {
+    let block = "- Configured guidance for {parent}, switched from {other}.";
+    let probe = Arc::new(Probe::default());
+    let agent = MinimalHost::start(&builder_with_branch_config(
+        &probe,
+        BranchToolConfig {
+            default_note: Some(block.into()),
+            ..Default::default()
+        },
+    ))
+    .await
+    .unwrap();
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let line = open_line(&session, "the configured line").await;
+    switch(&session, &line).await;
+    let notes = owed_notes(&session, &line, 1).await;
+    let note = notes.last().expect("the line holds its note");
+    assert!(
+        note.contains("How you work here:\n- Configured guidance for main, switched from main."),
+        "{note}"
+    );
+    assert!(
+        !note.contains("- The user switched here to continue directly"),
+        "the built-in bullets are replaced: {note}"
+    );
+    assert!(
+        note.contains("you send no automatic idle notice to main"),
+        "the note's protocol sentences stay: {note}"
+    );
+    soon(agent.close()).await.unwrap();
+}
+
 /// #549: a description set at the declaring owner's factory configuration
 /// reaches the model request byte for byte, carried through ToolRegistry and
 /// ToolBinding by the shipped assembly.
@@ -4834,7 +4874,7 @@ async fn the_branch_tool_declares_its_actions_and_modes() {
         "- end: on a line opened with create, end your own line.",
         "Returns the line's id.",
         "It is your last action.",
-        "A line messages and reads the line it was cut from and the lines it opened. The end action ends the calling line only.",
+        "A line messages and reads the line it was cut from and the lines it opened. The end action ends the calling line and every line below it.",
     ] {
         assert!(
             branch.description.contains(sentence),
@@ -9551,6 +9591,10 @@ async fn a_default_branch_that_was_a_tool_line_stops_sending_its_idle_notice() {
     soon(agent.close()).await.unwrap();
 }
 
+/// A note a move writes survives the line's next compaction: the tool line the
+/// move makes the default branch, the tool line it displaced, a line the user
+/// opened, and the root, which gets no note and so keeps no block with a
+/// parent (design §5, §12.1).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_switched_line_keeps_its_identity_after_a_compaction() {
     let mut builder = AgentBuilder::new(AgentConfig::default());
@@ -9574,19 +9618,13 @@ async fn a_switched_line_keeps_its_identity_after_a_compaction() {
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
+
+    // The tool line the first move makes the default branch, and the tool line
+    // the next move displaces it with.
     let line = open_line(&session, "the parser race").await;
-    soon(session.set_default_branch(
-        &line,
-        BranchSource::User {
-            operation_id: "switch".into(),
-        },
-    ))
-    .await
-    .unwrap();
-    for text in ["x".repeat(1500), "y".repeat(1500)] {
-        session.submit(text, InputMode::Queue, &line).await.unwrap();
-        patient(session.idle(&line)).await.unwrap();
-    }
+    let other = open_line(&session, "the renderer race").await;
+    switch(&session, &line).await;
+    compact_line(&session, &line).await;
     let note = line_block(&chain_events(&session, &line, ..).await.unwrap())
         .expect("the note is the latest block of the key");
     assert!(
@@ -9608,6 +9646,99 @@ async fn a_switched_line_keeps_its_identity_after_a_compaction() {
         note.0
     );
     assert!(!note.1, "the note is live");
+
+    // The tool line the next move displaces.
+    switch(&session, &other).await;
+    owed_notes(&session, &line, 2).await;
+    compact_line(&session, &line).await;
+    let note = line_block(&chain_events(&session, &line, ..).await.unwrap())
+        .expect("the former default branch keeps the note");
+    assert!(
+        note.0.starts_with(&format!(
+            "<dim-branch-line branch=\"{line}\" parent=\"main\" source=\"tool\" default=\"false\">"
+        )),
+        "{}",
+        note.0
+    );
+    assert!(
+        note.0.contains("Your purpose, as main wrote it:"),
+        "{}",
+        note.0
+    );
+    assert!(note.0.contains("the parser race"), "{}", note.0);
+    assert!(
+        note.0
+            .contains(&format!("moved from this line to line {other}")),
+        "the note names the line that holds the role: {}",
+        note.0
+    );
+    assert!(
+        note.0.contains(
+            "Only a line opened with create can end itself, and not while it or a line below it is the default branch."
+        ),
+        "the note's own end rule: {}",
+        note.0
+    );
+    assert!(!note.1, "the note is live");
+
+    // A line the user opened, which the move makes the default branch.
+    let cut = session.sequence("main").unwrap();
+    let opened = soon(session.branch(
+        "main".into(),
+        cut,
+        BranchOptions {
+            prompt: "the user line".into(),
+            source: BranchSource::User {
+                operation_id: "client".into(),
+            },
+        },
+    ))
+    .await
+    .unwrap();
+    soon(session.idle(&opened)).await.unwrap();
+    switch(&session, &opened).await;
+    owed_notes(&session, &opened, 1).await;
+    compact_line(&session, &opened).await;
+    let note = line_block(&chain_events(&session, &opened, ..).await.unwrap())
+        .expect("the user line keeps the note");
+    assert!(
+        note.0.starts_with(&format!(
+            "<dim-branch-line branch=\"{opened}\" parent=\"main\" source=\"user\" default=\"true\">"
+        )),
+        "{}",
+        note.0
+    );
+    assert!(
+        note.0.contains("opened by the user from line main"),
+        "{}",
+        note.0
+    );
+    assert!(
+        note.0.contains("the user ends this line"),
+        "the note's own end rule: {}",
+        note.0
+    );
+    assert!(!note.0.contains("Your purpose, as"), "{}", note.0);
+    assert!(!note.1, "the note is live");
+
+    // The root: a move back to it writes no note, so its compaction replays no
+    // identity block and the note it would carry names no parent.
+    switch(&session, "main").await;
+    compact_line(&session, "main").await;
+    let events = chain_events(&session, "main", ..).await.unwrap();
+    assert!(
+        baseline_message(&events, "branch:roster").is_some(),
+        "the root compacted and replayed its roster"
+    );
+    assert!(
+        baseline_message(&events, "branch:line").is_none(),
+        "the root gets no note: its identity key stays empty"
+    );
+    assert!(
+        line_block(&events).is_none(),
+        "the root holds no `branch:line` block"
+    );
+    assert_eq!(session.default_branch().unwrap(), "main");
     soon(agent.close()).await.unwrap();
 }
 
@@ -11058,7 +11189,9 @@ async fn a_clean_restart_writes_no_status_note() {
         .pop()
         .expect("B holds its notes");
     assert!(
-        latest.contains(&format!("Line {c} is now the session's default branch")),
+        latest.contains(&format!(
+            "The session's default branch moved from this line to line {c}"
+        )),
         "B's latest note names C before the restart: {latest}"
     );
     let id = session.id().to_owned();
@@ -11082,7 +11215,9 @@ async fn a_clean_restart_writes_no_status_note() {
         .pop()
         .expect("B holds its notes");
     assert!(
-        latest.contains(&format!("Line {c} is now the session's default branch")),
+        latest.contains(&format!(
+            "The session's default branch moved from this line to line {c}"
+        )),
         "B's latest note still names C: {latest}"
     );
     assert_eq!(
@@ -11533,7 +11668,7 @@ async fn a_move_that_stopped_between_its_fact_and_its_notes_is_completed_at_load
         (
             b.clone(),
             r#"default="false""#.to_owned(),
-            format!("Line {c} is now the session's default branch"),
+            format!("The session's default branch moved from this line to line {c}"),
         ),
         (
             c.clone(),
@@ -11829,7 +11964,9 @@ async fn a_move_committed_before_its_writer_starts_still_owes_its_note() {
     assert!(notes[0].contains("switched from line main"), "{}", notes[0]);
     assert!(notes[1].contains(r#"default="false""#), "{}", notes[1]);
     assert!(
-        notes[1].contains(&format!("Line {c} is now the session's default branch")),
+        notes[1].contains(&format!(
+            "The session's default branch moved from this line to line {c}"
+        )),
         "{}",
         notes[1]
     );
@@ -11848,7 +11985,9 @@ async fn a_move_committed_before_its_writer_starts_still_owes_its_note() {
     );
     assert!(at_c[1].contains(r#"default="false""#), "{}", at_c[1]);
     assert!(
-        at_c[1].contains(&format!("Line {b} is now the session's default branch")),
+        at_c[1].contains(&format!(
+            "The session's default branch moved from this line to line {b}"
+        )),
         "{}",
         at_c[1]
     );
