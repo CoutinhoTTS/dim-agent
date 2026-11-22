@@ -384,7 +384,7 @@ pub(crate) fn tool_call(name: &str, arguments: &str) -> Value {
 /// credential, constrained by neither the sandbox nor the file-tool
 /// boundary. No run's Session offers it.
 const PLUGIN_TOOL: &str = "plugin";
-/// The tools a run's Sessions declare: the served assembly's whole set —
+/// The tools a run's Sessions mount: the served assembly's whole set —
 /// the workspace host's tools and every part's contributed tools — without
 /// `plugin`. A Session's mount list fixes what it declares, in this order;
 /// without one it declares every host tool and every tool a part registers
@@ -400,11 +400,11 @@ const PLUGIN_TOOL: &str = "plugin";
 /// preflight check compares the probe Session's declared set with this
 /// list at run time, so an addition or removal surfaces as a failed check,
 /// not a silent drift in the set the probes serve; the fixture pin asserts
-/// the mounted order of the set. `web_search` is offered by Web's dynamic
-/// source only while a search service is usable: the probes are served a keyed
-/// stub adapter, and the service is cleared before the run's own Sessions,
-/// which do not call `web_search`, so their judged Timeline carries no source
-/// adoption.
+/// the mounted order of the static set. `web_search` is offered by Web's
+/// dynamic source only while a search service is usable: the probes are
+/// served a keyed stub adapter and declare it, while the service is cleared
+/// before the run's own Sessions, which mount the name but do not declare or
+/// call it, so their judged Timeline carries no source adoption.
 const RUN_TOOLS: &[&str] = &[
     "read",
     "write",
