@@ -435,6 +435,62 @@ async fn installing_a_binding_publishes_its_initialized_account() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unobserved_replacement_binding_does_not_inherit_the_previous_observation() {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let root = Ctx::root().unwrap();
+        let catalog = dim_app_server::catalog();
+        root.plugin(dim_app_server::methods::ManagementMethodsPlugin::typed(&catalog).unwrap());
+        let owner_plugin = root.plugin(ManagedProvidersPlugin::new(None));
+        let captured = Arc::new(OnceLock::new());
+        let fixture = Arc::new(Fixture::default());
+        *fixture.recovered_generation.lock().unwrap() = 1;
+        let watch = watch::channel(Some(true));
+        *fixture.watch.lock().unwrap() = Some(watch.0.clone());
+        let fixture_plugin = root.plugin(FixturePlugin(fixture.clone()));
+        let first_binding = root.plugin(ManagedProviderBinding);
+        let capture = root.plugin(Capture(captured.clone()));
+        for view in [&owner_plugin, &fixture_plugin, &first_binding, &capture] {
+            active(view).await;
+        }
+        let owner = captured.get().unwrap().clone();
+        assert!(owner.usable(), "the signed-in watch installs");
+
+        // The replacement has not read its store yet; the retired binding's
+        // signed-in state must not survive the swap.
+        watch.0.send_replace(None);
+        let replacement = root.plugin(ManagedProviderBinding);
+        active(&replacement).await;
+        assert!(
+            !owner.usable(),
+            "an unobserved replacement must not inherit the retired account"
+        );
+
+        watch.0.send_replace(Some(true));
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !owner.usable() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the replacement's own observation was not published");
+
+        watch.0.send_replace(Some(false));
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while owner.usable() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the replacement's sign-out was not published");
+
+        drop((fixture_plugin, capture));
+        root.shutdown().await.unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_lease_of_a_replaced_provider_never_reaches_its_replacement() {
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
         let root = Ctx::root().unwrap();
