@@ -15,15 +15,15 @@ struct TextPosition {
 /// Where a request's text goes in `exec`'s text mode ([`Display::final_reply_only`]).
 #[derive(Clone, Copy, PartialEq)]
 enum TextRoute {
-    /// The turn's final reply.
+    /// The turn's final reply: the last request of a turn that completed.
     Reply,
     /// Words before or between tool calls, or a request that failed or was
     /// cancelled: diagnostics, not the reply.
     Progress,
 }
 
-/// The current request's text while `exec` waits to learn whether it is the
-/// turn's final reply.
+/// The current request's text while `exec` waits to learn whether the turn
+/// delivers it as the reply.
 struct HeldText {
     request: String,
     text: String,
@@ -58,8 +58,8 @@ pub struct Display {
     pub retries: bool,
     /// The last attempt a retry line reported, by request id.
     retry_seen: HashMap<String, u8>,
-    /// `exec`'s text mode: a request's text waits for the request's terminal,
-    /// so stdout carries the turn's final reply alone.
+    /// `exec`'s text mode: a request's text waits for the turn to end, so
+    /// stdout carries the turn's final reply alone.
     pub final_reply_only: bool,
     held: Option<HeldText>,
     /// A diagnostic text line is open on stderr.
@@ -97,7 +97,7 @@ impl Display {
         if self.muted {
             return Ok(());
         }
-        self.finish_text()?;
+        self.end_lines()?;
         if self.interactive {
             println!("{}", safe(message));
         } else {
@@ -111,11 +111,18 @@ impl Display {
         io::stdout().flush()?;
         Ok(())
     }
+    /// Ends the text a run still holds: text the turn did not release as its
+    /// reply is diagnostics.
     pub fn finish_text(&mut self) -> Result<()> {
         if self.final_reply_only {
             self.route_text(TextRoute::Progress)?;
-            self.finish_progress()?;
         }
+        self.end_lines()
+    }
+    /// Ends the lines this display has open, so the next one starts on its own.
+    /// It does not decide where held text goes.
+    fn end_lines(&mut self) -> Result<()> {
+        self.finish_progress()?;
         if self.text_open {
             println!();
             self.text_open = false;
@@ -175,13 +182,9 @@ impl Display {
         self.held = Some(held);
         Ok(())
     }
-    fn text(&mut self, request: &str, text: &str) -> Result<()> {
-        if text.is_empty() || self.muted || self.json {
-            return Ok(());
-        }
-        if !self.final_reply_only {
-            return self.show_text(text);
-        }
+    /// A request that begins after the held one makes the held text
+    /// diagnostics: the later request is where the turn's reply can come from.
+    fn begin_request(&mut self, request: &str) -> Result<()> {
         if self
             .held
             .as_ref()
@@ -190,12 +193,17 @@ impl Display {
             self.route_text(TextRoute::Progress)?;
             self.held = None;
         }
-        let route = self
-            .held
-            .as_ref()
-            .filter(|held| held.request == request)
-            .and_then(|held| held.route);
-        match route {
+        Ok(())
+    }
+    fn text(&mut self, request: &str, text: &str) -> Result<()> {
+        if text.is_empty() || self.muted || self.json {
+            return Ok(());
+        }
+        if !self.final_reply_only {
+            return self.show_text(text);
+        }
+        self.begin_request(request)?;
+        match self.held.as_ref().and_then(|held| held.route) {
             Some(TextRoute::Reply) => self.show_text(text),
             Some(TextRoute::Progress) => self.show_progress(text),
             None => {
@@ -306,6 +314,10 @@ impl Display {
                 )?;
             }
             EventContent::ToolUse(data) => {
+                self.begin_request(&data.request_id)?;
+                if self.final_reply_only {
+                    self.route_text(TextRoute::Progress)?;
+                }
                 self.tools.insert(
                     (data.request_id.clone(), data.call.id.clone()),
                     data.call.name.clone(),
@@ -322,21 +334,26 @@ impl Display {
                 }
             }
             EventContent::ModelEnd(data) => {
+                self.begin_request(&data.request_id)?;
                 self.finished.insert(data.request_id.clone());
                 let incomplete = self.showed.remove(&data.request_id);
                 self.retry_seen.remove(&data.request_id);
                 if self.final_reply_only {
-                    let route = match &data.outcome {
+                    match &data.outcome {
                         ModelOutputOutcome::Completed {
                             finish_reason: FinishReason::ToolUse,
-                        } => TextRoute::Progress,
-                        ModelOutputOutcome::Completed { .. } => TextRoute::Reply,
-                        ModelOutputOutcome::Failed { .. }
-                        | ModelOutputOutcome::Cancelled { .. } => TextRoute::Progress,
-                    };
-                    self.route_text(route)?;
+                        }
+                        | ModelOutputOutcome::Failed { .. }
+                        | ModelOutputOutcome::Cancelled { .. } => {
+                            self.route_text(TextRoute::Progress)?
+                        }
+                        // A request that ended normally is the candidate
+                        // reply: the turn can still ask again, fail or be
+                        // cancelled before it ends.
+                        ModelOutputOutcome::Completed { .. } => {}
+                    }
                 }
-                self.finish_text()?;
+                self.end_lines()?;
                 if let ModelOutputOutcome::Failed {
                     error,
                     presentation,

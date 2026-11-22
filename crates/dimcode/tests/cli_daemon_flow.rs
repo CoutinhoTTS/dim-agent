@@ -1683,6 +1683,145 @@ fn exec_writes_a_reply_without_tools_to_stdout() {
     );
 }
 
+/// A request that ended normally is only the candidate reply: another request
+/// in the same turn makes its answer the turn's final one.
+#[test]
+fn exec_demotes_a_reply_when_the_same_turn_asks_again() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.start(false);
+        let submit = wire.read("session.submit");
+        wire.reply(&submit, json!({"event":{}}));
+        let idle = wire.read("session.idle");
+        wire.event(10,"text",json!({"turn_id":"turn","request_id":"first-request","delta":"Let me check the queue."}));
+        wire.event(11,"model-output-end",json!({"turn_id":"turn","request_id":"first-request","status":"completed","finish_reason":"end_turn"}));
+        wire.event(12,"text",json!({"turn_id":"turn","request_id":"second-request","delta":"The queue is empty."}));
+        wire.event(13,"model-output-end",json!({"turn_id":"turn","request_id":"second-request","status":"completed","finish_reason":"end_turn"}));
+        wire.end(json!({"turn_id":"turn","status":"completed","reason":"done"}));
+        wire.reply(&idle, json!({"sequence":30}));
+        wire.detach();
+    });
+    let output = wait(
+        home.command()
+            .args(["exec", "-p", "Is the queue empty?"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    daemon.join().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "status {:?} stdout {stdout:?} stderr {stderr:?}",
+        output.status.code()
+    );
+    assert_eq!(
+        stdout, "The queue is empty.\n",
+        "the turn's last request is its reply; stderr was {stderr:?}"
+    );
+    assert!(
+        stderr.contains("Let me check the queue."),
+        "the earlier request's words go to stderr: {stderr:?}"
+    );
+    assert!(
+        !stderr.contains("The queue is empty."),
+        "the reply appears once, on stdout: {stderr:?}"
+    );
+}
+
+/// A turn can fail after its model request ended normally; stdout carries no
+/// reply the turn never delivered.
+#[test]
+fn exec_demotes_a_reply_when_the_turn_fails() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.start(false);
+        let submit = wire.read("session.submit");
+        wire.reply(&submit, json!({"event":{}}));
+        let idle = wire.read("session.idle");
+        wire.event(10,"text",json!({"turn_id":"turn","request_id":"request","delta":"The service listens on port 8080."}));
+        wire.event(11,"model-output-end",json!({"turn_id":"turn","request_id":"request","status":"completed","finish_reason":"end_turn"}));
+        wire.end(json!({"turn_id":"turn","status":"failed","error":"fixture error"}));
+        wire.reply(&idle, json!({"sequence":30}));
+        wire.detach();
+    });
+    let output = wait(
+        home.command()
+            .args(["exec", "-p", "Which port does the service use?"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    daemon.join().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "stdout {stdout:?} stderr {stderr:?}"
+    );
+    assert!(
+        stdout.is_empty(),
+        "a failed turn leaves no reply on stdout; stdout was {stdout:?}"
+    );
+    assert!(
+        stderr.contains("The service listens on port 8080."),
+        "the answer of a turn that failed goes to stderr: {stderr:?}"
+    );
+}
+
+/// A notice is a diagnostic: it does not decide where a request's held text
+/// goes, so the answer of a successful turn still reaches stdout when a notice
+/// arrives between its chunks.
+#[test]
+fn exec_keeps_a_reply_on_stdout_past_a_notice_between_its_chunks() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.start(false);
+        let submit = wire.read("session.submit");
+        wire.reply(&submit, json!({"event":{}}));
+        let idle = wire.read("session.idle");
+        wire.event(10,"text",json!({"turn_id":"turn","request_id":"request","delta":"The service "}));
+        wire.notice("session.mcp.state",json!({"sessionId":"session","servers":[{"id":"docs","state":"auth_required"}]}));
+        wire.event(12,"text",json!({"turn_id":"turn","request_id":"request","delta":"listens on port 8080."}));
+        wire.event(14,"model-output-end",json!({"turn_id":"turn","request_id":"request","status":"completed","finish_reason":"end_turn"}));
+        wire.end(json!({"turn_id":"turn","status":"completed","reason":"done"}));
+        wire.reply(&idle, json!({"sequence":30}));
+        wire.detach();
+    });
+    let output = wait(
+        home.command()
+            .args(["exec", "-p", "Which port does the service use?"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    daemon.join().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "status {:?} stdout {stdout:?} stderr {stderr:?}",
+        output.status.code()
+    );
+    assert_eq!(
+        stdout, "The service listens on port 8080.\n",
+        "a notice between the chunks keeps the reply on stdout; stderr was {stderr:?}"
+    );
+    assert!(
+        stderr.contains("MCP \"docs\": sign-in required"),
+        "the notice itself goes to stderr: {stderr:?}"
+    );
+    assert!(
+        !stderr.contains("The service "),
+        "the reply appears once, on stdout: {stderr:?}"
+    );
+}
+
 #[test]
 fn exec_leaves_no_partial_text_on_stdout_after_an_interrupt() {
     let home = Home::new();
