@@ -38,6 +38,9 @@ pub(crate) type BodyRewrite = Arc<dyn Fn(Value) -> Value + Send + Sync>;
 
 /// The tool result's text where an image moved to the following user message.
 const TOOL_IMAGE_MARKER: &str = "[Image: sent in the following user message as tool output.]";
+/// The first line of a failed tool result where the destination's wire form
+/// carries no field that reports the outcome.
+const TOOL_ERROR_MARKER: &str = "[Error: this tool result reports a failed tool call.]";
 /// Names the tool call an image came from, before that image.
 const TOOL_IMAGE_LABEL: &str = "Tool output from tool call";
 
@@ -76,6 +79,14 @@ fn tool_result_images(kind: &ProviderKind, model_id: &str) -> bool {
     }
 }
 
+/// Whether the destination's wire form carries no field that reports a tool
+/// result's outcome: a Bedrock model AWS does not list for the optional
+/// `toolResult.status`. Anthropic reports it as `is_error`, and the Bedrock
+/// families keep `status`.
+fn tool_result_status_dropped(kind: &ProviderKind, model_id: &str) -> bool {
+    *kind == ProviderKind::Bedrock && !bedrock_tool_result_fields(model_id)
+}
+
 /// The body rewrite that drops `toolResult.status` for a Bedrock model AWS
 /// does not list for that optional field. The result text keeps the same
 /// meaning, and the families that support the field keep it.
@@ -83,7 +94,7 @@ pub(crate) fn tool_result_status_rewrite(
     kind: &ProviderKind,
     model_id: &str,
 ) -> Option<BodyRewrite> {
-    if *kind != ProviderKind::Bedrock || bedrock_tool_result_fields(model_id) {
+    if !tool_result_status_dropped(kind, model_id) {
         return None;
     }
     Some(Arc::new(|mut body: Value| {
@@ -713,6 +724,16 @@ fn image_part(
     }))
 }
 
+/// A failed result's text, naming the outcome where the wire form has no
+/// field that reports it ([`tool_result_status_dropped`]).
+fn failure_text(kind: &ProviderKind, model_id: &str, text: String) -> String {
+    if tool_result_status_dropped(kind, model_id) {
+        format!("{TOOL_ERROR_MARKER}\n{text}")
+    } else {
+        text
+    }
+}
+
 /// A tool result's output. Protocols whose tool message carries an image keep
 /// it inside the result; the others mark its place in the text and put the
 /// image in `following` (one user message after the step's tools).
@@ -729,7 +750,7 @@ fn tool_result(
         ToolContent::Text(text) => {
             return Ok(if is_error {
                 ToolResultOutput::ErrorText {
-                    value: text.clone(),
+                    value: failure_text(kind, &request.model_id, text.clone()),
                     provider_options: None,
                 }
             } else {
@@ -754,7 +775,7 @@ fn tool_result(
         }
         return Ok(if is_error {
             ToolResultOutput::ErrorText {
-                value: text,
+                value: failure_text(kind, &request.model_id, text),
                 provider_options: None,
             }
         } else {
@@ -819,7 +840,7 @@ fn tool_result(
         })
     } else if is_error {
         Ok(ToolResultOutput::ErrorText {
-            value: text,
+            value: failure_text(kind, &request.model_id, text),
             provider_options: None,
         })
     } else {

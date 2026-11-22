@@ -867,6 +867,10 @@ async fn a_gif_image_reaches_gemini_as_its_reference() {
     );
 }
 
+/// The line a failed result's text starts with where the destination's wire
+/// form reports no status field.
+const TOOL_ERROR_MARKER_TEXT: &str = "[Error: this tool result reports a failed tool call.]";
+
 /// One Bedrock request whose tool result carries a PNG.
 fn bedrock_tool_image_request(model: &str, is_error: bool) -> ModelRequest {
     serde_json::from_value(json!({
@@ -915,15 +919,18 @@ async fn bedrock_capture(request: ModelRequest, model: &'static str) -> Value {
     .await
 }
 
-fn bedrock_tool_result(body: &Value) -> &Value {
+fn bedrock_tool_result_part(body: &Value) -> &Value {
     body["messages"]
         .as_array()
         .unwrap()
         .iter()
         .flat_map(|message| message["content"].as_array().unwrap())
         .find_map(|part| part.get("toolResult"))
-        .map(|result| &result["content"])
         .expect("the request carries a tool result")
+}
+
+fn bedrock_tool_result(body: &Value) -> &Value {
+    &bedrock_tool_result_part(body)["content"]
 }
 
 /// Bedrock takes an image inside `toolResult` only on the models that support
@@ -971,8 +978,9 @@ async fn a_bedrock_tool_image_uses_a_placement_the_model_supports() {
 }
 
 /// Bedrock's optional `status` field is supported only on Amazon Nova and
-/// Anthropic Claude 3 and 4. The other models keep the result text and the
-/// image placement without the field, for either result status.
+/// Anthropic Claude 3 and 4. The other models keep the image placement without
+/// the field, for either result status, and a failure names itself in the
+/// result text.
 #[tokio::test]
 async fn a_bedrock_tool_status_reaches_only_the_models_that_support_it() {
     for (model, supports_status) in [
@@ -1003,15 +1011,24 @@ async fn a_bedrock_tool_status_reaches_only_the_models_that_support_it() {
                     json!(status),
                     "{model} {is_error}: {body}"
                 );
+                assert!(
+                    !body.to_string().contains(TOOL_ERROR_MARKER_TEXT),
+                    "{model} reports the outcome in the field: {body}"
+                );
             } else {
                 assert!(
                     result.get("status").is_none(),
                     "{model} does not support the status field: {body}"
                 );
+                let caption = if is_error {
+                    format!("{TOOL_ERROR_MARKER_TEXT}\ncaption{TOOL_IMAGE_MARKER}")
+                } else {
+                    format!("caption{TOOL_IMAGE_MARKER}")
+                };
                 assert_eq!(
                     result["content"],
-                    json!([{"text": format!("caption{TOOL_IMAGE_MARKER}")}]),
-                    "the image leaves the result and its text stays: {body}"
+                    json!([{"text": caption}]),
+                    "the image leaves the result and a failure stays in its text: {body}"
                 );
                 assert!(
                     content[tool + 1..]
@@ -1020,6 +1037,59 @@ async fn a_bedrock_tool_status_reaches_only_the_models_that_support_it() {
                     "the image follows the result in a user message: {body}"
                 );
             }
+        }
+    }
+}
+
+/// One Bedrock request whose tool result carries `content` and no image.
+fn bedrock_text_tool_result_request(model: &str, is_error: bool, blocks: bool) -> ModelRequest {
+    let content = if blocks {
+        json!([{"type": "text", "text": "result text"}])
+    } else {
+        json!("result text")
+    };
+    serde_json::from_value(json!({
+        "providerId": "application-alias", "modelId": model,
+        "messages": [
+            {"role": "user", "content": "look"},
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "call-1", "name": "read", "input": {}}
+            ]},
+            {"role": "tool_result", "content": [
+                {"type": "tool_result", "tool_use_id": "call-1", "is_error": is_error,
+                 "content": content}
+            ]}
+        ],
+        "tools": [tool("read")]
+    }))
+    .unwrap()
+}
+
+/// A Bedrock result without an image keeps its text-only form. Where AWS does
+/// not support the status field, a failure names itself in that text for both
+/// text forms.
+#[tokio::test]
+async fn a_bedrock_result_without_an_image_names_its_failure_in_the_text() {
+    let model = "us.meta.llama4-maverick-17b-instruct-v1:0";
+    for blocks in [false, true] {
+        for is_error in [false, true] {
+            let request = bedrock_text_tool_result_request(model, is_error, blocks);
+            let body = bedrock_capture(request, model).await;
+            let result = bedrock_tool_result_part(&body);
+            assert!(
+                result.get("status").is_none(),
+                "blocks={blocks} {is_error}: the status field is unsupported: {body}"
+            );
+            let text = if is_error {
+                format!("{TOOL_ERROR_MARKER_TEXT}\nresult text")
+            } else {
+                "result text".into()
+            };
+            assert_eq!(
+                result["content"],
+                json!([{"text": text}]),
+                "blocks={blocks} {is_error}: the text reports the outcome: {body}"
+            );
         }
     }
 }

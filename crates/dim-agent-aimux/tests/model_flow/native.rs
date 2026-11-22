@@ -3835,6 +3835,7 @@ impl ToolDriver for ImageEcho {
 }
 
 const TOOL_IMAGE_MARKER: &str = "[Image: sent in the following user message as tool output.]";
+const TOOL_ERROR_MARKER: &str = "[Error: this tool result reports a failed tool call.]";
 const TOOL_IMAGE_LABEL: &str = "Tool output from tool call";
 
 fn tool_result_events(events: &[Arc<AgentEvent>]) -> Vec<&ToolContent> {
@@ -4203,7 +4204,7 @@ async fn an_error_tool_result_image_keeps_the_flag_and_the_image() {
 
 /// AWS supports Bedrock's optional `toolResult.status` field only on Amazon
 /// Nova and Anthropic Claude 3 and 4. Another model receives no status for
-/// either result status, and its result text keeps the outcome.
+/// either result status, and a failure names itself in the result text.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_bedrock_model_outside_the_status_families_receives_no_tool_result_status() {
     use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
@@ -4269,8 +4270,13 @@ async fn a_bedrock_model_outside_the_status_families_receives_no_tool_result_sta
         );
         let text = result["toolResult"]["content"][0]["text"].as_str().unwrap();
         assert!(
-            text.starts_with("result text") && text.contains("following user message"),
-            "is_error={is_error}: the result text keeps the outcome: {body}"
+            text.contains("result text") && text.contains("following user message"),
+            "is_error={is_error}: the image leaves the result and its text stays: {body}"
+        );
+        assert_eq!(
+            text.starts_with(TOOL_ERROR_MARKER),
+            is_error,
+            "is_error={is_error}: a failure names itself in the text: {body}"
         );
     }
     root.shutdown().await.unwrap();
