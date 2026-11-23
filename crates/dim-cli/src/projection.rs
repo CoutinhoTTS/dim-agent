@@ -82,8 +82,6 @@ pub struct Projection {
     ended: Option<(u64, TurnEnd)>,
     /// Requests whose text, thinking or tool row already showed.
     showed: HashSet<String>,
-    /// Requests whose only visible output so far is progress thinking.
-    showed_thinking: HashSet<String>,
     /// Names each thinking row; a rebuilt row gets a new one.
     thinking_seq: u64,
     /// The `error` of a model failure already shown this turn: the turn's
@@ -429,7 +427,6 @@ impl Projection {
                     .entry(data.request_id.clone())
                     .or_default() += data.delta.chars().count() as u64;
                 self.showed.insert(data.request_id.clone());
-                self.showed_thinking.remove(&data.request_id);
                 let index = self.open_thinking(&data.request_id);
                 let thought = self
                     .thinking_rows
@@ -453,7 +450,6 @@ impl Projection {
             }
             EventContent::Text(data) => {
                 self.showed.insert(data.request_id.clone());
-                self.showed_thinking.remove(&data.request_id);
                 self.close_thinking(&data.request_id, event.create_at);
                 let index = match self.assistant_rows.get(&data.request_id) {
                     Some(index) => *index,
@@ -472,7 +468,6 @@ impl Projection {
             }
             EventContent::ToolUse(data) => {
                 self.showed.insert(data.request_id.clone());
-                self.showed_thinking.remove(&data.request_id);
                 self.close_thinking(&data.request_id, event.create_at);
                 self.close_assistant(&data.request_id);
                 let row_id = serde_json::to_string(&(&data.request_id, &data.call.id))
@@ -540,7 +535,6 @@ impl Projection {
             EventContent::ModelEnd(data) => {
                 self.thinking_characters.remove(&data.request_id);
                 let incomplete = self.showed.remove(&data.request_id);
-                self.showed_thinking.remove(&data.request_id);
                 self.close_thinking(&data.request_id, event.create_at);
                 self.close_assistant(&data.request_id);
                 self.retry = None;
@@ -1794,13 +1788,10 @@ impl Projection {
                         && progress.thinking_part_id != thought.part_id)
         }) {
             self.discard_thinking(request_id);
-            if self.showed_thinking.remove(request_id) {
-                self.showed.remove(request_id);
-            }
+            self.showed.remove(request_id);
         }
         if !progress.thinking.is_empty() {
             self.showed.insert(request_id.clone());
-            self.showed_thinking.insert(request_id.clone());
         }
         if progress.thinking.is_empty() {
             return;
