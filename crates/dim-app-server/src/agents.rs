@@ -171,6 +171,10 @@ struct SessionSlot {
     /// Incremented by every `acquire`: while it stays unchanged and `uses`
     /// stays 0, no lease has held the Session (idle unload §6.1).
     acquired: AtomicU64,
+    /// Set by a business close before its runtime close: an `acquire` that
+    /// would restore the Session refuses it, while a use of the loaded
+    /// Session is still admitted until `closed`.
+    closing: AtomicBool,
     /// Set by `session.close` and by a delete's close: the Session does not
     /// load again in this process (S5c D5).
     closed: AtomicBool,
@@ -656,13 +660,24 @@ impl AgentIndex {
         inner.versions.remove(session_id);
         inner.sessions.remove(session_id);
     }
-    /// The business close of Session `id`: its own close completes, and the
-    /// index records that it does not load again in this process. The Session
-    /// records stay, so a restart loads it again. A Session no loaded
-    /// instance holds is already closed.
+    /// The business close of Session `id`: it stops the Session's restoration
+    /// first, so an `acquire` that finds no loaded Session while this runs
+    /// does not load it again, and waits for a restore that already holds the
+    /// slot gate to end before closing what it loaded. The runtime close then
+    /// completes and the index records that the Session does not load again in
+    /// this process. The Session records stay, so a restart loads it again. A
+    /// Session no loaded instance holds is already closed.
     pub(crate) async fn close_session(&self, id: &str) -> dim_agent_runtime::Result<()> {
         #[cfg(feature = "testing")]
         let close_hold = self.close_hold.lock().expect("close hold").take();
+        if let Some((_, slot)) = self.owned_slot(id) {
+            slot.closing.store(true, Ordering::Release);
+            #[cfg(feature = "testing")]
+            if let Some(hold) = &close_hold {
+                hold.admission.notify_one();
+            }
+            drop(slot.gate.clone().lock_owned().await);
+        }
         let result = match self.session(id) {
             Some((_, session)) => session.close().await,
             None => match self
@@ -946,6 +961,9 @@ impl AgentIndex {
                 (session, gate, activity)
             }
             None if self.session_store.is_some() => {
+                if slot.closing.load(Ordering::Acquire) {
+                    return Err(AgentError::Closed(id.into()));
+                }
                 if self.settings.is_some() || expected_cwd.is_some() {
                     let config = self
                         .session_store
@@ -985,11 +1003,19 @@ impl AgentIndex {
                     .expect("AgentsPlugin apply sets its context")
                     .clone();
                 tokio::spawn(async move {
-                    let _slot = slot;
                     let session = host
                         .agent
                         .restore_session_for_version(id.clone(), version)
                         .await?;
+                    if slot.closing.load(Ordering::Acquire) {
+                        // The close stopped this Session's restoration while
+                        // this restore ran: release what it loaded and refuse
+                        // it.
+                        if let Err(error) = session.close().await {
+                            tracing::warn!(%error, session_id = %id, "Restored Session close failed");
+                        }
+                        return Err(AgentError::Closed(id));
+                    }
                     ctx.parallel(SessionRestored {
                         agent_id: host.agent_id.clone(),
                         session_id: id,

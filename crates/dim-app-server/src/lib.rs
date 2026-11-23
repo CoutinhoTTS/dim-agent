@@ -224,9 +224,9 @@ pub struct BranchesHold {
 }
 
 /// Feature `testing`: a hold on the business close of one Session. It
-/// notifies `admission` once the close stopped the Session loading in this
-/// process, `waiting` once its runtime close returned and before the close is
-/// recorded, and returns from `wait` once `release` is notified.
+/// notifies `admission` once the close stopped the Session's restoration in
+/// this process, `waiting` once its runtime close returned and before the close
+/// is recorded, and returns from `wait` once `release` is notified.
 #[cfg(feature = "testing")]
 #[derive(Default)]
 pub struct CloseHold {
