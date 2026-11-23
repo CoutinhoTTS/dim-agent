@@ -9,6 +9,11 @@ import {fileURLToPath} from 'node:url';
 // named explicitly so the selection never runs transport_flow, whose Windows
 // branches only switch a backend, and the compiled binary has to hold every
 // name: a renamed or removed case fails this step instead of running nothing.
+// `flows` and scripts/ci-changes.mjs's `windows_native` paths describe the same
+// tests: the paths decide whether this step runs, this list decides what it runs.
+// Change both together. If a test here lives outside those paths, a PR touching it
+// reaches this step only on the daily sweep or through another matching file; a
+// Windows-only test left out of `flows` never runs, the daily sweep included.
 export const flows = [
   {package: 'dim-agent-capabilities', target: 'capabilities_flow', tests: [
     'file_storage_flow::file_storage_flow',
