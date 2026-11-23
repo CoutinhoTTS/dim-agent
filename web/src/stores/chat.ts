@@ -99,6 +99,8 @@ type Channel = {
   states: Map<string, { running: boolean; stopping: boolean }>
   /** The newest move the server accepted; a completion older than it is stale. */
   moves: number
+  /** Advances on every status write: a read accepts its result only while this is unchanged. */
+  statusSeq: number
   /** The session's directory has been read once: the centre and every line it names are known. */
   directoryRead: boolean
   /** The retry reading the centre, so a second click and a resync never read beside it. */
@@ -130,6 +132,11 @@ function idleState(): { running: boolean; stopping: boolean } {
 /** Whether the page is closed. Reads that await can be overtaken by `session.closed`, so a check after one calls this: a direct comparison would narrow the status and leave the next one no overlap to test. */
 function closed(view: SessionView): boolean {
   return view.status === "closed"
+}
+
+function setStatus(channel: Channel, status: SessionView["status"]): void {
+  channel.view.status = status
+  channel.statusSeq++
 }
 
 /**
@@ -180,6 +187,7 @@ export const useChatStore = defineStore("chat", () => {
       lines: new Lines(),
       states: new Map(),
       moves: 0,
+      statusSeq: 0,
       directoryRead: false,
       retrying: undefined,
       syncing: false,
@@ -210,7 +218,7 @@ export const useChatStore = defineStore("chat", () => {
     if (channel.retrying !== undefined) await channel.retrying
     if (channel.syncing || closed(view)) return
     channel.syncing = true
-    channel.view.status = "loading"
+    setStatus(channel, "loading")
     channel.states.clear()
     view.approvals = []
     channel.directoryRead = false
@@ -266,7 +274,7 @@ export const useChatStore = defineStore("chat", () => {
       if (channel.main !== target) return
       if (main !== "ok") {
         if (main === "failed" && view.status !== "closed") {
-          view.status = "failed"
+          setStatus(channel, "failed")
           view.error = channel.main.error
         }
         return
@@ -291,16 +299,16 @@ export const useChatStore = defineStore("chat", () => {
         const policy = await sessionPermission(view.sessionId, centreId)
         if (view.status === "loading" && channel.main === target) {
           showPermission(view, centreId, policy)
-          view.status = "ready"
+          setStatus(channel, "ready")
           view.error = ""
         }
       }
       publish(channel)
       if (view.status !== "closed") void pumpHistory(channel)
     } catch (error) {
-      if (error instanceof RpcError && error.appError === "session_closed") view.status = "closed"
+      if (error instanceof RpcError && error.appError === "session_closed") setStatus(channel, "closed")
       else if (!(error instanceof ConnectionLost)) {
-        view.status = "failed"
+        setStatus(channel, "failed")
         view.error = error instanceof Error ? error.message : String(error)
       }
     } finally {
@@ -318,7 +326,9 @@ export const useChatStore = defineStore("chat", () => {
    * directory read did not finish has no centre to read: the retry repeats the
    * whole attach instead, which is what an unread directory of a reconnect
    * needs. A Session that closes while a read is out stays closed, as it does
-   * in `sync` and `setDefaultBranch`.
+   * in `sync` and `setDefaultBranch`, and a failure that a read of this line
+   * publishes while the retry is out stands: the policy read and the ready page
+   * are written only while no status landed since the retry started.
    */
   async function readCentre(channel: Channel): Promise<void> {
     const { view } = channel
@@ -328,33 +338,34 @@ export const useChatStore = defineStore("chat", () => {
     }
     const move = channel.moves
     const centre = view.defaultBranchId
+    const statusAt = channel.statusSeq
     try {
       const loaded = await loadHistory(channel, centre)
       // A later move owns the centre, and its own reads decide what it shows.
-      if (channel.moves !== move || closed(view)) return
+      if (channel.moves !== move || channel.statusSeq !== statusAt || closed(view)) return
       if (loaded !== "ok") {
         if (loaded === "failed" && view.status !== "closed") {
-          view.status = "failed"
+          setStatus(channel, "failed")
           view.error = channel.main.error
         }
         return
       }
       await adoptModel(channel, centre, channel.main).catch(() => undefined)
-      if (channel.moves !== move || view.defaultBranchId !== centre || closed(view)) return
+      if (channel.moves !== move || view.defaultBranchId !== centre || channel.statusSeq !== statusAt || closed(view)) return
       publish(channel)
       const refreshed = await refreshGoal(channel, centre)
-      if (channel.moves !== move || view.defaultBranchId !== centre || closed(view) || !refreshed) return
+      if (channel.moves !== move || view.defaultBranchId !== centre || channel.statusSeq !== statusAt || closed(view) || !refreshed) return
       const policy = await sessionPermission(view.sessionId, centre)
-      if (channel.moves !== move || view.defaultBranchId !== centre || closed(view)) return
+      if (channel.moves !== move || view.defaultBranchId !== centre || channel.statusSeq !== statusAt || closed(view)) return
       showPermission(view, centre, policy)
-      view.status = "ready"
+      setStatus(channel, "ready")
       view.error = ""
       publish(channel)
       void pumpHistory(channel)
     } catch (error) {
-      if (error instanceof RpcError && error.appError === "session_closed") view.status = "closed"
+      if (error instanceof RpcError && error.appError === "session_closed") setStatus(channel, "closed")
       else if (!(error instanceof ConnectionLost)) {
-        view.status = "failed"
+        setStatus(channel, "failed")
         view.error = error instanceof Error ? error.message : String(error)
       }
     }
@@ -456,7 +467,7 @@ export const useChatStore = defineStore("chat", () => {
         break
       }
       case "session.closed":
-        view.status = "closed"
+        setStatus(channel, "closed")
         view.running = false
         view.stopping = false
         view.sessionRunning = false
@@ -539,7 +550,7 @@ export const useChatStore = defineStore("chat", () => {
     // took its place starts clean, and its own reads report their own (design
     // §14).
     if (channel.view.status === "failed") {
-      channel.view.status = "ready"
+      setStatus(channel, "ready")
       channel.view.error = ""
     }
     channel.view.defaultBranchId = branchId
@@ -618,9 +629,9 @@ export const useChatStore = defineStore("chat", () => {
             // The Session ending and the connection going away are not failures of
             // this read: a closed page stays closed and a lost connection is the
             // reconnect's to report.
-            if (error instanceof RpcError && error.appError === "session_closed") channel.view.status = "closed"
+            if (error instanceof RpcError && error.appError === "session_closed") setStatus(channel, "closed")
             else if (channel.view.status !== "closed" && !(error instanceof ConnectionLost)) {
-              channel.view.status = "failed"
+              setStatus(channel, "failed")
               channel.view.error = error instanceof Error ? error.message : String(error)
             }
             return false
@@ -707,7 +718,7 @@ export const useChatStore = defineStore("chat", () => {
         branch.done = true
         branch.syncing = true
         branch.error = error instanceof Error ? error.message : String(error)
-        if (error instanceof RpcError && error.appError === "session_closed") channel.view.status = "closed"
+        if (error instanceof RpcError && error.appError === "session_closed") setStatus(channel, "closed")
         changed(channel)
         return "failed"
       }
@@ -1047,9 +1058,11 @@ export const useChatStore = defineStore("chat", () => {
     const moved = await client().call("session.branch_set_default", { sessionId, branchId }, readDefaultBranch)
     // A move the server accepted takes the next generation; one it refused takes
     // none, so an earlier accepted move still finishes rather than being
-    // discarded as stale (design §14).
+    // discarded as stale (design §14). Repeating the line already shown is
+    // complete unless a read still has the page loading: that read left the
+    // page to the line's own reads, which this move now is.
     const move = ++channel.moves
-    if (moved === view.defaultBranchId) return
+    if (moved === view.defaultBranchId && view.status !== "loading") return
     // The new centre's window is read before the stream changes hands: the
     // transcript on screen, its running state and every action that names
     // the centre keep naming the outgoing line until its replacement is
@@ -1069,7 +1082,7 @@ export const useChatStore = defineStore("chat", () => {
       // state its reconnect reads again rather than a ready page with no
       // messages.
       if (view.status !== "closed") {
-        view.status = loaded === "lost" ? "loading" : "failed"
+        setStatus(channel, loaded === "lost" ? "loading" : "failed")
         view.error = view.status === "failed" ? channel.main.error : ""
       }
       publish(channel)
@@ -1083,7 +1096,7 @@ export const useChatStore = defineStore("chat", () => {
       // leaves the centre's goal unread: the page goes back to the pending
       // state its reconnect reads again instead of a ready page with a stale
       // goal and the policy the move cleared.
-      if (view.status === "ready") view.status = "loading"
+      if (view.status === "ready") setStatus(channel, "loading")
       return
     }
     if (view.status === "failed") return
@@ -1097,7 +1110,7 @@ export const useChatStore = defineStore("chat", () => {
     // This line's history, goal and policy are in: a page a resync put in its
     // loading state leaves it here, through the reads of the centre it shows.
     if (view.status === "loading") {
-      view.status = "ready"
+      setStatus(channel, "ready")
       view.error = ""
     }
     publish(channel)
