@@ -132,6 +132,54 @@ fn tool(input: &str) -> StreamPart {
     StreamPart::ToolCall(call("call-1", "lookup", input))
 }
 
+fn tool_start() -> StreamPart {
+    StreamPart::ToolInputStart {
+        id: "call-1".into(),
+        tool_name: "lookup".into(),
+        provider_executed: None,
+        dynamic: None,
+        title: None,
+        provider_metadata: None,
+    }
+}
+
+struct DropFlag(Arc<AtomicBool>);
+
+impl Drop for DropFlag {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+/// A bridge over `protocol` whose stream is `stream`, with the drop of the
+/// transport observable.
+fn protocol_fixture<S>(
+    protocol: ModelProtocol,
+    stream: S,
+    dropped: Arc<AtomicBool>,
+) -> (ModelStream, CancellationToken, AbortSignal, Arc<AtomicBool>)
+where
+    S: Stream<Item = Result<StreamPart, AiMuxError>> + Send + 'static,
+{
+    let result = StreamResult {
+        stream: Box::pin(stream),
+        request: None,
+        response: None,
+    };
+    let cancel = CancellationToken::new();
+    let abort = AbortSignal::new();
+    let stream = convert(
+        result,
+        ToolNames::default(),
+        protocol,
+        cancel.clone(),
+        abort.clone(),
+        CancellationToken::new(),
+        tokio_util::task::TaskTracker::new().token(),
+    );
+    (stream, cancel, abort, dropped)
+}
+
 #[tokio::test]
 async fn native_content_and_tools_convert_in_order_to_agent_chunks() {
     let (mut stream, _, _, dropped) = fixture(vec![
@@ -933,6 +981,58 @@ async fn a_stalled_stream_after_a_cut_tool_call_keeps_its_parse_failure() {
             .is_some_and(|next| next.is_none()),
         "the stream did not end after the failure"
     );
+}
+
+/// A content filter a Responses-shaped stream delivers after a pending read
+/// is the reply's terminal: the call whose arguments it cut short settles as
+/// `content_filtered`, not as the parse failure it caused.
+#[tokio::test(start_paused = true)]
+async fn a_late_content_filter_after_a_pending_read_keeps_its_kind() {
+    for protocol in [
+        ModelProtocol::OpenaiResponses,
+        ModelProtocol::XaiResponses,
+        ModelProtocol::Anthropic,
+        ModelProtocol::Gemini,
+        ModelProtocol::Bedrock,
+    ] {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let flag = DropFlag(dropped.clone());
+        let stream = async_stream::stream! {
+            let _flag = flag;
+            yield Ok(start());
+            yield Ok(tool_start());
+            yield Ok(tool("{\"query\":"));
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            yield Ok(finish(
+                FinishReasonUnified::ContentFilter,
+                NativeUsage::default(),
+            ));
+        };
+        let (stream, _, abort, dropped) = protocol_fixture(protocol, stream, dropped);
+        let chunks = stream.collect::<Vec<_>>().await;
+        let Some(Err(failure)) = chunks.last() else {
+            panic!("{protocol:?}: missing failure: {chunks:?}")
+        };
+        let HostError::Failed {
+            model: Some(model), ..
+        } = failure
+        else {
+            panic!("{protocol:?}: {failure:?}");
+        };
+        assert_eq!(
+            model.kind,
+            ModelFailureKind::ContentFiltered,
+            "{protocol:?}"
+        );
+        assert!(
+            !chunks
+                .iter()
+                .any(|chunk| matches!(chunk, Ok(ModelChunk::ToolUse(_)))),
+            "{protocol:?}: the interrupted call is not announced as a completed call: {chunks:?}"
+        );
+        assert!(abort.is_aborted(), "{protocol:?}");
+        assert!(dropped.load(Ordering::SeqCst), "{protocol:?}");
+    }
 }
 
 #[tokio::test]
