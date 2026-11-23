@@ -132,6 +132,21 @@ fn send(
     }
 }
 
+/// A complete reply, for a stream whose content the test does not inspect.
+fn reply(message_id: &str) -> Vec<std::result::Result<ModelChunk, HostError>> {
+    vec![
+        Ok(ModelChunk::MessageStart {
+            message_id: message_id.into(),
+        }),
+        Ok(ModelChunk::Text("answer".into())),
+        Ok(ModelChunk::TextEnd),
+        Ok(ModelChunk::MessageStop {
+            message_id: message_id.into(),
+            reason: ModelStopReason::EndTurn,
+        }),
+    ]
+}
+
 /// Waits until the branch published `count` usage facts, so everything the
 /// stream sent before the last one was consumed without moving the clock.
 async fn wait_for_usage(session: &Session, count: usize) {
@@ -876,6 +891,100 @@ async fn a_pending_thinking_buffer_is_not_shown_after_a_retry() {
         let events = chain_events(&session, "main", ..).await.unwrap();
         assert_eq!(thinking_events(&events), ["kept"]);
         assert_eq!(text_events(&events), ["answer"]);
+        agent.close().await.unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+/// A steer consumed while the request waits to retry replaces it: the
+/// attempt that showed its thought wrote no fact, so the next attempt starts
+/// without visible output and the request is still replaceable.
+#[tokio::test(start_paused = true)]
+async fn a_steer_during_the_retry_backoff_replaces_the_attempt() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let (cut, cut_stream) = mpsc::unbounded_channel();
+        let (retry, retry_stream) = mpsc::unbounded_channel();
+        let (steer, steer_stream) = mpsc::unbounded_channel();
+        let model = Arc::new(ScriptedModel::new(vec![
+            cut_stream,
+            retry_stream,
+            steer_stream,
+        ]));
+        let agent = MinimalHost::start(&builder(model.clone(), Arc::new(MockTools)))
+            .await
+            .unwrap();
+        let session = agent
+            .create_session(SessionConfig::default())
+            .await
+            .unwrap();
+        session
+            .submit("go".into(), InputMode::Queue, "main")
+            .await
+            .unwrap();
+        let mut progress = session.on::<ModelProgress>("main").unwrap().unwrap();
+        send(
+            &cut,
+            vec![
+                Ok(ModelChunk::MessageStart {
+                    message_id: "cut".into(),
+                }),
+                Ok(ModelChunk::Thinking("shown".into())),
+            ],
+        );
+        progress
+            .wait_for(|progress| progress.thinking == "shown")
+            .await
+            .unwrap();
+        send(&cut, vec![Err(malformed_cut())]);
+        drop(cut);
+        progress
+            .wait_for(|progress| progress.retry.is_some())
+            .await
+            .unwrap();
+        session
+            .submit("STEER-MARKER".into(), InputMode::Steer, "main")
+            .await
+            .unwrap();
+        model.release.notify_one();
+        send(&retry, reply("retry"));
+        send(&steer, reply("steer"));
+        drop(retry);
+        drop(steer);
+        session.idle("main").await.unwrap();
+
+        let events = chain_events(&session, "main", ..).await.unwrap();
+        let calls: Vec<&str> = events
+            .iter()
+            .filter_map(|event| match &event.kind {
+                EventKind::ModelCall(data) => Some(data.request_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            calls.len(),
+            2,
+            "the steer starts one request of its own: {calls:?}"
+        );
+        assert!(
+            events.iter().any(|event| matches!(
+                &event.kind,
+                EventKind::ModelOutputEnd(ModelOutputEndData {
+                    request_id,
+                    outcome: ModelOutputOutcome::Cancelled { reason },
+                    ..
+                }) if request_id == calls[0]
+                    && reason == dim_agent_capabilities::steer::REPLACED_BY_STEER
+            )),
+            "the waiting attempt was replaced instead of retried: {calls:?}"
+        );
+        assert!(events.iter().any(|event| matches!(
+            &event.kind,
+            EventKind::TurnEnd(TurnEndData {
+                outcome: TurnOutcome::Completed { .. },
+                ..
+            })
+        )));
         agent.close().await.unwrap();
     })
     .await

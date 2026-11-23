@@ -868,3 +868,170 @@ async fn parse_output(
         "Provider stream ended without message_stop",
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dim_agent_runtime::{
+        MemoryTimelineStore, SessionConfig, Timeline, TimelineKey, TimelineStore,
+    };
+    use dim_agent_types::{ModelFailureKind, ModelRequest};
+    use futures_util::stream;
+    use rutis::Ctx;
+    use rutis::host::CtxHost;
+    use std::time::Duration;
+
+    fn scope() -> ModelCallData {
+        ModelCallData {
+            turn_id: "turn".into(),
+            request_id: "request".into(),
+            request: Arc::new(ModelRequest::new("provider", "model", Vec::new())),
+            configuration: None,
+            prompt: None,
+            failure_chain: None,
+        }
+    }
+
+    async fn timeline(branch: &str) -> Arc<Timeline> {
+        let store = Arc::new(MemoryTimelineStore::default());
+        store
+            .create_session("session", &SessionConfig::default())
+            .await
+            .unwrap();
+        Arc::new(Timeline::new(
+            Ctx::root().unwrap(),
+            TimelineKey {
+                session_id: "session".into(),
+                branch_id: branch.into(),
+            },
+            Vec::new(),
+            store,
+        ))
+    }
+
+    fn cut() -> HostError {
+        HostError::Failed {
+            message: "the stream ended without a finish reason".into(),
+            budget: None,
+            kind: HostErrorKind::Transport,
+            model: Some(Box::new(ModelFailureFacts {
+                kind: ModelFailureKind::MalformedResponse,
+                reason: Some("the stream ended without a finish reason".into()),
+                status: None,
+                provider_code: None,
+                request_id: None,
+                cause: Vec::new(),
+                retry_after: None,
+                attempts: 1,
+                waited: Duration::ZERO,
+                retry_after_stop: None,
+                retry_forbidden: false,
+            })),
+            presentation: None,
+        }
+    }
+
+    /// A text delta smaller than the flush threshold and younger than its age
+    /// leaves the final flush to the cut. Its append fails on a branch the
+    /// store does not hold.
+    #[tokio::test]
+    async fn a_failed_final_flush_is_not_replayable() {
+        let gate = Arc::new(OutputGate::default());
+        let progress = Arc::new(StateCell::new(ModelProgress::default()));
+        let mut output = Output::new(timeline("missing").await, gate, progress, scope());
+        let chunks: Vec<std::result::Result<ModelChunk, HostError>> = vec![
+            Ok(ModelChunk::MessageStart {
+                message_id: "m".into(),
+            }),
+            Ok(ModelChunk::Text("shown".into())),
+            Err(cut()),
+        ];
+        let stream: ModelStream = Box::pin(stream::iter(chunks));
+        let mut replay_safe = true;
+        let result = consume_output(
+            stream,
+            &mut output,
+            CancellationToken::new(),
+            &mut replay_safe,
+        )
+        .await;
+        assert!(
+            !replay_safe,
+            "a failed final flush is a local failure: the attempt may not be retried"
+        );
+        let Err(HostError::Failed { message, model, .. }) = result else {
+            panic!("a cut after a failed flush is a failure")
+        };
+        assert!(
+            model.is_none(),
+            "the local write error is returned instead of the provider's cut: {message}"
+        );
+    }
+
+    /// A thinking delta stays private until the buffer is shown; until then a
+    /// steer still replaces the request.
+    #[tokio::test(start_paused = true)]
+    async fn a_private_thinking_delta_leaves_the_request_replaceable() {
+        let gate = Arc::new(OutputGate::default());
+        let progress = Arc::new(StateCell::new(ModelProgress::default()));
+        let mut output = Output::new(
+            timeline("main").await,
+            gate.clone(),
+            progress.clone(),
+            scope(),
+        );
+        let replaceable = gate.clone();
+        let read = progress.clone();
+        let stream: ModelStream = Box::pin(stream::unfold(0u8, move |step| {
+            let replaceable = replaceable.clone();
+            let read = read.clone();
+            async move {
+                match step {
+                    0 => Some((
+                        Ok(ModelChunk::MessageStart {
+                            message_id: "m".into(),
+                        }),
+                        1,
+                    )),
+                    1 => Some((Ok(ModelChunk::Thinking("private".into())), 2)),
+                    2 => {
+                        assert!(
+                            read.get().thinking.is_empty(),
+                            "nothing was shown before the interval elapsed"
+                        );
+                        assert!(
+                            replaceable.replace(),
+                            "a request whose thinking was never shown is still replaceable"
+                        );
+                        Some((
+                            Ok(ModelChunk::ThinkingEnd {
+                                thinking: "private".into(),
+                            }),
+                            3,
+                        ))
+                    }
+                    3 => Some((
+                        Ok(ModelChunk::MessageStop {
+                            message_id: "m".into(),
+                            reason: ModelStopReason::EndTurn,
+                        }),
+                        4,
+                    )),
+                    _ => None,
+                }
+            }
+        }));
+        let mut replay_safe = true;
+        let result = consume_output(
+            stream,
+            &mut output,
+            CancellationToken::new(),
+            &mut replay_safe,
+        )
+        .await;
+        assert!(
+            matches!(&result, Err(HostError::Cancelled(reason)) if reason == REPLACED_BY_STEER),
+            "the replacement ends the attempt before its thinking is shown: {result:?}"
+        );
+    }
+}
