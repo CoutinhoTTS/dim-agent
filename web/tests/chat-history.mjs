@@ -22,6 +22,7 @@ registerHooks({
 })
 const { useChatStore } = await import("../src/stores/chat.ts")
 const { RpcError, RpcClient, ConnectionLost } = await import("../src/rpc/client.ts")
+const { readBranches, readDefaultBranch, readNotification } = await import("../src/rpc/read.ts")
 const event = (sequence, content) => ({ id: `e${sequence}`, sequence, createAt: sequence, content })
 const input = (sequence, text) => event(sequence, { kind: "input", text, content: [{ type: "text", text }], blocks: [] })
 const page = (events, through, nextAfter = through, done = true) => ({ events, through, nextAfter, done })
@@ -39,7 +40,7 @@ function session(t, history, reads = {}, display = true, transcript = false) {
       if (method === "session.history" || method === "session.history.display") return history(params)
       if (method === "session.attach") return { providerId: "test", modelId: "test" }
       if (method === "session.methods") return ["session.input.pending", "session.question.pending", "session.turn.get", "session.goal.get"]
-      if (method === "session.branches") return [{ branchId: "worker", parentBranchId: "main", branchPoint: 0, head: 0, state: "open" }]
+      if (method === "session.branches") return { defaultBranchId: "main", branches: [{ branchId: "worker", parentBranchId: "main", branchPoint: 0, head: 0, state: "open" }] }
       if (method === "session.branch.get") return { ...params, parentBranchId: "main", branchPoint: 0, head: 0, state: "open" }
       if (method === "session.input.pending") return { ...params, inputs: [], next: null }
       if (method === "session.question.pending") return { ...params, asks: [], next: null }
@@ -55,6 +56,54 @@ function session(t, history, reads = {}, display = true, transcript = false) {
   return chat
 }
 const receive = (chat, branchId, event) => chat.receive({ method: "session.event", sessionId: "session", branchId, event })
+
+test("the default line follows the directory snapshot and committed root notifications", async t => {
+  const history = deferred()
+  let persisted = "worker"
+  let head = 8
+  const model = { providerId: "test", modelId: "worker-model" }
+  const chat = session(t, ({ branchId }) => branchId === "main" ? history.promise : page([], 0), {
+    "session.branches": () => readBranches({
+      defaultBranchId: persisted,
+      branches: [
+        { branchId: "main", head, state: "open" },
+        { branchId: "worker", parentBranchId: "main", branchPoint: 1, head: 0, state: "open" },
+      ],
+    }),
+    "session.branch_set_default": (params) => {
+      assert.deepEqual(params, { sessionId: "session", branchId: "main" })
+      persisted = params.branchId
+      head++
+      return readDefaultBranch({ defaultBranchId: persisted })
+    },
+    "session.model.get": (params) => {
+      assert.deepEqual(params, { sessionId: "session", branchId: "worker", through: 0 })
+      return model
+    },
+  })
+  const moved = (sequence, branch) => chat.receive(readNotification("session.display", {
+    sessionId: "session", branchId: "main",
+    item: { id: `default-${sequence}`, sequence, create_at: sequence, type: "branch", name: "default", data: { branch } },
+  }))
+
+  await flush()
+  assert.equal(chat.views.session.defaultBranchId, "worker")
+  moved(7, "main")
+  history.resolve(page([input(8, "root transcript")], 8))
+  await flush()
+  assert.equal(chat.views.session.defaultBranchId, "worker")
+  assert.equal(chat.views.session.rows[0].text, "root transcript")
+  chat.ensureLine("session", "worker")
+  await flush()
+  assert.deepEqual(chat.views.session.branches.worker.model, model)
+
+  await chat.setDefaultLine("session", "main")
+  moved(9, "main")
+  moved(8, "worker")
+  assert.equal(chat.views.session.defaultBranchId, "main")
+  await chat.resync()
+  assert.equal(chat.views.session.defaultBranchId, "main")
+})
 
 for (const display of [true, false]) test(`conversation windows negotiate ${display ? "display summaries" : "bounded legacy history"}`, async t => {
   let attached = 0
