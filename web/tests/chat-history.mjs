@@ -24,6 +24,7 @@ const { useChatStore } = await import("../src/stores/chat.ts")
 const { RpcError, RpcClient, ConnectionLost } = await import("../src/rpc/client.ts")
 const event = (sequence, content) => ({ id: `e${sequence}`, sequence, createAt: sequence, content })
 const input = (sequence, text) => event(sequence, { kind: "input", text, content: [{ type: "text", text }], blocks: [] })
+const goalInput = (sequence, text) => event(sequence, { kind: "input", text, content: [{ type: "text", text }], blocks: [{ type: "raw", text, key: "goal:1", retire: false }] })
 const page = (events, through, nextAfter = through, done = true) => ({ events, through, nextAfter, done })
 const flush = () => new Promise(resolve => setTimeout(resolve, 25))
 /** Waits for a publish the store schedules on its own timer, rather than guessing how long it takes. */
@@ -277,6 +278,195 @@ test("a move whose goal refresh fails keeps its failure and reads no policy", as
   await flush()
   assert.equal(chat.views.session.status, "ready")
   assert.deepEqual(chat.views.session.permission, policy)
+})
+
+test("a Session that closes during a retry stays closed", async t => {
+  const held = deferred()
+  let fail = true
+  let retrying = false
+  const chat = session(t, () => {
+    if (fail) throw new Error("the line could not be read")
+    return page([input(1, "on the line")], 1)
+  }, {
+    "session.goal.get": params => retrying ? held.promise : { branchId: params.branchId, through: 1, goal: null },
+  })
+  await flush()
+  assert.equal(chat.views.session.status, "failed")
+  fail = false
+  retrying = true
+  chat.retryCentre("session")
+  await flush()
+  chat.receive({ method: "session.closed", sessionId: "session" })
+  assert.equal(chat.views.session.status, "closed")
+  held.resolve({ branchId: "main", through: 1, goal: null })
+  await flush()
+  assert.equal(chat.views.session.status, "closed", "a Session closed during the retry does not become ready again")
+})
+
+test("a Session that closes while a reconnect waits for a retry stays closed", async t => {
+  const held = deferred()
+  let fail = true
+  let hold = false
+  let attaches = 0
+  const chat = session(t, () => {
+    if (hold) return held.promise
+    if (fail) throw new Error("the line could not be read")
+    return page([input(1, "on the line")], 1)
+  }, {
+    "session.attach": () => {
+      attaches++
+      return { providerId: "test", modelId: "test" }
+    },
+  })
+  await flush()
+  assert.equal(chat.views.session.status, "failed")
+  fail = false
+  hold = true
+  chat.retryCentre("session")
+  await flush()
+  chat.receive({ method: "session.closed", sessionId: "session" })
+  void chat.resync()
+  await flush()
+  assert.equal(attaches, 1, "the reconnect waits for the retry")
+  hold = false
+  held.resolve(page([input(1, "on the line")], 1))
+  await flush()
+  assert.equal(chat.views.session.status, "closed", "a reconnect does not open a closed Session again")
+  assert.equal(attaches, 1, "a closed Session is not attached again")
+})
+
+test("a retry after a reconnect that could not attach attaches again", async t => {
+  let attaches = 0
+  let attachable = true
+  const chat = session(t, () => page([input(1, "stored")], 1), {
+    "session.attach": () => {
+      attaches++
+      if (!attachable) throw new Error("the attach failed")
+      return { providerId: "test", modelId: "test" }
+    },
+  })
+  await flush()
+  assert.equal(attaches, 1)
+  assert.equal(chat.views.session.status, "ready")
+  attachable = false
+  await chat.resync()
+  assert.equal(attaches, 2, "the reconnect attaches again")
+  assert.equal(chat.views.session.status, "failed")
+  attachable = true
+  chat.retryCentre("session")
+  await flush()
+  assert.equal(attaches, 3, "the retry repeats the attach instead of reading beside a connection without one")
+  assert.equal(chat.views.session.status, "ready")
+  assert.deepEqual(chat.views.session.rows.map(row => row.text), ["stored"])
+})
+
+test("a retry after a reconnect that cannot read the directory attaches again", async t => {
+  let attaches = 0
+  let directory = true
+  const chat = session(t, () => page([input(1, "stored")], 1), {
+    "session.attach": () => {
+      attaches++
+      return { providerId: "test", modelId: "test" }
+    },
+    "session.branches": () => {
+      if (!directory) throw new Error("the directory could not be read")
+      return { branches: [{ branchId: "worker", parentBranchId: "main", branchPoint: 0, head: 1, state: "open" }], defaultBranchId: "main" }
+    },
+  })
+  await flush()
+  assert.equal(chat.views.session.status, "ready")
+  directory = false
+  await chat.resync()
+  assert.equal(attaches, 2, "the reconnect attaches again")
+  assert.equal(chat.views.session.status, "failed")
+  directory = true
+  chat.retryCentre("session")
+  await flush()
+  assert.equal(attaches, 3, "a directory read that did not finish sends the retry back through the attach")
+  assert.equal(chat.views.session.status, "ready")
+  assert.deepEqual(chat.views.session.rows.map(row => row.text), ["stored"])
+})
+
+test("a reconnect that waits for a retry keeps the events buffered during it", async t => {
+  const held = deferred()
+  let fail = true
+  let hold = false
+  let attaches = 0
+  const chat = session(t, () => {
+    if (hold) return held.promise
+    if (fail) throw new Error("the line could not be read")
+    return page([], 0)
+  }, {
+    "session.attach": () => {
+      attaches++
+      return { providerId: "test", modelId: "test" }
+    },
+  })
+  await flush()
+  assert.equal(chat.views.session.status, "failed")
+  fail = false
+  hold = true
+  chat.retryCentre("session")
+  await flush()
+  receive(chat, "main", input(1, "buffered while the retry ran"))
+  await flush()
+  void chat.resync()
+  void chat.resync()
+  await flush()
+  assert.equal(attaches, 1, "the reconnects wait for the retry")
+  hold = false
+  held.reject(new Error("the line could not be read"))
+  await flush()
+  assert.equal(attaches, 2, "one reconnect attaches once the retry settles")
+  assert.deepEqual(chat.views.session.rows.map(row => row.text), ["buffered while the retry ran"], "the events buffered while the reconnect waited are not dropped")
+})
+
+test("a goal refresh reports neither a closed Session nor a lost connection as a failure", async t => {
+  let goal = "ok"
+  const chat = session(t, () => page([input(1, "stored")], 1), {
+    "session.goal.get": params => {
+      if (goal === "lost") throw new ConnectionLost()
+      if (goal === "failed") throw new Error("the goal read failed")
+      return { branchId: params.branchId, through: 1, goal: null }
+    },
+  })
+  await flush()
+  assert.equal(chat.views.session.status, "ready")
+  goal = "lost"
+  receive(chat, "main", goalInput(2, "keep going"))
+  await flush()
+  assert.equal(chat.views.session.status, "ready", "a lost connection is not a failed page")
+  goal = "failed"
+  chat.receive({ method: "session.closed", sessionId: "session" })
+  assert.equal(chat.views.session.status, "closed")
+  receive(chat, "main", goalInput(3, "keep going again"))
+  await flush()
+  assert.equal(chat.views.session.status, "closed", "a read after the Session closed keeps it closed")
+})
+
+test("a retry loads the side lines an earlier sync left waiting", async t => {
+  let fail = false
+  const chat = session(t, params => {
+    if (params.branchId === "worker") return page([input(1, "on the worker")], 1)
+    if (fail) throw new Error("the centre could not be read")
+    return page([input(1, "on the root")], 1)
+  }, {
+    "session.branches": () => ({ branches: [{ branchId: "worker", parentBranchId: "main", branchPoint: 0, head: 1, state: "open" }], defaultBranchId: "main" }),
+  })
+  await flush()
+  assert.equal(chat.views.session.status, "ready")
+  chat.ensureLine("session", "worker")
+  await flush()
+  assert.deepEqual(chat.views.session.branches.worker.rows.map(row => row.text), ["on the worker"])
+  fail = true
+  await chat.resync()
+  assert.equal(chat.views.session.status, "failed")
+  assert.equal(chat.views.session.branches.worker.status, "loading", "the side line is still waiting for its window")
+  fail = false
+  chat.retryCentre("session")
+  await flush()
+  assert.equal(chat.views.session.status, "ready")
+  assert.equal(chat.views.session.branches.worker.status, "ready", "the retry loads the side line the earlier sync queued")
 })
 
 for (const display of [true, false]) test(`conversation windows negotiate ${display ? "display summaries" : "bounded legacy history"}`, async t => {
