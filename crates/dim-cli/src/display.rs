@@ -336,17 +336,41 @@ impl Display {
         self.request_order.insert(request.to_owned(), order);
         order
     }
-    /// A request that first appears later makes the earlier held text
-    /// diagnostics: the later request is where the turn's reply can come from.
-    fn demote_before(&mut self, order: u64) -> Result<()> {
+    /// A request that first appears later makes the earlier held text of the
+    /// same turn diagnostics: the later request is where the turn's reply can
+    /// come from.
+    fn demote_before(&mut self, turn: &str, order: u64) -> Result<()> {
         for index in 0..self.held.len() {
-            if self.held[index].route.is_none()
+            if self.held[index].turn == turn
+                && self.held[index].route.is_none()
                 && self.request_order.get(&self.held[index].request).copied() < Some(order)
             {
                 self.held[index].route = Some(TextRoute::Progress);
                 self.flush(index)?;
             }
         }
+        Ok(())
+    }
+    /// `turn` reached `request`: every request marks the place the turn's reply
+    /// can come from, even one that writes no text, so the text it leaves
+    /// unsettled earlier in the turn is diagnostics.
+    fn observe_request(&mut self, turn: &str, request: &str) -> Result<()> {
+        let order = self.note_request(request);
+        if self.owns(turn) == Some(false)
+            || self
+                .held
+                .iter()
+                .any(|held| held.request == request)
+        {
+            return Ok(());
+        }
+        self.demote_before(turn, order)?;
+        self.held.push(HeldText {
+            turn: turn.to_owned(),
+            request: request.to_owned(),
+            text: String::new(),
+            route: None,
+        });
         Ok(())
     }
     /// Whether text of `turn` may be `exec`'s reply; `None` while the
@@ -359,36 +383,31 @@ impl Display {
         }
     }
     fn text(&mut self, turn: &str, request: &str, text: &str) -> Result<()> {
+        self.observe_request(turn, request)?;
         if text.is_empty() || self.muted || self.json {
             return Ok(());
         }
-        let order = self.note_request(request);
         match self.owns(turn) {
             Some(false) => {
                 self.route_request(request, TextRoute::Progress)?;
                 self.show_progress(text)
             }
-            Some(true) | None => self.hold(turn, request, text, order),
+            Some(true) | None => self.hold(request, text),
         }
     }
-    fn hold(&mut self, turn: &str, request: &str, text: &str, order: u64) -> Result<()> {
-        if let Some(index) = self.held.iter().position(|held| held.request == request) {
-            if let Some(route) = self.held[index].route {
-                return match route {
-                    TextRoute::Reply => self.show_text(text),
-                    TextRoute::Progress => self.show_progress(text),
-                };
-            }
-            self.held[index].text.push_str(text);
-            return Ok(());
+    fn hold(&mut self, request: &str, text: &str) -> Result<()> {
+        let index = self
+            .held
+            .iter()
+            .position(|held| held.request == request)
+            .expect("a request is observed before its text is held");
+        if let Some(route) = self.held[index].route {
+            return match route {
+                TextRoute::Reply => self.show_text(text),
+                TextRoute::Progress => self.show_progress(text),
+            };
         }
-        self.demote_before(order)?;
-        self.held.push(HeldText {
-            turn: turn.to_owned(),
-            request: request.to_owned(),
-            text: text.to_owned(),
-            route: None,
-        });
+        self.held[index].text.push_str(text);
         Ok(())
     }
     pub fn progress(&mut self, progress: Progress) -> Result<()> {
@@ -492,6 +511,11 @@ impl Display {
                     }
                 }
             }
+            EventContent::ModelStart(data) => {
+                if self.final_reply_only {
+                    self.observe_request(&data.turn_id, &data.request_id)?;
+                }
+            }
             EventContent::Text(data) => {
                 self.showed.insert(data.request_id.clone());
                 let request = data.request_id;
@@ -513,8 +537,7 @@ impl Display {
             }
             EventContent::ToolUse(data) => {
                 if self.final_reply_only {
-                    let order = self.note_request(&data.request_id);
-                    self.demote_before(order)?;
+                    self.observe_request(&data.turn_id, &data.request_id)?;
                     self.route_request(&data.request_id, TextRoute::Progress)?;
                 }
                 self.tools.insert(
@@ -537,6 +560,7 @@ impl Display {
                 let incomplete = self.showed.remove(&data.request_id);
                 self.retry_seen.remove(&data.request_id);
                 if self.final_reply_only {
+                    self.observe_request(&data.turn_id, &data.request_id)?;
                     match &data.outcome {
                         ModelOutputOutcome::Completed {
                             finish_reason: FinishReason::ToolUse,
