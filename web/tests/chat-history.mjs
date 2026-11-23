@@ -1362,6 +1362,83 @@ test("a Session that closes while the retry reads the policy stays closed", asyn
   assert.equal(chat.views.session.status, "closed", "a Session closed during the policy read stays closed")
 })
 
+test("a resync whose history read fails after another line took the centre leaves the moved page to its own reads", async t => {
+  const rootPage = deferred()
+  const workerPage = deferred()
+  const workerGoal = deferred()
+  let defaultId = "main"
+  let rootReads = 0
+  let workerFails = false
+  const chat = session(t, params => {
+    if (params.branchId === "worker") {
+      if (workerFails) throw new Error("the centred line could not be read")
+      return workerPage.promise
+    }
+    rootReads++
+    return rootReads === 1 ? page([input(1, "on the root")], 1) : rootPage.promise
+  }, {
+    "session.branches": () => ({ branches: [{ branchId: "worker", parentBranchId: "main", branchPoint: 0, head: 1, state: "open" }], defaultBranchId: defaultId }),
+    "session.branch_set_default": () => {
+      defaultId = "worker"
+      return "worker"
+    },
+    "session.goal.get": params => params.branchId === "worker" ? workerGoal.promise : { branchId: "main", through: 1, goal: null },
+  })
+  await flush()
+  assert.equal(chat.views.session.status, "ready")
+  const reconnecting = chat.resync()
+  await until(() => rootReads === 2)
+  const moving = chat.setDefaultBranch("session", "worker")
+  await flush()
+  workerPage.resolve(page([input(1, "on the worker")], 1))
+  await until(() => chat.views.session.defaultBranchId === "worker")
+  await flush()
+  rootPage.reject(new Error("the line that moved away could not be read"))
+  await reconnecting
+  await flush()
+  assert.equal(chat.views.session.status, "loading", "the outgoing line's late failure does not fail the moved page")
+  assert.equal(chat.views.session.error, "", "the outgoing line's failure is not reported for the centre")
+  workerGoal.resolve({ branchId: "worker", through: 1, goal: null })
+  await moving
+  await flush()
+  assert.equal(chat.views.session.status, "ready", "the moved page leaves loading through the reads of the centre it shows")
+  assert.equal(chat.views.session.error, "")
+  assert.deepEqual(chat.views.session.rows.map(row => row.text), ["on the worker"])
+  workerFails = true
+  await chat.resync()
+  await flush()
+  assert.equal(chat.views.session.status, "failed", "a read of the centre itself still fails the page")
+  assert.equal(chat.views.session.error, "the centred line could not be read")
+})
+
+test("a resync whose directory answer predates a move does not take the centre back", async t => {
+  const directory = deferred()
+  let directories = 0
+  const chat = session(t, params => page([input(1, `on ${params.branchId}`)], 1), {
+    // The resync's answer was read before the move was accepted and still names the old default.
+    "session.branches": () => {
+      directories++
+      return directories === 1
+        ? { branches: [{ branchId: "worker", parentBranchId: "main", branchPoint: 0, head: 1, state: "open" }], defaultBranchId: "main" }
+        : directory.promise
+    },
+    "session.branch_set_default": () => "worker",
+    "session.goal.get": params => ({ branchId: params.branchId, through: 1, goal: null }),
+  })
+  await flush()
+  assert.equal(chat.views.session.status, "ready")
+  const reconnecting = chat.resync()
+  await until(() => directories === 2)
+  await chat.setDefaultBranch("session", "worker")
+  await flush()
+  assert.equal(chat.views.session.defaultBranchId, "worker", "the move is the centre")
+  directory.resolve({ branches: [{ branchId: "worker", parentBranchId: "main", branchPoint: 0, head: 1, state: "open" }], defaultBranchId: "main" })
+  await reconnecting
+  await flush()
+  assert.equal(chat.views.session.defaultBranchId, "worker", "a directory answer read before the move does not take the centre back")
+  assert.deepEqual(chat.views.session.rows.map(row => row.text), ["on worker"], "the page keeps the transcript the move read")
+})
+
 test("a side line keeps the events it received while the centre page was failed", async t => {
   let failGoal = false
   const chat = session(t, params => page([input(1, `on ${params.branchId}`)], 1), {
