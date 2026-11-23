@@ -26,6 +26,7 @@ jobs:
     outputs:
       rust: ${{ steps.groups.outputs.rust }}
       windows: ${{ steps.groups.outputs.windows }}
+      windows_native: ${{ steps.groups.outputs.windows_native }}
       static: ${{ steps.groups.outputs.static }}
       xtask: ${{ steps.groups.outputs.xtask }}
       node: ${{ steps.groups.outputs.node }}
@@ -100,7 +101,7 @@ jobs:
           cargo run --locked -p xtask-check
   windows-cli:
     needs: changes
-    if: needs.changes.outputs.windows == 'true'
+    if: needs.changes.outputs.windows == 'true' || needs.changes.outputs.windows_native == 'true'
     runs-on: [self-hosted, windows, x64]
     timeout-minutes: 15
     env:
@@ -115,24 +116,24 @@ jobs:
         uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
         with:
           arch: amd64
-      - name: Reuse bounded Windows CLI target directory
+      - name: Reuse bounded Windows target directory
         shell: powershell
         env:
           CACHE_STAMP: ${{ hashFiles('rust-toolchain.toml') }}-${{ env.CARGO_PROFILE_DEV_DEBUG }}
         run: |
           $targetDir = [System.IO.Path]::GetFullPath($env:CARGO_TARGET_DIR)
           $stampFile = Join-Path $targetDir '.cache-stamp'
-          $maxBytes = 6GB
+          $maxBytes = 12GB
           $reset = $false
           if (Test-Path $targetDir) {
             $current = if (Test-Path $stampFile) { (Get-Content -Raw $stampFile).Trim() } else { '' }
             if ($current -ne $env:CACHE_STAMP) {
-              Write-Output 'Resetting Windows CLI target cache (toolchain or profile stamp changed).'
+              Write-Output 'Resetting Windows target cache (toolchain or profile stamp changed).'
               $reset = $true
             } else {
               $bytes = (Get-ChildItem -LiteralPath $targetDir -Recurse -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
               if ($bytes -gt $maxBytes) {
-                Write-Output "Resetting Windows CLI target cache ($([math]::Round($bytes / 1GB, 2)) GiB exceeded 6 GiB budget)."
+                Write-Output "Resetting Windows target cache ($([math]::Round($bytes / 1GB, 2)) GiB exceeded 12 GiB budget)."
                 $reset = $true
               }
             }
@@ -145,6 +146,50 @@ jobs:
           "CARGO_TARGET_DIR=$targetDir" >> $env:GITHUB_ENV
       - name: Verify native Windows CLI boundaries
         run: cargo test --locked -p dim-cli --lib
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        if: needs.changes.outputs.windows_native == 'true'
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+      - name: Provision portable CMake and NASM
+        # aws-lc-sys builds C sources on Windows x64 and needs NASM and CMake.
+        # The self-hosted runner has no installer rights, so unpack pinned
+        # portable archives under RUNNER_TEMP and expose them to this job only.
+        if: needs.changes.outputs.windows_native == 'true'
+        shell: powershell
+        env:
+          CMAKE_VERSION: '3.31.6'
+          CMAKE_SHA256: 'd163cd3ab4959b0a53fa8988f2ddbd2e6c501658201e6a154386bad9dbe4f836'
+          NASM_VERSION: '2.16.03'
+          NASM_SHA256: '3ee4782247bcb874378d02f7eab4e294a84d3d15f3f6ee2de2f47a46aa7226e6'
+        run: |
+          $ProgressPreference = 'SilentlyContinue'
+          function Add-PortableTool {
+            param([string]$Name, [string]$Version, [string]$Sha256, [string]$Url, [string]$VersionFlag)
+            if (Get-Command $Name -ErrorAction SilentlyContinue) {
+              Write-Output "Using the $Name already on PATH"
+              return
+            }
+            $archive = Join-Path $env:RUNNER_TEMP "$Name-$Version.zip"
+            Invoke-WebRequest -Uri $Url -OutFile $archive -UseBasicParsing
+            $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
+            if ($actual -ne $Sha256) { throw "$Name sha256 $actual does not match $Sha256" }
+            $directory = Join-Path $env:RUNNER_TEMP "dim-windows-native-$Name-$Version"
+            if (Test-Path $directory) { Remove-Item -LiteralPath $directory -Recurse -Force }
+            Expand-Archive -LiteralPath $archive -DestinationPath $directory -Force
+            $executable = Get-ChildItem -LiteralPath $directory -Recurse -File -Filter "$Name.exe" | Select-Object -First 1
+            if (-not $executable) { throw "$Name archive holds no $Name.exe" }
+            [System.IO.File]::AppendAllText($env:GITHUB_PATH, "$($executable.DirectoryName)`n")
+            & $executable.FullName $VersionFlag
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            Write-Output "Provisioned $Name $Version from $Url"
+          }
+          Add-PortableTool -Name 'cmake' -Version $env:CMAKE_VERSION -Sha256 $env:CMAKE_SHA256 -Url "https://github.com/Kitware/CMake/releases/download/v$env:CMAKE_VERSION/cmake-$env:CMAKE_VERSION-windows-x86_64.zip" -VersionFlag '--version'
+          Add-PortableTool -Name 'nasm' -Version $env:NASM_VERSION -Sha256 $env:NASM_SHA256 -Url "https://www.nasm.us/pub/nasm/releasebuilds/$env:NASM_VERSION/win64/nasm-$env:NASM_VERSION-win64.zip" -VersionFlag '-v'
+      - name: Verify native Windows boundary flows
+        # Scheduled sweeps select every check group, so they run these flows too.
+        if: needs.changes.outputs.windows_native == 'true'
+        run: node scripts/test-windows-native.mjs
   web:
     needs: changes
     if: needs.changes.outputs.web == 'true'

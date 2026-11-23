@@ -14,9 +14,9 @@ use dim_agent_capabilities::file_storage::FileStoragePlugin;
 use dim_agent_capabilities::history::HistoryRenderer;
 use dim_agent_runtime::testing::{chain_events, timeline_events};
 use dim_agent_runtime::{
-    AgentBuilder, AgentConfig, AgentError, MemoryTimelineStore, SessionConfig, StoredEvent,
-    Timeline, TimelineKey, TimelineQueryScope, TimelineStore, TimelineTrace, TraceStep,
-    testing::MinimalHost,
+    AgentBuilder, AgentConfig, AgentError, BranchOptions, Feature, MemoryTimelineStore,
+    SessionConfig, StoredEvent, Timeline, TimelineKey, TimelineQueryScope, TimelineStore,
+    TimelineTrace, TimelineTreeControl, TraceStep, testing::MinimalHost,
 };
 use dim_agent_types::{
     grant::{GrantKind, GrantMode, SessionGrant},
@@ -27,7 +27,7 @@ use dim_app_server::storage::{
     NodeLoads, STORE_FORMAT, SqliteStorage, SqliteTimelineStore, vacuum_store,
 };
 use rusqlite::{Connection, OptionalExtension, params};
-use rutis::host::CtxHost;
+use rutis::host::{CtxHost, FiberState};
 use std::{
     path::PathBuf,
     sync::Arc,
@@ -2315,6 +2315,327 @@ async fn branch_end_events_restore_unchanged_and_the_line_stays_ended() {
         Err(AgentError::BranchEnded(_))
     ));
     agent.close().await.unwrap();
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+}
+
+/// A stored Session on its root and one open child line, as the next process
+/// finds it: the Session id and the child line's id, with the database closed.
+async fn stored_two_line_session(database: &Database) -> (String, String) {
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    dim_agent_capabilities::defaults::mock_hosts(&mut builder);
+    dim_agent_capabilities::defaults::install(&mut builder);
+    builder.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(store.clone()));
+    let agent = MinimalHost::start(&builder).await.unwrap();
+    let session = settled(
+        "the Session opens",
+        agent.create_session(SessionConfig::default()),
+    )
+    .await
+    .unwrap();
+    settled("the root line idles", session.idle("main"))
+        .await
+        .unwrap();
+    let cut = session.sequence("main").unwrap();
+    let child = settled(
+        "the child line opens",
+        session.branch(
+            "main".into(),
+            cut,
+            BranchOptions {
+                prompt: "child work".into(),
+                source: BranchSource::Host {
+                    operation_id: "restore-progress".into(),
+                },
+            },
+        ),
+    )
+    .await
+    .unwrap();
+    settled("the child line idles", session.idle(&child))
+        .await
+        .unwrap();
+    let id = session.id().to_owned();
+    settled("the first host closes", agent.close())
+        .await
+        .unwrap();
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+    (id, child)
+}
+
+/// The host that restores a stored Session, its opening bounded by `bound`, or
+/// by the Session's default bound when `None`.
+async fn restoring_host(
+    database: &Database,
+    bound: Option<Duration>,
+) -> (MinimalHost, Arc<SqliteTimelineStore>, Arc<SqliteStorage>) {
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    dim_agent_capabilities::defaults::mock_hosts(&mut builder);
+    dim_agent_capabilities::defaults::install(&mut builder);
+    if let Some(bound) = bound {
+        builder.startup_timeout(bound);
+    }
+    builder.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(store.clone()));
+    let agent = MinimalHost::start(&builder).await.unwrap();
+    (agent, store, db)
+}
+
+/// A restore that reports no progress for longer than `startup_timeout` still
+/// names what it was running: every row is Active, so the message cannot list
+/// one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_silent_restore_times_out_naming_the_restore_phase() {
+    use dim_agent_capabilities::timeline_tree::testing::slow_restore_steps;
+    let database = Database::new();
+    let (id, _) = stored_two_line_session(&database).await;
+    let _slow = slow_restore_steps(&id, Duration::from_millis(1500));
+    let (agent, store, db) = restoring_host(&database, Some(Duration::from_secs(1))).await;
+    let error = match settled("the silent restore times out", agent.restore_session(id)).await {
+        Ok(_) => panic!("a restore silent past the bound must fail the opening"),
+        Err(error) => error,
+    };
+    let message = error.to_string();
+    assert!(
+        message.contains(
+            "initialization timed out: no pending row in this wait; still running: restore"
+        ),
+        "the message names the phase still running: {message}"
+    );
+    settled("the host closes", agent.close()).await.unwrap();
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+}
+
+/// Each restore step reports opening progress, so a restore whose steps are
+/// each shorter than `startup_timeout` and together longer still completes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_slow_restore_reports_progress_and_keeps_the_opening_alive() {
+    use dim_agent_capabilities::timeline_tree::testing::slow_restore_steps;
+    let database = Database::new();
+    let (id, child) = stored_two_line_session(&database).await;
+    let bound = Duration::from_secs(1);
+    let _slow = slow_restore_steps(&id, Duration::from_millis(250));
+    let (agent, store, db) = restoring_host(&database, Some(bound)).await;
+    let started = Instant::now();
+    let session = settled("the slow restore completes", agent.restore_session(id))
+        .await
+        .expect("reported progress renews the opening's inactivity bound");
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed > bound,
+        "the restore must outlast the bound to exercise renewal: {elapsed:?}"
+    );
+    let branches = session.branches();
+    let ids = branches
+        .iter()
+        .map(|info| info.id.as_str())
+        .collect::<Vec<_>>();
+    assert!(ids.contains(&"main"), "{ids:?}");
+    assert!(ids.contains(&child.as_str()), "{ids:?}");
+    settled("the host closes", agent.close()).await.unwrap();
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+}
+
+/// A restore resolves the identity its opening progress is reported under once
+/// per tree, not once per step: the steps of a stored Session cost no complete
+/// process diagnostics snapshot each.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_restore_resolves_its_reporting_identity_once() {
+    use dim_agent_capabilities::timeline_tree::testing::count_identity_resolutions;
+    let database = Database::new();
+    let (id, _) = stored_two_line_session(&database).await;
+    let resolutions = count_identity_resolutions(&id);
+    let (agent, store, db) = restoring_host(&database, None).await;
+    settled("the restore completes", agent.restore_session(id))
+        .await
+        .expect("a restore within its opening bound completes");
+    assert_eq!(
+        resolutions.count(),
+        1,
+        "the restore resolves the identity it reports progress under once"
+    );
+    settled("the host closes", agent.close()).await.unwrap();
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+}
+
+/// Each tree resolves the identity its opening progress is reported under
+/// within its own generation: a Session whose tree closed and was restored
+/// again reports under the new tree's live fiber, never the previous one's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn each_tree_generation_resolves_its_own_reporting_identity() {
+    use dim_agent_capabilities::timeline_tree::testing::count_identity_resolutions;
+    let database = Database::new();
+    let (id, _) = stored_two_line_session(&database).await;
+    let resolutions = count_identity_resolutions(&id);
+    let (agent, store, db) = restoring_host(&database, None).await;
+    let session = settled(
+        "the first restore completes",
+        agent.restore_session(id.clone()),
+    )
+    .await
+    .expect("a restore within its opening bound completes");
+    settled("the first Session closes", session.close())
+        .await
+        .unwrap();
+    let second = settled("the second restore completes", agent.restore_session(id))
+        .await
+        .expect("a restore within its opening bound completes");
+    let ids = resolutions.ids();
+    assert_eq!(
+        ids.len(),
+        2,
+        "each tree resolves the identity its reports are attributed to"
+    );
+    assert_ne!(
+        ids[0], ids[1],
+        "the second tree resolves its own fiber, not the previous generation's"
+    );
+    let live = second.diagnostics().unwrap().plugins;
+    assert!(
+        live.iter().any(|plugin| plugin.id == ids[1]
+            && plugin.name == "TimelineTree"
+            && plugin.state == FiberState::Active),
+        "the second tree reports under its own live fiber"
+    );
+    assert!(
+        !agent
+            .root()
+            .diagnostics()
+            .plugins
+            .iter()
+            .any(|plugin| plugin.id == ids[0] && plugin.state == FiberState::Active),
+        "the first tree's fiber is gone, so a report under it would be dropped"
+    );
+    settled("the host closes", agent.close()).await.unwrap();
+    store.close().await.unwrap();
+    db.close().await.unwrap();
+}
+
+/// A Session part that hands the flow the tree copy its Session's row mounts.
+/// Its declared inject makes it reload with that copy, so every tree it
+/// captures belongs to the generation that just applied.
+struct CaptureTree {
+    tree: rutis::host::Key<dim_agent_capabilities::timeline_tree::TimelineTree>,
+    captured: tokio::sync::mpsc::UnboundedSender<Arc<dyn TimelineTreeControl>>,
+}
+impl CaptureTree {
+    fn new(
+        names: &dim_agent_runtime::Names<'_>,
+        captured: tokio::sync::mpsc::UnboundedSender<Arc<dyn TimelineTreeControl>>,
+    ) -> rutis::Result<Self> {
+        Ok(Self {
+            tree: names.key()?,
+            captured,
+        })
+    }
+}
+impl rutis::host::DynPlugin for CaptureTree {
+    fn name(&self) -> &str {
+        "test.capture-tree"
+    }
+    fn injects(&self) -> Vec<rutis::host::TypeKey> {
+        vec![self.tree.erase()]
+    }
+    fn apply<'a>(
+        &'a self,
+        ctx: &'a rutis::Ctx,
+    ) -> rutis::host::BoxFuture<'a, rutis::Result<rutis::host::Effect>> {
+        Box::pin(async move {
+            let tree = ctx.require_at(&self.tree)?;
+            let _ = self.captured.send(tree);
+            Ok(rutis::host::Effect::Done)
+        })
+    }
+}
+
+/// A row reload rebuilds the tree for the Session that is already open: the
+/// new copy's tree reports under its own live fiber, and the disposed copy's
+/// fiber is no longer Active.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_row_reload_resolves_the_new_tree_reporting_identity() {
+    use dim_agent_capabilities::timeline_tree::testing::count_identity_resolutions;
+    let database = Database::new();
+    let (id, _) = stored_two_line_session(&database).await;
+    let resolutions = count_identity_resolutions(&id);
+    let db = SqliteStorage::open(database.0.clone()).unwrap();
+    let store = SqliteTimelineStore::new(db.clone());
+    let (captured, mut trees) = tokio::sync::mpsc::unbounded_channel();
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    dim_agent_capabilities::defaults::mock_hosts(&mut builder);
+    dim_agent_capabilities::defaults::install(&mut builder);
+    builder.require_feature(
+        Feature::new("test.capture-tree").session("test.capture-tree", move |names| {
+            Ok(Box::new(CaptureTree::new(names, captured.clone())?))
+        }),
+    );
+    builder.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(store.clone()));
+    let agent = MinimalHost::start(&builder).await.unwrap();
+    let session = settled(
+        "the first restore completes",
+        agent.restore_session(id.clone()),
+    )
+    .await
+    .expect("a restore within its opening bound completes");
+    let first = settled("the first tree is captured", async {
+        trees.recv().await.expect("a mounted tree copy")
+    })
+    .await;
+    settled(
+        "the TimelineTree row reloads",
+        agent.loader().restart("TimelineTree"),
+    )
+    .await
+    .expect("the row's copies reload");
+    let second = settled("the reloaded tree is captured", async {
+        loop {
+            let tree = trees.recv().await.expect("a mounted tree copy");
+            if !Arc::ptr_eq(&tree, &first) {
+                break tree;
+            }
+        }
+    })
+    .await;
+    let branches = store.branches(&id).await.unwrap();
+    settled(
+        "the reloaded tree restores the stored Session",
+        second.restore(branches),
+    )
+    .await
+    .expect("the reloaded tree restores the stored branches");
+    let ids = resolutions.ids();
+    assert_eq!(
+        ids.len(),
+        2,
+        "each tree resolves the identity its reports are attributed to"
+    );
+    assert_ne!(
+        ids[0], ids[1],
+        "the reloaded tree resolves its own fiber, not the disposed copy's"
+    );
+    let live = session.diagnostics().unwrap().plugins;
+    assert!(
+        live.iter().any(|plugin| plugin.id == ids[1]
+            && plugin.name == "TimelineTree"
+            && plugin.state == FiberState::Active),
+        "the reloaded tree reports under its own live fiber"
+    );
+    assert!(
+        !agent
+            .root()
+            .diagnostics()
+            .plugins
+            .iter()
+            .any(|plugin| plugin.id == ids[0] && plugin.state == FiberState::Active),
+        "the reloaded row disposed the first tree's fiber"
+    );
+    settled("the host closes", agent.close()).await.unwrap();
     store.close().await.unwrap();
     db.close().await.unwrap();
 }
@@ -8384,6 +8705,58 @@ async fn a_slow_store_upgrade_reports_progress_and_keeps_the_opening_alive() {
     assert!(
         !note.exists(),
         "a successful open removes the progress note"
+    );
+    let connection = Connection::open(&database.0).unwrap();
+    assert_eq!(marker(&connection), vec![i64::from(STORE_FORMAT)]);
+}
+
+/// Every step after the upgrade's own reports progress, so the opening's
+/// inactivity bound covers the index derivation, the reference check, the
+/// commit and each pragma that follows them.
+#[tokio::test]
+async fn a_store_upgrade_reports_progress_through_its_commit_and_pragmas() {
+    use dim_app_server::storage::take_upgrade_steps;
+    use tokio_util::sync::CancellationToken;
+
+    let database = Database::new();
+    drop(v13_store(&database.0));
+    let root = rutis::Ctx::root().unwrap();
+    let view = root.plugin(dim_app_server::storage::SqliteStoragePlugin::new(
+        database.0.clone(),
+    ));
+    dim_agent_runtime::wait_active(
+        &root,
+        std::slice::from_ref(&view),
+        Duration::from_secs(10),
+        &CancellationToken::new(),
+    )
+    .await
+    .expect("the store upgrades");
+    root.shutdown().await.unwrap();
+    let mut expected = vec![
+        "derived-indexes",
+        "references",
+        "commit",
+        "journal-mode",
+        "synchronous",
+        "wal-autocheckpoint",
+        "journal-size-limit",
+        "cache-size",
+        "foreign-keys",
+    ];
+    if cfg!(target_os = "macos") {
+        expected.push("fullfsync");
+    }
+    let database_path = database.0.canonicalize().unwrap();
+    let steps = take_upgrade_steps(&database_path);
+    let names: Vec<&str> = steps.iter().map(|(step, _)| *step).collect();
+    assert_eq!(
+        names, expected,
+        "the opening reports progress after every step past the upgrade's own"
+    );
+    assert!(
+        steps.windows(2).all(|pair| pair[0].1 < pair[1].1),
+        "every step writes its own report: {steps:?}"
     );
     let connection = Connection::open(&database.0).unwrap();
     assert_eq!(marker(&connection), vec![i64::from(STORE_FORMAT)]);

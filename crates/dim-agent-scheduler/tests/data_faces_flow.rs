@@ -562,6 +562,55 @@ async fn loops_face_matches_the_native_operations_over_a_bridge() {
     rig.close().await;
 }
 
+/// Every `loops` reply carries the whole prompt, including one longer than a
+/// client's display bound: truncation belongs to the reader.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_loops_face_carries_the_whole_prompt() {
+    let rig = Rig::start().await;
+    let prompt = format!("first line\n{}", "p".repeat(8_000));
+    let created = rig
+        .call(
+            "loops",
+            "start",
+            json!({
+                "sessionId":"saved-session",
+                "branchId":"other",
+                "prompt":prompt
+            }),
+        )
+        .await;
+    let loop_id = created["loopId"].as_str().unwrap().to_owned();
+    assert_eq!(created["prompt"], json!(prompt), "{created}");
+
+    let listed = rig
+        .call(
+            "loops",
+            "list",
+            json!({"sessionId":"saved-session","branchId":"other"}),
+        )
+        .await;
+    assert_eq!(listed["loops"][0]["prompt"], json!(prompt), "{listed}");
+
+    let armed = rig
+        .call(
+            "loops",
+            "next",
+            json!({"sessionId":"saved-session","loopId":loop_id,"delaySeconds":600}),
+        )
+        .await;
+    assert_eq!(armed["prompt"], json!(prompt), "{armed}");
+
+    let stopped = rig
+        .call(
+            "loops",
+            "stop",
+            json!({"sessionId":"saved-session","loopId":loop_id}),
+        )
+        .await;
+    assert_eq!(stopped["prompt"], json!(prompt), "{stopped}");
+    rig.close().await;
+}
+
 /// The face's malformed requests answer `invalid_params`, the code the
 /// `session.loop.*` handler gives the same requests, because one parse serves
 /// both.

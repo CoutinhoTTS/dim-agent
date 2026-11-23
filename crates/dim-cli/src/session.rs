@@ -316,6 +316,7 @@ pub async fn chat(
     let result = async {
         display.muted = !interactive;
         display.model = attached.model.map(|model| crate::wire::Configuration {
+            catalog_provider_id: attached.catalog_provider_id,
             provider_id: model.provider_id,
             model_id: model.model_id,
             capability_snapshot: attached.capability_snapshot,

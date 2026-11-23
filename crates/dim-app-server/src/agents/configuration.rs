@@ -8,13 +8,93 @@ use dim_agent_capabilities::{
     prompt_state::PromptSnapshot,
     timeline_tree::TreeCommands,
 };
-use dim_agent_runtime::{Names, PromptSourceTarget};
-use dim_agent_types::{ModelSelection, PromptScope};
+use dim_agent_runtime::{Names, PromptSourceTarget, Session, SessionConfig};
+use dim_agent_types::{
+    EventKind, ModelSelection, PromptScope, ROOT_BRANCH_ID, SessionConfigExpectation,
+};
 use rutis::Ctx;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use serde_json::{Value, json};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
+
+pub(crate) async fn check_configuration(
+    session: &Session,
+    initial: &SessionConfig,
+    through: u64,
+    expected: &SessionConfigExpectation,
+) -> Result<(), RpcError> {
+    let mismatch = |field| {
+        RpcError::app(
+            -32602,
+            "session_config_mismatch",
+            format!("Session configuration differs: {field}"),
+        )
+    };
+    if expected.model_id.is_some() || expected.reasoning_effort.is_some() {
+        let (model, _) = session
+            .session_service::<TreeCommands>()?
+            .adopted_configuration(ROOT_BRANCH_ID.into(), Some(through))
+            .await?;
+        let (id, config, metadata, snapshot) = match &model {
+            Some(model) => (
+                &model.model_id,
+                &model.config,
+                &model.metadata,
+                &model.capability_snapshot,
+            ),
+            None => (
+                &initial.model.model_id,
+                &initial.model.config,
+                &initial.model.metadata,
+                &initial.model.capability_snapshot,
+            ),
+        };
+        if expected
+            .model_id
+            .as_ref()
+            .is_some_and(|expected| expected != id)
+        {
+            return Err(mismatch("modelId"));
+        }
+        if let Some(expected) = &expected.reasoning_effort {
+            let actual =
+                crate::provider::adopted_selection_preferences(config.as_ref(), metadata.as_ref())
+                    .and_then(|preferences| preferences.reasoning_effort);
+            let declared;
+            let expected = match expected {
+                dim_agent_types::PreferenceUpdate::Value(value) => Some(value),
+                dim_agent_types::PreferenceUpdate::Clear(_) => {
+                    declared = crate::provider::declared_reasoning_effort(
+                        snapshot.as_ref(),
+                        metadata.as_ref(),
+                    );
+                    declared.as_ref()
+                }
+            };
+            if actual.as_ref() != expected {
+                return Err(mismatch("reasoningEffort"));
+            }
+        }
+    }
+    if let Some(expected) = expected.permission_preset {
+        let event = super::fork::read_one(
+            session,
+            through,
+            super::fork::in_field("kind", &["permission/changed"]),
+            dim_agent_runtime::QueryPick::Last,
+        )
+        .await?;
+        let actual = match event.as_deref().map(|event| &event.kind) {
+            Some(EventKind::PermissionChanged(changed)) => changed.policy.preset,
+            _ => initial.permission_policy.preset,
+        };
+        if expected != actual {
+            return Err(mismatch("permissionPreset"));
+        }
+    }
+    Ok(())
+}
 
 /// Agents' Session entry adopts profile configuration on the addressed branch
 /// and reads back the profile the branch's configuration was adopted from.
