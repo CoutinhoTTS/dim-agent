@@ -187,6 +187,34 @@ fn reject(cause: &str) -> Result<()> {
     )))
 }
 
+/// The one-event query both a fork's rest-point check and an attach's
+/// configuration check read: the named line's facts at a fixed cursor, with
+/// nothing still being published.
+pub(super) fn one_event(
+    scope: TimelineQueryScope,
+    through: u64,
+    filter: QueryFilter,
+    pick: QueryPick,
+) -> TimelineQuery {
+    TimelineQuery {
+        scope,
+        from: None,
+        through: Some(through),
+        include_publishing: false,
+        query: QuerySpec {
+            filter: Some(filter),
+            select: QuerySelect::Events,
+            group_by: vec![],
+            pick: Some(pick),
+            order_by: vec![],
+        },
+        page: Some(QueryPage {
+            limit: NonZeroU64::MIN,
+            after: None,
+        }),
+    }
+}
+
 pub(super) fn in_field(path: &str, values: &[&str]) -> QueryFilter {
     QueryFilter::In {
         value: QueryOperand::Field { path: path.into() },
@@ -218,26 +246,7 @@ pub(super) async fn read_one(
     pick: QueryPick,
 ) -> Result<Option<Arc<AgentEvent>>> {
     let reply = session
-        .query(
-            branch,
-            TimelineQuery {
-                scope,
-                from: None,
-                through: Some(at),
-                include_publishing: false,
-                query: QuerySpec {
-                    filter: Some(filter),
-                    select: QuerySelect::Events,
-                    group_by: vec![],
-                    pick: Some(pick),
-                    order_by: vec![],
-                },
-                page: Some(QueryPage {
-                    limit: NonZeroU64::MIN,
-                    after: None,
-                }),
-            },
-        )
+        .query(branch, one_event(scope, at, filter, pick))
         .await?;
     let QueryOutput::Events { events } = reply.result else {
         unreachable!("event selection returns events")

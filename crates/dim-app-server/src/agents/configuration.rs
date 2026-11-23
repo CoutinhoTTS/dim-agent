@@ -10,8 +10,7 @@ use dim_agent_capabilities::{
     timeline_tree::TreeCommands,
 };
 use dim_agent_runtime::{
-    Names, PromptSourceTarget, QueryOutput, QueryPage, QueryPick, QuerySelect, QuerySpec, Session,
-    SessionConfig, TimelineQuery, TimelineQueryScope,
+    Names, PromptSourceTarget, QueryOutput, QueryPick, Session, SessionConfig, TimelineQueryScope,
 };
 use dim_agent_types::{
     AgentEvent, EventKind, ModelSelection, PromptScope, SessionConfigExpectation,
@@ -19,7 +18,7 @@ use dim_agent_types::{
 use rutis::Ctx;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use serde_json::{Value, json};
-use std::{num::NonZeroU64, sync::Arc};
+use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 /// Checks an attach's or a fork's `expectedConfig` against one line at that
@@ -116,23 +115,12 @@ async fn published_permission_change(
     let reply = tree
         .query(
             line.branch_id.clone(),
-            TimelineQuery {
-                scope: TimelineQueryScope::Chain,
-                from: None,
-                through: Some(line.sequence),
-                include_publishing: false,
-                query: QuerySpec {
-                    filter: Some(super::fork::in_field("kind", &["permission/changed"])),
-                    select: QuerySelect::Events,
-                    group_by: vec![],
-                    pick: Some(QueryPick::Last),
-                    order_by: vec![],
-                },
-                page: Some(QueryPage {
-                    limit: NonZeroU64::MIN,
-                    after: None,
-                }),
-            },
+            super::fork::one_event(
+                TimelineQueryScope::Chain,
+                line.sequence,
+                super::fork::in_field("kind", &["permission/changed"]),
+                QueryPick::Last,
+            ),
         )
         .await?;
     let QueryOutput::Events { events } = reply.result else {
