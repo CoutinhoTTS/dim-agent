@@ -344,6 +344,10 @@
     "to": "dim-agent-types"
   },
   {
+    "from": "dim-oauth",
+    "to": "dim-client"
+  },
+  {
     "from": "dim-session-title",
     "to": "dim-agent-capabilities"
   },
