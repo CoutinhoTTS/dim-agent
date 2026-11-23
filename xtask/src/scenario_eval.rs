@@ -1382,6 +1382,7 @@ fn stop_name(stop: &str) -> Result<&'static str> {
         "switch_target_not_reached" => Ok("switch_target_not_reached"),
         "switch_target_ended" => Ok("switch_target_ended"),
         "switch_target_unknown" => Ok("switch_target_unknown"),
+        "switch_note_missing" => Ok("switch_note_missing"),
         "error" => Ok("error"),
         other => Err(format!("the saved run has an unknown stop {other}").into()),
     }
@@ -2080,15 +2081,32 @@ struct PendingSwitch {
     switch: Switch,
     line: Option<String>,
     /// The target line's first `turn/start` has been seen: the move and the
-    /// next input happen now, or on a retry while the line is not ready.
+    /// next input happen now, or on a retry while the line is not ready. A
+    /// chained move is due once the input before it has been consumed.
     triggered: bool,
     /// The further attempts left while the move answers `unknown_branch`.
     retries_left: u32,
+    /// `session.branch_set_default` answered: the follow-ups this move sends
+    /// wait for the notes it writes on the lines that answer them.
+    moved: bool,
+    /// The line the move left once it answered.
+    former: Option<String>,
+    /// The note the move wrote on the target line, and on the line it left.
+    target_note: Option<NoteSeen>,
+    former_note: Option<NoteSeen>,
+    /// A line the move owes a note ended before it wrote one: the line can
+    /// answer no follow-up.
+    ended: Option<(String, String)>,
+    /// The input the move before this one sent, and the line that took it: a
+    /// chained move fires once that line consumed it.
+    previous: Option<(String, String)>,
 }
 impl PendingSwitch {
-    /// `chained` switches fire right after the move before them instead of
-    /// waiting for their target's first `turn/start`: a second move runs on
-    /// a line that may have started its first turn before the run reached it.
+    /// `chained` switches do not wait for their target's first `turn/start`:
+    /// a second move runs on a line that may have started its first turn
+    /// before the run reached it. Such a move fires once the input the move
+    /// before it sent has been consumed, so the note the previous move wrote
+    /// on its target cannot be retired before that target answers.
     fn new(switch: Switch, user_line: Option<&str>, chained: bool) -> Self {
         let line = match &switch.to {
             SwitchTarget::Id(id) => Some(id.clone()),
@@ -2100,15 +2118,57 @@ impl PendingSwitch {
             line,
             triggered: chained,
             retries_left: UNKNOWN_BRANCH_RETRIES,
+            moved: false,
+            former: None,
+            target_note: None,
+            former_note: None,
+            ended: None,
+            previous: None,
         }
     }
 
-    /// Reads one notice: a tool `branch/create` renames the role's target, and
-    /// the target's first `turn/start` is when the move and the next input
-    /// happen. Once that turn has started the target is fixed: a line opened
-    /// afterwards has its own purpose, and the move and the input after it
-    /// stay with the line that started.
+    /// Reads one notice: a tool `branch/create` renames the role's target, the
+    /// target's first `turn/start` is when a single move and the next input
+    /// happen, a `branch:line` message is a note the move wrote, and a chained
+    /// move moves on when the input before it has been consumed. Once that
+    /// turn has started the target is fixed: a line opened afterwards has its
+    /// own purpose, and the move and the input after it stay with the line
+    /// that started.
     fn notice(&mut self, branch: &str, event: &Value) {
+        if event["type"] == "branch" && matches!(event["name"].as_str(), Some("end" | "ended")) {
+            if Some(branch) == self.line.as_deref() || self.former.as_deref() == Some(branch) {
+                self.ended = Some((
+                    branch.to_owned(),
+                    format!("line {branch} ended before its move note was written"),
+                ));
+            }
+            if self
+                .previous
+                .as_ref()
+                .is_some_and(|(line, _)| line == branch)
+            {
+                self.previous = None;
+                self.triggered = true;
+            }
+            return;
+        }
+        if event["type"] == "input"
+            && event["name"] == "consumed"
+            && let Some((_, input)) = &self.previous
+            && event["data"]["input_id"].as_str() == Some(input.as_str())
+        {
+            self.previous = None;
+            self.triggered = true;
+            return;
+        }
+        if let Some(note) = branch_line_note(event, branch) {
+            if Some(branch) == self.line.as_deref() {
+                self.target_note = Some(note);
+            } else if self.former.as_deref() == Some(branch) {
+                self.former_note = Some(note);
+            }
+            return;
+        }
         if let Some(line) = tool_line(event) {
             if (!self.triggered || self.line.is_none())
                 && matches!(
@@ -2128,12 +2188,15 @@ impl PendingSwitch {
         }
     }
 
-    /// Activates a chained move: it fires right after the move before it, so a
-    /// move to the latest tool line takes the line the run has recorded. A
-    /// move without one keeps waiting for a `branch/create` notice, as a
-    /// single move does.
-    fn activated(&mut self, latest_tool_line: Option<&str>) {
-        self.triggered = true;
+    /// Activates a chained move: it fires once the input the move before it
+    /// sent is consumed, so that move's target answers with its note in
+    /// effect. A move to the latest tool line takes the line the run has
+    /// recorded; one without a line keeps waiting for a `branch/create`
+    /// notice, as a single move does. A Session that named no input (the
+    /// move's answer carried no id) leaves the move due at once.
+    fn activated(&mut self, latest_tool_line: Option<&str>, previous: Option<(String, String)>) {
+        self.triggered = previous.is_none();
+        self.previous = previous;
         if self.line.is_none()
             && matches!(
                 &self.switch.to,
@@ -2143,7 +2206,112 @@ impl PendingSwitch {
             self.line = latest_tool_line.map(str::to_owned);
         }
     }
+
+    /// The notes this move's follow-ups need: one for each line that answers
+    /// one, when that line takes the move's role and is not the root, which
+    /// writes no note (design §12.1).
+    fn notes(&self, target: &str, former: &str) -> Vec<(String, bool, String)> {
+        let mut notes = Vec::new();
+        let message_line = self.switch.branch_id.as_deref().unwrap_or(target);
+        if message_line == target && target != "main" {
+            notes.push((target.to_owned(), true, former.to_owned()));
+        } else if message_line == former && former != "main" {
+            notes.push((former.to_owned(), false, target.to_owned()));
+        }
+        if self.switch.former_message.is_some() && former != "main" {
+            notes.push((former.to_owned(), false, target.to_owned()));
+        }
+        notes
+    }
+
+    /// Whether the note the move wrote on `line` is in: the role it states and
+    /// the participant it names.
+    fn saw_note(&self, line: &str, default: bool, other: &str) -> bool {
+        let note = if Some(line) == self.line.as_deref() {
+            &self.target_note
+        } else if self.former.as_deref() == Some(line) {
+            &self.former_note
+        } else {
+            return false;
+        };
+        note.as_ref().is_some_and(|note| {
+            note.default == default && note.text.contains(&note_marker(default, other))
+        })
+    }
 }
+
+/// A move's status note as a line published it: whether the line became the
+/// default, and the note's text, which names the other participant.
+struct NoteSeen {
+    default: bool,
+    text: String,
+}
+
+/// The sentence a move's note states for role `default` and participant
+/// `other`: the fixed words around the line id (design §12.1).
+fn note_marker(default: bool, other: &str) -> String {
+    if default {
+        format!("switched from line {other}.")
+    } else {
+        format!("moved from this line to line {other}.")
+    }
+}
+
+/// The status note a `branch:line` message carries for `branch`: the role it
+/// states and its text. A message without that block, or for another line,
+/// answers `None` (design §5, §12.1).
+fn branch_line_note(event: &Value, branch: &str) -> Option<NoteSeen> {
+    if event["type"] != "input" || event["name"] != "message" {
+        return None;
+    }
+    for block in event["data"]["blocks"].as_array()? {
+        if block["key"] != "branch:line" {
+            continue;
+        }
+        let text = block["text"].as_str()?;
+        let tag = text.split_once('>')?.0;
+        if note_attribute(tag, "branch") != Some(branch) {
+            continue;
+        }
+        let default = match note_attribute(tag, "default") {
+            Some("true") => true,
+            Some("false") => false,
+            _ => continue,
+        };
+        return Some(NoteSeen {
+            default,
+            text: text.to_owned(),
+        });
+    }
+    None
+}
+
+/// One attribute of a `<dim-branch-line ...>` tag.
+fn note_attribute<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
+    tag.split(' ').find_map(|attribute| {
+        let (key, value) = attribute.split_once("=\"")?;
+        (key == name).then(|| value.strip_suffix('"')).flatten()
+    })
+}
+
+/// One follow-up a move sent and the note its line must have written before
+/// the request that consumes it: the line, the input the Session wrote, and
+/// the note's role and other participant.
+struct SwitchNote {
+    line: String,
+    input: String,
+    default: bool,
+    other: String,
+}
+
+/// The run's switch follow-ups and the notes they must follow: a move waits
+/// for each note before it submits the input its line answers, and the run is
+/// not judged when a request consumed an input without its note.
+#[derive(Default)]
+struct SwitchNotes {
+    expected: Vec<SwitchNote>,
+}
+
 /// One source a scenario declares through the `eventHub` service, and
 /// optionally subscribes its Session's `main` branch to (EventHub design A.1,
 /// A.3). Without `subscribe` the source starts unsubscribed, for a scenario
@@ -2520,7 +2688,8 @@ struct RunRecord {
     texts: Vec<ConfiguredText>,
     session: Option<String>,
     /// `idle`, `turns`, `seconds`, `switch_target_not_reached`,
-    /// `switch_target_ended`, `switch_target_unknown` or `error`.
+    /// `switch_target_ended`, `switch_target_unknown`, `switch_note_missing`
+    /// or `error`.
     stop: &'static str,
     turns: u32,
     window: Option<f64>,
@@ -3599,7 +3768,7 @@ async fn product_probe(
         .rpc("session.attach", json!({"sessionId": probe}))
         .await
         .map_err(|error| format!("session.attach failed: {error}"))?;
-    submit(client, &probe, "PRODUCT-TOOLS\n", None, None)
+    let _ = submit(client, &probe, "PRODUCT-TOOLS\n", None, None)
         .await
         .map_err(|error| error.to_string())?;
     loop {
@@ -3762,7 +3931,7 @@ async fn preflight_session(
         .rpc("session.attach", json!({"sessionId": session}))
         .await
         .map_err(|error| (Vec::new(), format!("session.attach failed: {error}")))?;
-    submit(client, &session, &message, None, None)
+    let _ = submit(client, &session, &message, None, None)
         .await
         .map_err(|error| (Vec::new(), error))?;
     // The tool results in arrival order: the scripted steps run one per
@@ -5366,6 +5535,7 @@ fn child_record(
         "switch_target_not_reached" => "switch_target_not_reached",
         "switch_target_ended" => "switch_target_ended",
         "switch_target_unknown" => "switch_target_unknown",
+        "switch_note_missing" => "switch_note_missing",
         _ => "error",
     };
     let error = match &outcome.harness {
@@ -5459,6 +5629,7 @@ impl Finished {
                 window: None,
                 decline_retries: 0,
                 switch_retries: 0,
+                switch_notes: SwitchNotes::default(),
                 error: Some(error),
             },
             export: None,
@@ -5685,6 +5856,22 @@ async fn drive_once(
             });
         }
     };
+    // A scored follow-up must answer under the note its move wrote. A run
+    // whose request consumed the input without it is failed before the judge,
+    // so the policy comparison cannot score an answer that did not see the
+    // text being evaluated (Timeline branches §12.4).
+    if driven.error.is_none()
+        && let Some(error) = switch_notes_unseen(&export, &driven.switch_notes.expected)
+    {
+        driven.stop = "switch_note_missing";
+        driven.error = Some(error.clone());
+        return Ok(Finished {
+            driven,
+            export: Some(export),
+            view: None,
+            judging: Judging::not_asked(scenario, Some(error)),
+        });
+    }
     let (Some(host), Some(resolver)) = (
         server.service::<ModelHost>(),
         server.service::<ProviderConnectionResolver>(),
@@ -5829,6 +6016,127 @@ fn settle_failed_turn(driven: &mut Driven, failed_turn: Option<String>) {
     }
 }
 
+/// Why a scored switch follow-up did not see its note, or `None` when every
+/// consumed follow-up's request carries it: the request the line began after
+/// it consumed the input, and the note's exact text (Timeline branches §12.4).
+/// An input no request consumed is not checked: no answer of that line is
+/// scored.
+fn switch_notes_unseen(export: &str, notes: &[SwitchNote]) -> Option<String> {
+    /// One `input/message` of the export, the line it is on, and the note it
+    /// carries when it is one.
+    struct Message {
+        branch: String,
+        note: Option<NoteSeen>,
+    }
+    let mut messages: BTreeMap<String, Message> = BTreeMap::new();
+    let mut consumed: Vec<(String, u64, String)> = Vec::new();
+    let mut starts: Vec<(String, u64, String)> = Vec::new();
+    let mut calls: BTreeMap<(String, String), Value> = BTreeMap::new();
+    for line in export.lines() {
+        let Ok(record) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if record["kind"] != "event" {
+            continue;
+        }
+        let branch = record["branch_id"].as_str().unwrap_or_default().to_owned();
+        let event = &record["event"];
+        let sequence = event["sequence"].as_u64().unwrap_or_default();
+        let id = event["id"].as_str().unwrap_or_default().to_owned();
+        match (event["type"].as_str(), event["name"].as_str()) {
+            (Some("input"), Some("message")) => {
+                messages.insert(
+                    id,
+                    Message {
+                        note: branch_line_note(event, &branch),
+                        branch,
+                    },
+                );
+            }
+            (Some("input"), Some("consumed")) => {
+                if let Some(input) = event["data"]["input_id"].as_str() {
+                    consumed.push((branch, sequence, input.to_owned()));
+                }
+            }
+            (Some("step"), Some("model-start")) => {
+                if let Some(request) = event["data"]["request_id"].as_str() {
+                    starts.push((branch, sequence, request.to_owned()));
+                }
+            }
+            (Some("model"), Some("call")) => {
+                if let Some(request) = event["data"]["request_id"].as_str() {
+                    calls.insert(
+                        (branch, request.to_owned()),
+                        event["data"]["request"].clone(),
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+    for note in notes {
+        let Some(message) = messages.get(&note.input) else {
+            return Some(format!(
+                "the switch input {} on line {} is not in the export",
+                note.input, note.line
+            ));
+        };
+        let Some(consumed_at) = consumed
+            .iter()
+            .filter(|(branch, _, input)| branch == &message.branch && input == &note.input)
+            .map(|(_, sequence, _)| *sequence)
+            .min()
+        else {
+            continue;
+        };
+        let Some((_, _, request)) = starts
+            .iter()
+            .filter(|(branch, sequence, _)| branch == &message.branch && *sequence > consumed_at)
+            .min_by_key(|(_, sequence, _)| *sequence)
+        else {
+            return Some(format!(
+                "line {} consumed the switch input {} but started no request after it",
+                note.line, note.input
+            ));
+        };
+        let Some(call) = calls.get(&(message.branch.clone(), request.clone())) else {
+            return Some(format!(
+                "line {} consumed the switch input {} but its request never reached the model",
+                note.line, note.input
+            ));
+        };
+        let marker = note_marker(note.default, &note.other);
+        let texts: Vec<&str> = messages
+            .values()
+            .filter(|message| message.branch == note.line)
+            .filter_map(|message| message.note.as_ref())
+            .filter(|seen| seen.default == note.default && seen.text.contains(&marker))
+            .map(|seen| seen.text.as_str())
+            .collect();
+        if !texts
+            .iter()
+            .any(|text| request_carries(&call["messages"], text))
+        {
+            return Some(format!(
+                "the request that consumed the switch input on line {} does not carry the note it must answer under",
+                note.line
+            ));
+        }
+    }
+    None
+}
+
+/// Whether any string in `value` carries `needle`: a request is JSON, so a
+/// text with quotes in it is compared through the parsed value.
+fn request_carries(value: &Value, needle: &str) -> bool {
+    match value {
+        Value::String(text) => text.contains(needle),
+        Value::Array(items) => items.iter().any(|item| request_carries(item, needle)),
+        Value::Object(map) => map.values().any(|item| request_carries(item, needle)),
+        _ => false,
+    }
+}
+
 pub(crate) async fn selection(
     server: &RunningServer,
     target: &ModelId,
@@ -5901,6 +6209,9 @@ struct Driven {
     /// How many times the runner moved again after the target line answered
     /// `unknown_branch`.
     switch_retries: u32,
+    /// The switch follow-ups the run sent and the notes each line's request
+    /// must carry; the run is not judged when one is missing.
+    switch_notes: SwitchNotes,
     error: Option<String>,
 }
 
@@ -5940,6 +6251,7 @@ async fn drive(
             window: None,
             decline_retries: 0,
             switch_retries: 0,
+            switch_notes: SwitchNotes::default(),
             error: Some(error),
         };
     }
@@ -5965,6 +6277,7 @@ async fn drive(
                 window: None,
                 decline_retries: 0,
                 switch_retries: 0,
+                switch_notes: SwitchNotes::default(),
                 error: Some(format!("session.create failed: {error}")),
             };
         }
@@ -5978,6 +6291,7 @@ async fn drive(
         window: None,
         decline_retries: 0,
         switch_retries: 0,
+        switch_notes: SwitchNotes::default(),
         error: None,
     };
     if let Err(error) = client
@@ -6104,6 +6418,10 @@ async fn drive(
     // uses it: a `branch/create` reaches only the move that is front when it
     // arrives.
     let mut latest_tool_line: Option<String> = None;
+    // The follow-ups the moves sent and the notes their lines must carry: a
+    // move waits for its notes before it sends them, and the run is not judged
+    // when a request consumed one without its note.
+    let mut switch_notes = SwitchNotes::default();
     let mut last_event = Instant::now();
     // The events still to publish, and whether each was.
     let mut events: Vec<(EventSpec, bool)> = scenario
@@ -6174,6 +6492,7 @@ async fn drive(
                 &mut switches,
                 &mut default,
                 latest_tool_line.as_deref(),
+                Some(&mut switch_notes),
             ),
         )
         .await
@@ -6245,6 +6564,20 @@ async fn drive(
                 tokio::time::Instant::now()
                     + cleanup_budget(settings.stall_cleanup, settings.cleanup_budget_ms),
             );
+            // A pending switch the run stopped waiting on names itself, as the
+            // move's own deadline does: its note or its input did not come.
+            if let Some(pending) = switches.front() {
+                driven.error = Some(match &pending.line {
+                    Some(line) => format!(
+                        "the switch to line {line} did not answer before the run's {}s budget ran out",
+                        scenario.budget.seconds
+                    ),
+                    None => format!(
+                        "the switch did not answer before the run's {}s budget ran out",
+                        scenario.budget.seconds
+                    ),
+                });
+            }
             break;
         }
         if driven.turns >= scenario.budget.turns {
@@ -6430,8 +6763,25 @@ async fn drive(
             }
         }
     }
-    if let Some(pending) = switches.front() {
+    // A move that already happened leaves the outcome the run reached: the
+    // move is not the thing the run stopped waiting on (the run may have been
+    // waiting for its note or its input). A move that never happened keeps its
+    // own outcome, so a scenario that could not switch is not read as a run
+    // that reached its budget.
+    if let Some(pending) = switches.front()
+        && !pending.moved
+    {
         let reason = match (&pending.line, pending.triggered) {
+            _ if pending.previous.is_some() => match &pending.line {
+                Some(line) => format!(
+                    "the chained move to line {line} did not fire: the input before it was not consumed before the run stopped on {}",
+                    driven.stop
+                ),
+                None => format!(
+                    "the chained move did not fire: its target was not opened and the input before it was not consumed before the run stopped on {}",
+                    driven.stop
+                ),
+            },
             (Some(line), true) => format!(
                 "the move to line {line} did not complete before the run stopped on {}",
                 driven.stop
@@ -6455,6 +6805,7 @@ async fn drive(
             driven.error = Some(reason);
         }
     }
+    driven.switch_notes = switch_notes;
     driven
 }
 
@@ -7300,18 +7651,21 @@ fn submit_params(
     params
 }
 
+/// Sends one input and answers the id the Session wrote it under, when the
+/// reply names the event: a switch records it to check the note the line's
+/// request must carry.
 async fn submit(
     client: &mut impl SwitchClient,
     session: &str,
     text: &str,
     mode: Option<InputMode>,
     branch: Option<&str>,
-) -> std::result::Result<(), String> {
-    client
+) -> std::result::Result<Option<String>, String> {
+    let reply = client
         .rpc("session.submit", submit_params(session, text, mode, branch))
         .await
-        .map(|_| ())
-        .map_err(|error| format!("session.submit failed: {error}"))
+        .map_err(|error| format!("session.submit failed: {error}"))?;
+    Ok(reply["event"]["id"].as_str().map(str::to_owned))
 }
 
 /// The one RPC a switch and its next input make; the tests' fake records the
@@ -7358,20 +7712,27 @@ fn unknown_branch(error: &dim_client::Error) -> bool {
 }
 
 /// Runs the next move once it is due: the Session's default branch moves
-/// first, then the next input is submitted, naming a line only when the
-/// scenario does, and then the input meant for the line it moved away from.
-/// A move fires once and leaves the queue; the move after it fires on the next
-/// call, and is activated here with the tool line the run has seen opened.
+/// first, and then the inputs the move sends: the one on the new default,
+/// naming a line only when the scenario does, and the one meant for the line
+/// it moved away from. With `notes`, those inputs wait for the notes the move
+/// writes on the lines that answer them, and each input is recorded with its
+/// note for the run's check before the judge. A move fires once and leaves the
+/// queue; the move after it fires on a later call once its input has been
+/// consumed, and is activated here with the tool line the run has seen opened.
 async fn fire_switch(
     client: &mut impl SwitchClient,
     session: &str,
     switches: &mut VecDeque<PendingSwitch>,
     default: &mut String,
     latest_tool_line: Option<&str>,
+    notes: Option<&mut SwitchNotes>,
 ) -> std::result::Result<SwitchFire, String> {
     let Some(pending) = switches.front_mut() else {
         return Ok(SwitchFire::NotFired);
     };
+    if pending.moved {
+        return send_switch_follow_ups(client, session, switches, latest_tool_line, notes).await;
+    }
     if !pending.triggered {
         return Ok(SwitchFire::NotFired);
     }
@@ -7405,12 +7766,52 @@ async fn fire_switch(
         }
         return Err(format!("the switch to {line} failed: {error}"));
     }
-    let pending = switches.pop_front().expect("the switch is pending");
-    if let Some(next) = switches.front_mut() {
-        next.activated(latest_tool_line);
-    }
+    let pending = switches.front_mut().expect("the switch is pending");
     let former = std::mem::replace(default, line);
-    submit(
+    pending.moved = true;
+    pending.former = Some(former);
+    send_switch_follow_ups(client, session, switches, latest_tool_line, notes).await
+}
+
+/// Sends a moved switch's follow-ups once the notes they must follow are in,
+/// and records each input with the note its line answers under. A line the
+/// move owes a note that ended first fails the run's switch instead.
+async fn send_switch_follow_ups(
+    client: &mut impl SwitchClient,
+    session: &str,
+    switches: &mut VecDeque<PendingSwitch>,
+    latest_tool_line: Option<&str>,
+    mut notes: Option<&mut SwitchNotes>,
+) -> std::result::Result<SwitchFire, String> {
+    let Some(pending) = switches.front() else {
+        return Ok(SwitchFire::NotFired);
+    };
+    let target = pending.line.clone().expect("a moved switch names its line");
+    let former = pending.former.clone().expect("a moved switch left a line");
+    let wanted = pending.notes(&target, &former);
+    if notes.is_some() {
+        if let Some((line, error)) = &pending.ended
+            && wanted.iter().any(|(awaited, _, _)| awaited == line)
+        {
+            let line = line.clone();
+            let error = error.clone();
+            switches.pop_front();
+            return Ok(SwitchFire::TargetEnded { line, error });
+        }
+        if !wanted
+            .iter()
+            .all(|(line, default, other)| pending.saw_note(line, *default, other))
+        {
+            return Ok(SwitchFire::NotFired);
+        }
+    }
+    let pending = switches.pop_front().expect("the switch is pending");
+    let message_line = pending
+        .switch
+        .branch_id
+        .clone()
+        .unwrap_or_else(|| target.clone());
+    let receipt = submit(
         client,
         session,
         &pending.switch.message,
@@ -7418,8 +7819,39 @@ async fn fire_switch(
         pending.switch.branch_id.as_deref(),
     )
     .await?;
+    if let Some(gate) = notes.as_mut() {
+        let input = receipt.clone().ok_or_else(|| {
+            format!("session.submit answered no input id for the switch to {target}")
+        })?;
+        for (line, default, other) in &wanted {
+            if *line == message_line {
+                gate.expected.push(SwitchNote {
+                    line: line.clone(),
+                    input: input.clone(),
+                    default: *default,
+                    other: other.clone(),
+                });
+            }
+        }
+    }
     if let Some(message) = pending.switch.former_message.as_deref() {
-        submit(client, session, message, None, Some(former.as_str())).await?;
+        let receipt = submit(client, session, message, None, Some(former.as_str())).await?;
+        if let Some(gate) = notes.as_mut()
+            && former != "main"
+        {
+            let input = receipt.ok_or_else(|| {
+                format!("session.submit answered no input id for the switch to {target}")
+            })?;
+            gate.expected.push(SwitchNote {
+                line: former.clone(),
+                input,
+                default: false,
+                other: target.clone(),
+            });
+        }
+    }
+    if let Some(next) = switches.front_mut() {
+        next.activated(latest_tool_line, receipt.map(|input| (message_line, input)));
     }
     Ok(SwitchFire::Fired)
 }
@@ -7438,7 +7870,7 @@ async fn fire_due(
             .is_some_and(|after| started.elapsed().as_secs_f64() >= after);
         if due && !*fired {
             *fired = true;
-            submit(client, session, &steer.text, Some(InputMode::Steer), None).await?;
+            let _ = submit(client, session, &steer.text, Some(InputMode::Steer), None).await?;
             sent = true;
         }
     }
@@ -7465,7 +7897,7 @@ async fn fire_triggered(
             .is_some_and(|trigger| data.contains(trigger.as_str()));
         if triggered && !*fired {
             *fired = true;
-            submit(client, session, &steer.text, Some(InputMode::Steer), None).await?;
+            let _ = submit(client, session, &steer.text, Some(InputMode::Steer), None).await?;
             sent = true;
         }
     }
@@ -8957,14 +9389,30 @@ mod tests {
         for move_number in [1, 2] {
             assert!(
                 matches!(
-                    fire_switch(&mut client, "session", &mut switches, &mut default, None).await,
+                    fire_switch(
+                        &mut client,
+                        "session",
+                        &mut switches,
+                        &mut default,
+                        None,
+                        None
+                    )
+                    .await,
                     Ok(SwitchFire::Fired)
                 ),
                 "move {move_number}"
             );
         }
         assert!(matches!(
-            fire_switch(&mut client, "session", &mut switches, &mut default, None).await,
+            fire_switch(
+                &mut client,
+                "session",
+                &mut switches,
+                &mut default,
+                None,
+                None
+            )
+            .await,
             Ok(SwitchFire::NotFired)
         ));
         let calls: Vec<&str> = client
@@ -9021,9 +9469,18 @@ mod tests {
             inputs: ["i1".to_owned()].into(),
             ..SwitchRecorder::default()
         };
+        let mut notes = SwitchNotes::default();
         assert!(
             matches!(
-                fire_switch(&mut client, "session", &mut switches, &mut default, None).await,
+                fire_switch(
+                    &mut client,
+                    "session",
+                    &mut switches,
+                    &mut default,
+                    None,
+                    Some(&mut notes)
+                )
+                .await,
                 Ok(SwitchFire::NotFired)
             ),
             "the move's answer alone sends nothing"
@@ -9037,7 +9494,15 @@ mod tests {
         pending.notice("2", &move_note("2", true, "main"));
         assert!(
             matches!(
-                fire_switch(&mut client, "session", &mut switches, &mut default, None).await,
+                fire_switch(
+                    &mut client,
+                    "session",
+                    &mut switches,
+                    &mut default,
+                    None,
+                    Some(&mut notes)
+                )
+                .await,
                 Ok(SwitchFire::Fired)
             ),
             "the note releases the follow-up"
@@ -9048,6 +9513,11 @@ mod tests {
             "the move runs before its input"
         );
         assert_eq!(default, "2", "the move holds the new default");
+        assert_eq!(notes.expected.len(), 1, "one input, one note");
+        assert_eq!(notes.expected[0].line, "2");
+        assert_eq!(notes.expected[0].input, "i1");
+        assert!(notes.expected[0].default);
+        assert_eq!(notes.expected[0].other, "main");
     }
 
     /// A chained move waits for the input the move before it sent: the first
@@ -9088,14 +9558,30 @@ mod tests {
             .notice("2", &turn_start);
         assert!(
             matches!(
-                fire_switch(&mut client, "session", &mut switches, &mut default, None).await,
+                fire_switch(
+                    &mut client,
+                    "session",
+                    &mut switches,
+                    &mut default,
+                    None,
+                    None
+                )
+                .await,
                 Ok(SwitchFire::Fired)
             ),
             "the first move fires"
         );
         assert!(
             matches!(
-                fire_switch(&mut client, "session", &mut switches, &mut default, None).await,
+                fire_switch(
+                    &mut client,
+                    "session",
+                    &mut switches,
+                    &mut default,
+                    None,
+                    None
+                )
+                .await,
                 Ok(SwitchFire::NotFired)
             ),
             "the chained move waits for the input before it"
@@ -9109,12 +9595,67 @@ mod tests {
         pending.notice("2", &consumed("i1"));
         assert!(
             matches!(
-                fire_switch(&mut client, "session", &mut switches, &mut default, None).await,
+                fire_switch(
+                    &mut client,
+                    "session",
+                    &mut switches,
+                    &mut default,
+                    None,
+                    None
+                )
+                .await,
                 Ok(SwitchFire::Fired)
             ),
             "the consumed input releases the chained move"
         );
         assert_eq!(default, "3", "the chained move holds the new default");
+    }
+
+    /// The judge is not asked about a request that consumed a switch's input
+    /// without the note the move wrote: the check reads the export's
+    /// consumption and the request that began after it (Timeline branches
+    /// §12.4).
+    #[test]
+    fn a_request_that_consumed_a_follow_up_without_its_note_is_unseen() {
+        let note = "<dim-branch-line branch=\"2\" parent=\"main\" source=\"tool\" default=\"true\">\nswitched from line main.\n</dim-branch-line>";
+        let export = |request: &str| {
+            [
+                json!({"kind": "event", "branch_id": "2",
+                       "event": {"id": "n1", "sequence": 1, "type": "input", "name": "message",
+                                 "data": {"blocks": [{"type": "raw", "key": "branch:line",
+                                                        "text": note}]}}}),
+                json!({"kind": "event", "branch_id": "2",
+                       "event": {"id": "f1", "sequence": 2, "type": "input", "name": "message",
+                                 "data": {}}}),
+                json!({"kind": "event", "branch_id": "2",
+                       "event": {"id": "c1", "sequence": 3, "type": "input", "name": "consumed",
+                                 "data": {"input_id": "f1"}}}),
+                json!({"kind": "event", "branch_id": "2",
+                       "event": {"id": "s1", "sequence": 4, "type": "step", "name": "model-start",
+                                 "data": {"request_id": "r1"}}}),
+                json!({"kind": "event", "branch_id": "2",
+                       "event": {"id": "m1", "sequence": 5, "type": "model", "name": "call",
+                                 "data": {"request_id": "r1",
+                                          "request": {"messages": [{"role": "user", "content": request}]}}}}),
+            ]
+            .iter()
+            .map(|record| serde_json::to_string(record).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n")
+        };
+        let notes = [SwitchNote {
+            line: "2".into(),
+            input: "f1".into(),
+            default: true,
+            other: "main".into(),
+        }];
+        assert!(
+            switch_notes_unseen(&export(note), &notes).is_none(),
+            "the request carries the note"
+        );
+        let unseen = switch_notes_unseen(&export("the follow-up was answered"), &notes)
+            .expect("the request without the note is unseen");
+        assert!(unseen.contains("line 2"), "{unseen}");
     }
 
     /// A switch that has started its target stays with it: a tool line opened
@@ -9152,6 +9693,7 @@ mod tests {
                 "session",
                 &mut switch,
                 &mut "main".into(),
+                None,
                 None
             )
             .await,
@@ -9170,6 +9712,7 @@ mod tests {
                 "session",
                 &mut switch,
                 &mut "main".into(),
+                None,
                 None
             )
             .await,
@@ -9291,6 +9834,7 @@ mod tests {
                 "session",
                 &mut switch,
                 &mut "main".into(),
+                None,
                 None
             )
             .await,
@@ -9318,6 +9862,7 @@ mod tests {
                 "session",
                 &mut switch,
                 &mut "main".into(),
+                None,
                 None
             )
             .await,
@@ -9343,6 +9888,7 @@ mod tests {
             "session",
             &mut switch,
             &mut "main".into(),
+            None,
             None,
         )
         .await
@@ -9375,6 +9921,7 @@ mod tests {
                 "session",
                 &mut switch,
                 &mut "main".into(),
+                None,
                 None
             )
             .await,
@@ -9387,6 +9934,7 @@ mod tests {
                 "session",
                 &mut switch,
                 &mut "main".into(),
+                None,
                 None
             )
             .await,
@@ -9429,6 +9977,7 @@ mod tests {
                         "session",
                         &mut switch,
                         &mut "main".into(),
+                        None,
                         None
                     )
                     .await,
@@ -9443,6 +9992,7 @@ mod tests {
             "session",
             &mut switch,
             &mut "main".into(),
+            None,
             None,
         )
         .await
@@ -9492,6 +10042,7 @@ mod tests {
                 "session",
                 &mut switch,
                 &mut "main".into(),
+                None,
                 None,
             )
             .await
@@ -11009,6 +11560,7 @@ mod tests {
                 window: None,
                 decline_retries: 0,
                 switch_retries: 0,
+                switch_notes: SwitchNotes::default(),
                 error: None,
             }
         }
@@ -14067,6 +14619,8 @@ mod tests {
             // The `session.submit` calls read so far: the stalling scripts
             // hold the one after the move.
             let mut submits = 0;
+            // The default branch the chained scripts' moves leave.
+            let mut default = "main".to_owned();
             let mut first: Option<Instant> = None;
             // The line is busy until the peer writes the call's result, the
             // way a running turn is: `session.idle` stays unanswered and the
@@ -14286,9 +14840,55 @@ mod tests {
                         json!({"error": {"code": -32000, "message": "unknown branch: 2",
                                          "data": {"appError": "session_invalid_input"}}})
                     }
+                    "session.submit" => {
+                        json!({"result": {"event": {"id": format!("input-{submits}")}}})
+                    }
                     _ => json!({"result": {}}),
                 };
                 write.write_all(&frame(&request, body)).await.unwrap();
+                // The line a chained script moves to writes its note after the
+                // move's acknowledgment: the run waits for that note before it
+                // sends the input the line answers.
+                if method == "session.branch_set_default"
+                    && matches!(
+                        script,
+                        PeerScript::ChainedToolLineBeforeActivation
+                            | PeerScript::ChainedToolLineAfterActivation
+                    )
+                {
+                    let target = request["params"]["branchId"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned();
+                    let note = json!({
+                        "type": "input", "name": "message", "id": format!("note-{target}"),
+                        "sequence": 6,
+                        "data": {"blocks": [{"type": "raw", "key": "branch:line",
+                            "text": format!(
+                                "<dim-branch-line branch=\"{target}\" parent=\"main\" source=\"tool\" default=\"true\">\nThis line is now the session's default branch, switched from line {default}.\n</dim-branch-line>"
+                            )}]}
+                    });
+                    write.write_all(&notice_on(&target, note)).await.unwrap();
+                    default = target;
+                }
+                // A chained script consumes the input it answered: the move
+                // after it fires once its line has taken that input.
+                if method == "session.submit"
+                    && matches!(
+                        script,
+                        PeerScript::ChainedToolLineBeforeActivation
+                            | PeerScript::ChainedToolLineAfterActivation
+                    )
+                {
+                    let consumed = json!({
+                        "type": "input", "name": "consumed", "id": format!("consumed-{submits}"),
+                        "sequence": 7, "data": {"input_id": format!("input-{submits}")}
+                    });
+                    write
+                        .write_all(&notice_on(&default, consumed))
+                        .await
+                        .unwrap();
+                }
                 if method == "session.submit" {
                     write
                         .write_all(&notice(
@@ -18048,6 +18648,12 @@ mod tests {
             .iter()
             .map(|(path, text)| (path.as_str(), text.as_str()))
             .collect();
+        // The follow-ups the scenario sends: the tool line's input, then the
+        // user line's input and the former default's input.
+        let moves = scenario["moves"].as_array().cloned().unwrap_or_default();
+        let tool_input = moves[0]["message"].as_str().unwrap().to_owned();
+        let user_input = moves[1]["message"].as_str().unwrap().to_owned();
+        let former_input = moves[1]["formerMessage"].as_str().unwrap().to_owned();
         let fixture = Fixture::with_window(
             "user-line-notes",
             user_line_notes,
@@ -18132,23 +18738,44 @@ mod tests {
                 );
                 continue;
             }
+            let default_note = format!(
+                "How you work here:\n{}",
+                DEFAULT_NOTE
+                    .replace("{parent}", "main")
+                    .replace("{other}", "main")
+            );
             let user_note = format!(
                 "How you work here:\n{}",
-                USER_NOTE.replace("{other}", &tool)
-            );
-            assert!(
-                requests.iter().any(|request| carried(request, &user_note)),
-                "the user line's request carries its note with the tool line id: {user_note}"
+                USER_NOTE
+                    .replace("{parent}", "main")
+                    .replace("{other}", &tool)
             );
             let former_note = format!(
                 "How you work here:\n{}",
-                FORMER_NOTE.replace("{other}", &user)
+                FORMER_NOTE
+                    .replace("{parent}", "main")
+                    .replace("{other}", &user)
             );
-            assert!(
+            // The request that consumed each follow-up is the first that
+            // carries it: it must carry the note the move wrote on that line,
+            // so the line's answer was made under the policy text.
+            let consuming = |input: &str| -> &String {
                 requests
                     .iter()
-                    .any(|request| carried(request, &former_note)),
-                "the former default line's request carries its note with the user line id: {former_note}"
+                    .find(|request| carried(request, input))
+                    .unwrap_or_else(|| panic!("{arm}: a request answers {input:?}"))
+            };
+            assert!(
+                carried(consuming(&tool_input), &default_note),
+                "the request that answers the tool line's follow-up carries the move's default note: {default_note}"
+            );
+            assert!(
+                carried(consuming(&user_input), &user_note),
+                "the request that answers the user line's follow-up carries its note with the tool line id: {user_note}"
+            );
+            assert!(
+                carried(consuming(&former_input), &former_note),
+                "the request that answers the former default's input carries its note with the user line id: {former_note}"
             );
             for attribute in [
                 format!(
