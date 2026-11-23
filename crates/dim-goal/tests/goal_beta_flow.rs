@@ -1241,3 +1241,76 @@ async fn beta_13_a_queue_committed_during_the_catch_up_holds_the_pause() {
     );
     harness.close().await;
 }
+
+/// The turn end's `Pause` decides again after its last wait: a Queue that
+/// commits once the record's settle returned folds before the write, so the
+/// pause is not written and the Queue's completed report is evaluated
+/// (Pursuit §4.1, C4, C5).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn beta_14_a_queue_folded_during_the_pause_write_holds_the_pause() {
+    let model = Arc::new(ScriptedModel::default());
+    let mut fixture = Fixture::start_with(model).await;
+    fixture.set_limit(1).await;
+    let id = fixture.new_session(&["goal_update", "wait"]).await;
+    let session = fixture.agent.get_session(&id).unwrap();
+    let mut harness = Harness {
+        fixture,
+        id: id.clone(),
+        session,
+    };
+    let mut settle =
+        dim_goal::testing::hold_stage(&id, "main", dim_goal::testing::Stage::Settle, 0, None);
+    harness
+        .fixture
+        .goal_on(
+            &id,
+            "set",
+            json!({"objective": "make the tests pass", "judge": "evaluator"}),
+        )
+        .await
+        .unwrap();
+    let end = tokio::time::timeout(WAIT, settle.arrived())
+        .await
+        .expect("the pause record reached its last wait in time");
+    let queued = harness
+        .session
+        .submit(
+            format!(
+                "tool:goal_update {}",
+                json!({"status": "completed", "summary": "all tests pass"})
+            ),
+            InputMode::Queue,
+            "main",
+        )
+        .await
+        .unwrap();
+    assert!(
+        queued.sequence > end,
+        "the queued report at {} commits after the pause's turn end {end}",
+        queued.sequence
+    );
+    settle.release();
+
+    let paused = tokio::time::timeout(
+        NEGATIVE,
+        wait_goal(&harness.session, "main", r#"reason="limit""#),
+    )
+    .await;
+    assert!(
+        paused.is_err(),
+        "the turn end writes no pause while the Queue folds during its write: {paused:?}"
+    );
+
+    let request = wait_goal(&harness.session, "main", r#"kind="goal" op="completed""#).await;
+    let (_, queue_end) = harness
+        .turn_containing(request.sequence)
+        .await
+        .unwrap_or_else(|| panic!("the queue turn holding the request {}", request.sequence));
+    let creates = harness.create_for(queue_end).await;
+    assert_eq!(
+        creates.len(),
+        1,
+        "the queue's completed request is evaluated at its turn end: {creates:#?}"
+    );
+    harness.close().await;
+}

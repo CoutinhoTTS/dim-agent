@@ -907,6 +907,69 @@ async fn pursuit_2_a_continue_conclusion_reads_the_latest_committed_cutoff() {
     env.close().await;
 }
 
+/// The `continue` conclusion's `Pause` decides again after its last wait: a
+/// Queue that commits once the record's settle returned folds before the
+/// write, so the pause is not written and the Queue drives the next turn
+/// (Pursuit §4.1, §5).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pursuit_2_a_queue_folded_during_the_pause_write_holds_the_pause() {
+    let env = Env::start().await;
+    env.set_limit(1);
+    let (evaluation, create) = completion_requested_with(&env, Some(1)).await;
+    let through = env.timeline("main").committed() + 1;
+    let mut settle_gate = dim_goal::testing::hold_stage(
+        env.session_id(),
+        "main",
+        dim_goal::testing::Stage::Settle,
+        through,
+        None,
+    );
+    let conclusion = write_conclusion(
+        &env,
+        &create.branch,
+        evaluation,
+        "continue",
+        "CONTINUE:\n- still missing",
+    );
+    let after = tokio::time::timeout(support::WAIT, settle_gate.arrived())
+        .await
+        .expect("the pause record reached its last wait in time");
+    assert_eq!(
+        after, conclusion,
+        "the pause record names the conclusion input at {conclusion}"
+    );
+
+    let queued = env.write_message(
+        "main",
+        vec![raw("keep going", None, false)],
+        InputMode::Queue,
+    );
+    assert!(
+        queued.sequence > conclusion,
+        "the queued input at {} commits after the conclusion at {conclusion}",
+        queued.sequence
+    );
+    settle_gate.release();
+
+    let paused = tokio::time::timeout(NEGATIVE, env.wait_for("main", r#"reason="limit""#)).await;
+    assert!(
+        paused.is_err(),
+        "the continue conclusion writes no pause while the Queue folds during its write: {paused:?}"
+    );
+    let writes = env.settled("main").await;
+    assert!(
+        !writes
+            .iter()
+            .any(|block| block.marker.contains(r#"reason="limit""#)),
+        "no pause is stated after the Queue folds: {writes:#?}"
+    );
+    assert!(
+        env.pending_inputs("main").await.contains(&queued.id),
+        "the Queue drives the next turn instead of the pause"
+    );
+    env.close().await;
+}
+
 /// A `continue` conclusion that arrives while a background task is open waits
 /// for the task: its cancelled end takes the conclusion once, and a second
 /// cancelled end writes nothing more (Pursuit §5).

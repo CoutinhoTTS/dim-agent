@@ -1345,6 +1345,14 @@ impl Owner {
             }
         }
         self.settle_decisions().await?;
+        #[cfg(feature = "testing")]
+        crate::testing::stage_held(
+            &self.session_id,
+            &self.branch_id,
+            crate::testing::Stage::Settle,
+            after,
+        )
+        .await;
         self.write_status.borrow().clone()?;
         let (objective, status, judge, live) = {
             let state = self.state.lock().unwrap();

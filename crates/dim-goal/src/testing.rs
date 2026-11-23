@@ -99,6 +99,9 @@ pub enum Stage {
     Cutoff,
     /// After the evaluation decision and before `treeCommands.create`.
     Create,
+    /// After a record's `settle_decisions` returned, before its final decision
+    /// and write.
+    Settle,
     /// After `do_turn_end` took every decision it carries.
     Done,
     /// At the start of the closing pause, before it reads the fold.
