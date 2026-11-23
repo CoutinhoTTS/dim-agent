@@ -34,6 +34,10 @@ what the caller can do next. For each operation that holds a resource or waits, 
 normal path, the caller cancelling or unloading, and the owner closing or reloading, with the party
 that settles each resource.
 
+Ids, values, read-only views and callbacks cross owners. Where an object still has to be handed out,
+say why none of those works, and link the design shared by the plugins involved that fixes who
+creates, holds, hands over and cleans up the object, and what happens when any side closes or reloads.
+
 ### Exceptions with reasons
 
 One line each.
@@ -56,6 +60,7 @@ Written in the owner's issue; it is history once the change lands.
 - **Implementation task**: rewrite the owner's public surface; do not add an interface beside it.
   Read the responsibility split, write the callers' target code as flow tests, make the old public
   methods `pub(crate)` and use the compile errors as the migration list, implement the operations,
-  then migrate every caller. One owner and all of its callers are one change.
+  then migrate every caller. A plugin area's new operations, every caller and the removal of the old
+  surface are one change, with no period where old and new coexist.
 - **Acceptance**: the flow tests pass; no cross-crate reference to a deleted name remains; the
   catalog has no `internal(reason)` entry for the owner; the diff removes the old surface.
