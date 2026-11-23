@@ -1742,6 +1742,51 @@ fn exec_demotes_a_reply_when_the_same_turn_asks_again() {
     );
 }
 
+/// A request can end normally without writing any text. It is still the
+/// turn's last request, so the words of the request before it are diagnostics
+/// and stdout carries no reply the turn never delivered.
+#[test]
+fn exec_writes_nothing_to_stdout_when_the_last_request_is_empty() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.start(false);
+        let submit = wire.read("session.submit");
+        wire.reply(&submit, json!({"event":{"id":"input"}}));
+        let idle = wire.read("session.idle");
+        open_turn(wire, "turn", "input");
+        wire.event(12,"text",json!({"turn_id":"turn","request_id":"first-request","delta":"Let me check the queue."}));
+        wire.event(13,"model-output-end",json!({"turn_id":"turn","request_id":"first-request","status":"completed","finish_reason":"end_turn"}));
+        wire.event(14,"model-output-end",json!({"turn_id":"turn","request_id":"second-request","status":"completed","finish_reason":"end_turn"}));
+        wire.end(json!({"turn_id":"turn","status":"completed","reason":"done"}));
+        wire.reply(&idle, json!({"sequence":30}));
+        wire.detach();
+    });
+    let output = wait(
+        home.command()
+            .args(["exec", "-p", "Is the queue empty?"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    daemon.join().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "status {:?} stdout {stdout:?} stderr {stderr:?}",
+        output.status.code()
+    );
+    assert!(
+        stdout.is_empty(),
+        "an empty final reply writes nothing to stdout; stdout was {stdout:?}"
+    );
+    assert!(
+        stderr.contains("Let me check the queue."),
+        "the earlier request's words go to stderr: {stderr:?}"
+    );
+}
+
 /// A turn can fail after its model request ended normally; stdout carries no
 /// reply the turn never delivered.
 #[test]
@@ -2045,6 +2090,55 @@ fn exec_keeps_a_recovered_reply_when_an_earlier_request_ends_late() {
         wire.event(14,"model-output-end",json!({"turn_id":"turn","request_id":"earlier","status":"completed","finish_reason":"end_turn"}));
         wire.event(16,"text",json!({"turn_id":"turn","request_id":"recovered","delta":"The answer."}));
         wire.event(18,"model-output-end",json!({"turn_id":"turn","request_id":"recovered","status":"completed","finish_reason":"end_turn"}));
+        wire.end(json!({"turn_id":"turn","status":"completed","reason":"done"}));
+        wire.reply(&idle, json!({"sequence":30}));
+        wire.detach();
+    });
+    let output = wait(
+        home.command()
+            .args(["exec", "-p", "Which port does the service use?"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    daemon.join().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "status {:?} stdout {stdout:?} stderr {stderr:?}",
+        output.status.code()
+    );
+    assert_eq!(
+        stdout, "The answer.\n",
+        "the recovered reply stays whole on stdout; stderr was {stderr:?}"
+    );
+    assert!(
+        !stderr.contains("The answer."),
+        "the recovered reply appears once, on stdout: {stderr:?}"
+    );
+}
+
+/// A request that started earlier can end after the next request already
+/// wrote durable text. The later request's text is still the turn's reply.
+/// Arrival order: `turn/start`, `input/consumed`, both `model-start`s, the
+/// recovered request's text, the earlier request's late `model-output-end`,
+/// the recovered request's `model-output-end`, `turn/end`.
+#[test]
+fn exec_keeps_a_recovered_reply_when_the_earlier_request_ends_after_it() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.start(false);
+        let submit = wire.read("session.submit");
+        wire.reply(&submit, json!({"event":{"id":"input"}}));
+        let idle = wire.read("session.idle");
+        open_turn(wire, "turn", "input");
+        wire.event(11,"model-start",json!({"turn_id":"turn","request_id":"earlier"}));
+        wire.event(12,"model-start",json!({"turn_id":"turn","request_id":"recovered"}));
+        wire.event(13,"text",json!({"turn_id":"turn","request_id":"recovered","delta":"The answer."}));
+        wire.event(14,"model-output-end",json!({"turn_id":"turn","request_id":"earlier","status":"completed","finish_reason":"end_turn"}));
+        wire.event(15,"model-output-end",json!({"turn_id":"turn","request_id":"recovered","status":"completed","finish_reason":"end_turn"}));
         wire.end(json!({"turn_id":"turn","status":"completed","reason":"done"}));
         wire.reply(&idle, json!({"sequence":30}));
         wire.detach();
