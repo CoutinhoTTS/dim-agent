@@ -1506,3 +1506,157 @@ async fn pursuit_5_a_failed_or_cancelled_evaluator_turn_reports_failed() {
         env.close().await;
     }
 }
+
+/// A committed turn-end `Pause` ends the evaluator it replaces only after the
+/// fold consumed the record, and the ended line states no failure (Pursuit
+/// §4.1, §13 E2).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pursuit_2_a_committed_pause_ends_the_live_evaluator_once() {
+    let env = Env::start().await;
+    env.set_limit(1);
+    let (_, create) = completion_requested_with(&env, Some(1)).await;
+    let evaluator = create.branch.clone();
+    let fold_gate = dim_goal::testing::hold_input(env.session_id(), "main", 0);
+    env.turn_start("main", "next");
+    env.end_turn("main", "next", "completed");
+    let pause = env.wait_for("main", r#"reason="limit""#).await;
+    let held = tokio::time::timeout(support::WAIT, fold_gate.arrived())
+        .await
+        .expect("the pause reaches the fold in time");
+    assert_eq!(held, pause.sequence, "the held input is the pause record");
+    let ended = tokio::time::timeout(NEGATIVE, async {
+        loop {
+            if env
+                .ended("main")
+                .await
+                .iter()
+                .any(|ended| ended.branch == evaluator)
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(
+        ended.is_err(),
+        "the writer ends the evaluator only after the fold consumed its pause"
+    );
+    fold_gate.release();
+    tokio::time::timeout(support::WAIT, async {
+        loop {
+            if env
+                .ended("main")
+                .await
+                .iter()
+                .any(|ended| ended.branch == evaluator)
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the committed pause ends the evaluator");
+    let ended = env.ended("main").await;
+    assert_eq!(
+        ended
+            .iter()
+            .filter(|ended| ended.branch == evaluator)
+            .count(),
+        1,
+        "the evaluator ends once"
+    );
+    let writes = env.settled("main").await;
+    assert_eq!(
+        writes
+            .iter()
+            .filter(|block| block.marker.contains(r#"reason="limit""#))
+            .count(),
+        1,
+        "the pause is stated once: {writes:#?}"
+    );
+    assert!(
+        !writes
+            .iter()
+            .any(|block| block.marker.contains(r#"reason="evaluation_failed""#)),
+        "the ended evaluator states no failure: {writes:#?}"
+    );
+    env.close().await;
+}
+
+/// A pause written while a turn end's evaluator creation is claimed leaves no
+/// evaluator running: the committed record stops the decisions the creation
+/// belongs to before it reaches `tree.create` (Pursuit §4.1, §13 E2).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pursuit_2_a_pause_at_creation_leaves_no_live_evaluator() {
+    let env = Env::start().await;
+    env.set_limit(20);
+    let (_, first) = completion_requested_with(&env, Some(20)).await;
+    let evaluator = first.branch.clone();
+    let mut create_gate = dim_goal::testing::hold_stage(
+        env.session_id(),
+        "main",
+        dim_goal::testing::Stage::Create,
+        0,
+        None,
+    );
+    env.turn_start("main", "next");
+    env.tool(
+        "main",
+        json!({"status": "completed", "summary": "all tests pass"}),
+    )
+    .await;
+    let end = env.end_turn("main", "next", "completed");
+    let held = tokio::time::timeout(support::WAIT, create_gate.arrived())
+        .await
+        .expect("the turn end reaches its evaluator creation in time");
+    assert_eq!(held, end.sequence, "the held creation is this turn end's");
+    env.interrupt("main");
+    env.wait_for("main", r#"reason="interrupted""#).await;
+    // The pause's commit ends the evaluator it replaces; the writer reaches it
+    // only after the decisions it stops were stopped and awaited.
+    tokio::time::timeout(support::WAIT, async {
+        loop {
+            if env
+                .ended("main")
+                .await
+                .iter()
+                .any(|ended| ended.branch == evaluator)
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the pause ends the evaluator it replaced");
+    create_gate.release();
+    let expected = BranchSource::Host {
+        operation_id: format!("goal:evaluate:{}", end.sequence),
+    };
+    let created = tokio::time::timeout(NEGATIVE, async {
+        loop {
+            if let Some(create) = env
+                .creates("main")
+                .await
+                .into_iter()
+                .find(|create| create.source == expected)
+            {
+                return create;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    if let Ok(create) = created {
+        assert!(
+            env.ended("main")
+                .await
+                .iter()
+                .any(|ended| ended.branch == create.branch),
+            "a pause written while the evaluation is claimed leaves no live evaluator"
+        );
+    }
+    env.close().await;
+}
