@@ -93,7 +93,7 @@ pub struct FileTools {
     /// Runs after a complete sibling is synced and before commit verification;
     /// no sleeps, production hooks or global test locks.
     before_commit: Option<CommitHook>,
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     /// Runs at a new file's directory-sync boundary, after publication and
     /// before the parent is synced; no sleeps, production hooks or global test
     /// locks. A test moves or restricts the parent here.
@@ -107,6 +107,15 @@ pub struct FileTools {
 
 #[cfg(test)]
 type CommitHook = Arc<dyn Fn(&Path) + Send + Sync>;
+#[cfg(test)]
+#[derive(Clone)]
+/// The test-only hooks a mutation carries: the tool's `before_commit` and, on
+/// Unix, the new-file `before_sync`.
+pub(crate) struct MutationHooks {
+    pub(crate) before_commit: Option<CommitHook>,
+    #[cfg(unix)]
+    pub(crate) before_sync: Option<CommitHook>,
+}
 #[cfg(test)]
 type ResolveHook = Arc<dyn Fn(&Path) + Send + Sync>;
 #[cfg(test)]
@@ -146,7 +155,7 @@ impl FileTools {
             before_lock: None,
             #[cfg(test)]
             before_commit: None,
-            #[cfg(test)]
+            #[cfg(all(test, unix))]
             before_sync: None,
             #[cfg(test)]
             before_search: None,

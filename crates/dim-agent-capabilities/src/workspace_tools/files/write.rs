@@ -88,9 +88,11 @@ pub(super) async fn run(
         tools.boundary.is_some(),
     );
     #[cfg(test)]
-    let hook = tools.before_commit.clone();
-    #[cfg(test)]
-    let sync_hook = tools.before_sync.clone();
+    let hooks = super::MutationHooks {
+        before_commit: tools.before_commit.clone(),
+        #[cfg(unix)]
+        before_sync: tools.before_sync.clone(),
+    };
     let (_lock, written) = blocking(move || {
         let written = write_locked(
             &target,
@@ -100,9 +102,7 @@ pub(super) async fn run(
             binding,
             &cancel,
             #[cfg(test)]
-            hook,
-            #[cfg(test)]
-            sync_hook,
+            hooks,
         );
         (_lock, written)
     })
@@ -121,8 +121,7 @@ fn write_locked(
     content: &str,
     binding: WriteBinding,
     cancel: &CancellationToken,
-    #[cfg(test)] hook: Option<super::CommitHook>,
-    #[cfg(test)] sync_hook: Option<super::CommitHook>,
+    #[cfg(test)] hooks: super::MutationHooks,
 ) -> Result<(ToolResult, Option<TextFileBinding>), Cancelled> {
     let done = |result| Ok((result, None));
     let target = match Target::for_mutation(path, bounded, true) {
@@ -241,9 +240,7 @@ fn write_locked(
         &binding.raw_revision,
         cancel,
         #[cfg(test)]
-        hook,
-        #[cfg(test)]
-        sync_hook,
+        hooks,
     )?;
     if let Err(result) = written {
         return done(result);
@@ -326,6 +323,7 @@ impl Temporary<'_> {
 
     /// Removes the staging name now, before the directory sync, while the open
     /// file stays available to check which path the publication reached.
+    #[cfg(unix)]
     fn remove_name(&self) {
         if !self.staged_owned() {
             return;
@@ -364,8 +362,7 @@ pub(super) fn write_target(
     original: Option<&std::fs::File>,
     expected: &[u8; 32],
     cancel: &CancellationToken,
-    #[cfg(test)] hook: Option<super::CommitHook>,
-    #[cfg(test)] sync_hook: Option<super::CommitHook>,
+    #[cfg(test)] hooks: super::MutationHooks,
 ) -> Result<Result<(), ToolResult>, Cancelled> {
     #[cfg(unix)]
     if original.is_none() {
@@ -375,13 +372,9 @@ pub(super) fn write_target(
             display,
             cancel,
             #[cfg(test)]
-            hook,
-            #[cfg(test)]
-            sync_hook,
+            hooks,
         );
     }
-    #[cfg(test)]
-    let _ = sync_hook;
     let path = target.path();
     if let Some(original) = original {
         let writable = match target.open_writable() {
@@ -448,7 +441,7 @@ pub(super) fn write_target(
         return Ok(Err(write_failure(&error, display, false)));
     }
     #[cfg(test)]
-    if let Some(hook) = hook {
+    if let Some(hook) = &hooks.before_commit {
         hook(path);
     }
     Cancelled::check(cancel)?;
@@ -527,8 +520,7 @@ fn write_new_file(
     bytes: &[u8],
     display: &str,
     cancel: &CancellationToken,
-    #[cfg(test)] hook: Option<super::CommitHook>,
-    #[cfg(test)] sync_hook: Option<super::CommitHook>,
+    #[cfg(test)] hooks: super::MutationHooks,
 ) -> Result<Result<(), ToolResult>, Cancelled> {
     let path = target.path();
     let new_file = match NewFile::new(target) {
@@ -536,8 +528,8 @@ fn write_new_file(
         Err(TargetError::Refused) => return Ok(Err(refused(path))),
         Err(TargetError::Io(error)) => return Ok(Err(write_failure(&error, display, false))),
     };
-    #[cfg(all(target_os = "linux", test))]
-    let mut hook = hook;
+    #[cfg(all(test, target_os = "linux"))]
+    let mut hooks = hooks;
     #[cfg(target_os = "linux")]
     match new_file.create_anonymous() {
         Ok(Some(file)) => {
@@ -548,9 +540,10 @@ fn write_new_file(
                 display,
                 cancel,
                 #[cfg(test)]
-                hook.take(),
-                #[cfg(test)]
-                sync_hook.clone(),
+                super::MutationHooks {
+                    before_commit: hooks.before_commit.take(),
+                    before_sync: hooks.before_sync.clone(),
+                },
             )? {
                 Ok(publication) => publication,
                 Err(result) => return Ok(Err(result)),
@@ -569,9 +562,7 @@ fn write_new_file(
         display,
         cancel,
         #[cfg(test)]
-        hook,
-        #[cfg(test)]
-        sync_hook,
+        hooks,
     )
 }
 
@@ -608,15 +599,14 @@ fn publish_anonymous_new(
     bytes: &[u8],
     display: &str,
     cancel: &CancellationToken,
-    #[cfg(test)] hook: Option<super::CommitHook>,
-    #[cfg(test)] sync_hook: Option<super::CommitHook>,
+    #[cfg(test)] hooks: super::MutationHooks,
 ) -> Result<Result<AnonymousPublication, ToolResult>, Cancelled> {
     let path = new_file.path();
     if let Err(error) = file.write_all(bytes).and_then(|()| file.sync_all()) {
         return Ok(Err(write_failure(&error, display, false)));
     }
     #[cfg(test)]
-    if let Some(hook) = hook {
+    if let Some(hook) = hooks.before_commit {
         hook(path);
     }
     Cancelled::check(cancel)?;
@@ -641,7 +631,7 @@ fn publish_anonymous_new(
         Err(TargetError::Io(error)) => return Ok(Err(write_failure(&error, display, false))),
     }
     #[cfg(test)]
-    if let Some(hook) = sync_hook {
+    if let Some(hook) = hooks.before_sync {
         hook(path);
     }
     let synced = new_file.sync();
@@ -664,8 +654,7 @@ fn publish_named_new(
     bytes: &[u8],
     display: &str,
     cancel: &CancellationToken,
-    #[cfg(test)] hook: Option<super::CommitHook>,
-    #[cfg(test)] sync_hook: Option<super::CommitHook>,
+    #[cfg(test)] hooks: super::MutationHooks,
 ) -> Result<Result<(), ToolResult>, Cancelled> {
     let path = new_file.path();
     let staged = std::ffi::OsString::from(format!(".dim-write-{}", uuid::Uuid::new_v4()));
@@ -689,7 +678,7 @@ fn publish_named_new(
         return Ok(Err(write_failure(&error, display, false)));
     }
     #[cfg(test)]
-    if let Some(hook) = hook {
+    if let Some(hook) = hooks.before_commit {
         hook(path);
     }
     Cancelled::check(cancel)?;
@@ -731,7 +720,7 @@ fn publish_named_new(
     }
     temporary.remove_name();
     #[cfg(test)]
-    if let Some(hook) = sync_hook {
+    if let Some(hook) = hooks.before_sync {
         hook(path);
     }
     let synced = new_file.sync();

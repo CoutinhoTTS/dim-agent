@@ -335,9 +335,11 @@ fn edit_locked(
         &binding.raw_revision,
         cancel,
         #[cfg(test)]
-        hook,
-        #[cfg(test)]
-        None,
+        super::MutationHooks {
+            before_commit: hook,
+            #[cfg(unix)]
+            before_sync: None,
+        },
     )? {
         return done(result);
     }
