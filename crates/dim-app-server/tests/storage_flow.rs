@@ -8389,6 +8389,58 @@ async fn a_slow_store_upgrade_reports_progress_and_keeps_the_opening_alive() {
     assert_eq!(marker(&connection), vec![i64::from(STORE_FORMAT)]);
 }
 
+/// Every step after the upgrade's own reports progress, so the opening's
+/// inactivity bound covers the index derivation, the reference check, the
+/// commit and each pragma that follows them.
+#[tokio::test]
+async fn a_store_upgrade_reports_progress_through_its_commit_and_pragmas() {
+    use dim_app_server::storage::take_upgrade_steps;
+    use tokio_util::sync::CancellationToken;
+
+    let database = Database::new();
+    drop(v13_store(&database.0));
+    let root = rutis::Ctx::root().unwrap();
+    let view = root.plugin(dim_app_server::storage::SqliteStoragePlugin::new(
+        database.0.clone(),
+    ));
+    dim_agent_runtime::wait_active(
+        &root,
+        std::slice::from_ref(&view),
+        Duration::from_secs(10),
+        &CancellationToken::new(),
+    )
+    .await
+    .expect("the store upgrades");
+    root.shutdown().await.unwrap();
+    let mut expected = vec![
+        "derived-indexes",
+        "references",
+        "commit",
+        "journal-mode",
+        "synchronous",
+        "wal-autocheckpoint",
+        "journal-size-limit",
+        "cache-size",
+        "foreign-keys",
+    ];
+    if cfg!(target_os = "macos") {
+        expected.push("fullfsync");
+    }
+    let database_path = database.0.canonicalize().unwrap();
+    let steps = take_upgrade_steps(&database_path);
+    let names: Vec<&str> = steps.iter().map(|(step, _)| *step).collect();
+    assert_eq!(
+        names, expected,
+        "the opening reports progress after every step past the upgrade's own"
+    );
+    assert!(
+        steps.windows(2).all(|pair| pair[0].1 < pair[1].1),
+        "every step writes its own report: {steps:?}"
+    );
+    let connection = Connection::open(&database.0).unwrap();
+    assert_eq!(marker(&connection), vec![i64::from(STORE_FORMAT)]);
+}
+
 /// Grants upsert without downgrading write, survive a restart, are absent
 /// from a fork, and remove takes the same path it added.
 #[tokio::test]

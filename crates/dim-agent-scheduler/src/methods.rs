@@ -1179,7 +1179,7 @@ pub struct JobReply {
     pub records: Value,
 }
 
-const PROMPT_PREVIEW_BYTES: usize = 4 * 1024;
+pub(crate) const PROMPT_PREVIEW_BYTES: usize = 4 * 1024;
 const NAME_PREVIEW_BYTES: usize = 256;
 const DETAIL_PREVIEW_BYTES: usize = 512;
 
@@ -1426,7 +1426,7 @@ impl ScheduleJobs {
     }
 }
 
-fn truncate(text: &str, limit: usize) -> &str {
+pub(crate) fn truncate(text: &str, limit: usize) -> &str {
     if text.len() <= limit {
         return text;
     }
