@@ -1006,8 +1006,21 @@ async fn a_read_waiting_for_the_store_does_not_reopen_search_after_a_logout() {
     let fixture = oauth::start().await;
     let record = signed_in_record(&fixture).await;
     let home = home();
-    std::fs::write(home.join("auth.json"), b"{").unwrap();
+    std::fs::write(home.join("auth.json"), signed_out_record()).unwrap();
     let Process { root, providers } = process(&home).await;
+    // The startup observation publishes before this test changes the shared
+    // file, so no observation left from startup can publish a later state.
+    let mut account = root
+        .get::<dyn ManagedProvider>()
+        .unwrap()
+        .subscribe_account();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while *account.borrow_and_update() != Some(false) {
+            account.changed().await.unwrap();
+        }
+    })
+    .await
+    .expect("the startup observation did not publish the signed-out record");
     std::fs::write(home.join("auth.json"), record.clone()).unwrap();
     providers.status(PROVIDER, &cancel()).await.unwrap();
     await_usable(&providers, true).await;
