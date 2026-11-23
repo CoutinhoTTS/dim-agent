@@ -6,7 +6,9 @@ use dim_agent_capabilities::permission::{
 };
 use dim_agent_runtime::testing::{branch_events, chain_events};
 use dim_agent_runtime::{Agent, Session};
-use dim_agent_types::{InputBlock, InputMessageData, PermissionPolicy, UserInput};
+use dim_agent_types::{
+    AgentEvent, InputBlock, InputMessageData, InterruptScope, PermissionPolicy, UserInput,
+};
 use dim_app_server::methods::ManagementMethods;
 use rutis::host::{CtxHost, Key};
 use rutis_bridge::session::HostDispatch;
@@ -180,6 +182,7 @@ struct Setup {
     model: Option<Arc<dyn dim_agent_capabilities::host::ModelDriver>>,
     creation: Option<managed_launch::CreationControl>,
     dispatch_gate: Option<Arc<PendingDispatchGate>>,
+    close_gate: Option<Arc<PendingCloseGate>>,
 }
 
 #[derive(Default)]
@@ -227,6 +230,58 @@ impl rutis::host::DynPlugin for PendingDispatchPart {
         })
     }
 }
+
+/// Holds the next branch `stop/interrupt` at dispatch, so a close can be
+/// observed between writing its interrupt and settling. Later interrupts, such
+/// as the server's own shutdown, pass.
+#[derive(Default)]
+struct PendingCloseGate {
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+    passed: AtomicBool,
+}
+
+struct PendingClosePart {
+    gate: Arc<PendingCloseGate>,
+    dispatcher: Key<dim_agent_runtime::Dispatcher>,
+}
+
+impl rutis::host::DynPlugin for PendingClosePart {
+    fn name(&self) -> &str {
+        "pending-close-gate"
+    }
+    fn injects(&self) -> Vec<rutis::host::TypeKey> {
+        vec![self.dispatcher.erase()]
+    }
+    fn apply<'a>(
+        &'a self,
+        ctx: &'a rutis::Ctx,
+    ) -> rutis::host::BoxFuture<'a, rutis::Result<rutis::host::Effect>> {
+        Box::pin(async move {
+            let gate = self.gate.clone();
+            ctx.require_at(&self.dispatcher)?.subscribe(
+                ctx,
+                "pending-close-gate",
+                &["stop/interrupt"],
+                move |event| {
+                    let gate = gate.clone();
+                    Box::pin(async move {
+                        if matches!(&event.kind,
+                            EventKind::StopInterrupt(data) if data.scope == InterruptScope::Branch)
+                            && !gate.passed.swap(true, Ordering::SeqCst)
+                        {
+                            gate.entered.notify_one();
+                            gate.release.notified().await;
+                        }
+                        Ok(())
+                    })
+                },
+            )?;
+            Ok(rutis::host::Effect::Done)
+        })
+    }
+}
+
 pub(super) async fn serve_sessions(database: Option<std::path::PathBuf>) -> Served {
     serve_with(Setup {
         database,
@@ -323,6 +378,17 @@ async fn serve_with(setup: Setup) -> Served {
             "pending-dispatch-gate",
             move |names| {
                 Ok(Box::new(PendingDispatchPart {
+                    gate: gate.clone(),
+                    dispatcher: names.key()?,
+                }))
+            },
+        ));
+    }
+    if let Some(gate) = setup.close_gate {
+        builder.require_feature(Feature::new("pending-close-gate").branch(
+            "pending-close-gate",
+            move |names| {
+                Ok(Box::new(PendingClosePart {
                     gate: gate.clone(),
                     dispatcher: names.key()?,
                 }))
@@ -1144,6 +1210,290 @@ async fn a_consumer_launches_writes_waits_and_withdraws_by_input_id() {
         1
     );
     assert_eq!(calls.load(Ordering::SeqCst), 0);
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// Waits for the branch's event after `after` to be published and returns it.
+async fn published_after(session: &Session, after: u64) -> Arc<AgentEvent> {
+    let publication = session.publication("main").unwrap();
+    let mut watch = publication.watch();
+    let published = tokio::time::timeout(
+        Duration::from_secs(5),
+        watch.wait_for(|&(published, _)| published > after),
+    )
+    .await
+    .expect("the next event is published")
+    .expect("the branch's timeline is open");
+    let sequence = published.0;
+    branch_events(session, "main", sequence..=sequence)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap()
+}
+
+/// Sessions §6.6: a withdraw whose command was written before a close starts
+/// is decided by that branch's InputQueue, not by the close. Dispatch is held
+/// before the command, so the close's `stop/interrupt` is published ahead of
+/// the deletion: the reply is `deleted` with the deletion's sequence, a retry
+/// after the close fails `session_closed`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn withdraw_is_decided_when_its_command_precedes_a_close() {
+    let gate = Arc::new(PendingDispatchGate::default());
+    let close_gate = Arc::new(PendingCloseGate::default());
+    let Served {
+        server,
+        agent,
+        sessions,
+        mut client,
+        ..
+    } = serve_with(Setup {
+        dispatch_gate: Some(gate.clone()),
+        close_gate: Some(close_gate.clone()),
+        ..Default::default()
+    })
+    .await;
+    client_session(&mut client, &agent, host_policy()).await;
+    let session = awaiting_approval(&sessions, &agent).await;
+    sessions
+        .ok(
+            "input",
+            input(
+                &session,
+                "pending:dispatch-gate",
+                json!([{"type":"text","text":"hold dispatch"}]),
+            ),
+        )
+        .await;
+    tokio::time::timeout(Duration::from_secs(5), gate.entered.notified())
+        .await
+        .unwrap();
+    let held = sessions
+        .ok(
+            "input",
+            input(
+                &session,
+                "test:held",
+                json!([{"type":"text","text":"later"}]),
+            ),
+        )
+        .await;
+    let written = held["sequence"].as_u64().unwrap();
+    let input_id = held["inputId"].as_str().unwrap();
+    let request = json!({"sessionId":session.id(),"branchId":"main","inputId":held["inputId"]});
+    let dispatch = session.dispatch_watch("main").unwrap();
+    let waiting = tokio::spawn({
+        let sessions = sessions.clone();
+        let request = request.clone();
+        async move { sessions.call("withdraw", request).await }
+    });
+    let command = published_after(&session, written).await;
+    assert!(
+        matches!(command.kind, EventKind::InputWithdraw(_)),
+        "{command:?}"
+    );
+    assert!(
+        dispatch.borrow().sequence < command.sequence,
+        "InputQueue has not decided the command: {command:?}"
+    );
+    let close = session.close();
+    let interrupt = published_after(&session, command.sequence).await;
+    assert!(
+        matches!(&interrupt.kind, EventKind::StopInterrupt(data)
+            if data.scope == InterruptScope::Branch),
+        "{interrupt:?}"
+    );
+    assert!(
+        dispatch.borrow().sequence < command.sequence,
+        "the close started before InputQueue decided the command: {interrupt:?}"
+    );
+    gate.release.notify_one();
+    let reply = tokio::time::timeout(Duration::from_secs(5), waiting)
+        .await
+        .expect("the withdraw replies while the close waits for its interrupt")
+        .unwrap();
+    assert_eq!(reply["ok"], true, "{reply}");
+    assert_eq!(reply["value"]["status"], "deleted", "{reply}");
+    let deleted = reply["value"]["sequence"].as_u64().unwrap();
+    assert!(
+        deleted > interrupt.sequence,
+        "the deletion follows the close's own interrupt: {reply}"
+    );
+    let event = branch_events(&session, "main", deleted..=deleted)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert!(
+        matches!(&event.kind, EventKind::InputDeleted(data) if data.input_id == input_id),
+        "{event:?}"
+    );
+    close_gate.release.notify_one();
+    close.await.unwrap();
+    assert_eq!(sessions.error("withdraw", request).await, "session_closed");
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// Sessions §6.6: a close that starts after the command was written replies
+/// neither `reloading` nor `session_closed` when InputQueue decides the command
+/// `notHeld` either.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn withdraw_replies_not_held_when_its_command_precedes_a_close() {
+    let gate = Arc::new(PendingDispatchGate::default());
+    let close_gate = Arc::new(PendingCloseGate::default());
+    let Served {
+        server,
+        agent,
+        sessions,
+        mut client,
+        ..
+    } = serve_with(Setup {
+        dispatch_gate: Some(gate.clone()),
+        close_gate: Some(close_gate.clone()),
+        ..Default::default()
+    })
+    .await;
+    client_session(&mut client, &agent, host_policy()).await;
+    let session = awaiting_approval(&sessions, &agent).await;
+    let applied = sessions
+        .ok(
+            "lookup",
+            json!({"sessionId":session.id(),"branchId":"main","submissionId":"test:confirm"}),
+        )
+        .await;
+    sessions
+        .ok(
+            "input",
+            input(
+                &session,
+                "pending:dispatch-gate",
+                json!([{"type":"text","text":"hold dispatch"}]),
+            ),
+        )
+        .await;
+    tokio::time::timeout(Duration::from_secs(5), gate.entered.notified())
+        .await
+        .unwrap();
+    let written = session.sequence("main").unwrap();
+    let request = json!({"sessionId":session.id(),"branchId":"main","inputId":applied["inputId"]});
+    let dispatch = session.dispatch_watch("main").unwrap();
+    let waiting = tokio::spawn({
+        let sessions = sessions.clone();
+        let request = request.clone();
+        async move { sessions.call("withdraw", request).await }
+    });
+    let command = published_after(&session, written).await;
+    assert!(
+        matches!(command.kind, EventKind::InputWithdraw(_)),
+        "{command:?}"
+    );
+    assert!(
+        dispatch.borrow().sequence < command.sequence,
+        "InputQueue has not decided the command: {command:?}"
+    );
+    let close = session.close();
+    let interrupt = published_after(&session, command.sequence).await;
+    assert!(
+        matches!(&interrupt.kind, EventKind::StopInterrupt(data)
+            if data.scope == InterruptScope::Branch),
+        "{interrupt:?}"
+    );
+    assert!(
+        dispatch.borrow().sequence < command.sequence,
+        "the close started before InputQueue decided the command: {interrupt:?}"
+    );
+    gate.release.notify_one();
+    let reply = tokio::time::timeout(Duration::from_secs(5), waiting)
+        .await
+        .expect("the withdraw replies while the close waits for its interrupt")
+        .unwrap();
+    assert_eq!(reply["ok"], true, "{reply}");
+    assert_eq!(reply["value"], json!({"status":"notHeld"}), "{reply}");
+    close_gate.release.notify_one();
+    close.await.unwrap();
+    assert_eq!(sessions.error("withdraw", request).await, "session_closed");
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// Sessions §6.6: after the command was written, an index unload during the
+/// call replies `reloading` and leaves the outcome to InputQueue, which decides
+/// the command from history.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn withdraw_replies_reloading_when_the_index_unloads_after_its_command() {
+    let gate = Arc::new(PendingDispatchGate::default());
+    let Served {
+        server,
+        agent,
+        sessions,
+        mut client,
+        ..
+    } = serve_with(Setup {
+        dispatch_gate: Some(gate.clone()),
+        ..Default::default()
+    })
+    .await;
+    client_session(&mut client, &agent, host_policy()).await;
+    let session = awaiting_approval(&sessions, &agent).await;
+    sessions
+        .ok(
+            "input",
+            input(
+                &session,
+                "pending:dispatch-gate",
+                json!([{"type":"text","text":"hold dispatch"}]),
+            ),
+        )
+        .await;
+    tokio::time::timeout(Duration::from_secs(5), gate.entered.notified())
+        .await
+        .unwrap();
+    let held = sessions
+        .ok(
+            "input",
+            input(
+                &session,
+                "test:held",
+                json!([{"type":"text","text":"later"}]),
+            ),
+        )
+        .await;
+    let written = held["sequence"].as_u64().unwrap();
+    let input_id = held["inputId"].as_str().unwrap();
+    let request = json!({"sessionId":session.id(),"branchId":"main","inputId":held["inputId"]});
+    let dispatch = session.dispatch_watch("main").unwrap();
+    let waiting = tokio::spawn({
+        let sessions = sessions.clone();
+        async move { sessions.call("withdraw", request).await }
+    });
+    let command = published_after(&session, written).await;
+    assert!(
+        matches!(command.kind, EventKind::InputWithdraw(_)),
+        "{command:?}"
+    );
+    assert!(
+        dispatch.borrow().sequence < command.sequence,
+        "InputQueue has not decided the command: {command:?}"
+    );
+    server.restart("Agents").await.unwrap();
+    let reply = tokio::time::timeout(Duration::from_secs(5), waiting)
+        .await
+        .expect("the withdraw replies on the index unload")
+        .unwrap();
+    assert_eq!(reply["error"]["code"], "reloading", "{reply}");
+    assert_eq!(reply["error"]["retryable"], true, "{reply}");
+    gate.release.notify_one();
+    event_written(&session, "input/deleted").await;
+    let decided = branch_events(&session, "main", command.sequence..)
+        .await
+        .unwrap();
+    assert!(
+        decided.iter().any(|event| event.sequence > command.sequence
+            && matches!(&event.kind, EventKind::InputDeleted(data) if data.input_id == input_id)),
+        "InputQueue decides the command from history: {decided:?}"
+    );
     server.shutdown();
     server.join().await.unwrap();
 }

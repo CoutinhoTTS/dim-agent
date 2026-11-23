@@ -1378,36 +1378,15 @@ impl Connection {
                 }
                 Err(e) => Err(e),
             },
-            Call::Close(params) => {
-                let session = rpc.index.session(&params.session_id).map(|(_, s)| s);
-                let result = match session {
-                    Some(session) => session
-                        .close()
-                        .await
-                        .map_err(|error| {
-                            tracing::error!(%error, session_id=%params.session_id, "Session cleanup failed");
-                            RpcError::wire(-32000, "Session cleanup failed")
-                        }),
-                    None => {
-                        if let Some(host) = rpc.index.host_by_session(&params.session_id)
-                            && let Some(session) = host.agent.get_session(&params.session_id)
-                        {
-                            session.closed().await.map_err(|error| {
-                                tracing::error!(
-                                    %error,
-                                    session_id=%params.session_id,
-                                    "Session cleanup failed"
-                                );
-                                RpcError::wire(-32000, "Session cleanup failed")
-                            })
-                        } else {
-                            Ok(())
-                        }
-                    }
-                };
-                rpc.index.remove_version(&params.session_id);
-                result.map(|_| Reply::empty())
-            }
+            Call::Close(params) => rpc
+                .index
+                .close_session(&params.session_id)
+                .await
+                .map_err(|error| {
+                    tracing::error!(%error, session_id=%params.session_id, "Session cleanup failed");
+                    RpcError::wire(-32000, "Session cleanup failed")
+                })
+                .map(|_| Reply::empty()),
             Call::Delete(params) if params.require_inactive => {
                 match rpc.index.delete_if_inactive(&params.session_id).await {
                     Ok(DeleteOutcome::Removed(deleted)) => {
