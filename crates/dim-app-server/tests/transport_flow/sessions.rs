@@ -864,7 +864,47 @@ async fn idle_covers_written_turns_and_waits_on_a_pending_approval_until_stop() 
             .any(|event| matches!(event.kind, EventKind::TurnEnd(_))),
         "its turn ended by the cutoff"
     );
-    assert_eq!(sessions.ok("idle", at.clone()).await["sequence"], cutoff);
+    let second = sessions.ok("idle", at.clone()).await["sequence"]
+        .as_u64()
+        .unwrap();
+    assert!(
+        second >= cutoff,
+        "the idle branch never goes back: {second} < {cutoff}"
+    );
+    let presence = format!(
+        "<dim-state source=\"{}\">",
+        dim_agent_capabilities::environment_clients::CLIENTS
+    );
+    let snapshot = |kind: &EventKind| {
+        matches!(kind, EventKind::InputMessage(data)
+            if data.user.is_none()
+                && matches!(data.blocks.as_slice(), [InputBlock::Raw { text, .. }]
+                    if text.starts_with(&presence)))
+    };
+    let extra = branch_events(&session, "main", (cutoff + 1)..=second)
+        .await
+        .unwrap();
+    assert!(
+        extra.is_empty()
+            || (extra.len() == 2
+                && snapshot(&extra[0].kind)
+                && matches!(extra[1].kind, EventKind::InputApplied(_))),
+        "the idle branch only takes the client presence snapshot: {:?}",
+        extra
+            .iter()
+            .map(|event| event.kind.key())
+            .collect::<Vec<_>>()
+    );
+    let page = sessions
+        .ok(
+            "history",
+            json!({"sessionId":session.id(),"branchId":"main","through":second}),
+        )
+        .await;
+    assert_eq!(
+        page["through"], second,
+        "the idle cutoff ends an atomic batch"
+    );
 
     let session = awaiting_approval(&sessions, &agent).await;
     let at = json!({"sessionId":session.id(),"branchId":"main"});
