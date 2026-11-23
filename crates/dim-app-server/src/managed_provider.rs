@@ -20,9 +20,9 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 /// The longest a Session assembly or reconciliation waits for a provider's
-/// own account observation. The provider publishes the read through its watch,
-/// so a slower one still reaches open Sessions from there; an observation that
-/// outlives the wait leaves the last observation in place.
+/// own account observation. The provider publishes the read through its watch;
+/// the bound ends the caller's wait and the observation it started, so a
+/// timed-out read leaves the last observation in place and no work behind.
 const ACCOUNT_OBSERVATION_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
