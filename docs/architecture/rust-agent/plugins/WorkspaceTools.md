@@ -382,15 +382,19 @@ original owner, group, mode and extended attributes before the rename.
 - **Windows.** Unchanged: the private handle is installed with a hard link.
 
 A new file's success belongs to a path that names the file actually written.
-Once the entry is published and before the directory sync, the call re-stats the
-requested path and compares its inode with the published one
+Once the entry is published, the call syncs the directory that received it and
+keeps the sync result; the named path first removes its staging entry and
+keeps the published file open. Only then does the call re-stat the requested
+path and compare its inode with the published one
 ([`Target::path`](../../../../crates/dim-agent-capabilities/src/workspace_tools/files.rs)
-through `owned_temporary`). A parent renamed during the call leaves the file in
-the directory that was opened, while the requested path names another entry or
-nothing; that call returns `write_error`, declares no `fileWritten` effect and
-records no text binding for the path, so a later operation never starts from a
-revision the path does not hold. A parent-sync failure is still reported with
-its effect once this check passes.
+through `owned_temporary`), so the inode number cannot be reused by the time it
+is checked. A parent renamed during the call, including while the directory
+sync runs, leaves the file in the directory that was opened, while the
+requested path names another entry or nothing; that call returns `write_error`,
+declares no `fileWritten` effect and records no text binding for the path,
+whether the sync succeeded or failed, so a later operation never starts from a
+revision the path does not hold. A parent-sync failure is reported with its
+effect only once the check passes.
 
 Known limits:
 
@@ -543,7 +547,13 @@ parent after preparation and checks that the file follows the directory and
 that the call reports `write_error` for the path put back at the old name, with
 no `fileWritten` effect and no text binding. The in-crate Unix test
 `a_bounded_new_file_records_no_success_after_a_parent_rename` fixes the same
-record for a target below a boundary's held parent. The Linux tests
+record for a target below a boundary's held parent. The named and Linux tests
+`a_named_new_file_records_no_success_after_a_parent_moves_during_sync`,
+`an_anonymous_new_file_records_no_success_after_a_parent_moves_during_sync`
+and `a_fallback_new_file_records_no_success_after_a_parent_moves_during_sync`
+move the parent at the directory-sync boundary, once with the sync succeeding
+and once with it failing, and check that neither outcome records the old path.
+The Linux tests
 `an_unsupported_anonymous_publication_falls_back_to_named_staging`,
 `a_fallback_publication_does_not_replace_an_existing_entry`,
 `an_unknown_policy_clamps_an_anonymous_new_file_to_its_owner_bits`,
