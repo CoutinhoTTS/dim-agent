@@ -78,6 +78,31 @@ test('source areas select their groups',()=>{
   assert.deepEqual(classify(['docs/notes.md','crates/dim-cli/src/notes.rs']),only('rust','windows'));
 });
 
+test('Windows-native flows follow their storage, host and named pipe paths',()=>{
+  for (const file of [
+    'crates/dim-agent-capabilities/src/file_storage.rs',
+    'crates/dim-agent-capabilities/src/file_storage/windows.rs',
+    'crates/dim-agent-capabilities/src/host_platform/confined.rs',
+    'crates/dim-agent-capabilities/tests/capabilities_flow.rs',
+    'crates/dim-agent-capabilities/tests/file_storage_flow.rs',
+    'crates/dim-agent-capabilities/tests/host_platform_windows_flow.rs',
+    'crates/dim-app-server/src/transport.rs',
+    'crates/dim-app-server/src/pipe_client.rs',
+    'crates/dim-app-server/src/cli.rs',
+    'crates/dim-app-server/tests/app_server_flow.rs',
+    'crates/dim-app-server/tests/named_pipe_flow.rs',
+    'scripts/test-windows-native.mjs',
+  ]) assert.equal(classify([file]).windows_native,true,file);
+  for (const file of [
+    'crates/dim-cli/src/main.rs',
+    'crates/dim-app-server/src/lib.rs',
+    'crates/dim-app-server/tests/transport_flow.rs',
+    'crates/dim-agent-capabilities/tests/host_platform_flow.rs',
+    'crates/dim-agent-capabilities/src/workspace_tools/exec.rs',
+  ]) assert.equal(classify([file]).windows_native,false,file);
+  assert.equal(classify(['.github/workflows/ci.yml']).windows_native,true,'the workflow selects every check group');
+});
+
 test('native macOS CI follows its runner, packaging and Mach-O layout sources',()=>{
   assert.deepEqual(classify(['scripts/test-macos-native.mjs']),only('rust','scripts'));
   for (const name of ['release.test.mjs','stage-release.mjs','pack-release.mjs','native-binary.mjs','store-formats.mjs',
@@ -95,7 +120,7 @@ test('bridge, evaluation and wall-clock flows follow their owning paths',()=>{
   assert.deepEqual(classify(['xtask/scenario-eval/case.json']),only('rust','node','eval'));
   assert.deepEqual(classify(['crates/dim-agent-capabilities/src/workspace_tools/exec.rs']),only('rust','node','execution'));
   assert.deepEqual(classify(['crates/dim-agent-capabilities/src/workspace_tools/background.rs']),only('rust','node','execution'));
-  assert.deepEqual(classify(['crates/dim-agent-capabilities/src/host_platform/mod.rs']),only('rust','node','execution'));
+  assert.deepEqual(classify(['crates/dim-agent-capabilities/src/host_platform/mod.rs']),only('rust','node','execution','windows_native'));
   assert.deepEqual(classify(['tests/integration/tests/local_execution.rs']),only('rust','node','execution'));
   assert.deepEqual(classify(['scripts/run-rust-test.mjs']),only(...groups));
 });
