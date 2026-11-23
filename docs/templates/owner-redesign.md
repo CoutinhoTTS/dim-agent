@@ -4,7 +4,7 @@ Use this shape when an existing owner's public surface is redesigned under
 [design rules §7](../architecture/rust-agent/principles.md#7-所有者与操作). It has two parts. The design
 part is durable and goes into the owner's design document, `docs/design/plugins/<Owner>.md`,
 created from the [design template](design.md) when it does not exist. A plugin with several owners
-has one document per owner, each listed in `docs/design/plugins/README.md`. The delivery part is
+has one document per owner; the plugin's row in `docs/design/plugins/README.md` links each of them. The delivery part is
 temporary and goes into the owner's issue. A new owner uses the [design template](design.md) alone.
 
 Write conclusions first. Name things directly instead of referring back. Do not restate rules or
@@ -38,6 +38,7 @@ that settles each resource.
 Ids, values, read-only views and callbacks cross owners. Where an object still has to be handed out,
 say why none of those works, and link the design shared by the plugins involved that fixes who
 creates, holds, hands over and cleans up the object, and what happens when any side closes or reloads.
+A resource handle crosses only as a whole transfer: the receiver becomes its owner and settles it.
 
 ### Exceptions with reasons
 
@@ -65,7 +66,7 @@ Written in the owner's issue; it is history once the change lands.
 - **Implementation task**: rewrite the owner's public surface; do not add an interface beside it.
   Read the responsibility split, write the callers' target code as flow tests, make the old public
   methods `pub(crate)` and use the compile errors as the migration list, implement the operations,
-  then migrate every caller. A plugin area's new operations, every caller and the removal of the old
+  then migrate every caller. The owner's new operations, every caller and the removal of the old
   surface are one change, with no period where old and new coexist.
 - **Acceptance**: the flow tests pass; no cross-crate reference to a deleted name remains; the
   catalog has no `internal(reason)` entry for the owner; the diff removes the old surface.
