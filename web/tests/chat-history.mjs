@@ -1439,6 +1439,44 @@ test("a resync whose directory answer predates a move does not take the centre b
   assert.deepEqual(chat.views.session.rows.map(row => row.text), ["on worker"], "the page keeps the transcript the move read")
 })
 
+test("a resync's ready page does not land on a page a move took while its policy read was out", async t => {
+  const policy = deferred()
+  const workerGoal = deferred()
+  const read = { version: 1, policy: { preset: "read-only", allowedTools: [], disallowedTools: [] } }
+  let armed = false
+  let policyReads = 0
+  const chat = session(t, params => page([input(1, `on ${params.branchId}`)], 1), {
+    "session.branches": () => ({ branches: [{ branchId: "worker", parentBranchId: "main", branchPoint: 0, head: 1, state: "open" }], defaultBranchId: "main" }),
+    "session.branch_set_default": () => "worker",
+    "session.permission.get": () => {
+      if (!armed) return read
+      policyReads++
+      return policy.promise
+    },
+    "session.goal.get": params => params.branchId === "worker" ? workerGoal.promise : { branchId: "main", through: 1, goal: null },
+  })
+  const supports = globalThis.historyStores.connection.supports
+  globalThis.historyStores.connection.supports = name => name === "session.permission.get" || supports(name)
+  await flush()
+  assert.equal(chat.views.session.status, "ready")
+  armed = true
+  const reconnecting = chat.resync()
+  await until(() => policyReads === 1)
+  const moving = chat.setDefaultBranch("session", "worker")
+  await until(() => chat.views.session.defaultBranchId === "worker")
+  policy.resolve({ version: 2, policy: read.policy })
+  await flush()
+  assert.equal(chat.views.session.status, "loading", "the ready page a resync would publish does not land on the page the move took")
+  assert.deepEqual(chat.views.session.rows.map(row => row.text), ["on worker"], "the moved page keeps the transcript the move read")
+  workerGoal.resolve({ branchId: "worker", through: 1, goal: null })
+  await moving
+  await reconnecting
+  await flush()
+  assert.equal(chat.views.session.status, "ready", "the moved page leaves loading through its own reads")
+  assert.deepEqual(chat.views.session.permission, read.policy)
+  assert.equal(chat.views.session.permissionVersion, 2)
+})
+
 test("a side line keeps the events it received while the centre page was failed", async t => {
   let failGoal = false
   const chat = session(t, params => page([input(1, `on ${params.branchId}`)], 1), {
