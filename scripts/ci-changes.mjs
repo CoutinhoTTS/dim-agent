@@ -14,7 +14,7 @@ const cargoManifest=/(?:^|\/)Cargo\.toml$/;
 const windowsNative=[
   /^crates\/dim-agent-capabilities\/src\/(?:file_storage\.rs|file_storage\/|host_platform\.rs|host_platform\/)/,
   /^crates\/dim-agent-capabilities\/tests\/(?:capabilities_flow|file_storage_flow|host_platform_windows_flow)\.rs$/,
-  /^crates\/dim-app-server\/src\/(?:transport|pipe_client|cli)\.rs$/,
+  /^crates\/dim-app-server\/src\/(?:lib|transport|pipe_client|cli)\.rs$/,
   /^crates\/dim-app-server\/tests\/(?:app_server_flow|named_pipe_flow)\.rs$/,
   /^scripts\/test-windows-native\.mjs$/,
 ];
