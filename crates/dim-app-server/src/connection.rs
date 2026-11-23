@@ -322,17 +322,25 @@ impl Connection {
     ) -> Result<tokio::sync::OwnedMutexGuard<()>, RpcError> {
         let admission = usage.admission().await;
         let session = &usage.session;
-        if session.is_closing()
-            || !usage.is_exclusive(self.is_attached(session.id()))
-            || session
-                .branches()
-                .iter()
-                .any(|branch| session.state(&branch.id).is_ok_and(|state| state.running))
-        {
-            return Err(RpcError::service(
+        let conflict = || {
+            RpcError::service(
                 "provider_route_conflict",
                 "Temporary routing requires a Session without active work or another client",
-            ));
+            )
+        };
+        if session.is_closing() || !usage.is_exclusive(self.is_attached(session.id())) {
+            return Err(conflict());
+        }
+        for branch in session.branches() {
+            let dispatched = session.dispatch_watch(&branch.id)?.borrow().clone();
+            let publication = session.publication(&branch.id)?;
+            if dispatched.failure.is_some()
+                || publication.has_pending()
+                || dispatched.sequence < publication.sequence()
+                || session.state(&branch.id)?.running
+            {
+                return Err(conflict());
+            }
         }
         Ok(admission)
     }
