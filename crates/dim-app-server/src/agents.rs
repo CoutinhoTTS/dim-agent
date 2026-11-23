@@ -408,6 +408,10 @@ pub struct AgentIndex {
     /// waiting on its branch. Feature `testing` only.
     #[cfg(feature = "testing")]
     idle_admitted: Arc<tokio::sync::Notify>,
+    /// The hold the next business close of a Session takes. Feature
+    /// `testing` only.
+    #[cfg(feature = "testing")]
+    close_hold: Arc<Mutex<Option<Arc<crate::CloseHold>>>>,
 }
 /// One page of `branch`'s own facts after `after` through its Session's query:
 /// at most `limit`, never past `through`, ending on an atomic batch.
@@ -530,6 +534,14 @@ impl AgentIndex {
     pub(crate) fn idle_admitted(&self) -> Arc<tokio::sync::Notify> {
         self.idle_admitted.clone()
     }
+    /// The hold the next business close of a Session takes. Feature `testing`
+    /// only.
+    #[cfg(feature = "testing")]
+    pub(crate) fn hold_next_close(&self) -> Arc<crate::CloseHold> {
+        let hold = Arc::new(crate::CloseHold::default());
+        *self.close_hold.lock().expect("close hold") = Some(hold.clone());
+        hold
+    }
     /// How many uses Session `id` has right now. Feature `testing` only.
     #[cfg(feature = "testing")]
     pub(crate) fn uses(&self, id: &str) -> usize {
@@ -649,6 +661,8 @@ impl AgentIndex {
     /// records stay, so a restart loads it again. A Session no loaded
     /// instance holds is already closed.
     pub(crate) async fn close_session(&self, id: &str) -> dim_agent_runtime::Result<()> {
+        #[cfg(feature = "testing")]
+        let close_hold = self.close_hold.lock().expect("close hold").take();
         let result = match self.session(id) {
             Some((_, session)) => session.close().await,
             None => match self
@@ -659,6 +673,10 @@ impl AgentIndex {
                 None => Ok(()),
             },
         };
+        #[cfg(feature = "testing")]
+        if let Some(hold) = close_hold {
+            hold.wait().await;
+        }
         self.remove_version(id);
         result
     }
@@ -2343,6 +2361,8 @@ impl DynPlugin for AgentsPlugin {
                 stopping: CancellationToken::new(),
                 #[cfg(feature = "testing")]
                 idle_admitted: Arc::new(tokio::sync::Notify::new()),
+                #[cfg(feature = "testing")]
+                close_hold: Arc::new(Mutex::new(None)),
             };
             let index = Arc::new(index);
             let cleanup = index.clone();

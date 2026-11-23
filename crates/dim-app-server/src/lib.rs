@@ -223,6 +223,29 @@ pub struct BranchesHold {
     pub release: tokio::sync::Notify,
 }
 
+/// Feature `testing`: a hold on the business close of one Session. It
+/// notifies `admission` once the close stopped the Session loading in this
+/// process, `waiting` once its runtime close returned and before the close is
+/// recorded, and returns from `wait` once `release` is notified.
+#[cfg(feature = "testing")]
+#[derive(Default)]
+pub struct CloseHold {
+    pub admission: tokio::sync::Notify,
+    pub waiting: tokio::sync::Notify,
+    pub release: tokio::sync::Notify,
+}
+#[cfg(feature = "testing")]
+impl CloseHold {
+    /// Notifies `waiting`, then waits for `release`.
+    pub async fn wait(&self) {
+        self.waiting.notify_one();
+        self.release.notified().await;
+    }
+    pub fn release(&self) {
+        self.release.notify_one();
+    }
+}
+
 pub struct RunningServer {
     pub unix_path: Option<PathBuf>,
     pub pipe_name: Option<String>,
@@ -345,6 +368,24 @@ impl RunningServer {
         self.root
             .get::<AgentIndex>()
             .map_or(0, |index| index.uses(session_id))
+    }
+    /// Holds the next business close of a Session after its runtime close
+    /// returns and before the close is recorded. Feature `testing` only.
+    #[cfg(feature = "testing")]
+    pub fn hold_next_close(&self) -> Option<Arc<CloseHold>> {
+        self.root
+            .get::<AgentIndex>()
+            .map(|index| index.hold_next_close())
+    }
+    /// The business close of Session `session_id`, as `session.close` and
+    /// Collaboration's member close run it. Feature `testing` only.
+    #[cfg(feature = "testing")]
+    pub async fn close_session(&self, session_id: &str) -> dim_agent_runtime::Result<()> {
+        self.root
+            .get::<AgentIndex>()
+            .expect("the Agents index")
+            .close_session(session_id)
+            .await
     }
     pub async fn join(mut self) -> Result<ShutdownReason> {
         self.task.take().expect("server task").await?

@@ -2,12 +2,16 @@ use super::deletion::Store;
 use super::*;
 use dim_agent_capabilities::prompt_state::PromptSnapshot;
 use dim_agent_runtime::testing::{branch_events, chain_events, timeline_events};
-use dim_agent_runtime::{Agent, CollaborationRole, Session, TimelineQueryScope, TimelineStore};
+use dim_agent_runtime::{
+    Agent, CollaborationRole, Names, Session, SessionIdentity, TimelineQueryScope, TimelineStore,
+};
 use dim_agent_types::{
     AgentEvent, CollaborationDelivery, CollaborationOutcome, ContentBlock, EventKind, InputBlock,
     InputMessageData, MessageContent, ToolContent, ToolEffect,
 };
-use rutis::host::{BoxFuture, CtxHost};
+use futures_util::FutureExt;
+use rutis::Ctx;
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use std::ops::RangeInclusive;
 use std::sync::OnceLock;
 
@@ -2731,6 +2735,181 @@ async fn a_closed_member_stays_out_of_the_team_when_agents_reload() {
     server.shutdown();
     server.join().await.unwrap();
     tokio::fs::remove_dir_all(&store.0).await.unwrap();
+}
+
+/// #2034: a business close closes the Session's admission before its runtime
+/// close returns, so an `attach` that arrives in that window is refused
+/// instead of restoring the member the close is ending.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_close_refuses_an_attach_that_arrives_while_it_runs() {
+    let store = Store::new();
+    let (server, agent) = launch_with_agent(Arc::new(MockTools), store.config()).await;
+    let mut client = Client::new_version(&server, false, 4).await;
+    let member = stored_member(&mut client, &agent).await;
+    let hold = server.hold_next_close().expect("the Agents index");
+    let close = server.close_session(&member);
+    let mut attaching = Client::new_version(&server, false, 4).await;
+    let (closed, ()) = tokio::join!(close, async {
+        wait(&hold.waiting, "the close after its runtime close").await;
+        let attached = attaching
+            .rpc("session.attach", json!({"sessionId": member}))
+            .await;
+        assert_eq!(
+            attached["error"]["data"]["appError"], "session_closed",
+            "{attached}"
+        );
+        assert!(
+            agent.get_session(&member).is_none(),
+            "the attach must not restore the member the close is ending"
+        );
+        hold.release();
+    });
+    closed.expect("the close completes");
+    assert!(agent.get_session(&member).is_none());
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    tokio::fs::remove_dir_all(&store.0).await.unwrap();
+}
+
+/// #2034: a restore admitted before a close ends closed: the close closes the
+/// Session's admission first and waits for the restore, which releases what it
+/// loaded instead of publishing it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_close_settles_a_restore_that_was_already_admitted() {
+    let store = Store::new();
+    let held = HeldRestore::default();
+    let (server, agent) = launch_with(Arc::new(MockTools), store.config(), |builder| {
+        held.install(builder)
+    })
+    .await;
+    let mut client = Client::new_version(&server, false, 4).await;
+    let member = stored_member(&mut client, &agent).await;
+    unload(&agent, &member).await;
+    held.hold(&member);
+    let mut attaching = Client::new_version(&server, false, 4).await;
+    let attach = attaching
+        .send("session.attach", json!({"sessionId": member}))
+        .await;
+    held.entered().await;
+    let hold = server.hold_next_close().expect("the Agents index");
+    let close = server.close_session(&member);
+    let (closed, ()) = tokio::join!(close, async {
+        tokio::select! {
+            _ = wait(&hold.admission, "the close's admission") => {}
+            _ = wait(&hold.waiting, "the close after its runtime close") => {}
+        }
+        held.release();
+        let attached = attaching.response(attach).await;
+        assert_eq!(
+            attached["error"]["data"]["appError"], "session_closed",
+            "{attached}"
+        );
+        assert!(
+            agent.get_session(&member).is_none(),
+            "the closed member must not stay loaded"
+        );
+        hold.release();
+    });
+    closed.expect("the close completes");
+    assert!(agent.get_session(&member).is_none());
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    tokio::fs::remove_dir_all(&store.0).await.unwrap();
+}
+
+/// A stored member of a new Team, its request returned and its Session idle.
+async fn stored_member(client: &mut Client, agent: &Agent) -> String {
+    let lead = leader(client, allowed()).await;
+    let lead_session = agent.get_session(&lead).unwrap();
+    let holder = client.rpc("agent.list", json!({})).await["result"][0]["agentId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    say(
+        client,
+        &lead,
+        tool(json!({"action": "request", "agentId": holder, "prompt": "hello"})),
+        "queue",
+    )
+    .await;
+    let member = next_member(&lead_session, 0).await;
+    returned(client, &lead, &lead_session, 1).await;
+    member
+}
+
+/// Waits for a test hold; `poll` owns the deadline.
+async fn wait(signal: &tokio::sync::Notify, what: &str) {
+    poll(what, async || signal.notified().now_or_never()).await;
+}
+
+/// Holds the next restore of one Session in its Session part's apply, while
+/// `acquire` holds the Session's gate and slot.
+#[derive(Clone, Default)]
+struct HeldRestore(Arc<HeldState>);
+#[derive(Default)]
+struct HeldState {
+    held: std::sync::Mutex<Option<String>>,
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+impl HeldRestore {
+    fn install(&self, builder: &mut AgentBuilder) {
+        let held = self.clone();
+        builder.require_feature(
+            Feature::new("test.held-restore").session("test.held-restore", move |names| {
+                Ok(Box::new(HeldRestorePart::new(names, held.clone())?))
+            }),
+        );
+    }
+    fn hold(&self, id: &str) {
+        *self.0.held.lock().unwrap() = Some(id.to_owned());
+    }
+    async fn entered(&self) {
+        wait(&self.0.entered, "the held restore").await;
+    }
+    fn release(&self) {
+        self.0.release.notify_one();
+    }
+}
+struct HeldRestorePart {
+    held: HeldRestore,
+    identity: Key<SessionIdentity>,
+}
+impl HeldRestorePart {
+    fn new(names: &Names<'_>, held: HeldRestore) -> rutis::Result<Self> {
+        Ok(Self {
+            held,
+            identity: names.key()?,
+        })
+    }
+}
+impl DynPlugin for HeldRestorePart {
+    fn name(&self) -> &str {
+        "test.held-restore"
+    }
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.identity.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
+        Box::pin(async move {
+            let identity = ctx.require_at(&self.identity)?;
+            let state = &self.held.0;
+            let held = identity.restored
+                && state
+                    .held
+                    .lock()
+                    .unwrap()
+                    .take_if(|id| *id == identity.session_id)
+                    .is_some();
+            if held {
+                state.entered.notify_one();
+                state.release.notified().await;
+            }
+            Ok(Effect::Done)
+        })
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
