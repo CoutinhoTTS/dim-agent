@@ -157,10 +157,11 @@ impl Config {
                     .map(|(_, value)| value.clone())
             })
             .unwrap_or_default();
+        let base = base.to_str()?;
         platform
             .child_path(ChildPathRequest {
                 directories: Vec::new(),
-                base: base.to_string_lossy().into_owned(),
+                base: base.to_owned(),
             })
             .map(std::ffi::OsString::from)
     }

@@ -1028,21 +1028,35 @@ impl HostPlatform {
     }
     /// The process facts a consumer needs, in one call. Resolves the exec
     /// shell; in-process callers that need only captured facts read the fields.
-    pub async fn info(&self) -> HostInfo {
-        HostInfo {
+    pub async fn info(&self) -> Result<HostInfo, HostPlatformError> {
+        let home = self
+            .home
+            .to_str()
+            .ok_or_else(|| HostPlatformError::Invalid("the user home path is not UTF-8".into()))?;
+        let exec_root = self.exec_root();
+        let exec_root = exec_root
+            .to_str()
+            .ok_or_else(|| HostPlatformError::Invalid("the exec root path is not UTF-8".into()))?;
+        let mut platform_roots = Vec::with_capacity(self.platform_roots.len());
+        for root in &self.platform_roots {
+            platform_roots.push(
+                root.to_str()
+                    .ok_or_else(|| {
+                        HostPlatformError::Invalid("a platform root path is not UTF-8".into())
+                    })?
+                    .to_owned(),
+            );
+        }
+        Ok(HostInfo {
             os: self.os,
             arch: self.arch.clone(),
-            home: self.home.to_string_lossy().into_owned(),
+            home: home.to_owned(),
             timezone: self.timezone.clone(),
-            exec_root: self.exec_root().to_string_lossy().into_owned(),
-            platform_roots: self
-                .platform_roots
-                .iter()
-                .map(|root| root.to_string_lossy().into_owned())
-                .collect(),
+            exec_root: exec_root.to_owned(),
+            platform_roots,
             backend: self.sandbox_backend(),
             exec_shell: self.exec_shell().await,
-        }
+        })
     }
 
     fn arc(&self) -> Result<Arc<Self>, HostPlatformError> {
@@ -2128,17 +2142,17 @@ pub async fn resolve_shell(
             .map(|(index, source)| (&detected.shells[index], source)),
     };
     match selected {
-        Some((shell, source)) => ShellStatus::Available(ExecShellRuntime {
-            executable_path: shell.path.to_string_lossy().into_owned(),
-            edition: shell.edition,
+        Some((shell, source)) => available_shell(
+            shell.path.clone(),
+            shell.edition,
             source,
-            output_encoding: match shell.edition {
+            match shell.edition {
                 ShellEdition::GitBash | ShellEdition::WindowsPowershell | ShellEdition::Cmd => {
                     OutputEncoding::Unknown
                 }
                 _ => OutputEncoding::Utf8,
             },
-        }),
+        ),
         None => ShellStatus::Unavailable {
             code: EXEC_SHELL_UNAVAILABLE,
             reason: match explicit {
@@ -3164,6 +3178,26 @@ async fn wait_job_exit(pid: u32) -> io::Result<()> {
     }
 }
 
+fn available_shell(
+    path: PathBuf,
+    edition: ShellEdition,
+    source: ShellSource,
+    output_encoding: OutputEncoding,
+) -> ShellStatus {
+    match path.to_str() {
+        Some(path) => ShellStatus::Available(ExecShellRuntime {
+            executable_path: path.to_owned(),
+            edition,
+            source,
+            output_encoding,
+        }),
+        None => ShellStatus::Unavailable {
+            code: EXEC_SHELL_UNAVAILABLE,
+            reason: "The shell path is not UTF-8".into(),
+        },
+    }
+}
+
 impl HostPlatform {
     fn fallback_persistent_shell(&self) -> ShellStatus {
         if cfg!(windows) {
@@ -3174,15 +3208,15 @@ impl HostPlatform {
                     } else {
                         ShellEdition::WindowsPowershell
                     };
-                    return ShellStatus::Available(ExecShellRuntime {
-                        executable_path: path.to_string_lossy().into_owned(),
+                    return available_shell(
+                        path,
                         edition,
-                        source: ShellSource::Fallback,
-                        output_encoding: match edition {
+                        ShellSource::Fallback,
+                        match edition {
                             ShellEdition::Pwsh => OutputEncoding::Utf8,
                             _ => OutputEncoding::Unknown,
                         },
-                    });
+                    );
                 }
             }
             ShellStatus::Unavailable {
@@ -3191,12 +3225,12 @@ impl HostPlatform {
             }
         } else {
             if let Some(path) = find_executable("bash") {
-                return ShellStatus::Available(ExecShellRuntime {
-                    executable_path: path.to_string_lossy().into_owned(),
-                    edition: ShellEdition::Bash,
-                    source: ShellSource::Fallback,
-                    output_encoding: OutputEncoding::Utf8,
-                });
+                return available_shell(
+                    path,
+                    ShellEdition::Bash,
+                    ShellSource::Fallback,
+                    OutputEncoding::Utf8,
+                );
             }
             ShellStatus::Unavailable {
                 code: EXEC_SHELL_UNAVAILABLE,

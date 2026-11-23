@@ -1220,7 +1220,10 @@ async fn the_host_platform_service_answers_info() {
             .unwrap()
             .json()
             .unwrap();
-    assert_eq!(reply, serde_json::to_value(platform.info().await).unwrap());
+    assert_eq!(
+        reply,
+        serde_json::to_value(platform.info().await.unwrap()).unwrap()
+    );
 }
 
 #[tokio::test]

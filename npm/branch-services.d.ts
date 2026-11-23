@@ -425,6 +425,7 @@ export interface HostPlatform {
   /**
    * The process facts a consumer needs, in one call. Resolves the exec
    * shell; in-process callers that need only captured facts read the fields.
+   * @throws {HostPlatformErrorThrown}
    */
   info(): Promise<HostInfo>
   /**

@@ -388,10 +388,18 @@ impl HooksRuntime {
         if gate.is_some_and(|gate| gate.is_cancelled()) {
             return unloaded_run(handler).result;
         }
+        let env = match self.environment(handler) {
+            Ok(env) => env,
+            Err(reason) => {
+                let result = failed(reason, &[]);
+                self.report(handler, &result, started.elapsed());
+                return result;
+            }
+        };
         let request = SpawnWithStdinRequest {
             command: command.into(),
             cwd: self.config.cwd.clone(),
-            env: self.environment(handler),
+            env,
             stdin: Some(STANDARD.encode(stdin)),
             timeout_ms: handler.timeout.as_millis() as u64,
             limits: OutputLimits {
@@ -474,33 +482,37 @@ impl HooksRuntime {
     fn environment(
         &self,
         handler: &HookHandler,
-    ) -> std::collections::BTreeMap<String, Option<String>> {
+    ) -> Result<std::collections::BTreeMap<String, Option<String>>, String> {
         let mut env: std::collections::BTreeMap<_, _> = MANAGED_ENV
             .into_iter()
             .map(|key| (key.to_owned(), None))
             .collect();
+        let home = match self.sources.0.home() {
+            Some(home) => Some(
+                home.to_str()
+                    .ok_or_else(|| "DIMCODE_HOME is not UTF-8".to_owned())?
+                    .to_owned(),
+            ),
+            None => None,
+        };
+        let plugin_root = match handler.plugin_root.as_ref() {
+            Some(root) => Some(
+                root.to_str()
+                    .ok_or_else(|| "DIM_PLUGIN_ROOT is not UTF-8".to_owned())?
+                    .to_owned(),
+            ),
+            None => None,
+        };
         for (key, value) in [
             ("DIM_PROJECT_DIR", Some(self.config.cwd.clone())),
             ("DIM_HOOK_EVENT", Some(handler.event.name().to_owned())),
             ("DIM_SESSION_ID", Some(self.identity.session_id.clone())),
-            (
-                "DIMCODE_HOME",
-                self.sources
-                    .0
-                    .home()
-                    .map(|home| home.to_string_lossy().into_owned()),
-            ),
-            (
-                "DIM_PLUGIN_ROOT",
-                handler
-                    .plugin_root
-                    .as_ref()
-                    .map(|root| root.to_string_lossy().into_owned()),
-            ),
+            ("DIMCODE_HOME", home),
+            ("DIM_PLUGIN_ROOT", plugin_root),
         ] {
             env.insert(key.to_owned(), value);
         }
-        env
+        Ok(env)
     }
 }
 

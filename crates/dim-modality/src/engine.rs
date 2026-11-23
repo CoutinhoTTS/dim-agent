@@ -2287,29 +2287,66 @@ impl Shared {
             OsString::from("--output-mode"),
             OsString::from(params.output_mode.as_str()),
         ]);
-        let request = ConfinedRequest {
-            program: executable.to_string_lossy().into_owned(),
-            args: args
+        let strings = (|| -> Result<_, String> {
+            let program = executable
+                .to_str()
+                .ok_or_else(|| "The OCR helper path is not UTF-8".to_owned())?
+                .to_owned();
+            let args = args
                 .iter()
-                .map(|arg| arg.to_string_lossy().into_owned())
-                .collect(),
-            read: read
+                .map(|arg| {
+                    arg.to_str()
+                        .map(str::to_owned)
+                        .ok_or_else(|| "An OCR helper argument is not UTF-8".to_owned())
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let read = read
                 .into_iter()
-                .map(|path| path.to_string_lossy().into_owned())
-                .collect(),
-            write: write
+                .map(|path| {
+                    path.to_str()
+                        .map(str::to_owned)
+                        .ok_or_else(|| "An OCR read path is not UTF-8".to_owned())
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let write = write
                 .into_iter()
-                .map(|path| path.to_string_lossy().into_owned())
-                .collect(),
-            env: env
+                .map(|path| {
+                    path.to_str()
+                        .map(str::to_owned)
+                        .ok_or_else(|| "An OCR write path is not UTF-8".to_owned())
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let env = env
                 .into_iter()
                 .map(|(key, value)| {
-                    (
-                        key.to_string_lossy().into_owned(),
-                        value.to_string_lossy().into_owned(),
-                    )
+                    Ok((
+                        key.to_str()
+                            .ok_or_else(|| "An OCR environment key is not UTF-8".to_owned())?
+                            .to_owned(),
+                        value
+                            .to_str()
+                            .ok_or_else(|| "An OCR environment value is not UTF-8".to_owned())?
+                            .to_owned(),
+                    ))
                 })
-                .collect(),
+                .collect::<Result<Vec<_>, String>>()?;
+            Ok((program, args, read, write, env))
+        })();
+        let (program, args, read, write, env) = match strings {
+            Ok(strings) => strings,
+            Err(reason) => {
+                if !slot.cancel_requested() {
+                    self.fail_host(slot, "executor_error", reason).await;
+                }
+                return;
+            }
+        };
+        let request = ConfinedRequest {
+            program,
+            args,
+            read,
+            write,
+            env: env.into_iter().collect(),
             timeout_ms: OCR_TIMEOUT.as_millis() as u64,
             output_limit: OutputLimits {
                 stdout: OCR_STDOUT_LIMIT,
