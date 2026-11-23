@@ -14531,6 +14531,11 @@ mod tests {
         /// The target line `2` starts and ends its first turn and the move
         /// answers, and the input after the move never does.
         SwitchSubmitStalls,
+        /// The target line `2` starts and ends its first turn while the move
+        /// waits for the note it owes it: the move answers, the line writes
+        /// its note afterwards, and the run's turn budget ends it before the
+        /// note releases the follow-up.
+        SwitchNoteAfterTheLastTurn,
         /// The target line `2` starts and ends its first turn, the move to it
         /// never answers, and the Session's close never answers either: a run
         /// that stopped on its wall clock must still return, with cleanup
@@ -14849,6 +14854,7 @@ mod tests {
                         PeerScript::SwitchMoveRetries => None,
                         PeerScript::SwitchMoveStalls
                         | PeerScript::SwitchSubmitStalls
+                        | PeerScript::SwitchNoteAfterTheLastTurn
                         | PeerScript::SwitchMoveAndCloseStall => None,
                         PeerScript::ChainedToolLineBeforeActivation
                         | PeerScript::ChainedToolLineAfterActivation => None,
@@ -14923,6 +14929,7 @@ mod tests {
                         script,
                         PeerScript::ChainedToolLineBeforeActivation
                             | PeerScript::ChainedToolLineAfterActivation
+                            | PeerScript::SwitchNoteAfterTheLastTurn
                     )
                 {
                     let target = request["params"]["branchId"]
@@ -15021,6 +15028,7 @@ mod tests {
                         PeerScript::SwitchMoveRetries
                             | PeerScript::SwitchMoveStalls
                             | PeerScript::SwitchSubmitStalls
+                            | PeerScript::SwitchNoteAfterTheLastTurn
                             | PeerScript::SwitchMoveAndCloseStall
                     ) {
                         for (name, sequence) in [("start", 1), ("end", 2)] {
@@ -15232,6 +15240,59 @@ mod tests {
         assert!(
             failed(driven.stop, None, JudgeOutcome::Judged),
             "the outcome is a failed run on its own"
+        );
+    }
+
+    /// A run that stops on its turn budget while a move waits for its note is
+    /// not scored: the move happened, but the input that must answer under
+    /// the note was never sent, so the run is incomplete instead of ending on
+    /// `turns` with no error (Timeline branches §12.4).
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_run_that_reaches_the_turn_budget_before_the_note_is_not_scored() {
+        let directory = std::env::temp_dir().join(format!(
+            "dim-scenario-eval-note-turn-budget-{}",
+            std::process::id()
+        ));
+        let (socket, reads) =
+            scripted_peer(&directory, 8_000, PeerScript::SwitchNoteAfterTheLastTurn).await;
+        let mut client = driver_client(socket).await;
+        let mut scenario = scenario(Vec::new());
+        scenario.budget.turns = 1;
+        scenario.budget.seconds = 10.;
+        scenario.switch = Some(Switch {
+            to: SwitchTarget::Id("2".into()),
+            message: "next".into(),
+            branch_id: None,
+            former_message: None,
+        });
+        let driven = drive(
+            &mut client,
+            &RunSettings::default(),
+            &scenario,
+            &std::env::temp_dir(),
+            &peer_model(),
+            &ProducerState::default(),
+            None,
+        )
+        .await;
+        let moves: Vec<String> = reads.moves.lock().unwrap().clone();
+        let _ = std::fs::remove_dir_all(directory);
+        assert_eq!(moves, ["2"], "the move happened before the run stopped");
+        assert_eq!(driven.turns, 1, "the run stopped on its turn budget");
+        assert_eq!(driven.stop, "switch_incomplete", "{:?}", driven.error);
+        let error = driven.error.as_deref().unwrap_or_default();
+        assert!(
+            error.contains("line 2") && error.contains("follow-up") && error.contains("turns"),
+            "{error}"
+        );
+        assert!(
+            driven.switch_notes.expected.is_empty(),
+            "the run sent no scored follow-up"
+        );
+        assert!(
+            failed(driven.stop, driven.error.as_deref(), JudgeOutcome::Judged),
+            "the incomplete switch is a failed run and enters no probe rate"
         );
     }
 
