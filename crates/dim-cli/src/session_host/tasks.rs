@@ -204,6 +204,7 @@ impl Worker {
                 }
                 // Terminal for the directory as soon as the fact arrives; the
                 // transcript still waits for the window that recorded it.
+                let first_terminal = !self.projection.creation_failed(branch);
                 self.projection.apply(branch, event);
                 if self.focus == *branch {
                     let parent = self
@@ -221,6 +222,9 @@ impl Worker {
                         self.line_projection(&parent);
                     }
                     self.focus = parent;
+                    self.changed();
+                } else if first_terminal {
+                    // `/lines` draws the directory from published snapshots.
                     self.changed();
                 }
             }
