@@ -10,20 +10,25 @@ use dim_agent_capabilities::{
     timeline_tree::TreeCommands,
 };
 use dim_agent_runtime::{
-    Names, PromptSourceTarget, QueryPick, Session, SessionConfig, TimelineQueryScope,
+    Names, PromptSourceTarget, QueryOutput, QueryPage, QueryPick, QuerySelect, QuerySpec, Session,
+    SessionConfig, TimelineQuery, TimelineQueryScope,
 };
-use dim_agent_types::{EventKind, ModelSelection, PromptScope, SessionConfigExpectation};
+use dim_agent_types::{
+    AgentEvent, EventKind, ModelSelection, PromptScope, SessionConfigExpectation,
+};
 use rutis::Ctx;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use serde_json::{Value, json};
-use std::sync::Arc;
+use std::{num::NonZeroU64, sync::Arc};
 use tokio_util::sync::CancellationToken;
 
 /// Checks an attach's or a fork's `expectedConfig` against one line at that
 /// line's own published sequence: attach names the current default branch and
 /// its cursor, so a client that follows the default line reconnects against
 /// the configuration it shows; a fork names the root and its inherited cut,
-/// which is the configuration a fork copies.
+/// which is the configuration a fork copies. The configuration and the
+/// permission policy are read from the line's published facts, so a line that
+/// ends after an attach captured its cursor still answers with what it had.
 pub(crate) async fn check_configuration(
     session: &Session,
     initial: &SessionConfig,
@@ -37,9 +42,9 @@ pub(crate) async fn check_configuration(
             format!("Session configuration differs: {field}"),
         )
     };
+    let tree = session.session_service::<TreeCommands>()?;
     if expected.model_id.is_some() || expected.reasoning_effort.is_some() {
-        let (model, _) = session
-            .session_service::<TreeCommands>()?
+        let (model, _) = tree
             .adopted_configuration(line.branch_id.clone(), Some(line.sequence))
             .await?;
         let (id, config, metadata, snapshot) = match &model {
@@ -86,16 +91,10 @@ pub(crate) async fn check_configuration(
     if let Some(expected) = expected.permission_preset {
         // The line's policy is the last change on its ancestor chain: a line
         // that inherited its parent's change and wrote none of its own reads
-        // that change, not its creation configuration.
-        let event = super::fork::read_one(
-            session,
-            line.branch_id.as_str(),
-            TimelineQueryScope::Chain,
-            line.sequence,
-            super::fork::in_field("kind", &["permission/changed"]),
-            QueryPick::Last,
-        )
-        .await?;
+        // that change, not its creation configuration. The read stays at the
+        // cursor the attach captured, in the tree's published history, so the
+        // line may end while the check runs and still answer.
+        let event = published_permission_change(&tree, line).await?;
         let actual = match event.as_deref().map(|event| &event.kind) {
             Some(EventKind::PermissionChanged(changed)) => changed.policy.preset,
             _ => initial.permission_policy.preset,
@@ -105,6 +104,41 @@ pub(crate) async fn check_configuration(
         }
     }
     Ok(())
+}
+
+/// The last `permission/changed` on `line`'s ancestor chain at its pinned
+/// sequence, read from the tree's published history: a line that ended after
+/// the cursor was captured keeps the facts it published.
+async fn published_permission_change(
+    tree: &TreeCommands,
+    line: &BranchCursor,
+) -> Result<Option<Arc<AgentEvent>>, RpcError> {
+    let reply = tree
+        .query(
+            line.branch_id.clone(),
+            TimelineQuery {
+                scope: TimelineQueryScope::Chain,
+                from: None,
+                through: Some(line.sequence),
+                include_publishing: false,
+                query: QuerySpec {
+                    filter: Some(super::fork::in_field("kind", &["permission/changed"])),
+                    select: QuerySelect::Events,
+                    group_by: vec![],
+                    pick: Some(QueryPick::Last),
+                    order_by: vec![],
+                },
+                page: Some(QueryPage {
+                    limit: NonZeroU64::MIN,
+                    after: None,
+                }),
+            },
+        )
+        .await?;
+    let QueryOutput::Events { events } = reply.result else {
+        unreachable!("event selection returns events")
+    };
+    Ok(events.into_iter().next().map(|row| row.event))
 }
 
 /// Agents' Session entry adopts profile configuration on the addressed branch

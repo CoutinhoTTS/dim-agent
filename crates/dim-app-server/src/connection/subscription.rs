@@ -480,6 +480,14 @@ impl Connection {
         // attach, or a detach that completed first — events committed between
         // the pin and the new listener have none.
         if let Some(expected) = &params.expected_config {
+            // Feature `testing`: a test holds the check after this record is
+            // captured, moves the default away and ends the former default,
+            // then releases it.
+            #[cfg(feature = "testing")]
+            if let Some(hold) = self.hub.take_attach_check_hold() {
+                hold.entered.notify_one();
+                hold.release.notified().await;
+            }
             crate::agents::check_configuration(
                 &session,
                 session.config(),

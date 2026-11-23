@@ -559,6 +559,61 @@ async fn attach_checks_the_default_lines_permission_preset_through_its_chain() {
     server.join().await.unwrap();
 }
 
+/// An attach checks its permission preset at the cursor its record captured, in
+/// the tree's published history: the former default moves and ends after that
+/// record, and the pinned policy still answers.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn attach_checks_a_permission_preset_after_its_line_ends() {
+    let (server, agent) = launch_with_agent(Arc::new(MockTools), ServerConfig::default()).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let created = client.rpc("session.create", with_branch()).await;
+    assert_ok(&created);
+    let id = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    let session = agent.get_session(&id).unwrap();
+    session.idle("main").await.unwrap();
+
+    let line = open_line(&mut client, &id, "main", "worker work").await;
+    session.idle(&line).await.unwrap();
+    set_preset(&session, &line, "read-only").await;
+    assert_ok(&switch(&mut client, &id, &line).await);
+    let pinned = through(&mut client, &id, &line).await;
+
+    let hold = server
+        .hold_next_attach_check()
+        .expect("the ConnectionHub exists");
+    let attach = client
+        .send(
+            "session.attach",
+            json!({"sessionId":id,"expectedConfig":{"permissionPreset":"read-only"}}),
+        )
+        .await;
+    hold.entered.notified().await;
+    // The captured cursor's line stops being the default and ends while the
+    // attach checks the expectation.
+    assert_ok(&switch(&mut client, &id, "main").await);
+    assert_ok(
+        &client
+            .rpc(
+                "session.branch_end",
+                json!({"sessionId":id,"branchId":line.clone()}),
+            )
+            .await,
+    );
+    hold.release.notify_one();
+    let reply = client.response(attach).await;
+    assert_ok(&reply);
+    assert_eq!(
+        reply["result"]["defaultBranch"],
+        json!({"branchId":line,"sequence":pinned}),
+        "the reply keeps the line and cursor the check used: {reply}"
+    );
+
+    drop(client);
+    drop(agent);
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
 fn selection(model: &str, effort: Option<&str>) -> ModelSelection {
     ModelSelection {
         provider_id: "mock".into(),
