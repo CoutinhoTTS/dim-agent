@@ -644,6 +644,24 @@ impl AgentIndex {
         inner.versions.remove(session_id);
         inner.sessions.remove(session_id);
     }
+    /// The business close of Session `id`: its own close completes, and the
+    /// index records that it does not load again in this process. The Session
+    /// records stay, so a restart loads it again. A Session no loaded
+    /// instance holds is already closed.
+    pub(crate) async fn close_session(&self, id: &str) -> dim_agent_runtime::Result<()> {
+        let result = match self.session(id) {
+            Some((_, session)) => session.close().await,
+            None => match self
+                .host_by_session(id)
+                .and_then(|host| host.agent.get_session(id))
+            {
+                Some(session) => session.closed().await,
+                None => Ok(()),
+            },
+        };
+        self.remove_version(id);
+        result
+    }
     /// Sessions can also close through the runtime fault supervisor.
     /// Versions of a closing Agent stay until its settlement forgets them.
     pub fn retain_versions(&self) {
