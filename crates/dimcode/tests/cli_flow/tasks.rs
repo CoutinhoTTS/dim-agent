@@ -1541,7 +1541,7 @@ wire.reply(&second, json!({"events":[fact("member-input",1,1000,"input","message
             .contains("member original + live + live")
     );
     terminal.write(b"\x1b[27u and continue\r");
-    terminal.until("leader resumed after view");
+    terminal.until_visible("leader resumed after view");
     assert!(terminal.transcript.contains("leader notice while reading"));
     home.kill(&terminal);
     terminal.wait();

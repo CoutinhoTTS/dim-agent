@@ -109,7 +109,7 @@ fn first_shell_command_creates_once_without_submitting_a_model_turn() {
             });
             terminal.until("second-shell-output");
             terminal.write(b"next message\r");
-            terminal.until("message accepted");
+            terminal.until_visible("message accepted");
             terminal.write(b"/exit\r");
             terminal.until("Bye!");
             assert!(terminal.wait().success());
@@ -657,9 +657,9 @@ fn first_text_or_draft_creates_once_with_startup_options_in_both_tui_modes() {
             } else {
                 terminal.write(b"first text\r");
             }
-            terminal.until("first input accepted");
+            terminal.until_visible("first input accepted");
             terminal.write(b"second text\r");
-            terminal.until("second input accepted");
+            terminal.until_visible("second input accepted");
             terminal.write(b"/exit\r");
             terminal.until("Bye!");
             assert!(terminal.wait().success());
