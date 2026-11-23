@@ -1684,8 +1684,14 @@ impl FullScreen {
                     out.extend_from_slice(b"\x1b[0m");
                 }
                 (PaintedRow::Panel { margins, x, text }, old) => {
-                    if matches!(old, Some(PaintedRow::Panel { margins: prev, x: left, text: old_text })
-                    if x == left && margins == prev && strip_escapes(text) == strip_escapes(old_text))
+                    if let Some(PaintedRow::Panel {
+                        margins: prev,
+                        x: left,
+                        text: old_text,
+                    }) = old
+                        && x == left
+                        && margins == prev
+                        && strip_escapes(text) == strip_escapes(old_text)
                     {
                         push_move(&mut out, *x, i as u16);
                         out.extend_from_slice(b"\x1b[?7l");
@@ -2508,6 +2514,7 @@ fn padded_append<'a>(old: &str, new: &'a str, bar: &str) -> Option<(u16, &'a str
 fn plain_row_patch<'a>(old: &str, new: &'a str) -> Option<(u16, &'a str, usize)> {
     let mut old_chars = old.chars();
     let mut new_chars = new.char_indices();
+    let mut first_border = None;
     let mut start = None;
     let mut end = 0;
     let mut blanks = 0;
@@ -2519,14 +2526,13 @@ fn plain_row_patch<'a>(old: &str, new: &'a str) -> Option<(u16, &'a str, usize)>
         }
         let before = before.unwrap_or(' ');
         let (offset, after) = after.unwrap_or((new.len(), ' '));
-        if ![before, after]
-            .iter()
-            .all(|c| matches!(c, ' '..='~' | '\u{2500}'..='\u{257f}'))
-        {
+        if before == after && matches!(after, '\u{2500}'..='\u{257f}') {
+            first_border.get_or_insert((col, offset));
+        } else if !matches!(before, ' '..='~') || !matches!(after, ' '..='~') {
             return None;
         }
         if before != after {
-            start.get_or_insert((col, offset));
+            start.get_or_insert(first_border.unwrap_or((col, offset)));
             end = (offset + after.len_utf8()).min(new.len());
         }
         if offset == new.len() && start.is_some() {
@@ -2781,16 +2787,16 @@ mod tests {
     fn editing_a_plain_row_preserves_its_borders_and_clears_deleted_text() {
         let (mut screen, mut emu) = setup();
         let doc = Doc::new();
-        for (old, new) in [
-            ("│ draft     │", "│ draftx    │"),
-            ("│ draftx    │", "│ draft     │"),
-            ("draft stale", "draft"),
+        for (old, new, patch) in [
+            ("│ draft     │", "│ draftx    │", "\x1b[8;1H│ draftx"),
+            ("│ draftx    │", "│ draft     │", "\x1b[8;1H│ draft "),
+            ("draft stale", "draft", "\x1b[8;7H     "),
         ] {
             draw(&mut screen, &mut emu, &frame(&[], &[old]), &doc);
             let bytes = draw(&mut screen, &mut emu, &frame(&[], &[new]), &doc);
             assert_eq!(emu.row(SIZE.1 as usize - 1), new);
             assert!(!bytes.windows(ERASE_LINE.len()).any(|s| s == ERASE_LINE));
-            assert!(!String::from_utf8_lossy(&bytes).contains("draft"));
+            assert!(String::from_utf8_lossy(&bytes).contains(patch));
         }
     }
 
