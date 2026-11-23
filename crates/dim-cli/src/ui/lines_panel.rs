@@ -45,7 +45,7 @@ fn tree_order(lines: &[LineView]) -> Vec<(usize, usize)> {
                 !seen[*index] && lines[*index].parent.as_deref() == Some(lines[parent].id.as_str())
             })
             .collect();
-        children.sort_by_key(|index| lines[*index].cut.map(|cut| cut.sequence));
+        children.sort_by_key(|index| lines[*index].branch_point);
         for index in children {
             if seen[index] {
                 continue;
@@ -278,6 +278,8 @@ mod tests {
                     parent: None,
                     purpose: String::new(),
                     state: LineState::Main,
+                    running: Some(false),
+                    branch_point: None,
                     cut: None,
                 },
                 LineView {
@@ -285,6 +287,8 @@ mod tests {
                     parent: Some("main".into()),
                     purpose: "parser race".into(),
                     state: LineState::Working,
+                    running: Some(true),
+                    branch_point: Some(1),
                     cut: Some(crate::model::view::LineCut {
                         sequence: 1,
                         messages: 0,
@@ -295,6 +299,8 @@ mod tests {
                     parent: Some("main".into()),
                     purpose: "docs pass".into(),
                     state: LineState::EndedItself,
+                    running: None,
+                    branch_point: Some(1),
                     cut: Some(crate::model::view::LineCut {
                         sequence: 1,
                         messages: 0,
@@ -305,6 +311,8 @@ mod tests {
                     parent: Some("b-7c".into()),
                     purpose: "review".into(),
                     state: LineState::Waiting,
+                    running: Some(false),
+                    branch_point: Some(1),
                     cut: Some(crate::model::view::LineCut {
                         sequence: 1,
                         messages: 0,
@@ -421,10 +429,12 @@ mod tests {
     #[test]
     fn lines_are_listed_where_they_were_cut_from_their_parent() {
         let mut snapshot = snapshot("main");
+        snapshot.lines[2].branch_point = Some(0);
         snapshot.lines[2].cut = Some(crate::model::view::LineCut {
             sequence: 0,
             messages: 0,
         });
+        snapshot.lines[1].branch_point = Some(9);
         snapshot.lines[1].cut = Some(crate::model::view::LineCut {
             sequence: 9,
             messages: 3,
@@ -442,6 +452,83 @@ mod tests {
         assert!(
             rows[position("b-7c")].contains("after message 3"),
             "{rows:#?}"
+        );
+    }
+
+    #[test]
+    fn a_line_whose_count_is_unknown_is_listed_where_it_was_cut() {
+        let mut projection = crate::projection::Projection::default();
+        projection.missing_history("main");
+        let created = |sequence: u64, branch: &str, at: u64| {
+            serde_json::json!({
+                "id": format!("create-{branch}"), "sequence": sequence, "create_at": 2000,
+                "type": "branch", "name": "create",
+                "data": {
+                    "branch": branch, "at": {"kind": "sequence", "sequence": at},
+                    "source": {"kind": "tool", "turn_id": "t1", "request_id": "r1", "call_id": "c1"},
+                    "prompt": branch,
+                },
+            })
+        };
+        for (sequence, branch, at) in [(9, "b-02", 9), (10, "b-7c", 3)] {
+            let event = serde_json::from_value(created(sequence, branch, at)).expect("a creation");
+            projection.line_event("main", &event);
+        }
+        let mut snapshot = snapshot("main");
+        snapshot.lines.truncate(1);
+        snapshot
+            .lines
+            .extend(projection.line_views().iter().cloned());
+        assert!(
+            snapshot.lines.iter().all(|line| line.cut.is_none()),
+            "the parent history is incomplete, so no count is known"
+        );
+        let rows = LinesPanel::new(&snapshot)
+            .render(100, 20, &palette(), &markdown())
+            .into_iter()
+            .map(|row| crate::ui::render::panel::strip_escapes(&row))
+            .collect::<Vec<_>>();
+        let position = |id: &str| rows.iter().position(|row| row.contains(id)).unwrap();
+        assert!(
+            position("b-7c") < position("b-02"),
+            "the earlier cut comes first although neither count is known: {rows:#?}"
+        );
+    }
+
+    #[test]
+    fn a_directory_row_sorts_by_the_branch_point_it_names() {
+        let mut projection = crate::projection::Projection::default();
+        projection.missing_history("main");
+        let row = |branch: &str, at: u64| dim_client::wire::BranchEntry {
+            purpose: Some(branch.into()),
+            cut_messages: None,
+            end: None,
+            branch_id: branch.into(),
+            parent_branch_id: Some("main".into()),
+            branch_point: Some(at),
+            state: "open".into(),
+            head: 1,
+        };
+        projection.directory(&row("b-02", 9));
+        projection.directory(&row("b-7c", 3));
+        let mut snapshot = snapshot("main");
+        snapshot.lines.truncate(1);
+        snapshot
+            .lines
+            .extend(projection.line_views().iter().cloned());
+        assert!(
+            snapshot.lines.iter().all(|line| line.cut.is_none()),
+            "the directory carries no count and the history is incomplete"
+        );
+        let rows = LinesPanel::new(&snapshot)
+            .render(100, 20, &palette(), &markdown())
+            .into_iter()
+            .map(|row| crate::ui::render::panel::strip_escapes(&row))
+            .collect::<Vec<_>>();
+        let position = |id: &str| rows.iter().position(|row| row.contains(id)).unwrap();
+        assert!(
+            position("b-7c") < position("b-02"),
+            "the branch point the directory names orders the lines: {rows:#?}"
         );
     }
 

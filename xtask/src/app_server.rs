@@ -7,6 +7,7 @@ use dim_agent_capabilities::{
     history::HistoryRenderer,
     host::{IdentityContext, PrepareContextHost},
     model_provider::ModelProviderPlugin,
+    prompt_sources::PromptSourcesConfig,
     summary_strategy::ProductSummaryStrategyConfig,
     workspace_tools::WorkspaceToolsConfig,
 };
@@ -31,6 +32,9 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 /// sets a member here.
 #[derive(Clone, Debug, Default)]
 pub struct Overrides {
+    /// The base prompt in place of the built-in identity and rules
+    /// (model-prompts §8.1, PromptSources §2).
+    pub base_prompt: Option<Arc<str>>,
     /// The summary strategy's system prompt in place of its built-in
     /// `SYSTEM` (ContextCompaction §13.5).
     pub summary_prompt: Option<Arc<str>>,
@@ -85,6 +89,22 @@ pub struct RunSettings {
     /// run turns it off, so the tools the process registers are the ceiling
     /// its Sessions can declare.
     pub plugin_tools: bool,
+    /// A test hook: a timed-out run's Session close and its server's shutdown
+    /// never settle, to check that its child still returns the outcome and
+    /// frees the worker that runs it. The product and the evaluations set it
+    /// off.
+    pub stall_cleanup: bool,
+    /// A test hook: a timed-out run's whole cleanup budget in milliseconds, in
+    /// place of the run's cleanup budget. The product and the evaluations set
+    /// it off.
+    pub cleanup_budget_ms: Option<u64>,
+    /// A test hook: this scenario's Timeline export never completes, to check
+    /// that a timed-out run keeps its outcome without an export. The product
+    /// and the evaluations set it off.
+    pub stall_export: Option<String>,
+    /// A test hook: the judge phase's budget in milliseconds, in place of the
+    /// runner's own phase budget. The product and the evaluations set it off.
+    pub judge_budget_ms: Option<u64>,
 }
 
 impl Default for RunSettings {
@@ -98,6 +118,10 @@ impl Default for RunSettings {
             js_runtime: None,
             boundary: None,
             plugin_tools: true,
+            stall_cleanup: false,
+            cleanup_budget_ms: None,
+            stall_export: None,
+            judge_budget_ms: None,
         }
     }
 }
@@ -220,7 +244,7 @@ pub async fn serve_home(
     };
     let mut builder = AgentBuilder::new(AgentConfig::default());
     dim_session_title::install(&mut builder);
-    defaults::install_local_execution(
+    defaults::install_local_execution_with(
         &mut builder,
         ModelProviderPlugin::process,
         WorkspaceToolsConfig {
@@ -231,6 +255,10 @@ pub async fn serve_home(
             description: run.overrides.branch_description.clone(),
             roster_closing: run.overrides.roster_closing.clone(),
             max_open_lines: None,
+        },
+        PromptSourcesConfig {
+            base: run.overrides.base_prompt.clone(),
+            ..Default::default()
         },
     );
     dim_app_server::permission_rules::install(&mut builder);

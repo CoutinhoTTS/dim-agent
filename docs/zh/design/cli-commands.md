@@ -381,7 +381,7 @@ Goal cleared on main.
 否则整行都是 prompt，因此 `/loop check the deploy` 与 `/loop 5m check the deploy` 是同一命令的两种形式。
 
 行模式打印用法与 loop；两种终端 UI 模式选中时只填入 `/loop `，提交才分发，与 `/goal` 相同。回复给出 loop、
-状态、轮次，以及已安排时的下次到期时刻：
+状态、轮次、prompt，以及已安排时的下次到期时刻：
 
 ```text
 palette: loop + Enter -> /loop |          (completion only)
@@ -1146,7 +1146,8 @@ CLI 保留它，先等那个进程，不启动自己的守护进程。子进程�
 格式升级运行期间，守护进程把同一份说明写成进度类型：首行
 `dimcode-startup-progress v1 pid=<pid>`，正文
 `store-upgrade from=<from> to=<to> progress=<n>`，最多每秒一次，并在每个升级步骤结束时
-再写一次。库打开之后、监听端点 open 之前，守护进程把同一份说明写成装配类型
+再写一次，包括升级自身的步骤之后的步骤：派生索引、引用校验、提交，以及提交后设置的
+每个 pragma。库打开之后、监听端点 open 之前，守护进程把同一份说明写成装配类型
 `assembly progress=<n>`：装配每记录一次进展（某个 row 首次 Active，或一次
 `OpeningAdvanced` 报告），`<n>` 就增加；库删掉自己的说明后第一次进展立即写，之后最多
 每 500 毫秒写一次，区间内的最后一次进展在区间结束时写出，因此说明最多比守护进程自己
@@ -1714,6 +1715,18 @@ Session 保留 Approval 现有的所有者侧策略（#98 D10）。`--permission
 `invalid_params`、`session_invalid_input`、`session_closed`、`session_build_failed`、
 `service_reloading`、`unknown_method` 或 `input_blocked`。这些保留普通的错误诊断。其他错误，包括
 `submission_unknown` 和不透明的发布/存储失败，都可能发生在提交之后，不得触发再次发送。
+
+默认文本模式下，`exec` 的 stdout 只写这一回合的最终回复。这一回合是消费本次调用提交的输入的那个
+回合；分支上任何其他回合（无论先于还是晚于它完成）的文字都写到 stderr。模型在工具调用之前和工具
+调用之间写的文字写到 stderr，与 `[tool]`、`[done]`、`[failed]` 行同在。一段文字是否属于最终回复，
+要等这一回合结束才知道，因此每个请求的文字先按请求 id 分别保留到回合终态：以工具调用结束、失败
+（包括撞到输出上限）或被取消的请求把文字写到 stderr；正常结束的请求成为候选回复，成功完成的回合把
+最后一个请求的文字写到 stdout，而同一回合里更早的请求、失败或被取消的回合把它写到 stderr。请求按
+自己的 id 路由，早先的请求晚结束时不会截断已经开始写出的回复。`exec resume` 先收尾上一次调用留下
+的运行中回合，再提交提示词；那个回合的文字写到 stderr。回复流在以下时刻永久关闭：提交的回合结束、
+运行被中断、行模式在问句或审批处停止（退出 3）、提交失败或 Session 关闭（退出 1）、提交的输入被
+删除（退出 1）；此后到达的文字都是诊断。诊断行本身不决定保留文字的走向。最终回复为空的回合不在
+stdout 写任何内容。`exec --json` 和非 exec 的一次性 `dimcode --prompt` 运行保持现有的路由。
 
 JSON 模式下，stdout 每行一条紧凑的 JSON-RPC 通知，使用守护进程现有的 `method` 和 `params`。只输出
 所选 Session 的通知。协议握手、RPC 回复和其他 Session 不进入这个流。Session 句柄和给人看的诊断

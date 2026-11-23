@@ -162,7 +162,7 @@ fn reject(cause: &str) -> Result<()> {
     )))
 }
 
-fn in_field(path: &str, values: &[&str]) -> QueryFilter {
+pub(super) fn in_field(path: &str, values: &[&str]) -> QueryFilter {
     QueryFilter::In {
         value: QueryOperand::Field { path: path.into() },
         values: values.iter().map(|value| (*value).into()).collect(),
@@ -184,7 +184,7 @@ fn input_relation(kinds: &[&str]) -> QueryFilter {
     }
 }
 
-async fn read_one(
+pub(super) async fn read_one(
     session: &Session,
     at: u64,
     filter: QueryFilter,

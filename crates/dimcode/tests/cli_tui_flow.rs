@@ -1574,7 +1574,7 @@ fn a_new_session_shows_the_effort_its_creation_adopted() {
         terminal.until("Welcome to DIM");
         terminal.write(b"first message\r");
         terminal.until("test / model · high");
-        terminal.until("effortful input accepted");
+        terminal.until_visible("effortful input accepted");
         home.kill(&terminal);
         terminal.wait();
         daemon.join().unwrap();
@@ -5128,7 +5128,7 @@ fn tui_rapid_queue_controls_settle_each_held_input_once() {
             } else {
                 terminal.write(b"steer once\r");
             }
-            terminal.until("queue controls settled");
+            terminal.until_visible("queue controls settled");
             if !fullscreen {
                 assert_eq!(
                     strip_ansi(&terminal.transcript)
@@ -5517,7 +5517,7 @@ fn tui_escape_withdraws_the_queue_before_the_run_stops() {
             terminal.until("\x1b[?2026l");
             terminal.write(draft.as_bytes());
             terminal.write(b"\x1b");
-            terminal.until("interrupt settled");
+            terminal.until_visible("interrupt settled");
             terminal.write(b"\r");
             checked_done.recv_timeout(PATIENCE).unwrap();
             home.kill(&terminal);
@@ -7750,7 +7750,7 @@ fn member_tool_approval_requires_trusted_details_in_both_terminal_modes() {
         assert!(!terminal.transcript.contains("Full access"));
         assert!(!terminal.transcript.contains("Allow always"));
         terminal.write(b"y");
-        terminal.until("member approvals finished");
+        terminal.until_visible("member approvals finished");
         home.kill(&terminal);
         terminal.wait();
         daemon.join().unwrap();
@@ -7792,7 +7792,7 @@ fn member_approval_without_the_detail_method_offers_only_rejection() {
         terminal.write(b"ry");
         wait_checked.recv_timeout(PATIENCE).unwrap();
         terminal.write(b"n");
-        terminal.until("unsupported approval rejected");
+        terminal.until_visible("unsupported approval rejected");
         home.kill(&terminal);
         terminal.wait();
         daemon.join().unwrap();

@@ -47,6 +47,8 @@ impl From<DisplayNotice> for EventNotice {
 #[derive(Clone, Deserialize)]
 pub struct Configuration {
     pub provider_id: String,
+    #[serde(default)]
+    pub catalog_provider_id: Option<String>,
     pub model_id: String,
     /// The adopted model's capability declaration, including temporary routes.
     #[serde(default)]
@@ -331,6 +333,14 @@ pub struct DisplayPage {
     done: bool,
 }
 
+impl DisplayPage {
+    /// Whether the page reached the branch's start. A transcript leaves the
+    /// branch's own first events out, so `next_before` alone cannot say.
+    pub fn done(&self) -> bool {
+        self.done
+    }
+}
+
 impl From<DisplayPage> for HistoryWindow {
     fn from(page: DisplayPage) -> Self {
         Self {
@@ -396,6 +406,8 @@ pub struct Attached {
     pub sequence: u64,
     #[serde(default)]
     pub model: Option<dim_agent_types::ModelId>,
+    #[serde(default)]
+    pub catalog_provider_id: Option<String>,
     #[serde(default)]
     pub capability_snapshot: Option<Box<dim_agent_types::ModelCapabilitySnapshot>>,
     /// The adopted configuration's preferences; absent when it carries none.

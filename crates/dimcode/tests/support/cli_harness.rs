@@ -99,6 +99,7 @@ impl Home {
     pub fn command(&self) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_dimcode"));
         command.args(["--home", self.0.to_str().unwrap()]);
+        command.env_remove("TMUX");
         command.env("DIMCODE_UPDATE_CHECK", "0");
         command
     }
@@ -854,6 +855,30 @@ impl Terminal {
             tail.find(expected).map(|index| index + expected.len())
         });
     }
+    /// Waits for text on the terminal screen at a completed synchronized frame.
+    pub fn until_visible(&mut self, expected: &str) {
+        let mut size = unsafe { std::mem::zeroed::<libc::winsize>() };
+        let fd = self.master.as_ref().unwrap().as_raw_fd();
+        assert_eq!(unsafe { libc::ioctl(fd, libc::TIOCGWINSZ, &mut size) }, 0);
+        let rows = if size.ws_row == 0 { 24 } else { size.ws_row };
+        let cols = if size.ws_col == 0 { 80 } else { size.ws_col };
+        let mut parser = vt100::Parser::new(rows, cols, 0);
+        parser.process(&self.transcript.as_bytes()[..self.consumed]);
+        let mut parsed = 0;
+        self.wait_for(expected, |tail| {
+            for frame in tail[parsed..].split_inclusive("\x1b[?2026l") {
+                if !frame.ends_with("\x1b[?2026l") {
+                    break;
+                }
+                parser.process(frame.as_bytes());
+                parsed += frame.len();
+                if parser.screen().contents().contains(expected) {
+                    return Some(parsed);
+                }
+            }
+            None
+        });
+    }
     /// Waits until the text the user reads has shown `expected`. A row an
     /// attribute splits into runs, as a highlighted token is, does not hold
     /// its own text contiguously, so a wait on what the row says reads the
@@ -883,7 +908,7 @@ impl Terminal {
     }
     /// Reads until `found` names how far into the unconsumed transcript the
     /// wait is satisfied.
-    pub fn wait_for(&mut self, expected: &str, found: impl Fn(&str) -> Option<usize>) {
+    pub fn wait_for(&mut self, expected: &str, mut found: impl FnMut(&str) -> Option<usize>) {
         let deadline = Instant::now() + HANG_GUARD;
         loop {
             if let Some(end) = found(&self.transcript[self.consumed..]) {
@@ -906,6 +931,11 @@ impl Terminal {
             let mut bytes = [0u8; 4096];
             let size = match self.master.as_mut().unwrap().read(&mut bytes) {
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => continue,
+                Err(error)
+                    if cfg!(target_os = "linux") && error.raw_os_error() == Some(libc::EIO) =>
+                {
+                    0
+                }
                 result => result.unwrap(),
             };
             assert!(
