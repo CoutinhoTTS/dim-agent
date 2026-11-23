@@ -416,9 +416,11 @@ pub enum CredentialAuthority {
     Grok,
 }
 
+const LEGACY_CODEX_ID: &str = "openai-codex";
+
 fn managed_authority(provider_id: &str) -> CredentialAuthority {
     match provider_id {
-        "openai-codex" => CredentialAuthority::OpenaiCodex,
+        LEGACY_CODEX_ID => CredentialAuthority::OpenaiCodex,
         "grok-build" => CredentialAuthority::Grok,
         _ => CredentialAuthority::Static,
     }
@@ -1465,6 +1467,7 @@ fn reseed_candidate(
 
 pub struct ProviderService {
     db: Arc<SqliteStorage>,
+    sessions: Option<Arc<crate::storage::Store>>,
     oauth: Arc<ManagedProviders>,
     codex: Arc<OpenAICodexOAuthService>,
     grok: Arc<GrokOAuthService>,
@@ -1770,6 +1773,34 @@ impl ProviderService {
         .await
     }
 
+    async fn legacy_codex_visible(self: &Arc<Self>, cancel: &CancellationToken) -> bool {
+        if !matches!(self.oauth.legacy_codex_hidden(cancel).await, Ok(false)) {
+            return false;
+        }
+        if self
+            .codex
+            .status(cancel)
+            .await
+            .is_ok_and(|status| status.expires_at.is_some() || status.recovery_required)
+        {
+            return true;
+        }
+        let db = self.db.clone();
+        let visible: Result<bool, HostError> = self.owned(cancel, move |_| {
+            Box::pin(async move {
+                db.run_read(|connection| {
+                    connection.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM provider_model_state WHERE provider_id=?1)
+                            OR EXISTS(SELECT 1 FROM provider_models WHERE provider_id=?1 AND source IN ('user','override'))
+                            OR EXISTS(SELECT 1 FROM provider_selections WHERE provider_id=?1)",
+                        [LEGACY_CODEX_ID], |row| row.get(0),
+                    ).map_err(storage)
+                }).await.map_err(failure)
+            })
+        }).await;
+        visible.is_ok_and(|configured| configured)
+    }
+
     async fn account_available(
         self: &Arc<Self>,
         provider_id: &str,
@@ -1955,6 +1986,7 @@ impl ProviderService {
     ) -> Result<ProviderList, HostError> {
         let db = self.db.clone();
         let bundled = self.bundled.clone();
+        let show_legacy = self.legacy_codex_visible(cancel).await;
         let mut list = self
             .owned(cancel, move |_| {
                 Box::pin(async move {
@@ -1965,6 +1997,9 @@ impl ProviderService {
                             errors: Vec::new(),
                         };
                         for id in persistence::ids(&tx, &bundled)? {
+                            if id == LEGACY_CODEX_ID && !show_legacy {
+                                continue;
+                            }
                             match persistence::read(&tx, &id, persistence::Models::Header) {
                                 Ok(Some(PersistedProviderRecord::Static(record))) => {
                                     result.providers.push(static_summary(&bundled, id, *record))
@@ -2415,6 +2450,7 @@ impl ProviderService {
         model_id: Option<String>,
         cancel: &CancellationToken,
     ) -> Result<Vec<String>, HostError> {
+        let show_legacy = self.legacy_codex_visible(cancel).await;
         let db = self.db.clone();
         let bundled = self.bundled.clone();
         self.owned(cancel, move |_| {
@@ -2428,6 +2464,9 @@ impl ProviderService {
                         persistence::ids(&tx, &bundled)?
                     };
                     for id in ids {
+                        if id == LEGACY_CODEX_ID && !show_legacy {
+                            continue;
+                        }
                         match persistence::read(&tx, &id, persistence::Models::Header) {
                             Ok(Some(PersistedProviderRecord::Managed(_))) => selected.push((0, id)),
                             Ok(Some(PersistedProviderRecord::Static(r)))
@@ -3034,6 +3073,18 @@ impl ProviderService {
                 realtime,
             });
         }
+        if provider_id == crate::managed_provider::chatgpt::ID {
+            let (Some(sessions), Some(session_id)) = (&self.sessions, use_.session_id()) else {
+                return Err(chatgpt_requires_client_session());
+            };
+            let (origin, _) = sessions
+                .creation_record(session_id)
+                .await
+                .map_err(failure)?;
+            if origin != crate::protocol::SessionOrigin::Client {
+                return Err(chatgpt_requires_client_session());
+            }
+        }
         let mut catalog = self
             .catalog_target(provider_id.to_owned(), model_id.to_owned(), cancel)
             .await?
@@ -3054,7 +3105,11 @@ impl ProviderService {
             return Err(failure("Managed account or model route changed"));
         }
         let protocol = lease.protocol;
-        let recovered = plugin_connection(self.clone(), lease);
+        let recovered = plugin_connection(
+            self.clone(),
+            lease,
+            provider_id == crate::managed_provider::chatgpt::ID,
+        );
         Ok(Resolution {
             connection: ResolvedModelConnection {
                 connection: recovered.connection,
@@ -3065,6 +3120,13 @@ impl ProviderService {
             realtime,
         })
     }
+}
+
+fn chatgpt_requires_client_session() -> HostError {
+    HostError::classified(
+        HostErrorKind::InvalidRequest,
+        "ChatGPT plan usage requires an interactive Dim session",
+    )
 }
 
 struct ProductResolver(Arc<ProviderService>);
@@ -3275,10 +3337,12 @@ impl RecoverModelConnection for ManagedRecovery {
 struct PluginRecovery {
     owner: Arc<ProviderService>,
     lease: CredentialLease,
+    chatgpt: bool,
 }
 fn plugin_connection(
     owner: Arc<ProviderService>,
     lease: CredentialLease,
+    chatgpt: bool,
 ) -> RecoveredModelConnection {
     RecoveredModelConnection {
         connection: ModelConnection::Http(HttpModelConnection {
@@ -3288,14 +3352,22 @@ fn plugin_connection(
             network: ModelNetwork::default(),
             bearer: Some(lease.bearer.clone()),
             api_key: None,
-            preset: None,
+            preset: chatgpt.then(|| crate::managed_provider::chatgpt::ID.into()),
         }),
-        recovery: Arc::new(PluginRecovery { owner, lease }),
+        recovery: Arc::new(PluginRecovery {
+            owner,
+            lease,
+            chatgpt,
+        }),
     }
 }
 impl RecoverModelConnection for PluginRecovery {
     fn rejection(&self, error: &HostError, phase: CredentialRecoveryPhase) -> CredentialRejection {
-        oauth_rejection(error, phase)
+        if self.chatgpt && matches!(phase, CredentialRecoveryPhase::Recovered) {
+            CredentialRejection::Unrelated
+        } else {
+            oauth_rejection(error, phase)
+        }
     }
     fn recover(&self, cancel: CancellationToken) -> HostFuture<'_, RecoveredModelConnection> {
         Box::pin(async move {
@@ -3307,7 +3379,7 @@ impl RecoverModelConnection for PluginRecovery {
                 .await
                 .map_err(failure)?;
             self.owner.check(&cancel)?;
-            Ok(plugin_connection(self.owner.clone(), lease))
+            Ok(plugin_connection(self.owner.clone(), lease, self.chatgpt))
         })
     }
     fn finish_rejected(&self, cancel: CancellationToken) -> HostFuture<'_, ()> {
@@ -3343,6 +3415,7 @@ fn oauth_rejection(error: &HostError, phase: CredentialRecoveryPhase) -> Credent
 
 pub struct ProviderPlugin {
     db: Key<SqliteStorage>,
+    sessions: Option<Key<crate::storage::Store>>,
     index: Option<Key<crate::agents::AgentIndex>>,
     oauth: Key<ManagedProviders>,
     codex: Key<OpenAICodexOAuthService>,
@@ -3367,6 +3440,7 @@ impl ProviderPlugin {
     fn keyed(names: &Names<'_>, secret_host: bool, lifecycle: bool) -> rutis::Result<Self> {
         Ok(Self {
             db: names.key()?,
+            sessions: lifecycle.then(|| names.key()).transpose()?,
             index: lifecycle.then(|| names.key()).transpose()?,
             oauth: crate::managed_provider::owner_key(),
             codex: names.key()?,
@@ -3390,6 +3464,7 @@ impl DynPlugin for ProviderPlugin {
             self.host.erase(),
             self.methods.erase(),
         ];
+        keys.extend(self.sessions.as_ref().map(Key::erase));
         keys.extend(self.index.as_ref().map(Key::erase));
         keys.extend(self.secret_host.as_ref().map(Key::erase));
         keys
@@ -3397,6 +3472,11 @@ impl DynPlugin for ProviderPlugin {
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
             let db = ctx.require_at(&self.db)?;
+            let sessions = self
+                .sessions
+                .as_ref()
+                .map(|key| ctx.require_at(key))
+                .transpose()?;
             let index = self
                 .index
                 .as_ref()
@@ -3414,6 +3494,7 @@ impl DynPlugin for ProviderPlugin {
             let service =
                 Arc::new(ProviderService {
                     db,
+                    sessions,
                     oauth,
                     codex,
                     grok,

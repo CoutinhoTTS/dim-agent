@@ -67,7 +67,7 @@ use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 pub use targets::{ModalityTargets, TargetError, TargetReply, TargetRequest};
 pub use task::{TaskRecord, TaskState};
@@ -454,6 +454,7 @@ pub(crate) struct Evaluation {
     global: Option<ModelId>,
     /// The process context adapter copies are read from per call (A.2).
     ctx: Ctx,
+    has_resolved_adapter: OnceLock<bool>,
     /// Whether this daemon holds a HostPlatform, which a host task runs on
     /// (A14).
     host_platform: bool,
@@ -638,11 +639,17 @@ impl Evaluation {
                 .is_some_and(|adapter| adapter.0.available())
         })
     }
-    /// Whether an adapter serves any candidate provider at all, whatever it
-    /// claims: an adapter that serves no candidate model is not "no adapter".
-    fn has_adapter(&self) -> bool {
-        self.candidates()
-            .any(|model| self.adapter(&model.provider_id).is_some())
+    fn image_adapter_reason(&self, unserved: &str) -> Reason {
+        let has_adapter = *self.has_resolved_adapter.get_or_init(|| {
+            self.candidates()
+                .any(|model| self.adapter(&model.provider_id).is_some())
+        });
+        let detail = if has_adapter {
+            unserved
+        } else {
+            "No image adapter in this build"
+        };
+        reason("adapter", detail)
     }
     /// Whether the adapter of some candidate model serves this category; its
     /// `operations` then decides the category's options.
@@ -696,7 +703,9 @@ impl Evaluation {
                 Err(reason("runtime", "The adapter is unavailable"))
             };
         }
-        if category != "image" && !self.adapter_serves(category) {
+        if category == "image" {
+            Err(self.image_adapter_reason("No available adapter serves the model"))
+        } else if !self.adapter_serves(category) {
             Err(reason("build", "Not in this build"))
         } else {
             Err(reason("adapter", "No available adapter serves the model"))
@@ -884,12 +893,10 @@ impl Evaluation {
                 )],
             )
         } else if category == "image" {
-            let detail = if self.has_adapter() {
-                "The adapter serves no image model Provider lists"
-            } else {
-                "No image adapter in this build"
-            };
-            (false, vec![reason("adapter", detail)])
+            (
+                false,
+                vec![self.image_adapter_reason("The adapter serves no image model Provider lists")],
+            )
         } else {
             (false, vec![reason("build", "Not in this build")])
         };
@@ -1082,6 +1089,7 @@ pub(crate) async fn evaluate(
             declared,
             global,
             ctx: ctx.clone(),
+            has_resolved_adapter: OnceLock::new(),
             host_platform: ctx
                 .get::<dim_agent_capabilities::host_platform::HostPlatform>()
                 .is_some(),
