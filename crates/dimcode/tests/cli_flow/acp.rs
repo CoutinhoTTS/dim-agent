@@ -713,6 +713,90 @@ fn acp_loop_commands_keep_native_ids_and_require_an_unambiguous_branch_target() 
     );
 }
 
+/// `/loop` lists each prompt on its line, one line and at most 120
+/// characters; a record without one still prints without a separator.
+#[test]
+fn acp_loop_list_shows_the_prompt_on_one_line() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&[METHODS, &["session.methods"]].concat());
+        wire.created();
+        let methods = [
+            "session.loop.start",
+            "session.loop.list",
+            "session.loop.stop",
+        ];
+        let mut listed = 0;
+        loop {
+            let request = wire.frame();
+            match request["method"].as_str() {
+                Some("session.attach") => wire.reply(&request, json!({})),
+                Some("session.history") => wire.reply(
+                    &request,
+                    json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+                ),
+                Some("session.methods") => wire.reply(
+                    &request,
+                    json!({"methods":methods
+                        .iter()
+                        .map(|name| json!({"name":name,"mutating":!name.ends_with(".list")}))
+                        .collect::<Vec<_>>()}),
+                ),
+                Some("session.turn.get") => wire.reply(
+                    &request,
+                    json!({"branchId":"main","through":8,"turn":null,"output":null}),
+                ),
+                Some("session.loop.list") => {
+                    listed += 1;
+                    let loops = if listed == 1 {
+                        json!([
+                            {"loopId":"paced","state":"running","round":2,"nextAt":"2026-11-13T09:41:00.000Z","prompt":"check\nthe deploy"},
+                            {"loopId":"long","state":"waiting","round":1,"prompt":"z".repeat(150)},
+                            {"loopId":"old","state":"stopped","round":4}
+                        ])
+                    } else {
+                        json!([{"loopId":"old","state":"waiting","round":1}])
+                    };
+                    wire.reply(&request, json!({"loops": loops}));
+                    if listed == 2 {
+                        break;
+                    }
+                }
+                other => panic!("unexpected request {other:?}"),
+            }
+        }
+        detached_eof(wire);
+    });
+    let mut peer = Peer::start(&home);
+    peer.initialize();
+    peer.send(2, "session/new", json!({"cwd":home.0,"mcpServers":[]}));
+    assert!(peer.response(2).get("error").is_none());
+    assert_eq!(peer.commands(), ["loop"]);
+
+    let line = |shown: &str, id: &str| {
+        shown
+            .lines()
+            .find(|line| line.contains(id))
+            .unwrap_or_else(|| panic!("{id} is listed: {shown}"))
+            .to_owned()
+    };
+    let shown = peer.command(3, "session", "/loop");
+    assert_eq!(
+        line(&shown, "paced"),
+        "paced · running · round 2 · next 2026-11-13T09:41:00.000Z · check the deploy"
+    );
+    assert_eq!(
+        line(&shown, "long"),
+        format!("long · waiting · round 1 · {}", "z".repeat(120))
+    );
+    assert_eq!(line(&shown, "old"), "old · stopped · round 4");
+
+    let shown = peer.command(4, "session", "/loop");
+    assert_eq!(line(&shown, "old"), "old · waiting · round 1");
+    peer.close();
+    daemon.join().unwrap();
+}
+
 #[test]
 fn acp_compact_commands_report_each_native_outcome_once_and_cancel_without_submission() {
     for outcome in ["completed", "skipped", "failed", "cancelled"] {

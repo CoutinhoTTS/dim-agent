@@ -1103,6 +1103,7 @@ pub(crate) fn wire_loop(record: &Loop) -> serde_json::Value {
         "branchId": record.branch_id,
         "state": record.state.name(),
         "round": record.round,
+        "prompt": record.prompt,
         "nextAt": record.next_at,
         "lastRoundAt": record.last_round_at,
         "expiresAt": record.expires_at,
