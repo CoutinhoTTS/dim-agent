@@ -165,9 +165,11 @@ ModelFailure {
   where it may be retried
   ([output.rs](../../crates/dim-agent-capabilities/src/output.rs) clears replay
   safety when the attempt commits an event), so the turn ends with the failure
-  recorded and shown and the user resends by hand. Received but uncommitted
-  progress, thinking included, is not a fact and does not stop the retry. A
-  retry cannot follow committed output: what the request committed must match
+  recorded and shown and the user resends by hand. Received thinking that was
+  never committed is not a fact and does not stop the retry; a cut flushes
+  buffered text before it decides, so text that already reached the screen is
+  committed at the failure and is never replaced by a retry. A retry cannot
+  follow committed output: what the request committed must match
   the next complete reply, thinking included
   ([output.rs](../../crates/dim-agent-capabilities/src/output.rs)), and a second
   attempt brings its own thinking.

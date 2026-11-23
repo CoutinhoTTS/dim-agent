@@ -21,9 +21,9 @@ const TEXT_FLUSH_BYTES: usize = 4 * 1024;
 /// ... or once the oldest buffered text is this old, checked as text arrives.
 const TEXT_FLUSH_AGE: Duration = Duration::from_secs(1);
 /// Thinking progress is shown at most once per this interval, so a long
-/// thought does not send its whole text on every delta; the block end, a
-/// switch to text or a tool call, a retry and a cleared progress show it at
-/// once, and a timer shows the last delta within one interval.
+/// thought does not send its whole text on every delta; the block end and a
+/// switch to text or a tool call show it at once, a timer shows the last
+/// delta within one interval, and a retry or a cleared progress drops it.
 const THINKING_SHOW_AGE: Duration = Duration::from_millis(250);
 
 /// Progress that an event now holds; it leaves the progress once that event
@@ -590,7 +590,6 @@ impl Output {
 
 impl crate::model_provider::RetryObserver for Output {
     fn waiting(&mut self, retry: Option<crate::model_provider::RetryWaiting<'_>>) {
-        self.show_thinking();
         self.show(|progress| {
             progress.retry = retry.map(|retry| RetryProgress {
                 attempt: retry.attempt,
