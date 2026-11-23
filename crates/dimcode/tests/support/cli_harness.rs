@@ -383,14 +383,48 @@ impl Wire {
     pub fn attached(&mut self) {
         let attach = self.read("session.attach");
         self.reply(&attach, attach_record(&attach));
+        self.resumed_on("main", 8);
+    }
+    /// The attach reply, then the policy read of the line it names and the
+    /// window, pending-question and idle reads that follow: a Session's first
+    /// frame names one line, and the reply is where it comes from
+    /// (design §14).
+    pub fn attached_with_policy(&mut self, policy: Value) {
+        let attach = self.read("session.attach");
+        self.reply(&attach, attach_record(&attach));
+        let get = self.read("session.permission.get");
+        assert_eq!(
+            get["params"],
+            json!({"sessionId":"session","branchId":"main"})
+        );
+        self.reply(&get, policy);
+        self.resumed_on("main", 8);
+    }
+    /// The window, pending-question and idle reads a resumed Session makes on
+    /// `branch`, after its attach reply.
+    pub fn resumed_on(&mut self, branch: &str, through: u64) {
         let history = self.read("session.history");
+        assert_eq!(history["params"]["branchId"], branch);
+        // A line's window carries the configuration it adopted; the root takes
+        // the attach reply's model instead.
+        let events = if branch == "main" {
+            json!([])
+        } else {
+            json!([configured_event(through - 1, "line-model", json!({}))])
+        };
         self.reply(
             &history,
-            json!({"events":[],"through":8,"nextAfter":8,"done":true}),
+            json!({"events":events,"through":through,"nextAfter":through,"done":true}),
         );
-        self.no_pending_questions(8);
+        let question = self.read("session.question.pending");
+        assert_eq!(question["params"]["branchId"], branch);
+        self.reply(
+            &question,
+            json!({"branchId":branch,"through":through,"batches":[],"next":null}),
+        );
         let idle = self.read("session.idle");
-        self.reply(&idle, json!({"sequence":8}));
+        assert_eq!(idle["params"]["branchId"], branch);
+        self.reply(&idle, json!({"sequence":through}));
     }
     pub fn no_pending_questions(&mut self, through: u64) {
         let request = self.read("session.question.pending");
@@ -854,6 +888,64 @@ impl Terminal {
         self.wait_for(expected, |tail| {
             tail.find(expected).map(|index| index + expected.len())
         });
+    }
+    /// The rows the interface painted from their first column since transcript
+    /// offset `from`, in the order it painted them. The live region is
+    /// repainted in place, so a row it drew before a change is still in the
+    /// transcript; a frame paints a row as one cursor move to its first column
+    /// and the row's text, and this reads those paints instead of every write
+    /// the transcript ever held.
+    pub fn painted_rows(&self, from: usize) -> Vec<String> {
+        let mut rows = Vec::new();
+        let mut row: Option<String> = None;
+        let mut chars = self.transcript[from..].chars();
+        while let Some(c) = chars.next() {
+            if c == '\u{1b}' {
+                match chars.next() {
+                    Some('[') => {
+                        let mut params = String::new();
+                        let final_byte = loop {
+                            match chars.next() {
+                                Some(c) if ('\u{40}'..='\u{7e}').contains(&c) => break Some(c),
+                                Some(c) => params.push(c),
+                                None => break None,
+                            }
+                        };
+                        // Styling splits a row into runs that still read as one;
+                        // anything else (an erase, a move) ends the row.
+                        if final_byte == Some('m') {
+                            continue;
+                        }
+                        rows.extend(row.take());
+                        if final_byte == Some('H') && (params.is_empty() || params.ends_with(";1"))
+                        {
+                            row = Some(String::new());
+                        }
+                    }
+                    Some(']') | Some('P') => {
+                        let mut previous = '\0';
+                        for c in chars.by_ref() {
+                            if c == '\u{07}' || (previous == '\u{1b}' && c == '\\') {
+                                break;
+                            }
+                            previous = c;
+                        }
+                    }
+                    _ => {}
+                }
+                continue;
+            }
+            if c == '\r' || c == '\n' {
+                rows.extend(row.take());
+                continue;
+            }
+            if let Some(row) = &mut row {
+                row.push(c);
+            }
+        }
+        rows.extend(row);
+        rows.retain(|row| !row.is_empty());
+        rows
     }
     /// Waits for text on the terminal screen at a completed synchronized frame.
     pub fn until_visible(&mut self, expected: &str) {

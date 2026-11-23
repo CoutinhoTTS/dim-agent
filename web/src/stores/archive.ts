@@ -1,5 +1,5 @@
-import { ref } from "@vue/reactivity"
-import { defineStore } from "#workspace-store"
+import { ref } from "vue"
+import { defineStore } from "pinia"
 
 const STORAGE_KEY = "dim-web.archive.v1"
 

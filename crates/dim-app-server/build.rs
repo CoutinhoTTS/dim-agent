@@ -41,7 +41,6 @@ fn main() {
         "index.html",
         "vite.config.ts",
         "tsconfig.json",
-        "tsconfig.react.json",
         "package.json",
         "package-lock.json",
     ] {

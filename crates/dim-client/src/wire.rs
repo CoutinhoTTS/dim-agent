@@ -58,6 +58,41 @@ pub struct Configuration {
     #[serde(default)]
     pub model_preferences: Option<dim_agent_types::ModelPreferences>,
 }
+/// The reply to `session.model.get`: one line's adopted configuration at that
+/// line's own committed cutoff (design §14).
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdoptedConfiguration {
+    pub branch_id: String,
+    /// The requested line's committed cutoff, never an ancestor's sequence.
+    pub through: u64,
+    /// The line's configuration at that cutoff; `None` when it adopted none.
+    pub configuration: Option<AdoptedModel>,
+}
+/// The configuration `session.model.get` answers with: the values a
+/// `context/configured` event carries, under the adopted model's identity.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdoptedModel {
+    pub model: dim_agent_types::ModelId,
+    #[serde(default)]
+    pub catalog_provider_id: Option<String>,
+    #[serde(default)]
+    pub capability_snapshot: Option<Box<dim_agent_types::ModelCapabilitySnapshot>>,
+    #[serde(default)]
+    pub model_preferences: Option<dim_agent_types::ModelPreferences>,
+}
+impl From<AdoptedModel> for Configuration {
+    fn from(adopted: AdoptedModel) -> Self {
+        Self {
+            provider_id: adopted.model.provider_id,
+            catalog_provider_id: adopted.catalog_provider_id,
+            model_id: adopted.model.model_id,
+            capability_snapshot: adopted.capability_snapshot,
+            model_preferences: adopted.model_preferences,
+        }
+    }
+}
 pub enum EventContent {
     BranchCreate(BranchCreateData),
     BranchStart(BranchStartData),
@@ -397,6 +432,16 @@ impl HistoryWindow {
     }
 }
 
+/// The line the Session's conversation is on, with that line's own sequence:
+/// the branch-qualified cursor beside [`Attached::sequence`], which stays the
+/// root's (design §14).
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BranchCursor {
+    pub branch_id: String,
+    pub sequence: u64,
+}
+
 /// The record `session.attach` replies for the Session it opened. A server
 /// from before the record existed replies `{}`.
 #[derive(Deserialize)]
@@ -404,6 +449,10 @@ impl HistoryWindow {
 pub struct Attached {
     #[serde(default)]
     pub sequence: u64,
+    /// The line the conversation is on and its own cursor; absent from a
+    /// server older than the field, whose Session is on its root (design §14).
+    #[serde(default)]
+    pub default_branch: Option<BranchCursor>,
     #[serde(default)]
     pub model: Option<dim_agent_types::ModelId>,
     #[serde(default)]
@@ -423,6 +472,34 @@ pub struct Attached {
     /// The title's revision; 0 on a server that reports none.
     #[serde(default)]
     pub title_revision: u64,
+}
+impl Attached {
+    /// The reply's own configuration, which is the Session's and so the root's:
+    /// a conversation on a line reads that line's through `session.model.get`
+    /// (design §14).
+    pub fn configuration(&self) -> Option<Configuration> {
+        self.model.as_ref().map(|model| Configuration {
+            provider_id: model.provider_id.clone(),
+            catalog_provider_id: self.catalog_provider_id.clone(),
+            model_id: model.model_id.clone(),
+            capability_snapshot: self.capability_snapshot.clone(),
+            model_preferences: self.model_preferences.clone(),
+        })
+    }
+}
+
+/// The cursor a client resumes `line` from: the attach reply's own
+/// `defaultBranch`, or the root's `sequence` on a server that predates the
+/// field, whose Session is on its root (design §14).
+pub fn resume_cursor(
+    default_branch: Option<&BranchCursor>,
+    sequence: u64,
+    line: &str,
+) -> Option<u64> {
+    match default_branch {
+        Some(cursor) => (cursor.branch_id == line).then_some(cursor.sequence),
+        None => (line == dim_agent_types::ROOT_BRANCH_ID).then_some(sequence),
+    }
 }
 
 #[derive(Deserialize)]
@@ -492,8 +569,14 @@ pub struct TurnBoundary {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BranchDirectory {
     pub branches: Vec<BranchEntry>,
+    /// The line the Session's conversation is on (design §14). A server that
+    /// predates `session.branch_set_default` reports none, and such a Session
+    /// is on its root.
+    #[serde(default)]
+    pub default_branch_id: Option<String>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]

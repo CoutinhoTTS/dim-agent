@@ -40,17 +40,14 @@ const endsByOperation = { kind: "ended-by-operation" } as const
 export class Lines {
   private nodes = new Map<string, LineNode>()
   private running = new Set<string>()
-  private snapshot: LineView[] | undefined
 
   directory(entries: readonly BranchEntry[]): void {
     this.nodes.clear()
-    this.snapshot = undefined
     for (const entry of entries) this.detail(entry)
   }
 
   detail(entry: BranchEntry): void {
     if (entry.branchId === ROOT_BRANCH_ID) return
-    this.snapshot = undefined
     const previous = this.nodes.get(entry.branchId)
     this.nodes.set(entry.branchId, {
       id: entry.branchId, parentId: entry.parentBranchId!, at: entry.branchPoint!,
@@ -67,7 +64,6 @@ export class Lines {
     switch (content.kind) {
       case "branch-create": {
         if (this.nodes.has(content.branchId)) return
-        this.snapshot = undefined
         this.nodes.set(content.branchId, {
           id: content.branchId,
           parentId: branchId,
@@ -80,7 +76,6 @@ export class Lines {
         break
       }
       case "branch-create-failed": {
-        this.snapshot = undefined
         const node = this.nodes.get(content.branchId) ?? {
           id: content.branchId,
           parentId: branchId,
@@ -96,18 +91,12 @@ export class Lines {
       }
       case "branch-end": {
         const node = this.nodes.get(branchId)
-        if (node !== undefined) {
-          node.ended = { kind: "ending" }
-          this.snapshot = undefined
-        }
+        if (node !== undefined) node.ended = { kind: "ending" }
         break
       }
       case "branch-ended": {
         const node = this.nodes.get(content.branchId)
-        if (node !== undefined) {
-          node.ended = endedState(content.source, content.ancestor)
-          this.snapshot = undefined
-        }
+        if (node !== undefined) node.ended = endedState(content.source, content.ancestor)
         break
       }
       default:
@@ -116,7 +105,6 @@ export class Lines {
   }
 
   setRunning(branchId: string, running: boolean): void {
-    if (branchId !== ROOT_BRANCH_ID && this.running.has(branchId) !== running) this.snapshot = undefined
     if (running) this.running.add(branchId)
     else this.running.delete(branchId)
   }
@@ -127,7 +115,6 @@ export class Lines {
 
   /** Every line in tree order: main first, then children by cut and opening order. */
   views(): LineView[] {
-    if (this.snapshot) return this.snapshot
     const out: LineView[] = [
       { id: ROOT_BRANCH_ID, parentId: null, purpose: "", state: { kind: ROOT_BRANCH_ID }, cut: null, depth: 0 },
     ]
@@ -170,7 +157,6 @@ export class Lines {
       })
       walk(node.id, 2)
     }
-    this.snapshot = out
     return out
   }
 

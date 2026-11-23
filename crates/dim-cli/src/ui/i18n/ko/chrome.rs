@@ -37,7 +37,20 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "Running" => "실행 중",
         "Lines" => "라인",
-        "Enter show the line · x end it · Esc close" => "Enter 라인 보기 · x 종료 · Esc 닫기",
+        "Enter show · p continue from here · x end it · Esc close" => {
+            "Enter 보기 · p 여기서 계속 · x 종료 · Esc 닫기"
+        }
+        "Main line" => "메인 라인",
+        "Start" => "시작점",
+        "the default branch and the lines it continues from stay open; continue on another line first" => {
+            "기본 브랜치와 그 브랜치가 이어지는 라인은 닫을 수 없습니다. 먼저 다른 라인에서 계속하세요"
+        }
+        "The old default branch stays open and keeps the lines it opened. The root keeps its own right to open a line in either direction." => {
+            "이전 기본 브랜치는 열린 채로 남고 연 라인을 유지합니다. 루트는 어느 방향에서든 라인을 열 권리를 그대로 가집니다."
+        }
+        "The old default branch stays open and keeps the lines it opened. The two lines swap the right to open a line." => {
+            "이전 기본 브랜치는 열린 채로 남고 연 라인을 유지합니다. 두 라인이 라인을 열 권리를 교환합니다."
+        }
         "This session has no lines." => "이 세션에는 아직 라인이 없습니다.",
         "No matching lines." => "일치하는 라인이 없습니다.",
         "the session itself" => "세션 자체",
@@ -561,6 +574,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Send now failed: {error}; the draft was kept" => {
             "즉시 전송 실패: {error}. 초안은 유지되었습니다"
         }
+        "Send now failed: {error}" => "즉시 전송 실패: {error}",
         "Send now cancelled; the draft was kept" => {
             "즉시 전송이 취소되었습니다. 초안은 유지되었습니다"
         }
@@ -583,6 +597,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "선택 중 Shift+Tab으로 더 최근 항목 선택 · Esc 입력창으로 돌아가기"
         }
         "(shift+tab to cycle)" => "(Shift+Tab으로 전환)",
+        "Permission unavailable" => "권한을 사용할 수 없음",
         "Fullscreen" => "전체 화면",
         "PageUp/PageDown scroll · Home/End top or bottom (empty draft) · Tab pick a message, e edit it, q quote it" => {
             "PageUp/PageDown 스크롤 · Home/End 맨 위/아래 (초안이 비어 있을 때) · Tab 메시지 선택, e 편집, q 인용"

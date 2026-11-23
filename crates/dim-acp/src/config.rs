@@ -1,7 +1,7 @@
 use crate::rpc::Rpc;
 use agent_client_protocol::{Error, schema::v1 as acp};
-use dim_agent_types::{DEFAULT_BRANCH_ID, ModelId, PermissionPolicy, PermissionPreset};
-use dim_client::wire::{Configuration, Event, EventContent};
+use dim_agent_types::{ModelId, PermissionPolicy, PermissionPreset, ROOT_BRANCH_ID};
+use dim_client::wire::{AdoptedConfiguration, Configuration, Event, EventContent};
 use serde::Deserialize;
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
@@ -97,10 +97,34 @@ pub(crate) async fn models(rpc: &Rpc) -> Result<Vec<Model>, Error> {
     Ok(choices)
 }
 
+/// The configuration `branch` adopted at `through`, or at its head when
+/// omitted, with that line's own committed cutoff. Callers ask a server that
+/// offers the read: one without it cannot name this line's configuration, and
+/// the attach reply's is the root's (design §14).
+pub(crate) async fn adopted(
+    rpc: &Rpc,
+    session_id: &str,
+    branch: &str,
+    through: Option<u64>,
+) -> Result<(u64, Option<Configuration>), Error> {
+    let mut params = json!({"sessionId":session_id,"branchId":branch});
+    if let Some(through) = through {
+        params["through"] = json!(through);
+    }
+    let reply: AdoptedConfiguration = rpc.typed("session.model.get", params).await?;
+    if reply.branch_id != branch {
+        return Err(Error::internal_error().data(json!({"code":"model_get_answered_another_line"})));
+    }
+    Ok((reply.through, reply.configuration.map(Configuration::from)))
+}
+
 impl Config {
+    /// Reads the Session's configuration for `branch`, the line its
+    /// conversation is on: its policy and its model are that line's (design §4).
     pub(crate) async fn read(
         rpc: &Rpc,
         id: &str,
+        branch: &str,
         model: Option<Configuration>,
     ) -> Result<Self, Error> {
         let mut config = Self {
@@ -134,7 +158,7 @@ impl Config {
             config.policy = Some(
                 rpc.typed(
                     "session.permission.get",
-                    json!({"sessionId":id,"branchId":DEFAULT_BRANCH_ID}),
+                    json!({"sessionId":id,"branchId":branch}),
                 )
                 .await?,
             );
@@ -289,33 +313,36 @@ impl Config {
     }
 
     pub(crate) async fn recover_model(rpc: &Rpc, id: &str, value: &str) -> Result<Self, Error> {
-        let mut config = Self::read(rpc, id, None).await?;
-        config.set_model(rpc, id, value, true).await?;
-        #[derive(Deserialize)]
-        struct Current {
-            configuration: Option<AdoptedConfiguration>,
+        let branch = if rpc.supports("session.branches") {
+            let directory: dim_client::wire::BranchDirectory = rpc
+                .typed("session.branches", json!({"sessionId":id}))
+                .await?;
+            directory
+                .default_branch_id
+                .unwrap_or_else(|| ROOT_BRANCH_ID.to_owned())
+        } else {
+            ROOT_BRANCH_ID.to_owned()
+        };
+        let mut config = Self::read(rpc, id, &branch, None).await?;
+        // `session.attach` checks its route against the root and `session.submit`
+        // against the line it targets: restore an expired route on both.
+        let root = config.set_model(rpc, id, ROOT_BRANCH_ID, value, true).await;
+        if branch == ROOT_BRANCH_ID {
+            root?;
+        } else {
+            let line = config.set_model(rpc, id, &branch, value, true).await;
+            match (root, line) {
+                (Ok(()), Ok(())) => {}
+                (Ok(()), Err(error)) | (Err(error), Ok(()))
+                    if error.data.as_ref().is_some_and(|data| {
+                        data["nativeAppError"] == "provider_route_not_expired"
+                    }) => {}
+                (Err(error), _) => return Err(error),
+                (_, Err(error)) => return Err(error),
+            }
         }
-        #[derive(Deserialize)]
-        #[serde(rename_all = "camelCase")]
-        struct AdoptedConfiguration {
-            model: ModelId,
-            capability_snapshot: Option<Box<dim_agent_types::ModelCapabilitySnapshot>>,
-            model_preferences: Option<dim_agent_types::ModelPreferences>,
-        }
-        let current: Current = rpc
-            .typed(
-                "session.model.get",
-                json!({"sessionId":id,"branchId":DEFAULT_BRANCH_ID}),
-            )
-            .await?;
-        let current = current.configuration.ok_or_else(Error::internal_error)?;
-        config.model = Some(Configuration {
-            provider_id: current.model.provider_id,
-            model_id: current.model.model_id,
-            catalog_provider_id: None,
-            capability_snapshot: current.capability_snapshot,
-            model_preferences: current.model_preferences,
-        });
+        let (_, current) = adopted(rpc, id, &branch, None).await?;
+        config.model = Some(current.ok_or_else(Error::internal_error)?);
         Ok(config)
     }
 
@@ -323,6 +350,7 @@ impl Config {
         &mut self,
         rpc: &Rpc,
         id: &str,
+        branch: &str,
         value: &str,
         require_expired_route: bool,
     ) -> Result<(), Error> {
@@ -335,7 +363,7 @@ impl Config {
         #[serde(rename_all = "camelCase")]
         struct Select<'a> {
             session_id: &'a str,
-            branch_id: &'static str,
+            branch_id: &'a str,
             provider_id: &'a str,
             model_id: &'a str,
             #[serde(skip_serializing_if = "Option::is_none")]
@@ -348,7 +376,7 @@ impl Config {
             .ok_or_else(Error::invalid_params)?;
         let params = serde_json::to_value(Select {
             session_id: id,
-            branch_id: DEFAULT_BRANCH_ID,
+            branch_id: branch,
             provider_id: &model.provider,
             model_id: &model.id,
             require_expired_route: require_expired_route.then_some(true),
@@ -373,6 +401,7 @@ impl Config {
         mut self,
         rpc: &Rpc,
         id: &str,
+        branch: &str,
         key: &str,
         value: &str,
     ) -> Result<Self, Error> {
@@ -381,17 +410,17 @@ impl Config {
                 let current: Policy = rpc
                     .typed(
                         "session.permission.get",
-                        json!({"sessionId":id,"branchId":DEFAULT_BRANCH_ID}),
+                        json!({"sessionId":id,"branchId":branch}),
                     )
                     .await?;
                 let mut policy = current.policy;
                 policy.preset =
                     serde_json::from_value(json!(value)).map_err(|_| Error::invalid_params())?;
-                rpc.call("session.permission.update",json!({"sessionId":id,"branchId":DEFAULT_BRANCH_ID,"expectedVersion":current.version,"policy":policy})).await?;
+                rpc.call("session.permission.update",json!({"sessionId":id,"branchId":branch,"expectedVersion":current.version,"policy":policy})).await?;
                 self.policy = Some(
                     rpc.typed(
                         "session.permission.get",
-                        json!({"sessionId":id,"branchId":DEFAULT_BRANCH_ID}),
+                        json!({"sessionId":id,"branchId":branch}),
                     )
                     .await?,
                 );
@@ -414,7 +443,7 @@ impl Config {
                 let result: Adopted = rpc
                     .typed(
                         "session.model.update",
-                        json!({"sessionId":id,"branchId":DEFAULT_BRANCH_ID,"modelPreferences":{"reasoningEffort":patch}}),
+                        json!({"sessionId":id,"branchId":branch,"modelPreferences":{"reasoningEffort":patch}}),
                     )
                     .await?;
                 if !matches!(result.outcome.as_str(), "adopted" | "unchanged") {
@@ -422,7 +451,7 @@ impl Config {
                 }
             }
             "model" => {
-                self.set_model(rpc, id, value, false).await?;
+                self.set_model(rpc, id, branch, value, false).await?;
                 self.models = models(rpc).await?;
             }
             _ => return Err(Error::invalid_params()),
