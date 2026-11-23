@@ -8,8 +8,9 @@ sendable image as pixels where the destination takes its format; a model without
 image input, or an image that cannot be sent, sees an `img:` reference or
 placeholder and can ask `image_understand {image, question}` for a one-shot answer.
 A standalone request cannot resolve a reference, so a target that does not take
-the image's format fails the call without an answer. The tool is risk `session`;
-unknown input fields are rejected.
+the image's format fails the call without an answer, and a reused answer follows
+the format rule of the route that serves the target now. The tool is risk
+`session`; unknown input fields are rejected.
 
 ## Dependencies
 
@@ -21,13 +22,16 @@ unknown input fields are rejected.
 | `S:SessionIdentity` | Scope file reads to the calling Session. |
 | `P:ModalityTargets` | Resolve `image.understand` on every call, including reuse. |
 | `P:AuxiliaryModel` | Execute against the resolved target without conversation or tools. |
+| `P:ModelSelectionHost` | Read the protocol of the route that serves the resolved target now, before an answer is reused. |
 | `S:GuideEntries` | Explain image routing and references through the input guide. |
 
 These are the existing owners' faces, not new services. The tool consumes only
 `treeCommands.query` with published chain scope, `sessionFiles.read`,
-`modalityTargets.resolve`, `auxiliaryModel.complete`, and the registration routes
-of ToolRegistry and GuideEntries. See their owner contracts rather than a separate
-image-specific model or storage interface.
+`modalityTargets.resolve`, `auxiliaryModel.complete`, `modelSelectionHost.resolve`
+and the registration routes of ToolRegistry and GuideEntries. See their owner
+contracts rather than a separate image-specific model or storage interface. A
+route whose protocol the owner does not report is an unknown destination, which
+takes the four formats a request may carry.
 
 ## Facts, state and lifetime
 
@@ -46,7 +50,9 @@ its own inherited image index and cannot reuse another branch's answers.
 Concurrent identical calls in one branch share a future held only by its waiters.
 One waiter leaving releases only its share; the last waiter cancels and drops the
 provider request. Unload cancels this generation's work and discards its indexes.
-No result is reused until its ordinary tool result has committed.
+No result is reused until its ordinary tool result has committed, and not while
+the route that serves the target now does not take the image's format. An answer
+another caller has in flight is refused before this call waits for it.
 
 ## Verification
 
@@ -57,5 +63,6 @@ then rebuilds the reference index after restore; it does not run a summarizer.
 Request adaptation and immutable file-backed history are covered
 by `dim-agent-capabilities`'s `host_flows`; routing by the conversational model's
 vision capability is covered by `image_flow` and `read_image_flow`; a standalone
-call whose target cannot take the image's format is covered by `image_flow`;
-published inheritance and ended/restored queries are covered by `branch_flow`.
+call whose target cannot take the image's format, and a completed or in-flight
+answer whose route stops taking it, are covered by `image_flow`; published
+inheritance and ended/restored queries are covered by `branch_flow`.

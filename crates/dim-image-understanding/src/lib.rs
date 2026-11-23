@@ -4,15 +4,19 @@ mod history;
 
 use dim_agent_capabilities::timeline_tree::TreeCommands;
 use dim_agent_capabilities::{
+    auxiliary_model::require_sendable_image,
     host::{
         AuxiliaryErrorCode, AuxiliaryModel, AuxiliaryRequest, HostError, HostFuture,
-        ModelStopReason, SessionFiles, ToolExecutionContext,
+        ModelPortError, ModelSelectionHost, ModelSelectionRequest, ModelStopReason, SessionFiles,
+        ToolExecutionContext,
     },
     prompt_guide::{GuideEntries, GuideEntry, GuideScope},
     tool_registry::{ToolConcurrency, ToolContribution, ToolHandler, ToolRegistry, definition},
 };
 use dim_agent_runtime::{AgentBuilder, Feature, Names, SessionIdentity};
-use dim_agent_types::{Message, MessageContent, MessagePart, ModelId, Role, ToolCall, ToolResult};
+use dim_agent_types::{
+    Message, MessageContent, MessagePart, ModelId, ModelProtocol, Role, ToolCall, ToolResult,
+};
 use dim_modality::{ModalityTargets, TargetReply, TargetRequest};
 use futures_util::{
     FutureExt,
@@ -83,6 +87,7 @@ struct ImageUnderstanding {
     identity: Arc<SessionIdentity>,
     targets: Arc<ModalityTargets>,
     auxiliary: Arc<AuxiliaryModel>,
+    selection: Arc<ModelSelectionHost>,
     indexes: Mutex<HashMap<String, Arc<tokio::sync::Mutex<history::Index>>>>,
     flights: Mutex<HashMap<(String, ReuseKey), Weak<Flight>>>,
     stop: CancellationToken,
@@ -160,8 +165,18 @@ impl ImageUnderstanding {
             provider: target.provider_id.clone(),
             model: target.model_id.clone(),
         };
-        if let Some((event, result)) = index.answers.get(&key) {
-            return history::answer(self, &context.branch_id, through, event, *result).await;
+        // A reuse hit follows the format rule of a fresh call, so a committed
+        // answer is judged before it is returned.
+        let media_type = source.media_type.clone();
+        let route = target.clone();
+        if let Some((event, result)) = index.answers.get(&key).cloned() {
+            if let Some(failure) = self
+                .route_format_failure(&route, &media_type, &cancel)
+                .await?
+            {
+                return Ok(failure);
+            }
+            return history::answer(self, &context.branch_id, through, &event, result).await;
         }
         drop(index);
         let flight = {
@@ -243,7 +258,62 @@ impl ImageUnderstanding {
                 flight
             }
         };
+        // The shared call is joined or created above, which sends nothing yet;
+        // the same rule then refuses an image this route cannot take before the
+        // caller waits for an answer it could not return.
+        if let Some(failure) = self
+            .route_format_failure(&route, &media_type, &cancel)
+            .await?
+        {
+            return Ok(failure);
+        }
         flight.answer.clone().await
+    }
+
+    /// The failure a route that does not take the image's format gives, or
+    /// `None` when it does. A cancelled read is the caller's cancellation.
+    async fn route_format_failure(
+        &self,
+        target: &ModelId,
+        media_type: &str,
+        cancel: &CancellationToken,
+    ) -> Result<Option<ToolResult>, HostError> {
+        let protocol = self.route_protocol(target, cancel).await?;
+        Ok(require_sendable_image(protocol, media_type)
+            .err()
+            .map(|error| failed("image_understand_failed", error)))
+    }
+
+    /// The protocol of the route that serves `target` now, read from the
+    /// selection its owner records. A destination whose route the owner does
+    /// not report is unknown and takes the formats a request may carry; a
+    /// cancelled read is the caller's cancellation.
+    async fn route_protocol(
+        &self,
+        target: &ModelId,
+        cancel: &CancellationToken,
+    ) -> Result<Option<ModelProtocol>, HostError> {
+        let selection = match self
+            .selection
+            .resolve(
+                ModelSelectionRequest {
+                    explicit: Some(target.clone()),
+                    cwd: None,
+                },
+                cancel.clone(),
+            )
+            .await
+        {
+            Ok(selection) => selection,
+            Err(ModelPortError::Cancelled { message }) => {
+                return Err(HostError::Cancelled(message));
+            }
+            Err(_) => return Ok(None),
+        };
+        Ok(selection
+            .metadata
+            .and_then(|metadata| metadata.extensions.get("providerProtocol").cloned())
+            .and_then(|protocol| serde_json::from_value(protocol).ok()))
     }
 }
 
@@ -282,6 +352,7 @@ pub struct ImageUnderstandingPlugin {
     identity: Key<SessionIdentity>,
     targets: Key<ModalityTargets>,
     auxiliary: Key<AuxiliaryModel>,
+    selection: Key<ModelSelectionHost>,
     guide: Key<GuideEntries>,
 }
 
@@ -294,6 +365,7 @@ impl ImageUnderstandingPlugin {
             identity: names.key()?,
             targets: names.key()?,
             auxiliary: names.key()?,
+            selection: names.key()?,
             guide: names.key()?,
         })
     }
@@ -311,6 +383,7 @@ impl DynPlugin for ImageUnderstandingPlugin {
             self.identity.erase(),
             self.targets.erase(),
             self.auxiliary.erase(),
+            self.selection.erase(),
             self.guide.erase(),
         ]
     }
@@ -328,6 +401,7 @@ impl DynPlugin for ImageUnderstandingPlugin {
                 identity: ctx.require_at(&self.identity)?,
                 targets: ctx.require_at(&self.targets)?,
                 auxiliary: ctx.require_at(&self.auxiliary)?,
+                selection: ctx.require_at(&self.selection)?,
                 indexes: Mutex::default(),
                 flights: Mutex::default(),
                 stop,

@@ -140,10 +140,15 @@ image file bytes, not the pixels or base64 text. Equal bytes have equal
 references; the reference contract is [ImageUnderstanding §3](ImageUnderstanding.md#3-references).
 File-backed sources must be resolved before computing the reference.
 
-The destination's format support is part of that routing rule. The preparation
-formats are PNG, JPEG, WebP and GIF; Gemini takes all but GIF (its guides list
-PNG, JPEG, WebP, HEIC and HEIF), so a GIF becomes its reference there, and
-every other destination takes every format a request may carry. The provider
+The destination's format support is part of that routing rule, and it is one
+whitelist per protocol. The preparation formats are PNG, JPEG, WebP and GIF.
+Gemini takes all but GIF (its guides list PNG, JPEG, WebP, HEIC and HEIF), so a
+GIF becomes its reference there; a native xAI route takes JPEG and PNG only (the
+Chat Completions and Responses image input limits), so a WebP or a GIF becomes
+its reference there; and every other destination takes the four a request may
+carry, as a destination whose protocol is unknown does. A standalone image
+question follows the same rule and fails instead of sending
+([ImageUnderstanding §3](ImageUnderstanding.md#3-references)). The provider
 request encoder applies the destination's message-placement support: Bedrock
 takes an image inside a `toolResult` block only on Amazon Nova and Anthropic
 Claude 3 and 4, and AWS supports that block's `status` field only on the same

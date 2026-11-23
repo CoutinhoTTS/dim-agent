@@ -22,12 +22,26 @@ const GEMINI_IMAGE_FORMATS: [&str; 5] = [
     "image/heif",
 ];
 
-/// Whether a destination takes this image format as pixels. Gemini takes the
-/// formats its guides list; every other destination takes every format a
-/// request may carry, and a destination whose protocol is unknown takes them
-/// too (Attachments A.1).
+/// The image formats a native xAI route accepts as pixels: its Chat
+/// Completions and Responses image input limits list JPEG and PNG only.
+const XAI_IMAGE_FORMATS: [&str; 2] = ["image/png", "image/jpeg"];
+
+/// The image formats a request may carry as pixels (the feature list), and the
+/// ones a destination whose protocol carries no narrower rule takes.
+pub(crate) const REQUEST_IMAGE_FORMATS: [&str; 4] =
+    ["image/png", "image/jpeg", "image/webp", "image/gif"];
+
+/// Whether a destination takes this image format as pixels: one whitelist per
+/// protocol, and the four a request may carry for a destination whose protocol
+/// is unknown or lists no narrower rule (Attachments A.1).
 pub fn takes_image_format(protocol: Option<ModelProtocol>, media_type: &str) -> bool {
-    protocol != Some(ModelProtocol::Gemini) || GEMINI_IMAGE_FORMATS.contains(&media_type)
+    match protocol {
+        Some(ModelProtocol::Gemini) => GEMINI_IMAGE_FORMATS.contains(&media_type),
+        Some(ModelProtocol::Xai | ModelProtocol::XaiResponses) => {
+            XAI_IMAGE_FORMATS.contains(&media_type)
+        }
+        _ => REQUEST_IMAGE_FORMATS.contains(&media_type),
+    }
 }
 
 /// Returns `img:` and the first 16 lowercase SHA-256 hex digits of the
@@ -38,10 +52,7 @@ pub fn takes_image_format(protocol: Option<ModelProtocol>, media_type: &str) -> 
 /// cannot decode return `None`.
 pub fn image_reference(source: &ImageSource) -> Option<String> {
     if source.source_type != ImageSourceType::Base64
-        || !matches!(
-            source.media_type.as_str(),
-            "image/png" | "image/jpeg" | "image/webp" | "image/gif"
-        )
+        || !REQUEST_IMAGE_FORMATS.contains(&source.media_type.as_str())
     {
         return None;
     }

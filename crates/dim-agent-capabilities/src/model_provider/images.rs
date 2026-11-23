@@ -4,7 +4,9 @@
 //! when the destination takes its format. The adopted input and the history
 //! are never changed.
 use crate::host::{HostError, SessionFiles};
-use crate::images::{image_reference, image_reference_or_placeholder, takes_image_format};
+use crate::images::{
+    REQUEST_IMAGE_FORMATS, image_reference, image_reference_or_placeholder, takes_image_format,
+};
 use crate::session_files::check_image_budget;
 use base64::Engine;
 use dim_agent_types::*;
@@ -12,10 +14,6 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 const NO_IMAGE_INPUT: &str = "[Image omitted: the current model does not accept images.]";
-
-/// Image formats a request may send as pixels (feature list); a provider
-/// encoder turns one its destination does not take into a reference.
-const FORMATS: [&str; 4] = ["image/png", "image/jpeg", "image/webp", "image/gif"];
 
 /// What one image becomes in the request copy.
 enum Routed {
@@ -208,7 +206,7 @@ fn add_encoded_image(encoded: &mut usize, source: &ImageSource) -> Result<(), Ho
 /// A URL source, a file without an id, undecodable data or a format adapters
 /// do not accept (A10).
 fn sendable(source: &ImageSource) -> bool {
-    FORMATS.contains(&source.media_type.as_str())
+    REQUEST_IMAGE_FORMATS.contains(&source.media_type.as_str())
         && match source.source_type {
             ImageSourceType::File => source.file_id.as_ref().is_some_and(|id| !id.is_empty()),
             ImageSourceType::Base64 => source.data.as_deref().is_some_and(|data| {

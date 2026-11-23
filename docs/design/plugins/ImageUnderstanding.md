@@ -128,14 +128,18 @@ A conversational request may replace an image its model cannot take with a refer
 the branch history can resolve it. A standalone `image_understand` request carries no history,
 so a target that does not take the image's format fails the call with
 `image_understand_failed`: the tool sends no request, returns no answer and writes no reuse
-stamp. It never asks a model about an image the request does not carry.
+stamp. It never asks a model about an image the request does not carry. Reuse follows the same
+rule: the call reads the protocol of the route that serves its target now before it returns a
+committed answer or waits for one in flight, and fails the same way when that route does not
+take the image's format (§6).
 
 ## 4. Model choice and execution
 
 Each call resolves `modality.image.understand` through Modality's typed read (§5, M1) and uses
-the resulting target for that call and its retries. Explicit, configured default and automatic
-precedence, and the reason an unavailable target reports, are Modality's rule; this design
-consumes the answer.
+the resulting target for that call and its retries. It also reads the protocol of the route
+that serves that target now through Provider's `modelSelectionHost` (§3, §6). Explicit,
+configured default and automatic precedence, and the reason an unavailable target reports, are
+Modality's rule; this design consumes the answer.
 
 Execution uses the `auxiliaryModel` host's named-binding form: the resolved model, an
 instruction fixed by this design (the request's `system`, not the Agent System), one user
@@ -201,7 +205,12 @@ owner changes its own document.
 
 Reuse is limited to the calling branch. Key: the reference, the question bytes, and the
 instruction version. A candidate is reused only when it is a completed, non-truncated answer
-whose resolved target is still the model this call resolves to.
+whose resolved target is still the model this call resolves to, and only when the protocol of
+the route that serves that target now takes the image's format — the same whitelist a request
+follows ([Attachments](Attachments.md) A.1). A route whose protocol the owner does not report
+is an unknown destination and takes the four formats a request may carry. A committed answer is
+returned as it committed, and an answer another caller has in flight is refused before this
+call waits for it; the format read adds no provider call.
 
 The index is derived from committed tool facts of that branch — the calls and their results —
 and is rebuilt lazily, never persisted and never shared across Sessions. Failed, cancelled or
@@ -231,13 +240,13 @@ Rules: [principles §1 and §4](../../architecture/rust-agent/principles.md), [A
 | §4.4 No business meaning in core | No core change: the tool is registered through `toolRegistry`, and the image routing rule — pixels, a reference or a placeholder — stays in ModelProvider as Attachments already owns it. |
 | §4.5 Atomic batches | The design writes no event itself; Loop's ordinary tool-call batch covers the call and its result. |
 | §4.6 Context only from handed-off events | The answer reaches the model only as a tool result; no injection during request preparation. |
-| §4.7 Public events and services only | The part uses `toolRegistry`, `treeCommands.query` with published chain scope (§5 M4) to resolve a reference, the declared `auxiliaryModel` host, `sessionFiles` to read stored image bytes, `guideEntries` for its input-guide entry, and Modality's M1 read. |
+| §4.7 Public events and services only | The part uses `toolRegistry`, `treeCommands.query` with published chain scope (§5 M4) to resolve a reference, the declared `auxiliaryModel` host, `sessionFiles` to read stored image bytes, `guideEntries` for its input-guide entry, Provider's `modelSelectionHost` read for the serving route's protocol, and Modality's M1 read. |
 | §4.8 Requirements to mechanism owners | §5, M1–M4. The existing TimelineTree query gains published chain scope; no new runtime or rutis mechanism. |
 | §4.9 Only facts later decisions use enter the Timeline | Only the ordinary tool facts enter; the digest index is derived and discarded. |
 | §1 Capability and App Server boundary | A Session Capability in its own crate; the App Server only installs it. |
 | ADR 002 D1 Scope | Session: the tool table is the Session's, and a call acts in the calling branch. |
 | ADR 002 D2 No wiring modules | `toolRegistry` by name; nothing names this part. |
-| ADR 002 D3 Scope dependencies | Declares Modality's read and the auxiliary host; Modality does not depend on it, so there is no reload edge. |
+| ADR 002 D3 Scope dependencies | Declares Modality's read, Provider's selection read and the auxiliary host; Modality and Provider do not depend on it, so there is no reload edge. |
 | ADR 002 D4 Configuration | No configuration: limits and instruction are fixed here; the model is Modality's setting. |
 | ADR 002 D5 Language-neutral contracts | The tool declaration, its parameters, its errors and the reference string are neutral; a Rust binding is this crate. |
 | ADR 003 Approval scope | Admission is the declaration's risk class, not a per-call decision on the configured understanding model (§2). |
@@ -250,6 +259,9 @@ Rules: [principles §1 and §4](../../architecture/rust-agent/principles.md), [A
 - Changing the configured `modality.image.understand` model changes the model the fixture's
   provider sees; clearing the default restores automatic resolution; an unavailable default
   fails the call with its reason and no fallback.
+- A completed answer survives a route change that still takes the image's format, and is refused
+  once the same provider and model id serve a route that does not; an answer in flight is not
+  handed to a caller that arrives after the change.
 - A reference from another Session, an unknown digest, an oversized question and a truncated
   answer each produce their stated outcome.
 - Compaction does not break a reference that is still in the branch's history; a cut does for
