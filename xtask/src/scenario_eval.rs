@@ -308,7 +308,7 @@ use rutis::Ctx;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use serde_json::{Value, json};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     ffi::{OsStr, OsString},
     path::{Component, Path, PathBuf},
     process::Stdio,
@@ -2003,6 +2003,13 @@ struct ScenarioFile {
     /// The mid-run move of the default branch, when the scenario runs one.
     #[serde(default)]
     switch: Option<Switch>,
+    /// The mid-run moves of the default branch, in order, when the scenario
+    /// runs more than one: the first waits for its target line's first
+    /// `turn/start` like `switch`, and each later one moves right after the
+    /// one before it. `switch` stays the one-move spelling the committed
+    /// scenarios use.
+    #[serde(default)]
+    moves: Vec<Switch>,
     budget: Budget,
     probes: Vec<Probe>,
 }
@@ -2024,6 +2031,12 @@ pub(crate) struct Switch {
     /// switch.
     #[serde(default)]
     pub(crate) branch_id: Option<String>,
+    /// An input sent to the line this move moved away from, after the move
+    /// and the next input. The note a move writes goes in as `append` input,
+    /// and an append input never starts a turn, so an idle line that lost the
+    /// default branch needs this input to answer at all.
+    #[serde(default)]
+    pub(crate) former_message: Option<String>,
 }
 
 /// The line a [`Switch`] moves to, by role or by id.
@@ -2035,11 +2048,13 @@ pub(crate) enum SwitchTarget {
 }
 
 /// The role a [`SwitchTarget`] names. A tool line is a line the branch tool
-/// opened; the latest one is the line most recently opened that way.
+/// opened; the latest one is the line most recently opened that way. A user
+/// line is the line the scenario's last `session.branch_create` call opened.
 #[derive(Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum SwitchRole {
     LatestToolLine,
+    UserLine,
 }
 
 /// How many further moves a switch makes while the target line is not
@@ -2059,15 +2074,19 @@ struct PendingSwitch {
     retries_left: u32,
 }
 impl PendingSwitch {
-    fn new(switch: Switch) -> Self {
+    /// `chained` switches fire right after the move before them instead of
+    /// waiting for their target's first `turn/start`: a second move runs on
+    /// a line that may have started its first turn before the run reached it.
+    fn new(switch: Switch, user_line: Option<&str>, chained: bool) -> Self {
         let line = match &switch.to {
             SwitchTarget::Id(id) => Some(id.clone()),
-            SwitchTarget::Role(_) => None,
+            SwitchTarget::Role(SwitchRole::UserLine) => user_line.map(str::to_owned),
+            SwitchTarget::Role(SwitchRole::LatestToolLine) => None,
         };
         Self {
             switch,
             line,
-            triggered: false,
+            triggered: chained,
             retries_left: UNKNOWN_BRANCH_RETRIES,
         }
     }
@@ -2078,14 +2097,13 @@ impl PendingSwitch {
     /// afterwards has its own purpose, and the move and the input after it
     /// stay with the line that started.
     fn notice(&mut self, branch: &str, event: &Value) {
-        if self.triggered {
-            return;
-        }
         if event["type"] == "branch" && event["name"] == "create" {
-            if matches!(
-                &self.switch.to,
-                SwitchTarget::Role(SwitchRole::LatestToolLine)
-            ) && event["data"]["source"]["kind"] == "tool"
+            if (!self.triggered || self.line.is_none())
+                && matches!(
+                    &self.switch.to,
+                    SwitchTarget::Role(SwitchRole::LatestToolLine)
+                )
+                && event["data"]["source"]["kind"] == "tool"
                 && let Some(line) = event["data"]["branch"].as_str()
             {
                 self.line = Some(line.to_owned());
@@ -2232,6 +2250,9 @@ pub(crate) struct Scenario {
     /// The mid-run move of the default branch, when the scenario runs one.
     #[serde(default)]
     pub(crate) switch: Option<Switch>,
+    /// The mid-run moves after `switch`, in order.
+    #[serde(default)]
+    pub(crate) moves: Vec<Switch>,
     pub(crate) budget: Budget,
     probes: Vec<Probe>,
 }
@@ -2296,7 +2317,7 @@ fn into_scenario(
             }
         }
     }
-    if let Some(switch) = &raw.switch {
+    for switch in raw.switch.iter().chain(&raw.moves) {
         if switch.message.trim().is_empty() {
             return Err("a switch needs the input to send after the move".into());
         }
@@ -2312,6 +2333,28 @@ fn into_scenario(
         {
             return Err("a switch names an empty branch for its input".into());
         }
+        if switch
+            .former_message
+            .as_deref()
+            .is_some_and(|message| message.trim().is_empty())
+        {
+            return Err("a switch's former-default input is empty".into());
+        }
+    }
+    if !raw
+        .calls
+        .iter()
+        .any(|call| call.method == "session.branch_create")
+        && raw
+            .switch
+            .iter()
+            .chain(&raw.moves)
+            .any(|switch| matches!(switch.to, SwitchTarget::Role(SwitchRole::UserLine)))
+    {
+        return Err(
+            "a switch to the user line needs a session.branch_create call before the message"
+                .into(),
+        );
     }
     for call in &raw.calls {
         if call.method.trim().is_empty() {
@@ -2431,6 +2474,7 @@ fn into_scenario(
         events: raw.events,
         steers: raw.steers,
         switch: raw.switch,
+        moves: raw.moves,
         budget: raw.budget,
         probes: raw.probes,
     })
@@ -5946,20 +5990,31 @@ async fn drive(
             return driven;
         }
     }
+    // The line the scenario's last `session.branch_create` call opened: a
+    // switch names it by role, and the reply is where its id is known before
+    // the run starts.
+    let mut user_line: Option<String> = None;
     for (index, call) in scenario.calls.iter().enumerate() {
         let mut params = match &call.params {
             Value::Object(params) => params.clone(),
             _ => serde_json::Map::new(),
         };
         params.insert("sessionId".to_owned(), json!(session));
-        if let Err(error) = client.rpc(&call.method, Value::Object(params)).await {
-            driven.stop = "error";
-            driven.error = Some(format!(
-                "the calls step {} ({}) failed: {error}",
-                index + 1,
-                call.method
-            ));
-            return driven;
+        match client.rpc(&call.method, Value::Object(params)).await {
+            Ok(reply) => {
+                if call.method == "session.branch_create" {
+                    user_line = reply["branch"]["branchId"].as_str().map(str::to_owned);
+                }
+            }
+            Err(error) => {
+                driven.stop = "error";
+                driven.error = Some(format!(
+                    "the calls step {} ({}) failed: {error}",
+                    index + 1,
+                    call.method
+                ));
+                return driven;
+            }
         }
     }
     for source in &scenario.sources {
@@ -5997,7 +6052,27 @@ async fn drive(
         .cloned()
         .map(|steer| (steer, false))
         .collect();
-    let mut switch = scenario.switch.clone().map(PendingSwitch::new);
+    // The moves still to make, in order, and the default branch they move
+    // away from. A chained move fires right after the one before it.
+    let mut switches: VecDeque<PendingSwitch> = scenario
+        .switch
+        .iter()
+        .chain(&scenario.moves)
+        .enumerate()
+        .map(|(index, switch)| PendingSwitch::new(switch.clone(), user_line.as_deref(), index > 0))
+        .collect();
+    if switches.iter().any(|pending| {
+        matches!(pending.switch.to, SwitchTarget::Role(SwitchRole::UserLine))
+            && pending.line.is_none()
+    }) {
+        driven.stop = "error";
+        driven.error = Some(
+            "the switch to the user line has no line: the scenario's session.branch_create call answered no branch id"
+                .into(),
+        );
+        return driven;
+    }
+    let mut default = "main".to_owned();
     let mut last_event = Instant::now();
     // The events still to publish, and whether each was.
     let mut events: Vec<(EventSpec, bool)> = scenario
@@ -6059,10 +6134,12 @@ async fn drive(
         // The move and the input after it are bounded by the same absolute
         // deadline the budget check below applies: a reply that never comes
         // must not hold the run past its wall clock (model-prompts §8.1).
-        let line = switch.as_ref().and_then(|pending| pending.line.clone());
+        let line = switches
+            .front()
+            .and_then(|pending| pending.line.clone());
         let fired = match tokio::time::timeout(
             time_left(started, &scenario.budget),
-            fire_switch(client, &session, &mut switch),
+            fire_switch(client, &session, &mut switches, &mut default),
         )
         .await
         {
@@ -6120,7 +6197,7 @@ async fn drive(
         // first in this pass, so a subscription the model made in its last
         // turn has already started the clock and keeps the run open here
         // (EventHub design A.4).
-        let pending = switch.is_some()
+        let pending = !switches.is_empty()
             || steers.iter().any(|(_, fired)| !fired)
             || events.iter().any(|(event, fired)| {
                 !fired
@@ -6187,7 +6264,7 @@ async fn drive(
                                 return driven;
                             }
                         }
-                        if let Some(pending) = switch.as_mut() {
+                        if let Some(pending) = switches.front_mut() {
                             pending.notice(&branch, &event);
                         }
                         match fire_triggered(client, &session, &mut steers, &event).await {
@@ -6315,7 +6392,7 @@ async fn drive(
             }
         }
     }
-    if let Some(pending) = &switch {
+    if let Some(pending) = switches.front() {
         let reason = match (&pending.line, pending.triggered) {
             (Some(line), true) => format!(
                 "the move to line {line} did not complete before the run stopped on {}",
@@ -6326,7 +6403,7 @@ async fn drive(
                 driven.stop
             ),
             (None, _) => format!(
-                "the switch never fired: no tool line was opened before the run stopped on {}",
+                "the switch never fired: the line its role names was never opened before the run stopped on {}",
                 driven.stop
             ),
         };
@@ -7242,25 +7319,26 @@ fn unknown_branch(error: &dim_client::Error) -> bool {
             .is_some_and(|error| error.message.starts_with("unknown branch:"))
 }
 
-/// Runs the scenario's switch once the target line has started its first turn:
-/// the Session's default branch moves first, then the next input is submitted,
-/// naming a line only when the scenario does. A switch fires once; a later
-/// call leaves it unfired.
+/// Runs the next move once it is due: the Session's default branch moves
+/// first, then the next input is submitted, naming a line only when the
+/// scenario does, and then the input meant for the line it moved away from.
+/// A move fires once and leaves the queue; the move after it fires on the next
+/// call.
 async fn fire_switch(
     client: &mut impl SwitchClient,
     session: &str,
-    switch: &mut Option<PendingSwitch>,
+    switches: &mut VecDeque<PendingSwitch>,
+    default: &mut String,
 ) -> std::result::Result<SwitchFire, String> {
-    let Some(pending) = switch.as_mut() else {
+    let Some(pending) = switches.front_mut() else {
         return Ok(SwitchFire::NotFired);
     };
     if !pending.triggered {
         return Ok(SwitchFire::NotFired);
     }
-    let line = pending
-        .line
-        .clone()
-        .expect("a triggered switch names its line");
+    let Some(line) = pending.line.clone() else {
+        return Ok(SwitchFire::NotFired);
+    };
     if let Err(error) = client
         .rpc(
             "session.branch_set_default",
@@ -7269,7 +7347,7 @@ async fn fire_switch(
         .await
     {
         if let Some("branch_ended" | "branch_target_protected") = dim_client::app_error(&error) {
-            switch.take();
+            switches.pop_front();
             return Ok(SwitchFire::TargetEnded {
                 line: line.clone(),
                 error: error.to_string(),
@@ -7280,7 +7358,7 @@ async fn fire_switch(
                 pending.retries_left -= 1;
                 return Ok(SwitchFire::Retry);
             }
-            switch.take();
+            switches.pop_front();
             return Ok(SwitchFire::TargetUnknown {
                 line: line.clone(),
                 error: error.to_string(),
@@ -7288,7 +7366,11 @@ async fn fire_switch(
         }
         return Err(format!("the switch to {line} failed: {error}"));
     }
-    let pending = switch.take().expect("the switch is pending");
+    let pending = switches.pop_front().expect("the switch is pending");
+    if let Some(next) = switches.front_mut() {
+        next.triggered = true;
+    }
+    let former = std::mem::replace(default, line);
     submit(
         client,
         session,
@@ -7297,6 +7379,9 @@ async fn fire_switch(
         pending.switch.branch_id.as_deref(),
     )
     .await?;
+    if let Some(message) = pending.switch.former_message.as_deref() {
+        submit(client, session, message, None, Some(former.as_str())).await?;
+    }
     Ok(SwitchFire::Fired)
 }
 
@@ -8399,6 +8484,7 @@ mod tests {
             events: Vec::new(),
             steers: Vec::new(),
             switch: None,
+            moves: Vec::new(),
             budget: Budget {
                 turns: 4,
                 seconds: 60.,
@@ -8671,11 +8757,16 @@ mod tests {
             json!({"type": "branch", "name": "create",
                    "data": {"branch": branch, "source": {"kind": kind}}})
         };
-        let mut pending = PendingSwitch::new(Switch {
-            to: SwitchTarget::Role(SwitchRole::LatestToolLine),
-            message: "next".into(),
-            branch_id: None,
-        });
+        let mut pending = PendingSwitch::new(
+            Switch {
+                to: SwitchTarget::Role(SwitchRole::LatestToolLine),
+                message: "next".into(),
+                branch_id: None,
+                former_message: None,
+            },
+            None,
+            false,
+        );
         pending.notice("main", &turn_start);
         assert!(!pending.triggered, "main's turn starts no switch");
         pending.notice("main", &create("2", "tool"));
@@ -8685,11 +8776,16 @@ mod tests {
         pending.notice("2", &turn_start);
         assert!(pending.triggered, "the target's first turn start is");
         assert_eq!(pending.line.as_deref(), Some("2"));
-        let mut pending = PendingSwitch::new(Switch {
-            to: SwitchTarget::Role(SwitchRole::LatestToolLine),
-            message: "next".into(),
-            branch_id: None,
-        });
+        let mut pending = PendingSwitch::new(
+            Switch {
+                to: SwitchTarget::Role(SwitchRole::LatestToolLine),
+                message: "next".into(),
+                branch_id: None,
+                former_message: None,
+            },
+            None,
+            false,
+        );
         pending.notice("main", &create("2", "tool"));
         pending.notice("3", &turn_start);
         assert!(!pending.triggered, "another line's turn starts no switch");
@@ -8699,13 +8795,168 @@ mod tests {
             !pending.triggered,
             "a line the user opened is not a tool line"
         );
-        let mut pending = PendingSwitch::new(Switch {
-            to: SwitchTarget::Id("4".into()),
-            message: "next".into(),
-            branch_id: None,
-        });
+        let mut pending = PendingSwitch::new(
+            Switch {
+                to: SwitchTarget::Id("4".into()),
+                message: "next".into(),
+                branch_id: None,
+                former_message: None,
+            },
+            None,
+            false,
+        );
         pending.notice("4", &turn_start);
         assert!(pending.triggered);
+    }
+
+    /// A scenario's moves can end on the line its `session.branch_create` call
+    /// opened, and a move can carry the input for the line it moved away from:
+    /// the role and that input parse, and a user-line move without the call is
+    /// refused before any run (design §12.3).
+    #[test]
+    fn a_move_names_the_user_line_and_the_input_for_the_former_default() {
+        let directory = std::env::temp_dir().join(format!(
+            "dim-scenario-eval-user-line-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(directory.join("workspace")).unwrap();
+        let parse = |moves: Value, calls: Value| {
+            let file: ScenarioFile = serde_json::from_value(json!({
+                "message": "first",
+                "calls": calls,
+                "moves": moves,
+                "budget": {"turns": 3, "seconds": 60, "window": 1000},
+                "probes": [{"id": "ran", "kind": "must_show", "text": "it ran"}]
+            }))
+            .unwrap();
+            into_scenario("case".into(), directory.clone(), file)
+        };
+        let create = json!([{"method": "session.branch_create",
+                             "params": {"parentBranchId": "main", "at": 0,
+                                        "prompt": "the user's line"}}]);
+        let scenario = parse(
+            json!([
+                {"to": {"role": "latest_tool_line"}, "message": "second"},
+                {"to": {"role": "user_line"}, "message": "third",
+                 "formerMessage": "report to the user"}
+            ]),
+            create.clone(),
+        )
+        .unwrap();
+        assert_eq!(scenario.moves.len(), 2);
+        assert!(matches!(
+            scenario.moves[1].to,
+            SwitchTarget::Role(SwitchRole::UserLine)
+        ));
+        assert_eq!(
+            scenario.moves[1].former_message.as_deref(),
+            Some("report to the user")
+        );
+        assert!(
+            scenario.switch.is_none(),
+            "a scenario with several moves states them under moves"
+        );
+        let Err(error) = parse(
+            json!([{"to": {"role": "user_line"}, "message": "second"}]),
+            json!([]),
+        ) else {
+            panic!("a user-line move without the call is refused");
+        };
+        assert!(error.contains("session.branch_create"), "{error}");
+        let Err(error) = parse(
+            json!([{"to": {"id": "3"}, "message": "second",
+                    "formerMessage": " "}]),
+            create,
+        ) else {
+            panic!("an empty former-default input is refused");
+        };
+        assert!(error.contains("former-default input is empty"), "{error}");
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    /// A second move fires right after the first, and a move that names a
+    /// former-default input sends it to the line it moved away from: the note
+    /// a move writes goes in as `append` input, which never starts a turn, so
+    /// that input is the only thing that brings the former default line's
+    /// answer (model-prompts §9.8).
+    #[tokio::test]
+    async fn a_second_move_fires_after_the_first_and_wakes_the_former_default() {
+        let create = |line: &str| {
+            json!({"type": "branch", "name": "create",
+                   "data": {"branch": line, "source": {"kind": "tool"}}})
+        };
+        let turn_start = json!({"type": "turn", "name": "start", "data": {}});
+        let mut first = PendingSwitch::new(
+            Switch {
+                to: SwitchTarget::Role(SwitchRole::LatestToolLine),
+                message: "to the tool line".into(),
+                branch_id: None,
+                former_message: None,
+            },
+            None,
+            false,
+        );
+        first.notice("main", &create("2"));
+        first.notice("2", &turn_start);
+        let second = PendingSwitch::new(
+            Switch {
+                to: SwitchTarget::Role(SwitchRole::UserLine),
+                message: "to the user line".into(),
+                branch_id: None,
+                former_message: Some("to the former default".into()),
+            },
+            Some("3"),
+            true,
+        );
+        assert!(
+            second.triggered,
+            "a chained move fires after the move before it"
+        );
+        let mut switches: VecDeque<PendingSwitch> = [first, second].into();
+        let mut default = "main".to_owned();
+        let mut client = SwitchRecorder::default();
+        for move_number in [1, 2] {
+            assert!(
+                matches!(
+                    fire_switch(&mut client, "session", &mut switches, &mut default).await,
+                    Ok(SwitchFire::Fired)
+                ),
+                "move {move_number}"
+            );
+        }
+        assert!(matches!(
+            fire_switch(&mut client, "session", &mut switches, &mut default).await,
+            Ok(SwitchFire::NotFired)
+        ));
+        let calls: Vec<&str> = client
+            .calls
+            .iter()
+            .map(|(method, _)| method.as_str())
+            .collect();
+        assert_eq!(
+            calls,
+            [
+                "session.branch_set_default",
+                "session.submit",
+                "session.branch_set_default",
+                "session.submit",
+                "session.submit"
+            ],
+            "each move runs before its input, and the former default's input follows the move"
+        );
+        assert_eq!(client.calls[0].1["branchId"], "2");
+        assert_eq!(client.calls[2].1["branchId"], "3");
+        assert_eq!(client.calls[3].1["text"], "to the user line");
+        assert!(
+            client.calls[3].1.get("branchId").is_none(),
+            "the next input lands on the new default branch"
+        );
+        assert_eq!(client.calls[4].1["text"], "to the former default");
+        assert_eq!(
+            client.calls[4].1["branchId"], "2",
+            "the former-default input names the line the move moved away from"
+        );
+        assert_eq!(default, "3", "the last move holds the default branch");
     }
 
     /// A switch that has started its target stays with it: a tool line opened
@@ -8718,12 +8969,18 @@ mod tests {
                    "data": {"branch": line, "source": {"kind": "tool"}}})
         };
         let turn_start = json!({"type": "turn", "name": "start", "data": {}});
-        let mut switch = Some(PendingSwitch::new(Switch {
-            to: SwitchTarget::Role(SwitchRole::LatestToolLine),
-            message: "next".into(),
-            branch_id: None,
-        }));
-        let pending = switch.as_mut().expect("the switch is pending");
+        let mut switch: VecDeque<PendingSwitch> = vec![PendingSwitch::new(
+            Switch {
+                to: SwitchTarget::Role(SwitchRole::LatestToolLine),
+                message: "next".into(),
+                branch_id: None,
+                former_message: None,
+            },
+            None,
+            false,
+        )]
+        .into();
+        let pending = switch.front_mut().expect("the switch is pending");
         pending.notice("main", &create("A"));
         pending.notice("A", &turn_start);
         assert!(pending.triggered);
@@ -8732,10 +8989,10 @@ mod tests {
             ..SwitchRecorder::default()
         };
         assert!(matches!(
-            fire_switch(&mut client, "session", &mut switch).await,
+            fire_switch(&mut client, "session", &mut switch, &mut "main".into()).await,
             Ok(SwitchFire::Retry)
         ));
-        let pending = switch.as_mut().expect("the retry keeps the switch");
+        let pending = switch.front_mut().expect("the retry keeps the switch");
         pending.notice("main", &create("B"));
         assert_eq!(
             pending.line.as_deref(),
@@ -8743,7 +9000,7 @@ mod tests {
             "the line that started keeps the move"
         );
         assert!(matches!(
-            fire_switch(&mut client, "session", &mut switch).await,
+            fire_switch(&mut client, "session", &mut switch, &mut "main".into()).await,
             Ok(SwitchFire::Fired)
         ));
         let calls: Vec<&str> = client
@@ -8784,16 +9041,21 @@ mod tests {
         }
     }
 
-    /// A switch whose target has started its first turn, ready to move.
-    fn triggered_switch() -> Option<PendingSwitch> {
-        let mut pending = PendingSwitch::new(Switch {
-            to: SwitchTarget::Id("2".into()),
-            message: "next".into(),
-            branch_id: None,
-        });
+    /// A move whose target has started its first turn, ready to move.
+    fn triggered_switch() -> VecDeque<PendingSwitch> {
+        let mut pending = PendingSwitch::new(
+            Switch {
+                to: SwitchTarget::Id("2".into()),
+                message: "next".into(),
+                branch_id: None,
+                former_message: None,
+            },
+            None,
+            false,
+        );
         pending.notice("2", &json!({"type": "turn", "name": "start", "data": {}}));
         assert!(pending.triggered);
-        Some(pending)
+        vec![pending].into()
     }
 
     /// The tree's `unknown_branch` as the Session protocol answers it: the
@@ -8814,7 +9076,7 @@ mod tests {
         let mut client = SwitchRecorder::default();
         let mut switch = triggered_switch();
         assert!(matches!(
-            fire_switch(&mut client, "session", &mut switch).await,
+            fire_switch(&mut client, "session", &mut switch, &mut "main".into()).await,
             Ok(SwitchFire::Fired)
         ));
         let calls: Vec<&str> = client
@@ -8834,7 +9096,7 @@ mod tests {
             "the next input lands on the new default branch"
         );
         assert!(matches!(
-            fire_switch(&mut client, "session", &mut switch).await,
+            fire_switch(&mut client, "session", &mut switch, &mut "main".into()).await,
             Ok(SwitchFire::NotFired)
         ));
         assert_eq!(client.calls.len(), 2, "a switch fires once");
@@ -8852,7 +9114,7 @@ mod tests {
             ..SwitchRecorder::default()
         };
         let mut switch = triggered_switch();
-        let error = match fire_switch(&mut client, "session", &mut switch).await {
+        let error = match fire_switch(&mut client, "session", &mut switch, &mut "main".into()).await {
             Err(error) => error,
             Ok(outcome) => panic!("the move was refused, not {outcome:?}"),
         };
@@ -8876,12 +9138,15 @@ mod tests {
         };
         let mut switch = triggered_switch();
         assert!(matches!(
-            fire_switch(&mut client, "session", &mut switch).await,
+            fire_switch(&mut client, "session", &mut switch, &mut "main".into()).await,
             Ok(SwitchFire::Retry)
         ));
-        assert!(switch.is_some(), "the switch stays pending for the retry");
+        assert!(
+            !switch.is_empty(),
+            "the switch stays pending for the retry"
+        );
         assert!(matches!(
-            fire_switch(&mut client, "session", &mut switch).await,
+            fire_switch(&mut client, "session", &mut switch, &mut "main".into()).await,
             Ok(SwitchFire::Fired)
         ));
         let calls: Vec<&str> = client
@@ -8899,7 +9164,7 @@ mod tests {
             "the retry moves before it sends the next input"
         );
         assert_eq!(client.calls[2].1["text"], "next");
-        assert!(switch.is_none());
+        assert!(switch.is_empty());
     }
 
     /// A line that never becomes ready is its own outcome after the retry
@@ -8916,21 +9181,21 @@ mod tests {
         for retry in 0..UNKNOWN_BRANCH_RETRIES {
             assert!(
                 matches!(
-                    fire_switch(&mut client, "session", &mut switch).await,
+                    fire_switch(&mut client, "session", &mut switch, &mut "main".into()).await,
                     Ok(SwitchFire::Retry)
                 ),
                 "retry {retry}"
             );
-            assert!(switch.is_some(), "retry {retry}: still pending");
+            assert!(!switch.is_empty(), "retry {retry}: still pending");
         }
-        match fire_switch(&mut client, "session", &mut switch).await {
+        match fire_switch(&mut client, "session", &mut switch, &mut "main".into()).await {
             Ok(SwitchFire::TargetUnknown { line, error }) => {
                 assert_eq!(line, "2");
                 assert!(error.contains("unknown branch"), "{error}");
             }
             outcome => panic!("the unready target is its own outcome, not {outcome:?}"),
         }
-        assert!(switch.is_none());
+        assert!(switch.is_empty());
         assert_eq!(
             client.calls.len(),
             UNKNOWN_BRANCH_RETRIES as usize + 1,
@@ -8964,7 +9229,7 @@ mod tests {
                 ..SwitchRecorder::default()
             };
             let mut switch = triggered_switch();
-            match fire_switch(&mut client, "session", &mut switch).await {
+            match fire_switch(&mut client, "session", &mut switch, &mut "main".into()).await {
                 Ok(SwitchFire::TargetEnded { line, error }) => {
                     assert_eq!(line, "2");
                     assert!(error.contains(code), "{code}: {error}");
@@ -13885,6 +14150,7 @@ mod tests {
             to: SwitchTarget::Id("2".into()),
             message: "next".into(),
             branch_id: None,
+            former_message: None,
         });
         let driven = drive(
             &mut client,
@@ -13933,6 +14199,7 @@ mod tests {
             to: SwitchTarget::Id("2".into()),
             message: "next".into(),
             branch_id: None,
+            former_message: None,
         });
         let driven = drive(
             &mut client,
@@ -13995,6 +14262,7 @@ mod tests {
                 to: SwitchTarget::Id("2".into()),
                 message: "next".into(),
                 branch_id: None,
+                former_message: None,
             });
             let driven = tokio::time::timeout(
                 GUARD,
@@ -14064,6 +14332,7 @@ mod tests {
             to: SwitchTarget::Id("2".into()),
             message: "next".into(),
             branch_id: None,
+            former_message: None,
         });
         let cancel = CancellationToken::new();
         let model = peer_model();
