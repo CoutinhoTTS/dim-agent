@@ -14417,10 +14417,8 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_chained_switch_uses_the_tool_line_the_run_has_seen() {
-        let directory = std::env::temp_dir().join(format!(
-            "dim-scenario-eval-chained-tool-line-{}",
-            std::process::id()
-        ));
+        let directory =
+            std::env::temp_dir().join(format!("dim-scenario-eval-chained-{}", std::process::id()));
         let (socket, reads) = scripted_peer(
             &directory,
             8_000,
@@ -14478,7 +14476,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_chained_switch_waits_for_the_tool_line_opened_after_it_was_activated() {
         let directory = std::env::temp_dir().join(format!(
-            "dim-scenario-eval-chained-tool-line-later-{}",
+            "dim-scenario-eval-chained-later-{}",
             std::process::id()
         ));
         let (socket, reads) = scripted_peer(
