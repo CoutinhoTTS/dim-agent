@@ -216,6 +216,7 @@ pub async fn chat(
     };
     let mut display = Display::new(interactive, options.json);
     display.retries = !matches!(options.action, Action::Exec);
+    display.final_reply_only = matches!(options.action, Action::Exec) && !options.json;
     for note in &notes {
         display.record(note)?;
     }
@@ -587,6 +588,7 @@ pub async fn chat(
         Ok(0)
     }
     .await;
+    display.close_reply()?;
     display.finish_text()?;
     let detached = tokio::time::timeout(
         std::time::Duration::from_secs(5),
@@ -728,11 +730,13 @@ async fn wait_turn(
         }
         Some(Submission::Message(mut user)) => {
             crate::images::import(client, session_id, &mut user.content).await?;
-            let mut params = json!({"sessionId":session_id,"branchId":DEFAULT_BRANCH_ID,"submissionId":uuid::Uuid::new_v4().to_string(),"mode":"queue"});
+            let submission_id = uuid::Uuid::new_v4().to_string();
+            let mut params = json!({"sessionId":session_id,"branchId":DEFAULT_BRANCH_ID,"submissionId":submission_id.clone(),"mode":"queue"});
             match user.content.as_slice() {
                 [ContentBlock::Text { text }] => params["text"] = json!(text),
                 _ => params["user"] = json!(user),
             }
+            display.submitting(submission_id);
             Some(client.send("session.submit", params).await?)
         }
         None => None,
@@ -772,12 +776,15 @@ async fn wait_turn(
             && rule_write.is_none()
             && questions.idle(input.is_none() || code == 0)
         {
+            display.close_reply()?;
             display.cursor = display.cursor.max(sequence);
             display.finish_text()?;
             return Ok(if code != 0 {
                 code
             } else if display.failed {
                 2
+            } else if display.reply_input_deleted() {
+                1
             } else {
                 0
             });
@@ -872,6 +879,7 @@ async fn wait_turn(
                         "Interactive answer required; stopping. Rerun in a terminal to answer it",
                     )?;
                     code = 3;
+                    display.close_reply()?;
                 }
                 for branch_id in &branches {
                     questions
@@ -898,8 +906,9 @@ async fn wait_turn(
         } else {
             tokio::select! {
                 _ = interrupts.recv() => {
+                    display.close_reply()?;
                     if settled.is_some() && stop.is_none() && questions.asking() {
-                        if !display.json { println!(); }
+                        display.finish_interrupt()?;
                         questions.interrupt(client, session_id).await?;
                         code = 130;
                         continue;
@@ -908,7 +917,7 @@ async fn wait_turn(
                         display.record("[stopping] Still waiting for resource settlement")?;
                         continue;
                     }
-                    if !display.json { println!(); }
+                    display.finish_interrupt()?;
                     if let Some(run) = shell
                         .as_mut()
                         .filter(|run| !prompted && !questions.asking() && !run.stopping)
@@ -1105,15 +1114,19 @@ async fn wait_turn(
                 }
             }
             Message::Response { id, result } if Some(id) == submit => {
-                let written = match result {
-                    Ok(written) => written,
+                let written: crate::wire::SubmissionReceipt = match result {
+                    Ok(written) => serde_json::from_value(written)
+                        .map_err(|error| format!("Invalid submission receipt: {error}"))?,
                     Err(error) => match error.data.as_ref().and_then(|data| data.get("appError")).and_then(Value::as_str) {
                         Some("invalid_params" | "session_invalid_input" | "session_closed" | "session_build_failed" | "service_reloading" | "unknown_method" | "input_blocked") => return Err(error.into()),
                         _ => return Err(format!("Submission outcome could not be confirmed: {error}. The input may already be queued; resume the session instead of sending it again").into()),
                     },
                 };
+                if !written.event.id.is_empty() {
+                    display.accepted(written.event.id)?;
+                }
                 // A check's warning names work the input was written without.
-                for warning in crate::wire::warnings(&written) {
+                for warning in written.warnings {
                     display.record(&warning.message)?;
                 }
                 if let Some(draft) = draft.take() {
@@ -1264,6 +1277,7 @@ async fn wait_turn(
                     display.record("Interactive approval required; the operation was denied. Rerun in a terminal to review it")?;
                     approval_replies.insert(client.send("approval.respond", json!({"sessionId":session_id,"branchId":approval.branch_id,"requestId":approval.request_id,"decision":"deny"})).await?);
                     code = 3;
+                    display.close_reply()?;
                     stop = Some(client.send("session.stop", json!({"sessionId":session_id,"branchId":DEFAULT_BRANCH_ID,"reason":"Interactive approval required"})).await?);
                 } else {
                     approvals.push_back(approval);
@@ -1362,6 +1376,7 @@ fn render(notice: Message, session_id: &str, display: &mut Display) -> Result<()
     if display.json {
         if params["sessionId"].as_str() == Some(session_id) {
             if method == "session.closed" {
+                display.close_reply()?;
                 return Err("Session closed while attached".into());
             }
             let event = &params["event"];
@@ -1426,6 +1441,7 @@ fn render(notice: Message, session_id: &str, display: &mut Display) -> Result<()
             }
         }
         "session.closed" if params["sessionId"].as_str() == Some(session_id) => {
+            display.close_reply()?;
             return Err("Session closed while attached".into());
         }
         _ => {}

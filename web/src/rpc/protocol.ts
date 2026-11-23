@@ -9,3 +9,15 @@ export const ROOT_BRANCH_ID = "main"
  * follow a Session whose default branch has moved.
  */
 export const DEFAULT_BRANCH_ID = ROOT_BRANCH_ID
+
+export type Delegation = {
+  id: string
+  title: string
+  prompt: string
+  at: number
+  state: "starting" | "running" | "completed" | "failed" | "cancelled"
+  memberId?: string
+  agentId?: string
+  result?: string
+  reason?: string
+}
