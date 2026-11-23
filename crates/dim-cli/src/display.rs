@@ -356,12 +356,7 @@ impl Display {
     /// unsettled earlier in the turn is diagnostics.
     fn observe_request(&mut self, turn: &str, request: &str) -> Result<()> {
         let order = self.note_request(request);
-        if self.owns(turn) == Some(false)
-            || self
-                .held
-                .iter()
-                .any(|held| held.request == request)
-        {
+        if self.owns(turn) == Some(false) || self.held.iter().any(|held| held.request == request) {
             return Ok(());
         }
         self.demote_before(turn, order)?;
