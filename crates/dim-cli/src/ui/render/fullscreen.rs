@@ -2716,21 +2716,26 @@ mod tests {
 
     #[test]
     fn following_streamed_rows_keeps_the_dock_and_does_not_resend_retained_text() {
-        let (mut screen, mut emu) = setup();
         let mut doc = Doc::new();
         doc.say(&["history"; 20]);
         let rows = [
             "alpha", "bravo", "charlie", "delta", "echo", "界", "golf", "hotel",
         ];
-        draw(&mut screen, &mut emu, &frame(&rows[..6], &DOCK), &doc);
-        let patch = draw(&mut screen, &mut emu, &frame(&rows, &DOCK), &doc);
-        assert!(!String::from_utf8_lossy(&patch).contains("delta"));
-        let after = (emu.rows_text(), emu.cx, emu.cy);
-        screen.invalidate();
-        draw(&mut screen, &mut emu, &frame(&rows, &DOCK), &doc);
-        assert_eq!(after, (emu.rows_text(), emu.cx, emu.cy));
-        assert_eq!(emu.row(6), DOCK[0]);
-        assert_eq!(emu.row(7), DOCK[1]);
+        for synchronized in [false, true] {
+            let mut screen = FullScreen::new(SIZE, synchronized);
+            let mut emu = Emu::new(SIZE.0.into(), SIZE.1.into());
+            draw(&mut screen, &mut emu, &frame(&rows[..6], &DOCK), &doc);
+            let patch = draw(&mut screen, &mut emu, &frame(&rows, &DOCK), &doc);
+            assert_eq!(patch.starts_with(BEGIN_SYNC), synchronized);
+            assert_eq!(patch.ends_with(END_SYNC), synchronized);
+            assert!(!String::from_utf8_lossy(&patch).contains("delta"));
+            let after = (emu.rows_text(), emu.cx, emu.cy);
+            screen.invalidate();
+            draw(&mut screen, &mut emu, &frame(&rows, &DOCK), &doc);
+            assert_eq!(after, (emu.rows_text(), emu.cx, emu.cy));
+            assert_eq!(emu.row(6), DOCK[0]);
+            assert_eq!(emu.row(7), DOCK[1]);
+        }
     }
 
     #[test]
@@ -2798,6 +2803,12 @@ mod tests {
             assert_eq!(emu.row(SIZE.1 as usize - 1), new);
             assert!(!bytes.windows(ERASE_LINE.len()).any(|s| s == ERASE_LINE));
             assert!(String::from_utf8_lossy(&bytes).contains(patch));
+        }
+        for (old, new) in [("│ abc │", "╭ abc ╮"), ("ab界", "abc")] {
+            draw(&mut screen, &mut emu, &frame(&[], &[old]), &doc);
+            let bytes = draw(&mut screen, &mut emu, &frame(&[], &[new]), &doc);
+            assert!(bytes.windows(ERASE_LINE.len()).any(|s| s == ERASE_LINE));
+            assert_eq!(emu.row(SIZE.1 as usize - 1), new);
         }
     }
 
