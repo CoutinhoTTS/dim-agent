@@ -1063,4 +1063,91 @@ mod tests {
             "the replacement ends the attempt before its thinking is shown: {result:?}"
         );
     }
+
+    /// A cancelled request ends before an item that is ready at the same
+    /// time; with both branches ready the choice must not be left to chance.
+    #[tokio::test(start_paused = true)]
+    async fn a_cancelled_request_ends_before_a_ready_item() {
+        for attempt in 0..32 {
+            let gate = Arc::new(OutputGate::default());
+            let progress = Arc::new(StateCell::new(ModelProgress::default()));
+            let mut output = Output::new(timeline("main").await, gate.clone(), progress, scope());
+            gate.replace();
+            let cancel = CancellationToken::new();
+            cancel.cancel();
+            let chunks: Vec<std::result::Result<ModelChunk, HostError>> = vec![Err(cut())];
+            let stream: ModelStream = Box::pin(stream::iter(chunks));
+            let mut replay_safe = true;
+            let result = consume_output(stream, &mut output, cancel, &mut replay_safe).await;
+            assert!(
+                matches!(result, Err(HostError::Cancelled(_))),
+                "attempt {attempt}: cancellation wins over a ready item: {result:?}"
+            );
+        }
+    }
+
+    /// Thinking that keeps arriving still shows within the interval: the
+    /// deadline is not starved by the next chunk.
+    #[tokio::test(start_paused = true)]
+    async fn a_continuous_thinking_stream_shows_within_the_interval() {
+        let gate = Arc::new(OutputGate::default());
+        let progress = Arc::new(StateCell::new(ModelProgress::default()));
+        let mut output = Output::new(
+            timeline("main").await,
+            gate,
+            progress.clone(),
+            scope(),
+        );
+        let read = progress.clone();
+        let stream: ModelStream = Box::pin(stream::unfold(0u8, move |step| {
+            let read = read.clone();
+            async move {
+                match step {
+                    0 => Some((
+                        Ok(ModelChunk::MessageStart {
+                            message_id: "m".into(),
+                        }),
+                        1,
+                    )),
+                    1..=3 => {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        Some((Ok(ModelChunk::Thinking("abc".into())), step + 1))
+                    }
+                    4 => {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        assert_eq!(
+                            read.get().thinking,
+                            "abcabcabc",
+                            "the interval shows the buffered thinking while deltas keep arriving"
+                        );
+                        Some((Ok(ModelChunk::Thinking("d".into())), 5))
+                    }
+                    5 => Some((
+                        Ok(ModelChunk::ThinkingEnd {
+                            thinking: "abcabcd".into(),
+                        }),
+                        6,
+                    )),
+                    6 => Some((
+                        Ok(ModelChunk::MessageStop {
+                            message_id: "m".into(),
+                            reason: ModelStopReason::EndTurn,
+                        }),
+                        7,
+                    )),
+                    _ => None,
+                }
+            }
+        }));
+        let mut replay_safe = true;
+        let result = consume_output(
+            stream,
+            &mut output,
+            CancellationToken::new(),
+            &mut replay_safe,
+        )
+        .await;
+        assert!(result.is_ok(), "the attempt completes: {result:?}");
+        assert_eq!(output.committed_thinking, "abcabcd");
+    }
 }
