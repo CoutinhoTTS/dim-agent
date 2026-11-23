@@ -1806,10 +1806,12 @@ impl Projection {
             return;
         }
         let index = self.open_thinking(request_id);
-        self.thinking_rows
-            .get_mut(request_id)
-            .expect("opened above")
-            .part_id = progress.thinking_part_id.clone();
+        if progress.thinking_part_id.is_some() {
+            self.thinking_rows
+                .get_mut(request_id)
+                .expect("opened above")
+                .part_id = progress.thinking_part_id.clone();
+        }
         if let Some(started_at) = progress.thinking_started_at {
             self.thinking_rows
                 .get_mut(request_id)

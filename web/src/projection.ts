@@ -292,7 +292,7 @@ export class Projection {
       this.showedOutput.add(requestId)
       this.showedThinking.add(requestId)
       const thought = this.openThinking(requestId)
-      thought.partId = progress.thinkingPartId
+      if (progress.thinkingPartId !== undefined) thought.partId = progress.thinkingPartId
       if (progress.thinkingStartedAt !== undefined && !this.thoughtStarts.has(requestId)) this.thoughtStarts.set(requestId, progress.thinkingStartedAt)
       thought.progress = { text: progress.thinking, offset: progress.thinkingOffset }
       this.update(thought.index, { text: shown(thought) })
