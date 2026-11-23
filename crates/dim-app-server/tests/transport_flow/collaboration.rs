@@ -8470,11 +8470,17 @@ async fn member_approval_cancellation_and_policy_tightening_never_execute_a_late
             let _ = client.rpc("approval.respond", json!({"sessionId":lead,"branchId":"main","requestId":request_id,"decision":"allow"})).await;
             returned(&mut client, lead, &leader, index + 1).await;
             if let Some(child) = child {
-                let idle = member.idle(&child);
-                tokio::time::timeout(Duration::from_secs(5), idle)
+                let idle = tokio::time::timeout(Duration::from_secs(5), member.idle(&child))
                     .await
-                    .unwrap()
                     .unwrap();
+                if action == "close" {
+                    assert!(
+                        matches!(&idle, Err(dim_agent_runtime::AgentError::Closed(_))),
+                        "{action}: close ends the member Session: {idle:?}"
+                    );
+                } else {
+                    idle.unwrap();
+                }
             }
             let ended = client.rpc("session.collaboration.approval.get", json!({"sessionId":lead,"branchId":"main","requestId":request_id})).await;
             assert_eq!(ended["result"]["state"], "ended", "{action}");
