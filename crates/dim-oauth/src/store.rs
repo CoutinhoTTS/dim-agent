@@ -470,16 +470,27 @@ impl Store {
     pub fn account(&self) -> watch::Receiver<Option<bool>> {
         self.account.subscribe()
     }
-    /// Reads the account file under its lease and publishes the signed-in
-    /// state it stores. The observation is read-only: it never creates,
-    /// normalizes or rewrites `auth.json`, so a shared file another writer
-    /// populated stays as it is. A missing Dim record publishes signed out; a
-    /// record this build cannot validate leaves the watch as it was. The lease
-    /// keeps a concurrent write from overtaking the read; a later write moves
-    /// the watch again.
-    pub async fn observe_account(&self) -> Result<()> {
-        let mut file = self.open(None).await?;
+    /// Publishes the signed-in state the account file stores. An observation
+    /// whose validated state already equals the watch answers from the atomic
+    /// read without the lease; the first observation, or one whose state
+    /// differs, takes the lease, rereads the file and publishes what that read
+    /// holds. The observation is read-only: it never creates, normalizes or
+    /// rewrites `auth.json`, so a shared file another writer populated stays as
+    /// it is. A missing file is a home that never signed in and publishes
+    /// signed out; a record this build cannot validate leaves the watch as it
+    /// was. `cancel` ends a wait for the lease, so a caller that gives up does
+    /// not leave a retry behind.
+    pub async fn observe_account(&self, cancel: Option<&CancellationToken>) -> Result<()> {
+        if let Some(current) = self.observed_current().await
+            && *self.account.borrow() == Some(current)
+        {
+            return Ok(());
+        }
+        let mut file = self.open(cancel).await?;
         let (doc, _) = file.read().await?;
+        if cancel.is_some_and(CancellationToken::is_cancelled) {
+            return Err(ManagedError::ServiceReloading);
+        }
         file.publish(&doc);
         Ok(())
     }
@@ -495,7 +506,12 @@ impl Store {
             if self.stopping.is_cancelled() || cancel.is_cancelled() {
                 return Err(ManagedError::ServiceReloading);
             }
-            match self.files.lock(&path, &self.stopping).await {
+            let attempt = tokio::select! {
+                _ = self.stopping.cancelled() => return Err(ManagedError::ServiceReloading),
+                _ = cancel.cancelled() => return Err(ManagedError::ServiceReloading),
+                attempt = self.files.lock(&path, &self.stopping) => attempt,
+            };
+            match attempt {
                 Ok(lease) => return Ok(lease),
                 Err(FileStorageError::Locked) => tokio::select! {
                     _ = self.stopping.cancelled() => {}
@@ -511,6 +527,23 @@ impl Store {
             lease: self.lease(AUTH_FILE, cancel).await?,
             account: self.account.clone(),
         })
+    }
+
+    /// The signed-in state the account file stores, read without its lease.
+    /// A missing file is a home that never signed in; an unreadable or invalid
+    /// record returns `None`, which sends the observation down the leased path
+    /// that publishes it.
+    async fn observed_current(&self) -> Option<bool> {
+        let path = self.files.path(self.root, AUTH_FILE).ok()?;
+        let bytes = match self.files.read(&path, &CancellationToken::new()).await {
+            Ok(bytes) => bytes,
+            Err(FileStorageError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
+                return Some(false);
+            }
+            Err(_) => return None,
+        };
+        let doc = document(&bytes).ok()?;
+        signed_in(&doc)
     }
 
     /// Reads the account file without its lease. Writes are atomic replaces,

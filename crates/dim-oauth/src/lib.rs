@@ -212,6 +212,14 @@ impl Drop for CatalogWaiter {
     }
 }
 
+/// Cancels the operation it guards when its caller drops the wait.
+struct CancelOnDrop(CancellationToken);
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
+
 struct Inner {
     store: Store,
     client: Client,
@@ -305,7 +313,7 @@ impl Inner {
     /// validated; a failed read leaves the watch uninitialized, and the next
     /// write still moves it.
     async fn initialize_account(self: Arc<Self>) {
-        let _ = self.store.observe_account().await;
+        let _ = self.store.observe_account(None).await;
     }
     fn update(&self, id: &str, change: impl FnOnce(&mut Attempt)) {
         if let Some(attempt) = self.attempts.lock().unwrap().get_mut(id) {
@@ -1100,11 +1108,19 @@ impl ManagedProvider for DimOAuth {
     fn subscribe_account(&self) -> tokio::sync::watch::Receiver<Option<bool>> {
         self.0.store.account()
     }
+    /// The observation belongs to the caller: dropping the wait ends its lease
+    /// wait instead of leaving a retry behind.
     fn observe_account(&self, provider: &str) -> ManagedFuture<()> {
         let provider = provider.to_owned();
-        self.owned(|inner| async move {
+        let cancel = CancellationToken::new();
+        let guard = CancelOnDrop(cancel.clone());
+        let operation = self.owned(move |inner| async move {
             input(&provider)?;
-            inner.store.observe_account().await
+            inner.store.observe_account(Some(&cancel)).await
+        });
+        Box::pin(async move {
+            let _guard = guard;
+            operation.await
         })
     }
     fn recover(&self, provider: &str) -> ManagedFuture<AccountSnapshot> {
