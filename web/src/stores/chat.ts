@@ -112,8 +112,8 @@ type Channel = {
   historyRunning: boolean
   /** The goal refresh running now; a caller that arrives meanwhile waits for its result. */
   goalTask: Promise<boolean> | undefined
-  /** The lines a pending or running refresh still has to read, oldest first. */
-  goalLines: string[]
+  /** The lines a pending or running refresh still has to read, with the centre projection each read belongs to (none for a side line), oldest first. */
+  goalLines: { line: string; projection: Projection | undefined }[]
   publishTimer: ReturnType<typeof setTimeout> | undefined
 }
 
@@ -363,9 +363,13 @@ export const useChatStore = defineStore("chat", () => {
       // The centre's events that arrived while these reads were out waited on
       // the failed page's stream, which applies nothing: the guarded success
       // resumes its consumer, so a reply that landed in that interval shows in
-      // order without another event or a resync.
+      // order without another event or a resync. A failure belongs to the
+      // stream this consumer started on: a move, a reload or a close since then
+      // leaves the replacement to the reads of its own line.
+      const stream = channel.main
+      const projection = stream.projection
       void consumeLive(channel, centre).catch(error => {
-        const stream = ensureBranch(channel, centre)
+        if (channel.main !== stream || stream.projection !== projection || !stream.done || closed(view)) return
         stream.error = error instanceof Error ? error.message : String(error)
         stream.syncing = true
         changed(channel)
@@ -567,6 +571,9 @@ export const useChatStore = defineStore("chat", () => {
     useUiStore().followDefault(channel.view.sessionId, branchId)
     channel.branches.delete(branchId)
     branch.opened = true
+    // The outgoing centre's consumer, if it is suspended on that stream's queue,
+    // ends with the handover: its events belong to the line that left the role.
+    if (channel.main !== branch) channel.main.syncing = true
     channel.main = branch
     publish(channel)
   }
@@ -623,19 +630,23 @@ export const useChatStore = defineStore("chat", () => {
    */
   async function refreshGoal(channel: Channel, branchId = channel.view.defaultBranchId): Promise<boolean> {
     if (!channel.view.methods.includes("session.goal.get")) return true
-    if (!channel.goalLines.includes(branchId)) channel.goalLines.push(branchId)
+    // A read asked for while `branchId` is the centre belongs to the projection
+    // it showed then: a move away and back, or a reload, replaces that
+    // projection, and the line's own read decides what the new centre shows.
+    const projection = branchId === channel.view.defaultBranchId ? channel.main.projection : undefined
+    if (!channel.goalLines.some(entry => entry.line === branchId && entry.projection === projection)) channel.goalLines.push({ line: branchId, projection })
     if (channel.goalTask !== undefined) return channel.goalTask
     channel.goalTask = (async () => {
       try {
         while (channel.goalLines.length > 0) {
-          const line = channel.goalLines.shift()!
+          const entry = channel.goalLines.shift()!
           try {
-            const goal = await client().call("session.goal.get", { sessionId: channel.view.sessionId, branchId: line }, readGoal)
-            if (channel.view.defaultBranchId !== line) continue
+            const goal = await client().call("session.goal.get", { sessionId: channel.view.sessionId, branchId: entry.line }, readGoal)
+            if (channel.view.defaultBranchId !== entry.line || (entry.projection !== undefined && channel.main.projection !== entry.projection)) continue
             channel.main.projection.goal = goal
             changed(channel)
           } catch (error) {
-            if (channel.view.defaultBranchId !== line) continue
+            if (channel.view.defaultBranchId !== entry.line || (entry.projection !== undefined && channel.main.projection !== entry.projection)) continue
             // The Session ending and the connection going away are not failures of
             // this read: a closed page stays closed and a lost connection is the
             // reconnect's to report.
@@ -1101,7 +1112,9 @@ export const useChatStore = defineStore("chat", () => {
     await adoptModel(channel, moved, branch).catch(() => undefined)
     if (channel.moves !== move) return
     publish(channel)
-    if (!(await refreshGoal(channel))) {
+    const refreshed = await refreshGoal(channel, moved)
+    if (channel.moves !== move) return
+    if (!refreshed) {
       // A failed read owns the page already. A read that lost the connection
       // leaves the centre's goal unread: the page goes back to the pending
       // state its reconnect reads again instead of a ready page with a stale
