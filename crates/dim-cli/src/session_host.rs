@@ -4722,6 +4722,11 @@ impl Worker {
         }
         let cursor = self.cursors.entry(branch_id.to_owned()).or_default();
         if event.sequence <= *cursor {
+            if replayed {
+                // A cut read moves the cursor to a line's head without
+                // replaying its events; the line list still counts them.
+                self.projection.line_event(branch_id, &event);
+            }
             return;
         }
         *cursor = event.sequence;

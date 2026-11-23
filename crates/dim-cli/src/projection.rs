@@ -125,10 +125,10 @@ impl Projection {
     pub fn line_event(&mut self, parent: &str, event: &Event) {
         match &event.content {
             EventContent::Input(data) if data.user.is_some() => {
-                self.messages
-                    .entry(parent.to_owned())
-                    .or_default()
-                    .push((event.id.clone(), event.sequence));
+                let messages = self.messages.entry(parent.to_owned()).or_default();
+                if !messages.iter().any(|(id, _)| *id == event.id) {
+                    messages.push((event.id.clone(), event.sequence));
+                }
             }
             EventContent::InputDeleted(data) => {
                 if let Some(messages) = self.messages.get_mut(parent) {
