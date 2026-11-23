@@ -1786,7 +1786,10 @@ impl Projection {
         };
         if self.thinking_rows.get(request_id).is_some_and(|thought| {
             thought.written.is_empty()
-                && (progress.thinking.is_empty() && progress.text.is_empty()
+                && (progress.thinking.is_empty()
+                    && progress.text.is_empty()
+                    && progress.thinking_offset == 0
+                    && progress.text_offset == 0
                     || progress.thinking_part_id.is_some()
                         && progress.thinking_part_id != thought.part_id)
         }) {
