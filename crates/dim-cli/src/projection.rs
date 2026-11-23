@@ -3019,6 +3019,140 @@ mod tests {
         );
     }
 
+    /// Every order of `pages`, each page a range of event indices.
+    fn page_orders(pages: &[(usize, usize)]) -> Vec<Vec<(usize, usize)>> {
+        if pages.len() <= 1 {
+            return vec![pages.to_vec()];
+        }
+        let mut orders = Vec::new();
+        for (index, page) in pages.iter().enumerate() {
+            let mut rest = pages.to_vec();
+            rest.remove(index);
+            for mut order in page_orders(&rest) {
+                order.insert(0, *page);
+                orders.push(order);
+            }
+        }
+        orders
+    }
+
+    /// A cut counts what a complete chronological read counts, however the
+    /// history is split into pages and whichever page arrives first,
+    /// overlapping and repeated pages included. A withdrawal before a cut
+    /// leaves its input out of that cut; one after the cut keeps it in.
+    #[test]
+    fn a_cut_counts_the_same_however_its_history_is_paged() {
+        let withdrawal = |sequence: u64, input: &str| {
+            serde_json::json!({
+                "id": format!("deleted-{sequence}"), "sequence": sequence,
+                "create_at": sequence * 1000, "type": "input", "name": "deleted",
+                "data": {"input_id": input},
+            })
+        };
+        let events: Vec<Event> = [
+            user_says(1, "first ask"),
+            user_says(2, "second ask"),
+            line_created(3, "b-a", 2),
+            withdrawal(4, "in-1"),
+            line_created(5, "b-b", 4),
+        ]
+        .into_iter()
+        .map(|event| serde_json::from_value(event).expect("an event"))
+        .collect();
+
+        let counted = |projection: &Projection| {
+            ["b-a", "b-b"].map(|id| {
+                projection
+                    .line_views()
+                    .iter()
+                    .find(|line| line.id == id)
+                    .and_then(|line| line.cut)
+            })
+        };
+        let mut whole = Projection::default();
+        for event in &events {
+            whole.apply("main", event);
+        }
+        let expected = counted(&whole);
+        assert_eq!(
+            expected,
+            [
+                Some(LineCut {
+                    sequence: 2,
+                    messages: 2,
+                }),
+                Some(LineCut {
+                    sequence: 4,
+                    messages: 1,
+                }),
+            ],
+            "the first cut keeps the later-withdrawn message; the second leaves the earlier-withdrawn one out"
+        );
+
+        let run = |pages: &[(usize, usize)]| {
+            let mut projection = Projection::default();
+            projection.missing_history("main");
+            for &(start, end) in pages {
+                for event in &events[start..=end] {
+                    projection.line_event("main", event);
+                }
+            }
+            projection.whole_history("main");
+            assert_eq!(
+                counted(&projection),
+                expected,
+                "pages {pages:?} count what a complete read counts"
+            );
+            for &(start, end) in pages {
+                for event in &events[start..=end] {
+                    projection.line_event("main", event);
+                }
+            }
+            assert_eq!(
+                counted(&projection),
+                expected,
+                "the pages {pages:?} again count nothing twice"
+            );
+        };
+
+        let ranges: Vec<(usize, usize)> = (0..events.len())
+            .flat_map(|start| (start..events.len()).map(move |end| (start, end)))
+            .collect();
+        let mut deliveries = 0;
+        for boundaries in 0u32..(1 << (events.len() - 1)) {
+            let mut pages = Vec::new();
+            let mut start = 0;
+            for end in 0..events.len() {
+                if end == events.len() - 1 || boundaries & (1 << end) != 0 {
+                    pages.push((start, end));
+                    start = end + 1;
+                }
+            }
+            for order in page_orders(&pages) {
+                run(&order);
+                deliveries += 1;
+            }
+        }
+        for first in &ranges {
+            for second in &ranges {
+                for third in &ranges {
+                    let pages = [*first, *second, *third];
+                    if !(0..events.len())
+                        .all(|at| pages.iter().any(|(start, end)| *start <= at && at <= *end))
+                    {
+                        continue;
+                    }
+                    run(&pages);
+                    deliveries += 1;
+                }
+            }
+        }
+        assert_eq!(
+            deliveries, 1642,
+            "every split in every order, plus every delivery of up to three overlapping or repeated pages"
+        );
+    }
+
     #[test]
     fn a_message_is_received_by_the_line_it_names_and_shown_once() {
         let mut line = Projection::for_branch("b-7c");

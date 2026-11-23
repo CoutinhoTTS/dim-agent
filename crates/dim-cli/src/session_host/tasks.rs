@@ -871,6 +871,14 @@ mod tests {
         })
     }
 
+    /// The withdrawal of `input`, as the daemon sends it on the wire and in a page.
+    fn input_deleted(sequence: u64, input: &str) -> serde_json::Value {
+        json!({
+            "id": format!("deleted-{sequence}"), "sequence": sequence, "create_at": 2000,
+            "type": "input", "name": "deleted", "data": {"input_id": input}
+        })
+    }
+
     /// The creation of `branch` in `parent`'s history, cut after `at`.
     fn line_created(sequence: u64, branch: &str, at: u64) -> serde_json::Value {
         json!({
@@ -1471,6 +1479,66 @@ mod tests {
                 messages: 3,
             }),
             "an earlier page that repeats the open page counts nothing twice"
+        );
+    }
+
+    /// The open page carries the withdrawal and a cut after it while the
+    /// withdrawn input sits on an earlier page: the cut after the withdrawal
+    /// leaves the input out, and a cut before it keeps counting the input.
+    #[tokio::test]
+    async fn a_withdrawal_below_the_cursor_keeps_each_cut_at_its_own_sequence() {
+        let (mut worker, _receiver, _sent) =
+            crate::session_host::test_worker(&crate::session_host::TEST_FEATURES).await;
+        a_line_discovered_through_its_cut(&mut worker).await;
+        worker.projection.directory(&listed_line("b-91", "b-7c", 7));
+        assert_eq!(listed(&worker, "b-90").cut, None);
+        assert_eq!(listed(&worker, "b-91").cut, None);
+
+        open_line(
+            &mut worker,
+            "b-7c",
+            json!({
+                "events": [
+                    input_deleted(9, "in-5"),
+                    text(10, "r1", "carry on"),
+                    line_created(12, "b-90", 10),
+                ],
+                "through": 12, "nextBefore": 9, "nextAfter": 12,
+            }),
+        )
+        .await;
+        assert_eq!(
+            listed(&worker, "b-90").cut,
+            None,
+            "the window starts after the line's own start, so its cut counts nothing"
+        );
+
+        worker.task_history.get_mut("b-7c").unwrap().done = true;
+        worker.earlier();
+        worker.poll_task_history().await.unwrap();
+        answer(
+            &mut worker,
+            json!({
+                "events": [said(5, "withdrawn ask"), line_created(8, "b-91", 7)],
+                "through": 12, "nextBefore": 1, "nextAfter": 8,
+            }),
+        )
+        .await;
+        assert_eq!(
+            listed(&worker, "b-91").cut,
+            Some(crate::model::view::LineCut {
+                sequence: 7,
+                messages: 2,
+            }),
+            "a withdrawal after the cut leaves its message in the count"
+        );
+        assert_eq!(
+            listed(&worker, "b-90").cut,
+            Some(crate::model::view::LineCut {
+                sequence: 10,
+                messages: 1,
+            }),
+            "a withdrawal before the cut leaves its message out of the count"
         );
     }
 
