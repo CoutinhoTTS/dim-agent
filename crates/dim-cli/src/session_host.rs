@@ -65,19 +65,6 @@ const PROVIDER_METHODS: [&str; 5] = [
     "provider.probe",
 ];
 
-struct ProviderSummary {
-    provider_id: String,
-    source: String,
-    display_name: String,
-    driver_kind: String,
-    auth: serde_json::Value,
-    base_url: String,
-    credential_configured: bool,
-    glued_prefix: Option<String>,
-    enabled: bool,
-    version: u32,
-    account: Option<AccountDescriptor>,
-}
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ManagementInfo {
@@ -109,6 +96,12 @@ struct ManagementUpdateSummary {
 struct ManagementAccount {
     namespace: String,
     login_methods: Vec<String>,
+    state: Option<ManagementAccountState>,
+}
+
+#[derive(Deserialize)]
+struct ManagementAccountState {
+    account: Option<crate::model::session::Account>,
 }
 /// `provider.update`'s answer to what it did with the record's models when
 /// the patch changed its connection.
@@ -393,6 +386,7 @@ fn catalog_features(entry: Option<CatalogModel>) -> Update {
 struct Login {
     /// The panel's attempt tag for its updates.
     tag: u64,
+    migrate_legacy: bool,
     provider_id: String,
     /// The account namespace the attempt's methods belong to.
     namespace: String,
@@ -476,10 +470,7 @@ async fn run(
         worker.poll_workflow().await;
         worker.poll_context().await;
         worker.poll_compaction().await;
-        let workflow_poll = worker
-            .workflow
-            .next_at
-            .filter(|_| worker.workflow.request.is_none());
+        let workflow_poll = worker.workflow.next_at.filter(|_| worker.workflow_ready());
         let login_poll = worker.login.as_ref().and_then(|login| login.poll_at);
         let output_poll = worker
             .output
@@ -1396,6 +1387,7 @@ impl Worker {
                     self.send(Update::Notice(
                         "Session attachment changed; pick the message again".into(),
                     ));
+                    self.send(Update::ForkFailed);
                     return Ok(());
                 }
                 let forked = self
@@ -1418,6 +1410,7 @@ impl Worker {
                         ) {
                             self.send(Update::Notice(error.to_string()));
                         }
+                        self.send(Update::ForkFailed);
                     }
                 }
             }
@@ -1527,8 +1520,12 @@ impl Worker {
                     self.changed();
                 }
             }
-            // Home, not a Session: the first message creates one.
-            Command::NewSession => self.home(),
+            // Home, not a Session: the first message creates one. Every
+            // `/new` ends here, including the one that was already Home.
+            Command::NewSession => {
+                self.home();
+                self.send(Update::NewSessionDone);
+            }
             Command::DeleteSession { session_id, name } => {
                 let outcome = self.delete_session(&session_id).await;
                 let shown = session_id == self.session_id;
@@ -2003,6 +2000,30 @@ impl Worker {
                     .map_err(|error| error.to_string());
                 self.send(Update::Login(account));
             }
+            Command::ChatGptProfiles => self.chatgpt_profiles().await,
+            Command::SelectChatGptProfile {
+                profile_id,
+                attempt,
+            } => {
+                let result = self
+                    .client
+                    .rpc("account.chatgpt.select", json!({"profileId": profile_id}))
+                    .await;
+                match result {
+                    Ok(_) => {
+                        self.chatgpt_profiles().await;
+                        self.refresh_account_models(
+                            crate::login::CHATGPT_PROVIDER_ID,
+                            attempt,
+                            true,
+                        )
+                        .await;
+                    }
+                    Err(error) => {
+                        self.login_event(attempt, OauthEvent::Done(Err(Some(error.to_string()))))
+                    }
+                }
+            }
             Command::LoginUsage(provider_id) => {
                 let usage = self.account_usage(&provider_id).await;
                 self.send(Update::Usage(usage));
@@ -2017,6 +2038,16 @@ impl Worker {
                     )
                     .await;
                 self.send(Update::Notice(match result {
+                    Ok(reply)
+                        if target.namespace == crate::login::CHATGPT_NAMESPACE
+                            && reply.get("revocationConfirmed").and_then(Value::as_bool)
+                                == Some(false) =>
+                    {
+                        format!(
+                            "Signed out. OpenAI did not confirm revocation. Disconnect Dim at {}.",
+                            crate::login::CHATGPT_USAGE
+                        )
+                    }
                     Ok(_) => "Signed out.".into(),
                     Err(error) => format!("Sign-out failed: {error}"),
                 }));
@@ -3365,38 +3396,84 @@ impl Worker {
         Ok(())
     }
 
-    /// The `/connect` list: every static provider the App Server knows (the
-    /// bundled catalog's and custom ones), as the panel shows them.
     async fn providers(&mut self) -> Result<Vec<ProviderEntry>, String> {
         let current = self.model.as_ref().map(|model| model.provider_id.clone());
-        let listed = self.provider_summaries().await.map_err(|e| e.to_string())?;
-        Ok(listed
+        let entries = self
+            .provider_summaries()
+            .await
+            .map_err(|error| error.to_string())?;
+        entries
             .into_iter()
-            .map(|summary| ProviderEntry {
-                status: if !summary.enabled {
-                    "disabled"
-                } else if summary.credential_configured || summary.auth["type"] == "anonymous" {
-                    "connected"
-                } else {
-                    "disconnected"
-                }
-                .into(),
-                is_current: current.as_deref() == Some(summary.provider_id.as_str()),
-                enabled: summary.enabled,
-                custom: summary.source == "custom",
-                base_url: Some(summary.base_url).filter(|url| !url.is_empty()),
-                api_key_preview: summary.credential_configured.then(|| "••••••••".into()),
-                glued_prefix: summary.glued_prefix,
-                id: summary.provider_id,
-                version: summary.version,
-                name: summary.display_name,
-                driver: summary.driver_kind,
-                account: summary.account,
+            .filter_map(|entry| {
+                let chatgpt = entry
+                    .account
+                    .as_ref()
+                    .is_some_and(|account| account.namespace == crate::login::CHATGPT_NAMESPACE);
+                let ready = entry
+                    .account
+                    .as_ref()
+                    .and_then(|account| account.state.as_ref())
+                    .is_some_and(|state| state.account.is_some());
+                let account = entry.account.map(|account| AccountDescriptor {
+                    namespace: account.namespace,
+                    login_methods: account.login_methods,
+                });
+                let result = match entry.connection {
+                    Some(connection) => {
+                        let Some(enabled) = entry.enabled else {
+                            return Some(Err("Static Provider enable flag is missing".into()));
+                        };
+                        if entry.version.is_none() {
+                            return Some(Err("Static Provider record version is missing".into()));
+                        }
+                        let status = if !enabled {
+                            "disabled"
+                        } else if connection.credential_configured
+                            || connection.auth["type"] == "anonymous"
+                        {
+                            "connected"
+                        } else {
+                            "disconnected"
+                        };
+                        (
+                            status,
+                            enabled,
+                            connection.driver_kind,
+                            Some(connection.base_url).filter(|url| !url.is_empty()),
+                            connection.credential_configured.then(|| "••••••••".into()),
+                            connection.glued_prefix,
+                        )
+                    }
+                    None if chatgpt => (
+                        if ready { "connected" } else { "disconnected" },
+                        true,
+                        entry.provider_id.clone(),
+                        None,
+                        None,
+                        None,
+                    ),
+                    None => return None,
+                };
+                let (status, enabled, driver, base_url, api_key_preview, glued_prefix) = result;
+                Some(Ok(ProviderEntry {
+                    is_current: current.as_deref() == Some(entry.provider_id.as_str()),
+                    status: status.into(),
+                    enabled,
+                    custom: entry.source == "custom",
+                    base_url,
+                    api_key_preview,
+                    glued_prefix,
+                    id: entry.provider_id,
+                    version: entry.version,
+                    name: entry.display_name,
+                    driver,
+                    account,
+                }))
             })
-            .collect())
+            .collect()
     }
 
-    async fn provider_summaries(&mut self) -> crate::Result<Vec<ProviderSummary>> {
+    async fn provider_summaries(&mut self) -> crate::Result<Vec<ManagementInfo>> {
         if !self.client.supports(&PROVIDER_METHODS) {
             return Err("This daemon cannot manage providers".into());
         }
@@ -3423,33 +3500,7 @@ impl Worker {
                 break;
             }
         }
-        providers
-            .into_iter()
-            .filter_map(|entry| {
-                entry.connection.map(|connection| {
-                    Ok(ProviderSummary {
-                        provider_id: entry.provider_id,
-                        source: entry.source,
-                        display_name: entry.display_name,
-                        driver_kind: connection.driver_kind,
-                        auth: connection.auth,
-                        base_url: connection.base_url,
-                        credential_configured: connection.credential_configured,
-                        glued_prefix: connection.glued_prefix,
-                        enabled: entry
-                            .enabled
-                            .ok_or("Static Provider enable flag is missing")?,
-                        version: entry
-                            .version
-                            .ok_or("Static Provider record version is missing")?,
-                        account: entry.account.map(|account| AccountDescriptor {
-                            namespace: account.namespace,
-                            login_methods: account.login_methods,
-                        }),
-                    })
-                })
-            })
-            .collect()
+        Ok(providers)
     }
 
     /// Probe a new connection, then create once using the form's retained UUID.
@@ -4135,6 +4186,15 @@ impl Worker {
         }))
     }
 
+    async fn chatgpt_profiles(&mut self) {
+        let profiles = self
+            .client
+            .typed("account.chatgpt.profiles", json!({}))
+            .await
+            .map_err(|error| error.to_string());
+        self.send(Update::ChatGptProfiles(profiles));
+    }
+
     fn login_event(&self, tag: u64, event: OauthEvent) {
         self.send(Update::Oauth {
             attempt: tag,
@@ -4150,6 +4210,12 @@ impl Worker {
             attempt_id: String,
             authorization_url: String,
             expires_at: u64,
+        }
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum BrowserStep {
+            Browser(Browser),
+            Migrated { migrated: bool },
         }
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase")]
@@ -4199,17 +4265,55 @@ impl Worker {
                 Err(error) => Err(error),
             }
         } else {
-            if managed {
+            let chatgpt = start.namespace == crate::login::CHATGPT_NAMESPACE;
+            let local = std::env::var_os("SSH_CONNECTION").is_none()
+                && std::env::var_os("SSH_TTY").is_none();
+            let capture = if chatgpt && local {
+                crate::mcp::Capture::bind_ipv4("/auth/callback").await.ok()
+            } else {
+                None
+            };
+            if chatgpt {
+                let Some(capture) = &capture else {
+                    self.login_event(
+                        start.attempt,
+                        OauthEvent::Done(Err(Some(
+                            "Continue with ChatGPT from a terminal on this computer.".into(),
+                        ))),
+                    );
+                    return;
+                };
+                params["redirectUri"] = json!(capture.redirect_uri());
+                if start.migrate_legacy {
+                    params["migrateLegacy"] = json!(true);
+                }
+                if let Some(profile) = &start.profile_id {
+                    params["profileId"] = json!(profile);
+                }
+            } else if managed {
                 params["redirectUri"] = json!(self.options.redirect_uri);
             }
-            match self.client.typed::<Browser>(&method, params).await {
-                Ok(browser) => {
-                    let local = std::env::var_os("SSH_CONNECTION").is_none()
-                        && std::env::var_os("SSH_TTY").is_none();
+            match self.client.typed::<BrowserStep>(&method, params).await {
+                Ok(BrowserStep::Migrated { migrated: true }) if start.migrate_legacy => {
+                    self.login_event(start.attempt, OauthEvent::Exchanging);
+                    let providers = self.providers().await;
+                    self.send(Update::Providers(providers));
+                    self.refresh_account_models(&start.provider_id, start.attempt, true)
+                        .await;
+                    return;
+                }
+                Ok(BrowserStep::Migrated { .. }) => {
+                    self.login_event(
+                        start.attempt,
+                        OauthEvent::Done(Err(Some("Unexpected ChatGPT switch reply".into()))),
+                    );
+                    return;
+                }
+                Ok(BrowserStep::Browser(browser)) => {
                     let capture = if local && managed {
                         mcp::Capture::bind(&self.options.redirect_uri).await
                     } else {
-                        None
+                        capture
                     };
                     listener = capture.map(|capture| {
                         let now = std::time::SystemTime::now()
@@ -4247,6 +4351,7 @@ impl Worker {
             Ok(attempt_id) => {
                 self.login = Some(Login {
                     tag: start.attempt,
+                    migrate_legacy: start.migrate_legacy,
                     provider_id: start.provider_id,
                     namespace: start.namespace,
                     attempt_id,
@@ -4362,7 +4467,14 @@ impl Worker {
     }
 
     async fn login_done(&mut self, login: Login) {
-        if login.namespace == ACCOUNT_NAMESPACE {
+        if login.migrate_legacy {
+            let providers = self.providers().await;
+            self.send(Update::Providers(providers));
+        }
+        if matches!(
+            login.namespace.as_str(),
+            ACCOUNT_NAMESPACE | crate::login::CHATGPT_NAMESPACE
+        ) {
             if login.poll_at.is_some() {
                 self.login_event(login.tag, OauthEvent::Exchanging);
             }
@@ -4798,11 +4910,13 @@ impl Worker {
     }
 
     fn line_views(&self) -> Vec<LineView> {
+        let running = |id: &str| self.task_history.get(id).and_then(|branch| branch.running);
         let mut lines = vec![LineView {
             id: ROOT_BRANCH_ID.into(),
             parent: None,
             purpose: String::new(),
             state: LineState::Main,
+            running: running(ROOT_BRANCH_ID),
             cut: None,
         }];
         lines.extend(
@@ -4811,13 +4925,8 @@ impl Worker {
                 .iter()
                 .cloned()
                 .map(|mut line| {
-                    if line.state == LineState::Waiting
-                        && self
-                            .task_history
-                            .get(&line.id)
-                            .and_then(|history| history.running)
-                            == Some(true)
-                    {
+                    line.running = running(&line.id);
+                    if line.state == LineState::Waiting && line.running == Some(true) {
                         line.state = LineState::Working;
                     }
                     line
@@ -4915,7 +5024,6 @@ impl Worker {
             })
         });
         snapshot.focus = self.focus.clone();
-        snapshot.main_running = self.projection.running();
         snapshot.main_topic = self.projection.first_message();
         snapshot.session_title = self.session_title.clone();
         if self.focus != ROOT_BRANCH_ID {
@@ -4955,7 +5063,7 @@ impl Worker {
 }
 
 /// Answers the browser tab the local listener caught a callback from.
-async fn answer_browser(mut stream: tokio::net::TcpStream, completed: bool) {
+pub(crate) async fn answer_browser(mut stream: tokio::net::TcpStream, completed: bool) {
     use tokio::io::AsyncWriteExt;
     let page = if completed {
         "Sign-in completed. You can close this window."
@@ -5422,12 +5530,28 @@ const TEST_FEATURES: [&str; 4] = [
     "session.input.pending.blockPresence",
 ];
 
-/// A worker on a daemon that advertises `features` and answers nothing: the
-/// test supplies each reply itself, through `Worker::message`. Every request
-/// the worker sends is recorded, in order, for the tests that assert on one.
+/// A worker on a daemon that advertises `features` and answers only
+/// `session.attach` and `session.detach`: the test supplies every other reply
+/// itself, through `Worker::message`. Every request the worker sends is
+/// recorded, in order, for the tests that assert on one.
 #[cfg(all(test, unix))]
 async fn test_worker(
     features: &[&str],
+) -> (
+    Worker,
+    mpsc::Receiver<Update>,
+    std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+) {
+    test_worker_answering(features, false, None).await
+}
+
+/// [`test_worker`] with a daemon that refuses `session.fork` with an RPC error
+/// when `fail_fork` is set, and refuses `session.attach` for `refuse_attach`.
+#[cfg(all(test, unix))]
+async fn test_worker_answering(
+    features: &[&str],
+    fail_fork: bool,
+    refuse_attach: Option<&str>,
 ) -> (
     Worker,
     mpsc::Receiver<Update>,
@@ -5450,6 +5574,7 @@ async fn test_worker(
         .collect();
     let sent = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let recorded = std::sync::Arc::clone(&sent);
+    let refuse_attach = refuse_attach.map(str::to_owned);
     tokio::spawn(async move {
         let _home = home;
         let Ok((stream, _)) = listener.accept().await else {
@@ -5462,7 +5587,50 @@ async fn test_worker(
                 return;
             };
             if request["method"] != "hello" {
-                recorded.lock().unwrap().push(request);
+                recorded.lock().unwrap().push(request.clone());
+                if request["method"] == "session.fork" && fail_fork {
+                    let reply = json!({"jsonrpc":"2.0","id":request["id"],"error":{
+                        "code":-32603,"message":"the test daemon refuses the fork"
+                    }});
+                    if writer
+                        .write_all(format!("{reply}\n").as_bytes())
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+                if request["method"] == "session.detach" {
+                    let reply = json!({"jsonrpc":"2.0","id":request["id"],"result":{}});
+                    if writer
+                        .write_all(format!("{reply}\n").as_bytes())
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+                if request["method"] == "session.attach" {
+                    let refused = refuse_attach
+                        .as_deref()
+                        .is_some_and(|id| request["params"]["sessionId"] == id);
+                    let reply = if refused {
+                        json!({"jsonrpc":"2.0","id":request["id"],"error":{
+                            "code":-32603,"message":"the test daemon refuses the attach"
+                        }})
+                    } else {
+                        json!({"jsonrpc":"2.0","id":request["id"],"result":{
+                            "sequence":1,"model":{"providerId":"test","modelId":"test"}
+                        }})
+                    };
+                    if writer
+                        .write_all(format!("{reply}\n").as_bytes())
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
                 continue;
             }
             let reply = json!({"jsonrpc":"2.0","id":request["id"],"result":{
@@ -5549,6 +5717,405 @@ mod tests {
         assert!(
             transcript_mut(&mut main, &mut lines, "unknown").is_none(),
             "an unknown branch has no transcript"
+        );
+    }
+
+    /// A switch publishes the empty projection at once and the daemon's
+    /// state report only later: the empty snapshot carries no state, so the
+    /// interface must not read it as an idle Session.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_switch_publishes_the_placeholder_before_the_sessions_state() {
+        use crate::model::view::ViewSnapshot;
+
+        let (mut worker, mut receiver, _sent) = test_worker(&TEST_FEATURES).await;
+        worker
+            .attach("s2".into(), SwitchKind::Resumed)
+            .await
+            .expect("the switch attaches");
+        let published = |receiver: &mut mpsc::Receiver<Update>| -> Vec<ViewSnapshot> {
+            receiver
+                .try_iter()
+                .filter_map(|update| match update {
+                    Update::Snapshot(view) => Some(*view),
+                    _ => None,
+                })
+                .collect()
+        };
+        let snapshots = published(&mut receiver);
+        let placeholder = snapshots.last().expect("the switch published a snapshot");
+        assert_eq!(placeholder.session_id, "s2");
+        assert!(placeholder.rows.is_empty(), "the projection is still empty");
+        assert!(
+            snapshots
+                .iter()
+                .all(|view| view.lines.iter().all(|line| line.running.is_none())),
+            "the switch has no Session state to report yet"
+        );
+
+        worker
+            .message(Message::Notice {
+                method: "session.state".into(),
+                params: json!({"sessionId":"s2","branchId":"main","running":true}),
+            })
+            .await
+            .unwrap();
+        worker.publish();
+        let reported = published(&mut receiver);
+        let reported = reported
+            .last()
+            .expect("the state report published a snapshot");
+        assert!(
+            reported.lines.iter().all(|line| line.running.is_some()),
+            "the report is the Session's state"
+        );
+        assert!(reported.running, "the report carries the running turn");
+    }
+
+    /// A fork sent with an attachment that has moved on opens no Session, so
+    /// the notice and `ForkFailed` are its only ending.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_stale_fork_ends_with_a_notice_and_fork_failed() {
+        let (mut worker, receiver, _sent) = test_worker(&TEST_FEATURES).await;
+        worker
+            .attach("s2".into(), SwitchKind::Resumed)
+            .await
+            .expect("the switch attaches");
+        receiver.try_iter().for_each(drop);
+        worker
+            .command(Command::Fork {
+                session_id: "s1".into(),
+                projection_id: 0,
+                at: 1,
+            })
+            .await
+            .expect("the stale fork is handled");
+        let mut notices = Vec::new();
+        let mut failed = false;
+        for update in receiver.try_iter() {
+            match update {
+                Update::Notice(message) => notices.push(message),
+                Update::ForkFailed => failed = true,
+                _ => {}
+            }
+        }
+        assert!(
+            notices
+                .iter()
+                .any(|message| message == "Session attachment changed; pick the message again"),
+            "the stale fork says why: {notices:?}"
+        );
+        assert!(failed, "the stale fork ends the wait");
+    }
+
+    /// A fork the daemon refuses with an RPC error ends with `ForkFailed`, so
+    /// the interface stops waiting without a `Switched` for a Session that
+    /// was never opened.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_refused_fork_ends_with_fork_failed() {
+        let (mut worker, receiver, _sent) = test_worker_answering(&TEST_FEATURES, true, None).await;
+        worker
+            .attach("s2".into(), SwitchKind::Resumed)
+            .await
+            .expect("the switch attaches");
+        receiver.try_iter().for_each(drop);
+        let session_id = worker.session_id.clone();
+        let projection_id = worker.projection_id;
+        worker
+            .command(Command::Fork {
+                session_id,
+                projection_id,
+                at: 1,
+            })
+            .await
+            .expect("the refused fork is handled");
+        let mut notices = Vec::new();
+        let mut failed = false;
+        for update in receiver.try_iter() {
+            match update {
+                Update::Notice(message) => notices.push(message),
+                Update::ForkFailed => failed = true,
+                _ => {}
+            }
+        }
+        assert!(failed, "the refused fork ends the wait");
+        assert!(!notices.is_empty(), "the refused fork says why");
+    }
+
+    /// A `/new` is one command: the host ends it once, whether it leaves a
+    /// Session or finds itself already Home. A refused resume reports Home
+    /// with its own kind, so it cannot end the `/new` queued behind it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn every_new_session_command_ends_with_its_own_completion() {
+        let mut features = TEST_FEATURES.to_vec();
+        features.push("report.prepare");
+        let (mut worker, receiver, _sent) =
+            test_worker_answering(&features, false, Some("refused")).await;
+        worker
+            .attach("s1".into(), SwitchKind::Resumed)
+            .await
+            .expect("the switch attaches");
+        receiver.try_iter().for_each(drop);
+
+        worker
+            .command(Command::Resume("refused".into()))
+            .await
+            .expect("the refused resume is handled");
+        let mut resumed_home = false;
+        for update in receiver.try_iter() {
+            match update {
+                Update::Switched {
+                    session_id,
+                    kind: SwitchKind::Resumed,
+                    ..
+                } => {
+                    assert!(session_id.is_empty(), "the refusal reports Home");
+                    resumed_home = true;
+                }
+                Update::NewSessionDone => panic!("the refused resume ended a /new"),
+                _ => {}
+            }
+        }
+        assert!(resumed_home, "the refused resume reports Home");
+
+        worker
+            .command(Command::NewSession)
+            .await
+            .expect("the already-Home /new is handled");
+        assert_eq!(
+            receiver
+                .try_iter()
+                .filter(|update| matches!(update, Update::NewSessionDone))
+                .count(),
+            1,
+            "the already-Home /new has no completion"
+        );
+
+        worker
+            .attach("s1".into(), SwitchKind::Resumed)
+            .await
+            .expect("the switch attaches");
+        receiver.try_iter().for_each(drop);
+        worker
+            .command(Command::NewSession)
+            .await
+            .expect("the /new from a Session is handled");
+        let mut switched = 0;
+        let mut completions = 0;
+        for update in receiver.try_iter() {
+            match update {
+                Update::Switched {
+                    session_id,
+                    kind: SwitchKind::New,
+                    ..
+                } => {
+                    assert!(session_id.is_empty(), "the /new switch reports Home");
+                    switched += 1;
+                }
+                Update::NewSessionDone => completions += 1,
+                _ => {}
+            }
+        }
+        assert_eq!(switched, 1, "the /new from a Session reports Home once");
+        assert_eq!(completions, 1, "the /new from a Session has one completion");
+    }
+
+    /// A turn read answers what the recorded turn looks like, and a turn that
+    /// already ended clears the transcript's running flag. The line's live
+    /// report is a separate observation: it stays what `session.state` said,
+    /// so a history reply cannot make a busy line read as idle.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_turn_read_rewrites_the_transcript_not_the_lines_live_report() {
+        use crate::model::view::ViewSnapshot;
+
+        let (mut worker, mut receiver, _sent) = test_worker(&TEST_FEATURES).await;
+        worker
+            .attach("s2".into(), SwitchKind::Resumed)
+            .await
+            .expect("the switch attaches");
+        let published = |receiver: &mut mpsc::Receiver<Update>| -> ViewSnapshot {
+            receiver
+                .try_iter()
+                .filter_map(|update| match update {
+                    Update::Snapshot(view) => Some(*view),
+                    _ => None,
+                })
+                .last()
+                .expect("the worker published a snapshot")
+        };
+        worker
+            .message(Message::Notice {
+                method: "session.state".into(),
+                params: json!({"sessionId":"s2","branchId":"main","running":true}),
+            })
+            .await
+            .unwrap();
+        worker.publish();
+        let reported = published(&mut receiver);
+        assert_eq!(reported.lines[0].running, Some(true));
+        assert!(reported.running, "the report is main's running turn");
+
+        worker
+            .apply_inventory(
+                DEFAULT_BRANCH_ID,
+                1,
+                "session.turn.get",
+                json!({
+                    "branchId":"main",
+                    "through":1,
+                    "turn":{"turnId":"t-1","sequence":1,"ended":true}
+                }),
+            )
+            .expect("the turn read applies");
+        worker.publish();
+        let replayed = published(&mut receiver);
+        assert!(!replayed.running, "the ended turn rewrites the transcript");
+        assert_eq!(
+            replayed.lines[0].running,
+            Some(true),
+            "the line keeps the daemon's live report"
+        );
+    }
+
+    /// Every live line reports on its own: an idle `main` leaves a known
+    /// child unreported until its own `session.state` arrives, and only then
+    /// does that child's running flag show as work.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn every_live_line_carries_its_own_state_report() {
+        let (mut worker, mut receiver, _sent) = test_worker(&TEST_FEATURES).await;
+        worker
+            .attach("s2".into(), SwitchKind::Resumed)
+            .await
+            .expect("the switch attaches");
+        let lines = |receiver: &mut mpsc::Receiver<Update>| {
+            receiver
+                .try_iter()
+                .filter_map(|update| match update {
+                    Update::Snapshot(view) => Some(*view),
+                    _ => None,
+                })
+                .last()
+                .expect("the worker published a snapshot")
+                .lines
+        };
+        let create = json!({
+            "id": "create", "sequence": 1, "create_at": 1000, "type": "branch", "name": "create",
+            "data": {
+                "at": {"kind": "sequence", "sequence": 0}, "branch": "b-1", "prompt": "Check the parser",
+                "source": {"kind": "host", "operation_id": "op"}
+            }
+        });
+        let create: Event = serde_json::from_value(create).unwrap();
+        worker.discover_task_branches(&create);
+        worker.apply("main", create);
+        worker
+            .message(Message::Notice {
+                method: "session.state".into(),
+                params: json!({"sessionId":"s2","branchId":"main","running":false}),
+            })
+            .await
+            .unwrap();
+        worker.publish();
+        let shown = lines(&mut receiver);
+        assert_eq!(
+            shown[0].running,
+            Some(false),
+            "main reported its idle state"
+        );
+        assert_eq!(shown[1].state, LineState::Waiting);
+        assert_eq!(
+            shown[1].running, None,
+            "the child line has not reported yet"
+        );
+
+        worker
+            .message(Message::Notice {
+                method: "session.state".into(),
+                params: json!({"sessionId":"s2","branchId":"b-1","running":true}),
+            })
+            .await
+            .unwrap();
+        worker.publish();
+        let shown = lines(&mut receiver);
+        assert_eq!(
+            shown[1].running,
+            Some(true),
+            "the child line reported its running state"
+        );
+        assert_eq!(shown[1].state, LineState::Working);
+    }
+
+    /// A line that ended before this client attached never sends a
+    /// `session.state`. The host still lists it, ended and unreported, so the
+    /// interface can settle it without waiting.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_ended_line_is_listed_without_a_state_report() {
+        let (mut worker, receiver, _sent) = test_worker(&TEST_FEATURES).await;
+        worker
+            .attach("s2".into(), SwitchKind::Resumed)
+            .await
+            .expect("the switch attaches");
+        let create = json!({
+            "id": "create", "sequence": 1, "create_at": 1000, "type": "branch", "name": "create",
+            "data": {
+                "at": {"kind": "sequence", "sequence": 0}, "branch": "b-gone", "prompt": "Old line",
+                "source": {"kind": "host", "operation_id": "op"}
+            }
+        });
+        let ended = json!({
+            "id": "ended", "sequence": 2, "create_at": 2000, "type": "branch", "name": "ended",
+            "data": {"branch": "b-gone", "endEvent": 2, "source": {"kind": "host", "operation_id": "op"}}
+        });
+        let create: Event = serde_json::from_value(create).unwrap();
+        worker.discover_task_branches(&create);
+        worker.apply("main", create);
+        let ended: Event = serde_json::from_value(ended).unwrap();
+        worker.discover_task_branches(&ended);
+        worker.apply("main", ended);
+        worker
+            .command(Command::FocusLine("b-gone".into()))
+            .await
+            .unwrap();
+        worker
+            .message(Message::Notice {
+                method: "session.state".into(),
+                params: json!({"sessionId":"s2","branchId":"main","running":false}),
+            })
+            .await
+            .unwrap();
+        worker.publish();
+        let shown = receiver
+            .try_iter()
+            .filter_map(|update| match update {
+                Update::Snapshot(view) => Some(*view),
+                _ => None,
+            })
+            .last()
+            .expect("the worker published a snapshot");
+        assert_eq!(shown.focus, "b-gone");
+        let gone = shown
+            .lines
+            .iter()
+            .find(|line| line.id == "b-gone")
+            .expect("the ended line is listed");
+        assert_eq!(gone.state, LineState::EndedByOperation);
+        assert_eq!(
+            gone.running, None,
+            "the ended line never sends a state report"
+        );
+        assert!(
+            shown
+                .lines
+                .iter()
+                .filter(|line| line.id == "main")
+                .all(|line| line.running.is_some()),
+            "main did report"
         );
     }
 
