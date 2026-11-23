@@ -654,6 +654,106 @@ impl rutis::host::DynPlugin for UnreadyCapability {
     }
 }
 
+/// A process row that stays in `apply` until shutdown cancels it.
+struct UnreadyRow(&'static str);
+impl rutis::host::DynPlugin for UnreadyRow {
+    fn name(&self) -> &str {
+        self.0
+    }
+    fn apply<'a>(
+        &'a self,
+        ctx: &'a rutis::Ctx,
+    ) -> rutis::host::BoxFuture<'a, rutis::Result<rutis::host::Effect>> {
+        Box::pin(async move {
+            ctx.cancellation_token().cancelled().await;
+            Ok(rutis::host::Effect::Done)
+        })
+    }
+}
+
+/// An optional row still `Loading` when the process startup bound expires is
+/// named in the timeout error.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn process_startup_timeout_names_the_rows_that_are_not_active() {
+    let error = try_launch_with(
+        Arc::new(MockTools),
+        ServerConfig {
+            startup_timeout: Duration::from_secs(2),
+            ..Default::default()
+        },
+        |builder| {
+            builder.optional_plugin(|_| Ok(Box::new(UnreadyRow("UnreadyRow"))));
+        },
+    )
+    .await
+    .err()
+    .expect("process startup times out")
+    .to_string();
+    assert!(error.contains("process assembly timed out"), "{error}");
+    assert!(error.contains("UnreadyRow"), "{error}");
+}
+
+/// More inactive rows than the message lists are counted, not named.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn process_startup_timeout_counts_the_inactive_rows_past_the_list_limit() {
+    const CAPPED_ROWS: [&str; 9] = [
+        "CappedRow0",
+        "CappedRow1",
+        "CappedRow2",
+        "CappedRow3",
+        "CappedRow4",
+        "CappedRow5",
+        "CappedRow6",
+        "CappedRow7",
+        "CappedRow8",
+    ];
+    let error = try_launch_with(
+        Arc::new(MockTools),
+        ServerConfig {
+            startup_timeout: Duration::from_secs(2),
+            ..Default::default()
+        },
+        |builder| {
+            for name in CAPPED_ROWS {
+                builder.optional_plugin(move |_| Ok(Box::new(UnreadyRow(name))));
+            }
+        },
+    )
+    .await
+    .err()
+    .expect("process startup times out")
+    .to_string();
+    let listed = CAPPED_ROWS
+        .iter()
+        .filter(|name| error.contains(**name))
+        .count();
+    assert_eq!(listed, 8, "{error}");
+    assert!(error.contains("and 1 more"), "{error}");
+}
+
+/// A required row still `Loading` when the process startup bound expires keeps
+/// the initialization timeout message that names it and its state.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn process_startup_timeout_names_a_required_row_that_is_not_active() {
+    let error = try_launch_with(
+        Arc::new(MockTools),
+        ServerConfig {
+            startup_timeout: Duration::from_secs(2),
+            ..Default::default()
+        },
+        |builder| {
+            builder.plugin(|_| Ok(Box::new(UnreadyRow("UnreadyRow"))));
+        },
+    )
+    .await
+    .err()
+    .expect("process startup times out")
+    .to_string();
+    assert!(error.contains("initialization timed out"), "{error}");
+    assert!(error.contains("UnreadyRow Loading"), "{error}");
+    assert!(!error.contains("process assembly timed out"), "{error}");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn session_initialization_timeout_and_missing_dependency_fail_the_creation() {
     for missing_dependency in [false, true] {
