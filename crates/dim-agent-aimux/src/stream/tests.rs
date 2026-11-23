@@ -1153,9 +1153,7 @@ async fn a_strict_responses_stream_delivers_a_cut_call_next_to_its_filter() {
             if let Poll::Ready(Some(Ok(part))) = &polled {
                 this.seen.lock().unwrap().push(match part {
                     StreamPart::ToolCall(_) => Seen::ToolCall,
-                    StreamPart::Finish { finish_reason, .. } => {
-                        Seen::Finish(finish_reason.unified)
-                    }
+                    StreamPart::Finish { finish_reason, .. } => Seen::Finish(finish_reason.unified),
                     _ => Seen::Other,
                 });
             }
@@ -1217,7 +1215,11 @@ async fn a_strict_responses_stream_delivers_a_cut_call_next_to_its_filter() {
     assert!(
         matches!(
             seen.as_slice(),
-            [.., Seen::ToolCall, Seen::Finish(FinishReasonUnified::ContentFilter)]
+            [
+                ..,
+                Seen::ToolCall,
+                Seen::Finish(FinishReasonUnified::ContentFilter)
+            ]
         ),
         "the terminal was not handed over right after the cut call: {seen:?}"
     );
