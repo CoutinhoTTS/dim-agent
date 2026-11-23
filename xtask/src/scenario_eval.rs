@@ -9018,8 +9018,9 @@ mod tests {
                 "sibling-relay",
                 "switch-continue-directly",
                 "switch-then-open-lines",
+                "user-line-becomes-default",
             ],
-            "the committed branch set is the fifteen scenarios"
+            "the committed branch set is the sixteen scenarios"
         );
         assert_eq!(
             compact
@@ -17293,6 +17294,192 @@ mod tests {
             !offered.iter().any(|tool| tool == "plugin"),
             "the member declares no plugin tool: {offered:?}"
         );
+    }
+
+    /// The two note policies the user-line move turns on reach the model, on
+    /// the committed scenario: its `session.branch_create` call opens a user
+    /// line, main opens a tool line, and the move goes from main to the tool
+    /// line and then to the user line, after which the tool line and the user
+    /// line each receive an input. The current arm's requests carry no
+    /// guidance block, and the candidate arm carries each note with its
+    /// `{other}` placeholder replaced by the line id (Timeline branches §12.4,
+    /// model-prompts §9.8).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_user_line_switch_carries_both_notes_into_the_requests() {
+        const DESCRIPTION: &str = "CANDIDATE BRANCH TOOL DESCRIPTION";
+        const BASELINE_DESCRIPTION: &str = "BASELINE BRANCH TOOL DESCRIPTION";
+        const DEFAULT_NOTE: &str =
+            "- CANDIDATE default guidance for {parent}, switched from {other}.";
+        const USER_NOTE: &str = "- CANDIDATE user-line guidance for {other}.";
+        const FORMER_NOTE: &str = "- CANDIDATE former-default guidance for {other}.";
+        let case = repository()
+            .join("xtask/scenario-eval/timeline-branches/user-line-becomes-default");
+        let scenario: Value =
+            serde_json::from_slice(&std::fs::read(case.join("scenario.json")).unwrap()).unwrap();
+        let workspace: Vec<(String, String)> = workspace_files(&case)
+            .into_iter()
+            .map(|(path, text)| {
+                (
+                    path.strip_prefix("workspace")
+                        .expect("a file under workspace")
+                        .to_string_lossy()
+                        .into_owned(),
+                    text,
+                )
+            })
+            .collect();
+        let workspace: Vec<(&str, &str)> = workspace
+            .iter()
+            .map(|(path, text)| (path.as_str(), text.as_str()))
+            .collect();
+        let fixture = Fixture::with_window(
+            "user-line-notes",
+            user_line_notes,
+            scenario,
+            &workspace,
+            131_072,
+        )
+        .await;
+        let mut options = fixture.options(fixture.directory.join("out"));
+        options.baseline = pairs(&[
+            ("timeline-tree/branch-description", BASELINE_DESCRIPTION),
+            ("timeline-tree/default-note", ""),
+            ("timeline-tree/user-default-note", ""),
+            ("timeline-tree/former-default-note", ""),
+        ]);
+        options.texts = pairs(&[
+            ("timeline-tree/branch-description", DESCRIPTION),
+            ("timeline-tree/default-note", DEFAULT_NOTE),
+            ("timeline-tree/user-default-note", USER_NOTE),
+            ("timeline-tree/former-default-note", FORMER_NOTE),
+        ]);
+        let report = fixture.evaluate(&options).await.unwrap();
+        assert!(
+            report.contains("candidate is inconclusive: no comparison is a regression"),
+            "{report}"
+        );
+        let records = fixture.records(&options.out);
+        assert_eq!(records.len(), 2, "one run per arm");
+        for record in &records {
+            assert_eq!(
+                record["failed"], false,
+                "the scenario reaches idle on every line: {record}"
+            );
+        }
+        for arm in ["current", "candidate"] {
+            let directory = options.out.join("outputs").join(arm).join("case");
+            let export = std::fs::read_to_string(directory.join("run-0.timeline.jsonl")).unwrap();
+            let created = |kind: &str| -> String {
+                export
+                    .lines()
+                    .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                    .find(|line| {
+                        line["event"]["type"] == "branch"
+                            && line["event"]["name"] == "create"
+                            && line["event"]["data"]["source"]["kind"] == kind
+                    })
+                    .and_then(|line| line["event"]["data"]["branch"].as_str().map(str::to_owned))
+                    .unwrap_or_else(|| panic!("{arm}: a {kind} line was created"))
+            };
+            let tool = created("tool");
+            let user = created("user");
+            let requests = fixture.arm(arm);
+            let descriptions: Vec<String> = requests
+                .iter()
+                .filter_map(|request| {
+                    let request: Value = serde_json::from_str(request).ok()?;
+                    request["tools"].as_array()?.iter().find_map(|tool| {
+                        (tool["function"]["name"] == "branch")
+                            .then(|| {
+                                tool["function"]["description"]
+                                    .as_str()
+                                    .map(str::to_owned)
+                            })
+                            .flatten()
+                    })
+                })
+                .collect();
+            let expected_description = if arm == "current" {
+                BASELINE_DESCRIPTION
+            } else {
+                DESCRIPTION
+            };
+            assert!(
+                !descriptions.is_empty()
+                    && descriptions
+                        .iter()
+                        .all(|description| description == expected_description),
+                "{arm}: the branch tool description is the pair's text: {descriptions:?}"
+            );
+            if arm == "current" {
+                assert!(
+                    requests
+                        .iter()
+                        .all(|request| !carried(request, "How you work here:")),
+                    "the empty note baselines write no guidance block"
+                );
+                continue;
+            }
+            let user_note = format!(
+                "How you work here:\n{}",
+                USER_NOTE.replace("{other}", &tool)
+            );
+            assert!(
+                requests.iter().any(|request| carried(request, &user_note)),
+                "the user line's request carries its note with the tool line id: {user_note}"
+            );
+            let former_note = format!(
+                "How you work here:\n{}",
+                FORMER_NOTE.replace("{other}", &user)
+            );
+            assert!(
+                requests
+                    .iter()
+                    .any(|request| carried(request, &former_note)),
+                "the former default line's request carries its note with the user line id: {former_note}"
+            );
+            for attribute in [
+                format!(
+                    "<dim-branch-line branch=\"{user}\" parent=\"main\" source=\"user\" default=\"true\">"
+                ),
+                format!(
+                    "<dim-branch-line branch=\"{tool}\" parent=\"main\" source=\"tool\" default=\"false\">"
+                ),
+            ] {
+                assert!(
+                    requests
+                        .iter()
+                        .any(|request| carried(request, &attribute)),
+                    "a request carries {attribute}"
+                );
+            }
+        }
+    }
+
+    /// The run model of the user-line scenario: main opens the tool line on
+    /// its first request, every line answers with text, and the judge gives
+    /// each probe its verdict. A request that carries the tool result or a
+    /// line's birth identity is not main's first: the tool's result says
+    /// `Line created:`, and a line's first input says `You are line `.
+    fn user_line_notes(text: &str) -> Option<Value> {
+        if text.contains("You check statements") {
+            return Some(content(
+                r#"[{"id":"user-line-carries-the-work","verdict":"present","quote":"turn/end"},
+                    {"id":"former-default-answers-and-coordinates","verdict":"present","quote":"turn/end"},
+                    {"id":"former-default-leaves-the-new-scope","verdict":"absent","quote":"nothing"},
+                    {"id":"user-line-does-not-end-itself","verdict":"absent","quote":"nothing"}]"#,
+            ));
+        }
+        if text.contains("Open one line to diagnose the early-expiry bug")
+            && !text.contains("Line created:")
+            && !text.contains("You are line ")
+        {
+            return Some(tool_call(
+                "branch",
+                r#"{"action":"create","prompt":"diagnose the early-expiry bug in token.py and write notes.md"}"#,
+            ));
+        }
+        Some(content("Done."))
     }
 }
 
