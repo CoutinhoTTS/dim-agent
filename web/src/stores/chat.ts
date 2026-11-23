@@ -108,7 +108,8 @@ type Channel = {
   queued: Notification[]
   historyQueue: string[]
   historyRunning: boolean
-  goalRefreshing: boolean
+  /** The goal refresh running now; a caller that arrives meanwhile waits for its result. */
+  goalTask: Promise<boolean> | undefined
   goalDirty: boolean
   /** The centre whose goal a pending refresh reads; a read in flight belongs to an earlier line. */
   goalLine: string
@@ -186,7 +187,7 @@ export const useChatStore = defineStore("chat", () => {
       queued: [],
       historyQueue: [],
       historyRunning: false,
-      goalRefreshing: false, goalDirty: false, goalLine: ROOT_BRANCH_ID,
+      goalTask: undefined, goalDirty: false, goalLine: ROOT_BRANCH_ID,
       publishTimer: undefined,
     }
     channel.main.opened = true
@@ -212,7 +213,6 @@ export const useChatStore = defineStore("chat", () => {
     channel.syncing = true
     channel.view.status = "loading"
     channel.states.clear()
-    channel.queued = []
     view.approvals = []
     channel.directoryRead = false
     channel.main.syncing = true
@@ -273,14 +273,12 @@ export const useChatStore = defineStore("chat", () => {
       } catch {
         // The model is the centre line's own read: a failure leaves it unset, not the page failed.
       }
-      await refreshGoal(channel)
+      if (!(await refreshGoal(channel))) return
       if (view.status === "failed") return
-      const queued = channel.queued
-      channel.queued = []
       channel.syncing = false
-      for (const notification of queued) receive(notification)
+      drainQueued(channel)
       if (view.status !== "closed") showPermission(view, centreId, await sessionPermission(view.sessionId, centreId))
-      if (view.status !== "closed") {
+      if (view.status === "loading") {
         view.status = "ready"
         view.error = ""
       }
@@ -295,10 +293,7 @@ export const useChatStore = defineStore("chat", () => {
     } finally {
       channel.syncing = false
       channel.main.syncing = !channel.main.done || channel.main.error !== ""
-      if (channel.main.syncing) {
-        for (const notification of channel.queued) applyNotification(channel, notification)
-      }
-      channel.queued = []
+      drainQueued(channel)
       publish(channel)
     }
   }
@@ -373,6 +368,12 @@ export const useChatStore = defineStore("chat", () => {
     applyNotification(channel, notification)
   }
 
+  function drainQueued(channel: Channel): void {
+    const queued = channel.queued
+    channel.queued = []
+    for (const notification of queued) applyNotification(channel, notification)
+  }
+
   function applyNotification(channel: Channel, notification: Notification): void {
     const view = channel.view
     switch (notification.method) {
@@ -389,7 +390,9 @@ export const useChatStore = defineStore("chat", () => {
           applyEvent(channel, branchId, notification.event)
         } else {
           stream.queued.push(notification.event)
-          void consumeLive(channel, branchId).catch(error => {
+          // A failed page is replaced by the retry's window: the event waits
+          // there instead of being applied to a transcript that read replaces.
+          if (view.status !== "failed") void consumeLive(channel, branchId).catch(error => {
             stream.error = error instanceof Error ? error.message : String(error)
             stream.syncing = true
             changed(channel)
@@ -578,40 +581,43 @@ export const useChatStore = defineStore("chat", () => {
    * Reads `branchId`'s goal, which defaults to the centre at the call. The read
    * belongs to the line it names, and a failure belongs to it too: a line that
    * left the centre publishes nothing, and the centre that replaced it keeps
-   * the refresh it already asked for.
+   * the refresh it already asked for. A caller that arrives while a refresh
+   * runs waits for that refresh's result instead of assuming one.
    */
   async function refreshGoal(channel: Channel, branchId = channel.view.defaultBranchId): Promise<boolean> {
     if (!channel.view.methods.includes("session.goal.get")) return true
     channel.goalDirty = true
     channel.goalLine = branchId
-    if (channel.goalRefreshing) return true
-    channel.goalRefreshing = true
-    try {
-      while (channel.goalDirty) {
-        channel.goalDirty = false
-        const line = channel.goalLine
-        try {
-          const goal = await client().call("session.goal.get", { sessionId: channel.view.sessionId, branchId: line }, readGoal)
-          if (channel.view.defaultBranchId !== line) continue
-          channel.main.projection.goal = goal
-          changed(channel)
-        } catch (error) {
-          if (channel.view.defaultBranchId !== line) continue
-          // The Session ending and the connection going away are not failures of
-          // this read: a closed page stays closed and a lost connection is the
-          // reconnect's to report.
-          if (error instanceof RpcError && error.appError === "session_closed") channel.view.status = "closed"
-          else if (channel.view.status !== "closed" && !(error instanceof ConnectionLost)) {
-            channel.view.status = "failed"
-            channel.view.error = error instanceof Error ? error.message : String(error)
+    if (channel.goalTask !== undefined) return channel.goalTask
+    channel.goalTask = (async () => {
+      try {
+        while (channel.goalDirty) {
+          channel.goalDirty = false
+          const line = channel.goalLine
+          try {
+            const goal = await client().call("session.goal.get", { sessionId: channel.view.sessionId, branchId: line }, readGoal)
+            if (channel.view.defaultBranchId !== line) continue
+            channel.main.projection.goal = goal
+            changed(channel)
+          } catch (error) {
+            if (channel.view.defaultBranchId !== line) continue
+            // The Session ending and the connection going away are not failures of
+            // this read: a closed page stays closed and a lost connection is the
+            // reconnect's to report.
+            if (error instanceof RpcError && error.appError === "session_closed") channel.view.status = "closed"
+            else if (channel.view.status !== "closed" && !(error instanceof ConnectionLost)) {
+              channel.view.status = "failed"
+              channel.view.error = error instanceof Error ? error.message : String(error)
+            }
+            return false
           }
-          return false
         }
+        return true
+      } finally {
+        channel.goalTask = undefined
       }
-      return true
-    } finally {
-      channel.goalRefreshing = false
-    }
+    })()
+    return channel.goalTask
   }
 
   async function window(channel: Channel, branchId: string, before?: number, through?: number) {
@@ -1056,7 +1062,7 @@ export const useChatStore = defineStore("chat", () => {
     await adoptModel(channel, moved, branch).catch(() => undefined)
     if (channel.moves !== move) return
     publish(channel)
-    await refreshGoal(channel)
+    if (!(await refreshGoal(channel))) return
     if (view.status === "failed") return
     if (view.status === "closed") return
     const policy = await sessionPermission(sessionId, moved)
