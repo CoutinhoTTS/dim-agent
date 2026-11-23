@@ -692,7 +692,7 @@ have no own history; its fixed directory end identity remains even when the
 `session.model.get {sessionId, branchId, through?}` (v3, listed in `hello.features` with the
 other Session methods under `session.attach`'s admission) reads one line's adopted configuration at
 that line's own cutoff: `{branchId, through, configuration: {model: {providerId, modelId},
-capabilitySnapshot?, modelPreferences?} | null}`. The returned `through` is always the requested
+catalogProviderId?, capabilitySnapshot?, modelPreferences?} | null}`. The returned `through` is always the requested
 line's committed cutoff, never the sequence of an ancestor's adoption, so a client applies only
 that line's `Configuration` events whose `sequence > through` and refreshes by calling again without
 `through`. An open line waits for the Dispatcher to reach the committed head, so an adoption
