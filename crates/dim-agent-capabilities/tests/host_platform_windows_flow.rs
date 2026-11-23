@@ -1,7 +1,4 @@
-//! HostPlatform confined helpers on Windows
-//! (`docs/architecture/rust-agent/plugins/HostPlatform.md`). The platform has
-//! no confinement backend, so the timeout, output caps and cancellation apply
-//! and the result reports `confined: false`.
+use base64::Engine;
 use dim_agent_capabilities::execution_settings::{ExecutionSettings, ExecutionSettingsHost};
 use dim_agent_capabilities::host_platform::*;
 use std::{ffi::OsString, path::PathBuf, time::Duration};
@@ -17,93 +14,132 @@ fn platform() -> HostPlatform {
     .with_execution_settings(ExecutionSettingsHost::fixed(ExecutionSettings::default()))
 }
 
-fn command(script: &str) -> ConfinedSpec {
+fn request(
+    script: &str,
+    timeout: Duration,
+    stdout_limit: usize,
+    write: &std::path::Path,
+) -> ConfinedRequest {
     let executable = std::env::var_os("ComSpec")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(r"C:\Windows\System32\cmd.exe"));
-    ConfinedSpec {
-        executable,
+    ConfinedRequest {
+        program: executable.to_string_lossy().into_owned(),
         args: ["/d", "/s", "/v:off", "/c", script]
             .into_iter()
             .map(OsString::from)
+            .map(|arg| arg.to_string_lossy().into_owned())
             .collect(),
-        env: vec![],
+        read: Vec::new(),
+        write: vec![write.to_string_lossy().into_owned()],
+        env: Default::default(),
+        timeout_ms: timeout.as_millis() as u64,
+        output_limit: OutputLimits {
+            stdout: stdout_limit,
+            stderr: 1024,
+        },
+        services: SystemServices::None,
     }
+}
+
+fn cancelled(token: &CancellationToken) -> dim_agent_capabilities::host::CancelledFn {
+    let token = token.clone();
+    std::sync::Arc::new(move || {
+        let token = token.clone();
+        Box::pin(async move {
+            token.cancelled().await;
+            Ok(())
+        })
+    })
 }
 
 #[tokio::test]
 async fn a_helper_without_a_backend_reports_no_confinement_and_keeps_every_limit() {
     let write = std::env::temp_dir().join(format!("dim-confined-{}", std::process::id()));
     std::fs::create_dir_all(&write).unwrap();
-    let confinement = |timeout: Duration| Confinement {
-        read: vec![],
-        write: vec![write.clone()],
-        timeout,
-        stdout_limit: 1024,
-        stderr_limit: 1024,
-        services: SystemServices::None,
-    };
+    let platform = platform();
 
-    let ok = platform()
+    let ok = platform
         .spawn_confined(
-            command("echo ok"),
-            confinement(Duration::from_secs(30)),
-            CancellationToken::new(),
+            request("echo ok", Duration::from_secs(30), 1024, &write),
+            cancelled(&CancellationToken::new()),
         )
         .await
         .unwrap();
-    assert!(ok.status.success());
+    assert_eq!(ok.status, Some(0));
     assert!(!ok.confined, "Windows cannot confine a host-owned helper");
-    assert_eq!(String::from_utf8_lossy(&ok.stdout).trim(), "ok");
+    let stdout = base64::engine::general_purpose::STANDARD
+        .decode(&ok.stdout)
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&stdout).trim(), "ok");
 
-    let timed = platform()
+    let timed = platform
         .spawn_confined(
-            command("ping -n 61 127.0.0.1 >nul"),
-            confinement(Duration::from_millis(300)),
-            CancellationToken::new(),
+            request(
+                "ping -n 61 127.0.0.1 >nul",
+                Duration::from_millis(300),
+                1024,
+                &write,
+            ),
+            cancelled(&CancellationToken::new()),
         )
         .await;
     assert!(
-        matches!(timed, Err(ConfinedError::TimedOut)),
+        matches!(timed, Err(HostPlatformError::Failed(_))),
         "{:?}",
         timed.err()
     );
+    assert!(
+        timed
+            .err()
+            .is_some_and(|error| error.to_string().contains("timeout")),
+        "the helper must time out"
+    );
 
-    let flooded = platform()
+    let flooded = platform
         .spawn_confined(
-            command("for /L %i in (1,1,100000) do @echo 01234567890123456789"),
-            confinement(Duration::from_secs(30)),
-            CancellationToken::new(),
+            request(
+                "for /L %i in (1,1,100000) do @echo 01234567890123456789",
+                Duration::from_secs(30),
+                1024,
+                &write,
+            ),
+            cancelled(&CancellationToken::new()),
         )
         .await;
     assert!(
-        matches!(
-            flooded,
-            Err(ConfinedError::OutputLimit {
-                stream: ConfinedStream::Stdout
-            })
-        ),
+        matches!(flooded, Err(HostPlatformError::Failed(_))),
         "{:?}",
         flooded.err()
     );
+    assert!(
+        flooded
+            .err()
+            .is_some_and(|error| error.to_string().contains("stdout limit")),
+        "the helper must hit the output limit"
+    );
 
     let cancel = CancellationToken::new();
-    let cancel_platform = platform();
-    let (cancelled, ()) = tokio::join!(
-        cancel_platform.spawn_confined(
-            command("ping -n 61 127.0.0.1 >nul"),
-            confinement(Duration::from_secs(30)),
-            cancel.clone(),
+    let cancel_task = async {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        cancel.cancel();
+    };
+    let (result, ()) = tokio::join!(
+        platform.spawn_confined(
+            request(
+                "ping -n 61 127.0.0.1 >nul",
+                Duration::from_secs(30),
+                1024,
+                &write,
+            ),
+            cancelled(&cancel),
         ),
-        async {
-            tokio::time::sleep(Duration::from_millis(200)).await;
-            cancel.cancel();
-        },
+        cancel_task,
     );
     assert!(
-        matches!(cancelled, Err(ConfinedError::Cancelled)),
+        matches!(result, Err(HostPlatformError::Cancelled)),
         "{:?}",
-        cancelled.err()
+        result.err()
     );
     std::fs::remove_dir_all(&write).unwrap();
 }
