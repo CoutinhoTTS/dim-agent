@@ -378,6 +378,82 @@ struct State {
     last_write: u64,
 }
 
+/// What a record states when its writer reaches the fold (D3, Pursuit §4.1).
+/// An automatic pause carries the decision's inputs instead of the reason the
+/// caller found: the writer decides it again after its last wait.
+enum Record {
+    /// A state the caller settled: an interrupt, a failed creation, a
+    /// conclusion's outcome or the answer to a change trigger. No later fold
+    /// fact changes what it states.
+    Stated(Option<text::State>),
+    /// The turn ending at `after` stops continuing.
+    TurnEndPause {
+        limit: Option<u64>,
+        progress: Option<fold::Progress>,
+    },
+    /// The evaluation's `continue` conclusion stops continuing (Pursuit §5).
+    ConclusionPause {
+        end: u64,
+        limit: Option<u64>,
+        conclusion: Conclusion,
+    },
+}
+
+impl Record {
+    fn automatic(&self) -> bool {
+        !matches!(self, Self::Stated(_))
+    }
+
+    /// The pause the fold decides for this record at `after`, `None` when it
+    /// decides none: the goal keeps running and the record writes nothing.
+    fn pause(&self, state: &State, after: u64) -> Option<&'static str> {
+        let fold = &state.fold;
+        match self {
+            Self::Stated(_) => None,
+            Self::TurnEndPause { limit, progress } => {
+                if fold.turn_end.as_ref().map(|end| end.sequence) != Some(after)
+                    || fold.interrupt_after(after).is_some()
+                {
+                    return None;
+                }
+                match fold::decide_turn_end(fold, *limit, *progress) {
+                    Some(Decision::Pause { reason }) => Some(reason),
+                    _ => None,
+                }
+            }
+            Self::ConclusionPause {
+                end,
+                limit,
+                conclusion,
+            } => {
+                if state.written.contains(&after)
+                    || fold.turn_end.as_ref().map(|end| end.sequence) != Some(*end)
+                    || fold::decide_conclusion(fold, after, conclusion)
+                        != Some(ConclusionAction::Continue)
+                {
+                    return None;
+                }
+                match fold::decide_evaluated_continuation(fold, *limit) {
+                    Some(Decision::Pause { reason }) => Some(reason),
+                    _ => None,
+                }
+            }
+        }
+    }
+}
+
+/// What one record did when its writer reached the fold.
+enum Recorder {
+    /// The record stated its state.
+    Written,
+    /// An automatic pause no longer holds after the writer's last wait: the
+    /// decisions `settle_decisions` cancelled are taken again.
+    Superseded,
+    /// The fold moved past the record before it wrote, or the record was
+    /// already stated: nothing waits for it.
+    Answered,
+}
+
 struct Owner {
     branch_id: String,
     #[cfg(feature = "testing")]
@@ -1300,7 +1376,11 @@ impl Owner {
                     }
                 };
                 owner
-                    .record(at, Some(text::State::Paused(reason.to_owned())), false)
+                    .record(
+                        at,
+                        Record::Stated(Some(text::State::Paused(reason.to_owned()))),
+                        false,
+                    )
                     .await
             })
         });
@@ -1309,15 +1389,18 @@ impl Owner {
     async fn record(
         self: &Arc<Self>,
         after: u64,
-        status: Option<text::State>,
+        record: Record,
         answer: bool,
     ) -> Result<(), AgentError> {
         let (reply, result) = tokio::sync::oneshot::channel();
         let owner = self.clone();
         self.tasks.spawn(async move {
-            let result = owner.record_inner(after, status, answer).await;
+            let result = owner.record_inner(after, record, answer).await;
             owner.state.lock().unwrap().terminating = false;
-            if let Err(Err(error)) = reply.send(result) {
+            if matches!(&result, Ok(Recorder::Superseded)) {
+                owner.resume_decisions();
+            }
+            if let Err(Err(error)) = reply.send(result.map(|_| ())) {
                 tracing::warn!(%error, "Goal terminal state could not be saved");
                 let _ = owner.write_status.send_replace(Err(error));
             }
@@ -1330,9 +1413,9 @@ impl Owner {
     async fn record_inner(
         self: &Arc<Self>,
         after: u64,
-        status: Option<text::State>,
+        record: Record,
         answer: bool,
-    ) -> Result<(), AgentError> {
+    ) -> Result<Recorder, AgentError> {
         let _write = self.write_guard().await?;
         {
             let state = self.state.lock().unwrap();
@@ -1340,8 +1423,9 @@ impl Owner {
                 || state.fold.last_change > after
                 || after < state.recorded
                 || state.written.contains(&after)
+                || record.automatic() && record.pause(&state, after).is_none()
             {
-                return Ok(());
+                return Ok(Recorder::Answered);
             }
         }
         self.settle_decisions().await?;
@@ -1354,10 +1438,35 @@ impl Owner {
         )
         .await;
         self.write_status.borrow().clone()?;
+        // The settle is this writer's last wait, and a driving Queue can fold
+        // while it runs: the decision is taken again here, under the lock and
+        // at the latest committed cutoff, so the fact wins instead of being
+        // stated over (C4, C5, Pursuit §4.1).
+        let status = match &record {
+            Record::Stated(status) => status.clone(),
+            Record::TurnEndPause { .. } | Record::ConclusionPause { .. } => {
+                let decided = self
+                    .decide_committed(CatchUp::Live, |state, _| {
+                        if state.fold.last_change > after || after < state.recorded {
+                            return None;
+                        }
+                        record.pause(state, after)
+                    })
+                    .await?;
+                let Some(reason) = decided else {
+                    return Ok(Recorder::Superseded);
+                };
+                Some(text::State::Paused(reason.to_owned()))
+            }
+        };
         let (objective, status, judge, live) = {
             let state = self.state.lock().unwrap();
             if state.fold.last_change > after || after < state.recorded {
-                return Ok(());
+                return Ok(if record.automatic() {
+                    Recorder::Superseded
+                } else {
+                    Recorder::Answered
+                });
             }
             (
                 state.fold.objective.clone(),
@@ -1387,7 +1496,7 @@ impl Owner {
         let mut state = self.state.lock().unwrap();
         state.written.insert(after);
         state.recorded = state.recorded.max(after);
-        Ok(())
+        Ok(Recorder::Written)
     }
 
     async fn settle_decisions(&self) -> Result<(), AgentError> {
@@ -1438,7 +1547,7 @@ impl Owner {
             return;
         };
         self.task(format!("state:{last}"), None, move |owner| {
-            Box::pin(async move { owner.record(last, None, true).await })
+            Box::pin(async move { owner.record(last, Record::Stated(None), true).await })
         });
     }
 
@@ -1634,7 +1743,7 @@ impl Owner {
                 {
                     self.record(
                         after,
-                        Some(text::State::Paused("evaluation_failed".to_owned())),
+                        Record::Stated(Some(text::State::Paused("evaluation_failed".to_owned()))),
                         false,
                     )
                     .await?;
@@ -1719,9 +1828,9 @@ impl Owner {
                     text::continuation(&self.branch_id, count, limit, idle, after, &self.texts);
                 self.write(input).await?;
             }
-            Decision::Pause { reason } => {
+            Decision::Pause { .. } => {
                 drop(write);
-                self.record(after, Some(text::State::Paused(reason.to_owned())), false)
+                self.record(after, Record::TurnEndPause { limit, progress }, false)
                     .await?;
             }
         }
@@ -1969,7 +2078,7 @@ impl Owner {
                 owner
                     .record(
                         at,
-                        Some(text::State::Paused("evaluation_failed".to_owned())),
+                        Record::Stated(Some(text::State::Paused("evaluation_failed".to_owned()))),
                         false,
                     )
                     .await
@@ -2006,18 +2115,26 @@ impl Owner {
             ConclusionAction::Failed => {
                 self.record(
                     sequence,
-                    Some(text::State::Paused("evaluation_failed".to_owned())),
+                    Record::Stated(Some(text::State::Paused("evaluation_failed".to_owned()))),
                     false,
                 )
                 .await?;
             }
             ConclusionAction::Completed(text) => {
-                self.record(sequence, Some(text::State::Completed(text)), false)
-                    .await?;
+                self.record(
+                    sequence,
+                    Record::Stated(Some(text::State::Completed(text))),
+                    false,
+                )
+                .await?;
             }
             ConclusionAction::Blocked(text) => {
-                self.record(sequence, Some(text::State::Blocked(text)), false)
-                    .await?;
+                self.record(
+                    sequence,
+                    Record::Stated(Some(text::State::Blocked(text))),
+                    false,
+                )
+                .await?;
             }
             ConclusionAction::Continue => {
                 let Ok(limit) = self.limit().await else {
@@ -2079,11 +2196,15 @@ impl Owner {
                         self.write(input).await?;
                         self.state.lock().unwrap().written.insert(sequence);
                     }
-                    Decision::Pause { reason } => {
+                    Decision::Pause { .. } => {
                         drop(write);
                         self.record(
                             sequence,
-                            Some(text::State::Paused(reason.to_owned())),
+                            Record::ConclusionPause {
+                                end: end.sequence,
+                                limit,
+                                conclusion,
+                            },
                             false,
                         )
                         .await?;
