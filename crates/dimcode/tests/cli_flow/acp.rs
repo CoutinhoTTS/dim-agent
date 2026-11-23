@@ -4083,6 +4083,24 @@ fn acp_provider_routes_are_isolated_between_processes_sharing_a_daemon() {
         )
         .unwrap();
     assert!(!stored_config.contains("fixture-acp-only"));
+
+    let changed = call(
+        &mut b,
+        "providers/set",
+        json!({"providerId":provider,"apiType":"openai","baseUrl":second}),
+    );
+    assert_eq!(changed["result"], json!({}), "{changed}");
+    let disabled = native_call(
+        "provider.update",
+        json!({"providerId":provider,"expectedVersion":record["version"],"patch":{"enabled":false}}),
+    );
+    let cleared = call(&mut b, "providers/disable", json!({"providerId":provider}));
+    assert_eq!(cleared["result"], json!({}), "{cleared}");
+    native_call(
+        "provider.update",
+        json!({"providerId":provider,"expectedVersion":disabled["version"],"patch":{"enabled":true}}),
+    );
+    assert!(provider_row(call(&mut b, "providers/list", json!({})))["current"].is_null());
     b.close();
 }
 

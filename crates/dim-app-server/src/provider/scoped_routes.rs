@@ -134,10 +134,18 @@ impl ProviderService {
         request: RouteTarget,
         cancel: &CancellationToken,
     ) -> Result<(), RpcError> {
-        if self
-            .routing_target(&request.provider_id, cancel)
-            .await?
-            .is_some()
+        let has_override = self
+            .startup
+            .lock()
+            .unwrap()
+            .routes
+            .get(caller.id())
+            .is_some_and(|routes| routes.contains_key(&request.provider_id));
+        if has_override
+            || self
+                .routing_target(&request.provider_id, cancel)
+                .await?
+                .is_some()
         {
             self.put_scoped_route(caller, request.provider_id, None, cancel)?;
         }
