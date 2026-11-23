@@ -125,7 +125,8 @@ impl ProviderService {
             request.provider_id,
             Some(Route { source, connection }),
             cancel,
-        )
+        )?;
+        Ok(())
     }
 
     pub(super) async fn disable_scoped_route(
@@ -133,7 +134,7 @@ impl ProviderService {
         caller: &Caller,
         request: RouteTarget,
         cancel: &CancellationToken,
-    ) -> Result<(), RpcError> {
+    ) -> Result<bool, RpcError> {
         let has_override = self
             .startup
             .lock()
@@ -147,9 +148,9 @@ impl ProviderService {
                 .await?
                 .is_some()
         {
-            self.put_scoped_route(caller, request.provider_id, None, cancel)?;
+            return self.put_scoped_route(caller, request.provider_id, None, cancel);
         }
-        Ok(())
+        Ok(false)
     }
 
     fn put_scoped_route(
@@ -158,7 +159,7 @@ impl ProviderService {
         id: String,
         route: Option<Route>,
         cancel: &CancellationToken,
-    ) -> Result<(), RpcError> {
+    ) -> Result<bool, RpcError> {
         let mut bindings = self.startup.lock().unwrap();
         if cancel.is_cancelled() {
             return Err(RpcError::interrupted());
@@ -181,8 +182,9 @@ impl ProviderService {
             });
         }
         let routes = bindings.routes.entry(scope.to_owned()).or_default();
-        routes.insert(id, route);
-        Ok(())
+        let sets_route = route.is_some();
+        let before = routes.insert(id, route);
+        Ok(sets_route || before.is_none_or(|previous| previous.is_some()))
     }
 
     pub(crate) fn scoped_connection_owner(

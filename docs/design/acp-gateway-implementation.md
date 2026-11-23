@@ -646,11 +646,11 @@ Lody [Open / Resume / Fork]
 
 ### 13.4 Provider 向导
 
-采用 ACP Gateway 进程内的临时作用域。Gateway 通过唯一的受保护本地 RPC 连接调用 [Provider 临时路由入口](appserver/provider-management.md#connection-scoped-provider-routes)。三个入口都可用时，initialize 声明 `agentCapabilities.providers`。路由写入已经成功或仍在途时，RPC 断开会结束 ACP 连接，避免重连后把会话绕回共享路由。已明确失败的写入不改变重连行为。
+采用 ACP Gateway 进程内的临时作用域。Gateway 通过唯一的受保护本地 RPC 连接调用 [Provider 临时路由入口](appserver/provider-management.md#connection-scoped-provider-routes)。三个入口都可用时，initialize 声明 `agentCapabilities.providers`。路由修改已经生效或仍在途时，RPC 断开会结束 ACP 连接，避免重连后把会话绕回共享路由。已明确失败的写入和未改变状态的 disable 保留普通重连行为。list 读取调用时的路由快照。客户端需要确认变更时，先等待 set 或 disable 的回复。
 
 `list` 发布可配置的启用中静态 Provider，须已具备普通模型选择所需凭据或使用匿名连接。协议为 `openai`（OpenAI-compatible Chat）、`openai-responses` 或 `anthropic`，按现有驱动取其中一个。列表回显协议、安全地址和 `required:false`。本进程禁用后仍可发现，`current` 省略。`set` 整体替换 headers，省略等同空 map。`disable` 对未知 ID 幂等。
 
-新建、首次加载或恢复空闲且未被其他客户端占用的 Session 时采用当前连接的路由。配置相等断言先于路由采用。所选 Provider 被禁用时返回明确错误，客户端可以选择其他模型。已建立的 Session 保留采用时的路由，显式切换模型时重新采用目标的当前路由。模型选项使用会话采用的目录 Provider 身份，临时连接身份仍用于执行。试图从其他连接续用临时路由、或连接结束后恢复该路由，均明确失败。过期后可通过原生 session.model.update 显式选择共享模型，再重新打开 Session。 同一 Gateway 的路由写入与 new、fork 建立按顺序执行。原生建立到新 Session 首次 attach 使用同一份路由设置。协议边界见 [ACP Provider RFD](https://github.com/agentclientprotocol/agent-client-protocol/blob/66ff8076ec2320d85e84fedc83cb779e9d906a89/docs/rfds/custom-llm-endpoint.mdx#behavior)。
+新建、首次加载或恢复空闲且未被其他客户端占用的 Session 时采用当前连接的路由。配置相等断言先于路由采用。所选 Provider 被禁用时返回明确错误，客户端可以选择其他模型。已建立的 Session 保留采用时的路由，显式切换模型时重新采用目标的当前路由。模型选项使用会话采用的目录 Provider 身份，临时连接身份仍用于执行。试图从其他连接续用临时路由、或连接结束后恢复该路由，均明确失败。过期后，ACP 客户端可在尚未建立 Session 时调用 `session/set_config_option`，以 `configId: "model"` 显式选择共享目录模型，再调用 load 或 resume。Gateway 使用 [原生过期路由恢复](model-configuration.md#model-parameters)，成功后读取实际配置。fork 继续核对其继承切点。同一 Gateway 的路由写入与 new、fork 建立按顺序执行。原生建立到新 Session 首次 attach 使用同一份路由设置。协议边界见 [ACP Provider RFD](https://github.com/agentclientprotocol/agent-client-protocol/blob/66ff8076ec2320d85e84fedc83cb779e9d906a89/docs/rfds/custom-llm-endpoint.mdx#behavior)。
 
 ### 13.5 向所有者提出的要求
 

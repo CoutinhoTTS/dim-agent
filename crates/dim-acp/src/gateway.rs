@@ -36,7 +36,7 @@ pub(crate) enum Work {
     Providers {
         reply: Responder,
         mutating: bool,
-        result: Result<Value, Error>,
+        result: Result<(Value, bool), Error>,
     },
     Initialized {
         reply: Responder,
@@ -86,7 +86,7 @@ pub(crate) enum Work {
         id: String,
         reply: Responder,
         mode: bool,
-        revision: u64,
+        revision: Option<u64>,
         result: Result<Config, Error>,
         refreshed: Option<Config>,
     },
@@ -726,14 +726,17 @@ impl Gateway {
                         match method.as_str() {
                             "providers/list" => {
                                 let _: acp::ListProvidersRequest = params(value)?;
-                                encode_native(crate::providers::list(&rpc).await?)
+                                Ok((encode_native(crate::providers::list(&rpc).await?)?, false))
                             }
-                            "providers/set" => {
-                                encode_native(crate::providers::set(&rpc, params(value)?).await?)
+                            "providers/set" => Ok((
+                                encode_native(crate::providers::set(&rpc, params(value)?).await?)?,
+                                true,
+                            )),
+                            _ => {
+                                let changed =
+                                    crate::providers::disable(&rpc, params(value)?).await?;
+                                Ok((encode_native(acp::DisableProviderResponse::new())?, changed))
                             }
-                            _ => encode_native(
-                                crate::providers::disable(&rpc, params(value)?).await?,
-                            ),
                         }
                     }
                     .await;
@@ -1372,6 +1375,24 @@ impl Gateway {
                     Ok(args) => args,
                     Err(error) => return reply.respond_with_error(error),
                 };
+                if key == "model"
+                    && !self.sessions.contains_key(&id)
+                    && rpc.supports("session.model.update.requireExpiredRoute")
+                    && rpc.supports("session.model.get")
+                {
+                    self.spawn(async move {
+                        let result = Config::recover_model(&rpc, &id, &value).await;
+                        Work::Configured {
+                            id,
+                            reply,
+                            mode: false,
+                            revision: None,
+                            result,
+                            refreshed: None,
+                        }
+                    });
+                    return Ok(());
+                }
                 let Some(Slot::Ready(session)) = self.sessions.get_mut(&id) else {
                     return reply.respond_with_error(Error::resource_not_found(Some(id)));
                 };
@@ -1438,7 +1459,7 @@ impl Gateway {
                         id,
                         reply,
                         mode,
-                        revision,
+                        revision: Some(revision),
                         result,
                         refreshed,
                     }
@@ -1600,8 +1621,13 @@ impl Gateway {
                 result,
             } => {
                 self.pending_provider_routes -= usize::from(mutating);
-                self.provider_routes_used |= mutating && result.is_ok();
-                reply.respond_with_result(result)?;
+                match result {
+                    Ok((value, changed)) => {
+                        self.provider_routes_used |= changed;
+                        reply.respond_with_result(Ok(value))?;
+                    }
+                    Err(error) => reply.respond_with_error(error)?,
+                }
             }
             Work::Initialized { reply, result } => {
                 self.initializing = false;
@@ -2079,6 +2105,11 @@ impl Gateway {
                 result,
                 refreshed,
             } => {
+                let Some(revision) = revision else {
+                    return reply.respond_with_result(result.and_then(|config| {
+                        encode_native(acp::SetSessionConfigOptionResponse::new(config.options()))
+                    }));
+                };
                 let Some(Slot::Ready(session)) = self.sessions.get_mut(&id) else {
                     return reply.respond_with_error(Error::resource_not_found(Some(id)));
                 };

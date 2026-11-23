@@ -142,6 +142,8 @@ session.model.update {
 } -> {model: {providerId, modelId}, outcome: "adopted" | "unchanged"}
 ```
 
+A protected local client with `session.model.update.requireExpiredRoute` may send `requireExpiredRoute: true` together with both target IDs and without `startup`. The update requires an expired temporary route and exclusive, idle Session admission. It adopts the explicit shared catalog model even if the caller has its own route for that Provider. A live route owned by another connection yields `provider_route_conflict`. A selection without an expired route yields `provider_route_not_expired`. See [Provider route ownership](appserver/provider-management.md#connection-scoped-provider-routes).
+
 A plain string sets the field. `{action:"clear"}` clears it and needs no
 `value`; any other action, including `{action:"set"}`, any extra field, null and
 an empty string are invalid. An omitted field keeps its adopted value.

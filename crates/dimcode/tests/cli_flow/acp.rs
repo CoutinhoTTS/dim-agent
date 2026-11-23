@@ -1266,6 +1266,55 @@ fn acp_stdio_does_not_repeat_creation_when_the_native_reply_is_lost() {
 }
 
 #[test]
+fn acp_stdio_reconnects_after_an_unchanged_provider_disable() {
+    let home = Home::new();
+    let endpoint = home.0.join("rust/daemon.sock");
+    let listener = UnixListener::bind(&endpoint).unwrap();
+    fs::set_permissions(&endpoint, fs::Permissions::from_mode(0o600)).unwrap();
+    let (disconnect, acknowledged) = std::sync::mpsc::sync_channel(0);
+    let daemon = thread::spawn(move || {
+        let mut features = METHODS.to_vec();
+        features.extend([
+            "provider.routes.list",
+            "provider.routes.set",
+            "provider.routes.disable",
+        ]);
+        let mut wire = accept_native(&listener);
+        wire.hello(&features);
+        let disable = wire.read("provider.routes.disable");
+        wire.reply(&disable, json!(false));
+        acknowledged.recv_timeout(PATIENCE).unwrap();
+        drop(wire);
+        let mut wire = accept_native(&listener);
+        wire.hello(&features);
+        let list = wire.read("session.list");
+        wire.reply(&list, json!([]));
+        detached_eof(&mut wire);
+    });
+    let mut peer = Peer::start(&home);
+    peer.initialize();
+    peer.send(2, "providers/disable", json!({"providerId":"unknown"}));
+    assert_eq!(peer.response(2)["result"], json!({}));
+    disconnect.send(()).unwrap();
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        assert!(
+            Instant::now() < deadline,
+            "Native restoration did not become ready"
+        );
+        peer.send(3, "session/list", json!({}));
+        let list = peer.response(3);
+        if list.get("error").is_none() {
+            assert_eq!(list["result"]["sessions"], json!([]));
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    peer.close();
+    daemon.join().unwrap();
+}
+
+#[test]
 fn acp_stdio_temporary_mcp_rebinds_expired_resources_before_submission() {
     let home = Home::new();
     let (submitted, accepted) = std::sync::mpsc::sync_channel(0);
@@ -4036,10 +4085,12 @@ fn acp_provider_routes_are_isolated_between_processes_sharing_a_daemon() {
     proxy.join().unwrap();
 
     a.close();
+    let mut restarted = Peer::start(&home);
+    restarted.initialize();
     let deadline = Instant::now() + PATIENCE;
     loop {
         let expired = call(
-            &mut b,
+            &mut restarted,
             "session/resume",
             json!({"sessionId":a_id,"cwd":home.0}),
         );
@@ -4053,13 +4104,29 @@ fn acp_provider_routes_are_isolated_between_processes_sharing_a_daemon() {
         );
         thread::sleep(Duration::from_millis(10));
     }
-    let restored = native_call(
-        "session.model.update",
-        json!({"sessionId":a_id,"providerId":provider,"modelId":"acp-route-fixture"}),
+    let refused = call(
+        &mut restarted,
+        "session/set_config_option",
+        json!({"sessionId":b_id,"configId":"model","value":"acp-route-fixture"}),
     );
-    assert_eq!(restored["model"]["providerId"], provider);
+    assert_eq!(
+        refused["error"]["data"]["nativeAppError"], "provider_route_not_expired",
+        "{refused}"
+    );
+    let restored = call(
+        &mut restarted,
+        "session/set_config_option",
+        json!({"sessionId":a_id,"configId":"model","value":"acp-route-fixture"}),
+    );
+    assert!(
+        restored["result"]["configOptions"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{restored}"))
+            .iter()
+            .any(|option| option["id"] == "model" && option["currentValue"] == "acp-route-fixture")
+    );
     let resumed = call(
-        &mut b,
+        &mut restarted,
         "session/resume",
         json!({"sessionId":a_id,"cwd":home.0}),
     );
@@ -4083,6 +4150,7 @@ fn acp_provider_routes_are_isolated_between_processes_sharing_a_daemon() {
         )
         .unwrap();
     assert!(!stored_config.contains("fixture-acp-only"));
+    restarted.close();
 
     let changed = call(
         &mut b,

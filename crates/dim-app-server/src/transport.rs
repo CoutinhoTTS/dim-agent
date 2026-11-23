@@ -848,6 +848,8 @@ async fn run_connection(
                                         }
                                         if local && hub.config().product_home.is_some() {
                                             features.push("session.create.modelFromSession");
+                                            features
+                                                .push("session.model.update.requireExpiredRoute");
                                         }
                                         if hub.config().database_path.is_some() {
                                             features.push("session.fork");

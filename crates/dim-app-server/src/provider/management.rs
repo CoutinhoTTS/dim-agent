@@ -208,12 +208,11 @@ pub(super) fn provide(
                                     .await?;
                                 reply(crate::protocol::Empty::default())
                             }
-                            _ => {
+                            _ => reply(
                                 provider
                                     .disable_scoped_route(caller, params(value)?, cancel)
-                                    .await?;
-                                reply(crate::protocol::Empty::default())
-                            }
+                                    .await?,
+                            ),
                         }
                     }
                     "provider.models.query" => reply(

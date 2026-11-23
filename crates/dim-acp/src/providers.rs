@@ -88,7 +88,7 @@ pub(crate) async fn set(
 pub(crate) async fn disable(
     rpc: &Rpc,
     request: acp::DisableProviderRequest,
-) -> Result<acp::DisableProviderResponse, Error> {
+) -> Result<bool, Error> {
     #[derive(Serialize)]
     #[serde(rename_all = "camelCase")]
     struct Target {
@@ -98,6 +98,5 @@ pub(crate) async fn disable(
         provider_id: request.provider_id.to_string(),
     })
     .map_err(|_| Error::internal_error())?;
-    rpc.call(DISABLE, params).await?;
-    Ok(acp::DisableProviderResponse::new())
+    rpc.typed(DISABLE, params).await
 }

@@ -415,6 +415,8 @@ pub struct UpdateModel {
     pub model_preferences: ModelPreferenceUpdate,
     #[serde(default, deserialize_with = "optional_non_null")]
     pub startup: Option<crate::provider::StartupInput>,
+    #[serde(default)]
+    pub require_expired_route: bool,
 }
 
 #[derive(Debug, Serialize)]

@@ -1684,6 +1684,13 @@ impl Connection {
                     .get::<dim_agent_capabilities::prompt_state::PromptSnapshot>(&branch)?
                     .and_then(|state| state.configuration);
                 let scoped_target = p.startup.is_none() && p.provider_id.is_some();
+                if p.require_expired_route
+                    && (self.entry != Entry::Local || !scoped_target || p.model_id.is_none())
+                {
+                    return Err(RpcError::invalid(
+                        "Expired route recovery requires a protected-local catalog model selection",
+                    ));
+                }
                 let recover_shared = if let Some(provider) = &route_owner {
                     let metadata = match &current {
                         Some(current) => current.metadata.as_ref(),
@@ -1696,6 +1703,17 @@ impl Connection {
                     )?
                 } else {
                     false
+                };
+                if p.require_expired_route && !recover_shared {
+                    return Err(RpcError::service(
+                        "provider_route_not_expired",
+                        "Session does not have an expired temporary model route",
+                    ));
+                }
+                let mut scoped_admission = if recover_shared {
+                    Some(self.scoped_route_admission(usage).await?)
+                } else {
+                    None
                 };
                 let mut startup_admission = None;
                 let mut model = if let Some(startup) = p.startup {
@@ -1793,7 +1811,6 @@ impl Connection {
                         }
                     }
                 };
-                let mut scoped_admission = None;
                 if scoped_target
                     && !recover_shared
                     && let Some(provider) = route_owner
@@ -1831,11 +1848,43 @@ impl Connection {
                     .await?;
                 let outcome = configuration_outcome(outcome)?;
                 if startup_admission.is_some() {
-                    rpc.ctx
-                        .get::<crate::provider::ProviderService>()
-                        .ok_or_else(RpcError::reloading)?
-                        .retain_startup(session, &model)
-                        .map_err(provider_error)?;
+                    let retained = if scoped_admission.is_some() && self.closed.is_cancelled() {
+                        Err(RpcError::closed())
+                    } else {
+                        rpc.ctx
+                            .get::<crate::provider::ProviderService>()
+                            .ok_or_else(RpcError::reloading)
+                            .and_then(|provider| {
+                                provider
+                                    .retain_startup(session, &model)
+                                    .map_err(provider_error)
+                            })
+                    };
+                    if let Err(error) = retained {
+                        if scoped_admission.is_some() {
+                            let previous = current.map_or_else(
+                                || session.config().model.clone(),
+                                |model| dim_agent_types::ModelSelection {
+                                    provider_id: model.provider_id,
+                                    model_id: model.model_id,
+                                    capability_snapshot: model.capability_snapshot,
+                                    config: model.config,
+                                    metadata: model.metadata,
+                                },
+                            );
+                            let rollback = session
+                                .configure(
+                                    dim_agent_runtime::ConfigureUpdate {
+                                        model: Some(previous),
+                                        ..Default::default()
+                                    },
+                                    &branch,
+                                )
+                                .await?;
+                            configuration_outcome(rollback)?;
+                        }
+                        return Err(error);
+                    }
                 }
                 drop(scoped_admission);
                 Reply::ModelUpdate(ModelUpdateResult { model: id, outcome })
