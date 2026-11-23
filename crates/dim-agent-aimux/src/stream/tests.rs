@@ -18,6 +18,7 @@ use super::*;
 struct NativeStream {
     parts: VecDeque<Result<StreamPart, AiMuxError>>,
     dropped: Arc<AtomicBool>,
+    end_when_empty: bool,
 }
 
 impl Stream for NativeStream {
@@ -26,6 +27,7 @@ impl Stream for NativeStream {
     fn poll_next(mut self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         match self.parts.pop_front() {
             Some(part) => Poll::Ready(Some(part)),
+            None if self.end_when_empty => Poll::Ready(None),
             None => Poll::Pending,
         }
     }
@@ -40,11 +42,26 @@ impl Drop for NativeStream {
 fn fixture(
     parts: Vec<Result<StreamPart, AiMuxError>>,
 ) -> (ModelStream, CancellationToken, AbortSignal, Arc<AtomicBool>) {
+    fixture_with(parts, false)
+}
+
+/// A fixture whose stream ends instead of stalling once its parts are read.
+fn fixture_ending(
+    parts: Vec<Result<StreamPart, AiMuxError>>,
+) -> (ModelStream, CancellationToken, AbortSignal, Arc<AtomicBool>) {
+    fixture_with(parts, true)
+}
+
+fn fixture_with(
+    parts: Vec<Result<StreamPart, AiMuxError>>,
+    end_when_empty: bool,
+) -> (ModelStream, CancellationToken, AbortSignal, Arc<AtomicBool>) {
     let dropped = Arc::new(AtomicBool::new(false));
     let result = StreamResult {
         stream: Box::pin(NativeStream {
             parts: parts.into(),
             dropped: dropped.clone(),
+            end_when_empty,
         }),
         request: None,
         response: None,
@@ -764,6 +781,59 @@ async fn whole_tool_with_input_end_and_truncated_open_blocks_remain_valid() {
         } else {
             assert!(matches!(chunks.last(), Some(Err(_))));
         }
+    }
+}
+
+/// An interrupted tool call keeps its parse failure when the stream reports no
+/// finish reason at all: a stream that ends, an error part and a stream error
+/// all keep the malformed response the call already caused.
+#[tokio::test]
+async fn an_interrupted_tool_call_keeps_its_failure_without_a_finish_reason() {
+    let interrupted = || {
+        vec![
+            Ok(StreamPart::ToolInputStart {
+                id: "call-1".into(),
+                tool_name: "lookup".into(),
+                provider_executed: None,
+                dynamic: None,
+                title: None,
+                provider_metadata: None,
+            }),
+            Ok(tool("{\"query\":")),
+        ]
+    };
+    let mut error_part = interrupted();
+    error_part.push(Ok(StreamPart::Error {
+        error: AiMuxError::invalid_response_data("the stream broke"),
+    }));
+    let mut stream_error = interrupted();
+    stream_error.push(Err(AiMuxError::invalid_response_data(
+        "the transport broke",
+    )));
+    for (case, parts) in [
+        ("a stream that ends", interrupted()),
+        ("an error part", error_part),
+        ("a stream error", stream_error),
+    ] {
+        let (stream, _, abort, dropped) = fixture_ending(parts);
+        let chunks = collect_or_stall(stream, case).await;
+        let Some(Err(failure)) = chunks.last() else {
+            panic!("{case}: missing failure: {chunks:?}")
+        };
+        let HostError::Failed {
+            model: Some(model), ..
+        } = failure
+        else {
+            panic!("{case}: {failure:?}")
+        };
+        assert_eq!(model.kind, ModelFailureKind::MalformedResponse, "{case}");
+        assert_eq!(
+            model.reason.as_deref(),
+            Some("invalid arguments for tool 'lookup'"),
+            "{case}"
+        );
+        assert!(abort.is_aborted(), "{case}");
+        assert!(dropped.load(Ordering::SeqCst), "{case}");
     }
 }
 
