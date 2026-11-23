@@ -17,6 +17,9 @@ use std::{
 use tokio::sync::{Notify, mpsc};
 use tokio_util::sync::CancellationToken;
 
+/// The interval `output.rs` shows thinking progress at.
+const THINKING_SHOW_INTERVAL: Duration = Duration::from_millis(250);
+
 fn builder(model: Arc<dyn ModelDriver>, tools: Arc<dyn ToolDriver>) -> AgentBuilder {
     let mut builder = AgentBuilder::new(AgentConfig::default());
     builder
@@ -147,6 +150,22 @@ async fn wait_for_usage(session: &Session, count: usize) {
     }
 }
 
+/// Waits until the branch ends its turn; its outcome tells a missing retry
+/// apart from a retry still starting.
+async fn turn_end(session: &Session) -> String {
+    let mut dispatch = session.dispatch_watch("main").unwrap();
+    loop {
+        let events = chain_events(session, "main", ..).await.unwrap();
+        if let Some(outcome) = events.iter().find_map(|event| match &event.kind {
+            EventKind::TurnEnd(data) => Some(format!("{:?}", data.outcome)),
+            _ => None,
+        }) {
+            return outcome;
+        }
+        dispatch.changed().await.unwrap();
+    }
+}
+
 /// Takes every progress snapshot the cell published since the last call.
 fn snapshots(progress: &mut tokio::sync::watch::Receiver<ModelProgress>) -> Vec<ModelProgress> {
     let mut taken = Vec::new();
@@ -154,6 +173,19 @@ fn snapshots(progress: &mut tokio::sync::watch::Receiver<ModelProgress>) -> Vec<
         taken.push(progress.borrow_and_update().clone());
     }
     taken
+}
+
+/// Adds the snapshots a subscriber received since the last call, and their
+/// serialized size, to `updates` and `bytes`.
+fn drain(
+    progress: &mut tokio::sync::watch::Receiver<ModelProgress>,
+    updates: &mut usize,
+    bytes: &mut usize,
+) {
+    for snapshot in snapshots(progress) {
+        *updates += 1;
+        *bytes += serde_json::to_vec(&snapshot).unwrap().len();
+    }
 }
 
 fn thinking_events(events: &[Arc<AgentEvent>]) -> Vec<String> {
@@ -176,7 +208,7 @@ fn text_events(events: &[Arc<AgentEvent>]) -> Vec<String> {
         .collect()
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(start_paused = true)]
 async fn a_stream_cut_before_any_committed_event_retries_in_place() {
     tokio::time::timeout(Duration::from_secs(10), async {
         let (cut, cut_stream) = mpsc::unbounded_channel();
@@ -215,7 +247,14 @@ async fn a_stream_cut_before_any_committed_event_retries_in_place() {
         send(&cut, vec![Err(malformed_cut())]);
         drop(cut);
 
-        model.second_attempt.notified().await;
+        let ended = tokio::select! {
+            _ = model.second_attempt.notified() => None,
+            outcome = turn_end(&session) => Some(outcome),
+        };
+        assert!(
+            ended.is_none(),
+            "a cut before any committed output retries in place; the turn ended with {ended:?}"
+        );
         let cleared = session.get::<ModelProgress>("main").unwrap().unwrap();
         assert!(
             cleared.thinking.is_empty() && cleared.text.is_empty(),
@@ -274,7 +313,7 @@ async fn a_stream_cut_before_any_committed_event_retries_in_place() {
     .unwrap();
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(start_paused = true)]
 async fn a_stream_cut_after_a_committed_event_ends_the_turn_without_retrying() {
     tokio::time::timeout(Duration::from_secs(10), async {
         let (cut, cut_stream) = mpsc::unbounded_channel();
@@ -329,7 +368,7 @@ async fn a_stream_cut_after_a_committed_event_ends_the_turn_without_retrying() {
     .unwrap();
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(start_paused = true)]
 async fn a_usage_fact_before_a_cut_stops_the_retry() {
     tokio::time::timeout(Duration::from_secs(10), async {
         let (cut, cut_stream) = mpsc::unbounded_channel();
@@ -392,7 +431,7 @@ async fn a_usage_fact_before_a_cut_stops_the_retry() {
     .unwrap();
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(start_paused = true)]
 async fn thinking_progress_is_shown_once_per_interval() {
     tokio::time::timeout(Duration::from_secs(10), async {
         let (chunks, receiver) = mpsc::unbounded_channel();
@@ -493,7 +532,7 @@ async fn thinking_progress_is_shown_once_per_interval() {
     .unwrap();
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(start_paused = true)]
 async fn a_text_delta_shows_buffered_thinking_at_once() {
     tokio::time::timeout(Duration::from_secs(10), async {
         let (chunks, receiver) = mpsc::unbounded_channel();
@@ -557,7 +596,7 @@ async fn a_text_delta_shows_buffered_thinking_at_once() {
     .unwrap();
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(start_paused = true)]
 async fn a_tool_start_shows_buffered_thinking_at_once() {
     tokio::time::timeout(Duration::from_secs(10), async {
         let (chunks, receiver) = mpsc::unbounded_channel();
@@ -618,8 +657,8 @@ async fn a_tool_start_shows_buffered_thinking_at_once() {
     .unwrap();
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn buffered_thinking_is_shown_within_one_interval_without_another_delta() {
+#[tokio::test(start_paused = true)]
+async fn a_thinking_block_end_shows_the_buffer_at_once() {
     tokio::time::timeout(Duration::from_secs(10), async {
         let (chunks, receiver) = mpsc::unbounded_channel();
         let model = Arc::new(ScriptedModel::new(vec![receiver]));
@@ -644,34 +683,39 @@ async fn buffered_thinking_is_shown_within_one_interval_without_another_delta() 
             &chunks,
             vec![
                 Ok(ModelChunk::MessageStart {
-                    message_id: "alone".into(),
+                    message_id: "end".into(),
                 }),
-                Ok(ModelChunk::Thinking("alone".into())),
-                Ok(usage(1)),
+                Ok(ModelChunk::Thinking("abc".into())),
+                Ok(ModelChunk::ThinkingEnd {
+                    thinking: "abc".into(),
+                }),
             ],
         );
-        wait_for_usage(&session, 1).await;
-        let taken = snapshots(&mut progress);
-        assert!(
-            taken.is_empty(),
-            "nothing is shown before the interval elapses: {taken:?}"
-        );
         let shown = progress
-            .wait_for(|progress| progress.thinking == "alone")
+            .wait_for(|progress| progress.thinking_offset + progress.thinking.len() as u64 == 3)
             .await
             .unwrap()
             .clone();
-        assert_eq!(shown.thinking, "alone");
-
+        assert_eq!(
+            shown.thinking_offset + shown.thinking.len() as u64,
+            3,
+            "the block end shows the whole block: {shown:?}"
+        );
+        tokio::time::advance(THINKING_SHOW_INTERVAL).await;
+        tokio::task::yield_now().await;
+        let settled = session.get::<ModelProgress>("main").unwrap().unwrap();
+        assert_eq!(
+            settled.thinking_offset + settled.thinking.len() as u64,
+            3,
+            "the interval does not show the block's thinking again: {settled:?}"
+        );
         send(
             &chunks,
             vec![
-                Ok(ModelChunk::ThinkingEnd {
-                    thinking: "alone".into(),
-                }),
+                Ok(ModelChunk::Text("answer".into())),
                 Ok(ModelChunk::TextEnd),
                 Ok(ModelChunk::MessageStop {
-                    message_id: "alone".into(),
+                    message_id: "end".into(),
                     reason: ModelStopReason::EndTurn,
                 }),
             ],
@@ -682,4 +726,157 @@ async fn buffered_thinking_is_shown_within_one_interval_without_another_delta() 
     })
     .await
     .unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_pending_thinking_buffer_is_not_shown_after_a_retry() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let (cut, cut_stream) = mpsc::unbounded_channel();
+        let (retry, retry_stream) = mpsc::unbounded_channel();
+        let model = Arc::new(ScriptedModel::new(vec![cut_stream, retry_stream]));
+        let agent = MinimalHost::start(&builder(model.clone(), Arc::new(MockTools)))
+            .await
+            .unwrap();
+        let session = agent
+            .create_session(SessionConfig::default())
+            .await
+            .unwrap();
+        session
+            .submit("go".into(), InputMode::Queue, "main")
+            .await
+            .unwrap();
+        let mut progress = session.on::<ModelProgress>("main").unwrap().unwrap();
+        progress
+            .wait_for(|progress| progress.request_id.is_some())
+            .await
+            .unwrap();
+        snapshots(&mut progress);
+        send(
+            &cut,
+            vec![
+                Ok(ModelChunk::MessageStart {
+                    message_id: "cut".into(),
+                }),
+                Ok(ModelChunk::Thinking("discarded".into())),
+                Err(malformed_cut()),
+            ],
+        );
+        drop(cut);
+
+        let ended = tokio::select! {
+            _ = model.second_attempt.notified() => None,
+            outcome = turn_end(&session) => Some(outcome),
+        };
+        assert!(
+            ended.is_none(),
+            "a cut before any committed output retries in place; the turn ended with {ended:?}"
+        );
+        let cleared = session.get::<ModelProgress>("main").unwrap().unwrap();
+        assert!(
+            cleared.thinking.is_empty(),
+            "the failed attempt's buffered thinking is gone before the retry: {cleared:?}"
+        );
+
+        model.release.notify_one();
+        tokio::time::advance(THINKING_SHOW_INTERVAL).await;
+        tokio::task::yield_now().await;
+        let retrying = session.get::<ModelProgress>("main").unwrap().unwrap();
+        assert!(
+            retrying.thinking.is_empty(),
+            "the retry does not show the failed attempt's buffer: {retrying:?}"
+        );
+
+        send(
+            &retry,
+            vec![
+                Ok(ModelChunk::MessageStart {
+                    message_id: "retry".into(),
+                }),
+                Ok(ModelChunk::Thinking("kept".into())),
+                Ok(ModelChunk::ThinkingEnd {
+                    thinking: "kept".into(),
+                }),
+                Ok(ModelChunk::Text("answer".into())),
+                Ok(ModelChunk::TextEnd),
+                Ok(ModelChunk::MessageStop {
+                    message_id: "retry".into(),
+                    reason: ModelStopReason::EndTurn,
+                }),
+            ],
+        );
+        drop(retry);
+        session.idle("main").await.unwrap();
+        assert_eq!(model.calls.load(Ordering::SeqCst), 2);
+        let events = chain_events(&session, "main", ..).await.unwrap();
+        assert_eq!(thinking_events(&events), ["kept"]);
+        assert_eq!(text_events(&events), ["answer"]);
+        agent.close().await.unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+/// The comparison the pull request reports: 2,000 deltas of 8 bytes, 20 ms
+/// apart, measure the updates and serialized bytes one subscriber sees.
+#[tokio::test(start_paused = true)]
+async fn thinking_progress_volume_is_throttled() {
+    let (chunks, receiver) = mpsc::unbounded_channel();
+    let model = Arc::new(ScriptedModel::new(vec![receiver]));
+    let agent = MinimalHost::start(&builder(model.clone(), Arc::new(MockTools)))
+        .await
+        .unwrap();
+    let session = agent
+        .create_session(SessionConfig::default())
+        .await
+        .unwrap();
+    session
+        .submit("go".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    let mut progress = session.on::<ModelProgress>("main").unwrap().unwrap();
+    progress
+        .wait_for(|progress| progress.request_id.is_some())
+        .await
+        .unwrap();
+    let (mut updates, mut bytes) = (0, 0);
+    drain(&mut progress, &mut updates, &mut bytes);
+    send(
+        &chunks,
+        vec![Ok(ModelChunk::MessageStart {
+            message_id: "volume".into(),
+        })],
+    );
+    tokio::task::yield_now().await;
+    for _ in 0..2000 {
+        send(&chunks, vec![Ok(ModelChunk::Thinking("abcdefgh".into()))]);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        drain(&mut progress, &mut updates, &mut bytes);
+    }
+    send(
+        &chunks,
+        vec![
+            Ok(ModelChunk::ThinkingEnd {
+                thinking: "abcdefgh".repeat(2000),
+            }),
+            Ok(ModelChunk::Text("answer".into())),
+            Ok(ModelChunk::TextEnd),
+            Ok(ModelChunk::MessageStop {
+                message_id: "volume".into(),
+                reason: ModelStopReason::EndTurn,
+            }),
+        ],
+    );
+    drop(chunks);
+    session.idle("main").await.unwrap();
+    drain(&mut progress, &mut updates, &mut bytes);
+    println!("thinking progress: {updates} updates, {bytes} bytes");
+    assert!(
+        updates < 300,
+        "the interval throttles 2,000 deltas to {updates} updates"
+    );
+    assert!(
+        bytes < 2_000_000,
+        "the throttle keeps the snapshots under 2 MB, got {bytes}"
+    );
+    agent.close().await.unwrap();
 }
