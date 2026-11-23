@@ -1289,4 +1289,80 @@ mod tests {
         assert_eq!(keys.keys, Vec::new(), "no key is read from a definition");
         assert_eq!(keys.unreadable, vec!["src.rs:3".to_owned()]);
     }
+
+    /// A block a key argument evaluates to reads the constant it declares, not
+    /// the constant of the same name outside it.
+    #[test]
+    fn a_block_key_argument_reads_the_constant_it_declares() {
+        let text = "const HINT: &str = \"Outer key\";\n\nfn draw() {\n    let a = t({\n        const HINT: &str = \"Inner key\";\n        HINT\n    });\n}\n";
+        let keys = call_keys(text, "src.rs").unwrap();
+        assert_eq!(
+            keys.keys,
+            vec![("Inner key".to_owned(), "src.rs:6".to_owned())]
+        );
+        assert_eq!(
+            keys.unreadable,
+            Vec::<String>::new(),
+            "the inner constant is read"
+        );
+    }
+
+    /// A block a key argument evaluates to reads the binding it declares, which
+    /// is not a constant, so the argument is counted instead.
+    #[test]
+    fn a_block_key_argument_reads_the_binding_it_declares() {
+        let text = "const HINT: &str = \"Kept\";\n\nfn draw(q: &str) {\n    let a = t({\n        let HINT = q;\n        HINT\n    });\n}\n";
+        let keys = call_keys(text, "src.rs").unwrap();
+        assert_eq!(keys.keys, Vec::new(), "a binding is not the constant");
+        assert_eq!(keys.unreadable, vec!["src.rs:6".to_owned()]);
+    }
+
+    /// A block in a `match` arm of a key argument reads its own constant, while
+    /// an arm that declares none still reads the outer one.
+    #[test]
+    fn a_match_arm_block_key_argument_reads_its_own_constant() {
+        let text = "const HINT: &str = \"Outer key\";\n\nfn draw(k: K) {\n    let a = t(match k {\n        K::A => {\n            const HINT: &str = \"Inner key\";\n            HINT\n        }\n        K::B => HINT,\n    });\n}\n";
+        let keys = call_keys(text, "src.rs").unwrap();
+        assert_eq!(
+            keys.keys,
+            vec![
+                ("Inner key".to_owned(), "src.rs:7".to_owned()),
+                ("Outer key".to_owned(), "src.rs:9".to_owned()),
+            ]
+        );
+        assert_eq!(keys.unreadable, Vec::<String>::new());
+    }
+
+    /// A branch of an `if` key argument opens the scope of a block it holds, and
+    /// a block inside that block opens its own.
+    #[test]
+    fn an_if_branch_of_a_key_argument_reads_a_nested_block_scope() {
+        let text = "const HINT: &str = \"Outer key\";\n\nfn draw(c: bool) {\n    let a = t(if c {\n        const HINT: &str = \"Inner key\";\n        { HINT }\n    } else {\n        HINT\n    });\n}\n";
+        let keys = call_keys(text, "src.rs").unwrap();
+        assert_eq!(
+            keys.keys,
+            vec![
+                ("Inner key".to_owned(), "src.rs:6".to_owned()),
+                ("Outer key".to_owned(), "src.rs:8".to_owned()),
+            ]
+        );
+        assert_eq!(keys.unreadable, Vec::<String>::new());
+    }
+
+    /// A `use`, a `static` and a macro in a block a key argument evaluates to
+    /// each hide the constant of the same name, so the argument is counted.
+    #[test]
+    fn a_use_static_or_macro_in_a_key_argument_block_hides_the_constant() {
+        let text = "const HINT: &str = \"Outer key\";\n\nfn draw(q: Q) {\n    let a = t({ use other::HINT; HINT });\n    let b = t({ static HINT: &str = \"A static\"; HINT });\n    let c = t({ bind_hint!(); HINT });\n}\n";
+        let keys = call_keys(text, "src.rs").unwrap();
+        assert_eq!(keys.keys, Vec::new(), "no outer constant is read");
+        assert_eq!(
+            keys.unreadable,
+            vec![
+                "src.rs:4".to_owned(),
+                "src.rs:5".to_owned(),
+                "src.rs:6".to_owned(),
+            ]
+        );
+    }
 }
