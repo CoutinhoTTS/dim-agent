@@ -3957,6 +3957,10 @@ async fn connection_updates_list_the_new_endpoint_and_keep_bundled_models() {
             let connected = result.unwrap();
             assert_eq!(connected.info.enabled, Some(true));
             assert_eq!(connected.info.version, Some(version + 1));
+            assert_eq!(
+                serde_json::to_value(&connected).unwrap()["modelsListed"],
+                json!("listed")
+            );
             assert_eq!(connected.models.unwrap()[0].model.model_id, "magpie-model");
         } else {
             assert!(result.is_err());
@@ -3971,6 +3975,76 @@ async fn connection_updates_list_the_new_endpoint_and_keep_bundled_models() {
             assert!(unchanged.models.unwrap().is_empty());
         }
     }
+
+    let disabled = provider
+        .update(
+            "magpie".into(),
+            version + 1,
+            serde_json::from_value(json!({"enabled":false})).unwrap(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let moved = provider
+        .update(
+            "magpie".into(),
+            disabled.info.version.unwrap(),
+            serde_json::from_value(json!({"baseUrl":format!("{base}/magpie-next/v1")})).unwrap(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert_eq!(moved.info.enabled, Some(false));
+    assert!(moved.models.unwrap().is_empty());
+    assert!(
+        requests.try_recv().is_err(),
+        "changing a disabled connection does not list"
+    );
+    let manual = provider
+        .create_model(
+            "magpie".into(),
+            moved.info.version.unwrap(),
+            model("manual", 4096),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let reconnecting = {
+        let provider = provider.clone();
+        let cancel = cancel.clone();
+        tokio::spawn(async move {
+            let patch = serde_json::from_value(json!({"enabled":true})).unwrap();
+            provider
+                .update("magpie".into(), manual.version, patch, &cancel)
+                .await
+        })
+    };
+    let (uri, reply) = tokio::time::timeout(std::time::Duration::from_secs(5), requests.recv())
+        .await
+        .expect("enabling must refill the cleared endpoint listing even with manual models")
+        .unwrap();
+    assert_eq!(uri.path(), "/magpie-next/v1/models");
+    reply
+        .send((
+            StatusCode::OK,
+            Json(json!({"data":[{"id":"next-model",
+        "context_window":64000,"max_output_tokens":512}]})),
+        ))
+        .unwrap();
+    let reconnected = reconnecting.await.unwrap().unwrap();
+    assert_eq!(
+        serde_json::to_value(&reconnected).unwrap()["modelsListed"],
+        json!("listed")
+    );
+    assert_eq!(
+        reconnected
+            .models
+            .unwrap()
+            .into_iter()
+            .map(|row| row.model.model_id)
+            .collect::<Vec<_>>(),
+        ["next-model", "manual"]
+    );
 
     let azure = {
         let mut azure = input(
@@ -4011,6 +4085,97 @@ async fn connection_updates_list_the_new_endpoint_and_keep_bundled_models() {
             .credential_configured
     );
     assert!(requests.try_recv().is_err());
+
+    root.shutdown().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+
+    let home = temp_home("provider-legacy-magpie");
+    let (root, provider) = provider_root(&home).await;
+    provider
+        .update(
+            "magpie".into(),
+            magpie.info.version.unwrap(),
+            serde_json::from_value(json!({
+                "baseUrl":format!("{base}/legacy/v1"),
+                "credential":{"action":"set","value":"magpie-key"}
+            }))
+            .unwrap(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    root.shutdown().await.unwrap();
+    rusqlite::Connection::open(home.join("native.sqlite"))
+        .unwrap()
+        .execute(
+            "UPDATE providers SET record=json_set(record,'$.enabled',json('true')) WHERE provider_id='magpie'",
+            [],
+        )
+        .unwrap();
+    let (root, provider) = provider_root(&home).await;
+    let legacy = provider
+        .management("magpie".into(), None, &cancel)
+        .await
+        .unwrap()
+        .providers
+        .remove(0);
+    assert_eq!(legacy.info.enabled, Some(true));
+    assert!(legacy.models.unwrap().is_empty());
+    let network = provider
+        .update(
+            "magpie".into(),
+            legacy.info.version.unwrap(),
+            serde_json::from_value(json!({"network":{"timeoutMs":{"action":"set","value":1000}}}))
+                .unwrap(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert!(
+        serde_json::to_value(&network)
+            .unwrap()
+            .get("modelsListed")
+            .is_none()
+    );
+    assert!(
+        requests.try_recv().is_err(),
+        "a network-only change must not list even with no models"
+    );
+    let repointed = {
+        let cancel = cancel.clone();
+        let patch =
+            serde_json::from_value(json!({"baseUrl":format!("{base}/legacy-next/v1")})).unwrap();
+        tokio::spawn(async move {
+            provider
+                .update(
+                    "magpie".into(),
+                    network.info.version.unwrap(),
+                    patch,
+                    &cancel,
+                )
+                .await
+        })
+    };
+    let (uri, reply) = tokio::time::timeout(std::time::Duration::from_secs(5), requests.recv())
+        .await
+        .expect("changing an enabled legacy connection must fill its empty bundled catalog")
+        .unwrap();
+    assert_eq!(uri.path(), "/legacy-next/v1/models");
+    reply
+        .send((
+            StatusCode::OK,
+            Json(json!({"data":[{"id":"legacy-next-model"}]})),
+        ))
+        .unwrap();
+    let repointed = repointed.await.unwrap().unwrap();
+    assert_eq!(
+        serde_json::to_value(&repointed).unwrap()["modelsListed"],
+        json!("listed")
+    );
+    assert_eq!(
+        repointed.models.unwrap()[0].model.model_id,
+        "legacy-next-model"
+    );
 
     root.shutdown().await.unwrap();
     server.abort();
@@ -9774,9 +9939,8 @@ async fn provider_root(home: &Path) -> (Ctx, Arc<ProviderService>) {
     (root, provider)
 }
 
-/// Points the empty-bundle builtin at a listing endpoint. Its bundle holds no
-/// row, so the record starts with an empty stored list and the refresh is what
-/// fills it.
+/// Connects the empty-bundle builtin to a listing endpoint so the next refresh
+/// reads a catalog already populated by discovery.
 async fn listed_provider(
     provider: &Arc<ProviderService>,
     endpoint: &str,
@@ -9802,13 +9966,10 @@ async fn listed_provider(
         .unwrap();
     assert_eq!(
         serde_json::to_value(&updated).unwrap()["modelsListed"],
-        json!("bundled"),
-        "{LISTED_PROVIDER}: the bundle declares its rows, so the connection write lists nothing"
+        json!("listed"),
+        "{LISTED_PROVIDER}: connecting fills the empty bundle"
     );
-    assert!(
-        updated.models.as_ref().is_none_or(Vec::is_empty),
-        "{LISTED_PROVIDER}: the empty bundle leaves the stored list empty"
-    );
+    assert_eq!(updated.models.unwrap()[0].model.model_id, LISTED_ID);
 }
 
 /// One stored model row, by id, read from the record's own JSON: the record
@@ -9923,8 +10084,8 @@ const LISTED_PROVIDER: &str = "ollama";
 const LISTED_ID: &str = "claude-opus-5-5";
 
 /// A listed id on a provider whose bundled entry is empty is identified against
-/// the catalog, never against the row an earlier listing wrote: on the refresh
-/// that stores it, on the next refresh, and on a later read.
+/// the catalog, never against the row an earlier listing wrote: on refresh and
+/// on a later read.
 #[tokio::test]
 async fn a_listed_id_is_identified_against_the_catalog_on_a_refresh_and_a_read() {
     let (endpoint, server) = listing_server(json!({"data":[{"id": LISTED_ID}]})).await;
@@ -9940,23 +10101,12 @@ async fn a_listed_id_is_identified_against_the_catalog_on_a_refresh_and_a_read()
         "{LISTED_ID}: the vendor row declares efforts, so the answer is visible"
     );
 
-    // The first refresh stores the listing's row; the second is where that
-    // stored row used to answer for itself.
-    let first = provider
-        .refresh_for(LISTED_PROVIDER.into(), &cancel)
-        .await
-        .unwrap();
-    assert_eq!(
-        served(&first.models, LISTED_ID).id,
-        LISTED_ID,
-        "the first refresh stores the listing"
-    );
-    let second = provider
+    let refreshed = provider
         .refresh_for(LISTED_PROVIDER.into(), &cancel)
         .await
         .unwrap();
 
-    // What discovery wrote on the second refresh is the vendor's answer, so the
+    // What discovery wrote on refresh is the vendor's answer, so the
     // row a later refresh reads carries no identity of its own. This is the
     // discovery half of the answer: it reads only what `discover` projected.
     let written = stored_row(&home, LISTED_PROVIDER, LISTED_ID);
@@ -9995,7 +10145,7 @@ async fn a_listed_id_is_identified_against_the_catalog_on_a_refresh_and_a_read()
     assert_eq!(served_limits(read), entry_limits(&vendor), "{LISTED_ID}");
 
     // The refresh's own reply says the same.
-    let answered = served(&second.models, LISTED_ID);
+    let answered = served(&refreshed.models, LISTED_ID);
     assert_ne!(
         served_rule(answered),
         "provider-exact",

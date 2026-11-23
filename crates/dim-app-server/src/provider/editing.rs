@@ -488,18 +488,30 @@ impl ProviderService {
         self.adopt_provider(&provider_id, cancel).await?;
         let id = provider_id.clone();
         let db = self.db.clone();
-        let header = self
+        let bundled_count = self.bundled.bundled_model_count(&provider_id);
+        let changes_endpoint = patch.changes_endpoint();
+        let check_empty_listing =
+            bundled_count == Some(0) && patch.enabled == Some(true) && !changes_endpoint;
+        let (header, empty_endpoint_listing) = self
             .owned(cancel, move |_| {
                 Box::pin(async move {
                     db.run_read(move |c| {
-                        persistence::static_read(c, &id, persistence::Models::Header)
+                        let header = persistence::static_read(c, &id, persistence::Models::Header)?;
+                        let empty = check_empty_listing
+                            && header.as_ref().is_some_and(|record| {
+                                record.version == expected_version
+                                    && !record.enabled
+                                    && record.remote_models
+                            })
+                            && !persistence::has_endpoint_models(c, &id)?;
+                        Ok((header, empty))
                     })
                     .await
                     .map_err(ProviderError::from)
                 })
             })
-            .await?
-            .ok_or(ProviderError::NotFound)?;
+            .await?;
+        let header = header.ok_or(ProviderError::NotFound)?;
         if header.version != expected_version {
             return Err(ProviderError::Conflict(
                 "Provider version changed; reread before retrying".into(),
@@ -508,13 +520,14 @@ impl ProviderService {
         let inherited_count = if header.remote_models {
             None
         } else {
-            self.bundled.bundled_model_count(&provider_id)
+            bundled_count
         };
         let enabled = patch.enabled.unwrap_or(header.enabled);
         let listable = self.remote_model_list(&provider_id, &header);
         let load_empty_bundle = inherited_count == Some(0) && enabled && listable;
         let bundled_models = inherited_count.is_some() && !load_empty_bundle;
-        let refresh = patch.changes_endpoint() || (load_empty_bundle && !header.enabled);
+        let refresh = changes_endpoint
+            || (!header.enabled && listable && (load_empty_bundle || empty_endpoint_listing));
         let (record, models_listed) = if patch.glued_prefix.is_none()
             && (!refresh || bundled_models || !listable)
         {

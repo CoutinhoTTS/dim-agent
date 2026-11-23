@@ -41,7 +41,7 @@ pub struct ManagementProvider {
     pub models: Option<Vec<ManagementModel>>,
     pub preferences: BTreeMap<String, ModelPreferences>,
     /// What a connection update did with the record's models, including an
-    /// enable that fills an empty bundled catalog. Absent from reads.
+    /// enable that fills an empty bundled catalog or endpoint listing. Absent from reads.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub models_listed: Option<ModelsListed>,
 }
