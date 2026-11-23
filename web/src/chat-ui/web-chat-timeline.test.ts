@@ -1410,15 +1410,21 @@ describe("chat store moves", () => {
 
     const written = chat.writeGoal("s-1", "set", "root work", "main").catch((cause: unknown) => cause)
     await vi.waitFor(() => expect(held.main !== undefined).toBe(true))
-    const moved = chat.setDefaultBranch("s-1", "worker")
-    await moved
-    expect(chat.views["s-1"]!.defaultBranchId).toBe("worker")
+    let finished = false
+    const moved = chat.setDefaultBranch("s-1", "worker").then(() => { finished = true })
+    // The move continues on the new centre but waits for the goal refresh the
+    // outgoing line started, so it cannot finish while that read is held.
+    await vi.waitFor(() => expect(chat.views["s-1"]!.defaultBranchId).toBe("worker"))
+    await settle()
+    expect(finished).toBe(false)
 
     // The outgoing line's read fails only after the centre has moved on; the
     // refresh the new centre asked for is still pending.
     held.main!.reject(new Error("the goal read failed"))
     await vi.waitFor(() => expect(held.worker !== undefined).toBe(true))
     held.worker!.resolve({ branchId: "worker", through: 5, goal: { objective: "worker work", status: { kind: "active" }, evaluator: false } })
+    await moved
+    expect(chat.views["s-1"]!.defaultBranchId).toBe("worker")
     expect(await written).toBeUndefined()
 
     const view = chat.views["s-1"]!
