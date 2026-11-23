@@ -89,6 +89,7 @@ test("a coalesced clear rebuilds the replaced attempt's thought row", () => {
   assert.notEqual(thoughts[0].key, first.key, "the rebuilt thought row has a new identity")
   assert.equal(thoughts[0].text, "a longer successful thought")
 
+  projection.apply({ id: "second", sequence: 4, createAt: 1_003, content: { kind: "thinking", requestId: "r1", delta: "a longer successful thought" } })
   projection.apply(event(5, { kind: "text", requestId: "r1", delta: "Done." }))
   const thought = projection.rows.find((row) => row.kind === "thinking")
   assert.equal(thought.elapsedMs, 3, "the span starts at the new attempt")
@@ -103,6 +104,65 @@ test("a coalesced clear before text leaves no empty thought row", () => {
   const thoughts = projection.rows.filter((row) => row.kind === "thinking")
   assert.equal(thoughts.length, 0, JSON.stringify(projection.rows))
   assert.equal(projection.rows.find((row) => row.kind === "assistant").text, "partial answer")
+})
+
+function failedThought() {
+  return { sessionId: "s", branchId: "main", requestId: "r1", thinkingPartId: "first", text: "", textOffset: 0, thinking: "failed attempt", thinkingOffset: 0, thinkingStartedAt: 1_000 }
+}
+
+test("a durable thought before the retry notice rebuilds the row", () => {
+  const projection = new Projection()
+  projection.apply(event(1, { kind: "model-start", requestId: "r1" }))
+  projection.progress(failedThought())
+  const replaced = projection.rows[0]
+  // The progress notice is coalesced; the retry's first committed thought arrives first.
+  projection.apply({ id: "second", sequence: 2, createAt: 1_002, content: { kind: "thinking", requestId: "r1", delta: "a longer successful thought" } })
+  const thoughts = projection.rows.filter((row) => row.kind === "thinking")
+  assert.equal(thoughts.length, 1, JSON.stringify(projection.rows))
+  assert.notEqual(thoughts[0].key, replaced.key, "the rebuilt thought row has a new identity")
+  assert.equal(thoughts[0].text, "a longer successful thought")
+  projection.apply(event(3, { kind: "text", requestId: "r1", delta: "Done." }))
+  assert.equal(projection.rows.find((row) => row.kind === "thinking").elapsedMs, 1, "the span starts at the new attempt")
+})
+
+test("a durable text before the retry notice leaves no empty thought row", () => {
+  const projection = new Projection()
+  projection.apply(event(1, { kind: "model-start", requestId: "r1" }))
+  projection.progress(failedThought())
+  projection.apply(event(2, { kind: "text", requestId: "r1", delta: "answer" }))
+  assert.equal(projection.rows.filter((row) => row.kind === "thinking").length, 0, JSON.stringify(projection.rows))
+  assert.equal(projection.rows.find((row) => row.kind === "assistant").text, "answer")
+})
+
+test("a durable tool event before the retry notice leaves no empty thought row", () => {
+  const projection = new Projection()
+  projection.apply(event(1, { kind: "model-start", requestId: "r1" }))
+  projection.progress(failedThought())
+  projection.apply(event(2, { kind: "tool-use-start", requestId: "r1", callId: "call", name: "echo" }))
+  assert.equal(projection.rows.filter((row) => row.kind === "thinking").length, 0, JSON.stringify(projection.rows))
+  projection.apply(event(3, { kind: "model-end", requestId: "r1", error: "boom", failure: failure() }))
+  const row = projection.rows.at(-1)
+  assert.equal(row.kind, "error")
+  assert.ok(!row.text.startsWith("The response above is incomplete."), row.text)
+
+  const second = new Projection()
+  second.apply(event(1, { kind: "model-start", requestId: "r1" }))
+  second.progress(failedThought())
+  second.apply(event(2, { kind: "tool-use", requestId: "r1", callId: "call", name: "echo", input: {} }))
+  assert.equal(second.rows.filter((row) => row.kind === "thinking").length, 0, JSON.stringify(second.rows))
+})
+
+test("a stale progress snapshot does not reopen a replaced thought", () => {
+  const projection = new Projection()
+  projection.apply(event(1, { kind: "model-start", requestId: "r1" }))
+  const failed = failedThought()
+  projection.progress(failed)
+  projection.apply({ id: "second", sequence: 2, createAt: 1_002, content: { kind: "thinking", requestId: "r1", delta: "success" } })
+  // The page replays its cached snapshot, still the replaced attempt's.
+  projection.progress(failed)
+  const thoughts = projection.rows.filter((row) => row.kind === "thinking")
+  assert.equal(thoughts.length, 1, JSON.stringify(projection.rows))
+  assert.equal(thoughts[0].text, "success", "the stale snapshot leaves the new attempt's thought alone")
 })
 
 test("a tool start settles a thought before its arguments arrive", () => {
