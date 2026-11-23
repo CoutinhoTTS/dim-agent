@@ -659,16 +659,29 @@ async fn parse_output(
     let mut stop_seen = false;
     let mut published = output.timeline.watch();
     loop {
+        // A cancelled request ends at once; a stop lets the host end its
+        // stream, so the calls it started still close.
+        if !stop_seen && cancel.is_cancelled() {
+            if output.gate.replaced() {
+                return Err(HostError::Cancelled("Model invocation cancelled".into()));
+            }
+            stop_seen = true;
+        }
         let show_at = output.thinking_show_at;
+        if show_at.is_some_and(|at| Instant::now() >= at) {
+            if output.show_thinking()? {
+                visible = true;
+            }
+            continue;
+        }
         let until = show_at.unwrap_or_else(Instant::now);
         let next = tokio::select! {
-            chunk = stream.next() => chunk,
-            changed = published.changed(), if !output.handoffs.is_empty() => {
-                if changed.is_ok() {
-                    output.show(|_| {});
-                } else {
-                    output.handoffs.clear();
+            biased;
+            _ = cancel.cancelled(), if !stop_seen => {
+                if output.gate.replaced() {
+                    return Err(HostError::Cancelled("Model invocation cancelled".into()));
                 }
+                stop_seen = true;
                 continue;
             }
             _ = tokio::time::sleep_until(until), if show_at.is_some() => {
@@ -677,15 +690,15 @@ async fn parse_output(
                 }
                 continue;
             }
-            _ = cancel.cancelled(), if !stop_seen => {
-                if output.gate.replaced() {
-                    return Err(HostError::Cancelled("Model invocation cancelled".into()));
+            changed = published.changed(), if !output.handoffs.is_empty() => {
+                if changed.is_ok() {
+                    output.show(|_| {});
+                } else {
+                    output.handoffs.clear();
                 }
-                // A stop lets the host end its stream: output it already
-                // sent still closes the calls it started.
-                stop_seen = true;
                 continue;
             }
+            chunk = stream.next() => chunk,
         };
         let Some(chunk) = next else { break };
         let chunk = match chunk {
