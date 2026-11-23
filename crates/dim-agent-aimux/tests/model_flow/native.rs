@@ -2239,6 +2239,192 @@ async fn a_thinking_only_reply_fails_after_one_attempt() {
     chat.close().await;
 }
 
+/// Every failed `step/model-output-end` in `events`, with the line it carries.
+fn failed_model_outputs(events: &[Arc<AgentEvent>]) -> Vec<(String, ModelFailure)> {
+    events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::ModelOutputEnd(data) => match &data.outcome {
+                ModelOutputOutcome::Failed {
+                    error,
+                    failure: Some(failure),
+                    ..
+                } => Some((error.clone(), (**failure).clone())),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect()
+}
+
+/// A content-filter finish reason is `content_filtered` in the persisted
+/// terminal, and the call the reply announced before the filter is closed
+/// without a continuation: the turn ends failed after one request.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_content_filter_finish_reason_ends_the_turn_without_a_continuation() {
+    let chat = NativeServer::start("openai-chat").await;
+    let agent = model_agent(chat.models(), None).await;
+    let session = agent.create_session(chat.session_config()).await.unwrap();
+    session
+        .submit("finish-filter".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
+    let failures = failed_model_outputs(&events);
+    assert_eq!(failures.len(), 1, "{events:?}");
+    let (line, failure) = &failures[0];
+    assert_eq!(failure.kind, ModelFailureKind::ContentFiltered);
+    assert!(
+        line.starts_with("The provider's content filter blocked the response"),
+        "{line}"
+    );
+    assert!(line.ends_with(" Rephrase the request."), "{line}");
+    assert!(
+        matches!(
+            events
+                .iter()
+                .rfind(|event| matches!(event.kind, EventKind::TurnEnd(_)))
+                .unwrap()
+                .kind,
+            EventKind::TurnEnd(TurnEndData {
+                outcome: TurnOutcome::Failed { .. },
+                ..
+            })
+        ),
+        "{events:?}"
+    );
+    assert_eq!(
+        chat.endpoint.requests.lock().unwrap().len(),
+        1,
+        "the content filter ends the turn instead of continuing it"
+    );
+    agent.close().await.unwrap();
+    chat.close().await;
+}
+
+/// An unrecognized finish reason is `unknown` in the persisted terminal, and a
+/// reply that announced a call before it gets exactly one continuation.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unrecognized_finish_reason_continues_the_turn_once() {
+    let chat = NativeServer::start("openai-chat").await;
+    let agent = model_agent(chat.models(), None).await;
+    let session = agent.create_session(chat.session_config()).await.unwrap();
+    session
+        .submit("finish-unrecognized".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
+    let failures = failed_model_outputs(&events);
+    assert_eq!(failures.len(), 1, "{events:?}");
+    let (line, failure) = &failures[0];
+    assert_eq!(failure.kind, ModelFailureKind::Unknown);
+    assert!(line.starts_with("The model request failed"), "{line}");
+    assert!(
+        matches!(
+            events
+                .iter()
+                .rfind(|event| matches!(event.kind, EventKind::TurnEnd(_)))
+                .unwrap()
+                .kind,
+            EventKind::TurnEnd(TurnEndData {
+                outcome: TurnOutcome::Completed { .. },
+                ..
+            })
+        ),
+        "{events:?}"
+    );
+    assert_eq!(
+        chat.endpoint.requests.lock().unwrap().len(),
+        2,
+        "the announced call and one continuation"
+    );
+    agent.close().await.unwrap();
+    chat.close().await;
+}
+
+/// An unrecognized finish reason on a reply that announced nothing is
+/// `unknown` and gets no continuation.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unrecognized_finish_reason_without_announced_calls_does_not_continue() {
+    let chat = NativeServer::start("openai-chat").await;
+    let agent = model_agent(chat.models(), None).await;
+    let session = agent.create_session(chat.session_config()).await.unwrap();
+    session
+        .submit("finish-unrecognized-quiet".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
+    let failures = failed_model_outputs(&events);
+    assert_eq!(failures.len(), 1, "{events:?}");
+    assert_eq!(failures[0].1.kind, ModelFailureKind::Unknown);
+    assert!(
+        matches!(
+            events
+                .iter()
+                .rfind(|event| matches!(event.kind, EventKind::TurnEnd(_)))
+                .unwrap()
+                .kind,
+            EventKind::TurnEnd(TurnEndData {
+                outcome: TurnOutcome::Failed { .. },
+                ..
+            })
+        ),
+        "{events:?}"
+    );
+    assert_eq!(
+        chat.endpoint.requests.lock().unwrap().len(),
+        1,
+        "a reply that announced no call is not continued"
+    );
+    agent.close().await.unwrap();
+    chat.close().await;
+}
+
+/// A provider generation error finish reason is `unknown` in the persisted
+/// terminal, and a reply that announced a call before it gets exactly one
+/// continuation.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_generation_error_finish_reason_continues_the_turn_once() {
+    let server = NativeServer::start("gemini").await;
+    let agent = model_agent(server.models(), None).await;
+    let session = agent.create_session(server.session_config()).await.unwrap();
+    session
+        .submit("finish-error".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
+    let failures = failed_model_outputs(&events);
+    assert_eq!(failures.len(), 1, "{events:?}");
+    let (line, failure) = &failures[0];
+    assert_eq!(failure.kind, ModelFailureKind::Unknown);
+    assert!(line.starts_with("The model request failed"), "{line}");
+    assert!(
+        matches!(
+            events
+                .iter()
+                .rfind(|event| matches!(event.kind, EventKind::TurnEnd(_)))
+                .unwrap()
+                .kind,
+            EventKind::TurnEnd(TurnEndData {
+                outcome: TurnOutcome::Completed { .. },
+                ..
+            })
+        ),
+        "{events:?}"
+    );
+    assert_eq!(
+        server.endpoint.requests.lock().unwrap().len(),
+        2,
+        "the announced call and one continuation"
+    );
+    agent.close().await.unwrap();
+    server.close().await;
+}
+
 async fn respond_native(
     State(endpoint): State<NativeEndpoint>,
     uri: Uri,
@@ -2436,6 +2622,24 @@ async fn respond_native(
                 }
             } else if continuation {
                 frame(json!({"content":"finished"}), json!("stop")) + "data: [DONE]\n\n"
+            } else if request_text.contains("finish-filter") {
+                frame(json!({"content":"before"}), Value::Null)
+                    + &frame(
+                        json!({"tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"echo","arguments":"{\"text\":\"result text\"}"}}]}),
+                        json!("content_filter"),
+                    )
+                    + "data: [DONE]\n\n"
+            } else if request_text.contains("finish-unrecognized-quiet") {
+                frame(json!({"content":"before"}), Value::Null)
+                    + &frame(json!({}), json!("unexpected_finish"))
+                    + "data: [DONE]\n\n"
+            } else if request_text.contains("finish-unrecognized") {
+                frame(json!({"content":"before"}), Value::Null)
+                    + &frame(
+                        json!({"tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"echo","arguments":"{\"text\":\"result text\"}"}}]}),
+                        json!("unexpected_finish"),
+                    )
+                    + "data: [DONE]\n\n"
             } else {
                 frame(json!({"content":"before"}), Value::Null)
                     + &frame(
@@ -2483,8 +2687,14 @@ async fn respond_native(
             sse(events)
         }
         "gemini" => {
+            let finish_error = request.to_string().contains("finish-error");
             let parts = if continuation {
                 json!([{"text":"finished"}])
+            } else if finish_error {
+                json!([
+                    {"text":"before","thoughtSignature":"boundary-signature"},
+                    {"functionCall":{"name":"echo","args":{"text":"result text"}},"thoughtSignature":"tool-signature"}
+                ])
             } else if request.to_string().contains("native-text-tool")
                 || request.to_string().contains("native-thought-tool")
             {
@@ -2503,7 +2713,7 @@ async fn respond_native(
                 {"functionCall":{"name":"echo","args":{"text":"result text"}},"thoughtSignature":"tool-signature"}
                 ])
             };
-            let mut chunk = json!({"candidates":[{"content":{"role":"model","parts":parts},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":3,"totalTokenCount":8}});
+            let mut chunk = json!({"candidates":[{"content":{"role":"model","parts":parts},"finishReason":if finish_error && !continuation {"MALFORMED_FUNCTION_CALL"} else {"STOP"},"index":0}],"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":3,"totalTokenCount":8}});
             if missing_terminal {
                 chunk["candidates"][0]
                     .as_object_mut()

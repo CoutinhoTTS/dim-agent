@@ -583,6 +583,58 @@ async fn unsupported_parameters_and_results_end_the_call() {
     }
 }
 
+/// A finish reason that fails the reply is the one failure no provider error
+/// object describes, so the bridge names its kind from the reason alone: a
+/// content filter is `content_filtered`, and a provider generation error or an
+/// unrecognized reason is `unknown`.
+#[tokio::test]
+async fn finish_reason_failures_carry_their_kind() {
+    for (reason, kind, reason_sentence, line) in [
+        (
+            FinishReasonUnified::ContentFilter,
+            ModelFailureKind::ContentFiltered,
+            "the stream ended on a content-filter finish reason",
+            "The provider's content filter blocked the response: the stream ended on a content-filter finish reason. Rephrase the request.",
+        ),
+        (
+            FinishReasonUnified::Error,
+            ModelFailureKind::Unknown,
+            "the provider reported a generation error",
+            "The model request failed: the provider reported a generation error. See the details.",
+        ),
+        (
+            FinishReasonUnified::Other,
+            ModelFailureKind::Unknown,
+            "the stream ended on an unsupported finish reason",
+            "The model request failed: the stream ended on an unsupported finish reason. See the details.",
+        ),
+    ] {
+        let case = reason_sentence;
+        let (stream, _, abort, dropped) = fixture(vec![
+            Ok(start()),
+            Ok(finish(reason, NativeUsage::default())),
+        ]);
+        let failure = collect_or_stall(stream, case)
+            .await
+            .into_iter()
+            .find_map(Result::err)
+            .unwrap_or_else(|| panic!("{case}: the reply completed"));
+        let HostError::Failed {
+            message,
+            model: Some(model),
+            ..
+        } = failure
+        else {
+            panic!("{case}: {failure:?}");
+        };
+        assert_eq!(model.kind, kind, "{case}");
+        assert_eq!(model.reason.as_deref(), Some(reason_sentence), "{case}");
+        assert_eq!(message, line, "{case}");
+        assert!(abort.is_aborted(), "{case}");
+        assert!(dropped.load(Ordering::SeqCst), "{case}");
+    }
+}
+
 #[tokio::test]
 async fn dropping_output_stream_releases_transport_without_another_poll() {
     let (mut stream, _, _, dropped) = fixture(vec![Ok(start())]);
