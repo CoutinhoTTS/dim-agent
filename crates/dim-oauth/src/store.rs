@@ -531,8 +531,8 @@ impl Store {
 
     /// The signed-in state the account file stores, read without its lease.
     /// A missing file is a home that never signed in; an unreadable or invalid
-    /// record returns `None`, which sends the observation down the leased path
-    /// that publishes it.
+    /// record returns `None`, which sends the observation down the leased path;
+    /// that path publishes only a validated read.
     async fn observed_current(&self) -> Option<bool> {
         let path = self.files.path(self.root, AUTH_FILE).ok()?;
         let bytes = match self.files.read(&path, &CancellationToken::new()).await {
