@@ -50,6 +50,8 @@ type Stream = {
   written: string
   /** Unicode scalar values in `written`, the unit of progress offsets. */
   writtenChars: number
+  /** The open thinking block's identity, as the progress notice named it. */
+  partId?: string
   /** The latest unwritten tail and the offset it follows. */
   progress?: { text: string; offset: number }
 }
@@ -79,6 +81,10 @@ export class Projection {
   private output: { requestId: string; textCharacters: number; thinkingCharacters: number } | undefined
   /** Requests whose text, thinking or tool row already showed. */
   private showedOutput = new Set<string>()
+  /** Requests whose only visible output so far is progress thinking. */
+  private showedThinking = new Set<string>()
+  /** Names each thought row; a rebuilt row gets a new one. */
+  private rowSeq = 0
   /** The error of the model failure the latest turn end may repeat. */
   private shownFailure: string | undefined
 
@@ -199,6 +205,7 @@ export class Projection {
         break
       case "thinking": {
         this.showedOutput.add(content.requestId)
+        this.showedThinking.delete(content.requestId)
         if (!this.thoughts.has(content.requestId)) this.thoughtStarts.set(content.requestId, event.createAt)
         const thought = this.openThinking(content.requestId)
         commit(thought, content.delta)
@@ -207,6 +214,7 @@ export class Projection {
       }
       case "text": {
         this.showedOutput.add(content.requestId)
+        this.showedThinking.delete(content.requestId)
         this.closeThinking(content.requestId, event.createAt)
         const answer = this.openAnswer(content.requestId)
         commit(answer, content.delta)
@@ -215,6 +223,7 @@ export class Projection {
       }
       case "tool-use":
         this.showedOutput.add(content.requestId)
+        this.showedThinking.delete(content.requestId)
         this.closeThinking(content.requestId, event.createAt)
         this.closeAnswer(content.requestId)
         this.tools.set(content.callId, this.push({ kind: "tool", key: `tool-${content.callId}`, callId: content.callId, name: content.name, input: content.input, pending: true }))
@@ -232,6 +241,7 @@ export class Projection {
         break
       case "model-end": {
         const incomplete = this.showedOutput.delete(content.requestId)
+        this.showedThinking.delete(content.requestId)
         this.closeThinking(content.requestId, event.createAt)
         this.closeAnswer(content.requestId)
         if (content.error !== undefined) {
@@ -273,19 +283,50 @@ export class Projection {
   progress(progress: ModelProgress): void {
     const requestId = progress.requestId
     if (requestId === undefined) return
+    const thought = this.thoughts.get(requestId)
+    if (thought !== undefined && thought.written === "" && this.replacedAttempt(progress, thought)) {
+      this.discardThinking(requestId)
+      if (this.showedThinking.delete(requestId)) this.showedOutput.delete(requestId)
+    }
     if (progress.thinking !== "") {
       this.showedOutput.add(requestId)
+      this.showedThinking.add(requestId)
       const thought = this.openThinking(requestId)
+      thought.partId = progress.thinkingPartId
       if (progress.thinkingStartedAt !== undefined && !this.thoughtStarts.has(requestId)) this.thoughtStarts.set(requestId, progress.thinkingStartedAt)
       thought.progress = { text: progress.thinking, offset: progress.thinkingOffset }
       this.update(thought.index, { text: shown(thought) })
     }
     if (progress.text !== "") {
       this.showedOutput.add(requestId)
+      this.showedThinking.delete(requestId)
       const answer = this.openAnswer(requestId)
       answer.progress = { text: progress.text, offset: progress.textOffset }
       this.update(answer.index, { text: shown(answer) })
     }
+  }
+
+  /** Whether a notice opens a new attempt in place of a thought this one replaced. */
+  private replacedAttempt(progress: ModelProgress, thought: Stream): boolean {
+    if (progress.thinking === "" && progress.text === "") return true
+    return progress.thinking !== "" && progress.thinkingPartId !== undefined && progress.thinkingPartId !== thought.partId
+  }
+
+  /** Drops a thought opened only by an uncommitted attempt's progress. */
+  private discardThinking(requestId: string): void {
+    const thought = this.thoughts.get(requestId)
+    if (thought === undefined) return
+    this.thoughts.delete(requestId)
+    this.thoughtStarts.delete(requestId)
+    this.removeRow(thought.index)
+  }
+
+  private removeRow(index: number): void {
+    this.rows.splice(index, 1)
+    const shift = (value: number): number => value > index ? value - 1 : value
+    for (const stream of [...this.answers.values(), ...this.thoughts.values()]) stream.index = shift(stream.index)
+    for (const [callId, value] of this.tools) this.tools.set(callId, shift(value))
+    for (const [branchId, value] of this.lines) this.lines.set(branchId, shift(value))
   }
 
   /**
@@ -330,7 +371,7 @@ export class Projection {
   private openThinking(requestId: string): Stream {
     let thought = this.thoughts.get(requestId)
     if (thought === undefined) {
-      thought = { index: this.push({ kind: "thinking", key: `thinking-${requestId}-${this.rows.length}`, text: "", streaming: true }), written: "", writtenChars: this.output?.requestId === requestId ? this.output.thinkingCharacters : 0 }
+      thought = { index: this.push({ kind: "thinking", key: `thinking-${requestId}-${this.rowSeq++}`, text: "", streaming: true }), written: "", writtenChars: this.output?.requestId === requestId ? this.output.thinkingCharacters : 0 }
       this.thoughts.set(requestId, thought)
     }
     return thought
