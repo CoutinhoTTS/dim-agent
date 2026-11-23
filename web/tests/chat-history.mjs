@@ -1979,5 +1979,5 @@ test("a resync failure a move overtook does not fail the centre the move install
   assert.equal(chat.views.session.error, "")
   receive(chat, "worker", input(2, "on the worker live"))
   await flush()
-  assert.deepEqual(chat.views.session.rows.map(row => row.text), ["on the worker", "on the worker live"], "the moved centre keeps consuming its live events")
+  assert.deepEqual(chat.views.session.rows.map(row => row.text), ["on worker", "on the worker live"], "the moved centre keeps consuming its live events")
 })
