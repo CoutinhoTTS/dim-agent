@@ -90,6 +90,28 @@ impl ModelDriver for ScriptedModel {
     }
 }
 
+fn failure(kind: ModelFailureKind, retry_after: Option<Duration>) -> HostError {
+    HostError::Failed {
+        message: "the provider rejected the request".into(),
+        budget: None,
+        kind: HostErrorKind::Transport,
+        model: Some(Box::new(ModelFailureFacts {
+            kind,
+            reason: Some("the provider rejected the request".into()),
+            status: None,
+            provider_code: None,
+            request_id: None,
+            cause: Vec::new(),
+            retry_after,
+            attempts: 1,
+            waited: Duration::ZERO,
+            retry_after_stop: None,
+            retry_forbidden: false,
+        })),
+        presentation: None,
+    }
+}
+
 fn malformed_cut() -> HostError {
     HostError::Failed {
         message: "the stream ended without a finish reason".into(),
@@ -897,6 +919,91 @@ async fn a_pending_thinking_buffer_is_not_shown_after_a_retry() {
     .unwrap();
 }
 
+/// Hands each attempt the next scripted stream; the stream that ends in an
+/// error reports the drain that follows it and holds it until the test lets
+/// it end, so an input can arrive while the failed attempt still drains.
+struct DrainingModel {
+    calls: AtomicUsize,
+    streams: Mutex<Vec<mpsc::UnboundedReceiver<std::result::Result<ModelChunk, HostError>>>>,
+    draining: Arc<Notify>,
+    release: Arc<Notify>,
+}
+impl DrainingModel {
+    fn new(
+        streams: Vec<mpsc::UnboundedReceiver<std::result::Result<ModelChunk, HostError>>>,
+    ) -> Self {
+        Self {
+            calls: AtomicUsize::new(0),
+            streams: Mutex::new(streams),
+            draining: Arc::new(Notify::new()),
+            release: Arc::new(Notify::new()),
+        }
+    }
+}
+impl ModelDriver for DrainingModel {
+    fn invoke(
+        &self,
+        _: Arc<ModelRequest>,
+        _: ModelConnection,
+        _: CancellationToken,
+    ) -> HostFuture<'_, ModelStream> {
+        Box::pin(async move {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            let receiver = {
+                let mut streams = self.streams.lock().unwrap();
+                assert!(
+                    !streams.is_empty(),
+                    "attempt {} has no scripted stream",
+                    call + 1
+                );
+                streams.remove(0)
+            };
+            let draining = self.draining.clone();
+            let release = self.release.clone();
+            let stream = futures_util::stream::unfold(
+                (receiver, false),
+                move |(mut receiver, failed)| {
+                    let draining = draining.clone();
+                    let release = release.clone();
+                    async move {
+                        if failed {
+                            draining.notify_one();
+                            release.notified().await;
+                            return None;
+                        }
+                        receiver.recv().await.map(|item| {
+                            let failed = item.is_err();
+                            (item, (receiver, failed))
+                        })
+                    }
+                },
+            );
+            Ok(Box::pin(stream) as ModelStream)
+        })
+    }
+}
+
+/// Waits until the applied input's event was dispatched, so every listener,
+/// the steer gate included, handled it.
+async fn wait_input_applied(session: &Session, input_id: &str) {
+    let mut dispatch = session.dispatch_watch("main").unwrap();
+    loop {
+        let events = chain_events(session, "main", ..).await.unwrap();
+        if let Some(sequence) = events.iter().find_map(|event| match &event.kind {
+            EventKind::InputApplied(data) if data.input_id == input_id => Some(event.sequence),
+            _ => None,
+        }) {
+            while dispatch.borrow_and_update().sequence < sequence {
+                if dispatch.changed().await.is_err() {
+                    return;
+                }
+            }
+            return;
+        }
+        dispatch.changed().await.unwrap();
+    }
+}
+
 /// A steer consumed while the request waits to retry replaces it: the
 /// attempt that showed its thought wrote no fact, so the next attempt starts
 /// without visible output and the request is still replaceable.
@@ -987,6 +1094,133 @@ async fn a_steer_during_the_retry_backoff_replaces_the_attempt() {
         )));
         agent.close().await.unwrap();
     })
+    .await
+    .unwrap();
+}
+
+/// A steer that arrives while a failed attempt drains does not rewrite a
+/// terminal failure: the gate a shown thought closed stays closed, and the
+/// turn ends with the provider's failure instead of a replacement.
+async fn a_steer_during_a_terminal_failure(
+    kind: ModelFailureKind,
+    retry_after: Option<Duration>,
+) {
+    let (cut, cut_stream) = mpsc::unbounded_channel();
+    let (steer, steer_stream) = mpsc::unbounded_channel();
+    let model = Arc::new(DrainingModel::new(vec![cut_stream, steer_stream]));
+    let agent = MinimalHost::start(&builder(model.clone(), Arc::new(MockTools)))
+        .await
+        .unwrap();
+    let session = agent
+        .create_session(SessionConfig::default())
+        .await
+        .unwrap();
+    session
+        .submit("go".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    let mut progress = session.on::<ModelProgress>("main").unwrap().unwrap();
+    send(
+        &cut,
+        vec![
+            Ok(ModelChunk::MessageStart {
+                message_id: "cut".into(),
+            }),
+            Ok(ModelChunk::Thinking("shown".into())),
+        ],
+    );
+    progress
+        .wait_for(|progress| progress.thinking == "shown")
+        .await
+        .unwrap();
+    send(&cut, vec![Err(failure(kind, retry_after))]);
+    model.draining.notified().await;
+    let steer_input = session
+        .submit("STEER-MARKER".into(), InputMode::Steer, "main")
+        .await
+        .unwrap();
+    wait_input_applied(&session, &steer_input.id).await;
+    model.release.notify_one();
+    send(&steer, reply("steer"));
+    drop(cut);
+    drop(steer);
+    session.idle("main").await.unwrap();
+
+    let events = chain_events(&session, "main", ..).await.unwrap();
+    let first = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::ModelCall(data) => Some(data.request_id.as_str()),
+            _ => None,
+        })
+        .expect("a model call");
+    let outcome = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::ModelOutputEnd(ModelOutputEndData {
+                request_id,
+                outcome,
+                ..
+            }) if request_id == first => Some(outcome),
+            _ => None,
+        })
+        .expect("the first request's terminal");
+    assert!(
+        matches!(
+            outcome,
+            ModelOutputOutcome::Failed {
+                failure: Some(facts),
+                ..
+            } if facts.kind == kind
+        ),
+        "a terminal {kind:?} failure stays a failure: {outcome:?}"
+    );
+    assert!(
+        !events.iter().any(|event| matches!(
+            &event.kind,
+            EventKind::ModelOutputEnd(ModelOutputEndData {
+                request_id,
+                outcome: ModelOutputOutcome::Cancelled { reason },
+                ..
+            }) if request_id == first
+                && reason == dim_agent_capabilities::steer::REPLACED_BY_STEER
+        )),
+        "the drain-time steer did not replace the terminal failure"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            &event.kind,
+            EventKind::TurnEnd(TurnEndData {
+                outcome: TurnOutcome::Failed { .. },
+                ..
+            })
+        )),
+        "the failure ends the turn: {events:?}"
+    );
+    agent.close().await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_steer_during_a_non_retryable_failure_drain_keeps_the_failure() {
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        a_steer_during_a_terminal_failure(ModelFailureKind::InvalidRequest, None),
+    )
+    .await
+    .unwrap();
+}
+
+/// A retryable failure whose wait does not fit the budget stops at once; a
+/// steer during the drain cannot replace it either.
+#[tokio::test(start_paused = true)]
+async fn a_steer_during_a_spent_retry_budget_drain_keeps_the_failure() {
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        a_steer_during_a_terminal_failure(
+            ModelFailureKind::Network,
+            Some(Duration::from_secs(301)),
+        ),
+    )
     .await
     .unwrap();
 }
