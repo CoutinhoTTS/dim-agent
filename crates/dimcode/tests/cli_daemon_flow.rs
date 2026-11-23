@@ -1545,6 +1545,13 @@ fn headless_streams_unicode_once_and_waits_for_the_delivery_barrier() {
     assert_eq!(String::from_utf8(output.stdout).unwrap(), "你好世界\n");
 }
 
+/// The turn facts an App Server sends before the submitted input's turn
+/// writes text: the branch's turn starts, then InputQueue consumes the input.
+fn open_turn(wire: &mut Wire, turn: &str, input: &str) {
+    wire.notice("session.event",json!({"sessionId":"session","branchId":"main","event":{"id":"turn-start","sequence":9,"create_at":1,"type":"turn","name":"start","data":{"turn_id":turn}}}));
+    wire.notice("session.event",json!({"sessionId":"session","branchId":"main","event":{"id":"input-consumed","sequence":10,"create_at":1,"type":"input","name":"consumed","data":{"input_id":input}}}));
+}
+
 #[test]
 fn exec_writes_only_the_final_reply_to_stdout() {
     let home = Home::new();
@@ -1552,8 +1559,9 @@ fn exec_writes_only_the_final_reply_to_stdout() {
         wire.start(false);
         let submit = wire.read("session.submit");
         wire.notice("session.model.progress",json!({"sessionId":"session","branchId":"main","requestId":"model-request","textOffset":0,"text":"I will read the config.","thinking":"","thinkingOffset":0}));
-        wire.reply(&submit, json!({"event":{}}));
+        wire.reply(&submit, json!({"event":{"id":"input"}}));
         let idle = wire.read("session.idle");
+        open_turn(wire, "turn", "input");
         wire.event(12,"text",json!({"turn_id":"turn","request_id":"model-request","delta":"I will read the config."}));
         wire.event(14,"tool-use",json!({"turn_id":"turn","request_id":"model-request","call":{"id":"call","name":"read","input":{"path":"config/service.toml"}}}));
         wire.event(16,"tool-result",json!({"turn_id":"turn","request_id":"model-request","results":[{"call_id":"call","result":{"content":"port = 8080"}}]}));
@@ -1596,18 +1604,19 @@ fn exec_keeps_words_between_tool_calls_on_stderr() {
     let daemon = home.daemon(|wire| {
         wire.start(false);
         let submit = wire.read("session.submit");
-        wire.reply(&submit, json!({"event":{}}));
+        wire.reply(&submit, json!({"event":{"id":"input"}}));
         let idle = wire.read("session.idle");
-        wire.event(10,"text",json!({"turn_id":"turn","request_id":"first-request","delta":"I will read the config."}));
-        wire.event(11,"tool-use",json!({"turn_id":"turn","request_id":"first-request","call":{"id":"config","name":"read","input":{"path":"config/service.toml"}}}));
-        wire.event(12,"tool-result",json!({"turn_id":"turn","request_id":"first-request","results":[{"call_id":"config","result":{"content":"port = 8080"}}]}));
-        wire.event(13,"model-output-end",json!({"turn_id":"turn","request_id":"first-request","status":"completed","finish_reason":"tool_use"}));
-        wire.event(14,"text",json!({"turn_id":"turn","request_id":"second-request","delta":"The port is fixed; I will read the deploy script."}));
-        wire.event(15,"tool-use",json!({"turn_id":"turn","request_id":"second-request","call":{"id":"deploy","name":"read","input":{"path":"scripts/deploy.sh"}}}));
-        wire.event(16,"tool-result",json!({"turn_id":"turn","request_id":"second-request","results":[{"call_id":"deploy","result":{"content":"export PORT=8080"}}]}));
-        wire.event(17,"model-output-end",json!({"turn_id":"turn","request_id":"second-request","status":"completed","finish_reason":"tool_use"}));
-        wire.event(18,"text",json!({"turn_id":"turn","request_id":"final-request","delta":"The service listens on port 8080."}));
-        wire.event(19,"model-output-end",json!({"turn_id":"turn","request_id":"final-request","status":"completed","finish_reason":"end_turn"}));
+        open_turn(wire, "turn", "input");
+        wire.event(12,"text",json!({"turn_id":"turn","request_id":"first-request","delta":"I will read the config."}));
+        wire.event(13,"tool-use",json!({"turn_id":"turn","request_id":"first-request","call":{"id":"config","name":"read","input":{"path":"config/service.toml"}}}));
+        wire.event(14,"tool-result",json!({"turn_id":"turn","request_id":"first-request","results":[{"call_id":"config","result":{"content":"port = 8080"}}]}));
+        wire.event(15,"model-output-end",json!({"turn_id":"turn","request_id":"first-request","status":"completed","finish_reason":"tool_use"}));
+        wire.event(16,"text",json!({"turn_id":"turn","request_id":"second-request","delta":"The port is fixed; I will read the deploy script."}));
+        wire.event(17,"tool-use",json!({"turn_id":"turn","request_id":"second-request","call":{"id":"deploy","name":"read","input":{"path":"scripts/deploy.sh"}}}));
+        wire.event(18,"tool-result",json!({"turn_id":"turn","request_id":"second-request","results":[{"call_id":"deploy","result":{"content":"export PORT=8080"}}]}));
+        wire.event(19,"model-output-end",json!({"turn_id":"turn","request_id":"second-request","status":"completed","finish_reason":"tool_use"}));
+        wire.event(20,"text",json!({"turn_id":"turn","request_id":"final-request","delta":"The service listens on port 8080."}));
+        wire.event(21,"model-output-end",json!({"turn_id":"turn","request_id":"final-request","status":"completed","finish_reason":"end_turn"}));
         wire.end(json!({"turn_id":"turn","status":"completed","reason":"done"}));
         wire.reply(&idle, json!({"sequence":30}));
         wire.detach();
@@ -1648,8 +1657,9 @@ fn exec_writes_a_reply_without_tools_to_stdout() {
     let daemon = home.daemon(|wire| {
         wire.start(false);
         let submit = wire.read("session.submit");
-        wire.reply(&submit, json!({"event":{}}));
+        wire.reply(&submit, json!({"event":{"id":"input"}}));
         let idle = wire.read("session.idle");
+        open_turn(wire, "turn", "input");
         wire.notice("session.model.progress",json!({"sessionId":"session","branchId":"main","requestId":"request","textOffset":0,"text":"The service listens on port 8080.","thinking":"","thinkingOffset":0}));
         wire.event(12,"text",json!({"turn_id":"turn","request_id":"request","delta":"The service listens on port 8080."}));
         wire.event(14,"model-output-end",json!({"turn_id":"turn","request_id":"request","status":"completed","finish_reason":"end_turn"}));
@@ -1691,12 +1701,13 @@ fn exec_demotes_a_reply_when_the_same_turn_asks_again() {
     let daemon = home.daemon(|wire| {
         wire.start(false);
         let submit = wire.read("session.submit");
-        wire.reply(&submit, json!({"event":{}}));
+        wire.reply(&submit, json!({"event":{"id":"input"}}));
         let idle = wire.read("session.idle");
-        wire.event(10,"text",json!({"turn_id":"turn","request_id":"first-request","delta":"Let me check the queue."}));
-        wire.event(11,"model-output-end",json!({"turn_id":"turn","request_id":"first-request","status":"completed","finish_reason":"end_turn"}));
-        wire.event(12,"text",json!({"turn_id":"turn","request_id":"second-request","delta":"The queue is empty."}));
-        wire.event(13,"model-output-end",json!({"turn_id":"turn","request_id":"second-request","status":"completed","finish_reason":"end_turn"}));
+        open_turn(wire, "turn", "input");
+        wire.event(12,"text",json!({"turn_id":"turn","request_id":"first-request","delta":"Let me check the queue."}));
+        wire.event(13,"model-output-end",json!({"turn_id":"turn","request_id":"first-request","status":"completed","finish_reason":"end_turn"}));
+        wire.event(14,"text",json!({"turn_id":"turn","request_id":"second-request","delta":"The queue is empty."}));
+        wire.event(15,"model-output-end",json!({"turn_id":"turn","request_id":"second-request","status":"completed","finish_reason":"end_turn"}));
         wire.end(json!({"turn_id":"turn","status":"completed","reason":"done"}));
         wire.reply(&idle, json!({"sequence":30}));
         wire.detach();
@@ -1739,10 +1750,11 @@ fn exec_demotes_a_reply_when_the_turn_fails() {
     let daemon = home.daemon(|wire| {
         wire.start(false);
         let submit = wire.read("session.submit");
-        wire.reply(&submit, json!({"event":{}}));
+        wire.reply(&submit, json!({"event":{"id":"input"}}));
         let idle = wire.read("session.idle");
-        wire.event(10,"text",json!({"turn_id":"turn","request_id":"request","delta":"The service listens on port 8080."}));
-        wire.event(11,"model-output-end",json!({"turn_id":"turn","request_id":"request","status":"completed","finish_reason":"end_turn"}));
+        open_turn(wire, "turn", "input");
+        wire.event(12,"text",json!({"turn_id":"turn","request_id":"request","delta":"The service listens on port 8080."}));
+        wire.event(13,"model-output-end",json!({"turn_id":"turn","request_id":"request","status":"completed","finish_reason":"end_turn"}));
         wire.end(json!({"turn_id":"turn","status":"failed","error":"fixture error"}));
         wire.reply(&idle, json!({"sequence":30}));
         wire.detach();
@@ -1781,10 +1793,11 @@ fn exec_demotes_a_reply_when_the_turn_is_cancelled() {
     let daemon = home.daemon(|wire| {
         wire.start(false);
         let submit = wire.read("session.submit");
-        wire.reply(&submit, json!({"event":{}}));
+        wire.reply(&submit, json!({"event":{"id":"input"}}));
         let idle = wire.read("session.idle");
-        wire.event(10,"text",json!({"turn_id":"turn","request_id":"request","delta":"The service listens on port 8080."}));
-        wire.event(11,"model-output-end",json!({"turn_id":"turn","request_id":"request","status":"completed","finish_reason":"end_turn"}));
+        open_turn(wire, "turn", "input");
+        wire.event(12,"text",json!({"turn_id":"turn","request_id":"request","delta":"The service listens on port 8080."}));
+        wire.event(13,"model-output-end",json!({"turn_id":"turn","request_id":"request","status":"completed","finish_reason":"end_turn"}));
         wire.end(json!({"turn_id":"turn","status":"cancelled","reason":"interrupted"}));
         wire.reply(&idle, json!({"sequence":30}));
         wire.detach();
@@ -1824,12 +1837,13 @@ fn exec_keeps_a_reply_on_stdout_past_a_notice_between_its_chunks() {
     let daemon = home.daemon(|wire| {
         wire.start(false);
         let submit = wire.read("session.submit");
-        wire.reply(&submit, json!({"event":{}}));
+        wire.reply(&submit, json!({"event":{"id":"input"}}));
         let idle = wire.read("session.idle");
-        wire.event(10,"text",json!({"turn_id":"turn","request_id":"request","delta":"The service "}));
+        open_turn(wire, "turn", "input");
+        wire.event(12,"text",json!({"turn_id":"turn","request_id":"request","delta":"The service "}));
         wire.notice("session.mcp.state",json!({"sessionId":"session","servers":[{"id":"docs","state":"auth_required"}]}));
-        wire.event(12,"text",json!({"turn_id":"turn","request_id":"request","delta":"listens on port 8080."}));
-        wire.event(14,"model-output-end",json!({"turn_id":"turn","request_id":"request","status":"completed","finish_reason":"end_turn"}));
+        wire.event(14,"text",json!({"turn_id":"turn","request_id":"request","delta":"listens on port 8080."}));
+        wire.event(16,"model-output-end",json!({"turn_id":"turn","request_id":"request","status":"completed","finish_reason":"end_turn"}));
         wire.end(json!({"turn_id":"turn","status":"completed","reason":"done"}));
         wire.reply(&idle, json!({"sequence":30}));
         wire.detach();
@@ -1884,9 +1898,12 @@ fn exec_resume_keeps_the_running_turns_reply_off_stdout() {
         let submit = wire.read("session.submit");
         wire.reply(&submit, json!({"event":{}}));
         let idle = wire.read("session.idle");
-        wire.event(14,"text",json!({"turn_id":"new-turn","request_id":"new-request","delta":"The new answer."}));
-        wire.notice("session.event",json!({"sessionId":"session","branchId":"main","event":{"id":"new-end","sequence":16,"create_at":1,"type":"turn","name":"end","data":{"turn_id":"new-turn","status":"completed","reason":"done"}}}));
-        wire.reply(&idle, json!({"sequence":16}));
+        wire.notice("session.event",json!({"sessionId":"session","branchId":"main","event":{"id":"new-input","sequence":13,"create_at":1,"type":"input","name":"message","data":{"submission_id":submit["params"]["submissionId"],"user":{"content":[{"type":"text","text":"continue"}]},"mode":"queue"}}}));
+        wire.notice("session.event",json!({"sessionId":"session","branchId":"main","event":{"id":"new-start","sequence":14,"create_at":1,"type":"turn","name":"start","data":{"turn_id":"new-turn"}}}));
+        wire.notice("session.event",json!({"sessionId":"session","branchId":"main","event":{"id":"new-consumed","sequence":15,"create_at":1,"type":"input","name":"consumed","data":{"input_id":"new-input"}}}));
+        wire.event(17,"text",json!({"turn_id":"new-turn","request_id":"new-request","delta":"The new answer."}));
+        wire.notice("session.event",json!({"sessionId":"session","branchId":"main","event":{"id":"new-end","sequence":18,"create_at":1,"type":"turn","name":"end","data":{"turn_id":"new-turn","status":"completed","reason":"done"}}}));
+        wire.reply(&idle, json!({"sequence":18}));
         wire.detach();
     });
     let output = wait(
@@ -1922,8 +1939,9 @@ fn exec_leaves_no_partial_text_on_stdout_after_an_interrupt() {
     let daemon = home.daemon(move |wire| {
         wire.start(false);
         let submit = wire.read("session.submit");
-        wire.reply(&submit, json!({"event":{}}));
+        wire.reply(&submit, json!({"event":{"id":"input"}}));
         let idle = wire.read("session.idle");
+        open_turn(wire, "turn", "input");
         wire.notice("session.model.progress",json!({"sessionId":"session","branchId":"main","requestId":"request","textOffset":0,"text":"I will read the config.","thinking":"","thinkingOffset":0}));
         wire.event(12,"text",json!({"turn_id":"turn","request_id":"request","delta":"I will read the config."}));
         rendered.send(()).unwrap();
@@ -1959,6 +1977,340 @@ fn exec_leaves_no_partial_text_on_stdout_after_an_interrupt() {
     assert!(
         stderr.contains("I will read the config."),
         "the interrupted request's words go to stderr: {stderr:?}"
+    );
+}
+
+/// A SIGINT handled before the first text closes the reply stream: the text
+/// and successful terminal the daemon already queued cannot reach stdout.
+#[test]
+fn exec_handles_sigint_before_the_first_text() {
+    let home = Home::new();
+    let (submitted, wait_submitted) = std::sync::mpsc::channel();
+    let daemon = home.daemon(move |wire| {
+        wire.start(false);
+        let submit = wire.read("session.submit");
+        wire.reply(&submit, json!({"event":{"id":"input"}}));
+        let idle = wire.read("session.idle");
+        submitted.send(()).unwrap();
+        let stop = wire.read("session.stop");
+        wire.event(12,"text",json!({"turn_id":"turn","request_id":"request","delta":"The service listens on port 8080."}));
+        wire.event(14,"model-output-end",json!({"turn_id":"turn","request_id":"request","status":"completed","finish_reason":"end_turn"}));
+        wire.end(json!({"turn_id":"turn","status":"completed","reason":"done"}));
+        wire.reply(&stop, json!({"sequence":30}));
+        wire.reply(&idle, json!({"sequence":30}));
+        wire.detach();
+    });
+    let child = home
+        .command()
+        .args(["exec", "-p", "Which port does the service use?"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    wait_submitted.recv_timeout(PATIENCE).unwrap();
+    assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
+    let output = wait(child);
+    daemon.join().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(130),
+        "stdout {stdout:?} stderr {stderr:?}"
+    );
+    assert!(
+        stdout.is_empty(),
+        "a closed stream keeps the queued reply off stdout; stdout was {stdout:?}"
+    );
+    assert!(
+        stderr.contains("The service listens on port 8080."),
+        "the text after the interrupt is diagnostics: {stderr:?}"
+    );
+}
+
+/// An earlier request's late model end changes only its own entry: the text
+/// the recovered request already wrote stays whole on stdout.
+#[test]
+fn exec_keeps_a_recovered_reply_when_an_earlier_request_ends_late() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.start(false);
+        let submit = wire.read("session.submit");
+        wire.reply(&submit, json!({"event":{"id":"input"}}));
+        let idle = wire.read("session.idle");
+        open_turn(wire, "turn", "input");
+        wire.event(11,"model-start",json!({"turn_id":"turn","request_id":"earlier"}));
+        wire.event(12,"model-start",json!({"turn_id":"turn","request_id":"recovered"}));
+        wire.notice("session.model.progress",json!({"sessionId":"session","branchId":"main","requestId":"recovered","textOffset":0,"text":"The ","thinking":"","thinkingOffset":0}));
+        wire.event(14,"model-output-end",json!({"turn_id":"turn","request_id":"earlier","status":"completed","finish_reason":"end_turn"}));
+        wire.event(16,"text",json!({"turn_id":"turn","request_id":"recovered","delta":"The answer."}));
+        wire.event(18,"model-output-end",json!({"turn_id":"turn","request_id":"recovered","status":"completed","finish_reason":"end_turn"}));
+        wire.end(json!({"turn_id":"turn","status":"completed","reason":"done"}));
+        wire.reply(&idle, json!({"sequence":30}));
+        wire.detach();
+    });
+    let output = wait(
+        home.command()
+            .args(["exec", "-p", "Which port does the service use?"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    daemon.join().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "status {:?} stdout {stdout:?} stderr {stderr:?}",
+        output.status.code()
+    );
+    assert_eq!(
+        stdout, "The answer.\n",
+        "the recovered reply stays whole on stdout; stderr was {stderr:?}"
+    );
+    assert!(
+        !stderr.contains("The answer."),
+        "the recovered reply appears once, on stdout: {stderr:?}"
+    );
+}
+
+/// After the submitted turn ends, another turn on the branch may complete
+/// before idle: its answer is not this run's reply.
+#[test]
+fn exec_keeps_another_turn_off_stdout_after_the_submitted_turn() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.start(false);
+        let submit = wire.read("session.submit");
+        wire.reply(&submit, json!({"event":{"id":"input"}}));
+        let idle = wire.read("session.idle");
+        open_turn(wire, "turn", "input");
+        wire.event(12,"text",json!({"turn_id":"turn","request_id":"request","delta":"Our answer."}));
+        wire.event(13,"model-output-end",json!({"turn_id":"turn","request_id":"request","status":"completed","finish_reason":"end_turn"}));
+        wire.notice("session.event",json!({"sessionId":"session","branchId":"main","event":{"id":"our-end","sequence":14,"create_at":1,"type":"turn","name":"end","data":{"turn_id":"turn","status":"completed","reason":"done"}}}));
+        wire.notice("session.event",json!({"sessionId":"session","branchId":"main","event":{"id":"later-start","sequence":15,"create_at":1,"type":"turn","name":"start","data":{"turn_id":"later"}}}));
+        wire.notice("session.event",json!({"sessionId":"session","branchId":"main","event":{"id":"later-consumed","sequence":16,"create_at":1,"type":"input","name":"consumed","data":{"input_id":"another-input"}}}));
+        wire.event(17,"text",json!({"turn_id":"later","request_id":"later-request","delta":"Another answer."}));
+        wire.event(18,"model-output-end",json!({"turn_id":"later","request_id":"later-request","status":"completed","finish_reason":"end_turn"}));
+        wire.notice("session.event",json!({"sessionId":"session","branchId":"main","event":{"id":"later-end","sequence":19,"create_at":1,"type":"turn","name":"end","data":{"turn_id":"later","status":"completed","reason":"done"}}}));
+        wire.reply(&idle, json!({"sequence":30}));
+        wire.detach();
+    });
+    let output = wait(
+        home.command()
+            .args(["exec", "-p", "Which port does the service use?"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    daemon.join().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "status {:?} stdout {stdout:?} stderr {stderr:?}",
+        output.status.code()
+    );
+    assert_eq!(
+        stdout, "Our answer.\n",
+        "only the submitted turn writes the reply; stderr was {stderr:?}"
+    );
+    assert!(
+        stderr.contains("Another answer."),
+        "the later turn's words go to stderr: {stderr:?}"
+    );
+}
+
+/// A turn that did not consume the submitted input cannot write its reply.
+#[test]
+fn exec_ignores_a_turn_that_did_not_consume_its_prompt() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.start(false);
+        let submit = wire.read("session.submit");
+        wire.reply(&submit, json!({"event":{"id":"input"}}));
+        let idle = wire.read("session.idle");
+        wire.notice("session.event",json!({"sessionId":"session","branchId":"main","event":{"id":"other-start","sequence":9,"create_at":1,"type":"turn","name":"start","data":{"turn_id":"other"}}}));
+        wire.notice("session.event",json!({"sessionId":"session","branchId":"main","event":{"id":"other-consumed","sequence":10,"create_at":1,"type":"input","name":"consumed","data":{"input_id":"other-input"}}}));
+        wire.event(11,"text",json!({"turn_id":"other","request_id":"other-request","delta":"The other answer."}));
+        wire.event(12,"model-output-end",json!({"turn_id":"other","request_id":"other-request","status":"completed","finish_reason":"end_turn"}));
+        wire.notice("session.event",json!({"sessionId":"session","branchId":"main","event":{"id":"other-end","sequence":13,"create_at":1,"type":"turn","name":"end","data":{"turn_id":"other","status":"completed","reason":"done"}}}));
+        wire.notice("session.event",json!({"sessionId":"session","branchId":"main","event":{"id":"turn-start","sequence":14,"create_at":1,"type":"turn","name":"start","data":{"turn_id":"turn"}}}));
+        wire.notice("session.event",json!({"sessionId":"session","branchId":"main","event":{"id":"input-consumed","sequence":15,"create_at":1,"type":"input","name":"consumed","data":{"input_id":"input"}}}));
+        wire.event(16,"text",json!({"turn_id":"turn","request_id":"request","delta":"Our answer."}));
+        wire.event(17,"model-output-end",json!({"turn_id":"turn","request_id":"request","status":"completed","finish_reason":"end_turn"}));
+        wire.end(json!({"turn_id":"turn","status":"completed","reason":"done"}));
+        wire.reply(&idle, json!({"sequence":30}));
+        wire.detach();
+    });
+    let output = wait(
+        home.command()
+            .args(["exec", "-p", "Which port does the service use?"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    daemon.join().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "status {:?} stdout {stdout:?} stderr {stderr:?}",
+        output.status.code()
+    );
+    assert_eq!(
+        stdout, "Our answer.\n",
+        "the submitted input's turn alone writes the reply; stderr was {stderr:?}"
+    );
+    assert!(
+        stderr.contains("The other answer."),
+        "the other turn's words go to stderr: {stderr:?}"
+    );
+}
+
+/// A deleted submission has no answer: the stream closes at once and the run
+/// exits as a failure, even when another turn completes successfully.
+#[test]
+fn exec_closes_its_reply_stream_when_its_input_is_deleted() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.start(false);
+        let submit = wire.read("session.submit");
+        wire.reply(&submit, json!({"event":{"id":"input"}}));
+        let idle = wire.read("session.idle");
+        wire.notice("session.event",json!({"sessionId":"session","branchId":"main","event":{"id":"deleted","sequence":9,"create_at":1,"type":"input","name":"deleted","data":{"input_id":"input"}}}));
+        wire.notice("session.event",json!({"sessionId":"session","branchId":"main","event":{"id":"later-start","sequence":10,"create_at":1,"type":"turn","name":"start","data":{"turn_id":"later"}}}));
+        wire.event(11,"text",json!({"turn_id":"later","request_id":"later-request","delta":"Another answer."}));
+        wire.event(12,"model-output-end",json!({"turn_id":"later","request_id":"later-request","status":"completed","finish_reason":"end_turn"}));
+        wire.notice("session.event",json!({"sessionId":"session","branchId":"main","event":{"id":"later-end","sequence":13,"create_at":1,"type":"turn","name":"end","data":{"turn_id":"later","status":"completed","reason":"done"}}}));
+        wire.reply(&idle, json!({"sequence":30}));
+        wire.detach();
+    });
+    let output = wait(
+        home.command()
+            .args(["exec", "-p", "Which port does the service use?"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    daemon.join().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "stdout {stdout:?} stderr {stderr:?}"
+    );
+    assert!(
+        stdout.is_empty(),
+        "a deleted submission leaves no reply on stdout; stdout was {stdout:?}"
+    );
+    assert!(
+        stderr.contains("The submitted input was deleted"),
+        "the deletion is reported: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("Another answer."),
+        "a later turn's words are diagnostics: {stderr:?}"
+    );
+}
+
+/// A question a line run cannot answer stops the turn with exit 3; the text
+/// and successful terminal that follow cannot reach stdout.
+#[test]
+fn exec_stops_at_a_question_without_a_terminal() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.start(false);
+        let submit = wire.read("session.submit");
+        wire.reply(&submit, json!({"event":{"id":"input"}}));
+        let idle = wire.read("session.idle");
+        open_turn(wire, "turn", "input");
+        wire.event(11,"tool-call",json!({"turn_id":"turn","request_id":"request","calls":[{"id":"question","name":"ask_user","input":{"questions":[{"header":"Database","question":"Which database should the service use?","options":[{"label":"PostgreSQL"},{"label":"SQLite"}]}]}}]}));
+        let stop = wire.read("session.stop");
+        wire.event(13,"text",json!({"turn_id":"turn","request_id":"request","delta":"The service listens on port 8080."}));
+        wire.event(14,"model-output-end",json!({"turn_id":"turn","request_id":"request","status":"completed","finish_reason":"end_turn"}));
+        wire.end(json!({"turn_id":"turn","status":"completed","reason":"done"}));
+        wire.reply(&stop, json!({"sequence":30}));
+        wire.reply(&idle, json!({"sequence":30}));
+        wire.detach();
+    });
+    let output = wait(
+        home.command()
+            .args(["exec", "-p", "plan"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    daemon.join().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "stdout {stdout:?} stderr {stderr:?}"
+    );
+    assert!(
+        stdout.is_empty(),
+        "a question stop leaves no reply on stdout; stdout was {stdout:?}"
+    );
+    assert!(
+        stderr.contains("The service listens on port 8080."),
+        "the text after the stop is diagnostics: {stderr:?}"
+    );
+}
+
+/// An approval a line run cannot review stops the turn with exit 3; the text
+/// and successful terminal that follow cannot reach stdout.
+#[test]
+fn exec_stops_at_an_approval_without_a_terminal() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.start(false);
+        let submit = wire.read("session.submit");
+        wire.reply(&submit, json!({"event":{"id":"input"}}));
+        let idle = wire.read("session.idle");
+        open_turn(wire, "turn", "input");
+        wire.notice("approval.request",json!({"sessionId":"session","branchId":"main","requestId":"read-approval","source":{"kind":"model"},"call":{"name":"read","input":{"path":"/etc/hosts"}},"reason":"Reading outside the session workspace requires approval: /etc/hosts"}));
+        let approval = wire.read("approval.respond");
+        assert_eq!(approval["params"]["decision"], "deny");
+        let stop = wire.read("session.stop");
+        wire.event(13,"text",json!({"turn_id":"turn","request_id":"request","delta":"The service listens on port 8080."}));
+        wire.event(14,"model-output-end",json!({"turn_id":"turn","request_id":"request","status":"completed","finish_reason":"end_turn"}));
+        wire.end(json!({"turn_id":"turn","status":"completed","reason":"done"}));
+        wire.reply(&stop, json!({"sequence":30}));
+        wire.reply(&idle, json!({"sequence":30}));
+        wire.reply(&approval, json!({}));
+        wire.detach();
+    });
+    let output = wait(
+        home.command()
+            .args(["exec", "--prompt", "read /etc/hosts"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    daemon.join().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "stdout {stdout:?} stderr {stderr:?}"
+    );
+    assert!(
+        stdout.is_empty(),
+        "an approval stop leaves no reply on stdout; stdout was {stdout:?}"
+    );
+    assert!(
+        stderr.contains("The service listens on port 8080."),
+        "the text after the stop is diagnostics: {stderr:?}"
     );
 }
 
@@ -2762,7 +3114,10 @@ fn resume_advances_filtered_history_positions_and_does_not_reprint_old_output() 
         let idle = wire.read("session.idle"); wire.reply(&idle,json!({"sequence":10}));
         let submit = wire.read("session.submit"); wire.reply(&submit,json!({"event":{}}));
         let idle = wire.read("session.idle");
-        wire.event(12,"text",json!({"turn_id":"new-turn","request_id":"new-request","delta":"new output"}));
+        wire.notice("session.event",json!({"sessionId":"session","branchId":"main","event":{"id":"new-input","sequence":11,"create_at":1,"type":"input","name":"message","data":{"submission_id":submit["params"]["submissionId"],"user":{"content":[{"type":"text","text":"continue"}]},"mode":"queue"}}}));
+        wire.notice("session.event",json!({"sessionId":"session","branchId":"main","event":{"id":"new-start","sequence":12,"create_at":1,"type":"turn","name":"start","data":{"turn_id":"new-turn"}}}));
+        wire.notice("session.event",json!({"sessionId":"session","branchId":"main","event":{"id":"new-consumed","sequence":13,"create_at":1,"type":"input","name":"consumed","data":{"input_id":"new-input"}}}));
+        wire.event(14,"text",json!({"turn_id":"new-turn","request_id":"new-request","delta":"new output"}));
         wire.end(json!({"turn_id":"new-turn","status":"completed","reason":"done"}));
         wire.reply(&idle,json!({"sequence":30})); wire.detach();
     });
