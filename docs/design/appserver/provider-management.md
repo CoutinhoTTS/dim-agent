@@ -228,7 +228,7 @@ snapshot across account owners.
 | `connection` | Safe static-record connection below; `null` when connection configuration exists only in the optional account package |
 | `models` | `{model: ModelEntry, source: "default" \| "override" \| "user", enabled: boolean, endpoint: ModelProtocol \| null, unavailableReason: string \| null, missingLimits: ("contextWindow" \| "maxOutputTokens")[], actions: string[], endpointOverride?: NewApiEndpoint}[]`; endpoint overrides use the executable subset in §6. `null` only for an account entry with no local catalog record. Bad catalog data is an error. `missingLimits` names the limits no source declared (§3.5) and is empty otherwise. `catalogName` is the name `provider.catalog` publishes for that row, present only when it differs from `model.displayName`; an absent field means the display name is already the one to show. It is computed, so `model.displayName` stays the name the provider or the user stated and an edit never writes the computed name back. Model actions are `set_enabled`, `edit`, `reset`, `delete`, restricted by origin/authority, and `set_enabled` only on an entry without an `unavailableReason`, because the set keeps an unavailable entry's enablement |
 | `preferences` | Map from model ID to the existing `ModelPreferences` shape |
-| `modelsListed` | Absent from the reads and from an update that did not change `baseUrl`, `credential` or `headers`; on the other updates it says what the write did with the record's models: `listed`, `bundled`, `unsupported` or `disabled` |
+| `modelsListed` | Absent from reads. On a connection update it says what happened to the model list: `listed`, `bundled`, `unsupported` or `disabled`. It is also `listed` when enabling fills an empty catalog under §3.2; other updates omit it |
 
 `ManagementDriver` fields are `driverKind: string`, `authTypes: StaticAuth["type"][]`
 and `remoteModelList: boolean`, derived from executable drivers. `StaticAuth` is the
@@ -291,10 +291,11 @@ A base is established by the first configuration of an untouched builtin or by
 the explicit source-adoption flow below.
 
 The shared default HTTP client for remote model listings is created by the first
-listing request. Local reads, selection and bundled connection configuration do
-not create it. Construction failure fails that operation with the existing
-Provider failure instead of failing process assembly. Per-request network
-overrides still build their own client with the requested proxy and timeout.
+listing request that uses the default network settings, including one triggered
+by a Provider update (§3.2). Local reads and selection do not create it.
+Construction failure fails that operation with the existing Provider failure
+instead of failing process assembly. Per-request network overrides still build
+their own client with the requested proxy and timeout.
 
 Display lists use bounded pages and server-side search. Opening a conversation
 reads its adopted model; it does not enumerate candidate catalogs. Web and CLI
@@ -442,9 +443,10 @@ Provider overview -> Connection -> Save (summary + committed version)
 ```
 
 This selection changes only the reply, not CAS, secret preservation, cancellation
-or discovery. Enablement, credential and network-only configuration of unchanged
-bundled defaults reads and writes no model payload. A full reply still constructs
-the requested complete edit snapshot. Existing method
+or discovery. For enablement, credential and network-only updates that keep
+inheriting an unchanged nonempty bundled catalog, the write itself reads and
+writes no model payload. A full reply still constructs the requested complete
+edit snapshot. Existing method
 request/reply shapes remain except the additive `provider.update.reply` selection,
 the explicit `ModelEdit.endpoint` addition and
 typed errors in §3.4. Existing writes retain `mutating:true`, `interruption:Drain`.
@@ -452,7 +454,7 @@ typed errors in §3.4. Existing writes retain `mutating:true`, `interruption:Dra
 | Method | Request | Reply / behavior | mutating | interruption |
 | --- | --- | --- | --- | --- |
 | `provider.create`  | `{providerId, displayName, connection, models: ModelEntry[], enabled, gluedPrefix?}` | `ManagementProvider`; create-only, caller-generated fresh UUID, existing ID conflicts; `gluedPrefix` takes the patch's rule: trimmed, and an empty one states none | true | `Drain` |
-| `provider.update`  | `{providerId, expectedVersion, patch, reply?: "full" \| "summary"}` | `ManagementProvider` by default; `reply:"summary"` returns the committed safe `ManagementInfo` plus optional `modelsListed`; validate and commit one partial update transaction; a patch that changes `baseUrl`, `credential` or `headers` also replaces the record's own models with the new endpoint's listing in that same compare-and-set write, and `modelsListed` says what it did; a `network`-only change saves alone | true | `Drain` |
+| `provider.update`  | `{providerId, expectedVersion, patch, reply?: "full" \| "summary"}` | `ManagementProvider` by default; `reply:"summary"` returns the committed safe `ManagementInfo` plus optional `modelsListed`. Connection changes and enablement use the listing rules below | true | `Drain` |
 | `provider.probe`  | `{providerId, connection}` | `{models: ModelEntry[]}`; §3.3, no record writes or version check | false | `Drain` |
 | `provider.models.create`  | `{providerId, expectedVersion, model: ModelEntry, reply?: "full" \| "summary"}` | Existing catalog by default, `{version}` for `reply:"summary"`; separate user-added list; duplicate default or user ID rejected; add enabled and remove any stale `modelConfigOverrides`, `disabledModelIds`, `modelPreferences` and `endpointOverrides` entries for that ID in the same transaction | true | `Drain` |
 | `provider.models.delete`  | `{providerId, expectedVersion, modelId, reply?: "full" \| "summary"}` | Existing catalog by default, `{version}` for `reply:"summary"`; only user-added items; remove that ID from `disabledModelIds` and clean owned preferences/routes/selections in the same transaction | true | `Drain` |
@@ -485,26 +487,28 @@ same method: copy the complete public `ModelEntry` identified by
 `{providerId, modelId}`; persist neither a template reference nor a client-side
 bundled catalog. Clients never reconstruct descriptors from `ProviderModel`.
 
-An update that changes `baseUrl`, `credential` or `headers` — the endpoint or
-the account the record reaches — lists the models of the new endpoint when the
-record's models are its own — the bundled catalog does not define the provider,
-or `remoteModels` is already true — and commits the listing with the connection
-in one compare-and-set write. The listing is taken outside the write and keeps
-`refresh`'s user-model conflict rule. An invalid patch is rejected before
-anything is listed, as `provider_invalid_config` with its reason. A failed
-listing fails the update and writes nothing, so re-pointing never leaves the old
-endpoint's models on the new one. A disabled record whose models are its own
-drops them in the same write, without a request: they are the old endpoint's,
-the empty, listable catalog is filled by the explicit refresh operation after
-the record is enabled. A `network`-only change — a proxy or a timeout
-— saves alone and lists nothing: it changes how the endpoint is reached, not
-what it serves, and requiring a listing would make those settings unsavable
-whenever listing fails. A driver that cannot list saves the connection alone. A
-record whose models are the bundled catalog's keeps them through any connection
-change, and later bundled updates still reach it;
-`dimcode models PROVIDER --refresh` stays the explicit way to replace them. A
-stored listing sets `remoteModels` as `refresh` does. The reply's `modelsListed`
-says which of these happened.
+An update that changes `baseUrl`, `credential` or `headers` changes the endpoint
+or account the record reaches. If the Provider supports remote listing and the
+update leaves it enabled, the owner lists the endpoint's models unless the
+record inherits a nonempty bundled catalog. That catalog is kept, and later
+bundled updates still reach it. A connection change that leaves the record
+disabled makes no request and drops its own endpoint models, if any. Enabling a
+listable built-in Provider defined with an empty bundle (as with Magpie) fills
+its inherited catalog or an empty saved endpoint listing, including one cleared
+by a disabled connection change. A nonempty saved listing is kept on enablement
+without a request. User-added models do not count as endpoint models. An
+enable-only update does not fill a cleared endpoint listing for a custom Provider
+or a built-in defined with a nonempty bundle; use explicit refresh. A `network`-only
+change saves alone: it changes how the endpoint is reached, not what it serves.
+A driver that cannot list saves the connection alone.
+
+An invalid patch is rejected before discovery, as `provider_invalid_config`
+with its reason. The request runs outside the write and keeps `refresh`'s
+user-model conflict rule. On success, the owner stores the connection and the
+listing in the same compare-and-set write and sets `remoteModels` as `refresh`
+does. A failed listing leaves the record unchanged. The Models area's `Ctrl+R`
+and `dimcode models PROVIDER --refresh` remain available for an explicit
+refresh, including for a record that was already enabled with no models.
 
 | `patch` field | Operation | Writable records |
 | --- | --- | --- |
@@ -1422,9 +1426,8 @@ Native CLI migration includes `PROVIDER_METHODS` in
 `crates/dim-cli/src/session_host.rs`, all save callers, and actual-daemon flows:
 Add probes the unsaved connection **before** create, retains its generated UUID
 for recovery, and never saves then refreshes as a test. Connection edits probe a
-draft when requested, then update the changed fields; the update lists and
-stores the new endpoint's models when the record's models are its own, and a
-proxy or timeout edit saves alone. Disconnect sends credential
+draft when requested, then update the changed fields under §3.2's listing rules.
+Disconnect sends credential
 clear **and** `enabled:false` atomically, fixing the enabled-key-required rejection
 of clear alone. Enable/disable use update; account login/logout retain their owners.
 When listing is unsupported, connection edits still save and explicitly report
