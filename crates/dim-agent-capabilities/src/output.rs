@@ -1105,12 +1105,7 @@ mod tests {
     async fn a_continuous_thinking_stream_shows_within_the_interval() {
         let gate = Arc::new(OutputGate::default());
         let progress = Arc::new(StateCell::new(ModelProgress::default()));
-        let mut output = Output::new(
-            timeline("main").await,
-            gate,
-            progress.clone(),
-            scope(),
-        );
+        let mut output = Output::new(timeline("main").await, gate, progress.clone(), scope());
         let read = progress.clone();
         let stream: ModelStream = Box::pin(stream::unfold(0u8, move |step| {
             let read = read.clone();
