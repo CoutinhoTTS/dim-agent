@@ -1116,6 +1116,130 @@ async fn cancelling_the_grace_returns_at_once() {
     assert!(dropped.load(Ordering::SeqCst));
 }
 
+/// The real Responses adapter with strict streaming, the assembly every
+/// request uses, delivers a cut client call and the content-filter terminal
+/// that explains it next to each other: the strict stream holds the call
+/// until `Finish`, so the bridge sees the terminal on its next read even
+/// though the adapter queues the call and the terminal in separate events.
+#[tokio::test]
+async fn a_strict_responses_stream_delivers_a_cut_call_next_to_its_filter() {
+    use std::sync::Mutex;
+
+    use aimux_core::language_model::LanguageModel;
+    use aimux_core::language_model_message::convert_to_language_model_prompt;
+    use aimux_core::message::ModelMessage;
+    use aimux_core::options::CallOptions;
+    use aimux_providers::openai::{OpenAIProviderSettings, create_openai};
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum Seen {
+        ToolCall,
+        Finish(FinishReasonUnified),
+        Other,
+    }
+
+    struct Observed {
+        inner: Pin<Box<dyn Stream<Item = Result<StreamPart, AiMuxError>> + Send>>,
+        seen: Arc<Mutex<Vec<Seen>>>,
+    }
+
+    impl Stream for Observed {
+        type Item = Result<StreamPart, AiMuxError>;
+
+        fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            let this = self.get_mut();
+            let polled = this.inner.as_mut().poll_next(cx);
+            if let Poll::Ready(Some(Ok(part))) = &polled {
+                this.seen.lock().unwrap().push(match part {
+                    StreamPart::ToolCall(_) => Seen::ToolCall,
+                    StreamPart::Finish { finish_reason, .. } => {
+                        Seen::Finish(finish_reason.unified)
+                    }
+                    _ => Seen::Other,
+                });
+            }
+            polled
+        }
+    }
+
+    let server = MockServer::start().await;
+    let body = [
+        json!({"type":"response.created","response":{"id":"resp-order","created_at":1,"model":"test-model"}}),
+        json!({"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc-1","call_id":"call-1","name":"lookup","arguments":""}}),
+        json!({"type":"response.function_call_arguments.delta","item_id":"fc-1","output_index":0,"delta":"{\"query\":"}),
+        json!({"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"fc-1","call_id":"call-1","name":"lookup","arguments":"{\"query\":"}}),
+        json!({"type":"response.incomplete","response":{"id":"resp-order","incomplete_details":{"reason":"content_filter"},"usage":{"input_tokens":3,"output_tokens":2}}}),
+    ]
+    .into_iter()
+    .map(|event| format!("data: {event}\n\n"))
+    .collect::<String>();
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(body),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let model = create_openai(OpenAIProviderSettings {
+        api_key: Some("test-key".into()),
+        base_url: Some(format!("{}/v1", server.uri())),
+        ..Default::default()
+    })
+    .unwrap()
+    .responses("test-model");
+    let mut options = CallOptions::new(
+        convert_to_language_model_prompt(&[ModelMessage::user("hi")], None, None).unwrap(),
+    );
+    options.strict_stream = Some(true);
+    let result = model.do_stream(&options).await.unwrap();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let stream = convert(
+        StreamResult {
+            stream: Box::pin(Observed {
+                inner: result.stream,
+                seen: seen.clone(),
+            }),
+            request: result.request,
+            response: result.response,
+        },
+        ToolNames::default(),
+        ModelProtocol::OpenaiResponses,
+        CancellationToken::new(),
+        AbortSignal::new(),
+        CancellationToken::new(),
+        tokio_util::task::TaskTracker::new().token(),
+    );
+    let chunks = stream.collect::<Vec<_>>().await;
+    let seen = seen.lock().unwrap();
+    assert!(
+        matches!(
+            seen.as_slice(),
+            [.., Seen::ToolCall, Seen::Finish(FinishReasonUnified::ContentFilter)]
+        ),
+        "the terminal was not handed over right after the cut call: {seen:?}"
+    );
+    assert!(
+        !chunks
+            .iter()
+            .any(|chunk| matches!(chunk, Ok(ModelChunk::ToolUse(_)))),
+        "the interrupted call is not announced as a completed call: {chunks:?}"
+    );
+    let Some(Err(failure)) = chunks.last() else {
+        panic!("missing failure: {chunks:?}")
+    };
+    let HostError::Failed {
+        model: Some(model), ..
+    } = failure
+    else {
+        panic!("{failure:?}");
+    };
+    assert_eq!(model.kind, ModelFailureKind::ContentFiltered);
+    server.verify().await;
+}
+
 #[tokio::test]
 async fn a_text_block_can_reopen_after_its_end() {
     // Strict mode rejects an end for a block that never started, a repeated
