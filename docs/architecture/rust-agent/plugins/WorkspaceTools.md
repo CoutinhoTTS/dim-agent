@@ -383,9 +383,11 @@ original owner, group, mode and extended attributes before the rename.
 
 A new file's success belongs to a path that names the file actually written.
 Once the entry is published, the call syncs the directory that received it and
-keeps the sync result; the named path first removes its staging entry and
-keeps the published file open. Only then does the call re-stat the requested
-path and compare its inode with the published one
+keeps the sync result, except that on macOS a target without a held parent
+reopens the requested parent by path, so a parent renamed after publication
+makes that sync reach another directory or fail; the named path first removes
+its staging entry and keeps the published file open. Only then does the call
+re-stat the requested path and compare its inode with the published one
 ([`Target::path`](../../../../crates/dim-agent-capabilities/src/workspace_tools/files.rs)
 through `owned_temporary`), so the inode number cannot be reused by the time it
 is checked. A parent renamed during the call, including while the directory
