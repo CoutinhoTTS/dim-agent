@@ -222,6 +222,8 @@ export type ModelProgress = {
   sessionId: string
   branchId: string
   requestId?: string
+  /** Stable identity of the open thinking block, when one exists. */
+  thinkingPartId?: string
   text: string
   /** Unicode scalar values of the request's `step/text` deltas before `text`. */
   textOffset: number

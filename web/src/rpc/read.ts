@@ -848,6 +848,7 @@ export function readNotification(method: string, value: unknown): Notification |
       }
     case "session.model.progress": {
       const requestId = optStr(params, "requestId", method)
+      const thinkingPartId = optStr(params, "thinkingPartId", method)
       const retry = readRetryProgress(params.retry, `${method}.retry`)
       const thinkingStartedAt = optNum(params, "thinkingStartedAt", method)
       return {
@@ -856,6 +857,7 @@ export function readNotification(method: string, value: unknown): Notification |
           sessionId: str(params, "sessionId", method),
           branchId: str(params, "branchId", method),
           ...(requestId === undefined ? {} : { requestId }),
+          ...(thinkingPartId === undefined ? {} : { thinkingPartId }),
           text: str(params, "text", method),
           textOffset: num(params, "textOffset", method),
           thinking: str(params, "thinking", method),
