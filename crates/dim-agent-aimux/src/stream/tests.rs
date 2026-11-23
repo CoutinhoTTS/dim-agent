@@ -1001,6 +1001,60 @@ async fn a_stalled_stream_after_a_cut_tool_call_keeps_its_parse_failure() {
     );
 }
 
+/// Cancelling after a cut tool call wins over a part the stream has already
+/// delivered: the cut call settles as cancelled rather than as its parse
+/// failure.
+#[tokio::test]
+async fn cancelling_a_cut_tool_call_wins_a_ready_part() {
+    let cancel = CancellationToken::new();
+    let abort = AbortSignal::new();
+    let dropped = Arc::new(AtomicBool::new(false));
+    let flag = DropFlag(dropped.clone());
+    let stream_cancel = cancel.clone();
+    let result = StreamResult {
+        stream: Box::pin(async_stream::stream! {
+            let _flag = flag;
+            yield Ok(start());
+            yield Ok(tool_start());
+            yield Ok(tool("{\"query\":"));
+            stream_cancel.cancel();
+            yield Ok(StreamPart::TextDelta {
+                id: "text".into(),
+                delta: "late".into(),
+                provider_metadata: None,
+            });
+            std::future::pending::<()>().await;
+        }),
+        request: None,
+        response: None,
+    };
+    let mut stream = convert(
+        result,
+        ToolNames::default(),
+        ModelProtocol::OpenaiChat,
+        cancel,
+        abort.clone(),
+        CancellationToken::new(),
+        tokio_util::task::TaskTracker::new().token(),
+    );
+    assert!(matches!(
+        stream.next().await.unwrap().unwrap(),
+        ModelChunk::MessageStart { .. }
+    ));
+    assert!(matches!(
+        stream.next().await.unwrap().unwrap(),
+        ModelChunk::ToolStart { .. }
+    ));
+    let next = stream.next().await;
+    assert!(
+        matches!(next, Some(Err(HostError::Cancelled(_)))),
+        "{next:?}"
+    );
+    assert!(abort.is_aborted());
+    assert!(dropped.load(Ordering::SeqCst));
+    assert!(stream.next().await.is_none());
+}
+
 /// A content filter a Responses-shaped stream delivers after a pending read
 /// is the reply's terminal: the call whose arguments it cut short settles as
 /// `content_filtered`, not as the parse failure it caused.
