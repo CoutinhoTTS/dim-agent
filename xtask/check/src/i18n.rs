@@ -16,7 +16,8 @@
 //!
 //! A constant is read only where its name still means it: a parameter, a local,
 //! a pattern, a `use` import, a static, a glob import or a constant an inner
-//! scope declares hides an outer one, and a name no lookup settles is counted
+//! scope declares hides an outer one, including one a block a key argument
+//! evaluates to declares, and a name no lookup settles is counted
 //! instead. An inline module and a macro in statement or item position may hold
 //! a name the scan cannot see, so neither reads an outer constant either. A key
 //! argument that reduces to no literal is counted for the same reason: it names
@@ -500,12 +501,31 @@ impl Calls {
         }
     }
 
-    /// Adds the literal a block evaluates to.
+    /// Adds the literal a block evaluates to, read in the scope the block's own
+    /// items and bindings open.
     fn block(&mut self, block: &Block) {
-        match block.stmts.last() {
-            Some(Stmt::Expr(value, None)) => self.literals(value),
-            _ => self.unreadable(block.brace_token.span.open()),
-        }
+        self.statements(block, |calls| match block.stmts.last() {
+            Some(Stmt::Expr(value, None)) => calls.literals(value),
+            _ => calls.unreadable(block.brace_token.span.open()),
+        });
+    }
+
+    /// Visits `block`'s statements in the scope its items and bindings open,
+    /// then runs `visit` in that same scope.
+    fn statements(&mut self, block: &Block, visit: impl FnOnce(&mut Self)) {
+        let scope = scope(block.stmts.iter().filter_map(|statement| match statement {
+            Stmt::Item(item) => Some(item),
+            _ => None,
+        }));
+        self.scoped(scope, |calls| {
+            for statement in &block.stmts {
+                calls.visit_stmt(statement);
+                if let Stmt::Local(local) = statement {
+                    calls.bind(&local.pat);
+                }
+            }
+            visit(calls);
+        });
     }
 
     /// Adds `text` at `span`, unless it is empty: a panel draws nothing for
@@ -645,18 +665,7 @@ impl<'ast> Visit<'ast> for Calls {
     }
 
     fn visit_block(&mut self, node: &'ast Block) {
-        let scope = scope(node.stmts.iter().filter_map(|statement| match statement {
-            Stmt::Item(item) => Some(item),
-            _ => None,
-        }));
-        self.scoped(scope, |calls| {
-            for statement in &node.stmts {
-                calls.visit_stmt(statement);
-                if let Stmt::Local(local) = statement {
-                    calls.bind(&local.pat);
-                }
-            }
-        });
+        self.statements(node, |_| {});
     }
 
     fn visit_expr_closure(&mut self, node: &'ast syn::ExprClosure) {
