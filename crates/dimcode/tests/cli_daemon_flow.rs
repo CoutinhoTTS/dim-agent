@@ -2075,6 +2075,52 @@ fn exec_keeps_a_recovered_reply_when_an_earlier_request_ends_late() {
     );
 }
 
+/// The turn that consumes the submitted input can end before the submit reply
+/// names the input. Arrival order: submit request, `turn/start`,
+/// `input/consumed`, `text`, `model-output-end`, `turn/end`, submit reply,
+/// `session.idle` reply. The held facts are replayed when the reply names the
+/// input, so the completed turn's reply still reaches stdout.
+#[test]
+fn exec_keeps_a_reply_whose_turn_ended_before_the_submit_reply() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.start(false);
+        let submit = wire.read("session.submit");
+        open_turn(wire, "turn", "input");
+        wire.event(12,"text",json!({"turn_id":"turn","request_id":"request","delta":"The service listens on port 8080."}));
+        wire.event(13,"model-output-end",json!({"turn_id":"turn","request_id":"request","status":"completed","finish_reason":"end_turn"}));
+        wire.end(json!({"turn_id":"turn","status":"completed","reason":"done"}));
+        wire.reply(&submit, json!({"event":{"id":"input"}}));
+        let idle = wire.read("session.idle");
+        wire.reply(&idle, json!({"sequence":30}));
+        wire.detach();
+    });
+    let output = wait(
+        home.command()
+            .args(["exec", "-p", "Which port does the service use?"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    daemon.join().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "status {:?} stdout {stdout:?} stderr {stderr:?}",
+        output.status.code()
+    );
+    assert_eq!(
+        stdout, "The service listens on port 8080.\n",
+        "the reply of a turn that ended before the receipt stays on stdout; stderr was {stderr:?}"
+    );
+    assert!(
+        !stderr.contains("The service listens on port 8080."),
+        "the reply appears once, on stdout: {stderr:?}"
+    );
+}
+
 /// After the submitted turn ends, another turn on the branch may complete
 /// before idle: its answer is not this run's reply.
 #[test]
@@ -2216,6 +2262,112 @@ fn exec_closes_its_reply_stream_when_its_input_is_deleted() {
     assert!(
         stderr.contains("Another answer."),
         "a later turn's words are diagnostics: {stderr:?}"
+    );
+}
+
+/// The submitted input can be deleted before the submit reply names it.
+/// Arrival order: submit request, `input/deleted`, submit reply, then another
+/// turn that completes. The deletion is replayed on the receipt, so the stream
+/// closes, the deletion is reported and the run exits 1.
+#[test]
+fn exec_reports_a_deletion_that_arrives_before_the_submit_reply() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.start(false);
+        let submit = wire.read("session.submit");
+        wire.notice("session.event",json!({"sessionId":"session","branchId":"main","event":{"id":"deleted","sequence":9,"create_at":1,"type":"input","name":"deleted","data":{"input_id":"input"}}}));
+        wire.reply(&submit, json!({"event":{"id":"input"}}));
+        let idle = wire.read("session.idle");
+        wire.notice("session.event",json!({"sessionId":"session","branchId":"main","event":{"id":"later-start","sequence":10,"create_at":1,"type":"turn","name":"start","data":{"turn_id":"later"}}}));
+        wire.event(11,"text",json!({"turn_id":"later","request_id":"later-request","delta":"Another answer."}));
+        wire.event(12,"model-output-end",json!({"turn_id":"later","request_id":"later-request","status":"completed","finish_reason":"end_turn"}));
+        wire.notice("session.event",json!({"sessionId":"session","branchId":"main","event":{"id":"later-end","sequence":13,"create_at":1,"type":"turn","name":"end","data":{"turn_id":"later","status":"completed","reason":"done"}}}));
+        wire.reply(&idle, json!({"sequence":30}));
+        wire.detach();
+    });
+    let output = wait(
+        home.command()
+            .args(["exec", "-p", "Which port does the service use?"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    daemon.join().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "stdout {stdout:?} stderr {stderr:?}"
+    );
+    assert!(
+        stdout.is_empty(),
+        "a deletion seen before the receipt leaves no reply on stdout; stdout was {stdout:?}"
+    );
+    assert!(
+        stderr.contains("The submitted input was deleted"),
+        "the deletion is reported: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("Another answer."),
+        "a later turn's words are diagnostics: {stderr:?}"
+    );
+}
+
+/// A failed turn that is not the submitted one does not set the run's exit
+/// code. Arrival order: submit → submit reply → `turn/start`/`input/consumed`/
+/// `turn/end` of an unrelated turn that failed → the submitted turn's start,
+/// consumption, text and successful end → another turn that failed after it →
+/// `session.idle` reply. The submitted turn's reply is the answer and the run
+/// exits 0.
+#[test]
+fn exec_keeps_its_exit_code_when_another_turn_fails() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.start(false);
+        let submit = wire.read("session.submit");
+        wire.reply(&submit, json!({"event":{"id":"input"}}));
+        let idle = wire.read("session.idle");
+        wire.notice("session.event",json!({"sessionId":"session","branchId":"main","event":{"id":"other-start","sequence":9,"create_at":1,"type":"turn","name":"start","data":{"turn_id":"other"}}}));
+        wire.notice("session.event",json!({"sessionId":"session","branchId":"main","event":{"id":"other-consumed","sequence":10,"create_at":1,"type":"input","name":"consumed","data":{"input_id":"other-input"}}}));
+        wire.notice("session.event",json!({"sessionId":"session","branchId":"main","event":{"id":"other-end","sequence":11,"create_at":1,"type":"turn","name":"end","data":{"turn_id":"other","status":"failed","error":"fixture error"}}}));
+        wire.notice("session.event",json!({"sessionId":"session","branchId":"main","event":{"id":"turn-start","sequence":12,"create_at":1,"type":"turn","name":"start","data":{"turn_id":"turn"}}}));
+        wire.notice("session.event",json!({"sessionId":"session","branchId":"main","event":{"id":"input-consumed","sequence":13,"create_at":1,"type":"input","name":"consumed","data":{"input_id":"input"}}}));
+        wire.event(14,"text",json!({"turn_id":"turn","request_id":"request","delta":"The service listens on port 8080."}));
+        wire.event(15,"model-output-end",json!({"turn_id":"turn","request_id":"request","status":"completed","finish_reason":"end_turn"}));
+        wire.notice("session.event",json!({"sessionId":"session","branchId":"main","event":{"id":"turn-end","sequence":16,"create_at":1,"type":"turn","name":"end","data":{"turn_id":"turn","status":"completed","reason":"done"}}}));
+        wire.notice("session.event",json!({"sessionId":"session","branchId":"main","event":{"id":"later-start","sequence":17,"create_at":1,"type":"turn","name":"start","data":{"turn_id":"later"}}}));
+        wire.notice("session.event",json!({"sessionId":"session","branchId":"main","event":{"id":"later-consumed","sequence":18,"create_at":1,"type":"input","name":"consumed","data":{"input_id":"another-input"}}}));
+        wire.event(19,"text",json!({"turn_id":"later","request_id":"later-request","delta":"Another answer."}));
+        wire.event(20,"model-output-end",json!({"turn_id":"later","request_id":"later-request","status":"completed","finish_reason":"end_turn"}));
+        wire.notice("session.event",json!({"sessionId":"session","branchId":"main","event":{"id":"later-end","sequence":21,"create_at":1,"type":"turn","name":"end","data":{"turn_id":"later","status":"failed","error":"fixture error"}}}));
+        wire.reply(&idle, json!({"sequence":30}));
+        wire.detach();
+    });
+    let output = wait(
+        home.command()
+            .args(["exec", "-p", "Which port does the service use?"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    daemon.join().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "another turn's failure does not set the run's exit code: stdout {stdout:?} stderr {stderr:?}"
+    );
+    assert_eq!(
+        stdout, "The service listens on port 8080.\n",
+        "the submitted turn's reply stays the answer; stderr was {stderr:?}"
+    );
+    assert!(
+        stderr.contains("Another answer."),
+        "the later turn's words are diagnostics: {stderr:?}"
     );
 }
 
