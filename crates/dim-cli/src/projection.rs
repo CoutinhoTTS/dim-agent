@@ -4238,23 +4238,15 @@ mod tests {
         );
     }
 
-    /// A retry that starts with text and never shows a thought leaves no
-    /// empty thought row, and the replaced attempt's thought does not make
-    /// the failure claim that a response is incomplete.
+    /// A retry that never shows a thought leaves no empty thought row, and
+    /// the replaced attempt's thought does not make the failure claim that a
+    /// response is incomplete.
     #[test]
     fn a_retry_without_thinking_leaves_no_empty_thought_row() {
         let mut projection = Projection::default();
         apply(&mut projection, &[model_start(1)]);
         projection.progress(&part_progress("failed attempt", "first", 1000));
         projection.progress(&empty_progress());
-        projection.progress(
-            &serde_json::from_value(serde_json::json!({
-                "sessionId": "s", "branchId": "main", "requestId": "r1",
-                "text": "partial answer", "textOffset": 0,
-                "thinking": "", "thinkingOffset": 0,
-            }))
-            .unwrap(),
-        );
         apply(
             &mut projection,
             &[model_end(
@@ -4275,6 +4267,33 @@ mod tests {
             !row.text.starts_with("The response above is incomplete."),
             "nothing showed above the failure: {}",
             row.text
+        );
+    }
+
+    /// A clear that a coalesced notice dropped is still detected from the new
+    /// attempt's text: the replaced thought leaves no empty row.
+    #[test]
+    fn a_coalesced_clear_before_text_leaves_no_empty_thought_row() {
+        let mut projection = Projection::default();
+        apply(&mut projection, &[model_start(1)]);
+        projection.progress(&part_progress("failed attempt", "first", 1000));
+        projection.progress(
+            &serde_json::from_value(serde_json::json!({
+                "sessionId": "s", "branchId": "main", "requestId": "r1",
+                "text": "partial answer", "textOffset": 0,
+                "thinking": "", "thinkingOffset": 0,
+            }))
+            .unwrap(),
+        );
+        apply(&mut projection, &[step(2, "text", "partial answer")]);
+        let rows = projection.snapshot().rows;
+        assert!(
+            !rows.iter().any(|row| row.kind == RowKind::Thinking),
+            "the replaced thought leaves no empty row: {rows:?}"
+        );
+        assert!(
+            rows.iter().any(|row| row.text == "partial answer"),
+            "the new attempt's text shows: {rows:?}"
         );
     }
 }
