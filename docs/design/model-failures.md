@@ -183,7 +183,10 @@ ModelFailure {
   never committed is not a fact and does not stop the retry; while it is still
   private it is not visible output either, so a Steer still replaces the
   request, and a retry starts from nothing with every client resetting what the
-  replaced attempt showed. An unclassified stream ending carries no failure
+  replaced attempt showed. Only a retry reopens the request: a terminal
+  failure leaves the attempt's shown output alone, so an input that arrives
+  while the failed stream drains cannot replace it and the turn ends with the
+  provider's failure. An unclassified stream ending carries no failure
   facts and is not retried; classifying an ending as a cut belongs to the
   driver. A retry cannot follow committed output: what the request committed
   must match

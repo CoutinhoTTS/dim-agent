@@ -612,6 +612,9 @@ impl crate::model_provider::RetryObserver for Output {
             });
         });
     }
+    fn retrying(&mut self) {
+        self.forget_attempt();
+    }
 }
 
 pub(crate) async fn consume_output(
@@ -629,12 +632,12 @@ pub(crate) async fn consume_output(
     cancel.cancel();
     let flushed = output.flush_text();
     // A retry may follow only an attempt that left no fact behind and whose
-    // shown text reached the Timeline: its progress is dropped and the next
-    // attempt starts from nothing.
+    // shown text reached the Timeline. What the attempt showed stays until
+    // the recovery policy starts another one: only a retry may clear it and
+    // let a steer replace the request again.
     *replay_safe = flushed.is_ok() && !output.committed;
-    if *replay_safe {
-        output.forget_attempt();
-    }
+    output.thinking_pending.clear();
+    output.thinking_show_at = None;
     while stream.next().await.is_some() {}
     // A failed final flush is a local write failure, not the provider's cut:
     // the text the client already saw must not be replaced by a retry.
