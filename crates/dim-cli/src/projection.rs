@@ -2546,6 +2546,12 @@ mod tests {
         })
     }
 
+    fn step_with_id(sequence: u64, id: &str, name: &str, delta: &str) -> serde_json::Value {
+        let mut step = step(sequence, name, delta);
+        step["id"] = id.into();
+        step
+    }
+
     /// The strategy-neutral diagnostics every compaction record carries.
     fn diagnostics() -> serde_json::Value {
         serde_json::json!({
@@ -4674,7 +4680,13 @@ mod tests {
             "the rebuilt thought row has a new identity"
         );
         assert_eq!(rows[0].text, "a longer successful thought");
-        apply(&mut projection, &[step(6, "text", "Done.")]);
+        apply(
+            &mut projection,
+            &[
+                step_with_id(5, "second", "thinking", "a longer successful thought"),
+                step(6, "text", "Done."),
+            ],
+        );
         let rows = projection.snapshot().rows;
         assert_eq!(
             rows[0].elapsed_ms,
@@ -4739,6 +4751,127 @@ mod tests {
         assert!(
             rows.iter().any(|row| row.text == "partial answer"),
             "the new attempt's text shows: {rows:?}"
+        );
+    }
+
+    /// The App Server batches progress notices and sends durable events at
+    /// once, so a retry's first committed thought can arrive before the notice
+    /// that would reset the replaced attempt's row.
+    #[test]
+    fn a_durable_thought_before_the_retry_notice_rebuilds_the_row() {
+        let mut projection = Projection::default();
+        apply(&mut projection, &[model_start(1)]);
+        projection.progress(&part_progress("failed attempt", "first", 1000));
+        let replaced = projection.snapshot().rows[0].row_id.clone();
+        apply(
+            &mut projection,
+            &[step_with_id(
+                5,
+                "second",
+                "thinking",
+                "a longer successful thought",
+            )],
+        );
+        let rows = projection.snapshot().rows;
+        assert_eq!(
+            rows.len(),
+            1,
+            "the replaced attempt leaves one thought row: {rows:?}"
+        );
+        assert_ne!(
+            rows[0].row_id, replaced,
+            "the rebuilt thought row has a new identity"
+        );
+        assert_eq!(rows[0].text, "a longer successful thought");
+        apply(&mut projection, &[step(6, "text", "Done.")]);
+        let rows = projection.snapshot().rows;
+        assert_eq!(
+            rows[0].elapsed_ms,
+            Some(1000),
+            "the span starts at the new attempt, not the replaced one: {rows:?}"
+        );
+    }
+
+    /// A retry whose first committed output is text drops the replaced
+    /// attempt's row instead of settling it empty.
+    #[test]
+    fn a_durable_text_before_the_retry_notice_leaves_no_empty_thought_row() {
+        let mut projection = Projection::default();
+        apply(&mut projection, &[model_start(1)]);
+        projection.progress(&part_progress("failed attempt", "first", 1000));
+        apply(&mut projection, &[step(5, "text", "answer")]);
+        let rows = projection.snapshot().rows;
+        assert!(
+            !rows.iter().any(|row| row.kind == RowKind::Thinking),
+            "the replaced thought leaves no empty row: {rows:?}"
+        );
+        assert!(
+            rows.iter().any(|row| row.text == "answer"),
+            "the new attempt's text shows: {rows:?}"
+        );
+    }
+
+    /// A retry whose first committed output is a tool event drops the replaced
+    /// attempt's row instead of settling it empty, and the failure that follows
+    /// does not claim a response is incomplete.
+    #[test]
+    fn a_durable_tool_event_before_the_retry_notice_leaves_no_empty_thought_row() {
+        let mut projection = Projection::default();
+        apply(&mut projection, &[model_start(1)]);
+        projection.progress(&part_progress("failed attempt", "first", 1000));
+        apply(
+            &mut projection,
+            &[serde_json::json!({
+                "id": "tool-start-1",
+                "sequence": 5,
+                "create_at": 5000,
+                "type": "step",
+                "name": "tool-use-start",
+                "data": {"turn_id": "t1", "request_id": "r1", "call_id": "call", "name": "echo"},
+            })],
+        );
+        let rows = projection.snapshot().rows;
+        assert!(
+            !rows.iter().any(|row| row.kind == RowKind::Thinking),
+            "the replaced thought leaves no empty row: {rows:?}"
+        );
+        apply(
+            &mut projection,
+            &[model_end(
+                6,
+                failure_data(serde_json::json!({"failure": failure_fact()})),
+            )],
+        );
+        let rows = projection.snapshot().rows;
+        let row = rows
+            .iter()
+            .find(|row| row.kind == RowKind::Error)
+            .expect("a failure row");
+        assert!(
+            !row.text.starts_with("The response above is incomplete."),
+            "nothing showed above the failure: {}",
+            row.text
+        );
+
+        let mut projection = Projection::default();
+        apply(&mut projection, &[model_start(1)]);
+        projection.progress(&part_progress("failed attempt", "first", 1000));
+        apply(
+            &mut projection,
+            &[serde_json::json!({
+                "id": "tool-1",
+                "sequence": 5,
+                "create_at": 5000,
+                "type": "step",
+                "name": "tool-use",
+                "data": {"turn_id": "t1", "request_id": "r1",
+                    "call": {"id": "call", "name": "echo", "input": {}}},
+            })],
+        );
+        let rows = projection.snapshot().rows;
+        assert!(
+            !rows.iter().any(|row| row.kind == RowKind::Thinking),
+            "the tool use drops the replaced row: {rows:?}"
         );
     }
 }
