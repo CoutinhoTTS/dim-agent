@@ -336,6 +336,8 @@ fn edit_locked(
         cancel,
         #[cfg(test)]
         hook,
+        #[cfg(test)]
+        None,
     )? {
         return done(result);
     }

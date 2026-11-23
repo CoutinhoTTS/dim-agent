@@ -89,6 +89,8 @@ pub(super) async fn run(
     );
     #[cfg(test)]
     let hook = tools.before_commit.clone();
+    #[cfg(test)]
+    let sync_hook = tools.before_sync.clone();
     let (_lock, written) = blocking(move || {
         let written = write_locked(
             &target,
@@ -99,6 +101,8 @@ pub(super) async fn run(
             &cancel,
             #[cfg(test)]
             hook,
+            #[cfg(test)]
+            sync_hook,
         );
         (_lock, written)
     })
@@ -118,6 +122,7 @@ fn write_locked(
     binding: WriteBinding,
     cancel: &CancellationToken,
     #[cfg(test)] hook: Option<super::CommitHook>,
+    #[cfg(test)] sync_hook: Option<super::CommitHook>,
 ) -> Result<(ToolResult, Option<TextFileBinding>), Cancelled> {
     let done = |result| Ok((result, None));
     let target = match Target::for_mutation(path, bounded, true) {
@@ -237,6 +242,8 @@ fn write_locked(
         cancel,
         #[cfg(test)]
         hook,
+        #[cfg(test)]
+        sync_hook,
     )?;
     if let Err(result) = written {
         return done(result);
@@ -349,6 +356,7 @@ pub(super) fn write_target(
     expected: &[u8; 32],
     cancel: &CancellationToken,
     #[cfg(test)] hook: Option<super::CommitHook>,
+    #[cfg(test)] sync_hook: Option<super::CommitHook>,
 ) -> Result<Result<(), ToolResult>, Cancelled> {
     #[cfg(unix)]
     if original.is_none() {
@@ -359,8 +367,12 @@ pub(super) fn write_target(
             cancel,
             #[cfg(test)]
             hook,
+            #[cfg(test)]
+            sync_hook,
         );
     }
+    #[cfg(test)]
+    let _ = sync_hook;
     let path = target.path();
     if let Some(original) = original {
         let writable = match target.open_writable() {
@@ -507,6 +519,7 @@ fn write_new_file(
     display: &str,
     cancel: &CancellationToken,
     #[cfg(test)] hook: Option<super::CommitHook>,
+    #[cfg(test)] sync_hook: Option<super::CommitHook>,
 ) -> Result<Result<(), ToolResult>, Cancelled> {
     let path = target.path();
     let new_file = match NewFile::new(target) {
@@ -527,6 +540,8 @@ fn write_new_file(
                 cancel,
                 #[cfg(test)]
                 hook.take(),
+                #[cfg(test)]
+                sync_hook.clone(),
             )? {
                 Ok(publication) => publication,
                 Err(result) => return Ok(Err(result)),
@@ -546,6 +561,8 @@ fn write_new_file(
         cancel,
         #[cfg(test)]
         hook,
+        #[cfg(test)]
+        sync_hook,
     )
 }
 
@@ -583,6 +600,7 @@ fn publish_anonymous_new(
     display: &str,
     cancel: &CancellationToken,
     #[cfg(test)] hook: Option<super::CommitHook>,
+    #[cfg(test)] sync_hook: Option<super::CommitHook>,
 ) -> Result<Result<AnonymousPublication, ToolResult>, Cancelled> {
     let path = new_file.path();
     if let Err(error) = file.write_all(bytes).and_then(|()| file.sync_all()) {
@@ -616,6 +634,10 @@ fn publish_anonymous_new(
     if !new_file.published_at_target(&file) {
         return Ok(Err(path_not_written(display)));
     }
+    #[cfg(test)]
+    if let Some(hook) = sync_hook {
+        hook(path);
+    }
     if let Err(error) = new_file.sync() {
         return Ok(Err(sync_failure(error, path, display)));
     }
@@ -633,6 +655,7 @@ fn publish_named_new(
     display: &str,
     cancel: &CancellationToken,
     #[cfg(test)] hook: Option<super::CommitHook>,
+    #[cfg(test)] sync_hook: Option<super::CommitHook>,
 ) -> Result<Result<(), ToolResult>, Cancelled> {
     let path = new_file.path();
     let staged = std::ffi::OsString::from(format!(".dim-write-{}", uuid::Uuid::new_v4()));
@@ -700,6 +723,10 @@ fn publish_named_new(
         return Ok(Err(path_not_written(display)));
     }
     drop(temporary);
+    #[cfg(test)]
+    if let Some(hook) = sync_hook {
+        hook(path);
+    }
     if let Err(error) = new_file.sync() {
         return Ok(Err(sync_failure(error, path, display)));
     }

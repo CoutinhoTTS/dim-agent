@@ -94,6 +94,11 @@ pub struct FileTools {
     /// no sleeps, production hooks or global test locks.
     before_commit: Option<CommitHook>,
     #[cfg(test)]
+    /// Runs at a new file's directory-sync boundary, after publication and
+    /// before the parent is synced; no sleeps, production hooks or global test
+    /// locks. A test moves or restricts the parent here.
+    before_sync: Option<CommitHook>,
+    #[cfg(test)]
     /// Runs inside a bounded `grep` walk for each walked entry, before the
     /// entry is read; no sleeps, production hooks or global test locks. A
     /// test swaps a directory here.
@@ -141,6 +146,8 @@ impl FileTools {
             before_lock: None,
             #[cfg(test)]
             before_commit: None,
+            #[cfg(test)]
+            before_sync: None,
             #[cfg(test)]
             before_search: None,
         }
@@ -2262,6 +2269,153 @@ mod mutation_tests {
             "the directory now at the admitted path receives nothing"
         );
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Moves a new file's parent at the directory-sync boundary: publication
+    /// has already happened below `parent`, and the requested path stops
+    /// naming it. A successful directory sync leaves an empty directory at the
+    /// old path; a failing one makes the directory the file was published into
+    /// unreadable.
+    #[cfg(unix)]
+    struct ParentMovedAtSync {
+        parent: PathBuf,
+        moved: PathBuf,
+    }
+
+    #[cfg(unix)]
+    impl ParentMovedAtSync {
+        fn new(parent: PathBuf, moved: PathBuf) -> Self {
+            Self { parent, moved }
+        }
+
+        fn hook(&self, sync_fails: bool) -> CommitHook {
+            use std::os::unix::fs::PermissionsExt;
+            let (parent, moved) = (self.parent.clone(), self.moved.clone());
+            Arc::new(move |path| {
+                assert_eq!(path, parent.join("new"));
+                std::fs::rename(&parent, &moved).unwrap();
+                if sync_fails {
+                    std::fs::set_permissions(&moved, std::fs::Permissions::from_mode(0o300))
+                        .unwrap();
+                } else {
+                    std::fs::create_dir(&parent).unwrap();
+                }
+            })
+        }
+
+        fn assert_not_recorded(&self, result: &ToolResult, reads: &FileReads, sync_fails: bool) {
+            assert_eq!(
+                result.is_error,
+                Some(true),
+                "sync_fails={sync_fails}: {result:?}"
+            );
+            assert_eq!(
+                result.structured_content.as_ref().unwrap()["code"],
+                "write_error"
+            );
+            assert_eq!(
+                result.effects, None,
+                "sync_fails={sync_fails}: the old path was not written"
+            );
+            assert!(
+                reads.get(&self.parent.join("new")).is_none(),
+                "sync_fails={sync_fails}: the old path gained no text binding"
+            );
+            assert_eq!(std::fs::read(self.moved.join("new")).unwrap(), b"text\n");
+        }
+
+        fn finish(self) {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&self.moved, std::fs::Permissions::from_mode(0o700)).unwrap();
+            std::fs::remove_dir_all(self.parent.parent().unwrap()).unwrap();
+        }
+    }
+
+    /// A named new file syncs the directory it published into before the call
+    /// decides which path was written. A parent moved during that sync, with
+    /// the sync succeeding or failing, leaves no `fileWritten` effect and no
+    /// text binding at the old path.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_named_new_file_records_no_success_after_a_parent_moves_during_sync() {
+        for sync_fails in [false, true] {
+            let root = std::env::temp_dir().join(format!("dim-new-file-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(root.join("parent")).unwrap();
+            let root = root.canonicalize().unwrap();
+            let moved = ParentMovedAtSync::new(root.join("parent"), root.join("moved"));
+            let mut tools = FileTools::new(root.clone(), root.clone(), root.join("out"));
+            tools.before_sync = Some(moved.hook(sync_fails));
+            let reads = branch();
+            let result = call(
+                &tools,
+                &reads,
+                "write",
+                json!({"path": "parent/new", "content": "text\n"}),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+            moved.assert_not_recorded(&result, &reads, sync_fails);
+            moved.finish();
+        }
+    }
+
+    /// The anonymous publication path syncs the held parent before validating
+    /// the requested path: a parent moved during the sync, with the sync
+    /// succeeding or failing, records nothing at the old path.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn an_anonymous_new_file_records_no_success_after_a_parent_moves_during_sync() {
+        for sync_fails in [false, true] {
+            let root = std::env::temp_dir().join(format!("dim-new-file-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(root.join("parent")).unwrap();
+            let root = root.canonicalize().unwrap();
+            require_anonymous_staging(&root.join("parent"));
+            let moved = ParentMovedAtSync::new(root.join("parent"), root.join("moved"));
+            let mut tools = FileTools::new(root.clone(), root.clone(), root.join("out"));
+            tools.before_sync = Some(moved.hook(sync_fails));
+            let reads = branch();
+            let result = call(
+                &tools,
+                &reads,
+                "write",
+                json!({"path": "parent/new", "content": "text\n"}),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+            moved.assert_not_recorded(&result, &reads, sync_fails);
+            moved.finish();
+        }
+    }
+
+    /// The named fallback on Linux syncs before validating the requested path
+    /// too: a parent moved during the sync, with the sync succeeding or
+    /// failing, records nothing at the old path.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_fallback_new_file_records_no_success_after_a_parent_moves_during_sync() {
+        for sync_fails in [false, true] {
+            let root = std::env::temp_dir().join(format!("dim-new-file-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(root.join("parent")).unwrap();
+            let root = root.canonicalize().unwrap();
+            let _forced = ForcedNamedStaging::new(&root.join("parent"));
+            let moved = ParentMovedAtSync::new(root.join("parent"), root.join("moved"));
+            let mut tools = FileTools::new(root.clone(), root.clone(), root.join("out"));
+            tools.before_sync = Some(moved.hook(sync_fails));
+            let reads = branch();
+            let result = call(
+                &tools,
+                &reads,
+                "write",
+                json!({"path": "parent/new", "content": "text\n"}),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+            moved.assert_not_recorded(&result, &reads, sync_fails);
+            moved.finish();
+        }
     }
 
     /// A filesystem or process that cannot publish an anonymous inode falls
