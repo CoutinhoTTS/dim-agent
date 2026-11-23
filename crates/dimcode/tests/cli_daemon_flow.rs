@@ -2169,6 +2169,59 @@ fn exec_keeps_another_turn_off_stdout_after_the_submitted_turn() {
     );
 }
 
+/// A later turn can start, and forward its live text, before the submitted
+/// turn's durable `TurnEnd` reaches the client. Live progress has no turn
+/// identity, so it cannot decide where the submitted turn's held text goes.
+/// Arrival order: submit request, submit reply, `turn/start`,
+/// `input/consumed`, text, live text of a later turn, `model-output-end`,
+/// `turn/end`, `session.idle` reply. The submitted turn's reply is the run's
+/// answer, and the later turn's live text is not output.
+#[test]
+fn exec_ignores_a_later_turns_live_text_before_the_turn_ends() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.start(false);
+        let submit = wire.read("session.submit");
+        wire.reply(&submit, json!({"event":{"id":"input"}}));
+        let idle = wire.read("session.idle");
+        open_turn(wire, "turn", "input");
+        wire.event(12,"text",json!({"turn_id":"turn","request_id":"request","delta":"The service listens on port 8080."}));
+        wire.notice("session.model.progress",json!({"sessionId":"session","branchId":"main","requestId":"later-request","textOffset":0,"text":"Another turn starts.","thinking":"","thinkingOffset":0}));
+        wire.event(14,"model-output-end",json!({"turn_id":"turn","request_id":"request","status":"completed","finish_reason":"end_turn"}));
+        wire.end(json!({"turn_id":"turn","status":"completed","reason":"done"}));
+        wire.reply(&idle, json!({"sequence":30}));
+        wire.detach();
+    });
+    let output = wait(
+        home.command()
+            .args(["exec", "-p", "Which port does the service use?"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    daemon.join().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "status {:?} stdout {stdout:?} stderr {stderr:?}",
+        output.status.code()
+    );
+    assert_eq!(
+        stdout, "The service listens on port 8080.\n",
+        "the submitted turn's reply stays the answer; stderr was {stderr:?}"
+    );
+    assert!(
+        !stdout.contains("Another turn starts."),
+        "a later turn's live text never reaches stdout: {stdout:?}"
+    );
+    assert!(
+        !stderr.contains("Another turn starts."),
+        "live text is not diagnostics either: {stderr:?}"
+    );
+}
+
 /// A turn that did not consume the submitted input cannot write its reply.
 #[test]
 fn exec_ignores_a_turn_that_did_not_consume_its_prompt() {
