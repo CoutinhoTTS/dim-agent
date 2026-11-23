@@ -2,6 +2,7 @@
 //! §20.10, §20.17, §20.21, §20.22, §20.23, §20.27).
 use super::deletion::Store;
 use super::*;
+use dim_agent_types::{ModelConfig, ModelSelection, ProviderReasoningConfig, RequestMetadata};
 
 fn error_name(value: &Value) -> &str {
     value["error"]["data"]["appError"].as_str().unwrap()
@@ -462,6 +463,183 @@ async fn attach_keeps_the_root_sequence_beside_the_default_cursor() {
         attached["result"]["defaultBranch"],
         json!({"branchId":b,"sequence":line_head})
     );
+}
+
+/// An attach's `expectedConfig` belongs to the line the Session's conversation
+/// is on: a client that follows the default line reconnects against that
+/// line's model and effort, not the root's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn attach_checks_the_default_lines_model_and_effort() {
+    let (server, agent) = launch_with_agent(Arc::new(MockTools), ServerConfig::default()).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let created = client.rpc("session.create", with_branch()).await;
+    assert_ok(&created);
+    let id = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    let session = agent.get_session(&id).unwrap();
+    session.idle("main").await.unwrap();
+    adopt_model(&session, "main", "alpha", Some("low")).await;
+
+    let line = open_line(&mut client, &id, "main", "worker work").await;
+    session.idle(&line).await.unwrap();
+    adopt_model(&session, &line, "beta", Some("high")).await;
+    assert_ok(&switch(&mut client, &id, &line).await);
+
+    let attached = attach_expecting(
+        &mut client,
+        &id,
+        json!({"modelId":"beta","reasoningEffort":"high"}),
+    )
+    .await;
+    assert_ok(&attached);
+    assert_eq!(attached["result"]["defaultBranch"]["branchId"], json!(line));
+
+    let root_model = attach_expecting(&mut client, &id, json!({"modelId":"alpha"})).await;
+    assert_eq!(mismatch_field(&root_model), "modelId");
+    let root_effort = attach_expecting(
+        &mut client,
+        &id,
+        json!({"modelId":"beta","reasoningEffort":"low"}),
+    )
+    .await;
+    assert_eq!(mismatch_field(&root_effort), "reasoningEffort");
+
+    // With the root as the default line, the root's own values are the ones
+    // the same expectation checks.
+    assert_ok(&switch(&mut client, &id, "main").await);
+    assert_ok(
+        &attach_expecting(
+            &mut client,
+            &id,
+            json!({"modelId":"alpha","reasoningEffort":"low"}),
+        )
+        .await,
+    );
+
+    drop(client);
+    drop(agent);
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// A line's permission policy is the last `permission/changed` on its chain: an
+/// attach that follows the default line checks that policy, whether the line
+/// wrote it or inherited the root's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn attach_checks_the_default_lines_permission_preset_through_its_chain() {
+    let (server, agent) = launch_with_agent(Arc::new(MockTools), ServerConfig::default()).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let created = client.rpc("session.create", with_branch()).await;
+    assert_ok(&created);
+    let id = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    let session = agent.get_session(&id).unwrap();
+    session.idle("main").await.unwrap();
+
+    // The root's change is inside the line's inherited cut, and the line
+    // writes no change of its own.
+    set_preset(&session, "main", "read-only").await;
+    let line = open_line(&mut client, &id, "main", "worker work").await;
+    session.idle(&line).await.unwrap();
+    assert_ok(&switch(&mut client, &id, &line).await);
+    assert_ok(&attach_expecting(&mut client, &id, json!({"permissionPreset":"read-only"})).await);
+
+    // The line's own change is the policy it answers with, and the root keeps
+    // its own.
+    set_preset(&session, &line, "full-access").await;
+    assert_ok(&attach_expecting(&mut client, &id, json!({"permissionPreset":"full-access"})).await);
+    let root_preset =
+        attach_expecting(&mut client, &id, json!({"permissionPreset":"read-only"})).await;
+    assert_eq!(mismatch_field(&root_preset), "permissionPreset");
+
+    assert_ok(&switch(&mut client, &id, "main").await);
+    assert_ok(&attach_expecting(&mut client, &id, json!({"permissionPreset":"read-only"})).await);
+
+    drop(client);
+    drop(agent);
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+fn selection(model: &str, effort: Option<&str>) -> ModelSelection {
+    ModelSelection {
+        provider_id: "mock".into(),
+        model_id: model.into(),
+        capability_snapshot: None,
+        config: effort.map(|effort| ModelConfig {
+            reasoning: Some(ProviderReasoningConfig {
+                effort: Some(effort.into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+        metadata: effort.map(|_| RequestMetadata {
+            extensions: [("providerProtocol".to_owned(), json!("anthropic"))]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        }),
+    }
+}
+
+async fn adopt_model(
+    session: &dim_agent_runtime::Session,
+    branch: &str,
+    model: &str,
+    effort: Option<&str>,
+) {
+    session
+        .configure(
+            dim_agent_runtime::ConfigureUpdate {
+                model: Some(selection(model, effort)),
+                ..Default::default()
+            },
+            branch,
+        )
+        .await
+        .unwrap();
+}
+
+async fn attach_expecting(client: &mut Client, session: &str, expected: Value) -> Value {
+    client
+        .rpc(
+            "session.attach",
+            json!({"sessionId":session,"expectedConfig":expected}),
+        )
+        .await
+}
+
+/// The field a refused `expectedConfig` names.
+fn mismatch_field(reply: &Value) -> &str {
+    assert_eq!(
+        reply["error"]["data"]["appError"], "session_config_mismatch",
+        "{reply}"
+    );
+    reply["error"]["message"]
+        .as_str()
+        .unwrap()
+        .strip_prefix("Session configuration differs: ")
+        .unwrap_or_else(|| panic!("a field name: {reply}"))
+}
+
+/// Writes `permission/changed` on `branch` through the owner's own operation:
+/// the RPC that serves it is advertised only to a protected local profile.
+async fn set_preset(session: &dim_agent_runtime::Session, branch: &str, preset: &str) {
+    use dim_agent_capabilities::permission::{Permission, PermissionState};
+
+    let expected = session
+        .get::<PermissionState>(branch)
+        .unwrap()
+        .expect("the line publishes its permission state")
+        .version;
+    let policy = serde_json::from_value(json!({
+        "preset":preset,"allowedTools":["branch","wait"],"disallowedTools":[]
+    }))
+    .unwrap();
+    session
+        .service::<Permission>(branch)
+        .unwrap()
+        .update(expected, policy)
+        .await
+        .unwrap();
 }
 
 /// §14: `session.branches` takes the default and the rows from one tree

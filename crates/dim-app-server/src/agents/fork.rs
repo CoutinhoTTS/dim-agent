@@ -9,6 +9,8 @@ use std::{num::NonZeroU64, sync::Arc};
 pub(super) async fn validate_rest_point(session: &Session, at: u64) -> Result<()> {
     if read_one(
         session,
+        ROOT_BRANCH_ID,
+        TimelineQueryScope::Branch,
         at,
         in_field("kind", &["turn/start", "turn/end"]),
         QueryPick::Last,
@@ -20,6 +22,8 @@ pub(super) async fn validate_rest_point(session: &Session, at: u64) -> Result<()
     }
     let interrupted_at = read_one(
         session,
+        ROOT_BRANCH_ID,
+        TimelineQueryScope::Branch,
         at,
         in_field("kind", &["stop/interrupt"]),
         QueryPick::Last,
@@ -112,9 +116,16 @@ pub(super) async fn validate_rest_point(session: &Session, at: u64) -> Result<()
             })
             .collect(),
     };
-    if read_one(session, at, pending, QueryPick::First)
-        .await?
-        .is_some()
+    if read_one(
+        session,
+        ROOT_BRANCH_ID,
+        TimelineQueryScope::Branch,
+        at,
+        pending,
+        QueryPick::First,
+    )
+    .await?
+    .is_some()
     {
         return reject("an input is waiting to be consumed");
     }
@@ -141,15 +152,29 @@ pub(super) async fn validate_rest_point(session: &Session, at: u64) -> Result<()
             },
         ],
     };
-    if read_one(session, at, running, QueryPick::First)
-        .await?
-        .is_some()
+    if read_one(
+        session,
+        ROOT_BRANCH_ID,
+        TimelineQueryScope::Branch,
+        at,
+        running,
+        QueryPick::First,
+    )
+    .await?
+    .is_some()
     {
         return reject("a background task is running");
     }
-    if read_one(session, at, unposted_filter(), QueryPick::First)
-        .await?
-        .is_some()
+    if read_one(
+        session,
+        ROOT_BRANCH_ID,
+        TimelineQueryScope::Branch,
+        at,
+        unposted_filter(),
+        QueryPick::First,
+    )
+    .await?
+    .is_some()
     {
         return reject("a background task has not woken the branch");
     }
@@ -186,15 +211,17 @@ fn input_relation(kinds: &[&str]) -> QueryFilter {
 
 pub(super) async fn read_one(
     session: &Session,
+    branch: &str,
+    scope: TimelineQueryScope,
     at: u64,
     filter: QueryFilter,
     pick: QueryPick,
 ) -> Result<Option<Arc<AgentEvent>>> {
     let reply = session
         .query(
-            ROOT_BRANCH_ID,
+            branch,
             TimelineQuery {
-                scope: TimelineQueryScope::Branch,
+                scope,
                 from: None,
                 through: Some(at),
                 include_publishing: false,

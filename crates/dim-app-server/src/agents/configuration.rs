@@ -1,5 +1,6 @@
 use super::{AgentIndex, SESSION_NAMESPACE};
 use crate::connection::{configuration_outcome, port_error};
+use crate::protocol::BranchCursor;
 use dim_agent_capabilities::{
     host::ModelSelectionRequest,
     methods::{Interruption, MethodCall, MethodDecl, RpcError, SessionMethods, params, reply},
@@ -8,20 +9,25 @@ use dim_agent_capabilities::{
     prompt_state::PromptSnapshot,
     timeline_tree::TreeCommands,
 };
-use dim_agent_runtime::{Names, PromptSourceTarget, Session, SessionConfig};
-use dim_agent_types::{
-    EventKind, ModelSelection, PromptScope, ROOT_BRANCH_ID, SessionConfigExpectation,
+use dim_agent_runtime::{
+    Names, PromptSourceTarget, QueryPick, Session, SessionConfig, TimelineQueryScope,
 };
+use dim_agent_types::{EventKind, ModelSelection, PromptScope, SessionConfigExpectation};
 use rutis::Ctx;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use serde_json::{Value, json};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
+/// Checks an attach's or a fork's `expectedConfig` against one line at that
+/// line's own published sequence: attach names the current default branch and
+/// its cursor, so a client that follows the default line reconnects against
+/// the configuration it shows; a fork names the root and its inherited cut,
+/// which is the configuration a fork copies.
 pub(crate) async fn check_configuration(
     session: &Session,
     initial: &SessionConfig,
-    through: u64,
+    line: &BranchCursor,
     expected: &SessionConfigExpectation,
 ) -> Result<(), RpcError> {
     let mismatch = |field| {
@@ -34,7 +40,7 @@ pub(crate) async fn check_configuration(
     if expected.model_id.is_some() || expected.reasoning_effort.is_some() {
         let (model, _) = session
             .session_service::<TreeCommands>()?
-            .adopted_configuration(ROOT_BRANCH_ID.into(), Some(through))
+            .adopted_configuration(line.branch_id.clone(), Some(line.sequence))
             .await?;
         let (id, config, metadata, snapshot) = match &model {
             Some(model) => (
@@ -78,11 +84,16 @@ pub(crate) async fn check_configuration(
         }
     }
     if let Some(expected) = expected.permission_preset {
+        // The line's policy is the last change on its ancestor chain: a line
+        // that inherited its parent's change and wrote none of its own reads
+        // that change, not its creation configuration.
         let event = super::fork::read_one(
             session,
-            through,
+            line.branch_id.as_str(),
+            TimelineQueryScope::Chain,
+            line.sequence,
             super::fork::in_field("kind", &["permission/changed"]),
-            dim_agent_runtime::QueryPick::Last,
+            QueryPick::Last,
         )
         .await?;
         let actual = match event.as_deref().map(|event| &event.kind) {

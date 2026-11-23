@@ -483,7 +483,7 @@ impl Connection {
             crate::agents::check_configuration(
                 &session,
                 session.config(),
-                record.info.sequence,
+                &record.default_branch,
                 expected,
             )
             .await?;
