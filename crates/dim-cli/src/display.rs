@@ -2,7 +2,7 @@ use crate::wire::{Configuration, Event, EventContent, Progress};
 use crate::{Result, sanitize::safe};
 use dim_agent_types::*;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     io::{self, Write},
 };
 
@@ -26,10 +26,15 @@ enum TextRoute {
 /// delivers it as the reply.
 struct HeldText {
     request: String,
-    /// The turn the request's events named, when they named one.
-    turn: Option<String>,
     text: String,
     route: Option<TextRoute>,
+}
+
+/// A branch fact that arrived before the submission named its input: it is
+/// replayed in arrival order once the input is known or the stream closes.
+enum Pending {
+    Event { event: Event, history: bool },
+    Progress(Progress),
 }
 
 /// Which submitted input, and which turn consuming it, `exec`'s stdout may
@@ -82,14 +87,14 @@ pub struct Display {
     input_deleted: bool,
     /// The submitted input and turn this invocation's stdout may carry.
     reply: Reply,
+    /// Whether the submission's input is known; a failed turn before this
+    /// cannot be told apart from the submitted turn's own failure.
+    input_known: bool,
+    /// Facts that arrived before the submission named its input, in arrival
+    /// order, for a single `session.submit` round trip.
+    pending: VecDeque<Pending>,
     /// The branch's running turn, from its `turn/start` to its `turn/end`.
     turn: Option<String>,
-    /// Turns that ended before the submitted input's turn was known.
-    ended: HashMap<String, TurnOutcome>,
-    /// Inputs the branch consumed before the submission named them.
-    consumed: HashMap<String, String>,
-    /// Inputs the branch deleted before the submission named them.
-    deleted: HashSet<String>,
     /// The turn that asked each request, from the events that name both.
     request_turn: HashMap<String, String>,
     /// First sighting of each request, so a late end of an earlier request is
@@ -127,10 +132,9 @@ impl Display {
             final_reply_only: false,
             input_deleted: false,
             reply: Reply::Closed,
+            input_known: false,
+            pending: VecDeque::new(),
             turn: None,
-            ended: HashMap::new(),
-            consumed: HashMap::new(),
-            deleted: HashSet::new(),
             request_turn: HashMap::new(),
             request_order: HashMap::new(),
             next_request: 0,
@@ -172,45 +176,35 @@ impl Display {
         }
         self.reply = Reply::Submitted { submission_id };
         self.input_deleted = false;
+        self.input_known = false;
+        self.pending.clear();
         self.held.clear();
         self.turn = None;
-        self.ended.clear();
-        self.consumed.clear();
-        self.deleted.clear();
         self.request_turn.clear();
         self.request_order.clear();
     }
-    /// The branch wrote the submitted input: bind the turn that consumes it,
-    /// or close when it was already deleted or has already ended.
+    /// The branch wrote the submitted input: replay the facts that arrived
+    /// before this submission named it.
     pub fn accepted(&mut self, input_id: String) -> Result<()> {
         if !self.final_reply_only
             || !matches!(self.reply, Reply::Submitted { .. } | Reply::Accepted { .. })
         {
             return Ok(());
         }
-        if self.deleted.remove(&input_id) {
-            self.close_reply()?;
-            return Ok(());
-        }
-        self.reply = Reply::Accepted {
-            input_id: input_id.clone(),
-        };
-        if let Some(turn) = self.consumed.remove(&input_id) {
-            self.activate(input_id, turn)?;
-        }
-        Ok(())
+        self.input_known = true;
+        self.reply = Reply::Accepted { input_id };
+        self.replay()
     }
-    /// Closes the stream for good: text no turn released is diagnostics.
+    /// Closes the stream for good: text no turn released is diagnostics, and
+    /// the facts that arrived before the input was known are replayed in order.
     pub fn close_reply(&mut self) -> Result<()> {
         if !self.final_reply_only || self.reply == Reply::Closed {
             return Ok(());
         }
         self.reply = Reply::Closed;
+        self.replay()?;
         self.flush_held(TextRoute::Progress)?;
         self.turn = None;
-        self.ended.clear();
-        self.consumed.clear();
-        self.deleted.clear();
         self.request_turn.clear();
         self.request_order.clear();
         Ok(())
@@ -219,14 +213,18 @@ impl Display {
     pub fn reply_input_deleted(&self) -> bool {
         self.input_deleted
     }
-    fn activate(&mut self, input_id: String, turn_id: String) -> Result<()> {
-        if let Some(outcome) = self.ended.remove(&turn_id) {
-            self.reply = Reply::ActiveTurn {
-                input_id,
-                turn_id: turn_id.clone(),
-            };
-            return self.settle(&outcome);
+    /// Replays the facts held for the submission's unknown input, in arrival
+    /// order. A later fact sees the state every earlier one left behind.
+    fn replay(&mut self) -> Result<()> {
+        while let Some(pending) = self.pending.pop_front() {
+            match pending {
+                Pending::Event { event, history } => self.dispatch(event, history)?,
+                Pending::Progress(progress) => self.progress(progress)?,
+            }
         }
+        Ok(())
+    }
+    fn activate(&mut self, input_id: String, turn_id: String) -> Result<()> {
         self.reply = Reply::ActiveTurn {
             input_id,
             turn_id: turn_id.clone(),
@@ -237,10 +235,7 @@ impl Display {
     /// held request becomes diagnostics.
     fn bind_held(&mut self, turn_id: &str) -> Result<()> {
         for index in 0..self.held.len() {
-            let turn = self.held[index]
-                .turn
-                .clone()
-                .or_else(|| self.request_turn.get(&self.held[index].request).cloned());
+            let turn = self.request_turn.get(&self.held[index].request).cloned();
             if turn.as_deref().is_some_and(|turn| turn != turn_id) {
                 self.held[index].route = Some(TextRoute::Progress);
                 self.flush(index)?;
@@ -258,14 +253,10 @@ impl Display {
         };
         let mut last: Option<(String, u64)> = None;
         for held in &self.held {
-            let ours = held
-                .turn
-                .as_deref()
-                .is_none_or(|held| Some(held) == turn.as_deref())
-                && self
-                    .request_turn
-                    .get(&held.request)
-                    .is_none_or(|request| Some(request) == turn.as_ref());
+            let ours = self
+                .request_turn
+                .get(&held.request)
+                .is_none_or(|request| Some(request) == turn.as_ref());
             if ours {
                 let order = self.request_order.get(&held.request).copied().unwrap_or(0);
                 if last.as_ref().is_none_or(|(_, seen)| order > *seen) {
@@ -297,9 +288,6 @@ impl Display {
         }
         self.reply = Reply::Closed;
         self.held.clear();
-        self.ended.clear();
-        self.consumed.clear();
-        self.deleted.clear();
         self.request_turn.clear();
         self.request_order.clear();
         Ok(())
@@ -432,15 +420,15 @@ impl Display {
                 .insert(request.to_owned(), turn.to_owned());
         }
         match self.owns(request, turn) {
-            Some(true) => self.hold(request, turn, text, order),
+            Some(true) => self.hold(request, text, order),
             Some(false) => {
                 self.route_request(request, TextRoute::Progress)?;
                 self.show_progress(text)
             }
-            None => self.hold(request, turn, text, order),
+            None => self.hold(request, text, order),
         }
     }
-    fn hold(&mut self, request: &str, turn: Option<&str>, text: &str, order: u64) -> Result<()> {
+    fn hold(&mut self, request: &str, text: &str, order: u64) -> Result<()> {
         if let Some(index) = self.held.iter().position(|held| held.request == request) {
             if let Some(route) = self.held[index].route {
                 return match route {
@@ -454,13 +442,16 @@ impl Display {
         self.demote_before(order)?;
         self.held.push(HeldText {
             request: request.to_owned(),
-            turn: turn.map(str::to_owned),
             text: text.to_owned(),
             route: None,
         });
         Ok(())
     }
     pub fn progress(&mut self, progress: Progress) -> Result<()> {
+        if self.final_reply_only && matches!(self.reply, Reply::Submitted { .. }) {
+            self.pending.push_back(Pending::Progress(progress));
+            return Ok(());
+        }
         let Some(request) = progress.request_id else {
             return Ok(());
         };
@@ -520,6 +511,24 @@ impl Display {
         )
     }
     pub fn event(&mut self, event: Event, history: bool) -> Result<()> {
+        if self.final_reply_only
+            && let Reply::Submitted { submission_id } = &self.reply
+        {
+            let submission_id = submission_id.clone();
+            let accepted = !history
+                && matches!(&event.content, EventContent::Input(data)
+                    if data.submission_id.as_deref() == Some(submission_id.as_str()));
+            let input_id = accepted.then(|| event.id.clone());
+            self.pending.push_back(Pending::Event { event, history });
+            return match input_id {
+                Some(input_id) => self.accepted(input_id),
+                None => Ok(()),
+            };
+        }
+        self.dispatch(event, history)
+    }
+    /// One branch fact, in the order the branch wrote it.
+    fn dispatch(&mut self, event: Event, history: bool) -> Result<()> {
         if let EventContent::Configuration(configuration) = &event.content
             && event.sequence > self.model_through
         {
@@ -530,15 +539,8 @@ impl Display {
             return Ok(());
         }
         self.cursor = event.sequence;
-        let event_id = event.id.clone();
         match event.content {
             EventContent::Input(data) => {
-                if !history
-                    && let Reply::Submitted { submission_id } = &self.reply
-                    && data.submission_id.as_deref() == Some(submission_id.as_str())
-                {
-                    self.accepted(event_id)?;
-                }
                 if history {
                     if let Some(user) = data.user {
                         let text = crate::projection::user_text(&user.content);
@@ -563,6 +565,10 @@ impl Display {
                     .min(count);
                 position.committed += count;
                 position.printed = position.printed.max(position.committed);
+                if self.final_reply_only {
+                    self.note_request(&request);
+                    self.request_turn.insert(request.clone(), turn.clone());
+                }
                 self.text(
                     Some(&turn),
                     &request,
@@ -593,13 +599,17 @@ impl Display {
                 }
             }
             EventContent::ModelStart(data) => {
-                self.note_request(&data.request_id);
-                self.request_turn.insert(data.request_id, data.turn_id);
+                if self.final_reply_only {
+                    self.note_request(&data.request_id);
+                    self.request_turn.insert(data.request_id, data.turn_id);
+                }
             }
             EventContent::ModelEnd(data) => {
-                self.note_request(&data.request_id);
-                self.request_turn
-                    .insert(data.request_id.clone(), data.turn_id.clone());
+                if self.final_reply_only {
+                    self.note_request(&data.request_id);
+                    self.request_turn
+                        .insert(data.request_id.clone(), data.turn_id.clone());
+                }
                 self.finished.insert(data.request_id.clone());
                 let incomplete = self.showed.remove(&data.request_id);
                 self.retry_seen.remove(&data.request_id);
@@ -670,9 +680,6 @@ impl Display {
             }
             EventContent::InputConsumed(data) => {
                 let input = data.input_id;
-                if let Some(turn) = &self.turn {
-                    self.consumed.insert(input.clone(), turn.clone());
-                }
                 let accepted = match &self.reply {
                     Reply::Accepted { input_id } if *input_id == input => Some(input_id.clone()),
                     _ => None,
@@ -695,8 +702,6 @@ impl Display {
                     self.close_reply()?;
                     self.record("The submitted input was deleted before its turn ended")?;
                     self.input_deleted = true;
-                } else if matches!(self.reply, Reply::Submitted { .. }) {
-                    self.deleted.insert(input);
                 }
             }
             EventContent::TurnEnd(data) => {
@@ -704,14 +709,8 @@ impl Display {
                     &self.reply,
                     Reply::ActiveTurn { turn_id, .. } if *turn_id == data.turn_id
                 );
-                if self.final_reply_only {
-                    if own {
-                        self.settle(&data.outcome)?;
-                    } else if matches!(self.reply, Reply::Submitted { .. } | Reply::Accepted { .. })
-                    {
-                        self.ended
-                            .insert(data.turn_id.clone(), data.outcome.clone());
-                    }
+                if own {
+                    self.settle(&data.outcome)?;
                 }
                 if self.turn.as_deref() == Some(data.turn_id.as_str()) {
                     self.turn = None;
@@ -719,10 +718,16 @@ impl Display {
                 if own || !matches!(self.reply, Reply::ActiveTurn { .. }) {
                     self.finish_text()?;
                 }
+                // Only the submitted input's turn decides the run: a turn that
+                // ended before the input was known cannot be told apart from
+                // it and stands in for the run's outcome.
+                let attributed = own || !self.input_known;
                 let presented = self.shown_failure.take();
                 match data.outcome {
                     TurnOutcome::Failed { error } => {
-                        self.failed = true;
+                        if attributed {
+                            self.failed = true;
+                        }
                         if presented.as_deref() != Some(error.as_str()) {
                             self.record(
                                 "[failed] Model or turn failed; see the private daemon log for details",

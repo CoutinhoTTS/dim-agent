@@ -775,6 +775,7 @@ async fn wait_turn(
             && rule_write.is_none()
             && questions.idle(input.is_none() || code == 0)
         {
+            display.close_reply()?;
             display.cursor = display.cursor.max(sequence);
             display.finish_text()?;
             return Ok(if code != 0 {
