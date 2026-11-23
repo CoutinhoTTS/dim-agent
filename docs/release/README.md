@@ -97,6 +97,22 @@ The JSON fields remain `name`, `systemPrompt` and
 rely on the removed reply type's rejection of unknown fields. There is no
 App Server protocol, event or persistence-format change.
 
+## Method progress type compatibility
+
+The progress callback a `dimcode/plugin` method handler receives returns
+`Promise<void>`; its declaration was `() => void`. The host already supplies an
+asynchronous callback, so `await progress(...)` and `progress(...).catch(...)`
+now type-check, and no host build is required. The change breaks code that calls
+an exported `MethodHandler` or `SessionMethodHandler` directly: a synchronous
+argument such as `() => {}`, as a unit-test mock uses, fails with TS2345. Pass
+`async () => {}` instead. Handlers registered through
+`managementMethods.register` or `sessionMethods.register` receive the same
+callback at runtime. Awaiting it orders the host's send attempts and does not
+acknowledge client delivery; the host can drop a notice. The
+[authoring guide](../typescript-plugin-authoring.md#session-tools-and-client-methods)
+states the callback's delivery and rejection behaviour. There is no App Server
+protocol, event or persistence-format change.
+
 ## File access
 
 Under `read-only` and `workspace-write`, a file tool read (`read`, `grep` or `glob`) whose

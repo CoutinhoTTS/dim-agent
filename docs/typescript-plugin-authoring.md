@@ -651,6 +651,17 @@ returns a promise, and awaiting it is what keeps your notices in order: each cal
 runs on its own task, so two calls without a wait between them can arrive in either order. Await it
 as well when a notice has to be queued before the method returns, because the reply closes the
 progress channel and drops a send that has not run yet.
+
+Awaiting that promise orders the host's send attempts; it does not acknowledge
+delivery to the client. The host drops progress a method does not declare,
+progress sent after it hands over the reply, and progress its connection cannot
+take, including after a disconnect, while the call itself still resolves. A
+progress call you do not await returns a promise that can reject, for example
+when the data exceeds the channel limit or the bridge is closed, so attach
+`.catch(...)` to a detached call. A unit test that calls a `MethodHandler` or
+`SessionMethodHandler` directly must pass `async () => {}` as the progress
+callback; the type requires a promise.
+
 Return `{kind: 'value', value}`, return a failure as data, `{code, message}`, or
 rethrow the service error you received. An omitted value becomes JSON null. Rpc maps a failure to
 the wire error: `code` becomes `appError`, with JSON-RPC code -32602 for `invalid_params` and
