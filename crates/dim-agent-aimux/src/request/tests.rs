@@ -8,6 +8,7 @@ use aimux_providers::{
     bedrock::{AmazonBedrockProviderSettings, create_amazon_bedrock},
     google::{GoogleProviderSettings, create_google},
     openai_compatible::{OpenAICompatibleProviderSettings, create_openai_compatible},
+    xai::{XAIProviderSettings, create_xai},
 };
 use futures_util::StreamExt;
 use serde_json::json;
@@ -830,6 +831,8 @@ async fn the_gemini_body_carries_the_stored_nullable_type_verbatim() {
 
 /// A 1x1 GIF: Gemini does not take GIF in any part of a request.
 const GIF: &str = "R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==";
+/// A 1x1 WebP: a format the native xAI routes do not take.
+const WEBP: &str = "UklGRhoAAABXRUJQVlA4TA0AAAAvAAAAEAcQERGIiP4HAA==";
 
 /// Gemini takes PNG, JPEG and WebP but not GIF; a GIF becomes its reference.
 #[tokio::test]
@@ -865,6 +868,85 @@ async fn a_gif_image_reaches_gemini_as_its_reference() {
             .all(|part| part["inlineData"]["mimeType"] != "image/gif"),
         "no GIF reaches the wire: {body}"
     );
+}
+
+/// A native xAI body for `request` as it reaches the wire.
+async fn native_xai_capture(
+    request: ModelRequest,
+    kind: ProviderKind,
+    model: &'static str,
+) -> Value {
+    capture(
+        move |url| match kind {
+            ProviderKind::Xai => Arc::new(
+                create_openai_compatible(OpenAICompatibleProviderSettings {
+                    name: "xai".into(),
+                    base_url: url,
+                    ..OpenAICompatibleProviderSettings::default()
+                })
+                .unwrap()
+                .chat(model),
+            ),
+            _ => Arc::new(
+                create_xai(XAIProviderSettings {
+                    base_url: Some(url),
+                    api_key: Some("test-key".into()),
+                    ..XAIProviderSettings::default()
+                })
+                .unwrap()
+                .responses(model),
+            ),
+        },
+        convert(&request, &kind, None).unwrap().options,
+    )
+    .await
+}
+
+/// Native xAI takes PNG and JPEG only: a WebP in user content and a GIF in a
+/// tool result become their references and reach no wire as pixels, on either
+/// native route.
+#[tokio::test]
+async fn an_unsupported_image_reaches_native_xai_as_its_reference() {
+    for kind in [ProviderKind::Xai, ProviderKind::XaiResponses] {
+        let request: ModelRequest = serde_json::from_value(json!({
+            "providerId": "application-alias", "modelId": "grok-4",
+            "messages": [
+                {"role": "user", "content": [
+                    {"type": "image", "source": {"type": "base64", "mediaType": "image/png", "data": "aGVsbG8="}},
+                    {"type": "image", "source": {"type": "base64", "mediaType": "image/webp", "data": WEBP}}
+                ]},
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "call-1", "name": "read", "input": {}}
+                ]},
+                {"role": "tool_result", "content": [
+                    {"type": "tool_result", "tool_use_id": "call-1", "is_error": false,
+                     "content": [
+                        {"type": "text", "text": "caption"},
+                        {"type": "image", "source": {"type": "base64", "mediaType": "image/gif", "data": GIF}}
+                     ]}
+                ]},
+                {"role": "user", "content": "continue"}
+            ],
+            "tools": [tool("read")]
+        }))
+        .unwrap();
+        let body = native_xai_capture(request, kind, "grok-4").await;
+        let wire = body.to_string();
+        assert!(wire.contains("image/png"), "{kind:?}: {body}");
+        assert!(
+            !wire.contains("image/webp"),
+            "no WebP reaches the {kind:?} wire: {body}"
+        );
+        assert!(
+            !wire.contains("image/gif"),
+            "no GIF reaches the {kind:?} wire: {body}"
+        );
+        assert_eq!(
+            wire.matches("img:").count(),
+            2,
+            "both unsupported images reach the {kind:?} wire as references: {body}"
+        );
+    }
 }
 
 /// The line a failed result's text starts with where the destination's wire

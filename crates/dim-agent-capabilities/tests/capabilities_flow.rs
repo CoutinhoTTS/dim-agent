@@ -16,6 +16,7 @@ mod host_platform_flow;
 #[cfg(windows)]
 mod host_platform_windows_flow;
 mod host_port_faces;
+mod image_formats;
 mod input_flow;
 mod interrupt_flow;
 mod legacy_port_faces;
