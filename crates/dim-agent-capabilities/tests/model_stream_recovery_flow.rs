@@ -330,6 +330,69 @@ async fn a_stream_cut_after_a_committed_event_ends_the_turn_without_retrying() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_usage_fact_before_a_cut_stops_the_retry() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let (cut, cut_stream) = mpsc::unbounded_channel();
+        let model = Arc::new(ScriptedModel::new(vec![cut_stream]));
+        let agent = MinimalHost::start(&builder(model.clone(), Arc::new(MockTools)))
+            .await
+            .unwrap();
+        let session = agent
+            .create_session(SessionConfig::default())
+            .await
+            .unwrap();
+        session
+            .submit("go".into(), InputMode::Queue, "main")
+            .await
+            .unwrap();
+        send(
+            &cut,
+            vec![
+                Ok(ModelChunk::MessageStart {
+                    message_id: "usage".into(),
+                }),
+                Ok(usage(1)),
+                Err(malformed_cut()),
+            ],
+        );
+        drop(cut);
+        session.idle("main").await.unwrap();
+
+        assert_eq!(model.calls.load(Ordering::SeqCst), 1);
+        let events = chain_events(&session, "main", ..).await.unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event.kind, EventKind::ModelUsage(_)))
+                .count(),
+            1,
+            "the failed attempt's usage stays the only one"
+        );
+        let failure = events
+            .iter()
+            .find_map(|event| match &event.kind {
+                EventKind::ModelOutputEnd(ModelOutputEndData {
+                    outcome:
+                        ModelOutputOutcome::Failed {
+                            failure: Some(failure),
+                            ..
+                        },
+                    ..
+                }) => Some(failure.as_ref().clone()),
+                _ => None,
+            })
+            .expect("a failed model output with facts");
+        assert_eq!(
+            failure.attempts, 1,
+            "a committed usage fact stops the retry"
+        );
+        agent.close().await.unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn thinking_progress_is_shown_once_per_interval() {
     tokio::time::timeout(Duration::from_secs(10), async {
         let (chunks, receiver) = mpsc::unbounded_channel();
