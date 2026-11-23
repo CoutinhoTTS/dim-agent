@@ -278,7 +278,7 @@ export const useChatStore = defineStore("chat", () => {
       channel.syncing = false
       drainQueued(channel)
       if (view.status !== "closed") showPermission(view, centreId, await sessionPermission(view.sessionId, centreId))
-      if (view.status === "loading") {
+      if (view.status !== "closed") {
         view.status = "ready"
         view.error = ""
       }
@@ -390,9 +390,10 @@ export const useChatStore = defineStore("chat", () => {
           applyEvent(channel, branchId, notification.event)
         } else {
           stream.queued.push(notification.event)
-          // A failed page is replaced by the retry's window: the event waits
+          // A failed centre is replaced by the retry's window: its events wait
           // there instead of being applied to a transcript that read replaces.
-          if (view.status !== "failed") void consumeLive(channel, branchId).catch(error => {
+          // A side line's tab is not part of that read, so it keeps applying.
+          if (!(branchId === view.defaultBranchId && view.status === "failed")) void consumeLive(channel, branchId).catch(error => {
             stream.error = error instanceof Error ? error.message : String(error)
             stream.syncing = true
             changed(channel)
