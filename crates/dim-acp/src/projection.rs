@@ -1113,4 +1113,58 @@ mod tests {
             .collect();
         assert_eq!(texts, ["<dim-skill name=\"commit\">typed by hand"]);
     }
+
+    /// A replaced attempt's thought is never sent, so it cannot suppress the
+    /// successful attempt's committed thought, even when that thought is
+    /// shorter.
+    #[test]
+    fn r4_replaced_attempt_does_not_suppress_the_successful_thought() {
+        fn progress(request: &str, thinking: &str) -> Progress {
+            serde_json::from_value(json!({
+                "sessionId": "session",
+                "branchId": "main",
+                "requestId": request,
+                "text": "",
+                "textOffset": 0,
+                "thinking": thinking,
+                "thinkingOffset": 0,
+                "thinkingStartedAt": null,
+                "retry": null,
+            }))
+            .unwrap()
+        }
+        fn thoughts(updates: &[acp::SessionUpdate]) -> Vec<String> {
+            updates
+                .iter()
+                .filter_map(|update| {
+                    let update = serde_json::to_value(update).ok()?;
+                    if update["sessionUpdate"] != "agent_thought_chunk" {
+                        return None;
+                    }
+                    update["content"]["text"].as_str().map(str::to_owned)
+                })
+                .collect()
+        }
+        let mut projection = Projection::new("main", "", false);
+        let failed = projection.progress(progress("request", &"f".repeat(10)));
+        assert!(
+            thoughts(&failed).is_empty(),
+            "an uncommitted attempt's thought is not sent: {failed:?}"
+        );
+        let cleared = projection.progress(progress("request", ""));
+        assert!(cleared.is_empty(), "the cleared snapshot is not forwarded");
+        let committed = projection.event(&event(json!({
+            "id": "thinking-1",
+            "sequence": 1,
+            "create_at": 1000,
+            "type": "step",
+            "name": "thinking",
+            "data": {"turn_id": "turn", "request_id": "request", "delta": "success"},
+        })));
+        assert_eq!(
+            thoughts(&committed),
+            ["success"],
+            "the successful attempt's committed thought is sent in full"
+        );
+    }
 }
