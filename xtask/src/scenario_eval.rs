@@ -6134,9 +6134,7 @@ async fn drive(
         // The move and the input after it are bounded by the same absolute
         // deadline the budget check below applies: a reply that never comes
         // must not hold the run past its wall clock (model-prompts §8.1).
-        let line = switches
-            .front()
-            .and_then(|pending| pending.line.clone());
+        let line = switches.front().and_then(|pending| pending.line.clone());
         let fired = match tokio::time::timeout(
             time_left(started, &scenario.budget),
             fire_switch(client, &session, &mut switches, &mut default),
@@ -9114,7 +9112,8 @@ mod tests {
             ..SwitchRecorder::default()
         };
         let mut switch = triggered_switch();
-        let error = match fire_switch(&mut client, "session", &mut switch, &mut "main".into()).await {
+        let error = match fire_switch(&mut client, "session", &mut switch, &mut "main".into()).await
+        {
             Err(error) => error,
             Ok(outcome) => panic!("the move was refused, not {outcome:?}"),
         };
@@ -9141,10 +9140,7 @@ mod tests {
             fire_switch(&mut client, "session", &mut switch, &mut "main".into()).await,
             Ok(SwitchFire::Retry)
         ));
-        assert!(
-            !switch.is_empty(),
-            "the switch stays pending for the retry"
-        );
+        assert!(!switch.is_empty(), "the switch stays pending for the retry");
         assert!(matches!(
             fire_switch(&mut client, "session", &mut switch, &mut "main".into()).await,
             Ok(SwitchFire::Fired)
@@ -17581,8 +17577,8 @@ mod tests {
             "- CANDIDATE default guidance for {parent}, switched from {other}.";
         const USER_NOTE: &str = "- CANDIDATE user-line guidance for {other}.";
         const FORMER_NOTE: &str = "- CANDIDATE former-default guidance for {other}.";
-        let case = repository()
-            .join("xtask/scenario-eval/timeline-branches/user-line-becomes-default");
+        let case =
+            repository().join("xtask/scenario-eval/timeline-branches/user-line-becomes-default");
         let scenario: Value =
             serde_json::from_slice(&std::fs::read(case.join("scenario.json")).unwrap()).unwrap();
         let workspace: Vec<(String, String)> = workspace_files(&case)
@@ -17659,11 +17655,7 @@ mod tests {
                     let request: Value = serde_json::from_str(request).ok()?;
                     request["tools"].as_array()?.iter().find_map(|tool| {
                         (tool["function"]["name"] == "branch")
-                            .then(|| {
-                                tool["function"]["description"]
-                                    .as_str()
-                                    .map(str::to_owned)
-                            })
+                            .then(|| tool["function"]["description"].as_str().map(str::to_owned))
                             .flatten()
                     })
                 })
@@ -17716,9 +17708,7 @@ mod tests {
                 ),
             ] {
                 assert!(
-                    requests
-                        .iter()
-                        .any(|request| carried(request, &attribute)),
+                    requests.iter().any(|request| carried(request, &attribute)),
                     "a request carries {attribute}"
                 );
             }

@@ -4720,8 +4720,7 @@ async fn a_user_lines_default_note_reaches_the_model_request() {
             .iter()
             .map(|message| said(message))
             .find(|text| {
-                text.starts_with("<dim-branch-line ")
-                    && text.contains(" default=\"true\"")
+                text.starts_with("<dim-branch-line ") && text.contains(" default=\"true\"")
             })
             .unwrap_or_else(|| panic!("the request carries the note: {request:?}"));
         assert!(
@@ -4812,8 +4811,7 @@ async fn a_former_default_tool_lines_note_reaches_the_model_request() {
             .iter()
             .map(|message| said(message))
             .find(|text| {
-                text.starts_with("<dim-branch-line ")
-                    && text.contains(" default=\"false\"")
+                text.starts_with("<dim-branch-line ") && text.contains(" default=\"false\"")
             })
             .unwrap_or_else(|| panic!("the request carries the note: {request:?}"));
         assert!(
@@ -4896,7 +4894,10 @@ async fn an_appended_note_does_not_wake_the_idle_former_default() {
     assert!(
         !events.iter().any(|event| {
             event.sequence > note_at
-                && matches!(event.kind, EventKind::TurnStart(_) | EventKind::ModelCall(_))
+                && matches!(
+                    event.kind,
+                    EventKind::TurnStart(_) | EventKind::ModelCall(_)
+                )
         }),
         "the appended note starts no turn and makes no request"
     );
@@ -4914,8 +4915,11 @@ async fn an_appended_note_does_not_wake_the_idle_former_default() {
         })
         .expect("the input wakes the line into a request");
     assert!(
-        request.messages.iter().any(|message| said(message)
-            .contains("The session's default branch moved from this line")),
+        request
+            .messages
+            .iter()
+            .any(|message| said(message)
+                .contains("The session's default branch moved from this line")),
         "the woken request carries the note: {request:?}"
     );
     soon(agent.close()).await.unwrap();
