@@ -5201,6 +5201,11 @@ impl BranchTool {
         cancel: CancellationToken,
     ) -> std::result::Result<ToolResult, HostError> {
         let has_idle_notice = call.input.contains_key("idleNotice");
+        if call.input.contains_key("title") {
+            return Err(invalid(
+                "no `title` parameter; a line's name is the first line of `prompt`.",
+            ));
+        }
         let input: BranchInput =
             serde_json::from_value(serde_json::Value::Object(call.input)).map_err(invalid)?;
         if input.action != "create" && has_idle_notice {
@@ -6184,7 +6189,7 @@ fn branch_definition(description: &str) -> ToolDefinition {
             description,
             serde_json::json!({"type":"object","required":["action"],"additionalProperties":false,"properties":{
                 "action":{"type":"string","enum":["create","message","read","end"],"description":"What the call does."},
-                "prompt":{"type":"string","description":"create: the purpose of the new line."},
+                "prompt":{"type":"string","description":"create: the purpose of the new line; its first line is the line's name."},
                 "at":{"type":"number","minimum":0,"description":"create: the position to cut at; defaults to before this request."},
                 "idleNotice":{"type":"string","enum":["steer","none"],"description":"create: automatic notice to the parent after the line goes idle. Use none for a line that should wait quietly. Defaults to steer."},
                 "to":{"type":"string","description":"message: the line to send to."},

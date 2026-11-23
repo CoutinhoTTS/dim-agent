@@ -381,7 +381,7 @@ Goal cleared on main.
 否则整行都是 prompt，因此 `/loop check the deploy` 与 `/loop 5m check the deploy` 是同一命令的两种形式。
 
 行模式打印用法与 loop；两种终端 UI 模式选中时只填入 `/loop `，提交才分发，与 `/goal` 相同。回复给出 loop、
-状态、轮次，以及已安排时的下次到期时刻：
+状态、轮次、prompt，以及已安排时的下次到期时刻：
 
 ```text
 palette: loop + Enter -> /loop |          (completion only)
@@ -1146,7 +1146,8 @@ CLI 保留它，先等那个进程，不启动自己的守护进程。子进程�
 格式升级运行期间，守护进程把同一份说明写成进度类型：首行
 `dimcode-startup-progress v1 pid=<pid>`，正文
 `store-upgrade from=<from> to=<to> progress=<n>`，最多每秒一次，并在每个升级步骤结束时
-再写一次。库打开之后、监听端点 open 之前，守护进程把同一份说明写成装配类型
+再写一次，包括升级自身的步骤之后的步骤：派生索引、引用校验、提交，以及提交后设置的
+每个 pragma。库打开之后、监听端点 open 之前，守护进程把同一份说明写成装配类型
 `assembly progress=<n>`：装配每记录一次进展（某个 row 首次 Active，或一次
 `OpeningAdvanced` 报告），`<n>` 就增加；库删掉自己的说明后第一次进展立即写，之后最多
 每 500 毫秒写一次，区间内的最后一次进展在区间结束时写出，因此说明最多比守护进程自己
