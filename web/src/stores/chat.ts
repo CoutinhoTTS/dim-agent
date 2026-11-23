@@ -360,6 +360,16 @@ export const useChatStore = defineStore("chat", () => {
       showPermission(view, centre, policy)
       setStatus(channel, "ready")
       view.error = ""
+      // The centre's events that arrived while these reads were out waited on
+      // the failed page's stream, which applies nothing: the guarded success
+      // resumes its consumer, so a reply that landed in that interval shows in
+      // order without another event or a resync.
+      void consumeLive(channel, centre).catch(error => {
+        const stream = ensureBranch(channel, centre)
+        stream.error = error instanceof Error ? error.message : String(error)
+        stream.syncing = true
+        changed(channel)
+      })
       publish(channel)
       void pumpHistory(channel)
     } catch (error) {
