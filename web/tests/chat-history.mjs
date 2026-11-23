@@ -1052,3 +1052,204 @@ test("a resync that discovers a moved default shows its pending question once", 
   assert.equal(chat.views.session.defaultBranchId, "worker")
   assert.equal(chat.views.session.questions.filter(ask => ask.branchId === "worker").length, 1, "the newly centred line's question appears once")
 })
+
+test("a reconnect whose goal read fails keeps an approval it queued", async t => {
+  const attach = deferred()
+  let attaches = 0
+  let failGoal = false
+  const approval = { sessionId: "session", branchId: "main", requestId: "req-1", call: { name: "shell", input: {} }, reason: "fixture" }
+  const chat = session(t, () => page([input(1, "stored")], 1), {
+    "session.attach": () => {
+      attaches++
+      return attaches === 1 ? { providerId: "test", modelId: "test" } : attach.promise
+    },
+    "session.goal.get": params => {
+      if (failGoal) throw new Error("the goal read failed")
+      return { branchId: params.branchId, through: 1, goal: null }
+    },
+  })
+  await flush()
+  assert.equal(chat.views.session.status, "ready")
+  failGoal = true
+  const reconnecting = chat.resync()
+  await flush()
+  chat.receive({ method: "approval.request", request: approval })
+  attach.resolve({ providerId: "test", modelId: "test" })
+  await reconnecting
+  await flush()
+  assert.equal(chat.views.session.status, "failed")
+  failGoal = false
+  chat.retryCentre("session")
+  await flush()
+  assert.equal(chat.views.session.status, "ready")
+  assert.deepEqual(chat.views.session.approvals.map(request => request.requestId), ["req-1"], "the retry shows the approval the failed reconnect had queued")
+})
+
+test("a reconnect whose goal read fails keeps a queued close", async t => {
+  const attach = deferred()
+  let attaches = 0
+  let failGoal = false
+  const chat = session(t, () => page([input(1, "stored")], 1), {
+    "session.attach": () => {
+      attaches++
+      return attaches === 1 ? { providerId: "test", modelId: "test" } : attach.promise
+    },
+    "session.goal.get": params => {
+      if (failGoal) throw new Error("the goal read failed")
+      return { branchId: params.branchId, through: 1, goal: null }
+    },
+  })
+  await flush()
+  assert.equal(chat.views.session.status, "ready")
+  failGoal = true
+  const reconnecting = chat.resync()
+  await flush()
+  chat.receive({ method: "session.closed", sessionId: "session" })
+  attach.resolve({ providerId: "test", modelId: "test" })
+  await reconnecting
+  await flush()
+  failGoal = false
+  chat.retryCentre("session")
+  await flush()
+  assert.equal(chat.views.session.status, "closed", "a close queued behind a failed goal read is not dropped")
+})
+
+test("a reconnect whose goal read fails keeps the events it buffered", async t => {
+  const attach = deferred()
+  let attaches = 0
+  let failGoal = false
+  const chat = session(t, () => page([input(1, "stored")], 1), {
+    "session.attach": () => {
+      attaches++
+      return attaches === 1 ? { providerId: "test", modelId: "test" } : attach.promise
+    },
+    "session.goal.get": params => {
+      if (failGoal) throw new Error("the goal read failed")
+      return { branchId: params.branchId, through: 1, goal: null }
+    },
+  })
+  await flush()
+  assert.equal(chat.views.session.status, "ready")
+  failGoal = true
+  const reconnecting = chat.resync()
+  await flush()
+  receive(chat, "main", input(2, "arrived while reconnecting"))
+  attach.resolve({ providerId: "test", modelId: "test" })
+  await reconnecting
+  await flush()
+  assert.equal(chat.views.session.status, "failed")
+  failGoal = false
+  chat.retryCentre("session")
+  await flush()
+  assert.deepEqual(chat.views.session.rows.map(row => row.text), ["stored", "arrived while reconnecting"], "the events the failed reconnect had queued are replayed by the retry")
+})
+
+test("a reconnect whose goal read loses the connection is not ready", async t => {
+  let lost = false
+  const chat = session(t, () => page([input(1, "stored")], 1), {
+    "session.goal.get": params => {
+      if (lost) throw new ConnectionLost()
+      return { branchId: params.branchId, through: 1, goal: null }
+    },
+  })
+  await flush()
+  assert.equal(chat.views.session.status, "ready")
+  lost = true
+  await chat.resync()
+  await flush()
+  assert.equal(chat.views.session.status, "loading", "a goal read that lost the connection leaves the page to the reconnect")
+  lost = false
+  await chat.resync()
+  await flush()
+  assert.equal(chat.views.session.status, "ready")
+})
+
+test("a move waits for a goal refresh already running on its line", async t => {
+  const held = deferred()
+  let arm = false
+  const policies = []
+  const policy = { preset: "read-only", allowedTools: [], disallowedTools: [] }
+  const chat = session(t, params => page([input(1, `on ${params.branchId}`)], 1), {
+    "session.branches": () => ({ branches: [{ branchId: "worker", parentBranchId: "main", branchPoint: 0, head: 1, state: "open" }], defaultBranchId: "main" }),
+    "session.branch_set_default": () => "worker",
+    "session.goal.set": () => ({}),
+    "session.goal.get": params => {
+      if (arm && params.branchId === "worker") return held.promise
+      return { branchId: params.branchId, through: 1, goal: null }
+    },
+    "session.permission.get": params => {
+      policies.push(params.branchId)
+      return { version: 1, policy }
+    },
+  })
+  const supports = globalThis.historyStores.connection.supports
+  globalThis.historyStores.connection.supports = name => name === "session.permission.get" || supports(name)
+  await flush()
+  assert.deepEqual(policies, ["main"], "the first sync reads the centre's policy")
+  arm = true
+  const writing = chat.writeGoal("session", "set", "carry on", "worker").catch(() => undefined)
+  await flush()
+  const moving = chat.setDefaultBranch("session", "worker")
+  await flush()
+  assert.deepEqual(policies, ["main"], "the move waits for the goal refresh already running on its line")
+  held.reject(new Error("the goal read failed"))
+  await moving
+  await writing
+  await flush()
+  assert.equal(chat.views.session.status, "failed")
+  assert.deepEqual(policies, ["main"], "a failed goal refresh ends the move before its policy read")
+})
+
+test("a move whose goal read loses the connection reads no policy", async t => {
+  let lost = false
+  const policies = []
+  const policy = { preset: "read-only", allowedTools: [], disallowedTools: [] }
+  const chat = session(t, params => page([input(1, `on ${params.branchId}`)], 1), {
+    "session.branches": () => ({ branches: [{ branchId: "worker", parentBranchId: "main", branchPoint: 0, head: 1, state: "open" }], defaultBranchId: "main" }),
+    "session.branch_set_default": () => "worker",
+    "session.goal.get": params => {
+      if (lost) throw new ConnectionLost()
+      return { branchId: params.branchId, through: 1, goal: null }
+    },
+    "session.permission.get": params => {
+      policies.push(params.branchId)
+      return { version: 1, policy }
+    },
+  })
+  const supports = globalThis.historyStores.connection.supports
+  globalThis.historyStores.connection.supports = name => name === "session.permission.get" || supports(name)
+  await flush()
+  assert.deepEqual(policies, ["main"])
+  lost = true
+  await chat.setDefaultBranch("session", "worker")
+  await flush()
+  assert.equal(chat.views.session.defaultBranchId, "worker", "the accepted move stands")
+  assert.deepEqual(policies, ["main"], "a goal read that lost the connection ends the move before its policy read")
+})
+
+test("a Session that closes while the retry reads the policy stays closed", async t => {
+  const held = deferred()
+  let fail = true
+  let arm = false
+  const policy = { preset: "read-only", allowedTools: [], disallowedTools: [] }
+  const chat = session(t, () => {
+    if (fail) throw new Error("the line could not be read")
+    return page([input(1, "on the line")], 1)
+  }, {
+    "session.goal.get": params => ({ branchId: params.branchId, through: 1, goal: null }),
+    "session.permission.get": () => arm ? held.promise : { version: 1, policy },
+  })
+  const supports = globalThis.historyStores.connection.supports
+  globalThis.historyStores.connection.supports = name => name === "session.permission.get" || supports(name)
+  await flush()
+  assert.equal(chat.views.session.status, "failed")
+  fail = false
+  arm = true
+  chat.retryCentre("session")
+  await flush()
+  chat.receive({ method: "session.closed", sessionId: "session" })
+  assert.equal(chat.views.session.status, "closed")
+  held.resolve({ version: 1, policy })
+  await flush()
+  assert.equal(chat.views.session.status, "closed", "a Session closed during the policy read stays closed")
+})
